@@ -136,11 +136,11 @@ services:
 agent:
   model: claude-3.5-sonnet
 
-# LLM provider（密钥从环境变量读取）
+# LLM provider（全部从环境变量读取）
 hermes_agent:
-  url: "https://api.anthropic.com/v1"
+  url: "${ANTHROPIC_BASE_URL}"
   api_key: "${ANTHROPIC_API_KEY}"
-  model: claude-3.5-sonnet
+  model: "${HERMES_AGENT_MODEL}"
 
 # API 服务器（Gateway 模式）
 api_server:
