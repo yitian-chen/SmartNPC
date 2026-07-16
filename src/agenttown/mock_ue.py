@@ -299,6 +299,9 @@ class MockUE:
             self.npc.energy = min(100, self.npc.energy + duration * 2)
             gain = self.npc.energy - energy_before
             message_parts.append(f"charged {gain:.0f}% at {params.get('station_id', '')}")
+            # Advance game time — charging consumes real in-world time.
+            if duration > 0:
+                self.time.advance(duration)
             # Return extra fields for the ChargeAtOutput struct
             result = self._build_action_result(action, duration, message_parts, extra={
                 "energy_gain": round(gain, 1),
@@ -338,6 +341,14 @@ class MockUE:
         # Universal energy consumption
         self.npc.energy = max(0, self.npc.energy - duration * 0.1)
         self.npc.current_action = f"{action}({params.get('target', '') or params.get('object_id', '')})"
+
+        # Advance game time by the action's duration so tool calls
+        # actually consume the in-world time they claim to. Without this,
+        # the perception loop's fixed interval is the only time driver and
+        # a burst of work_assemble(30min) calls would all land on the same
+        # game minute.
+        if duration > 0:
+            self.time.advance(duration)
 
         self._log_action(action, params, duration)
         return self._build_action_result(action, duration, message_parts)
