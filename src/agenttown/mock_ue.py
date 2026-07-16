@@ -330,14 +330,18 @@ class MockUE:
         Run one full game day from start_hour to end_hour.
 
         The loop:
-          1. Push perception → Hermes decides what to do
-          2. Parse actions from Hermes response
-          3. Simulate action execution
-          4. Advance game time
-          5. Repeat
+          1. Push perception → Hermes responds in character
+          2. Log the character's narrative as the "action"
+          3. Advance game time
+          4. Repeat
+
+        Hermes outputs natural-language character narration, not
+        structured action commands.  We drive the loop by feeding
+        perception at regular intervals and logging responses.
         """
         self.time.hour = start_hour
         self.time.minute = 0
+        step = 0
 
         logger.info(f"=== Day {self.time.day} start ===")
         print(f"\n{'='*60}")
@@ -345,49 +349,111 @@ class MockUE:
         print(f"  NPC: {self.npc.name} ({self.npc.agent_id})")
         print(f"  Gateway: {self.gateway_url}")
         print(f"  Time speed: {self.time.speed}x")
+        print(f"  Perception interval: {self.perception_interval} game-min")
         print(f"{'='*60}\n")
 
         # Initial perception: let Hermes know the day started
         start_msg = (
             f"[SYSTEM] 新的一天开始了。游戏时间: {self.time.display}。"
-            f"你在{self.npc.current_zone}。"
-            f"请规划你今天要做的事，并按顺序执行。"
+            f"你在{self.npc.current_zone}，电池{self.npc.energy:.0f}%。"
+            f"附近有工作台和充电桩。请说说你现在要做什么。"
         )
-        self.send_message(start_msg)
+        response = self.send_message(start_msg)
+        self._print_response(response)
 
         while self.time.hour < end_hour:
-            # Push perception
-            response = self.push_perception()
-            text = self.extract_text(response)
+            step += 1
 
-            if text:
-                print(f"\n[{self.time.display}] 老陈: {text[:120]}...")
+            # Advance game time
+            self.time.advance(self.perception_interval)
 
-            # Parse action from response and execute
-            action, params = self._parse_action(text)
-            if action:
-                duration = self.execute_action(action, params)
-                self.time.advance(duration)
-            else:
-                # No action — idle, just advance time
-                self.time.advance(self.perception_interval)
+            # Build perception based on current state
+            perception = self._build_perception_text()
+            logger.info(f"[STEP {step}] {self.time.display} | zone={self.npc.current_zone}")
 
-            # Real-time delay (with time acceleration)
-            self.time.sleep(0.5)
+            # Send perception and get response
+            response = self.send_message(perception)
+            text = self._print_response(response)
+
+            # Log as action
+            self.action_log.append({
+                "time": self.time.display,
+                "step": step,
+                "zone": self.npc.current_zone,
+                "energy": int(self.npc.energy),
+                "response": text[:200] if text else "",
+            })
+
+            # Update NPC state based on game time progression
+            self.npc.energy = max(0, self.npc.energy - 0.5)
+            self.npc.fatigue = min(100, self.npc.fatigue + 0.3)
+
+            # Real-time pacing
+            self.time.sleep(0.3)
 
         # End of day
         end_msg = (
-            f"[SYSTEM] 一天结束了。游戏时间: {self.time.display}。"
-            f"你完成了今天的工作。请准备充电休息。"
+            f"[SYSTEM] 一天工作结束。时间: {self.time.display}。"
+            f"电池剩余{self.npc.energy:.0f}%。请准备充电休息，说说今天的感想。"
         )
-        self.send_message(end_msg)
+        response = self.send_message(end_msg)
+        self._print_response(response)
 
         print(f"\n{'='*60}")
-        print(f"  Day {self.time.day} complete")
-        print(f"  Actions executed: {len(self.action_log)}")
-        print(f"  Final zone: {self.npc.current_zone}")
-        print(f"  Energy: {self.npc.energy:.0f}%")
+        print(f"  Day {self.time.day} complete  |  {len(self.action_log)} steps")
+        print(f"  Final zone: {self.npc.current_zone}  |  Energy: {self.npc.energy:.0f}%")
         print(f"{'='*60}\n")
+
+    def _build_perception_text(self) -> str:
+        """Build natural-language perception text for the current game state."""
+        t = self.time
+        npc = self.npc
+        nearby = self._get_nearby_objects()
+
+        # Time-based context
+        if t.hour == 6:
+            period = "清晨"
+        elif t.hour < 12:
+            period = "上午"
+        elif t.hour < 13:
+            period = "中午"
+        elif t.hour < 18:
+            period = "下午"
+        else:
+            period = "傍晚"
+
+        lines = [
+            f"[感知] {period}，时间{t.display}。",
+            f"你在{npc.current_zone}，电池{npc.energy:.0f}%。",
+        ]
+        if nearby:
+            lines.append(f"附近有: {', '.join(nearby)}。")
+
+        # Context hints based on time
+        if t.hour == 12:
+            lines.append("午间维护时间到了，可以去充电。")
+        elif t.hour == 17:
+            lines.append("工作快结束了，准备收尾。")
+
+        # Scenario injection
+        self._inject_scenarios(lines)
+
+        lines.append("你现在想做什么？")
+        return "\n".join(lines)
+
+    def _print_response(self, response: Dict) -> str:
+        """Print the character's response in a readable format."""
+        text = self.extract_text(response)
+        if text:
+            # Decode any unicode escapes for display
+            try:
+                text = text.encode().decode("unicode_escape")
+            except (UnicodeDecodeError, UnicodeEncodeError):
+                pass
+            print(f"\n  [{self.time.display}] {text[:300]}")
+            if len(text) > 300:
+                print(f"  ... ({len(text)} chars total)")
+        return text or ""
 
     def _parse_action(self, text: str) -> Tuple[Optional[str], dict]:
         """
@@ -461,17 +527,18 @@ class MockUE:
     def print_report(self):
         """Print end-of-day summary report."""
         print(f"\n{'='*60}")
-        print(f"  Day {self.time.day} — Action Report")
+        print(f"  Day {self.time.day} — Summary Report")
         print(f"{'='*60}")
-        print(f"  {'Time':<10} {'Action':<20} {'Target':<20} {'Dur(min)':<10}")
+        print(f"  {'Time':<10} {'Zone':<20} {'Energy':<8} {'Response'}")
         print(f"  {'-'*60}")
         for entry in self.action_log:
+            resp = entry.get("response", "")[:60]
             print(
                 f"  {entry['time']:<10} "
-                f"{entry['action']:<20} "
-                f"{str(entry['params'].get('target', '')):<20} "
-                f"{entry['duration_game_min']:<10.0f}"
+                f"{entry.get('zone', ''):<20} "
+                f"{entry.get('energy', ''):<8} "
+                f"{resp}"
             )
         print(f"  {'-'*60}")
-        print(f"  Total actions: {len(self.action_log)}")
+        print(f"  Total steps: {len(self.action_log)}")
         print(f"{'='*60}\n")
