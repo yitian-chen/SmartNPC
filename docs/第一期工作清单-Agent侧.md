@@ -17,11 +17,12 @@
 
 | 我做（Agent 侧） | 我不用做（UE 侧） |
 |------|-----------|
-| World KB 设计与解析 | World KB 的 UE5 导出工具（Editor Exporter） |
+| World KB 解析与查询（加载 UE 同事提供的 world_kb.yaml） | World KB 的格式设计、UE 端导出工具（Editor Exporter） |
 | Agent Mind（Hermes）全部决策逻辑 | RobotActor / SmartObject / Zone Trigger 的 UE 实现 |
 | Action Translator 翻译层 | MoveTo / StateTree 的 UE 侧执行 |
 | LLM Gateway | ActionExecutor / PerceptionPackager |
 | Mock UE Bridge（模拟 UE 行为） | 真正的 WebSocket 客户端 |
+| 生成一份开发用 World KB 样例文档 | — |
 
 > **原则**：Agent 侧负责"想"，UE 侧负责"做"。协议未定前，Agent 与 Mock UE 之间用内部约定的消息格式；真协议确定后只替换序列化层。
 
@@ -37,7 +38,7 @@
                        │
 ┌──────────────────────┴───────────────────────────┐
 │  M-1  World Knowledge Base                        │
-│  YAML Schema · 解析器 · 语义解析器                   │
+│  解析器 · 语义查询（文档由UE侧提供）                  │
 └──────────────────────┬───────────────────────────┘
                        │
 ┌──────────────────────┴───────────────────────────┐
@@ -63,18 +64,22 @@
 
 ### M-1：World Knowledge Base（世界知识库）
 
-**目的**：Agent 不认识 3D 坐标，需要一份"世界字典"来翻译语义 ID ↔ 坐标。
+**定位**：World KB 的格式设计与 UE 端导出由 UE 同事负责。Agent 侧只需**加载并使用**这份文档。
+
+**目的**：Agent 不认识 3D 坐标，通过 World KB 将语义 ID 翻译为坐标和可用的交互行为。
 
 | # | 任务 | 说明 |
 |---|------|------|
-| 1.1 | 定义 YAML Schema | Phase 1 最小化：1 个 zone、1 个 NPC（H-01 老陈）、2 个 location（workbench_01、charging_station_01）、可用 actions |
-| 1.2 | 实现 YAML 解析器 | 加载 world_kb.yaml → Python 数据结构 |
+| 1.1 | **生成开发用样例 world_kb.yaml** | UE 同事真文档交付前，生成一份 Phase 1 最小化样例（1 zone + 1 NPC + 2 locations），供本地开发使用 |
+| 1.2 | 实现 YAML 解析器 | 加载 world_kb.yaml → Python 数据结构。**真文档交付后无需改动**（格式由 UE 侧约定） |
 | 1.3 | 实现 `resolve_target(id_or_desc)` | 判断输入是 zone / location / agent / object，返回对应实体结构 |
 | 1.4 | 实现 `get_position(id)` | 返回 interaction_point（location）或 entry_point（zone） |
 | 1.5 | 实现 `which_zone(pos)` | 坐标 → zone ID 查询 |
 | 1.6 | 实现 `get_available_actions(location_id)` | 返回该位置允许的动词列表 |
 
-#### Phase 1 最小 YAML 示例
+> **与 UE 同事的接口约定**：Agent 侧只依赖 world_kb.yaml 的最终格式，不关心 UE 侧如何生成。开发阶段用自生成的样例文档替代；真文档交付后直接替换文件即可。
+
+#### 开发用样例行
 
 ```yaml
 version: "1.0"
@@ -304,8 +309,9 @@ Mock UE → Agent:
 最优先开始的三个文件：
 
 1. **`hermes/profiles/H-01/SOUL.md`** —— 老陈的角色卡
-2. **`src/world_kb.py`** —— World KB 解析器 + `resolve_target()` + `get_position()`
+2. **`src/world_kb.py`** —— World KB 解析器 + `resolve_target()` + `get_position()`（用自生成的样例文档驱动）
 3. **`src/llm_gateway.py`** —— LLM Client 封装 + 战略层 prompt 模板
+4. **`assets/world_kb_sample.yaml`** —— 开发用样例 World KB（1 zone + 1 NPC + 2 locations）
 
 ---
 
@@ -313,7 +319,7 @@ Mock UE → Agent:
 
 第一期视为完成，需满足：
 
-- [ ] World KB 能正确加载并解析语义 ID → 坐标
+- [ ] World KB 解析器能正确加载样例文档并完成语义 ID → 坐标查询
 - [ ] H-01 老陈能在每天 06:00 生成一份合理的今日大纲
 - [ ] 战术层能把大纲任务分解为可执行的 action 序列
 - [ ] 执行层能逐个发送 action 给 Mock UE 并正确处理完成回调
