@@ -273,11 +273,21 @@ class MockUE:
 
         if action == "move_to":
             target = params.get("target", "")
-            moved = self._simulate_move(target)
-            if moved:
-                message_parts.append(f"arrived at {target}")
+            if not target:
+                raise ValueError("target is required")
+            # No-op if already at the target — don't waste a turn.
+            if self._already_at_target(target):
+                message_parts.append(f"already at {target}")
             else:
-                message_parts.append(f"unknown target: {target}")
+                moved = self._simulate_move(target)
+                if moved:
+                    message_parts.append(f"arrived at {target}")
+                else:
+                    raise ValueError(
+                        f"unknown target: {target!r}. "
+                        f"Valid zones: {sorted(ZONE_ENTRIES.keys())}. "
+                        f"Valid locations: {sorted(LOCATION_POINTS.keys())}."
+                    )
 
         elif action == "turn_to":
             target = params.get("target", "")
@@ -291,6 +301,20 @@ class MockUE:
         elif action == "interact_with":
             obj = params.get("object_id", "")
             verb = params.get("action", "")
+            if not obj:
+                raise ValueError("object_id is required")
+            # Reject zone IDs — they're not interactable objects.
+            if obj in ZONE_ENTRIES or obj in ZONE_BOUNDS:
+                raise ValueError(
+                    f"{obj!r} is a zone, not an object. "
+                    f"Use interact_with with an object_id from: {sorted(LOCATION_POINTS.keys())}. "
+                    f"To travel to a zone, use move_to instead."
+                )
+            if obj not in LOCATION_POINTS:
+                raise ValueError(
+                    f"unknown object_id: {obj!r}. "
+                    f"Valid objects: {sorted(LOCATION_POINTS.keys())}."
+                )
             message_parts.append(f"{verb} on {obj}")
 
         elif action == "charge_at":
@@ -408,6 +432,16 @@ class MockUE:
             self.npc.current_zone = new_zone
             logger.info(f"[ZONE] {old} → {new_zone}")
         return True
+
+    def _already_at_target(self, target: str) -> bool:
+        """Check if the NPC is already at the given target (zone or location)."""
+        if target == self.npc.current_zone:
+            return True
+        # A location is "current" if it lives in the NPC's current zone.
+        loc = LOCATION_POINTS.get(target)
+        if loc is not None:
+            return self._resolve_zone(loc) == self.npc.current_zone
+        return False
 
     # ─── 5.4 Zone Resolution ──────────────────────────────────
 
