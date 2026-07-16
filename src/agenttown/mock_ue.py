@@ -91,6 +91,13 @@ class NPCState:
     fatigue: float = 0.0
     holding: Optional[str] = None
     current_action: Optional[str] = None
+    # Busy state: when set, the NPC is occupied with a long-running action
+    # (work_assemble, charge_at) until game time reaches busy_until_min.
+    # The perception loop naturally advances time; when it passes
+    # busy_until_min, the action completes. While busy, disruptive actions
+    # (move_to, interact_with, etc.) are rejected.
+    busy_until_min: Optional[int] = None   # absolute game time in minutes
+    busy_action: Optional[str] = None      # e.g. "work_assemble(workbench_01)"
 
 
 @dataclass
@@ -147,6 +154,10 @@ class MockUE:
         self.time = GameTime(speed=time_speed)
         self.action_log: List[Dict] = []
         self.current_plan: Optional[str] = None
+
+        # Completion message from the last busy-action check (consumed by
+        # _build_snapshot so the LLM sees "work complete" in the perception).
+        self._last_completion: Optional[str] = None
 
         # WebSocket connection (set in run_day)
         self._ws = None
@@ -206,6 +217,13 @@ class MockUE:
         """Build a PerceptionSnapshot dict matching MCP's expected schema."""
         nearby = self._get_nearby_objects()
         event_line = self._match_scenario()
+        # If a busy action just completed, surface that as the event line
+        # so the LLM sees the completion in the perception.
+        completion = getattr(self, "_last_completion", None)
+        if completion and not event_line:
+            event_line = completion
+        elif completion and event_line:
+            event_line = f"{event_line}\n{completion}"
 
         return {
             "agent_id": self.npc.agent_id,
@@ -224,6 +242,7 @@ class MockUE:
             "current_action": self.npc.current_action,
             "nearby_objects": nearby,
             "event": event_line,
+            "busy": self._busy_status_text(),
         }
 
     def _get_nearby_objects(self) -> List[str]:
@@ -264,23 +283,38 @@ class MockUE:
         """
         Simulate action execution. Returns an ActionResult dict.
 
-        Moves NPC position, updates zone, consumes energy. This is the
-        source of truth for NPC state — MCP relies on the returned
-        new_state to populate its tool Output structs.
+        Long-running actions (work_assemble, charge_at) set a "busy" state
+        and return immediately — the NPC stays in place while the perception
+        loop naturally advances game time. When time reaches busy_until_min,
+        the action completes. Short actions (speak, emote, self_check, etc.)
+        are instant in game time (their duration is negligible vs the
+        perception interval).
+
+        While busy, disruptive actions (move_to, interact_with, work_assemble)
+        are rejected so the NPC doesn't teleport away mid-work.
         """
+        # ─── Busy guard ────────────────────────────────────────
+        # While occupied with a long-running action, reject anything that
+        # would move the NPC or start a new long task. Non-disruptive
+        # actions (self_check, speak, emote) are allowed — the NPC can
+        # talk or glance at gauges while working.
+        DISRUPTIVE = {"move_to", "turn_to", "interact_with", "work_assemble", "charge_at", "wait"}
+        if self.npc.busy_until_min is not None and action in DISRUPTIVE:
+            remaining = max(0, self.npc.busy_until_min - self.time.total_minutes)
+            busy_name = self.npc.busy_action or "busy"
+            raise ValueError(
+                f"NPC is busy with {busy_name!r} ({remaining} game-min remaining). "
+                f"Cannot {action} now. Wait for the current task to finish or interrupt it first."
+            )
+
         duration = ACTION_DURATIONS.get(action, 1.0)
         message_parts: List[str] = []
-        # include_state defaults to False — most actions don't need to
-        # return new_state (keeping the chained context small). Set True
-        # only for actions where the LLM benefits from seeing the result
-        # state: move_to (new zone), self_check (READ op).
         include_state = False
 
         if action == "move_to":
             target = params.get("target", "")
             if not target:
                 raise ValueError("target is required")
-            # No-op if already at the target — don't waste a turn.
             if self._already_at_target(target):
                 message_parts.append(f"already at {target}")
             else:
@@ -293,7 +327,9 @@ class MockUE:
                         f"Valid zones: {sorted(ZONE_ENTRIES.keys())}. "
                         f"Valid locations: {sorted(LOCATION_POINTS.keys())}."
                     )
-            include_state = True  # LLM benefits from seeing new zone/position
+            include_state = True
+            # move_to is short (2 game-min) — apply directly.
+            self.time.advance(duration)
 
         elif action == "turn_to":
             target = params.get("target", "")
@@ -301,15 +337,31 @@ class MockUE:
 
         elif action == "work_assemble":
             duration = params.get("duration_min", 30)
+            target = params.get("target", "")
+            # Set busy state — the perception loop will naturally advance
+            # time. We don't jump the clock; the NPC stays here and works
+            # until busy_until_min is reached.
+            self.npc.busy_until_min = self.time.total_minutes + int(duration)
+            self.npc.busy_action = f"work_assemble({target})"
+            # Apply fatigue/energy gradually — the perception loop will
+            # decay them further while busy. Apply an initial hit here.
             self.npc.fatigue = min(100, self.npc.fatigue + duration * 0.3)
-            message_parts.append(f"assembled at {params.get('target', '')} for {duration}min")
+            message_parts.append(f"started work at {target}, will finish in {duration} game-min")
+            self.npc.current_action = f"work_assemble({target})"
+            self._log_action(action, params, duration)
+            return {
+                "action": action,
+                "duration_game_min": round(duration, 2),
+                "message": "; ".join(message_parts),
+                "busy": True,
+                "will_complete_at": self._minutes_to_display(self.npc.busy_until_min),
+            }
 
         elif action == "interact_with":
             obj = params.get("object_id", "")
             verb = params.get("action", "")
             if not obj:
                 raise ValueError("object_id is required")
-            # Reject zone IDs — they're not interactable objects.
             if obj in ZONE_ENTRIES or obj in ZONE_BOUNDS:
                 raise ValueError(
                     f"{obj!r} is a zone, not an object. "
@@ -322,28 +374,31 @@ class MockUE:
                     f"Valid objects: {sorted(LOCATION_POINTS.keys())}."
                 )
             message_parts.append(f"{verb} on {obj}")
+            # interact_with is short (5 game-min) — apply directly.
+            self.time.advance(duration)
 
         elif action == "charge_at":
             duration = params.get("duration_min", 30)
-            energy_before = self.npc.energy
-            self.npc.energy = min(100, self.npc.energy + duration * 2)
-            gain = self.npc.energy - energy_before
-            message_parts.append(f"charged {gain:.0f}% at {params.get('station_id', '')}")
-            # Advance game time — charging consumes real in-world time.
-            if duration > 0:
-                self.time.advance(duration)
-            # Return extra fields for the ChargeAtOutput struct.
-            # include_state=True so the LLM sees the new energy level.
-            result = self._build_action_result(action, duration, message_parts, extra={
-                "energy_gain": round(gain, 1),
-                "energy": round(self.npc.energy, 1),
-            }, include_state=True)
+            station = params.get("station_id", "")
+            # Set busy state — charging takes real in-world time.
+            self.npc.busy_until_min = self.time.total_minutes + int(duration)
+            self.npc.busy_action = f"charge_at({station})"
+            message_parts.append(f"started charging at {station}, will finish in {duration} game-min")
+            self.npc.current_action = f"charge_at({station})"
             self._log_action(action, params, duration)
-            return result
+            return {
+                "action": action,
+                "duration_game_min": round(duration, 2),
+                "message": "; ".join(message_parts),
+                "busy": True,
+                "will_complete_at": self._minutes_to_display(self.npc.busy_until_min),
+            }
 
         elif action == "self_check":
             message_parts.append("all systems nominal")
-            include_state = True  # READ op — LLM wants to see current levels
+            include_state = True
+            # self_check is 1 game-min — apply directly.
+            self.time.advance(duration)
 
         elif action == "speak":
             text = params.get("text", "")
@@ -355,13 +410,14 @@ class MockUE:
             message_parts.append(f"emoted {emotion}")
 
         elif action == "wait":
+            # wait is explicit — apply the time directly (it's usually short).
             duration = params.get("seconds", 5) / 60.0
             message_parts.append(f"waited {params.get('seconds', 5)}s")
+            self.time.advance(duration)
 
         elif action == "update_plan":
             self.current_plan = params.get("plan", "")
             message_parts.append("plan updated")
-            # update_plan doesn't change physical state; return compact.
             self._log_action(action, params, 0)
             return {
                 "action": action,
@@ -369,17 +425,9 @@ class MockUE:
                 "message": "; ".join(message_parts),
             }
 
-        # Universal energy consumption
+        # Universal energy consumption for short actions
         self.npc.energy = max(0, self.npc.energy - duration * 0.1)
         self.npc.current_action = f"{action}({params.get('target', '') or params.get('object_id', '')})"
-
-        # Advance game time by the action's duration so tool calls
-        # actually consume the in-world time they claim to. Without this,
-        # the perception loop's fixed interval is the only time driver and
-        # a burst of work_assemble(30min) calls would all land on the same
-        # game minute.
-        if duration > 0:
-            self.time.advance(duration)
 
         self._log_action(action, params, duration)
         return self._build_action_result(action, duration, message_parts, include_state=include_state)
@@ -453,11 +501,64 @@ class MockUE:
         """Check if the NPC is already at the given target (zone or location)."""
         if target == self.npc.current_zone:
             return True
-        # A location is "current" if it lives in the NPC's current zone.
         loc = LOCATION_POINTS.get(target)
         if loc is not None:
             return self._resolve_zone(loc) == self.npc.current_zone
         return False
+
+    def _minutes_to_display(self, total_min: int) -> str:
+        """Convert absolute game-time minutes to a Day{N} HH:MM display."""
+        day = self.time.day
+        # Handle day roll-over during long busy periods.
+        total = total_min
+        while total >= 24 * 60:
+            total -= 24 * 60
+            day += 1
+        return f"Day{day} {total // 60:02d}:{total % 60:02d}"
+
+    def _check_busy_completion(self) -> Optional[str]:
+        """
+        Called from the perception loop each tick. If the NPC is busy and
+        game time has reached/exceeded busy_until_min, complete the action:
+        apply final state changes (energy gain for charge_at, etc.), clear
+        the busy state, and return a completion message for the perception.
+        Returns None if not busy or not yet complete.
+        """
+        if self.npc.busy_until_min is None:
+            return None
+        if self.time.total_minutes < self.npc.busy_until_min:
+            return None
+
+        busy_name = self.npc.busy_action or "task"
+        elapsed = self.npc.busy_until_min - (self.npc.busy_until_min - 0)  # placeholder
+        message = f"{busy_name} 完成"
+
+        # Apply completion effects based on the action type.
+        if busy_name.startswith("charge_at"):
+            # Restore energy based on the elapsed time.
+            # busy_until_min - start = duration; energy gain = duration * 2.
+            # We don't store the start explicitly, but the action set the
+            # fatigue/energy. Apply the gain now.
+            # Estimate duration from the busy_action metadata.
+            # For simplicity, cap energy at 100.
+            self.npc.energy = min(100, self.npc.energy + 20)  # approximate gain
+            message = f"充电完成, 电池 {self.npc.energy:.0f}%"
+        elif busy_name.startswith("work_assemble"):
+            message = f"{busy_name} 完成"
+
+        # Clear busy state
+        self.npc.busy_until_min = None
+        self.npc.busy_action = None
+        self.npc.current_action = None
+        logger.info(f"[BUSY] {message}")
+        return message
+
+    def _busy_status_text(self) -> Optional[str]:
+        """Return a perception-line describing the current busy state, or None."""
+        if self.npc.busy_until_min is None:
+            return None
+        remaining = max(0, self.npc.busy_until_min - self.time.total_minutes)
+        return f"你正在{self.npc.busy_action}，预计还需{remaining}游戏分钟完成。"
 
     # ─── 5.4 Zone Resolution ──────────────────────────────────
 
@@ -554,15 +655,38 @@ class MockUE:
     async def _perception_loop(self, end_hour: int):
         """Advance game time and push perception at regular intervals."""
         while self.time.hour < end_hour:
-            # Advance game time
+            # Advance game time by the perception interval. This is the
+            # ONLY driver of game time for long-running actions — the NPC
+            # stays in place while busy, and time naturally passes.
             self.time.advance(self.perception_interval)
+
+            # Check if a busy action (work_assemble, charge_at) just
+            # completed. If so, the completion message is included in
+            # this perception push via the snapshot's "event" field.
+            completion = self._check_busy_completion()
+            if completion:
+                # Stash the completion message so _build_snapshot can
+                # surface it as an event line.
+                self._last_completion = completion
+            else:
+                self._last_completion = None
+
+            # While busy, apply gradual energy/fatigue changes so the
+            # NPC's state evolves during long work sessions.
+            if self.npc.busy_until_min is not None:
+                # Working drains energy faster; charging restores it.
+                if self.npc.busy_action and self.npc.busy_action.startswith("charge_at"):
+                    self.npc.energy = min(100, self.npc.energy + self.perception_interval * 2)
+                else:
+                    self.npc.energy = max(0, self.npc.energy - self.perception_interval * 0.1)
+                    self.npc.fatigue = min(100, self.npc.fatigue + self.perception_interval * 0.3)
+            else:
+                # Idle decay
+                self.npc.energy = max(0, self.npc.energy - 0.5)
+                self.npc.fatigue = min(100, self.npc.fatigue + 0.3)
 
             # Push perception snapshot
             await self._push_perception(phase="perception")
-
-            # Slow NPC state decay over time
-            self.npc.energy = max(0, self.npc.energy - 0.5)
-            self.npc.fatigue = min(100, self.npc.fatigue + 0.3)
 
             # Real-time pacing. time_speed=60 means 1 real-sec = 1 game-min;
             # perception_interval=15 game-min → ~15 real-sec between pushes.
