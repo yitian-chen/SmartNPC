@@ -36,7 +36,7 @@ def main():
                         help="End hour (0-23)")
     parser.add_argument("--scenario", default=None,
                         help="YAML file with preset events (scenario injection)")
-    parser.add_argument("--interval", type=int, default=3,
+    parser.add_argument("--interval", type=int, default=15,
                         help="Perception push interval (game-minutes)")
 
     args = parser.parse_args()

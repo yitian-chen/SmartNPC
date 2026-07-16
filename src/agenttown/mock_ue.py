@@ -122,7 +122,7 @@ class MockUE:
         api_key: str = "agenttown-test-key",
         model: str = "deepseek-v4-flash",
         time_speed: float = 60.0,       # 1 real-sec = 1 game-min
-        perception_interval: int = 3,    # game-min between perception pushes
+        perception_interval: int = 15,   # game-min between perception pushes
         scenario_file: Optional[str] = None,
         log_dir: str = "logs",
     ):
@@ -138,6 +138,9 @@ class MockUE:
         self.last_perception_at = 0
         self.action_log: List[Dict] = []
 
+        # Session tracking — one Hermes conversation per game day
+        self._session_id: Optional[str] = None
+
         # Scenario injection
         self.scenarios: List[Dict] = []
         if scenario_file:
@@ -152,13 +155,19 @@ class MockUE:
     def send_message(self, message: str) -> Dict[str, Any]:
         """
         POST a message to Hermes Gateway /v1/responses.
+        Maintains a single session per game day via previous_response_id.
         Returns the parsed JSON response.
         """
         url = f"{self.gateway_url}/v1/responses"
-        payload = {
+        payload: Dict[str, Any] = {
             "model": self.model,
             "input": message,
         }
+        # Chain responses within the same day session
+        if self._session_id:
+            payload["previous_response_id"] = self._session_id
+            logger.debug(f"[SESSION] Chaining to {self._session_id[:20]}...")
+
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self.api_key}",
@@ -169,6 +178,8 @@ class MockUE:
             resp = requests.post(url, json=payload, headers=headers, timeout=120)
             resp.raise_for_status()
             data = resp.json()
+            # Update session ID for next call
+            self._session_id = data.get("id")
             self._log_response(data)
             return data
         except requests.RequestException as e:
@@ -342,6 +353,9 @@ class MockUE:
         self.time.hour = start_hour
         self.time.minute = 0
         step = 0
+
+        # Start a fresh Hermes session for this game day
+        self._session_id = None
 
         logger.info(f"=== Day {self.time.day} start ===")
         print(f"\n{'='*60}")
