@@ -6,17 +6,17 @@
 # ─── LLM Provider ───────────────────────────────────────────────
 model:
   provider: custom:agenttown
-  default: ${HERMES_AGENT_MODEL}
-  base_url: ${HERMES_AGENT_URL}
+  default: deepseek-v4-flash
+  base_url: https://api.deepseek.com
   api_mode: chat_completions
   context_length: 128000
 
 providers:
   agenttown:
     name: agenttown
-    base_url: ${HERMES_AGENT_URL}
+    base_url: https://api.deepseek.com
     key_env: HERMES_AGENT_API_KEY
-    default_model: ${HERMES_AGENT_MODEL}
+    default_model: deepseek-v4-flash
     api_mode: chat_completions
     discover_models: false
 
@@ -24,7 +24,7 @@ providers:
 API_SERVER_ENABLED: true
 API_SERVER_KEY: agenttown-test-key
 API_SERVER_HOST: 0.0.0.0
-API_SERVER_PORT: ${HERMES_PORT}
+API_SERVER_PORT: 8642
 API_SERVER_MODEL_NAME: h01
 
 # ─── Compression ────────────────────────────────────────────────
