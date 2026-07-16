@@ -270,6 +270,11 @@ class MockUE:
         """
         duration = ACTION_DURATIONS.get(action, 1.0)
         message_parts: List[str] = []
+        # include_state defaults to False — most actions don't need to
+        # return new_state (keeping the chained context small). Set True
+        # only for actions where the LLM benefits from seeing the result
+        # state: move_to (new zone), self_check (READ op).
+        include_state = False
 
         if action == "move_to":
             target = params.get("target", "")
@@ -288,6 +293,7 @@ class MockUE:
                         f"Valid zones: {sorted(ZONE_ENTRIES.keys())}. "
                         f"Valid locations: {sorted(LOCATION_POINTS.keys())}."
                     )
+            include_state = True  # LLM benefits from seeing new zone/position
 
         elif action == "turn_to":
             target = params.get("target", "")
@@ -326,16 +332,18 @@ class MockUE:
             # Advance game time — charging consumes real in-world time.
             if duration > 0:
                 self.time.advance(duration)
-            # Return extra fields for the ChargeAtOutput struct
+            # Return extra fields for the ChargeAtOutput struct.
+            # include_state=True so the LLM sees the new energy level.
             result = self._build_action_result(action, duration, message_parts, extra={
                 "energy_gain": round(gain, 1),
                 "energy": round(self.npc.energy, 1),
-            })
+            }, include_state=True)
             self._log_action(action, params, duration)
             return result
 
         elif action == "self_check":
             message_parts.append("all systems nominal")
+            include_state = True  # READ op — LLM wants to see current levels
 
         elif action == "speak":
             text = params.get("text", "")
@@ -353,12 +361,11 @@ class MockUE:
         elif action == "update_plan":
             self.current_plan = params.get("plan", "")
             message_parts.append("plan updated")
-            # update_plan doesn't change physical state; return early.
+            # update_plan doesn't change physical state; return compact.
             self._log_action(action, params, 0)
             return {
                 "action": action,
                 "duration_game_min": 0,
-                "new_state": self._state_snapshot(),
                 "message": "; ".join(message_parts),
             }
 
@@ -375,7 +382,7 @@ class MockUE:
             self.time.advance(duration)
 
         self._log_action(action, params, duration)
-        return self._build_action_result(action, duration, message_parts)
+        return self._build_action_result(action, duration, message_parts, include_state=include_state)
 
     def _build_action_result(
         self,
@@ -383,14 +390,23 @@ class MockUE:
         duration: float,
         messages: List[str],
         extra: Optional[Dict[str, Any]] = None,
+        include_state: bool = False,
     ) -> Dict[str, Any]:
-        """Build the standard ActionResult envelope."""
+        """
+        Build the standard ActionResult envelope.
+
+        include_state controls whether new_state is included. Set True only
+        for actions that change physical state the LLM needs to see in the
+        tool result (move_to, charge_at). Stateless actions (speak, emote,
+        wait, etc.) omit it to keep the chained context small.
+        """
         result: Dict[str, Any] = {
             "action": action,
             "duration_game_min": round(duration, 2),
-            "new_state": self._state_snapshot(),
             "message": "; ".join(messages) if messages else "ok",
         }
+        if include_state:
+            result["new_state"] = self._state_snapshot()
         if extra:
             result.update(extra)
         return result

@@ -92,6 +92,11 @@ func FormatSnapshot(p *Snapshot) string {
 		lines = append(lines, "你现在想做什么？")
 	}
 
+	// Conciseness directive — keeps the chained context from ballooning.
+	// The LLM tends to re-describe the environment every turn ("车间灯亮了",
+	// "机器在转") which accumulates rapidly via previous_response_id.
+	lines = append(lines, "（简短回应，不要重复描述已知的环境信息，直接说你要做什么或调用工具。）")
+
 	return strings.Join(lines, "\n")
 }
 

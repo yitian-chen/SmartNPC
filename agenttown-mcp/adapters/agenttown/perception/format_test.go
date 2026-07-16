@@ -29,8 +29,11 @@ func TestFormat_Perception(t *testing.T) {
 	if !strings.Contains(got, "附近有: workbench_01 (工作台), charging_station_01 (充电桩)。") {
 		t.Errorf("missing nearby line; got:\n%s", got)
 	}
-	if !strings.HasSuffix(got, "你现在想做什么？") {
-		t.Errorf("missing prompt suffix; got:\n%s", got)
+	if !strings.Contains(got, "你现在想做什么？") {
+		t.Errorf("missing prompt; got:\n%s", got)
+	}
+	if !strings.Contains(got, "简短回应") {
+		t.Errorf("missing conciseness directive; got:\n%s", got)
 	}
 }
 
