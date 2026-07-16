@@ -1,2 +1,31 @@
 .idea
 .env
+
+# ─── Hermes Profile 运行时文件 ───────────────────────────────
+# 只保留手写的 SOUL.md / SKILL.md / MEMORY.md / config.yaml，
+# 其余均为 Hermes Gateway 运行时产物。
+
+hermes/profiles/*/skills/
+hermes/profiles/*/logs/
+hermes/profiles/*/cron/
+hermes/profiles/*/sessions/
+hermes/profiles/*/sandboxes/
+hermes/profiles/*/platforms/
+hermes/profiles/*/hooks/
+hermes/profiles/*/memories/
+hermes/profiles/*/pairing/
+hermes/profiles/*/audio_cache/
+hermes/profiles/*/image_cache/
+hermes/profiles/*/bin/
+hermes/profiles/*/kanban/
+hermes/profiles/*/state.db*
+hermes/profiles/*/response_store.db*
+hermes/profiles/*/kanban.db*
+hermes/profiles/*/gateway.lock
+hermes/profiles/*/gateway.pid
+hermes/profiles/*/gateway_state.json
+hermes/profiles/*/channel_directory.json
+hermes/profiles/*/auth.lock
+hermes/profiles/*/.tirith-install-failed
+hermes/profiles/*/.skills_prompt_snapshot.json
+hermes/profiles/*/.bundled_manifest
