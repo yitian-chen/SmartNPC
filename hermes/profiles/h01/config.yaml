@@ -1,0 +1,43 @@
+# H-01 老陈 — Hermes Agent 配置
+#
+# 一期：单 Agent，无 MCP Server。
+# 后续期添加 mcp_servers 块连接 UE MCP。
+
+# ─── LLM Provider ───────────────────────────────────────────────
+model:
+  provider: custom:agenttown
+  default: ${HERMES_AGENT_MODEL}
+  base_url: ${HERMES_AGENT_URL}
+  api_mode: chat_completions
+  context_length: 128000
+
+providers:
+  agenttown:
+    name: agenttown
+    base_url: ${HERMES_AGENT_URL}
+    key_env: HERMES_AGENT_API_KEY
+    default_model: ${HERMES_AGENT_MODEL}
+    api_mode: chat_completions
+    discover_models: false
+
+# ─── REST Gateway ───────────────────────────────────────────────
+API_SERVER_ENABLED: true
+API_SERVER_KEY: agenttown-test-key
+API_SERVER_HOST: 0.0.0.0
+API_SERVER_PORT: ${HERMES_PORT}
+API_SERVER_MODEL_NAME: h01
+
+# ─── Compression ────────────────────────────────────────────────
+compression:
+  enabled: true
+  threshold: 0.30
+  target_ratio: 0.25
+  protect_last_n: 12
+  hygiene_hard_message_limit: 80
+
+# ─── Agent ──────────────────────────────────────────────────────
+agent:
+  tool_use_enforcement: false
+
+# ─── MCP Servers (一期为空) ─────────────────────────────────────
+mcp_servers: {}

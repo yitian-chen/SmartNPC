@@ -4,40 +4,35 @@
 #   bash docker/build-hermes.sh
 #
 # 使用：
-#   docker compose -f docker/docker-compose.yml up -d
+#   docker compose --env-file ../.env -f docker/docker-compose.yml up -d
 #   docker compose -f docker/docker-compose.yml logs -f
 #   docker compose -f docker/docker-compose.yml down
-
-version: "3.8"
 
 services:
   h01-gateway:
     image: hermes-agent:latest
     container_name: agenttown-h01
     ports:
-      - "${HERMES_PORT:-8642}:8642"
+      - "8642:8642"
     volumes:
-      # Hermes 持久数据（记忆、日志等）
       - hermes-data:/opt/data
-      # 挂载 Profile 文件到 Hermes profiles 目录
-      # SOUL.md / SKILL.md / MEMORY.md / config.yaml
-      - ../hermes/profiles/H-01:/opt/data/profiles/H-01:ro
+      - ../hermes/profiles/h01:/opt/data/profiles/h01
     environment:
-      # 从 .env 注入 LLM 配置（供 config.yaml 中 ${VAR} 展开）
-      - HERMES_AGENT_URL
-      - HERMES_AGENT_API_KEY
-      - HERMES_AGENT_MODEL
-      - HERMES_PORT
-    # Hermes main-wrapper 自动将参数路由为 `hermes <args>`
+      # Gateway 一期关闭外部门控，接受所有请求
+      - GATEWAY_ALLOW_ALL_USERS=true
+    env_file:
+      - ../.env
+    # 绕过 s6-overlay 交互模式，直接启动 Hermes Gateway
+    entrypoint: ["hermes"]
     command:
       - "-p"
-      - "H-01"
+      - "h01"
       - "gateway"
       - "run"
       - "--accept-hooks"
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8642/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:8641/health"]
       interval: 30s
       timeout: 5s
       retries: 3

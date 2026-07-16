@@ -1,0 +1,280 @@
+2026-07-16 08:58:13,129 INFO hermes_cli.plugins: Plugin 'browser-browser-use' registered browser provider: browser-use
+2026-07-16 08:58:13,130 INFO hermes_cli.plugins: Plugin 'browser-browserbase' registered browser provider: browserbase
+2026-07-16 08:58:13,131 INFO hermes_cli.plugins: Plugin 'browser-firecrawl' registered browser provider: firecrawl
+2026-07-16 08:58:13,287 INFO hermes_cli.plugins: Plugin 'fal' registered image_gen provider: fal
+2026-07-16 08:58:13,289 INFO hermes_cli.plugins: Plugin 'krea' registered image_gen provider: krea
+2026-07-16 08:58:13,290 INFO hermes_cli.plugins: Plugin 'openai' registered image_gen provider: openai
+2026-07-16 08:58:13,292 INFO hermes_cli.plugins: Plugin 'openai-codex' registered image_gen provider: openai-codex
+2026-07-16 08:58:13,294 INFO hermes_cli.plugins: Plugin 'openrouter' registered image_gen provider: openrouter
+2026-07-16 08:58:13,294 INFO hermes_cli.plugins: Plugin 'openrouter' registered image_gen provider: nous
+2026-07-16 08:58:13,296 INFO hermes_cli.plugins: Plugin 'xai' registered image_gen provider: xai
+2026-07-16 08:58:13,336 INFO hermes_cli.plugins: Plugin 'fal' registered video_gen provider: fal
+2026-07-16 08:58:13,338 INFO hermes_cli.plugins: Plugin 'xai' registered video_gen provider: xai
+2026-07-16 08:58:13,340 INFO hermes_cli.plugins: Plugin 'web-brave-free' registered web provider: brave-free
+2026-07-16 08:58:13,341 INFO hermes_cli.plugins: Plugin 'web-ddgs' registered web provider: ddgs
+2026-07-16 08:58:13,342 INFO hermes_cli.plugins: Plugin 'web-exa' registered web provider: exa
+2026-07-16 08:58:13,346 INFO hermes_cli.plugins: Plugin 'web-firecrawl' registered web provider: firecrawl
+2026-07-16 08:58:13,347 INFO hermes_cli.plugins: Plugin 'web-parallel' registered web provider: parallel
+2026-07-16 08:58:13,348 INFO hermes_cli.plugins: Plugin 'web-searxng' registered web provider: searxng
+2026-07-16 08:58:13,349 INFO hermes_cli.plugins: Plugin 'web-tavily' registered web provider: tavily
+2026-07-16 08:58:13,350 INFO hermes_cli.plugins: Plugin 'web-xai' registered web provider: xai
+2026-07-16 08:58:13,371 INFO hermes_cli.plugins: Plugin discovery complete: 51 found, 44 enabled
+2026-07-16 08:58:24,733 INFO tools.tirith_security: tirith not found — downloading latest release for x86_64-unknown-linux-gnu...
+2026-07-16 08:58:25,285 INFO gateway.run: Starting Hermes Gateway...
+2026-07-16 08:58:25,285 INFO gateway.run: Session storage: /opt/data/profiles/h01/sessions
+2026-07-16 08:58:25,287 INFO gateway.run: Agent budget: max_iterations=90 (agent.max_turns from config.yaml, or HERMES_MAX_ITERATIONS from .env, or default 90)
+2026-07-16 08:58:25,287 INFO gateway.run: Secret redaction: ENABLED (tool output, logs, and chat responses are scrubbed before delivery)
+2026-07-16 08:58:25,288 INFO gateway.run: Active profile: h01
+2026-07-16 08:58:25,314 WARNING gateway.run: No env user allowlists configured. Messaging platforms default to pairing/allowlist policies and will deny unknown senders unless you configure platform allowlists (e.g., TELEGRAM_ALLOWED_USERS=your_id) or explicitly opt in with GATEWAY_ALLOW_ALL_USERS=true plus dm_policy/group_policy: open on the platform.
+2026-07-16 08:58:25,481 INFO gateway.run: Connecting to api_server...
+2026-07-16 08:58:25,511 WARNING gateway.platforms.api_server: [Api_Server] API server is network-accessible (0.0.0.0) AND the terminal backend is 'local' (unsandboxed). Agent work dispatched through this endpoint runs as the host user with full terminal/file access. Strongly consider a sandboxed backend (terminal.backend: docker) and firewalling this port to trusted networks only.
+2026-07-16 08:58:25,533 INFO gateway.platforms.api_server: [Api_Server] API server listening on http://0.0.0.0:8642 (model: h01)
+2026-07-16 08:58:25,594 INFO gateway.run: ✓ api_server connected
+2026-07-16 08:58:25,611 INFO gateway.run: Gateway running with 1 platform(s)
+2026-07-16 08:58:25,624 INFO gateway.run: Channel directory built: 0 target(s)
+2026-07-16 08:58:26,627 INFO gateway.run: Press Ctrl+C to stop
+2026-07-16 08:58:26,639 INFO cron.scheduler_provider: In-process cron scheduler started (interval=60s)
+2026-07-16 08:58:26,643 INFO gateway.run: Gateway housekeeping started (interval=60s)
+2026-07-16 08:58:26,674 INFO gateway.run: kanban dispatcher: holding singleton dispatcher lock (/opt/data/kanban/.dispatcher.lock)
+2026-07-16 08:58:31,675 INFO gateway.run: kanban dispatcher: embedded in gateway (interval=60.0s)
+2026-07-16 08:59:43,425 INFO gateway.run: Received SIGTERM — initiating shutdown
+2026-07-16 08:59:43,425 WARNING gateway.run: Shutdown context: signal=SIGTERM under_systemd=no parent_pid=? parent_name=? loadavg_1m=0.26 parent_cmdline='(unknown)'
+2026-07-16 08:59:43,429 INFO gateway.run: Stopping gateway...
+2026-07-16 08:59:43,429 INFO gateway.run: Shutdown phase: notify_active_sessions done at +0.00s
+2026-07-16 08:59:43,460 INFO gateway.run: Shutdown phase: drain done at +0.03s (drain took 0.03s, timed_out=False, active_at_start=0, active_now=0, cron_at_start=0, cron_now=0)
+2026-07-16 08:59:43,508 INFO gateway.platforms.api_server: [Api_Server] API server stopped
+2026-07-16 08:59:43,508 INFO gateway.run: ✓ api_server disconnected (0.05s)
+2026-07-16 08:59:43,508 INFO gateway.run: Shutdown phase: all adapters disconnected at +0.08s
+2026-07-16 08:59:43,643 INFO gateway.run: Shutdown phase: final-cleanup tool kill done at +0.21s
+2026-07-16 08:59:43,686 INFO gateway.run: Shutdown phase: SessionDB close done at +0.26s
+2026-07-16 08:59:43,690 INFO gateway.run: Gateway stopped by an unexpected signal — persisting gateway_state=running so container_boot auto-starts on the next boot (issue #42675)
+2026-07-16 08:59:43,718 INFO gateway.run: Gateway stopped (total teardown 0.29s)
+2026-07-16 08:59:43,719 INFO gateway.run: Gateway housekeeping stopped
+2026-07-16 08:59:43,821 INFO gateway.run: Exiting with code 1 (signal-initiated shutdown without restart request) so systemd Restart=on-failure can revive the gateway.
+2026-07-16 08:59:45,723 INFO hermes_cli.plugins: Plugin 'browser-browser-use' registered browser provider: browser-use
+2026-07-16 08:59:45,725 INFO hermes_cli.plugins: Plugin 'browser-browserbase' registered browser provider: browserbase
+2026-07-16 08:59:45,725 INFO hermes_cli.plugins: Plugin 'browser-firecrawl' registered browser provider: firecrawl
+2026-07-16 08:59:45,905 INFO hermes_cli.plugins: Plugin 'fal' registered image_gen provider: fal
+2026-07-16 08:59:45,907 INFO hermes_cli.plugins: Plugin 'krea' registered image_gen provider: krea
+2026-07-16 08:59:45,908 INFO hermes_cli.plugins: Plugin 'openai' registered image_gen provider: openai
+2026-07-16 08:59:45,910 INFO hermes_cli.plugins: Plugin 'openai-codex' registered image_gen provider: openai-codex
+2026-07-16 08:59:45,912 INFO hermes_cli.plugins: Plugin 'openrouter' registered image_gen provider: openrouter
+2026-07-16 08:59:45,912 INFO hermes_cli.plugins: Plugin 'openrouter' registered image_gen provider: nous
+2026-07-16 08:59:45,914 INFO hermes_cli.plugins: Plugin 'xai' registered image_gen provider: xai
+2026-07-16 08:59:45,952 INFO hermes_cli.plugins: Plugin 'fal' registered video_gen provider: fal
+2026-07-16 08:59:45,954 INFO hermes_cli.plugins: Plugin 'xai' registered video_gen provider: xai
+2026-07-16 08:59:45,956 INFO hermes_cli.plugins: Plugin 'web-brave-free' registered web provider: brave-free
+2026-07-16 08:59:45,957 INFO hermes_cli.plugins: Plugin 'web-ddgs' registered web provider: ddgs
+2026-07-16 08:59:45,958 INFO hermes_cli.plugins: Plugin 'web-exa' registered web provider: exa
+2026-07-16 08:59:45,962 INFO hermes_cli.plugins: Plugin 'web-firecrawl' registered web provider: firecrawl
+2026-07-16 08:59:45,964 INFO hermes_cli.plugins: Plugin 'web-parallel' registered web provider: parallel
+2026-07-16 08:59:45,965 INFO hermes_cli.plugins: Plugin 'web-searxng' registered web provider: searxng
+2026-07-16 08:59:45,966 INFO hermes_cli.plugins: Plugin 'web-tavily' registered web provider: tavily
+2026-07-16 08:59:45,968 INFO hermes_cli.plugins: Plugin 'web-xai' registered web provider: xai
+2026-07-16 08:59:45,989 INFO hermes_cli.plugins: Plugin discovery complete: 51 found, 44 enabled
+2026-07-16 08:59:54,361 INFO gateway.run: Starting Hermes Gateway...
+2026-07-16 08:59:54,361 INFO gateway.run: Session storage: /opt/data/profiles/h01/sessions
+2026-07-16 08:59:54,363 INFO gateway.run: Agent budget: max_iterations=90 (agent.max_turns from config.yaml, or HERMES_MAX_ITERATIONS from .env, or default 90)
+2026-07-16 08:59:54,363 INFO gateway.run: Secret redaction: ENABLED (tool output, logs, and chat responses are scrubbed before delivery)
+2026-07-16 08:59:54,364 INFO gateway.run: Active profile: h01
+2026-07-16 08:59:54,382 WARNING gateway.run: No env user allowlists configured. Messaging platforms default to pairing/allowlist policies and will deny unknown senders unless you configure platform allowlists (e.g., TELEGRAM_ALLOWED_USERS=your_id) or explicitly opt in with GATEWAY_ALLOW_ALL_USERS=true plus dm_policy/group_policy: open on the platform.
+2026-07-16 08:59:54,398 INFO gateway.run: Previous gateway exited cleanly — skipping session suspension
+2026-07-16 08:59:54,490 INFO gateway.run: Connecting to api_server...
+2026-07-16 08:59:54,513 WARNING gateway.platforms.api_server: [Api_Server] API server is network-accessible (0.0.0.0) AND the terminal backend is 'local' (unsandboxed). Agent work dispatched through this endpoint runs as the host user with full terminal/file access. Strongly consider a sandboxed backend (terminal.backend: docker) and firewalling this port to trusted networks only.
+2026-07-16 08:59:54,536 INFO gateway.platforms.api_server: [Api_Server] API server listening on http://0.0.0.0:8641 (model: h01)
+2026-07-16 08:59:54,564 INFO gateway.run: ✓ api_server connected
+2026-07-16 08:59:54,581 INFO gateway.run: Gateway running with 1 platform(s)
+2026-07-16 08:59:54,607 INFO gateway.run: Channel directory built: 0 target(s)
+2026-07-16 08:59:55,301 INFO aiohttp.access: 127.0.0.1 [16/Jul/2026:08:59:55 +0000] "GET /health HTTP/1.1" 200 526 "-" "curl/8.14.1"
+2026-07-16 08:59:55,620 INFO gateway.run: Press Ctrl+C to stop
+2026-07-16 08:59:55,653 INFO cron.scheduler_provider: In-process cron scheduler started (interval=60s)
+2026-07-16 08:59:55,658 INFO gateway.run: Gateway housekeeping started (interval=60s)
+2026-07-16 08:59:55,687 INFO gateway.run: kanban dispatcher: holding singleton dispatcher lock (/opt/data/kanban/.dispatcher.lock)
+2026-07-16 09:00:00,687 INFO gateway.run: kanban dispatcher: embedded in gateway (interval=60.0s)
+2026-07-16 09:00:08,231 INFO aiohttp.access: 172.20.0.1 [16/Jul/2026:09:00:08 +0000] "GET /health HTTP/1.1" 200 526 "-" "curl/8.21.0"
+2026-07-16 09:00:15,871 WARNING gateway.platforms.api_server: API server rejected invalid API key: remote='172.20.0.1' peer_ip='172.20.0.1' method='POST' path='/v1/responses' user_agent='curl/8.21.0'
+2026-07-16 09:00:15,871 INFO aiohttp.access: 172.20.0.1 [16/Jul/2026:09:00:15 +0000] "POST /v1/responses HTTP/1.1" 401 573 "-" "curl/8.21.0"
+2026-07-16 09:00:25,377 INFO aiohttp.access: 127.0.0.1 [16/Jul/2026:09:00:25 +0000] "GET /health HTTP/1.1" 200 526 "-" "curl/8.14.1"
+2026-07-16 09:00:34,863 WARNING gateway.platforms.api_server: API server rejected invalid API key: remote='172.20.0.1' peer_ip='172.20.0.1' method='POST' path='/v1/responses' user_agent='curl/8.21.0'
+2026-07-16 09:00:34,863 INFO aiohttp.access: 172.20.0.1 [16/Jul/2026:09:00:34 +0000] "POST /v1/responses HTTP/1.1" 401 573 "-" "curl/8.21.0"
+2026-07-16 09:00:55,434 INFO aiohttp.access: 127.0.0.1 [16/Jul/2026:09:00:55 +0000] "GET /health HTTP/1.1" 200 526 "-" "curl/8.14.1"
+2026-07-16 09:01:16,591 INFO gateway.run: Received SIGTERM — initiating shutdown
+2026-07-16 09:01:16,591 WARNING gateway.run: Shutdown context: signal=SIGTERM under_systemd=no parent_pid=? parent_name=? loadavg_1m=0.08 parent_cmdline='(unknown)'
+2026-07-16 09:01:16,595 INFO gateway.run: Stopping gateway...
+2026-07-16 09:01:16,595 INFO gateway.run: Shutdown phase: notify_active_sessions done at +0.00s
+2026-07-16 09:01:16,635 INFO gateway.run: Shutdown phase: drain done at +0.04s (drain took 0.04s, timed_out=False, active_at_start=0, active_now=0, cron_at_start=0, cron_now=0)
+2026-07-16 09:01:16,652 INFO gateway.platforms.api_server: [Api_Server] API server stopped
+2026-07-16 09:01:16,652 INFO gateway.run: ✓ api_server disconnected (0.02s)
+2026-07-16 09:01:16,652 INFO gateway.run: Shutdown phase: all adapters disconnected at +0.06s
+2026-07-16 09:01:16,889 INFO gateway.run: Shutdown phase: final-cleanup tool kill done at +0.29s
+2026-07-16 09:01:16,894 INFO gateway.run: Shutdown phase: SessionDB close done at +0.30s
+2026-07-16 09:01:16,897 INFO gateway.run: Gateway stopped by an unexpected signal — persisting gateway_state=running so container_boot auto-starts on the next boot (issue #42675)
+2026-07-16 09:01:16,917 INFO gateway.run: Gateway stopped (total teardown 0.32s)
+2026-07-16 09:01:16,918 INFO gateway.run: Gateway housekeeping stopped
+2026-07-16 09:01:17,018 INFO gateway.run: Exiting with code 1 (signal-initiated shutdown without restart request) so systemd Restart=on-failure can revive the gateway.
+2026-07-16 09:01:18,341 INFO hermes_cli.plugins: Plugin 'browser-browser-use' registered browser provider: browser-use
+2026-07-16 09:01:18,342 INFO hermes_cli.plugins: Plugin 'browser-browserbase' registered browser provider: browserbase
+2026-07-16 09:01:18,344 INFO hermes_cli.plugins: Plugin 'browser-firecrawl' registered browser provider: firecrawl
+2026-07-16 09:01:18,510 INFO hermes_cli.plugins: Plugin 'fal' registered image_gen provider: fal
+2026-07-16 09:01:18,512 INFO hermes_cli.plugins: Plugin 'krea' registered image_gen provider: krea
+2026-07-16 09:01:18,514 INFO hermes_cli.plugins: Plugin 'openai' registered image_gen provider: openai
+2026-07-16 09:01:18,516 INFO hermes_cli.plugins: Plugin 'openai-codex' registered image_gen provider: openai-codex
+2026-07-16 09:01:18,518 INFO hermes_cli.plugins: Plugin 'openrouter' registered image_gen provider: openrouter
+2026-07-16 09:01:18,518 INFO hermes_cli.plugins: Plugin 'openrouter' registered image_gen provider: nous
+2026-07-16 09:01:18,521 INFO hermes_cli.plugins: Plugin 'xai' registered image_gen provider: xai
+2026-07-16 09:01:18,562 INFO hermes_cli.plugins: Plugin 'fal' registered video_gen provider: fal
+2026-07-16 09:01:18,565 INFO hermes_cli.plugins: Plugin 'xai' registered video_gen provider: xai
+2026-07-16 09:01:18,569 INFO hermes_cli.plugins: Plugin 'web-brave-free' registered web provider: brave-free
+2026-07-16 09:01:18,570 INFO hermes_cli.plugins: Plugin 'web-ddgs' registered web provider: ddgs
+2026-07-16 09:01:18,572 INFO hermes_cli.plugins: Plugin 'web-exa' registered web provider: exa
+2026-07-16 09:01:18,577 INFO hermes_cli.plugins: Plugin 'web-firecrawl' registered web provider: firecrawl
+2026-07-16 09:01:18,579 INFO hermes_cli.plugins: Plugin 'web-parallel' registered web provider: parallel
+2026-07-16 09:01:18,580 INFO hermes_cli.plugins: Plugin 'web-searxng' registered web provider: searxng
+2026-07-16 09:01:18,582 INFO hermes_cli.plugins: Plugin 'web-tavily' registered web provider: tavily
+2026-07-16 09:01:18,584 INFO hermes_cli.plugins: Plugin 'web-xai' registered web provider: xai
+2026-07-16 09:01:18,607 INFO hermes_cli.plugins: Plugin discovery complete: 51 found, 44 enabled
+2026-07-16 09:01:27,760 INFO gateway.run: Starting Hermes Gateway...
+2026-07-16 09:01:27,760 INFO gateway.run: Session storage: /opt/data/profiles/h01/sessions
+2026-07-16 09:01:27,840 INFO gateway.run: Agent budget: max_iterations=90 (agent.max_turns from config.yaml, or HERMES_MAX_ITERATIONS from .env, or default 90)
+2026-07-16 09:01:27,841 INFO gateway.run: Secret redaction: ENABLED (tool output, logs, and chat responses are scrubbed before delivery)
+2026-07-16 09:01:27,842 INFO gateway.run: Active profile: h01
+2026-07-16 09:01:27,878 WARNING gateway.run: No env user allowlists configured. Messaging platforms default to pairing/allowlist policies and will deny unknown senders unless you configure platform allowlists (e.g., TELEGRAM_ALLOWED_USERS=your_id) or explicitly opt in with GATEWAY_ALLOW_ALL_USERS=true plus dm_policy/group_policy: open on the platform.
+2026-07-16 09:01:27,901 INFO gateway.run: Previous gateway exited cleanly — skipping session suspension
+2026-07-16 09:01:28,003 INFO gateway.run: Connecting to api_server...
+2026-07-16 09:01:28,027 WARNING gateway.platforms.api_server: [Api_Server] API server is network-accessible (0.0.0.0) AND the terminal backend is 'local' (unsandboxed). Agent work dispatched through this endpoint runs as the host user with full terminal/file access. Strongly consider a sandboxed backend (terminal.backend: docker) and firewalling this port to trusted networks only.
+2026-07-16 09:01:28,049 INFO gateway.platforms.api_server: [Api_Server] API server listening on http://0.0.0.0:8641 (model: h01)
+2026-07-16 09:01:28,079 INFO gateway.run: ✓ api_server connected
+2026-07-16 09:01:28,108 INFO gateway.run: Gateway running with 1 platform(s)
+2026-07-16 09:01:28,135 INFO gateway.run: Channel directory built: 0 target(s)
+2026-07-16 09:01:29,142 INFO gateway.run: Press Ctrl+C to stop
+2026-07-16 09:01:29,183 INFO cron.scheduler_provider: In-process cron scheduler started (interval=60s)
+2026-07-16 09:01:29,188 INFO gateway.run: Gateway housekeeping started (interval=60s)
+2026-07-16 09:01:29,220 INFO gateway.run: kanban dispatcher: holding singleton dispatcher lock (/opt/data/kanban/.dispatcher.lock)
+2026-07-16 09:01:32,949 INFO aiohttp.access: 127.0.0.1 [16/Jul/2026:09:01:32 +0000] "GET /health HTTP/1.1" 200 526 "-" "curl/8.14.1"
+2026-07-16 09:01:34,222 INFO gateway.run: kanban dispatcher: embedded in gateway (interval=60.0s)
+2026-07-16 09:01:34,415 INFO aiohttp.access: 172.20.0.1 [16/Jul/2026:09:01:34 +0000] "GET /health HTTP/1.1" 200 526 "-" "curl/8.21.0"
+2026-07-16 09:01:34,494 WARNING gateway.platforms.api_server: API server rejected invalid API key: remote='172.20.0.1' peer_ip='172.20.0.1' method='POST' path='/v1/responses' user_agent='curl/8.21.0'
+2026-07-16 09:01:34,494 INFO aiohttp.access: 172.20.0.1 [16/Jul/2026:09:01:34 +0000] "POST /v1/responses HTTP/1.1" 401 573 "-" "curl/8.21.0"
+2026-07-16 09:01:42,276 WARNING gateway.platforms.api_server: API server rejected invalid API key: remote='172.20.0.1' peer_ip='172.20.0.1' method='POST' path='/v1/responses' user_agent='curl/8.21.0'
+2026-07-16 09:01:42,277 INFO aiohttp.access: 172.20.0.1 [16/Jul/2026:09:01:42 +0000] "POST /v1/responses HTTP/1.1" 401 573 "-" "curl/8.21.0"
+2026-07-16 09:02:02,537 INFO gateway.run: Received SIGTERM — initiating shutdown
+2026-07-16 09:02:02,537 WARNING gateway.run: Shutdown context: signal=SIGTERM under_systemd=no parent_pid=? parent_name=? loadavg_1m=0.17 parent_cmdline='(unknown)'
+2026-07-16 09:02:02,541 INFO gateway.run: Stopping gateway...
+2026-07-16 09:02:02,541 INFO gateway.run: Shutdown phase: notify_active_sessions done at +0.00s
+2026-07-16 09:02:02,579 INFO gateway.run: Shutdown phase: drain done at +0.04s (drain took 0.04s, timed_out=False, active_at_start=0, active_now=0, cron_at_start=0, cron_now=0)
+2026-07-16 09:02:02,605 INFO gateway.platforms.api_server: [Api_Server] API server stopped
+2026-07-16 09:02:02,605 INFO gateway.run: ✓ api_server disconnected (0.03s)
+2026-07-16 09:02:02,605 INFO gateway.run: Shutdown phase: all adapters disconnected at +0.06s
+2026-07-16 09:02:02,731 INFO gateway.run: Shutdown phase: final-cleanup tool kill done at +0.19s
+2026-07-16 09:02:02,735 INFO gateway.run: Shutdown phase: SessionDB close done at +0.19s
+2026-07-16 09:02:02,738 INFO gateway.run: Gateway stopped by an unexpected signal — persisting gateway_state=running so container_boot auto-starts on the next boot (issue #42675)
+2026-07-16 09:02:02,765 INFO gateway.run: Gateway stopped (total teardown 0.22s)
+2026-07-16 09:02:02,765 INFO gateway.run: Gateway housekeeping stopped
+2026-07-16 09:02:02,866 INFO gateway.run: Exiting with code 1 (signal-initiated shutdown without restart request) so systemd Restart=on-failure can revive the gateway.
+2026-07-16 09:02:04,065 INFO hermes_cli.plugins: Plugin 'browser-browser-use' registered browser provider: browser-use
+2026-07-16 09:02:04,066 INFO hermes_cli.plugins: Plugin 'browser-browserbase' registered browser provider: browserbase
+2026-07-16 09:02:04,067 INFO hermes_cli.plugins: Plugin 'browser-firecrawl' registered browser provider: firecrawl
+2026-07-16 09:02:04,241 INFO hermes_cli.plugins: Plugin 'fal' registered image_gen provider: fal
+2026-07-16 09:02:04,243 INFO hermes_cli.plugins: Plugin 'krea' registered image_gen provider: krea
+2026-07-16 09:02:04,245 INFO hermes_cli.plugins: Plugin 'openai' registered image_gen provider: openai
+2026-07-16 09:02:04,247 INFO hermes_cli.plugins: Plugin 'openai-codex' registered image_gen provider: openai-codex
+2026-07-16 09:02:04,248 INFO hermes_cli.plugins: Plugin 'openrouter' registered image_gen provider: openrouter
+2026-07-16 09:02:04,248 INFO hermes_cli.plugins: Plugin 'openrouter' registered image_gen provider: nous
+2026-07-16 09:02:04,251 INFO hermes_cli.plugins: Plugin 'xai' registered image_gen provider: xai
+2026-07-16 09:02:04,288 INFO hermes_cli.plugins: Plugin 'fal' registered video_gen provider: fal
+2026-07-16 09:02:04,290 INFO hermes_cli.plugins: Plugin 'xai' registered video_gen provider: xai
+2026-07-16 09:02:04,293 INFO hermes_cli.plugins: Plugin 'web-brave-free' registered web provider: brave-free
+2026-07-16 09:02:04,294 INFO hermes_cli.plugins: Plugin 'web-ddgs' registered web provider: ddgs
+2026-07-16 09:02:04,295 INFO hermes_cli.plugins: Plugin 'web-exa' registered web provider: exa
+2026-07-16 09:02:04,299 INFO hermes_cli.plugins: Plugin 'web-firecrawl' registered web provider: firecrawl
+2026-07-16 09:02:04,300 INFO hermes_cli.plugins: Plugin 'web-parallel' registered web provider: parallel
+2026-07-16 09:02:04,301 INFO hermes_cli.plugins: Plugin 'web-searxng' registered web provider: searxng
+2026-07-16 09:02:04,302 INFO hermes_cli.plugins: Plugin 'web-tavily' registered web provider: tavily
+2026-07-16 09:02:04,304 INFO hermes_cli.plugins: Plugin 'web-xai' registered web provider: xai
+2026-07-16 09:02:04,326 INFO hermes_cli.plugins: Plugin discovery complete: 51 found, 44 enabled
+2026-07-16 09:02:12,755 INFO gateway.run: Starting Hermes Gateway...
+2026-07-16 09:02:12,755 INFO gateway.run: Session storage: /opt/data/profiles/h01/sessions
+2026-07-16 09:02:12,757 INFO gateway.run: Agent budget: max_iterations=90 (agent.max_turns from config.yaml, or HERMES_MAX_ITERATIONS from .env, or default 90)
+2026-07-16 09:02:12,757 INFO gateway.run: Secret redaction: ENABLED (tool output, logs, and chat responses are scrubbed before delivery)
+2026-07-16 09:02:12,758 INFO gateway.run: Active profile: h01
+2026-07-16 09:02:12,785 WARNING gateway.run: No env user allowlists configured. Messaging platforms default to pairing/allowlist policies and will deny unknown senders unless you configure platform allowlists (e.g., TELEGRAM_ALLOWED_USERS=your_id) or explicitly opt in with GATEWAY_ALLOW_ALL_USERS=true plus dm_policy/group_policy: open on the platform.
+2026-07-16 09:02:12,809 INFO gateway.run: Previous gateway exited cleanly — skipping session suspension
+2026-07-16 09:02:12,899 INFO gateway.run: Connecting to api_server...
+2026-07-16 09:02:12,947 WARNING gateway.platforms.api_server: [Api_Server] API server is network-accessible (0.0.0.0) AND the terminal backend is 'local' (unsandboxed). Agent work dispatched through this endpoint runs as the host user with full terminal/file access. Strongly consider a sandboxed backend (terminal.backend: docker) and firewalling this port to trusted networks only.
+2026-07-16 09:02:12,968 INFO gateway.platforms.api_server: [Api_Server] API server listening on http://0.0.0.0:8641 (model: h01)
+2026-07-16 09:02:12,990 INFO gateway.run: ✓ api_server connected
+2026-07-16 09:02:13,001 INFO gateway.run: Gateway running with 1 platform(s)
+2026-07-16 09:02:13,018 INFO gateway.run: Channel directory built: 0 target(s)
+2026-07-16 09:02:13,633 INFO aiohttp.access: 127.0.0.1 [16/Jul/2026:09:02:13 +0000] "GET /health HTTP/1.1" 200 526 "-" "curl/8.14.1"
+2026-07-16 09:02:14,033 INFO gateway.run: Press Ctrl+C to stop
+2026-07-16 09:02:14,053 INFO cron.scheduler_provider: In-process cron scheduler started (interval=60s)
+2026-07-16 09:02:14,057 INFO gateway.run: Gateway housekeeping started (interval=60s)
+2026-07-16 09:02:14,089 INFO gateway.run: kanban dispatcher: holding singleton dispatcher lock (/opt/data/kanban/.dispatcher.lock)
+2026-07-16 09:02:19,089 INFO gateway.run: kanban dispatcher: embedded in gateway (interval=60.0s)
+2026-07-16 09:02:19,782 WARNING gateway.platforms.api_server: API server rejected invalid API key: remote='172.20.0.1' peer_ip='172.20.0.1' method='POST' path='/v1/responses' user_agent='curl/8.21.0'
+2026-07-16 09:02:19,782 INFO aiohttp.access: 172.20.0.1 [16/Jul/2026:09:02:19 +0000] "POST /v1/responses HTTP/1.1" 401 573 "-" "curl/8.21.0"
+2026-07-16 09:02:35,645 WARNING gateway.platforms.api_server: API server rejected invalid API key: remote='172.20.0.1' peer_ip='172.20.0.1' method='POST' path='/v1/responses' user_agent='curl/8.21.0'
+2026-07-16 09:02:35,646 INFO aiohttp.access: 172.20.0.1 [16/Jul/2026:09:02:35 +0000] "POST /v1/responses HTTP/1.1" 401 573 "-" "curl/8.21.0"
+2026-07-16 09:02:43,689 INFO aiohttp.access: 127.0.0.1 [16/Jul/2026:09:02:43 +0000] "GET /health HTTP/1.1" 200 526 "-" "curl/8.14.1"
+2026-07-16 09:03:13,741 INFO aiohttp.access: 127.0.0.1 [16/Jul/2026:09:03:13 +0000] "GET /health HTTP/1.1" 200 526 "-" "curl/8.14.1"
+2026-07-16 09:03:20,146 INFO gateway.run: Received SIGTERM — initiating shutdown
+2026-07-16 09:03:20,146 WARNING gateway.run: Shutdown context: signal=SIGTERM under_systemd=no parent_pid=? parent_name=? loadavg_1m=0.34 parent_cmdline='(unknown)'
+2026-07-16 09:03:20,149 INFO gateway.run: Stopping gateway...
+2026-07-16 09:03:20,150 INFO gateway.run: Shutdown phase: notify_active_sessions done at +0.00s
+2026-07-16 09:03:20,175 INFO gateway.run: Shutdown phase: drain done at +0.03s (drain took 0.03s, timed_out=False, active_at_start=0, active_now=0, cron_at_start=0, cron_now=0)
+2026-07-16 09:03:20,195 INFO gateway.platforms.api_server: [Api_Server] API server stopped
+2026-07-16 09:03:20,195 INFO gateway.run: ✓ api_server disconnected (0.02s)
+2026-07-16 09:03:20,195 INFO gateway.run: Shutdown phase: all adapters disconnected at +0.05s
+2026-07-16 09:03:20,338 INFO gateway.run: Shutdown phase: final-cleanup tool kill done at +0.19s
+2026-07-16 09:03:20,346 INFO gateway.run: Shutdown phase: SessionDB close done at +0.20s
+2026-07-16 09:03:20,351 INFO gateway.run: Gateway stopped by an unexpected signal — persisting gateway_state=running so container_boot auto-starts on the next boot (issue #42675)
+2026-07-16 09:03:20,375 INFO gateway.run: Gateway stopped (total teardown 0.23s)
+2026-07-16 09:03:20,375 INFO gateway.run: Gateway housekeeping stopped
+2026-07-16 09:03:20,476 INFO gateway.run: Exiting with code 1 (signal-initiated shutdown without restart request) so systemd Restart=on-failure can revive the gateway.
+2026-07-16 09:03:36,621 INFO hermes_cli.plugins: Plugin 'browser-browser-use' registered browser provider: browser-use
+2026-07-16 09:03:36,622 INFO hermes_cli.plugins: Plugin 'browser-browserbase' registered browser provider: browserbase
+2026-07-16 09:03:36,623 INFO hermes_cli.plugins: Plugin 'browser-firecrawl' registered browser provider: firecrawl
+2026-07-16 09:03:36,833 INFO hermes_cli.plugins: Plugin 'fal' registered image_gen provider: fal
+2026-07-16 09:03:36,835 INFO hermes_cli.plugins: Plugin 'krea' registered image_gen provider: krea
+2026-07-16 09:03:36,837 INFO hermes_cli.plugins: Plugin 'openai' registered image_gen provider: openai
+2026-07-16 09:03:36,839 INFO hermes_cli.plugins: Plugin 'openai-codex' registered image_gen provider: openai-codex
+2026-07-16 09:03:36,841 INFO hermes_cli.plugins: Plugin 'openrouter' registered image_gen provider: openrouter
+2026-07-16 09:03:36,841 INFO hermes_cli.plugins: Plugin 'openrouter' registered image_gen provider: nous
+2026-07-16 09:03:36,843 INFO hermes_cli.plugins: Plugin 'xai' registered image_gen provider: xai
+2026-07-16 09:03:36,882 INFO hermes_cli.plugins: Plugin 'fal' registered video_gen provider: fal
+2026-07-16 09:03:36,885 INFO hermes_cli.plugins: Plugin 'xai' registered video_gen provider: xai
+2026-07-16 09:03:36,887 INFO hermes_cli.plugins: Plugin 'web-brave-free' registered web provider: brave-free
+2026-07-16 09:03:36,888 INFO hermes_cli.plugins: Plugin 'web-ddgs' registered web provider: ddgs
+2026-07-16 09:03:36,889 INFO hermes_cli.plugins: Plugin 'web-exa' registered web provider: exa
+2026-07-16 09:03:36,893 INFO hermes_cli.plugins: Plugin 'web-firecrawl' registered web provider: firecrawl
+2026-07-16 09:03:36,894 INFO hermes_cli.plugins: Plugin 'web-parallel' registered web provider: parallel
+2026-07-16 09:03:36,895 INFO hermes_cli.plugins: Plugin 'web-searxng' registered web provider: searxng
+2026-07-16 09:03:36,896 INFO hermes_cli.plugins: Plugin 'web-tavily' registered web provider: tavily
+2026-07-16 09:03:36,898 INFO hermes_cli.plugins: Plugin 'web-xai' registered web provider: xai
+2026-07-16 09:03:36,919 INFO hermes_cli.plugins: Plugin discovery complete: 51 found, 44 enabled
+2026-07-16 09:03:45,703 INFO gateway.run: Starting Hermes Gateway...
+2026-07-16 09:03:45,703 INFO gateway.run: Session storage: /opt/data/profiles/h01/sessions
+2026-07-16 09:03:45,705 INFO gateway.run: Agent budget: max_iterations=90 (agent.max_turns from config.yaml, or HERMES_MAX_ITERATIONS from .env, or default 90)
+2026-07-16 09:03:45,705 INFO gateway.run: Secret redaction: ENABLED (tool output, logs, and chat responses are scrubbed before delivery)
+2026-07-16 09:03:45,706 INFO gateway.run: Active profile: h01
+2026-07-16 09:03:45,744 INFO gateway.run: Previous gateway exited cleanly — skipping session suspension
+2026-07-16 09:03:45,846 INFO gateway.run: Connecting to api_server...
+2026-07-16 09:03:45,919 WARNING gateway.platforms.api_server: [Api_Server] API server is network-accessible (0.0.0.0) AND the terminal backend is 'local' (unsandboxed). Agent work dispatched through this endpoint runs as the host user with full terminal/file access. Strongly consider a sandboxed backend (terminal.backend: docker) and firewalling this port to trusted networks only.
+2026-07-16 09:03:45,939 INFO gateway.platforms.api_server: [Api_Server] API server listening on http://0.0.0.0:8642 (model: h01)
+2026-07-16 09:03:45,994 INFO gateway.run: ✓ api_server connected
+2026-07-16 09:03:46,008 INFO gateway.run: Gateway running with 1 platform(s)
+2026-07-16 09:03:46,022 INFO gateway.run: Channel directory built: 0 target(s)
+2026-07-16 09:03:47,040 INFO gateway.run: Press Ctrl+C to stop
+2026-07-16 09:03:47,055 INFO cron.scheduler_provider: In-process cron scheduler started (interval=60s)
+2026-07-16 09:03:47,060 INFO gateway.run: Gateway housekeeping started (interval=60s)
+2026-07-16 09:03:47,087 INFO gateway.run: kanban dispatcher: holding singleton dispatcher lock (/opt/data/kanban/.dispatcher.lock)
+2026-07-16 09:03:47,971 INFO aiohttp.access: 172.20.0.1 [16/Jul/2026:09:03:47 +0000] "GET /health HTTP/1.1" 200 526 "-" "curl/8.21.0"
+2026-07-16 09:03:52,088 INFO gateway.run: kanban dispatcher: embedded in gateway (interval=60.0s)
+2026-07-16 09:06:14,149 INFO aiohttp.access: 172.20.0.1 [16/Jul/2026:09:06:14 +0000] "GET /health HTTP/1.1" 200 526 "-" "curl/7.81.0"
+2026-07-16 09:06:44,512 WARNING gateway.platforms.api_server: API server rejected invalid API key: remote='172.20.0.1' peer_ip='172.20.0.1' method='POST' path='/v1/responses' user_agent='curl/7.81.0'
+2026-07-16 09:06:44,513 INFO aiohttp.access: 172.20.0.1 [16/Jul/2026:09:06:44 +0000] "POST /v1/responses HTTP/1.1" 401 573 "-" "curl/7.81.0"
+2026-07-16 09:11:43,577 WARNING gateway.platforms.api_server: API server rejected invalid API key: remote='172.20.0.1' peer_ip='172.20.0.1' method='POST' path='/v1/responses' user_agent='curl/7.81.0'
+2026-07-16 09:11:43,578 INFO aiohttp.access: 172.20.0.1 [16/Jul/2026:09:11:43 +0000] "POST /v1/responses HTTP/1.1" 401 573 "-" "curl/7.81.0"
+2026-07-16 09:12:14,661 INFO aiohttp.access: 172.20.0.1 [16/Jul/2026:09:12:14 +0000] "GET /health HTTP/1.1" 200 526 "-" "curl/8.21.0"
+2026-07-16 09:12:25,566 WARNING gateway.platforms.api_server: API server rejected invalid API key: remote='172.20.0.1' peer_ip='172.20.0.1' method='POST' path='/v1/responses' user_agent='curl/8.21.0'
+2026-07-16 09:12:25,567 INFO aiohttp.access: 172.20.0.1 [16/Jul/2026:09:12:25 +0000] "POST /v1/responses HTTP/1.1" 401 573 "-" "curl/8.21.0"
