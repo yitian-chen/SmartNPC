@@ -464,7 +464,7 @@ class MockUE:
                 text = text.encode().decode("unicode_escape")
             except (UnicodeDecodeError, UnicodeEncodeError):
                 pass
-            print(f"\n  [{self.time.display}] {text[:300]}")
+            print(f"  [{self.time.display}] {text[:500]}")
             if len(text) > 300:
                 print(f"  ... ({len(text)} chars total)")
         return text or ""
@@ -534,7 +534,7 @@ class MockUE:
         """Log Hermes response summary."""
         text = self.extract_text(data)
         usage = data.get("usage", {})
-        logger.debug(f"Tokens: {usage.get('total_tokens', '?')} | Text: {text[:100]}")
+        logger.debug(f"Tokens: {usage.get('total_tokens', '?')} | {len(text)} chars | {text[:200]}")
 
     # ─── Report ───────────────────────────────────────────────
 

@@ -34,3 +34,4 @@ hermes/profiles/*/plan.md
 # ─── Mock UE 运行时输出 ─────────────────────────────────────
 logs/
 __pycache__/
+models_dev_cache.json
