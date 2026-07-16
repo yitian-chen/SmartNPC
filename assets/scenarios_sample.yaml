@@ -1,0 +1,27 @@
+# 示例场景文件 — 用于 Mock UE 的 5.6 场景注入
+#
+# 在指定游戏时间自动注入突发事件到 perception_update 中。
+# 格式：hour + minute + description
+#
+# 用法：python src/run_day.py --scenario assets/scenarios_sample.yaml
+
+events:
+  - hour: 7
+    minute: 30
+    description: "车间3号传送带发出异常噪音。你可能需要检查一下。"
+
+  - hour: 10
+    minute: 45
+    description: "中央调度塔推送了一条低优先级通知：B区零件库存不足，建议优先使用A区库存。"
+
+  - hour: 12
+    minute: 0
+    description: "午间维护时间到了。可以去充电站充电并与其他机器人交流。"
+
+  - hour: 15
+    minute: 20
+    description: "修理厂发来一条消息：1号焊接机器人的校准参数偏离正常值。"
+
+  - hour: 17
+    minute: 30
+    description: "日终汇报时间快到了。该准备今天的工作总结了。"

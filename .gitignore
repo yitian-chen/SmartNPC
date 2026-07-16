@@ -29,3 +29,7 @@ hermes/profiles/*/auth.lock
 hermes/profiles/*/.tirith-install-failed
 hermes/profiles/*/.skills_prompt_snapshot.json
 hermes/profiles/*/.bundled_manifest
+
+# ─── Mock UE 运行时输出 ─────────────────────────────────────
+logs/
+__pycache__/
