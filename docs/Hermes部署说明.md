@@ -17,7 +17,7 @@ Windows 文件系统                           WSL (Docker)
 │  │   └── profiles/       │ mount │    │ HTTP POST                   │
 │  │       └── H-01/       │──────▶│    ▼                             │
 │  │           ├── SOUL.md  │       │  ┌───────────────────────────┐  │
-│  │           ├── SKILL.md │       │  │ Container: hermes-h01      │  │
+│  │           ├── SKILL.md │       │  │ Container: h01-gateway      │  │
 │  │           ├── MEMORY.md│       │  │                            │  │
 │  │           └── config/  │       │  │ Hermes Gateway :8642       │  │
 │  │                        │       │  │  ├── SOUL.md (volume)      │  │
@@ -79,182 +79,131 @@ LLM 密钥通过 docker-compose 的 `env_file` 注入容器。
 
 ## 三、Docker 部署配置
 
-### 3.1 docker-compose.yml
+### 3.1 Hermes 镜像构建
 
-仓库目录结构：
+Hermes 自带官方 Dockerfile，使用 `docker/build-hermes.sh` 从本地 Hermes 源码构建：
+
+```bash
+# WSL 中执行，需要 Hermes 源码已 clone 到本地
+bash docker/build-hermes.sh
+```
+
+> 镜像名 `hermes-agent:latest`。Hermes 源码默认路径为 Windows 侧 `C:\Users\<user>\AppData\Local\hermes\hermes-agent\`，在 WSL 中自动映射为 `/mnt/c/Users/<user>/AppData/Local/hermes/hermes-agent/`。可设置 `HERMES_SOURCE` 环境变量指向其他路径。
+
+Hermes 官方镜像特性：
+- s6-overlay 进程管理
+- 非 root 用户运行（UID 10000），支持 `HERMES_UID`/`HERMES_GID` 重映射
+- 数据目录 `/opt/data`（持久化卷）
+- Profile 路径 `/opt/data/profiles/<name>/`
+
+### 3.2 仓库目录结构
 
 ```
 AgentTown_v3/
 ├── .env                          ← LLM 密钥（不进 git）
 ├── docker/
 │   ├── docker-compose.yml        ← 一期单 Agent 编排
-│   ├── docker-compose.multi.yml  ← 后续期多 Agent 编排
-│   └── Dockerfile                ← Hermes 容器镜像（如需自构建）
+│   ├── docker-compose.multi.yml  ← 后续期多 Agent 编排（待创建）
+│   ├── build-hermes.sh           ← 构建 Hermes 镜像脚本
+│   └── setup.sh                  ← 一键部署脚本
 └── hermes/
     └── profiles/
         └── H-01/
-            ├── config.yaml       ← Hermes 运行配置
-            └── .env.example      ← 变量说明
+            ├── SOUL.md           ← 人格（签入 git）
+            ├── SKILL.md          ← 技能（签入 git）
+            ├── MEMORY.md         ← 记忆（运行时，不签入）
+            └── config.yaml       ← 配置（签入 git，密钥走 .env）
 ```
 
-**docker-compose.yml（一期）**：
+### 3.3 docker-compose.yml（一期）
 
 ```yaml
 # docker/docker-compose.yml
 version: "3.8"
 
 services:
-  hermes-h01:
-    # 如果 Hermes 有官方镜像，直接用
-    # image: hermes/hermes:latest
-    # 否则用自构建镜像
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile
-    container_name: hermes-h01
+  h01-gateway:
+    image: hermes-agent:latest
+    container_name: agenttown-h01
     ports:
-      - "8642:8642"
+      - "${HERMES_PORT:-8642}:8642"
     volumes:
-      # 挂载 profile 目录（SOUL.md / SKILL.md / MEMORY.md 均在此）
-      - ../hermes/profiles/H-01:/home/hermes/.hermes/profiles/H-01
-    env_file:
-      - ../.env
+      # Hermes 持久数据（记忆、日志等）
+      - hermes-data:/opt/data
+      # 挂载 Profile 文件（只读）
+      - ../hermes/profiles/H-01:/opt/data/profiles/H-01:ro
     environment:
-      - HERMES_PROFILE=H-01
-      - HERMES_PORT=8642
+      - HERMES_AGENT_URL
+      - HERMES_AGENT_API_KEY
+      - HERMES_AGENT_MODEL
+      - HERMES_PORT
+    command:
+      - "-p"
+      - "H-01"
+      - "gateway"
+      - "run"
+      - "--accept-hooks"
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8642/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+volumes:
+  hermes-data:
+    name: agenttown-hermes-data
 ```
 
-### 3.2 config.yaml（Hermes 运行配置）
-
-放在 `hermes/profiles/H-01/config.yaml`，签入 git（不含密钥）：
-
-```yaml
-# hermes/profiles/H-01/config.yaml
-
-# Agent 模型
-agent:
-  model: claude-3.5-sonnet
-
-# LLM provider（全部从环境变量读取）
-hermes_agent:
-  url: "${ANTHROPIC_BASE_URL}"
-  api_key: "${ANTHROPIC_API_KEY}"
-  model: "${HERMES_AGENT_MODEL}"
-
-# API 服务器（Gateway 模式）
-api_server:
-  enabled: true
-  port: 8642
-  host: "0.0.0.0"      # 容器内必须绑定 0.0.0.0
-
-# MCP 服务器（一期为空）
-mcp_servers: []
-```
-
-### 3.3 Dockerfile（如需自构建）
-
-```dockerfile
-# docker/Dockerfile
-FROM python:3.12-slim
-
-# 安装系统依赖
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl \
-    git \
-    && rm -rf /var/lib/apt/lists/*
-
-# 创建 hermes 用户
-RUN useradd -m -s /bin/bash hermes
-
-# 安装 Hermes（替换为实际安装方式）
-# 方式 A：官方安装脚本
-# RUN curl -fsSL https://hermes.example.com/install.sh | bash
-
-# 方式 B：pip 安装（如果 Hermes 发布到 PyPI）
-# RUN pip install hermes-agent
-
-# 方式 C：从 GitHub 安装
-# RUN pip install git+https://github.com/hermes/hermes-agent.git
-
-# 安装 MCP 支持
-RUN pip install mcp
-
-# 创建 profile 目录结构
-RUN mkdir -p /home/hermes/.hermes/profiles && \
-    chown -R hermes:hermes /home/hermes/.hermes
-
-USER hermes
-WORKDIR /home/hermes
-
-# 入口：启动指定 profile 的 gateway
-ENTRYPOINT ["hermes", "-p", "${HERMES_PROFILE}", "gateway", "run", "--accept-hooks"]
-```
-
-> **注意**：Dockerfile 内容取决于 Hermes 的实际发布形式。请根据 Hermes 官方文档调整安装步骤。
+**关键说明**：
+- Profile 文件通过 volume 挂载为只读（`:ro`），MEMORY.md 和日志写入 `hermes-data` 持久卷
+- LLM 配置通过 `HERMES_AGENT_*` 环境变量传入，在 `config.yaml` 中通过 `${VAR}` 引用
+- Hermes 的 main-wrapper 自动将 command 路由为 `hermes -p H-01 gateway run --accept-hooks`
 
 ---
 
 ## 四、一期部署流程
 
-### 步骤 1：准备 profile 文件
-
-在 `hermes/profiles/H-01/` 下准备以下文件：
-
-```
-hermes/profiles/H-01/
-├── SOUL.md        ← 手写人格
-├── SKILL.md       ← 技能声明
-├── config.yaml    ← Hermes 配置
-└── .env.example   ← 变量说明（参考用）
-```
-
-> MEMORY.md 首次启动时自动生成（容器内），会自动持久化到挂载的 volume 中。
-
-### 步骤 2：配置 .env
-
-仓库根 `.env` 中填入 LLM 密钥：
-
-```env
-ANTHROPIC_API_KEY=sk-ant-xxx
-```
-
-### 步骤 3：构建并启动容器
+### 方式 A：一键部署
 
 ```bash
-# 在 WSL 中进入仓库目录
-cd /mnt/d/AgentTown_v3
+# WSL 中
+cd /mnt/d/SmartNPC_v3
+bash docker/setup.sh
+```
 
-# 构建镜像（仅首次）
-docker compose -f docker/docker-compose.yml build
+### 方式 B：手动分步
 
-# 启动
+#### 步骤 1：构建 Hermes 镜像
+
+```bash
+bash docker/build-hermes.sh
+```
+
+#### 步骤 2：启动容器
+
+```bash
 docker compose -f docker/docker-compose.yml up -d
-
-# 查看日志
-docker compose -f docker/docker-compose.yml logs -f hermes-h01
 ```
 
-### 步骤 4：验证容器状态
+#### 步骤 3：查看日志
 
 ```bash
-# 容器运行中
-docker ps | grep hermes-h01
-
-# 健康检查（Gateway 启动约 5-10 秒后可用）
-curl -s http://localhost:8642/health
+docker compose -f docker/docker-compose.yml logs -f
 ```
 
-### 步骤 5：验证 LLM 对话
+#### 步骤 4：验证
 
 ```bash
+# 健康检查
+curl http://localhost:8642/health
+
 # 测试对话
 curl -s -X POST http://localhost:8642/v1/responses \
   -H "Content-Type: application/json" \
-  -d '{"message": "现在是什么时间？你该做什么？"}'
+  -d '{"message":"老陈，今天该做什么？"}'
 ```
-
-预期收到 Hermes 的 LLM 回复。
 
 ---
 
@@ -263,27 +212,20 @@ curl -s -X POST http://localhost:8642/v1/responses \
 ### 5.1 修改 profile 后重启
 
 ```bash
-# 修改了仓库中的 SOUL.md / SKILL.md / config.yaml 后
-docker compose -f docker/docker-compose.yml restart hermes-h01
+# 修改了仓库中 SOUL.md / SKILL.md / config.yaml 后
+docker compose -f docker/docker-compose.yml restart h01-gateway
 ```
 
-无需重新构建镜像，profile 文件通过 volume 实时同步。
+Profile 文件通过 volume 实时挂载，无需重新构建镜像。
 
-### 5.2 查看 Agent 决策日志
-
-```bash
-# 进入容器
-docker exec -it hermes-h01 bash
-
-# 日志位置
-cat ~/.hermes/profiles/H-01/logs/latest.log
-```
-
-或直接在宿主机（WSL）查看 volume 挂载目录：
+### 5.2 查看日志
 
 ```bash
-# 日志也挂载到了 Windows 侧
-cat /mnt/d/AgentTown_v3/hermes/profiles/H-01/logs/latest.log
+# 跟随日志
+docker compose -f docker/docker-compose.yml logs -f h01-gateway
+
+# 最近 50 行
+docker compose -f docker/docker-compose.yml logs --tail 50 h01-gateway
 ```
 
 ### 5.3 停止和清理
@@ -292,7 +234,7 @@ cat /mnt/d/AgentTown_v3/hermes/profiles/H-01/logs/latest.log
 # 停止
 docker compose -f docker/docker-compose.yml down
 
-# 停止并删除 volume（重置 MEMORY.md）
+# 停止并删除持久数据（重置 MEMORY.md）
 docker compose -f docker/docker-compose.yml down -v
 ```
 
@@ -355,11 +297,11 @@ Content-Type: application/json
 version: "3.8"
 
 services:
-  hermes-h01:
+  h01-gateway:
     build:
       context: ..
       dockerfile: docker/Dockerfile
-    container_name: hermes-h01
+    container_name: h01-gateway
     ports:
       - "8641:8641"
     volumes:
@@ -395,7 +337,7 @@ services:
 docker compose -f docker/docker-compose.multi.yml up -d
 
 # 启动指定几个
-docker compose -f docker/docker-compose.multi.yml up -d hermes-h01 hermes-h02
+docker compose -f docker/docker-compose.multi.yml up -d h01-gateway hermes-h02
 ```
 
 ---
@@ -412,15 +354,16 @@ docker compose -f docker/docker-compose.multi.yml up -d hermes-h01 hermes-h02
 | `hermes/profiles/H-01/.env.example` | **是** | 变量说明 |
 | `hermes/profiles/H-01/MEMORY.md` | **否** | 运行时产物，每机独立 |
 | `hermes/profiles/H-01/logs/` | **否** | 运行时日志 |
-| `docker/Dockerfile` | **是** | 容器镜像定义 |
+| `docker/build-hermes.sh` | **是** | 镜像构建脚本 |
 | `docker/docker-compose.yml` | **是** | 部署编排 |
+| `docker/setup.sh` | **是** | 一键部署脚本 |
 | `.env` | **否** | 真实 API Key |
 
 ### 8.2 修改生效流程
 
 ```
 修改 SOUL.md / SKILL.md / config.yaml
-  → docker compose restart hermes-h01
+  → docker compose restart h01-gateway
   → 容器内 Hermes 重启，新配置生效
 ```
 
@@ -435,28 +378,28 @@ docker compose -f docker/docker-compose.multi.yml up -d hermes-h01 hermes-h02
 查看日志定位：
 
 ```bash
-docker compose -f docker/docker-compose.yml logs hermes-h01
+docker compose -f docker/docker-compose.yml logs h01-gateway
 ```
 
-常见原因：`.env` 中 API Key 缺失或格式错误。
+常见原因：`.env` 中 `HERMES_AGENT_API_KEY` 缺失或 `HERMES_AGENT_URL` 不可达。
 
 ### Q2：`localhost:8642` 无法访问
 
 确认容器正在运行且端口映射成功：
 
 ```bash
-docker ps | grep hermes-h01
+docker ps | grep agenttown-h01
 # 应看到 0.0.0.0:8642->8642/tcp
 ```
 
-如果容器正常运行但端口不通，检查 Hermes config.yaml 中 `api_server.host` 是否为 `"0.0.0.0"`。
+如果容器正常运行但端口不通，检查 Hermes config.yaml 中 `API_SERVER_HOST` 是否为 `"0.0.0.0"`。
 
 ### Q3：修改 SOUL.md 后不生效
 
 Volume 挂载实时同步文件内容，但 Hermes Gateway 在启动时加载 SOUL.md。修改后需重启容器：
 
 ```bash
-docker compose -f docker/docker-compose.yml restart hermes-h01
+docker compose -f docker/docker-compose.yml restart h01-gateway
 ```
 
 ### Q4：MEMORY.md 太大
@@ -464,21 +407,16 @@ docker compose -f docker/docker-compose.yml restart hermes-h01
 Hermes MEMORY.md 有 2200 字符上限。超出后旧的低重要性记忆自然挤出。如需重置：
 
 ```bash
-# 方式 1：删文件重启
-rm /mnt/d/AgentTown_v3/hermes/profiles/H-01/MEMORY.md
-docker compose -f docker/docker-compose.yml restart hermes-h01
-
-# 方式 2：重建容器（删除 volume）
 docker compose -f docker/docker-compose.yml down -v
 docker compose -f docker/docker-compose.yml up -d
 ```
 
 ### Q5：如何更换 LLM 模型
 
-编辑 `hermes/profiles/H-01/config.yaml` 和 `.env`，重启容器：
+编辑 `.env` 中的 `HERMES_AGENT_MODEL` 和 `HERMES_AGENT_URL`，重启容器：
 
 ```bash
-docker compose -f docker/docker-compose.yml restart hermes-h01
+docker compose -f docker/docker-compose.yml restart h01-gateway
 ```
 
 ### Q6：WSL 中 Docker 命令报 Permission Denied
@@ -497,10 +435,9 @@ sudo usermod -aG docker $USER
 ## 十、一期核心检查清单
 
 - [ ] WSL 中 Docker 可用：`docker --version` 正常
-- [ ] 仓库根 `.env` 中 LLM API Key 正确
+- [ ] 仓库根 `.env` 中 `HERMES_AGENT_*` 变量已配置且密钥正确
 - [ ] `hermes/profiles/H-01/` 下 SOUL.md / SKILL.md / config.yaml 已准备
-- [ ] `docker/Dockerfile` 和 `docker/docker-compose.yml` 已创建
-- [ ] `docker compose -f docker/docker-compose.yml build` 成功
+- [ ] Hermes 源码可用，`docker/build-hermes.sh` 能成功构建 `hermes-agent:latest`
 - [ ] `docker compose -f docker/docker-compose.yml up -d` 容器正常运行
 - [ ] `curl localhost:8642/health` 返回 200
 - [ ] Mock UE Bridge 能 POST 到 `localhost:8642` 并驱动 Agent 决策

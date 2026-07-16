@@ -1,0 +1,48 @@
+# AgentTown_v3 一期 — 单 Agent (H-01 老陈) Docker 部署
+#
+# 前置：先构建 Hermes 镜像
+#   bash docker/build-hermes.sh
+#
+# 使用：
+#   docker compose -f docker/docker-compose.yml up -d
+#   docker compose -f docker/docker-compose.yml logs -f
+#   docker compose -f docker/docker-compose.yml down
+
+version: "3.8"
+
+services:
+  h01-gateway:
+    image: hermes-agent:latest
+    container_name: agenttown-h01
+    ports:
+      - "${HERMES_PORT:-8642}:8642"
+    volumes:
+      # Hermes 持久数据（记忆、日志等）
+      - hermes-data:/opt/data
+      # 挂载 Profile 文件到 Hermes profiles 目录
+      # SOUL.md / SKILL.md / MEMORY.md / config.yaml
+      - ../hermes/profiles/H-01:/opt/data/profiles/H-01:ro
+    environment:
+      # 从 .env 注入 LLM 配置（供 config.yaml 中 ${VAR} 展开）
+      - HERMES_AGENT_URL
+      - HERMES_AGENT_API_KEY
+      - HERMES_AGENT_MODEL
+      - HERMES_PORT
+    # Hermes main-wrapper 自动将参数路由为 `hermes <args>`
+    command:
+      - "-p"
+      - "H-01"
+      - "gateway"
+      - "run"
+      - "--accept-hooks"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8642/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+volumes:
+  hermes-data:
+    name: agenttown-hermes-data
