@@ -110,17 +110,11 @@ stop_all() {
     info "Stopping Mock UE..."
     pkill -f "run_day.py" 2>/dev/null && ok "  Mock UE stopped" || warn "  Mock UE not running"
 
-    # MCP (WSL Go binary) — kill by PID to avoid killing the shell itself
+    # MCP (WSL Go binary) — use pkill -x to match exact process name,
+    # avoiding accidentally killing the wsl bash shell itself.
     info "Stopping MCP..."
-    local mcp_pid
-    mcp_pid=$($WSL_BASH "pgrep -f 'agenttown-mcp --http' 2>/dev/null | head -1" || true)
-    if [ -n "$mcp_pid" ]; then
-        $WSL_BASH "kill $mcp_pid 2>/dev/null"
-        sleep 1
-        ok "  MCP stopped (PID $mcp_pid)"
-    else
-        warn "  MCP not running"
-    fi
+    $WSL_BASH 'pkill -x agenttown-mcp 2>/dev/null' && ok "  MCP stopped" || warn "  MCP not running"
+    sleep 1
 
     # Hermes (Docker)
     info "Stopping Hermes..."
@@ -147,10 +141,22 @@ start_mcp() {
     # 清空旧日志
     $WSL_BASH 'echo "" > /tmp/mcp.log'
 
-    info "Starting MCP in WSL background..."
-    $WSL_BASH '~/agenttown-mcp --http :8760 --ws :9000 --hermes-url http://localhost:8642 > /tmp/mcp.log 2>&1 &'
+    # 在 WSL 内创建启动脚本（setsid + disown 确保 MCP 进程在 WSL 会话
+    # 结束后仍能存活——直接 `wsl bash -c "cmd &"` 会在 wsl 返回时杀掉子进程）
+    $WSL_BASH 'cat > ~/start_mcp.sh << "LAUNCHER"
+#!/bin/bash
+pkill -x agenttown-mcp 2>/dev/null
+sleep 1
+setsid ~/agenttown-mcp --http :8760 --ws :9000 --hermes-url http://localhost:8642 > /tmp/mcp.log 2>&1 &
+disown
+sleep 2
+LAUNCHER
+chmod +x ~/start_mcp.sh'
 
-    wait_for "MCP HTTP (:8760)" check_mcp_http 15
+    info "Starting MCP in WSL background..."
+    $WSL_BASH 'bash ~/start_mcp.sh'
+
+    wait_for "MCP HTTP (:8760)" check_mcp_http 20
     wait_for "MCP WS (:9000)" check_mcp_ws 10
 }
 
@@ -163,15 +169,17 @@ start_hermes() {
     fi
 
     info "Starting Hermes via docker compose..."
-    $WSL docker compose -f "$DOCKER_COMPOSE_FILE" \
-        --env-file "$DOCKER_ENV_FILE" up -d
+    # MSYS_NO_PATHCONV=1 prevents Git Bash from mangling WSL paths
+    # --force-recreate ensures Hermes restarts and reconnects to MCP
+    MSYS_NO_PATHCONV=1 $WSL docker compose -f "$DOCKER_COMPOSE_FILE" \
+        --env-file "$DOCKER_ENV_FILE" up -d --force-recreate
 
     wait_for "Hermes Gateway (:8642)" check_hermes 40
 
     # 等 Hermes 连接 MCP（MCP 日志出现 session initialized）
     info "Waiting for Hermes to discover MCP tools..."
     local elapsed=0
-    while [ $elapsed -lt 20 ]; do
+    while [ $elapsed -lt 40 ]; do
         if $WSL_BASH 'tail -10 /tmp/mcp.log 2>/dev/null | grep -q "session initialized"'; then
             ok "Hermes connected to MCP"
             sleep 2  # 给 Hermes 额外时间完成工具注册
@@ -180,7 +188,7 @@ start_hermes() {
         sleep 2; elapsed=$((elapsed + 2)); printf "."
     done
     echo ""
-    fail "Hermes did not connect to MCP within 20s. Check:
+    fail "Hermes did not connect to MCP within 40s. Check:
   $WSL docker logs agenttown-h01 2>&1 | grep -i mcp
   $WSL tail -20 /tmp/mcp.log"
 }
