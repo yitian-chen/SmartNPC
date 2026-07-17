@@ -131,11 +131,20 @@ stop_all() {
 start_mcp() {
     info "=== Step 1: Start agenttown-mcp ==="
 
-    if ! $WSL_BASH 'test -f ~/agenttown-mcp'; then
-        fail "MCP binary not found at ~/agenttown-mcp in WSL. Build it first:
-  cd d:/SmartNPC_v3/agenttown-mcp
-  GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o /tmp/agenttown-mcp-linux ./cmd/agenttown-mcp
-  wsl cp /mnt/c/Users/yitianchen/AppData/Local/Temp/agenttown-mcp-linux ~/agenttown-mcp"
+    # 自动交叉编译 + 部署最新 MCP 二进制到 WSL 的 ~/agenttown-mcp。
+    # 跳过重编译则传 --no-build 标志。
+    if [ "${SKIP_MCP_BUILD:-0}" = "1" ]; then
+        warn "--no-build: skipping MCP build, using existing ~/agenttown-mcp"
+    else
+        info "Building MCP (linux/amd64, CGO disabled)..."
+        (cd "$PROJECT_DIR/agenttown-mcp" && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o /tmp/agenttown-mcp-linux ./cmd/agenttown-mcp) \
+            || fail "Go cross-compile failed"
+        info "Deploying to WSL ~/agenttown-mcp..."
+        MSYS_NO_PATHCONV=1 $WSL cp /mnt/d/SmartNPC_v3/tmp/agenttown-mcp-linux /home/yitianchen/agenttown-mcp \
+            || $WSL cp /mnt/c/Users/yitianchen/AppData/Local/Temp/agenttown-mcp-linux /home/yitianchen/agenttown-mcp \
+            || fail "Failed to copy binary to WSL ~/agenttown-mcp"
+        MSYS_NO_PATHCONV=1 $WSL chmod +x /home/yitianchen/agenttown-mcp
+        ok "MCP binary deployed"
     fi
 
     # 清空旧日志（MCP 日志写到项目 logs/ 目录）
@@ -148,7 +157,7 @@ start_mcp() {
 #!/bin/bash
 pkill -x agenttown-mcp 2>/dev/null
 sleep 1
-setsid ~/agenttown-mcp --http :8760 --ws :9090 --hermes-url http://localhost:8642 > /mnt/d/SmartNPC_v3/logs/mcp.log 2>&1 &
+setsid /home/yitianchen/agenttown-mcp --http :8760 --ws :9090 --hermes-url http://localhost:8642 > /mnt/d/SmartNPC_v3/logs/mcp.log 2>&1 &
 disown
 sleep 2
 LAUNCHER
