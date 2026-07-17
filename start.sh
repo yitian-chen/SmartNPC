@@ -17,7 +17,7 @@
 #   - Python 3.10+，已安装 websockets, pyyaml
 #   - d:/SmartNPC_v3/.env 存在且配置了 HERMES_AGENT_API_KEY
 
-set -euo pipefail
+set -uo pipefail
 
 # ─── 颜色输出 ──────────────────────────────────────────────────
 RED='\033[0;31m'
