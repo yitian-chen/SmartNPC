@@ -137,23 +137,29 @@ start_mcp() {
         warn "--no-build: skipping MCP build, using existing ~/agenttown-mcp"
     else
         info "Building MCP (linux/amd64, CGO disabled)..."
-        # Ensure Go is available. When invoked from outside Git Bash (e.g.
-        # PowerShell), the MinGW PATH may not include /d/Go/bin. Try common
-        # locations before failing.
-        if ! command -v go &>/dev/null; then
-            for candidate in /d/Go/bin/go /c/Go/bin/go "$(command -v go 2>/dev/null)"; do
-                if [ -x "$candidate" ]; then
-                    export PATH="$PATH:$(dirname "$candidate")"
-                    break
-                fi
-            done
+
+        # Locate the Go compiler. When bash is invoked from PowerShell,
+        # the MSYS PATH conversion may not include D:\Go\bin. Try common
+        # install paths, then fall back to scanning /d/Go and /c/Go.
+        GO_BIN=""
+        for candidate in \
+            "$(command -v go 2>/dev/null)" \
+            /d/Go/bin/go /c/Go/bin/go /e/Go/bin/go \
+            $(ls -d /d/Go/bin/go 2>/dev/null) \
+            $(ls -d /c/Go/bin/go 2>/dev/null); do
+            if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+                GO_BIN="$candidate"
+                break
+            fi
+        done
+        if [ -z "$GO_BIN" ]; then
+            fail "Go compiler not found. Tried: command -v go, /d/Go/bin/go, /c/Go/bin/go.
+  Install Go from https://go.dev/dl/ or skip the build with: SKIP_MCP_BUILD=1 bash start.sh"
         fi
-        if ! command -v go &>/dev/null; then
-            fail "Go compiler not found on PATH. Install Go or set SKIP_MCP_BUILD=1 to skip the build."
-        fi
-        go version
+        "$GO_BIN" version
+
         mkdir -p "$PROJECT_DIR/agenttown-mcp/tmp"
-        (cd "$PROJECT_DIR/agenttown-mcp" && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o tmp/agenttown-mcp-linux ./cmd/agenttown-mcp) \
+        (cd "$PROJECT_DIR/agenttown-mcp" && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 "$GO_BIN" build -o tmp/agenttown-mcp-linux ./cmd/agenttown-mcp) \
             || fail "Go cross-compile failed"
         info "Deploying to WSL ~/agenttown-mcp..."
         # Remove stale binary first (avoids "text file busy" if an old MCP is still shutting down).
