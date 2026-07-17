@@ -138,24 +138,18 @@ start_mcp() {
     else
         info "Building MCP (linux/amd64, CGO disabled)..."
 
-        # Locate the Go compiler. When bash is invoked from PowerShell or
-        # cmd.exe, the MINGW drive mounts (/d/, /c/) may not be set up.
-        # We try, in order:
-        #   1. `command -v go` — PATH-resolved, works in Git Bash
-        #   2. `cmd.exe //c where go` — native Windows, works everywhere
+        # Locate the Go compiler. Try these in order:
+        #   1. `command -v go` — works in Git Bash
+        #   2. /d/Go/bin/go, /c/Go/bin/go, /e/Go/bin/go — MINGW mount paths
+        #   3. ~/go/bin/go, ~/sdk/*/bin/go — user-local installs
         GO_BIN=""
         if command -v go &>/dev/null; then
             GO_BIN="$(command -v go)"
-        else
-            GO_WIN="$(cmd.exe //c "where go 2>NUL" 2>/dev/null | head -1 | tr -d '\r')"
-            if [ -n "$GO_WIN" ] && [ -f "$GO_WIN" ]; then
-                # Convert D:\Go\bin\go.exe to /d/Go/bin/go.exe (MINGW path).
-                GO_BIN="$(cygpath -u "$GO_WIN" 2>/dev/null || echo "$GO_WIN")"
-            fi
         fi
-        # Final fallback: scan common MINGW mount paths.
         if [ -z "$GO_BIN" ] || [ ! -x "$GO_BIN" ]; then
-            for p in /d/Go/bin/go /c/Go/bin/go /e/Go/bin/go; do
+            for p in \
+                /d/Go/bin/go /c/Go/bin/go /e/Go/bin/go \
+                "$HOME/go/bin/go" "$HOME/sdk/"*/bin/go; do
                 if [ -x "$p" ]; then GO_BIN="$p"; break; fi
             done
         fi
