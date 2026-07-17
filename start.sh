@@ -138,23 +138,30 @@ start_mcp() {
     else
         info "Building MCP (linux/amd64, CGO disabled)..."
 
-        # Locate the Go compiler. When bash is invoked from PowerShell,
-        # the MSYS PATH conversion may not include D:\Go\bin. Try common
-        # install paths, then fall back to scanning /d/Go and /c/Go.
+        # Locate the Go compiler. When bash is invoked from PowerShell or
+        # cmd.exe, the MINGW drive mounts (/d/, /c/) may not be set up.
+        # We try, in order:
+        #   1. `command -v go` — PATH-resolved, works in Git Bash
+        #   2. `cmd.exe //c where go` — native Windows, works everywhere
         GO_BIN=""
-        for candidate in \
-            "$(command -v go 2>/dev/null)" \
-            /d/Go/bin/go /c/Go/bin/go /e/Go/bin/go \
-            $(ls -d /d/Go/bin/go 2>/dev/null) \
-            $(ls -d /c/Go/bin/go 2>/dev/null); do
-            if [ -n "$candidate" ] && [ -x "$candidate" ]; then
-                GO_BIN="$candidate"
-                break
+        if command -v go &>/dev/null; then
+            GO_BIN="$(command -v go)"
+        else
+            GO_WIN="$(cmd.exe //c "where go 2>NUL" 2>/dev/null | head -1 | tr -d '\r')"
+            if [ -n "$GO_WIN" ] && [ -f "$GO_WIN" ]; then
+                # Convert D:\Go\bin\go.exe to /d/Go/bin/go.exe (MINGW path).
+                GO_BIN="$(cygpath -u "$GO_WIN" 2>/dev/null || echo "$GO_WIN")"
             fi
-        done
-        if [ -z "$GO_BIN" ]; then
-            fail "Go compiler not found. Tried: command -v go, /d/Go/bin/go, /c/Go/bin/go.
-  Install Go from https://go.dev/dl/ or skip the build with: SKIP_MCP_BUILD=1 bash start.sh"
+        fi
+        # Final fallback: scan common MINGW mount paths.
+        if [ -z "$GO_BIN" ] || [ ! -x "$GO_BIN" ]; then
+            for p in /d/Go/bin/go /c/Go/bin/go /e/Go/bin/go; do
+                if [ -x "$p" ]; then GO_BIN="$p"; break; fi
+            done
+        fi
+        if [ -z "$GO_BIN" ] || [ ! -x "$GO_BIN" ]; then
+            fail "Go compiler not found. Install Go from https://go.dev/dl/ or skip the build:
+  SKIP_MCP_BUILD=1 bash start.sh"
         fi
         "$GO_BIN" version
 
