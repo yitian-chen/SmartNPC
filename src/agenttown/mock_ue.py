@@ -47,6 +47,8 @@ TYPE_HEARTBEAT = "heartbeat"
 TYPE_ERROR = "error"
 TYPE_SCAN_AREA = "scan_area"
 TYPE_NARRATIVE = "narrative"  # MCP → Mock UE, display only
+TYPE_RESYNC = "resync"        # reconnect: exchange last_received_seq (约定11)
+TYPE_EVENT_LOST = "event_lost"  # reconnect: buffer rollover warning
 
 # cmd constants
 CMD_MOVE_TO = "MoveTo"
@@ -115,6 +117,23 @@ STATE_REPORT_INTERVAL_SEC = 15.0
 
 # heartbeat interval (seconds, real)
 HEARTBEAT_INTERVAL_SEC = 5.0
+
+# Reconnect backoff: 3s interval, exponential to 30s cap (§5.2).
+RECONNECT_BASE_SEC = 3.0
+RECONNECT_MAX_SEC = 30.0
+
+# Send buffer retention for reconnect replay (约定11).
+SEND_BUFFER_MAX_LEN = 200
+SEND_BUFFER_MAX_AGE_SEC = 60.0
+
+# Discrete outbound message types eligible for seq-replay after reconnect.
+# Continuous state (perception_update/state_report) and heartbeat are NOT
+# replayed — the peer uses the latest snapshot (约定11).
+DISCRETE_REPLAY_TYPES = {
+    TYPE_ACTION_STARTED,
+    TYPE_ACTION_COMPLETED,
+    TYPE_ERROR,
+}
 
 
 @dataclass
@@ -205,6 +224,12 @@ class MockUE:
         self._seq = 0
         self._started_ms = int(_time.time() * 1000)
 
+        # Reconnect / replay state (约定11).
+        self._last_received_seq = 0
+        self._send_buffer: List[Dict[str, Any]] = []  # {seq, frame, at}
+        self._connected = False
+        self._stop = False
+
         # Physical values last reported via state_report (for delta calc)
         self._last_reported = PhysicalState()
 
@@ -225,21 +250,77 @@ class MockUE:
         return self._seq
 
     async def _send(self, msg_type: str, agent_id: str, payload: Dict[str, Any]):
-        """Wrap payload in the 7-field envelope and send."""
+        """Wrap payload in the 7-field envelope and send.
+
+        Discrete message types are retained in the send buffer for reconnect
+        replay (约定11).
+        """
         if self._ws is None:
             logger.warning("send with no WS connection")
             return
+        seq = self._next_seq()
         env = {
             "version": PROTOCOL_VERSION,
             "msg_id": str(uuid.uuid4()),
-            "seq": self._next_seq(),
+            "seq": seq,
             "timestamp": int(_time.time() * 1000),
             "type": msg_type,
             "agent_id": agent_id,
             "payload": payload,
         }
-        await self._ws.send(json.dumps(env, ensure_ascii=False))
-        logger.debug(f"[WS→] {msg_type} seq={env['seq']}")
+        frame = json.dumps(env, ensure_ascii=False)
+        if msg_type in DISCRETE_REPLAY_TYPES:
+            self._buffer_outbound(seq, frame)
+        await self._ws.send(frame)
+        logger.debug(f"[WS→] {msg_type} seq={seq}")
+
+    def _buffer_outbound(self, seq: int, frame: str):
+        """Append a discrete message to the rolling send buffer and evict old."""
+        self._send_buffer.append({"seq": seq, "frame": frame, "at": _time.monotonic()})
+        self._evict_buffer()
+
+    def _evict_buffer(self):
+        """Trim send buffer to the retention window (length + age)."""
+        cutoff = _time.monotonic() - SEND_BUFFER_MAX_AGE_SEC
+        i = 0
+        while i < len(self._send_buffer) and self._send_buffer[i]["at"] < cutoff:
+            i += 1
+        overflow = len(self._send_buffer) - i - SEND_BUFFER_MAX_LEN
+        if overflow > 0:
+            i += overflow
+        if i > 0:
+            self._send_buffer = self._send_buffer[i:]
+
+    async def _replay_from(self, peer_last_seq: int):
+        """Re-send buffered discrete messages with seq > peer_last_seq.
+
+        If the oldest buffered seq is already beyond peer_last_seq+1, some
+        messages were lost to rollover — emit an event_lost warning (约定11).
+        """
+        self._evict_buffer()
+        to_replay = [m for m in self._send_buffer if m["seq"] > peer_last_seq]
+        oldest_seq = self._send_buffer[0]["seq"] if self._send_buffer else None
+
+        if oldest_seq is not None and oldest_seq > peer_last_seq + 1:
+            lost = oldest_seq - (peer_last_seq + 1)
+            logger.warning(
+                f"[EVENT_LOST] send buffer rolled past resume point: "
+                f"peer_last_seq={peer_last_seq} oldest={oldest_seq} lost={lost}")
+            await self._send(TYPE_EVENT_LOST, SYSTEM_AGENT_ID, {
+                "from_seq": peer_last_seq + 1,
+                "to_seq": oldest_seq,
+                "count": lost,
+                "reason": "send buffer rollover",
+            })
+
+        if not to_replay:
+            return
+        logger.info(f"[REPLAY] resending {len(to_replay)} discrete messages "
+                    f"after reconnect (peer_last_seq={peer_last_seq})")
+        for m in to_replay:
+            if self._ws is None:
+                return
+            await self._ws.send(m["frame"])
 
     # ─── Lifecycle messages ───────────────────────────────────
 
@@ -342,12 +423,24 @@ class MockUE:
         msg_type = env.get("type", "")
         payload = env.get("payload", {}) or {}
 
+        # Track highest inbound seq for reconnect replay (约定11); resync/
+        # event_lost are control messages and don't advance it.
+        seq = env.get("seq", 0)
+        if msg_type not in (TYPE_RESYNC, TYPE_EVENT_LOST):
+            if isinstance(seq, int) and seq > self._last_received_seq:
+                self._last_received_seq = seq
+
         if msg_type == TYPE_ACTION_COMMAND:
             await self._handle_action_command(payload)
         elif msg_type == TYPE_STOP_ACTION:
             await self._handle_stop_action(payload)
         elif msg_type == TYPE_SCAN_AREA:
             await self._send_perception()
+        elif msg_type == TYPE_RESYNC:
+            peer_last = int(payload.get("last_received_seq", 0))
+            await self._replay_from(peer_last)
+        elif msg_type == TYPE_EVENT_LOST:
+            logger.warning(f"[EVENT_LOST] peer reported: {payload}")
         elif msg_type == TYPE_NARRATIVE:
             text = payload.get("text", "")
             if text:
@@ -543,38 +636,85 @@ class MockUE:
         print(f"  Time speed: {self.time.speed}x | interval: {self.perception_interval} game-min")
         print(f"{'='*60}\n")
 
+        # Connection manager reconnects on drop; simulation runs independently
+        # and drives game time. Sends buffer/no-op while disconnected (约定11).
+        conn_task = asyncio.create_task(self._connection_manager())
+        hb_task = asyncio.create_task(self._heartbeat_loop())
         try:
-            self._ws = await websockets.connect(self.mcp_ws_url, max_size=1 << 20)
-            logger.info(f"connected to MCP at {self.mcp_ws_url}")
-        except Exception as e:
-            logger.error(f"failed to connect to MCP: {e}")
-            print(f"[ERROR] Cannot connect to MCP at {self.mcp_ws_url}: {e}")
-            return
-
-        try:
-            # Register (triggers Hermes session reset on MCP side).
-            await self._send_agent_registered()
-            # Initial state + perception.
-            await self._send_state_report()
-            await self._send_perception()
-
-            await asyncio.gather(
-                self._perception_loop(end_hour),
-                self._heartbeat_loop(),
-                self._read_loop(),
-            )
+            await self._perception_loop(end_hour)
         finally:
-            try:
-                await self._send_agent_unregistered("actor_destroyed")
-            except Exception:
-                pass
-            await self._ws.close()
+            self._stop = True
+            # Graceful unregister if currently connected.
+            if self._ws is not None:
+                try:
+                    await self._send_agent_unregistered("actor_destroyed")
+                    await self._ws.close()
+                except Exception:
+                    pass
+            conn_task.cancel()
+            hb_task.cancel()
+            for t in (conn_task, hb_task):
+                try:
+                    await t
+                except (asyncio.CancelledError, Exception):
+                    pass
             logger.info("disconnected from MCP")
 
         print(f"\n{'='*60}")
         print(f"  Day {self.time.day} complete | {len(self.action_log)} actions")
         print(f"  Final zone: {self.npc.current_zone} | energy: {self.npc.physical.energy:.0f}%")
         print(f"{'='*60}\n")
+
+    async def _connection_manager(self):
+        """Maintain the WS connection, reconnecting with exponential backoff.
+
+        On each (re)connect: re-register the agent, exchange resync so both
+        sides replay missed discrete messages, then read until the link drops
+        (§4.2, 约定11).
+        """
+        backoff = RECONNECT_BASE_SEC
+        first = True
+        while not self._stop:
+            try:
+                self._ws = await websockets.connect(self.mcp_ws_url, max_size=1 << 20)
+                self._connected = True
+                backoff = RECONNECT_BASE_SEC
+                if first:
+                    logger.info(f"connected to MCP at {self.mcp_ws_url}")
+                    first = False
+                else:
+                    logger.info(f"[RECONNECT] reconnected to MCP at {self.mcp_ws_url}")
+
+                # Re-register all agents (§4.2). agent_registered triggers the
+                # MCP Hermes session reset on the initial connect; on reconnect
+                # the MCP matches by agent_id.
+                await self._send_agent_registered()
+                # Announce our last received seq so MCP replays what we missed.
+                await self._send(TYPE_RESYNC, SYSTEM_AGENT_ID,
+                                 {"last_received_seq": self._last_received_seq})
+                # Push a fresh authoritative snapshot (continuous state isn't
+                # replayed — latest snapshot wins, 约定11).
+                await self._send_state_report()
+                await self._send_perception()
+
+                # Read until the connection drops.
+                await self._read_loop()
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.warning(f"[CONN] connection error: {e}")
+            finally:
+                self._connected = False
+                self._ws = None
+
+            if self._stop:
+                return
+            logger.info(f"[RECONNECT] retrying in {backoff:.0f}s")
+            try:
+                await asyncio.sleep(backoff)
+            except asyncio.CancelledError:
+                return
+            backoff = min(backoff * 2, RECONNECT_MAX_SEC)
 
     async def _perception_loop(self, end_hour: int):
         last_state_report = _time.monotonic()
@@ -623,14 +763,20 @@ class MockUE:
             p.fatigue = min(100, p.fatigue + interval * 0.05)
 
     async def _heartbeat_loop(self):
-        while True:
+        """Send heartbeats across the whole day, tolerating reconnects."""
+        while not self._stop:
             await asyncio.sleep(HEARTBEAT_INTERVAL_SEC)
+            if self._ws is None:
+                continue  # disconnected; connection_manager is reconnecting
             try:
                 await self._send_heartbeat()
             except Exception:
-                return
+                # Link dropped mid-send; connection_manager handles reconnect.
+                continue
 
     async def _read_loop(self):
+        """Read until the connection drops. Returns so the connection
+        manager can reconnect (raises nothing on normal close)."""
         if self._ws is None:
             return
         try:
@@ -643,8 +789,7 @@ class MockUE:
                 asyncio.create_task(self._handle_envelope(env))
         except websockets.ConnectionClosed:
             logger.info("WS connection closed")
-        except Exception as e:
-            logger.error(f"read loop error: {e}", exc_info=True)
+        # Other exceptions propagate to connection_manager for backoff.
 
     # ─── Logging ──────────────────────────────────────────────
 

@@ -158,3 +158,23 @@ type ErrorPayload struct {
 	ActionID  string         `json:"action_id,omitempty"`
 	Context   map[string]any `json:"context,omitempty"`
 }
+
+// ─── resync (control, reconnect) ────────────────────────────────
+
+// ResyncPayload conveys the sender's last successfully received seq so the
+// peer can replay discrete messages beyond it (约定11, §4.2).
+type ResyncPayload struct {
+	LastReceivedSeq int64 `json:"last_received_seq"`
+}
+
+// ─── event_lost (warning) ───────────────────────────────────────
+
+// EventLostPayload signals that some discrete messages could not be
+// replayed because the send buffer had already rolled past the resume
+// point. The receiver should fall back to the latest snapshot (约定11).
+type EventLostPayload struct {
+	FromSeq int64  `json:"from_seq"` // first seq the peer wanted (last_received_seq+1)
+	ToSeq   int64  `json:"to_seq"`   // oldest seq still available in the buffer
+	Count   int64  `json:"count"`    // number of lost discrete messages
+	Reason  string `json:"reason"`
+}

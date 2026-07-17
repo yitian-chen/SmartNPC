@@ -46,6 +46,16 @@ const (
 	// TypeScanArea is a control message (not in the spec's type table) used
 	// by the scan_area tool to request an immediate perception_update.
 	TypeScanArea = "scan_area"
+
+	// TypeResync is a control message exchanged after reconnect to convey
+	// the sender's last successfully received seq so the peer can replay
+	// discrete messages beyond it (约定11, §4.2).
+	TypeResync = "resync"
+
+	// TypeEventLost is a warning logged/emitted when the send buffer has
+	// already rolled over the peer's requested resume point, so some
+	// discrete messages cannot be replayed (约定11).
+	TypeEventLost = "event_lost"
 )
 
 // action_command cmd constants (§2.3).

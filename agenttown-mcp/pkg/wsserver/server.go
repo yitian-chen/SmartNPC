@@ -24,6 +24,23 @@ const (
 	defaultWriteWait   = 5 * time.Second
 )
 
+// Send-buffer retention for reconnect replay (约定11, §4.2).
+const (
+	sendBufferMaxLen = 200             // keep at most 200 discrete messages
+	sendBufferMaxAge = 60 * time.Second // or messages from the last 60s
+)
+
+// discreteReplayTypes are the outbound message types eligible for seq-replay
+// after a reconnect. Continuous state (perception_update/state_report) and
+// pure liveness (heartbeat) are NOT replayed — the peer uses the latest
+// snapshot instead (约定11).
+var discreteReplayTypes = map[string]bool{
+	protocol.TypeActionCommand:     true,
+	protocol.TypeStopAction:        true,
+	protocol.TypeEventNotification: true,
+	protocol.TypeError:             true,
+}
+
 // MessageHandler receives inbound envelopes from Mock UE (UE → Agent).
 // Called from the read loop, so long work should be offloaded to a goroutine.
 // It receives the message type, agent_id, and raw payload.
@@ -36,21 +53,37 @@ type Options struct {
 	CallTimeout time.Duration
 }
 
+// bufferedMsg is a discrete outbound message retained for reconnect replay.
+type bufferedMsg struct {
+	seq   int64
+	frame []byte
+	at    time.Time
+}
+
 // Server is a WebSocket server accepting a connection from Mock UE.
 //
 // Phase 1: single connection (one NPC). agent_id routing is threaded through
 // so multi-NPC is a natural extension. seq is a per-server monotonic counter
 // for outbound messages.
+//
+// Phase 7: outbound discrete messages are kept in a rolling send buffer;
+// lastReceivedSeq tracks the highest inbound seq. On reconnect the two sides
+// exchange resync{last_received_seq} and replay the discrete messages the
+// peer missed (约定11).
 type Server struct {
 	addr        string
 	log         *slog.Logger
 	callTimeout time.Duration
 
-	seq int64 // outbound sequence counter (atomic)
+	seq             int64 // outbound sequence counter (atomic)
+	lastReceivedSeq int64 // highest inbound seq seen (atomic)
 
 	mu      sync.RWMutex
 	conn    *websocket.Conn
 	pending map[string]chan *pendingResult // keyed by action_id (msg correlation)
+
+	bufMu     sync.Mutex
+	sendBuf   []bufferedMsg // rolling buffer of discrete outbound messages
 
 	handlerMu sync.RWMutex
 	handler   MessageHandler
@@ -143,6 +176,15 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 
 	s.log.Info("mock ue connected", "remote", r.RemoteAddr)
 
+	// Phase 7: on (re)connect, tell the peer the last inbound seq we saw so
+	// it can replay anything we missed. Also proactively replay our own
+	// buffered discrete messages once the peer sends its resync.
+	if err := s.SendEnvelope(protocol.SystemAgentID, protocol.TypeResync, protocol.ResyncPayload{
+		LastReceivedSeq: atomic.LoadInt64(&s.lastReceivedSeq),
+	}); err != nil {
+		s.log.Warn("resync send failed", "err", err)
+	}
+
 	readCtx := context.Background()
 	defer func() {
 		s.mu.Lock()
@@ -175,6 +217,12 @@ func (s *Server) readLoop(ctx context.Context, c *websocket.Conn) {
 			continue
 		}
 
+		// Track the highest inbound seq for reconnect replay (约定11).
+		// resync/event_lost are control messages and don't advance it.
+		if env.Type != protocol.TypeResync && env.Type != protocol.TypeEventLost {
+			s.observeInboundSeq(env.Seq)
+		}
+
 		switch env.Type {
 		case protocol.TypeActionStarted:
 			// ACK for an action_command — deliver to the waiting Call.
@@ -184,11 +232,38 @@ func (s *Server) readLoop(ctx context.Context, c *websocket.Conn) {
 				continue
 			}
 			s.deliverACK(&ack)
+		case protocol.TypeResync:
+			// Peer told us the last seq it received — replay what it missed.
+			var rs protocol.ResyncPayload
+			if err := json.Unmarshal(env.Payload, &rs); err != nil {
+				s.log.Warn("resync parse failed", "err", err)
+				continue
+			}
+			s.replayFrom(rs.LastReceivedSeq)
+		case protocol.TypeEventLost:
+			// Peer couldn't replay some discrete messages we sent it.
+			var el protocol.EventLostPayload
+			_ = json.Unmarshal(env.Payload, &el)
+			s.log.Warn("peer reported event_lost",
+				"from_seq", el.FromSeq, "to_seq", el.ToSeq, "count", el.Count, "reason", el.Reason)
 		default:
 			// All other inbound messages go to the registered handler:
 			// perception_update, action_completed, state_report,
 			// agent_registered, agent_unregistered, heartbeat, error.
 			s.dispatch(ctx, env.Type, env.AgentID, env.Payload)
+		}
+	}
+}
+
+// observeInboundSeq records the highest inbound seq seen so far.
+func (s *Server) observeInboundSeq(seq int64) {
+	for {
+		cur := atomic.LoadInt64(&s.lastReceivedSeq)
+		if seq <= cur {
+			return
+		}
+		if atomic.CompareAndSwapInt64(&s.lastReceivedSeq, cur, seq) {
+			return
 		}
 	}
 }
@@ -229,22 +304,18 @@ func (s *Server) dispatch(ctx context.Context, msgType, agentID string, payload 
 }
 
 // SendEnvelope sends an arbitrary envelope to the connected Mock UE.
+// Discrete message types are retained in the send buffer for reconnect
+// replay (约定11).
 func (s *Server) SendEnvelope(agentID, msgType string, payload any) error {
-	s.mu.RLock()
-	conn := s.conn
-	s.mu.RUnlock()
-	if conn == nil {
-		return errors.New("no mock ue connected")
-	}
-
 	raw, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("marshal payload: %w", err)
 	}
+	seq := s.nextSeq()
 	env := protocol.Envelope{
 		Version:   protocol.Version,
 		MsgID:     uuid.NewString(),
-		Seq:       s.nextSeq(),
+		Seq:       seq,
 		Timestamp: time.Now().UnixMilli(),
 		Type:      msgType,
 		AgentID:   agentID,
@@ -254,9 +325,101 @@ func (s *Server) SendEnvelope(agentID, msgType string, payload any) error {
 	if err != nil {
 		return fmt.Errorf("marshal envelope: %w", err)
 	}
+
+	// Retain discrete messages for potential replay before attempting the
+	// write, so a message that fails mid-send is still replayable.
+	if discreteReplayTypes[msgType] {
+		s.bufferOutbound(seq, frame)
+	}
+
+	return s.writeFrame(frame)
+}
+
+// writeFrame writes a pre-marshaled envelope frame to the current connection.
+func (s *Server) writeFrame(frame []byte) error {
+	s.mu.RLock()
+	conn := s.conn
+	s.mu.RUnlock()
+	if conn == nil {
+		return errors.New("no mock ue connected")
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), defaultWriteWait)
 	defer cancel()
 	return conn.Write(ctx, websocket.MessageText, frame)
+}
+
+// bufferOutbound appends a discrete message to the rolling send buffer and
+// evicts entries beyond the length/age retention window.
+func (s *Server) bufferOutbound(seq int64, frame []byte) {
+	cp := make([]byte, len(frame))
+	copy(cp, frame)
+
+	s.bufMu.Lock()
+	defer s.bufMu.Unlock()
+	s.sendBuf = append(s.sendBuf, bufferedMsg{seq: seq, frame: cp, at: time.Now()})
+	s.evictLocked()
+}
+
+// evictLocked trims the send buffer to the retention window. Caller holds bufMu.
+func (s *Server) evictLocked() {
+	cutoff := time.Now().Add(-sendBufferMaxAge)
+	// Drop by age.
+	i := 0
+	for i < len(s.sendBuf) && s.sendBuf[i].at.Before(cutoff) {
+		i++
+	}
+	// Drop by length.
+	if overflow := len(s.sendBuf) - i - sendBufferMaxLen; overflow > 0 {
+		i += overflow
+	}
+	if i > 0 {
+		s.sendBuf = append(s.sendBuf[:0], s.sendBuf[i:]...)
+	}
+}
+
+// replayFrom re-sends buffered discrete messages with seq > lastReceivedSeq.
+// If the oldest buffered message is newer than lastReceivedSeq+1, some
+// messages were lost to buffer rollover — emit an event_lost warning (约定11).
+func (s *Server) replayFrom(peerLastSeq int64) {
+	s.bufMu.Lock()
+	s.evictLocked()
+	var toReplay []bufferedMsg
+	var oldestSeq int64 = -1
+	for _, m := range s.sendBuf {
+		if oldestSeq == -1 {
+			oldestSeq = m.seq
+		}
+		if m.seq > peerLastSeq {
+			toReplay = append(toReplay, m)
+		}
+	}
+	s.bufMu.Unlock()
+
+	// Detect rollover gap: peer wants everything after peerLastSeq, but our
+	// oldest retained seq is already beyond peerLastSeq+1.
+	if oldestSeq > 0 && oldestSeq > peerLastSeq+1 {
+		lost := oldestSeq - (peerLastSeq + 1)
+		s.log.Warn("event_lost: send buffer rolled past peer resume point",
+			"peer_last_seq", peerLastSeq, "oldest_buffered_seq", oldestSeq, "lost", lost)
+		_ = s.SendEnvelope(protocol.SystemAgentID, protocol.TypeEventLost, protocol.EventLostPayload{
+			FromSeq: peerLastSeq + 1,
+			ToSeq:   oldestSeq,
+			Count:   lost,
+			Reason:  "send buffer rollover",
+		})
+	}
+
+	if len(toReplay) == 0 {
+		return
+	}
+	s.log.Info("replaying discrete messages after reconnect",
+		"peer_last_seq", peerLastSeq, "count", len(toReplay))
+	for _, m := range toReplay {
+		if err := s.writeFrame(m.frame); err != nil {
+			s.log.Warn("replay write failed", "seq", m.seq, "err", err)
+			return
+		}
+	}
 }
 
 // Call sends an action_command to Mock UE and waits for the action_started

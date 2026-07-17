@@ -146,6 +146,18 @@ func main() {
 		}
 		return a
 	}
+	// registerAgent returns true if this is the first registration for the
+	// agent_id (a new day → session reset); false if it's a re-registration
+	// after reconnect (restore, don't reset — §4.2).
+	registerAgent := func(id string) bool {
+		agentsMu.Lock()
+		defer agentsMu.Unlock()
+		if _, ok := agents[id]; ok {
+			return false
+		}
+		agents[id] = &agentContext{}
+		return true
+	}
 
 	// Register all tools. They call ws.SendAction/RequestScan.
 	tools.RegisterAll(server, ws, logger)
@@ -154,10 +166,15 @@ func main() {
 	ws.SetMessageHandler(func(_ context.Context, msgType, agentID string, payload json.RawMessage) {
 		switch msgType {
 		case protocol.TypeAgentRegistered:
-			// New connection = new day. Reset Hermes session.
-			hc.ResetSession()
-			getAgent(agentID) // ensure context exists
-			logger.Info("agent_registered", "agent_id", agentID, "payload", string(payload))
+			// First registration = new day → reset Hermes session.
+			// Re-registration after reconnect = restore, keep the session
+			// (§4.2: match by agent_id, don't wipe Agent Mind state).
+			if registerAgent(agentID) {
+				hc.ResetSession()
+				logger.Info("agent_registered (new day)", "agent_id", agentID, "payload", string(payload))
+			} else {
+				logger.Info("agent_registered (reconnect, session kept)", "agent_id", agentID)
+			}
 
 		case protocol.TypeAgentUnregistered:
 			agentsMu.Lock()
