@@ -160,7 +160,9 @@ sequenceDiagram
 | 消息方向 | type | 路由目标 |
 |----------|------|----------|
 | UE → Agent | `perception_update` | 按 agent_id → 对应 Agent Mind |
+| UE → Agent | `action_started` | 按 agent_id → 对应 Agent Mind |
 | UE → Agent | `action_completed` | 按 agent_id → 对应 Agent Mind |
+| UE → Agent | `state_report` | 按 agent_id → 对应 Agent Mind |
 | UE → Agent | `agent_registered` | → Agent Manager（创建新 Agent Mind） |
 | UE → Agent | `agent_unregistered` | → Agent Manager（销毁 Agent Mind） |
 | Agent → UE | `action_command` | 按 agent_id → UE 侧对应 RobotAgentComponent |
@@ -196,12 +198,14 @@ graph TB
 
 ### 2.1 统一消息封装
 
-所有消息共用外层结构：
+所有消息共用外层结构（**信封字段固定为以下 7 个，任何业务字段一律放入 `payload`**）：
 
 ```json
 {
-  "msg_id": "uuid-550e8400-e29b-41d4-a716-446655440000",
-  "timestamp": 1719456000,
+  "version": "1.0",
+  "msg_id": "550e8400-e29b-41d4-a716-446655440000",
+  "seq": 1024,
+  "timestamp": 1719456000000,
   "type": "message_type",
   "agent_id": "H-01",
   "payload": { ... }
@@ -210,26 +214,38 @@ graph TB
 
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
+| version | string | ✅ | 协议版本号，当前 `"1.0"`，用于演进兼容 |
 | msg_id | string (UUID) | ✅ | 消息唯一 ID，用于去重和追踪 |
-| timestamp | int (Unix epoch) | ✅ | 发送时间戳（秒） |
+| seq | int | ✅ | 同一发送端的单调递增序列号，用于检测乱序/丢失（重连后尤其有用） |
+| timestamp | int (Unix epoch **毫秒**) | ✅ | 发送时间戳（**毫秒**，全协议统一毫秒） |
 | type | string | ✅ | 消息类型（见下表） |
-| agent_id | string | ✅ | 所属 Agent ID（如 "H-01"） |
-| payload | object | ✅ | 消息体，结构因 type 而异 |
+| agent_id | string | ✅ | 所属 Agent ID（如 "H-01"）；系统级消息用保留 ID `"system"` |
+| payload | object | ✅ | 消息体，结构因 type 而异；**所有业务字段（含 action_id）必须在此** |
+
+> **约定 1（信封纯净）**：`action_id` 等业务字段**一律放入 payload**，不得出现在信封顶层。
+> **约定 2（时间单位）**：全协议所有时间戳单位为**毫秒**；所有时长字段以字段名后缀标注单位（`_ms` / `_sec`）。
+> **约定 3（坐标单位）**：所有坐标（position/dest 等）单位为 **UE5 厘米（cm）**，与 UE 世界坐标一致；三元组顺序为 `[X, Y, Z]`，旋转为 `[Pitch, Yaw, Roll]`（度）。
+> **约定 4（保留 ID）**：`agent_id = "system"` 为保留值，仅用于 `heartbeat` / `error` 等非特定 Agent 的系统级消息。
 
 ### 2.2 消息类型总表
 
 | type | 方向 | 用途 | 触发时机 |
 |------|------|------|----------|
-| `perception_update` | UE → Agent | 感知快照上报 | 每 3 秒 / zone 变化 / 事件触发 |
+| `perception_update` | UE → Agent | 感知快照上报（**含空间状态；物理状态仅在变化超阈值时附带**） | 每 3 秒 / zone 变化 / 事件触发 |
 | `action_command` | Agent → UE | 下发动作指令 | 战术层/反应层产出新 action |
+| `action_started` | UE → Agent | **动作已接收并开始执行的回执（ACK）** | UE 收到 action_command 并成功启动后立即回 |
 | `action_completed` | UE → Agent | 动作完成回调 | MoveTo 完成 / StateTree 完成 |
 | `stop_action` | Agent → UE | 停止当前动作 | 反应层决定打断 |
 | `event_notification` | Agent → Agent | 事件通知（内部路由） | Director 投放事件 |
-| `state_report` | UE → Agent | 物理状态上报 | 随 perception_update 或独立上报 |
+| `state_report` | UE → Agent | 物理状态上报（**物理状态的权威通道**） | 状态变化超阈值 / 每 15 秒兜底 |
 | `agent_registered` | UE → Agent | 机器人上线 | RobotActor BeginPlay |
 | `agent_unregistered` | UE → Agent | 机器人下线 | RobotActor EndPlay |
 | `heartbeat` | 双向 | 心跳保活 | 每 5 秒 |
 | `error` | 双向 | 错误上报 | 异常情况 |
+
+> **约定 5（感知 vs 状态分工，消除 #6 冗余）**：
+> - `perception_update` 负责**空间与环境感知**（position/rotation/zone/visible_agents/nearby_objects/audible_events/environment），**默认不携带 physical_state**；仅当某项物理数值自上次上报变化 ≥ 阈值（energy/fatigue/health 变化 ≥5，joint_wear 变化 ≥1）时，在 perception_update 中附带该变化项。
+> - `state_report` 是 **physical_state 的权威通道**：状态变化超阈值时即时上报，且每 15 秒做一次兜底全量上报，保证 Agent 侧物理状态不漂移。
 
 ### 2.3 各消息详细定义
 
@@ -237,22 +253,21 @@ graph TB
 
 ```json
 {
+  "version": "1.0",
   "msg_id": "uuid-001",
-  "timestamp": 1719456000,
+  "seq": 1001,
+  "timestamp": 1719456000000,
   "type": "perception_update",
   "agent_id": "H-01",
   "payload": {
     "location": {
       "position": [170.5, 100.0, 0.0],
-      "rotation": [0.0, 0.0, 90.0],
+      "rotation": [0.0, 90.0, 0.0],
       "current_zone": "central_plaza",
       "current_location": null
     },
-    "physical_state": {
-      "energy": 45,
-      "fatigue": 65,
-      "joint_wear": 82,
-      "health": 90
+    "physical_state_delta": {
+      "joint_wear": 82
     },
     "visible_agents": [
       {
@@ -280,6 +295,7 @@ graph TB
       }
     ],
     "current_animation": "walk",
+    "current_emote": null,
     "environment": {
       "time_of_day": "14:23",
       "weather": "clear"
@@ -290,27 +306,30 @@ graph TB
 
 | payload 字段 | 类型 | 说明 |
 |--------------|------|------|
-| location.position | [x,y,z] | UE5 世界坐标 |
-| location.rotation | [pitch,yaw,roll] | 朝向 |
+| location.position | [x,y,z] | UE5 世界坐标（**厘米**） |
+| location.rotation | [pitch,yaw,roll] | 朝向（**度**） |
 | location.current_zone | string/null | 当前所在 Zone ID |
 | location.current_location | string/null | 当前最近 Location ID |
-| physical_state | object | 物理状态（UE 是主人） |
+| physical_state_delta | object (可选) | **仅在物理数值变化超阈值时出现**，只含变化项；物理状态权威通道是 state_report |
 | visible_agents | array | 视线内的其他 Agent |
 | nearby_objects | array | 附近可交互 Smart Object |
 | audible_events | array | 听到的声音/广播 |
 | current_animation | string | 当前播放的动画 |
+| current_emote | string/null | **当前正在表现的情绪状态**（持续型 emote 的回报，供 Agent 感知"我此刻的情绪表现"，解决 #4 情绪一致性） |
 | environment | object | 环境信息 |
 
 #### action_command（Agent → UE）
 
 ```json
 {
+  "version": "1.0",
   "msg_id": "uuid-002",
-  "timestamp": 1719456005,
+  "seq": 2001,
+  "timestamp": 1719456005000,
   "type": "action_command",
   "agent_id": "H-01",
-  "action_id": "act_001",
   "payload": {
+    "action_id": "act_001",
     "cmd": "MoveTo",
     "params": {
       "dest": [160.0, 100.0, 0.0],
@@ -320,24 +339,30 @@ graph TB
 }
 ```
 
+> **注**：`action_id` 位于 payload 内（遵循约定1）。`action_id` 由 **Agent 侧生成并保证同一 agent 内唯一**，UE 侧原样回传于 action_started/action_completed。
+
 **cmd 类型与 params 对应**：
 
 | cmd | params | 说明 |
 |-----|--------|------|
 | `MoveTo` | {dest: [x,y,z], speed: "walk"\|"run"} | 原子：移动到坐标 |
 | `TurnTo` | {target: agent_id} 或 {direction: [dx,dy,dz]} | 原子：转向 |
-| `PlayAnimation` | {anim_id: string, duration: float} | 原子：播动画 |
-| `Speak` | {content: string, target: agent_id, audio_url: string} | 原子：说话 |
-| `Emote` | {emotion: "happy"\|"sad"\|"worried"\|...} | 原子：情绪表达 |
+| `PlayAnimation` | {anim_id: string, duration_sec: float} | 原子：播动画 |
+| `Speak` | {content: string, target: agent_id, audio_url: string\|null} | 原子：说话（audio_url 见约定6） |
+| `Emote` | {emotion: "happy"\|"sad"\|"worried"\|..., mode: "oneshot"\|"sustained"} | 原子：情绪表达（mode 见约定7） |
 | `Wait` | {duration_sec: float} | 原子：等待 |
 | `InteractSmartObject` | {object_id: string, action: string} | 原子：交互物件 |
 | `ExecuteComposite` | {name: string, params: {...}} | 复合：启动 StateTree |
 | `Stop` | {} | 停止当前所有动作 |
 
+> **约定 6（Speak/TTS）**：`audio_url` 由 **Agent 侧预生成**（调用 TTS 服务后填入 URL）；若为 `null` 或 UE 侧拉取音频失败，UE **降级为纯字幕显示**，不阻塞动作。
+> **约定 7（Emote 模式）**：`mode="oneshot"` 为一次性表情（播完即止）；`mode="sustained"` 为持续情绪状态（UE 保持该情绪表现，并在 perception_update 的 `current_emote` 回报，直到下一个 sustained emote 或显式清除）。
+
 **ExecuteComposite 示例**：
 
 ```json
 {
+  "action_id": "act_007",
   "cmd": "ExecuteComposite",
   "params": {
     "name": "work_assemble",
@@ -347,16 +372,47 @@ graph TB
 }
 ```
 
+#### action_started（UE → Agent，动作接收回执 ACK）
+
+```json
+{
+  "version": "1.0",
+  "msg_id": "uuid-002a",
+  "seq": 1002,
+  "timestamp": 1719456005200,
+  "type": "action_started",
+  "agent_id": "H-01",
+  "payload": {
+    "action_id": "act_001",
+    "accepted": true,
+    "estimated_duration_sec": 30
+  }
+}
+```
+
+| payload 字段 | 类型 | 说明 |
+|--------------|------|------|
+| action_id | string | 对应的 action_command 的 action_id |
+| accepted | bool | UE 是否成功接收并启动该动作 |
+| estimated_duration_sec | float/null | UE 预估的执行时长（可用于 Agent 侧设置执行超时） |
+| reject_reason | string (可选) | 当 accepted=false 时说明原因（如目标非法、动作冲突） |
+
+> **约定 8（ACK 机制，解决 #3）**：UE 收到 `action_command` 后**必须**在 2 秒内回 `action_started`。
+> - Agent 侧凭 action_started 区分"指令丢失/UE 未收到"（超时未收到 ACK → 重发或重决策）与"正在执行中"（收到 ACK 但尚未 completed）。
+> - 执行超时以 action_started 中的 `estimated_duration_sec` 为基准动态设定，不再使用固定 60 秒（解决长复合动作如 assemble 18000 秒的超时误判）。
+
 #### action_completed（UE → Agent）
 
 ```json
 {
+  "version": "1.0",
   "msg_id": "uuid-003",
-  "timestamp": 1719456035,
+  "seq": 1003,
+  "timestamp": 1719456035000,
   "type": "action_completed",
   "agent_id": "H-01",
-  "action_id": "act_001",
   "payload": {
+    "action_id": "act_001",
     "result": "success",
     "duration_ms": 30200,
     "progress": 1.0,
@@ -390,8 +446,10 @@ graph TB
 
 ```json
 {
+  "version": "1.0",
   "msg_id": "uuid-004",
-  "timestamp": 1719456040,
+  "seq": 2010,
+  "timestamp": 1719456040000,
   "type": "stop_action",
   "agent_id": "H-01",
   "payload": {
@@ -401,12 +459,19 @@ graph TB
 }
 ```
 
+> **约定 9（停止竞态处理，解决 #2）**：`stop_action` 携带的 `action_id` 必须与 UE 侧**当前正在执行的 action_id 匹配**才执行停止：
+> - **匹配** → UE 停止该动作，回 `action_completed {result: "interrupted", progress: ...}`。
+> - **不匹配**（目标动作已完成或已被新动作替换）→ UE **忽略该 stop**，并回一条 `error {error_code: "STOP_ID_MISMATCH", context: {requested: act_010, current: act_012}}`，避免误停新动作。
+> - Agent 侧收到 mismatch error 后，以最新的 action 状态为准重新决策，不重复发送 stop。
+
 #### event_notification（Agent 内部路由）
 
 ```json
 {
+  "version": "1.0",
   "msg_id": "uuid-005",
-  "timestamp": 1719456045,
+  "seq": 3001,
+  "timestamp": 1719456045000,
   "type": "event_notification",
   "agent_id": "H-03",
   "payload": {
@@ -430,6 +495,8 @@ graph TB
 | `direct` | 直接感知（视觉/听觉范围内） |
 | `broadcast` | 全园区广播（severity > 5） |
 | `rumor` | 二手传闻（对话中得知） |
+
+> **约定 10（rumor 传播，明确 #7）**：`rumor` 级别的传播由**子系统7 Event Bus** 负责，机制为：事件发生后，知情 Agent 在后续对话（Speak）中提及 → Event Bus 依据"对话可达性"在延迟 `T_rumor`（默认 30-120 秒随机）后向对话对象投递一条 `perception_level="rumor"` 的 event_notification。**第一期（单 NPC）不实现 rumor，仅保留字段定义。**
 
 #### state_report（UE → Agent，可选独立上报）
 
