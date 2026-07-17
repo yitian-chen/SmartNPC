@@ -217,6 +217,13 @@ func (s *Server) readLoop(ctx context.Context, c *websocket.Conn) {
 			continue
 		}
 
+		// Log every inbound message from UE at INFO (skip heartbeat to keep
+		// the log readable). Show the full payload so the reader can trace
+		// exactly what Mock UE sent.
+		if env.Type != protocol.TypeHeartbeat {
+			s.log.Info("[UE→MCP]", "type", env.Type, "seq", env.Seq, "agent_id", env.AgentID, "payload", string(env.Payload))
+		}
+
 		// Track the highest inbound seq for reconnect replay (约定11).
 		// resync/event_lost are control messages and don't advance it.
 		if env.Type != protocol.TypeResync && env.Type != protocol.TypeEventLost {
@@ -274,9 +281,10 @@ func (s *Server) deliverACK(ack *protocol.ActionStartedPayload) {
 	ch, ok := s.pending[ack.ActionID]
 	s.mu.RUnlock()
 	if !ok {
-		s.log.Warn("action_started with no pending caller", "action_id", ack.ActionID)
+		s.log.Warn("[UE→MCP/ACK] action_started with no pending caller", "action_id", ack.ActionID)
 		return
 	}
+	s.log.Info("[UE→MCP/ACK]", "action_id", ack.ActionID, "accepted", ack.Accepted, "est_duration_sec", ack.EstimatedDurationSec)
 	result := &pendingResult{started: ack}
 	if !ack.Accepted {
 		result.errMsg = ack.RejectReason
@@ -330,6 +338,15 @@ func (s *Server) SendEnvelope(agentID, msgType string, payload any) error {
 	// write, so a message that fails mid-send is still replayable.
 	if discreteReplayTypes[msgType] {
 		s.bufferOutbound(seq, frame)
+	}
+
+	// Log every outbound envelope at INFO (skip resync/heartbeat/scan_area
+	// for readability). Include the full payload so the reader can trace
+	// every command MCP issues to Mock UE.
+	if msgType != protocol.TypeResync && msgType != protocol.TypeHeartbeat && msgType != protocol.TypeScanArea && msgType != "narrative" {
+		s.log.Info("[MCP→UE]", "type", msgType, "seq", seq, "agent_id", agentID, "payload", string(raw))
+	} else if msgType == protocol.TypeResync || msgType == "narrative" {
+		s.log.Debug("[MCP→UE]", "type", msgType, "seq", seq, "agent_id", agentID, "payload", string(raw))
 	}
 
 	return s.writeFrame(frame)
@@ -454,6 +471,7 @@ func (s *Server) Call(ctx context.Context, agentID, cmd string, params map[strin
 		Cmd:      cmd,
 		Params:   params,
 	}
+	s.log.Info("[MCP→UE/CMD]", "cmd", cmd, "action_id", actionID, "agent_id", agentID, "params", fmt.Sprint(params))
 	if err := s.SendEnvelope(agentID, protocol.TypeActionCommand, cmdPayload); err != nil {
 		return nil, fmt.Errorf("send action_command: %w", err)
 	}

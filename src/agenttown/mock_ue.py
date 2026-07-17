@@ -272,7 +272,13 @@ class MockUE:
         if msg_type in DISCRETE_REPLAY_TYPES:
             self._buffer_outbound(seq, frame)
         await self._ws.send(frame)
-        logger.debug(f"[WS→] {msg_type} seq={seq}")
+        # Full raw log: show the complete envelope so the reader can trace every
+        # message Mock UE sends to the MCP. Heartbeat is throttled to DEBUG.
+        if msg_type == TYPE_HEARTBEAT:
+            logger.debug(f"[UE→MCP] {msg_type} seq={seq}")
+        else:
+            logger.info(f"[UE→MCP] {msg_type} seq={seq} agent={agent_id}\n"
+                        f"  payload={json.dumps(payload, ensure_ascii=False)}")
 
     def _buffer_outbound(self, seq: int, frame: str):
         """Append a discrete message to the rolling send buffer and evict old."""
@@ -422,13 +428,24 @@ class MockUE:
     async def _handle_envelope(self, env: Dict[str, Any]):
         msg_type = env.get("type", "")
         payload = env.get("payload", {}) or {}
+        seq = env.get("seq", 0)
 
         # Track highest inbound seq for reconnect replay (约定11); resync/
         # event_lost are control messages and don't advance it.
-        seq = env.get("seq", 0)
         if msg_type not in (TYPE_RESYNC, TYPE_EVENT_LOST):
             if isinstance(seq, int) and seq > self._last_received_seq:
                 self._last_received_seq = seq
+
+        # Log every inbound message from MCP at INFO (except heartbeat at DEBUG).
+        if msg_type == TYPE_NARRATIVE:
+            text = payload.get("text", "")
+            logger.info(f"[MCP→UE/NARRATIVE] seq={seq}\n"
+                        f"  text={text[:500]}")
+        elif msg_type not in (TYPE_HEARTBEAT, TYPE_RESYNC, TYPE_EVENT_LOST):
+            logger.info(f"[MCP→UE] {msg_type} seq={seq}\n"
+                        f"  payload={json.dumps(payload, ensure_ascii=False)}")
+        elif msg_type in (TYPE_RESYNC, TYPE_EVENT_LOST):
+            logger.info(f"[MCP→UE] {msg_type} payload={payload}")
 
         if msg_type == TYPE_ACTION_COMMAND:
             await self._handle_action_command(payload)
@@ -445,7 +462,6 @@ class MockUE:
             text = payload.get("text", "")
             if text:
                 print(f"\n  [{self.time.display}] {text[:500]}")
-                logger.info(f"[NARRATIVE] {text}")
         else:
             logger.debug(f"[WS←] unhandled type: {msg_type}")
 
@@ -454,7 +470,7 @@ class MockUE:
         cmd = payload.get("cmd", "")
         params = payload.get("params", {}) or {}
 
-        logger.info(f"[CMD←] {cmd} action_id={action_id} params={params}")
+        logger.info(f"[MCP→UE/CMD] {cmd} action_id={action_id} params={json.dumps(params, ensure_ascii=False)}")
 
         # Busy guard: reject disruptive commands while busy.
         DISRUPTIVE = {CMD_MOVE_TO, CMD_TURN_TO, CMD_INTERACT, CMD_EXECUTE_COMPOSITE, CMD_WAIT}
@@ -492,6 +508,7 @@ class MockUE:
     async def _handle_stop_action(self, payload: Dict[str, Any]):
         req_id = payload.get("action_id", "")
         cur = self.npc.busy_action_id
+        logger.info(f"[MCP→UE/STOP] action_id={req_id} current_busy={cur}")
         if cur is not None and cur == req_id:
             # Match → interrupt.
             progress = self._busy_progress()

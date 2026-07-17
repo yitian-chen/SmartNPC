@@ -220,6 +220,12 @@ func main() {
 				logger.Warn("perception format returned empty", "raw", string(payload))
 				return
 			}
+			// Log the formatted perception narrative being handed to Hermes.
+			display := text
+			if len(display) > 500 {
+				display = display[:500] + "..."
+			}
+			logger.Info("[MCP→Hermes/PERCEPTION]", "agent_id", agentID, "text", display)
 			// Async POST — don't block the WS read loop.
 			go func() {
 				resp, err := hc.Send(context.Background(), text)
@@ -228,9 +234,14 @@ func main() {
 					return
 				}
 				narrative := resp.ExtractText()
-				logger.Info("hermes turn complete",
+				disp := narrative
+				if len(disp) > 500 {
+					disp = disp[:500] + "..."
+				}
+				logger.Info("[Hermes→MCP/RESPONSE]",
 					"tokens", resp.Usage.TotalTokens,
 					"narrative_len", len(narrative),
+					"narrative", disp,
 				)
 				if narrative != "" {
 					if err := ws.SendEnvelope(agentID, "narrative", map[string]any{

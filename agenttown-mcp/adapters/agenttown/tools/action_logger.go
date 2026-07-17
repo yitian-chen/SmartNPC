@@ -52,5 +52,5 @@ func logToolCall(name string, input any) {
 		"ts", time.Now().UTC().Format(time.RFC3339Nano),
 	)
 	// Also emit to stderr so the operator sees calls in real time.
-	fmt.Fprintf(os.Stderr, "[TOOL] %s | %s\n", name, string(payload))
+	fmt.Fprintf(os.Stderr, "[Hermes→MCP/TOOL] %s | %s\n", name, string(payload))
 }

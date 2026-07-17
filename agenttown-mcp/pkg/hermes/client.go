@@ -140,7 +140,15 @@ func (c *Client) doSend(ctx context.Context, input string) (*Response, error) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+c.cfg.APIKey)
 
-	c.log.Debug("hermes POST", "url", url, "input_len", len(input), "prev_id", prev)
+	inputLen := len(input)
+	// Log the raw input being sent to Hermes (truncate for readability
+	// since narratives can be long — full payload available in the log
+	// file if needed).
+	display := input
+	if inputLen > 2000 {
+		display = input[:2000] + "... (truncated)"
+	}
+	c.log.Info("[MCP→Hermes]", "len", inputLen, "prev_id", prev, "input", display)
 
 	resp, err := c.http.Do(req)
 	if err != nil {
@@ -165,7 +173,7 @@ func (c *Client) doSend(ctx context.Context, input string) (*Response, error) {
 		c.prevResponseID = hr.ID
 	}
 
-	c.log.Info("hermes turn", "id", hr.ID, "tokens", hr.Usage.TotalTokens, "status", hr.Status, "turn", c.turnCount)
+	c.log.Info("[Hermes→MCP]", "id", hr.ID, "tokens", hr.Usage.TotalTokens, "status", hr.Status, "turn", c.turnCount)
 	return &hr, nil
 }
 
