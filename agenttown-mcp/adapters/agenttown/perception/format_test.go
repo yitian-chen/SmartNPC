@@ -32,8 +32,8 @@ func TestFormat_Perception(t *testing.T) {
 	if !strings.Contains(got, "你现在想做什么？") {
 		t.Errorf("missing prompt; got:\n%s", got)
 	}
-	if !strings.Contains(got, "简短回应") {
-		t.Errorf("missing conciseness directive; got:\n%s", got)
+	if !strings.Contains(got, "必须调用对应的 MCP 工具") {
+		t.Errorf("missing tool-use directive; got:\n%s", got)
 	}
 }
 

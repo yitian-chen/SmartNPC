@@ -92,10 +92,13 @@ func FormatSnapshot(p *Snapshot) string {
 		lines = append(lines, "你现在想做什么？")
 	}
 
-	// Conciseness directive — keeps the chained context from ballooning.
-	// The LLM tends to re-describe the environment every turn ("车间灯亮了",
-	// "机器在转") which accumulates rapidly via previous_response_id.
-	lines = append(lines, "（简短回应，不要重复描述已知的环境信息，直接说你要做什么或调用工具。）")
+	// Tool-use directive — the LLM tends to narrate actions ("走到工作台前")
+	// instead of calling the corresponding MCP tools. This instruction makes
+	// it clear that actions MUST be executed via tool calls, not narration.
+	// Also keeps the chained context concise by discouraging environment
+	// re-description.
+	lines = append(lines, "")
+	lines = append(lines, "【重要】执行任何动作时必须调用对应的 MCP 工具（如 mcp__agenttown__move_to、mcp__agenttown__work_assemble、mcp__agenttown__speak、mcp__agenttown__charge_at 等），不要只用文字叙述。回复要简短，不要重复描述已知环境。")
 
 	return strings.Join(lines, "\n")
 }

@@ -712,8 +712,17 @@ class MockUE:
                     # Tool call from MCP — handle it (may take time; run concurrently)
                     asyncio.create_task(self._handle_request(msg))
                 elif msg_type == TYPE_EVENT:
-                    # MCP → Mock UE events are rare in Phase 1; log and ignore.
-                    logger.debug(f"[WS←] event: {msg.get('name')}")
+                    name = msg.get("name", "")
+                    if name == "narrative":
+                        # Hermes narrative text pushed from MCP — display it
+                        data = msg.get("data", {})
+                        text = data.get("text", "") if isinstance(data, dict) else ""
+                        if text:
+                            print(f"\n  [{self.time.display}] {text[:500]}")
+                            if len(text) > 500:
+                                print(f"  ... ({len(text)} chars)")
+                    else:
+                        logger.debug(f"[WS←] event: {name}")
                 else:
                     logger.debug(f"[WS←] unknown frame type: {msg_type}")
         except websockets.ConnectionClosed:

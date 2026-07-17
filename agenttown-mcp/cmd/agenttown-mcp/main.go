@@ -121,19 +121,20 @@ func main() {
 					logger.Error("hermes send failed", "err", err)
 					return
 				}
-				// Hermes may have called MCP tools during this turn; the
-				// tool calls already went through the WS to Mock UE.
-				// The narrative text here is logged but not pushed back to
-				// Mock UE (it would be a redundant channel — Mock UE gets
-				// the structured tool calls directly).
 				narrative := resp.ExtractText()
-				if len(narrative) > 200 {
-					narrative = narrative[:200] + "..."
-				}
 				logger.Info("hermes turn complete",
 					"tokens", resp.Usage.TotalTokens,
-					"narrative", narrative,
+					"narrative_len", len(narrative),
 				)
+				// Push the narrative to Mock UE so the operator can see
+				// what the NPC is "saying" in real time.
+				if narrative != "" {
+					if err := ws.Broadcast("narrative", map[string]any{
+						"text": narrative,
+					}); err != nil {
+						logger.Debug("narrative push to mock ue failed", "err", err)
+					}
+				}
 			}()
 		case wsserver.EventDayStarted:
 			hc.ResetSession()
