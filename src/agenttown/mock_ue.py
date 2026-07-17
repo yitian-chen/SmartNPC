@@ -283,21 +283,20 @@ class MockUE:
         """
         Simulate action execution. Returns an ActionResult dict.
 
-        Long-running actions (work_assemble, charge_at) set a "busy" state
-        and return immediately — the NPC stays in place while the perception
-        loop naturally advances game time. When time reaches busy_until_min,
-        the action completes. Short actions (speak, emote, self_check, etc.)
-        are instant in game time (their duration is negligible vs the
-        perception interval).
+        IMPORTANT: Game time is NEVER advanced here. The perception loop
+        is the sole driver of game time (via time.advance(perception_interval)
+        each tick). Actions report their nominal duration for the LLM's
+        information, but the actual time passes naturally via the perception
+        loop.
 
-        While busy, disruptive actions (move_to, interact_with, work_assemble)
-        are rejected so the NPC doesn't teleport away mid-work.
+        Long-running actions (work_assemble, charge_at) set a "busy" state
+        — the NPC stays in place until the perception loop advances time
+        past busy_until_min. Short actions are instant in game time.
+
+        While busy, disruptive actions (move_to, interact_with, etc.) are
+        rejected so the NPC doesn't teleport away mid-work.
         """
         # ─── Busy guard ────────────────────────────────────────
-        # While occupied with a long-running action, reject anything that
-        # would move the NPC or start a new long task. Non-disruptive
-        # actions (self_check, speak, emote) are allowed — the NPC can
-        # talk or glance at gauges while working.
         DISRUPTIVE = {"move_to", "turn_to", "interact_with", "work_assemble", "charge_at", "wait"}
         if self.npc.busy_until_min is not None and action in DISRUPTIVE:
             remaining = max(0, self.npc.busy_until_min - self.time.total_minutes)
@@ -328,8 +327,6 @@ class MockUE:
                         f"Valid locations: {sorted(LOCATION_POINTS.keys())}."
                     )
             include_state = True
-            # move_to is short (2 game-min) — apply directly.
-            self.time.advance(duration)
 
         elif action == "turn_to":
             target = params.get("target", "")
@@ -338,13 +335,8 @@ class MockUE:
         elif action == "work_assemble":
             duration = params.get("duration_min", 30)
             target = params.get("target", "")
-            # Set busy state — the perception loop will naturally advance
-            # time. We don't jump the clock; the NPC stays here and works
-            # until busy_until_min is reached.
             self.npc.busy_until_min = self.time.total_minutes + int(duration)
             self.npc.busy_action = f"work_assemble({target})"
-            # Apply fatigue/energy gradually — the perception loop will
-            # decay them further while busy. Apply an initial hit here.
             self.npc.fatigue = min(100, self.npc.fatigue + duration * 0.3)
             message_parts.append(f"started work at {target}, will finish in {duration} game-min")
             self.npc.current_action = f"work_assemble({target})"
@@ -374,13 +366,10 @@ class MockUE:
                     f"Valid objects: {sorted(LOCATION_POINTS.keys())}."
                 )
             message_parts.append(f"{verb} on {obj}")
-            # interact_with is short (5 game-min) — apply directly.
-            self.time.advance(duration)
 
         elif action == "charge_at":
             duration = params.get("duration_min", 30)
             station = params.get("station_id", "")
-            # Set busy state — charging takes real in-world time.
             self.npc.busy_until_min = self.time.total_minutes + int(duration)
             self.npc.busy_action = f"charge_at({station})"
             message_parts.append(f"started charging at {station}, will finish in {duration} game-min")
@@ -397,8 +386,6 @@ class MockUE:
         elif action == "self_check":
             message_parts.append("all systems nominal")
             include_state = True
-            # self_check is 1 game-min — apply directly.
-            self.time.advance(duration)
 
         elif action == "speak":
             text = params.get("text", "")
@@ -410,10 +397,8 @@ class MockUE:
             message_parts.append(f"emoted {emotion}")
 
         elif action == "wait":
-            # wait is explicit — apply the time directly (it's usually short).
             duration = params.get("seconds", 5) / 60.0
             message_parts.append(f"waited {params.get('seconds', 5)}s")
-            self.time.advance(duration)
 
         elif action == "update_plan":
             self.current_plan = params.get("plan", "")
@@ -425,7 +410,8 @@ class MockUE:
                 "message": "; ".join(message_parts),
             }
 
-        # Universal energy consumption for short actions
+        # Universal energy consumption for short actions.
+        # Time is NOT advanced here — only the perception loop advances time.
         self.npc.energy = max(0, self.npc.energy - duration * 0.1)
         self.npc.current_action = f"{action}({params.get('target', '') or params.get('object_id', '')})"
 
@@ -688,11 +674,10 @@ class MockUE:
             # Push perception snapshot
             await self._push_perception(phase="perception")
 
-            # Real-time pacing. time_speed=60 means 1 real-sec = 1 game-min;
-            # perception_interval=15 game-min → ~15 real-sec between pushes.
-            # Use a shorter real delay for dev (cap at 2s so high-speed runs
-            # still feel live).
-            real_delay = min(2.0, self.perception_interval / max(self.time.speed, 1) * 60)
+            # Real-time pacing: speed=60 means 1 real-sec = 1 game-min;
+            # perception_interval=30 game-min at speed 300 → 6 real-sec.
+            # No artificial cap — the speed parameter controls the pace.
+            real_delay = self.perception_interval / max(self.time.speed, 1) * 60
             await asyncio.sleep(real_delay)
 
     async def _ws_read_loop(self):
