@@ -134,41 +134,49 @@ start_mcp() {
     # 自动交叉编译 + 部署最新 MCP 二进制到 WSL 的 ~/agenttown-mcp。
     # 跳过重编译则传 --no-build 标志。
     if [ "${SKIP_MCP_BUILD:-0}" = "1" ]; then
-        warn "--no-build: skipping MCP build, using existing ~/agenttown-mcp"
+        warn "--no-build: skipping MCP build, using existing binary"
     else
-        info "Building MCP (linux/amd64, CGO disabled)..."
-
-        # Locate the Go compiler. Try these in order:
-        #   1. `command -v go` — works in Git Bash
-        #   2. /d/Go/bin/go, /c/Go/bin/go, /e/Go/bin/go — MINGW mount paths
-        #   3. ~/go/bin/go, ~/sdk/*/bin/go — user-local installs
+        # Locate the Go compiler. Try: PATH, env vars, known MINGW mount
+        # paths, user-local SDK dirs. From PowerShell-launched bash the
+        # MINGW drive mounts (/d/, /c/) may not exist, so the check is
+        # best-effort.
         GO_BIN=""
         if command -v go &>/dev/null; then
             GO_BIN="$(command -v go)"
         fi
         if [ -z "$GO_BIN" ] || [ ! -x "$GO_BIN" ]; then
             for p in \
+                "${GOROOT:+$GOROOT/bin/go}" \
                 /d/Go/bin/go /c/Go/bin/go /e/Go/bin/go \
                 "$HOME/go/bin/go" "$HOME/sdk/"*/bin/go; do
                 if [ -x "$p" ]; then GO_BIN="$p"; break; fi
             done
         fi
-        if [ -z "$GO_BIN" ] || [ ! -x "$GO_BIN" ]; then
-            fail "Go compiler not found. Install Go from https://go.dev/dl/ or skip the build:
-  SKIP_MCP_BUILD=1 bash start.sh"
-        fi
-        "$GO_BIN" version
 
-        mkdir -p "$PROJECT_DIR/agenttown-mcp/tmp"
-        (cd "$PROJECT_DIR/agenttown-mcp" && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 "$GO_BIN" build -o tmp/agenttown-mcp-linux ./cmd/agenttown-mcp) \
-            || fail "Go cross-compile failed"
-        info "Deploying to WSL ~/agenttown-mcp..."
-        # Remove stale binary first (avoids "text file busy" if an old MCP is still shutting down).
-        MSYS_NO_PATHCONV=1 $WSL rm -f /home/yitianchen/agenttown-mcp
-        MSYS_NO_PATHCONV=1 $WSL cp /mnt/d/SmartNPC_v3/agenttown-mcp/tmp/agenttown-mcp-linux /home/yitianchen/agenttown-mcp \
-            || fail "Failed to copy binary to WSL ~/agenttown-mcp"
-        MSYS_NO_PATHCONV=1 $WSL chmod +x /home/yitianchen/agenttown-mcp
-        ok "MCP binary deployed"
+        if [ -n "$GO_BIN" ] && [ -x "$GO_BIN" ]; then
+            info "Building MCP (linux/amd64, CGO disabled)..."
+            "$GO_BIN" version
+
+            mkdir -p "$PROJECT_DIR/agenttown-mcp/tmp"
+            (cd "$PROJECT_DIR/agenttown-mcp" && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 "$GO_BIN" build -o tmp/agenttown-mcp-linux ./cmd/agenttown-mcp) \
+                || fail "Go cross-compile failed"
+            info "Deploying to WSL ~/agenttown-mcp..."
+            # Remove stale binary first (avoids "text file busy").
+            MSYS_NO_PATHCONV=1 $WSL rm -f /home/yitianchen/agenttown-mcp
+            MSYS_NO_PATHCONV=1 $WSL cp /mnt/d/SmartNPC_v3/agenttown-mcp/tmp/agenttown-mcp-linux /home/yitianchen/agenttown-mcp \
+                || fail "Failed to copy binary to WSL ~/agenttown-mcp"
+            MSYS_NO_PATHCONV=1 $WSL chmod +x /home/yitianchen/agenttown-mcp
+            ok "MCP binary deployed"
+        else
+            # Go not found — skip the build, rely on existing binary.
+            warn "Go compiler not found, skipping build"
+            if ! MSYS_NO_PATHCONV=1 $WSL test -x /home/yitianchen/agenttown-mcp; then
+                fail "Go not found and no existing MCP binary in WSL.
+  Build once from Git Bash:   bash start.sh
+  Or set env var:             GO_BIN=D:/Go/bin/go.exe bash start.sh"
+            fi
+            ok "Using existing MCP binary (build skipped)"
+        fi
     fi
 
     # 清空旧日志（MCP 日志写到项目 logs/ 目录）
