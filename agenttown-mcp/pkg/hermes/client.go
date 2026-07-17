@@ -2,6 +2,11 @@
 // /v1/responses endpoint. It maintains a per-game-day session via the
 // `previous_response_id` field, with automatic summarization + reset
 // when the token count exceeds a configurable threshold.
+//
+// All Send calls are serialized via a mutex — no two Hermes calls
+// can be in flight simultaneously. This prevents race conditions
+// where concurrent calls chain to the same prevResponseID and
+// defeat the session-reset mechanism.
 package hermes
 
 import (
@@ -19,8 +24,7 @@ import (
 )
 
 // DefaultTokenThreshold is the point at which the client auto-summarizes
-// and resets the session. 50K tokens is roughly 4-5 game hours of
-// perception + tool calls with DeepSeek.
+// and resets the session.
 const DefaultTokenThreshold = 50000
 
 // Config configures the Client.
@@ -37,27 +41,25 @@ type Config struct {
 
 // Client POSTs perception text to Hermes /v1/responses.
 //
-// It owns the `previous_response_id` session state so that one game day
-// chains into a single Hermes conversation. When the token count exceeds
-// TokenThreshold, it automatically:
-//  1. Asks Hermes to summarize the day so far
-//  2. Resets the session (clears previous_response_id)
-//  3. Prepends the summary to the next perception
-//
-// This prevents the exponential token growth that would otherwise make
-// a full 16-hour day infeasible.
+// All calls are serialized via sendMu — no two Hermes requests can
+// be in flight at the same time. This is critical because concurrent
+// calls would chain to the same prevResponseID, causing token
+// explosion and defeating session resets.
 type Client struct {
 	cfg  Config
 	http *http.Client
 	log  *slog.Logger
 
-	mu              sync.Mutex
+	// sendMu serializes the entire Send → doSend → summarizeAndReset
+	// cycle. Held for the full duration of a Hermes round-trip (up to
+	// 120s). This is intentional — we never want concurrent calls.
+	sendMu          sync.Mutex
 	prevResponseID  string
-	pendingSummary  string // summary from a reset, prepended to next Send
-	turnCount       int    // perceptions sent since last reset
+	pendingSummary  string
+	turnCount       int
 }
 
-// New creates a Client. Defaults: 120s timeout, 50K token threshold.
+// New creates a Client.
 func New(cfg Config) *Client {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
@@ -73,16 +75,20 @@ func New(cfg Config) *Client {
 }
 
 // Send POSTs the given input to Hermes /v1/responses and returns the
-// response. If the token count exceeds the threshold after this call,
-// it automatically triggers a summarize-and-reset cycle.
+// response. The call is serialized — if another Send is in flight,
+// this call blocks until it completes.
+//
+// If the token count exceeds the threshold after this call, it
+// automatically triggers a summarize-and-reset cycle (also serialized).
 func (c *Client) Send(ctx context.Context, input string) (*Response, error) {
+	c.sendMu.Lock()
+	defer c.sendMu.Unlock()
+
 	// If there's a pending summary from a previous reset, prepend it.
 	fullInput := input
-	c.mu.Lock()
 	summary := c.pendingSummary
 	c.pendingSummary = ""
 	c.turnCount++
-	c.mu.Unlock()
 
 	if summary != "" {
 		fullInput = "[今日纪要] " + summary + "\n\n" + input
@@ -108,11 +114,10 @@ func (c *Client) Send(ctx context.Context, input string) (*Response, error) {
 	return resp, nil
 }
 
-// doSend performs the actual HTTP POST, updating prevResponseID.
+// doSend performs the HTTP POST and updates prevResponseID.
+// Caller MUST hold sendMu.
 func (c *Client) doSend(ctx context.Context, input string) (*Response, error) {
-	c.mu.Lock()
 	prev := c.prevResponseID
-	c.mu.Unlock()
 
 	body := request{
 		Model:              c.cfg.Model,
@@ -157,21 +162,16 @@ func (c *Client) doSend(ctx context.Context, input string) (*Response, error) {
 	}
 
 	if hr.ID != "" {
-		c.mu.Lock()
 		c.prevResponseID = hr.ID
-		c.mu.Unlock()
 	}
 
 	c.log.Info("hermes turn", "id", hr.ID, "tokens", hr.Usage.TotalTokens, "status", hr.Status, "turn", c.turnCount)
 	return &hr, nil
 }
 
-// summarizeAndReset asks Hermes for a brief summary of the day so far,
-// then resets the session. The summary is stored and prepended to the
-// next Send() call so the LLM retains day context without the full
-// conversation history.
+// summarizeAndReset asks Hermes for a brief summary, then resets the
+// session. Caller MUST hold sendMu.
 func (c *Client) summarizeAndReset(ctx context.Context) error {
-	// Ask for a concise summary.
 	resp, err := c.doSend(ctx, "请用100字以内总结今天到目前为止发生的事，包括你做了什么、见了谁、有什么重要发现。只输出总结，不要其他内容。")
 	if err != nil {
 		return fmt.Errorf("summarize send: %w", err)
@@ -182,38 +182,33 @@ func (c *Client) summarizeAndReset(ctx context.Context) error {
 		return errors.New("summary was empty")
 	}
 
-	// Truncate to a reasonable length to avoid the summary itself
-	// being too large.
 	if len(summary) > 500 {
 		summary = summary[:500]
 	}
 
 	// Reset the session — next Send will start a fresh conversation.
-	c.mu.Lock()
 	c.prevResponseID = ""
 	c.pendingSummary = summary
 	c.turnCount = 0
-	c.mu.Unlock()
 
 	c.log.Info("session reset with summary", "summary_len", len(summary), "summary", summary)
 	return nil
 }
 
-// ResetSession clears the stored previous_response_id and summary.
-// Call on day_started so a new game day begins a fresh conversation.
+// ResetSession clears the session state. Safe to call from any goroutine.
 func (c *Client) ResetSession() {
-	c.mu.Lock()
+	c.sendMu.Lock()
+	defer c.sendMu.Unlock()
 	c.prevResponseID = ""
 	c.pendingSummary = ""
 	c.turnCount = 0
-	c.mu.Unlock()
 	c.log.Info("hermes session reset (new game day)")
 }
 
 // SessionID returns the current previous_response_id (for /status).
 func (c *Client) SessionID() string {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.sendMu.Lock()
+	defer c.sendMu.Unlock()
 	return c.prevResponseID
 }
 

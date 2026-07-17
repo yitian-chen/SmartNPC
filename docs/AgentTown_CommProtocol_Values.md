@@ -12,6 +12,7 @@
 3. [数值系统设计](#三数值系统设计)
 4. [连接生命周期](#四连接生命周期)
 5. [错误处理与容错](#五错误处理与容错)
+6. [MCP 层设计](#六mcp-层设计agent-接入层)
 
 ---
 
@@ -502,8 +503,10 @@ graph TB
 
 ```json
 {
+  "version": "1.0",
   "msg_id": "uuid-006",
-  "timestamp": 1719456050,
+  "seq": 1006,
+  "timestamp": 1719456050000,
   "type": "state_report",
   "agent_id": "H-01",
   "payload": {
@@ -521,14 +524,16 @@ graph TB
 }
 ```
 
-**说明**：通常 `physical_state` 随 `perception_update` 一起上报。当需要独立、高频上报物理状态时用此消息。
+**说明**：`state_report` 是 **physical_state 的权威通道**（约定5）。触发条件：任一物理数值变化超阈值时即时上报；无变化时每 15 秒兜底全量上报一次。`perception_update` 不再常驻携带完整 physical_state。
 
 #### agent_registered（UE → Agent）
 
 ```json
 {
+  "version": "1.0",
   "msg_id": "uuid-007",
-  "timestamp": 1719456055,
+  "seq": 1007,
+  "timestamp": 1719456055000,
   "type": "agent_registered",
   "agent_id": "H-01",
   "payload": {
@@ -546,8 +551,10 @@ graph TB
 
 ```json
 {
+  "version": "1.0",
   "msg_id": "uuid-008",
-  "timestamp": 1719456060,
+  "seq": 1008,
+  "timestamp": 1719456060000,
   "type": "agent_unregistered",
   "agent_id": "H-01",
   "payload": {
@@ -562,8 +569,10 @@ graph TB
 
 ```json
 {
+  "version": "1.0",
   "msg_id": "uuid-009",
-  "timestamp": 1719456065,
+  "seq": 1009,
+  "timestamp": 1719456065000,
   "type": "heartbeat",
   "agent_id": "system",
   "payload": {
@@ -572,14 +581,16 @@ graph TB
 }
 ```
 
-**说明**：每 5 秒互发一次，超时 15 秒无响应视为断线。
+**说明**：每 5 秒互发一次，超时 15 秒无响应视为断线。`agent_id` 固定为保留值 `"system"`（约定4）。
 
 #### error（双向）
 
 ```json
 {
+  "version": "1.0",
   "msg_id": "uuid-010",
-  "timestamp": 1719456070,
+  "seq": 1010,
+  "timestamp": 1719456070000,
   "type": "error",
   "agent_id": "H-01",
   "payload": {
@@ -592,6 +603,16 @@ graph TB
   }
 }
 ```
+
+**error_code 取值表**：
+
+| error_code | 含义 | 接收方处理 |
+|------------|------|-----------|
+| `ACTION_FAILED` | 动作执行失败（如寻路不可达） | Agent 重新决策 |
+| `STOP_ID_MISMATCH` | stop_action 的 action_id 与当前动作不匹配 | Agent 以最新状态重决策，不重发 stop |
+| `INVALID_MESSAGE` | 消息格式错误/校验失败 | 丢弃并记录 |
+| `UNKNOWN_AGENT` | agent_id 未注册 | 忽略并记录 |
+| `INTERNAL_ERROR` | 接收方内部异常 | 记录，必要时进安全模式 |
 
 ---
 
@@ -849,8 +870,11 @@ sequenceDiagram
 **重连后的状态同步**：
 - UE 侧重新发送所有 `agent_registered`
 - Agent 侧根据 `agent_id` 匹配已有 Agent Mind（如果还在内存）
-- Agent 侧向 UE 请求当前所有 Agent 的 `state_report`（物理状态）
+- Agent 侧向 UE 请求当前所有 Agent 的 `state_report`（物理状态）+ 一次全量 `perception_update`（空间快照）
+- **断线期间的事件补偿（约定11）**：双方各维护一个**发送缓冲队列**（保留最近 N=200 条或最近 60 秒的消息，按 seq 排序）。重连后通过交换"最后成功接收的 seq"，对端**重放 seq 之后的消息**。若缓冲已滚动丢失，则该 agent 以"当前快照为准"，并记录一条 `event_lost` 告警日志。
 - 恢复正常通信
+
+> **约定 11（断线补偿）**：离散事件（action_completed / event_notification）优先走 seq 重放补偿；连续状态（position/physical_state）不重放，直接以重连后的最新快照为准。
 
 ### 4.3 关闭流程
 
@@ -883,17 +907,20 @@ sequenceDiagram
 | WebSocket 断线 | 双方（心跳超时） | UE 侧自动重连；Agent 侧保留 Agent Mind 状态 5 分钟 |
 | Agent 进程崩溃 | UE 侧（断线） | UE 侧机器人进入"待机动画"，等待重连 |
 | UE5 崩溃 | Agent 侧（断线） | Agent 侧保存状态，等待 UE 重连 |
-| LLM 调用失败 | Agent 侧 | 重试 3 次 → 降级到本地小模型 → 返回默认行为（idle） |
+| LLM 调用失败 | Agent 侧 | 单次决策：重试 3 次 → 降级到本地小模型 → 本次返回默认行为（idle）。**连续 5 次决策均失败** → 进入安全模式 |
 | MoveTo 不可达 | UE 侧 | 发 `action_completed {result: failed}` → Agent 重新决策 |
 | StateTree 执行错误 | UE 侧 | 发 `error` 消息 → Agent 重新决策 |
 | Agent Mind 内部异常 | Agent 侧 | 记录日志 → 该 Agent 进入 safe mode（只 idle） |
-| 消息格式错误 | 接收方 | 丢弃 + 发 `error` 消息回報 |
+| 消息格式错误 | 接收方 | 丢弃 + 发 `error {error_code: INVALID_MESSAGE}` 回报 |
+
+> **约定 12（失败降级 vs 安全模式边界）**：**单次** LLM/决策失败仅影响本次行为（降级为 idle），不进安全模式；只有**连续多次（默认 5 次）**失败或内部异常才升级为安全模式。避免偶发失败导致 NPC 长时间"呆滞"。
 
 ### 5.2 超时机制
 
 | 操作 | 超时时间 | 超时后行为 |
 |------|----------|------------|
-| action_completed 等待 | 60 秒 | Agent 侧认为动作卡死，发 stop_action + 重新决策 |
+| action_started 等待（ACK） | 2 秒 | 未收到 ACK，认为指令丢失 → 重发一次；再失败则重新决策 |
+| action_completed 等待 | `estimated_duration_sec × 1.5`（无估值时默认 60 秒） | 认为动作卡死 → 发 stop_action + 重新决策 |
 | LLM 调用 | 10 秒 | 重试 → 降级 |
 | 心跳响应 | 15 秒 | 认为断线 |
 | 重连尝试 | 3 秒间隔，指数退避到 30 秒 | 持续重试 |
@@ -914,7 +941,140 @@ UE 侧收到 `idle` 后播放待机动画，机器人不会完全卡死。
 
 ---
 
-## 六、总结
+## 六、MCP 层设计（Agent 接入层）
+
+> 因第一期采用现成 Agent（Hermes，MCP 原生），在 Agent 与 UE 通信协议之间引入 **MCP 层**。它对下用本文定义的 WebSocket 协议连接 UE，对上以标准 MCP 暴露给 Agent。
+
+### 6.1 定位与职责
+
+MCP 层是 **UE WebSocket 协议 ⟷ Agent(MCP)** 的适配与语义化中枢，一体承担三项职责：
+
+```mermaid
+graph LR
+    subgraph UE["UE5 Process"]
+        WSC["AgentBridgeClient (WebSocket)"]
+    end
+    subgraph MCP["MCP 层 (Adapter + Semantic + Tools)"]
+        WSS["WebSocket Client<br/>连UE, 收发协议消息"]
+        KB["World KB<br/>(加载 world_kb.yaml)"]
+        SEM["Semantic Engine<br/>坐标→地点名→第一人称叙事"]
+        NOTIFY["MCP Notification/SSE<br/>主动推送感知/事件给Agent"]
+        TOOLS["MCP Tools<br/>复合+原子行为 (带agent_id)"]
+    end
+    subgraph AG["Agent (Hermes)"]
+        MIND["Agent Mind"]
+    end
+
+    WSC <-->|"WebSocket JSON<br/>(本文协议)"| WSS
+    WSS --> SEM
+    KB --> SEM
+    SEM --> NOTIFY
+    NOTIFY -->|"push (SSE)"| MIND
+    MIND -->|"call tool (agent_id)"| TOOLS
+    TOOLS -->|"翻译为 action_command"| WSS
+```
+
+| 职责 | 说明 |
+|------|------|
+| **协议适配** | 作为 WebSocket 客户端连接 UE 的 `AgentBridgeClient`，收发本文第二章定义的所有协议消息 |
+| **感知语义化** | 加载 World KB，将原始感知（坐标/ID）翻译为**地点名→第一人称叙事**（认知层），全部在 MCP 层完成 |
+| **感知推送** | 通过 **MCP 通知 / SSE** 主动把语义化后的感知与事件推给 Agent（不依赖 Agent 轮询） |
+| **工具暴露** | 向 Agent 暴露**复合 + 原子行为** MCP Tools，调用时翻译为 `action_command` 下发 UE |
+
+> **核心权衡**：本文 WebSocket 协议是"UE 主动推送"范式，MCP 是"Agent 调用工具"范式。MCP 层通过 **SSE 推送（感知方向）+ Tool 调用（动作方向）** 弥合两种范式——感知走推送，动作走工具，方向清晰。
+
+### 6.2 感知送达：MCP 通知 / SSE 推送
+
+UE 推来的 `perception_update` / `event_notification` / `action_started` / `action_completed` / `state_report`，经 MCP 层语义化后，**通过 MCP 的 server 通知 / SSE 主动推送**给 Agent，而非等待 Agent 轮询。
+
+| UE 协议消息 | MCP 层处理 | 推送给 Agent 的形式 |
+|-------------|-----------|--------------------|
+| `perception_update` | 语义化为第一人称叙事 | SSE 通知：`perception`（含叙事文本） |
+| `event_notification` | 语义化事件描述 | SSE 通知：`event`（紧急事件即时推送，供反应层打断） |
+| `action_started` | 透传 | SSE 通知：`action_ack` |
+| `action_completed` | 透传（含 result/progress） | SSE 通知：`action_result` |
+| `state_report` | 附加到感知上下文 | 随下次 `perception` 通知携带 |
+
+> **反应层打断**：`event`（紧急事件）通过 SSE 即时推送，保证反应层能及时收到并决定是否打断当前动作。
+
+### 6.3 感知语义化（全部在 MCP 层）
+
+三层感知翻译（对应子系统5）**全部在 MCP 层内完成**，Agent 拿到的是"成品叙事"：
+
+```
+Layer1 原始感知(UE)  →  Layer2 语义(查World KB)  →  Layer3 认知(第一人称叙事)
+[245.3,128.7,0]        "档案馆修理台"              "你现在在档案馆的修理台旁..."
+K-03 distance=2.1      "K-03 三条腿"              "你看到 K-03 三条腿(你最亲近的伙伴)就在旁边"
+```
+
+MCP 层语义化后推送给 Agent 的示例（叙事文本 + 结构化附带）：
+
+```json
+{
+  "notify_type": "perception",
+  "agent_id": "H-03",
+  "narrative": "你现在在档案馆的修理台旁。时间 14:23。\n你看到：K-03 三条腿（你最亲近的伙伴）就在旁边，正在休息。\n你附近可用：修理台（闲置）、档案终端（闲置）。\n你听到：D-02 小八在广场广播：\"K-03 出事了！\"",
+  "structured": {
+    "current_zone": "archive_room",
+    "current_location": "repair_table",
+    "visible_agents": ["K-03"],
+    "usable_objects": ["repair_table", "archive_terminal"]
+  }
+}
+```
+
+> `narrative` 供 LLM 直接理解；`structured` 供 Agent 需要精确判断时使用（如距离/可用动作校验）。
+
+### 6.4 MCP Tools 定义（复合 + 原子，均带 agent_id）
+
+Tools 参照子系统6，**复合行为 + 必要原子行为均开放给 LLM 调用**。**所有 tool 的第一个参数固定为 `agent_id`**（单 MCP Server 服务多 NPC 的隔离手段）。MCP 层收到调用后翻译为对应 `action_command` 下发 UE。
+
+**复合行为 Tools**（默认优先使用）：
+
+| MCP Tool | 参数 | 翻译为 action_command |
+|----------|------|----------------------|
+| `work_assemble` | agent_id, target, duration_min | ExecuteComposite {name:"work_assemble"} |
+| `patrol_route` | agent_id, route_id | ExecuteComposite {name:"patrol_route"} |
+| `charge_at` | agent_id, station_id, duration_min | ExecuteComposite {name:"charge_at"} |
+| `repair_target` | agent_id, target_agent_id | ExecuteComposite {name:"repair_target"} |
+| `social_chat_with` | agent_id, target_agent_id | ExecuteComposite {name:"social_chat_with"} |
+| `rest_idle` | agent_id, duration_min | ExecuteComposite {name:"rest_idle"} |
+| `archive_research` | agent_id, duration_min | ExecuteComposite {name:"archive_research"} |
+
+**原子行为 Tools**（需精细控制时使用）：
+
+| MCP Tool | 参数 | 翻译为 action_command |
+|----------|------|----------------------|
+| `move_to` | agent_id, target（语义ID/描述） | MoveTo（MCP层查 World KB 解析坐标） |
+| `turn_to` | agent_id, target | TurnTo |
+| `speak` | agent_id, content, target | Speak（MCP层可调 TTS 填 audio_url） |
+| `emote` | agent_id, emotion, mode | Emote |
+| `interact` | agent_id, object_id, action | InteractSmartObject |
+| `wait` | agent_id, duration_sec | Wait |
+| `scan_area` | agent_id | 主动请求一次 perception_update |
+| `stop` | agent_id | Stop / stop_action |
+
+> **语义目标解析**：原子 tool 接受**语义目标**（如 `move_to(target="工作台")`），由 MCP 层查 World KB 的 `resolve_target` / `get_position` 解析为坐标，再填入 action_command 的 `dest`。Agent 无需接触任何坐标。
+
+### 6.5 多 NPC 隔离：单 Server + agent_id 参数
+
+- **单个 MCP Server** 服务所有 NPC（第一期仅 1 个，但架构就绪）。
+- 每个 tool 调用**必须带 `agent_id`**，MCP 层据此翻译为对应 agent 的 `action_command`。
+- SSE 推送按 `agent_id` 分流：Agent 侧订阅自己 NPC 的感知/事件流。
+- **第一期**：只有 1 个 agent_id，流程完全打通即可；多 NPC 时无需改协议，仅扩展订阅路由。
+
+### 6.6 MCP 层与本协议的关系小结
+
+| 方向 | 范式 | 承载 |
+|------|------|------|
+| UE → Agent（感知/事件） | 推送 | WebSocket 协议消息 → 语义化 → **MCP SSE 通知** |
+| Agent → UE（动作） | 调用 | **MCP Tool 调用** → 翻译 → WebSocket `action_command` |
+
+> **结论**：MCP 层让本文定义的 WebSocket 协议对 Agent "隐形"——Agent 只看到"推来的叙事"和"可调的工具"，完全不感知底层坐标与协议细节。这既满足 Hermes 的 MCP 接入需求，又保持了 UE 端与协议层的独立与可复用。
+
+---
+
+## 七、总结
 
 ### 通信架构核心
 
@@ -931,20 +1091,33 @@ UE 侧收到 `idle` 后播放待机动画，机器人不会完全卡死。
 | 项 | 答案 |
 |---|------|
 | 原则 | 谁产生谁管 |
-| 物理数值 | UE 是主人，随 perception_update 上报 |
+| 物理数值 | UE 是主人，随 state_report 上报（perception 仅带变化项） |
 | 心理/关系数值 | Agent 是主人，不同步 |
 | 任务状态 | Agent 是主人，不同步 |
 | Director 获取全局状态 | Agent Minds 定期上报（进程内部） |
 
+### MCP 层核心
+
+| 项 | 答案 |
+|---|------|
+| 定位 | UE WebSocket 协议 ⟷ Agent(MCP) 的适配 + 语义化中枢 |
+| 感知送达 | MCP 通知 / SSE **推送**（含紧急事件即时推送供打断） |
+| 语义化 | **全部在 MCP 层**：坐标→地点名→第一人称叙事 |
+| Tools | 复合 + 原子行为，均开放给 LLM，**统一带 agent_id** |
+| 多 NPC | 单 MCP Server + agent_id 参数隔离 |
+
 ### 设计原则
 
 1. **单连接 + agent_id 路由**：简化连接管理，便于调试
-2. **消息统一封装**：msg_id + timestamp + type + agent_id + payload
-3. **数值归属清晰**：物理 UE 管，心理 Agent 管，不交叉
-4. **单向数据流**：UE → Agent（perception），Agent → UE（action）
-5. **容错优先**：断线重连、超时降级、安全模式
-6. **可观测**：每条消息有 msg_id，可追踪完整链路
+2. **消息统一封装**：version + msg_id + seq + timestamp + type + agent_id + payload，业务字段一律入 payload
+3. **时间与坐标单位统一**：时间戳毫秒，坐标厘米
+4. **动作生命周期可靠**：command → started(ACK) → completed，停止有 ID 匹配校验
+5. **数值归属清晰**：物理 UE 管，心理 Agent 管，不交叉
+6. **感知/动作范式分离**：感知走 SSE 推送，动作走 MCP Tool 调用
+7. **容错优先**：断线重连 + seq 重放补偿、超时降级、失败/安全模式分级
+8. **可观测**：每条消息有 msg_id + seq，可追踪完整链路
+9. **MCP 层隔离底层**：Agent 只见叙事与工具，不感知坐标与协议细节
 
 ---
 
-*本文档定义了 Agent Town 的通信协议与数值系统，作为实现的契约依据。*
+*本文档定义了 Agent Town 的通信协议、数值系统与 MCP 接入层，作为实现的契约依据。*
