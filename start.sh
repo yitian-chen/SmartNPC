@@ -217,7 +217,16 @@ start_mock_ue() {
     echo ""
 
     cd "$PROJECT_DIR"
-    python "$MOCK_UE_SCRIPT" "${args[@]}"
+    # 检测 python 命令（WSL 通常只有 python3）
+    local py_cmd="python"
+    if ! command -v python &>/dev/null; then
+        if command -v python3 &>/dev/null; then
+            py_cmd="python3"
+        else
+            fail "Python not found. Install it: sudo apt install python3 python3-pip"
+        fi
+    fi
+    $py_cmd "$MOCK_UE_SCRIPT" "${args[@]}"
 }
 
 # ─── 主流程 ────────────────────────────────────────────────────
