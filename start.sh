@@ -37,6 +37,24 @@ DOCKER_COMPOSE="$PROJECT_DIR/docker/docker-compose.yml"
 ENV_FILE="$PROJECT_DIR/.env"
 MOCK_UE_SCRIPT="$PROJECT_DIR/src/run_day.py"
 
+# ─── 环境检测 ──────────────────────────────────────────────────
+# 检测是否在 WSL 内部运行。如果在 Windows Git Bash 中运行，
+# `wsl` 命令可用，需要通过它调用 WSL 内的工具。如果在 WSL 内部
+# 运行，`wsl` 不存在，命令直接执行。
+if command -v wsl &>/dev/null; then
+    # Windows Git Bash — 通过 wsl 调用 WSL 命令
+    WSL="wsl"
+    WSL_BASH="wsl bash -c"
+    DOCKER_COMPOSE_FILE="/mnt/d/SmartNPC_v3/docker/docker-compose.yml"
+    DOCKER_ENV_FILE="/mnt/d/SmartNPC_v3/.env"
+else
+    # 已在 WSL 内部 — 直接执行
+    WSL=""
+    WSL_BASH="bash -c"
+    DOCKER_COMPOSE_FILE="$PROJECT_DIR/docker/docker-compose.yml"
+    DOCKER_ENV_FILE="$PROJECT_DIR/.env"
+fi
+
 MOCK_START=6
 MOCK_END=22
 MOCK_SPEED=300
@@ -69,8 +87,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 # ─── 健康检查函数 ──────────────────────────────────────────────
-check_mcp_http() { wsl curl -sf http://localhost:8760/healthz >/dev/null 2>&1; }
-check_mcp_ws()   { wsl curl -sf http://localhost:9000/healthz >/dev/null 2>&1; }
+check_mcp_http() { $WSL curl -sf http://localhost:8760/healthz >/dev/null 2>&1; }
+check_mcp_ws()   { $WSL curl -sf http://localhost:9000/healthz >/dev/null 2>&1; }
 check_hermes()   { curl -sf http://localhost:8642/health >/dev/null 2>&1; }
 
 wait_for() {
@@ -95,9 +113,9 @@ stop_all() {
     # MCP (WSL Go binary) — kill by PID to avoid killing the shell itself
     info "Stopping MCP..."
     local mcp_pid
-    mcp_pid=$(wsl bash -c "pgrep -f 'agenttown-mcp --http' 2>/dev/null | head -1" || true)
+    mcp_pid=$($WSL_BASH "pgrep -f 'agenttown-mcp --http' 2>/dev/null | head -1" || true)
     if [ -n "$mcp_pid" ]; then
-        wsl bash -c "kill $mcp_pid 2>/dev/null"
+        $WSL_BASH "kill $mcp_pid 2>/dev/null"
         sleep 1
         ok "  MCP stopped (PID $mcp_pid)"
     else
@@ -106,7 +124,7 @@ stop_all() {
 
     # Hermes (Docker)
     info "Stopping Hermes..."
-    wsl docker compose -f /mnt/d/SmartNPC_v3/docker/docker-compose.yml stop 2>/dev/null \
+    $WSL docker compose -f "$DOCKER_COMPOSE_FILE" stop 2>/dev/null \
         && ok "  Hermes stopped" \
         || warn "  Hermes not running"
 
@@ -119,7 +137,7 @@ stop_all() {
 start_mcp() {
     info "=== Step 1: Start agenttown-mcp ==="
 
-    if ! wsl bash -c 'test -f ~/agenttown-mcp'; then
+    if ! $WSL_BASH 'test -f ~/agenttown-mcp'; then
         fail "MCP binary not found at ~/agenttown-mcp in WSL. Build it first:
   cd d:/SmartNPC_v3/agenttown-mcp
   GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o /tmp/agenttown-mcp-linux ./cmd/agenttown-mcp
@@ -127,10 +145,10 @@ start_mcp() {
     fi
 
     # 清空旧日志
-    wsl bash -c 'echo "" > /tmp/mcp.log'
+    $WSL_BASH 'echo "" > /tmp/mcp.log'
 
     info "Starting MCP in WSL background..."
-    wsl bash -c '~/agenttown-mcp --http :8760 --ws :9000 --hermes-url http://localhost:8642 > /tmp/mcp.log 2>&1 &'
+    $WSL_BASH '~/agenttown-mcp --http :8760 --ws :9000 --hermes-url http://localhost:8642 > /tmp/mcp.log 2>&1 &'
 
     wait_for "MCP HTTP (:8760)" check_mcp_http 15
     wait_for "MCP WS (:9000)" check_mcp_ws 10
@@ -145,8 +163,8 @@ start_hermes() {
     fi
 
     info "Starting Hermes via docker compose..."
-    wsl docker compose -f /mnt/d/SmartNPC_v3/docker/docker-compose.yml \
-        --env-file /mnt/d/SmartNPC_v3/.env up -d
+    $WSL docker compose -f "$DOCKER_COMPOSE_FILE" \
+        --env-file "$DOCKER_ENV_FILE" up -d
 
     wait_for "Hermes Gateway (:8642)" check_hermes 40
 
@@ -154,7 +172,7 @@ start_hermes() {
     info "Waiting for Hermes to discover MCP tools..."
     local elapsed=0
     while [ $elapsed -lt 20 ]; do
-        if wsl bash -c 'tail -10 /tmp/mcp.log 2>/dev/null | grep -q "session initialized"'; then
+        if $WSL_BASH 'tail -10 /tmp/mcp.log 2>/dev/null | grep -q "session initialized"'; then
             ok "Hermes connected to MCP"
             sleep 2  # 给 Hermes 额外时间完成工具注册
             return 0
@@ -163,8 +181,8 @@ start_hermes() {
     done
     echo ""
     fail "Hermes did not connect to MCP within 20s. Check:
-  wsl docker logs agenttown-h01 2>&1 | grep -i mcp
-  wsl tail -20 /tmp/mcp.log"
+  $WSL docker logs agenttown-h01 2>&1 | grep -i mcp
+  $WSL tail -20 /tmp/mcp.log"
 }
 
 # ─── 步骤 3: 启动 Mock UE ─────────────────────────────────────
