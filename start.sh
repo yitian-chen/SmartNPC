@@ -137,11 +137,28 @@ start_mcp() {
         warn "--no-build: skipping MCP build, using existing ~/agenttown-mcp"
     else
         info "Building MCP (linux/amd64, CGO disabled)..."
-        (cd "$PROJECT_DIR/agenttown-mcp" && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o /tmp/agenttown-mcp-linux ./cmd/agenttown-mcp) \
+        # Ensure Go is available. When invoked from outside Git Bash (e.g.
+        # PowerShell), the MinGW PATH may not include /d/Go/bin. Try common
+        # locations before failing.
+        if ! command -v go &>/dev/null; then
+            for candidate in /d/Go/bin/go /c/Go/bin/go "$(command -v go 2>/dev/null)"; do
+                if [ -x "$candidate" ]; then
+                    export PATH="$PATH:$(dirname "$candidate")"
+                    break
+                fi
+            done
+        fi
+        if ! command -v go &>/dev/null; then
+            fail "Go compiler not found on PATH. Install Go or set SKIP_MCP_BUILD=1 to skip the build."
+        fi
+        go version
+        mkdir -p "$PROJECT_DIR/agenttown-mcp/tmp"
+        (cd "$PROJECT_DIR/agenttown-mcp" && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o tmp/agenttown-mcp-linux ./cmd/agenttown-mcp) \
             || fail "Go cross-compile failed"
         info "Deploying to WSL ~/agenttown-mcp..."
-        MSYS_NO_PATHCONV=1 $WSL cp /mnt/d/SmartNPC_v3/tmp/agenttown-mcp-linux /home/yitianchen/agenttown-mcp \
-            || $WSL cp /mnt/c/Users/yitianchen/AppData/Local/Temp/agenttown-mcp-linux /home/yitianchen/agenttown-mcp \
+        # Remove stale binary first (avoids "text file busy" if an old MCP is still shutting down).
+        MSYS_NO_PATHCONV=1 $WSL rm -f /home/yitianchen/agenttown-mcp
+        MSYS_NO_PATHCONV=1 $WSL cp /mnt/d/SmartNPC_v3/agenttown-mcp/tmp/agenttown-mcp-linux /home/yitianchen/agenttown-mcp \
             || fail "Failed to copy binary to WSL ~/agenttown-mcp"
         MSYS_NO_PATHCONV=1 $WSL chmod +x /home/yitianchen/agenttown-mcp
         ok "MCP binary deployed"
