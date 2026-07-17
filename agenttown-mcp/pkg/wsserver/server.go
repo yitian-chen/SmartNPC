@@ -1,7 +1,4 @@
 // Package wsserver hosts the WebSocket server that Mock UE connects to.
-//
-// Mock UE is the client; agenttown-mcp is the server. This is the inverse of
-// the SmartNPC layout (where mcp was the WS client to a SMAPI mod server).
 package wsserver
 
 import (
@@ -12,10 +9,13 @@ import (
 	"log/slog"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
 	"github.com/google/uuid"
+
+	"github.com/AgentTown/agenttown-mcp/pkg/protocol"
 )
 
 // Default timeouts.
@@ -24,9 +24,10 @@ const (
 	defaultWriteWait   = 5 * time.Second
 )
 
-// EventHandler receives Mock-UE-pushed events. Called from the read loop, so
-// long work should be offloaded to a goroutine.
-type EventHandler func(ctx context.Context, name string, data json.RawMessage)
+// MessageHandler receives inbound envelopes from Mock UE (UE → Agent).
+// Called from the read loop, so long work should be offloaded to a goroutine.
+// It receives the message type, agent_id, and raw payload.
+type MessageHandler func(ctx context.Context, msgType, agentID string, payload json.RawMessage)
 
 // Options configures New.
 type Options struct {
@@ -35,22 +36,32 @@ type Options struct {
 	CallTimeout time.Duration
 }
 
-// Server is a WebSocket server accepting connections from Mock UE.
+// Server is a WebSocket server accepting a connection from Mock UE.
 //
-// Phase 1: tracks a single connection (one NPC). Multi-NPC is a Phase 2
-// extension — the conn/pending map already keys by connection, so the
-// shape extends naturally.
+// Phase 1: single connection (one NPC). agent_id routing is threaded through
+// so multi-NPC is a natural extension. seq is a per-server monotonic counter
+// for outbound messages.
 type Server struct {
 	addr        string
 	log         *slog.Logger
 	callTimeout time.Duration
 
+	seq int64 // outbound sequence counter (atomic)
+
 	mu      sync.RWMutex
 	conn    *websocket.Conn
-	pending map[string]chan *Response
+	pending map[string]chan *pendingResult // keyed by action_id (msg correlation)
 
-	eventMu sync.RWMutex
-	handler EventHandler
+	handlerMu sync.RWMutex
+	handler   MessageHandler
+}
+
+// pendingResult carries a correlated response back to a waiting Call.
+// Phase 1 uses action_started as the correlation signal; on ACK we deliver
+// the ActionStartedPayload.
+type pendingResult struct {
+	started *protocol.ActionStartedPayload
+	errMsg  string
 }
 
 // New creates an unstarted server. Call Serve to begin accepting connections.
@@ -65,16 +76,20 @@ func New(opts Options) *Server {
 		addr:        opts.Addr,
 		log:         opts.Logger,
 		callTimeout: opts.CallTimeout,
-		pending:     make(map[string]chan *Response),
+		pending:     make(map[string]chan *pendingResult),
 	}
 }
 
-// SetEventHandler registers the callback invoked when an Event frame arrives
-// from Mock UE. Safe to call before or during Serve.
-func (s *Server) SetEventHandler(h EventHandler) {
-	s.eventMu.Lock()
+// SetMessageHandler registers the callback for inbound envelopes.
+func (s *Server) SetMessageHandler(h MessageHandler) {
+	s.handlerMu.Lock()
 	s.handler = h
-	s.eventMu.Unlock()
+	s.handlerMu.Unlock()
+}
+
+// nextSeq returns the next outbound sequence number.
+func (s *Server) nextSeq() int64 {
+	return atomic.AddInt64(&s.seq, 1)
 }
 
 // Serve starts the HTTP server with the WebSocket endpoint at /ws and a
@@ -83,8 +98,7 @@ func (s *Server) Serve(ctx context.Context) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		connected := s.IsConnected()
-		_, _ = w.Write([]byte(fmt.Sprintf(`{"ok":true,"ws_connected":%v}`, connected)))
+		_, _ = w.Write([]byte(fmt.Sprintf(`{"ok":true,"ws_connected":%v}`, s.IsConnected())))
 	})
 	mux.HandleFunc("/ws", s.handleWS)
 
@@ -111,22 +125,15 @@ func (s *Server) Serve(ctx context.Context) error {
 // handleWS upgrades the HTTP connection to WebSocket and runs the read loop.
 func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	c, err := websocket.Accept(w, r, &websocket.AcceptOptions{
-		// Allow cross-origin (Mock UE on host, MCP on host — same origin in
-		// Phase 1, but be permissive for dev).
 		InsecureSkipVerify: true,
 	})
 	if err != nil {
 		s.log.Warn("ws accept failed", "err", err)
 		return
 	}
-	// Disable the server-side read limit so large perception snapshots
-	// don't trip it. Mock UE payloads are < 10KB; default is 32KB which
-	// is fine, but we bump it defensively.
 	c.SetReadLimit(1 << 20) // 1 MiB
 
 	s.mu.Lock()
-	// Phase 1: single connection. If a new one arrives while the old is
-	// still open, close the old one.
 	if s.conn != nil {
 		s.log.Info("replacing existing ws connection")
 		_ = s.conn.Close(websocket.StatusNormalClosure, "replaced")
@@ -136,8 +143,6 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 
 	s.log.Info("mock ue connected", "remote", r.RemoteAddr)
 
-	// Detach the request context — the read loop should outlive the HTTP
-	// request that upgraded it.
 	readCtx := context.Background()
 	defer func() {
 		s.mu.Lock()
@@ -152,7 +157,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	s.readLoop(readCtx, c)
 }
 
-// readLoop reads frames and dispatches Response → pending callers, Event → handler.
+// readLoop reads envelopes and dispatches by type.
 func (s *Server) readLoop(ctx context.Context, c *websocket.Conn) {
 	for {
 		_, data, err := c.Read(ctx)
@@ -164,135 +169,67 @@ func (s *Server) readLoop(ctx context.Context, c *websocket.Conn) {
 			return
 		}
 
-		// Detect frame type via the "type" field without fully unmarshaling.
-		var probe struct {
-			Type string `json:"type"`
-		}
-		if json.Unmarshal(data, &probe) != nil {
-			s.log.Warn("ws frame parse failed", "raw", string(data))
+		var env protocol.Envelope
+		if err := json.Unmarshal(data, &env); err != nil {
+			s.log.Warn("envelope parse failed", "raw", string(data), "err", err)
 			continue
 		}
 
-		switch probe.Type {
-		case TypeResponse:
-			var resp Response
-			if err := json.Unmarshal(data, &resp); err != nil {
-				s.log.Warn("ws response parse failed", "err", err)
+		switch env.Type {
+		case protocol.TypeActionStarted:
+			// ACK for an action_command — deliver to the waiting Call.
+			var ack protocol.ActionStartedPayload
+			if err := json.Unmarshal(env.Payload, &ack); err != nil {
+				s.log.Warn("action_started parse failed", "err", err)
 				continue
 			}
-			s.deliverResponse(&resp)
-		case TypeEvent:
-			var evt Event
-			if err := json.Unmarshal(data, &evt); err != nil {
-				s.log.Warn("ws event parse failed", "err", err)
-				continue
-			}
-			s.dispatchEvent(ctx, &evt)
-		case TypeRequest:
-			s.log.Warn("ignoring inbound Request frame (MCP is the request originator)", "raw", string(data))
+			s.deliverACK(&ack)
 		default:
-			s.log.Warn("unknown ws frame type", "type", probe.Type)
+			// All other inbound messages go to the registered handler:
+			// perception_update, action_completed, state_report,
+			// agent_registered, agent_unregistered, heartbeat, error.
+			s.dispatch(ctx, env.Type, env.AgentID, env.Payload)
 		}
 	}
 }
 
-// deliverResponse hands a Response to the goroutine waiting on its ID.
-func (s *Server) deliverResponse(resp *Response) {
+// deliverACK hands an action_started to the goroutine waiting on its action_id.
+func (s *Server) deliverACK(ack *protocol.ActionStartedPayload) {
 	s.mu.RLock()
-	ch, ok := s.pending[resp.ID]
+	ch, ok := s.pending[ack.ActionID]
 	s.mu.RUnlock()
 	if !ok {
-		s.log.Warn("ws response with no pending caller", "id", resp.ID)
+		s.log.Warn("action_started with no pending caller", "action_id", ack.ActionID)
 		return
 	}
+	result := &pendingResult{started: ack}
+	if !ack.Accepted {
+		result.errMsg = ack.RejectReason
+		if result.errMsg == "" {
+			result.errMsg = "action rejected"
+		}
+	}
 	select {
-	case ch <- resp:
+	case ch <- result:
 	default:
-		s.log.Warn("ws response channel full, dropping", "id", resp.ID)
+		s.log.Warn("ack channel full, dropping", "action_id", ack.ActionID)
 	}
 }
 
-// dispatchEvent invokes the registered handler for an Event.
-func (s *Server) dispatchEvent(ctx context.Context, evt *Event) {
-	s.eventMu.RLock()
+// dispatch invokes the registered handler for an inbound envelope.
+func (s *Server) dispatch(ctx context.Context, msgType, agentID string, payload json.RawMessage) {
+	s.handlerMu.RLock()
 	h := s.handler
-	s.eventMu.RUnlock()
+	s.handlerMu.RUnlock()
 	if h == nil {
-		s.log.Debug("ws event dropped (no handler)", "name", evt.Name)
+		s.log.Debug("envelope dropped (no handler)", "type", msgType)
 		return
 	}
-	h(ctx, evt.Name, evt.Data)
+	h(ctx, msgType, agentID, payload)
 }
 
-// Call sends a Request to Mock UE and awaits the matching Response.
-//
-// Returns an error if no Mock UE is connected, the call times out, or Mock UE
-// returns an error response. Thread-safe; multiple goroutines may Call
-// concurrently.
-func (s *Server) Call(ctx context.Context, action string, params any) (json.RawMessage, error) {
-	s.mu.RLock()
-	conn := s.conn
-	s.mu.RUnlock()
-	if conn == nil {
-		return nil, errors.New("no mock ue connected")
-	}
-
-	id := uuid.NewString()
-	ch := make(chan *Response, 1)
-
-	s.mu.Lock()
-	s.pending[id] = ch
-	s.mu.Unlock()
-	defer func() {
-		s.mu.Lock()
-		delete(s.pending, id)
-		s.mu.Unlock()
-	}()
-
-	req := Request{
-		Type:   TypeRequest,
-		ID:     id,
-		Action: action,
-		Params: params,
-	}
-	payload, err := json.Marshal(req)
-	if err != nil {
-		return nil, fmt.Errorf("marshal request: %w", err)
-	}
-
-	writeCtx, cancel := context.WithTimeout(ctx, defaultWriteWait)
-	defer cancel()
-	if err := conn.Write(writeCtx, websocket.MessageText, payload); err != nil {
-		return nil, fmt.Errorf("ws write: %w", err)
-	}
-
-	timeout := s.callTimeout
-	if deadline, ok := ctx.Deadline(); ok {
-		if d := time.Until(deadline); d < timeout {
-			timeout = d
-		}
-	}
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
-
-	select {
-	case resp := <-ch:
-		if !resp.OK {
-			if resp.Error != nil {
-				return nil, fmt.Errorf("%s: %s", resp.Error.Code, resp.Error.Message)
-			}
-			return nil, errors.New("mock ue returned ok=false with no error detail")
-		}
-		return resp.Data, nil
-	case <-timer.C:
-		return nil, fmt.Errorf("ws call %s timeout after %s", action, timeout)
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
-}
-
-// Broadcast sends an Event frame to the connected Mock UE. Fire-and-forget.
-func (s *Server) Broadcast(name string, data any) error {
+// SendEnvelope sends an arbitrary envelope to the connected Mock UE.
+func (s *Server) SendEnvelope(agentID, msgType string, payload any) error {
 	s.mu.RLock()
 	conn := s.conn
 	s.mu.RUnlock()
@@ -300,18 +237,80 @@ func (s *Server) Broadcast(name string, data any) error {
 		return errors.New("no mock ue connected")
 	}
 
-	payload, err := json.Marshal(Event{
-		Type:      TypeEvent,
-		Name:      name,
-		Data:      mustMarshal(data),
-		Timestamp: time.Now().UnixMilli(),
-	})
+	raw, err := json.Marshal(payload)
 	if err != nil {
-		return err
+		return fmt.Errorf("marshal payload: %w", err)
+	}
+	env := protocol.Envelope{
+		Version:   protocol.Version,
+		MsgID:     uuid.NewString(),
+		Seq:       s.nextSeq(),
+		Timestamp: time.Now().UnixMilli(),
+		Type:      msgType,
+		AgentID:   agentID,
+		Payload:   raw,
+	}
+	frame, err := json.Marshal(env)
+	if err != nil {
+		return fmt.Errorf("marshal envelope: %w", err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), defaultWriteWait)
 	defer cancel()
-	return conn.Write(ctx, websocket.MessageText, payload)
+	return conn.Write(ctx, websocket.MessageText, frame)
+}
+
+// Call sends an action_command to Mock UE and waits for the action_started
+// ACK. Returns the ACK payload (with estimated_duration_sec). This is the
+// Phase 1/5 bridge: tools call this and return after ACK; action_completed
+// arrives asynchronously and is handled by the message handler.
+//
+// The `cmd` and `params` form the action_command payload. action_id is
+// generated here and returned via the ACK.
+func (s *Server) Call(ctx context.Context, agentID, cmd string, params map[string]any) (*protocol.ActionStartedPayload, error) {
+	s.mu.RLock()
+	conn := s.conn
+	s.mu.RUnlock()
+	if conn == nil {
+		return nil, errors.New("no mock ue connected")
+	}
+
+	actionID := "act_" + uuid.NewString()[:12]
+	ch := make(chan *pendingResult, 1)
+
+	s.mu.Lock()
+	s.pending[actionID] = ch
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		delete(s.pending, actionID)
+		s.mu.Unlock()
+	}()
+
+	cmdPayload := protocol.ActionCommandPayload{
+		ActionID: actionID,
+		Cmd:      cmd,
+		Params:   params,
+	}
+	if err := s.SendEnvelope(agentID, protocol.TypeActionCommand, cmdPayload); err != nil {
+		return nil, fmt.Errorf("send action_command: %w", err)
+	}
+
+	// ACK must arrive within 2s (约定8).
+	ackTimeout := 2 * time.Second
+	timer := time.NewTimer(ackTimeout)
+	defer timer.Stop()
+
+	select {
+	case res := <-ch:
+		if res.errMsg != "" {
+			return res.started, fmt.Errorf("action rejected: %s", res.errMsg)
+		}
+		return res.started, nil
+	case <-timer.C:
+		return nil, fmt.Errorf("action_started ACK timeout after %s (action_id=%s)", ackTimeout, actionID)
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 }
 
 // IsConnected reports whether a Mock UE is currently connected.
@@ -321,15 +320,15 @@ func (s *Server) IsConnected() bool {
 	return s.conn != nil
 }
 
-// mustMarshal is a helper for Broadcast; panics on marshal failure (only
-// happens with non-serializable input, which is a programming bug).
-func mustMarshal(v any) json.RawMessage {
-	if v == nil {
-		return nil
-	}
-	b, err := json.Marshal(v)
-	if err != nil {
-		return nil
-	}
-	return b
+// SendAction implements the tools.Executor interface: sends an
+// action_command and waits for the ACK. It's an alias for Call with the
+// signature the tools layer expects.
+func (s *Server) SendAction(ctx context.Context, agentID, cmd string, params map[string]any) (*protocol.ActionStartedPayload, error) {
+	return s.Call(ctx, agentID, cmd, params)
+}
+
+// RequestScan asks Mock UE to emit an immediate perception_update for the
+// given agent. Backs the scan_area tool. Fire-and-forget (no ACK expected).
+func (s *Server) RequestScan(ctx context.Context, agentID string) error {
+	return s.SendEnvelope(agentID, protocol.TypeScanArea, map[string]any{})
 }

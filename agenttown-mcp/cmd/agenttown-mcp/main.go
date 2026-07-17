@@ -4,20 +4,16 @@
 // Three roles in one process:
 //
 //  1. MCP Server (Streamable HTTP at :8760/mcp) — Hermes connects here as
-//     a standard MCP client, discovers the 10 game tools, and calls them
-//     during a turn.
-//  2. WebSocket Server (:9000/ws) — Mock UE connects here, pushes JSON
-//     perception events. MCP converts them to natural language and POSTs
-//     to Hermes /v1/responses.
-//  3. Hermes HTTP Client — owns the per-game-day session via
-//     previous_response_id.
+//     a standard MCP client, discovers the game tools, and calls them.
+//  2. WebSocket Server (:9090/ws) — Mock UE (simulating UE) connects here,
+//     pushes protocol messages (perception_update / state_report / ...).
+//  3. Hermes HTTP Client — owns the per-game-day session.
 //
-// Tool flow: Hermes calls a tool → MCP logs to console → MCP forwards the
-// call to Mock UE over WS → Mock UE simulates and returns ActionResult →
-// MCP returns the result to Hermes.
+// Messages follow the 7-field envelope in pkg/protocol. The action
+// lifecycle is command → action_started(ACK) → action_completed; tools
+// return after ACK and completions are folded into the next perception.
 //
-// IMPORTANT: in stdio mode, never write logs to stdout — it would corrupt
-// the MCP stream. All logging goes through stderr.
+// IMPORTANT: in stdio mode, never write logs to stdout.
 package main
 
 import (
@@ -29,6 +25,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -38,11 +35,47 @@ import (
 	"github.com/AgentTown/agenttown-mcp/adapters/agenttown/tools"
 	"github.com/AgentTown/agenttown-mcp/internal/log"
 	"github.com/AgentTown/agenttown-mcp/pkg/hermes"
+	"github.com/AgentTown/agenttown-mcp/pkg/protocol"
 	"github.com/AgentTown/agenttown-mcp/pkg/transport"
 	"github.com/AgentTown/agenttown-mcp/pkg/wsserver"
 )
 
 var version = "0.1.0-dev"
+
+// agentContext holds per-agent state the MCP layer accumulates between
+// perception turns: the latest physical state (from state_report) and any
+// pending action completions to fold into the next perception narrative.
+type agentContext struct {
+	mu                sync.Mutex
+	latestPhysical    *protocol.PhysicalState
+	pendingCompletion []string // human-readable completion lines
+}
+
+func (a *agentContext) addCompletion(line string) {
+	a.mu.Lock()
+	a.pendingCompletion = append(a.pendingCompletion, line)
+	a.mu.Unlock()
+}
+
+func (a *agentContext) drainCompletions() []string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	c := a.pendingCompletion
+	a.pendingCompletion = nil
+	return c
+}
+
+func (a *agentContext) setPhysical(p protocol.PhysicalState) {
+	a.mu.Lock()
+	a.latestPhysical = &p
+	a.mu.Unlock()
+}
+
+func (a *agentContext) physical() *protocol.PhysicalState {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.latestPhysical
+}
 
 func main() {
 	log.EnableUTF8Console()
@@ -51,7 +84,7 @@ func main() {
 		showVersion  = flag.Bool("version", false, "print version and exit")
 		logLevel     = flag.String("log-level", "info", "log level: debug|info|warn|error")
 		httpAddr     = flag.String("http", ":8760", "MCP Streamable HTTP addr (empty = stdio)")
-		wsAddr       = flag.String("ws", ":9000", "WebSocket server addr for Mock UE")
+		wsAddr       = flag.String("ws", ":9090", "WebSocket server addr for Mock UE")
 		hermesURL    = flag.String("hermes-url", "http://localhost:8642", "Hermes Gateway base URL")
 		hermesAPIKey = flag.String("hermes-api-key", "agenttown-test-key", "Hermes Gateway bearer token")
 		hermesModel  = flag.String("hermes-model", "deepseek-v4-flash", "Hermes model name")
@@ -100,18 +133,74 @@ func main() {
 		Logger: logger,
 	})
 
-	// Register all 10 tools. They call ws.Call(...) to reach Mock UE.
+	// Per-agent context (Phase 1: single agent, but keyed for multi-NPC).
+	var agentsMu sync.Mutex
+	agents := make(map[string]*agentContext)
+	getAgent := func(id string) *agentContext {
+		agentsMu.Lock()
+		defer agentsMu.Unlock()
+		a, ok := agents[id]
+		if !ok {
+			a = &agentContext{}
+			agents[id] = a
+		}
+		return a
+	}
+
+	// Register all tools. They call ws.SendAction/RequestScan.
 	tools.RegisterAll(server, ws, logger)
 
-	// ─── Wire perception flow ──────────────────────────────────
-	// Mock UE pushes perception_update events → format NL → POST Hermes.
-	// day_started → reset Hermes session for a fresh conversation.
-	ws.SetEventHandler(func(_ context.Context, name string, data json.RawMessage) {
-		switch name {
-		case wsserver.EventPerceptionUpdate:
-			text := perception.Format(data)
+	// ─── Wire inbound message handler ──────────────────────────
+	ws.SetMessageHandler(func(_ context.Context, msgType, agentID string, payload json.RawMessage) {
+		switch msgType {
+		case protocol.TypeAgentRegistered:
+			// New connection = new day. Reset Hermes session.
+			hc.ResetSession()
+			getAgent(agentID) // ensure context exists
+			logger.Info("agent_registered", "agent_id", agentID, "payload", string(payload))
+
+		case protocol.TypeAgentUnregistered:
+			agentsMu.Lock()
+			delete(agents, agentID)
+			agentsMu.Unlock()
+			logger.Info("agent_unregistered", "agent_id", agentID)
+
+		case protocol.TypeHeartbeat:
+			logger.Debug("heartbeat", "agent_id", agentID)
+
+		case protocol.TypeStateReport:
+			var sr protocol.StateReportPayload
+			if err := json.Unmarshal(payload, &sr); err != nil {
+				logger.Warn("state_report parse failed", "err", err)
+				return
+			}
+			getAgent(agentID).setPhysical(sr.PhysicalState)
+			logger.Info("state_report", "agent_id", agentID,
+				"energy", sr.PhysicalState.Energy, "fatigue", sr.PhysicalState.Fatigue,
+				"joint_wear", sr.PhysicalState.JointWear, "health", sr.PhysicalState.Health)
+
+		case protocol.TypeActionCompleted:
+			var ac protocol.ActionCompletedPayload
+			if err := json.Unmarshal(payload, &ac); err != nil {
+				logger.Warn("action_completed parse failed", "err", err)
+				return
+			}
+			line := fmt.Sprintf("动作 %s 已完成（%s）", ac.ActionID, ac.Result)
+			getAgent(agentID).addCompletion(line)
+			logger.Info("action_completed", "agent_id", agentID,
+				"action_id", ac.ActionID, "result", ac.Result, "progress", ac.Progress)
+
+		case protocol.TypeError:
+			logger.Warn("error from mock ue", "agent_id", agentID, "payload", string(payload))
+
+		case protocol.TypePerceptionUpdate:
+			ac := getAgent(agentID)
+			// Fold pending completions + latest physical state into the
+			// narrative context.
+			extras := ac.drainCompletions()
+			text := perception.Format(payload, ac.physical(), extras)
 			if text == "" {
-				logger.Warn("perception format returned empty", "raw", string(data))
+				logger.Warn("perception format returned empty", "raw", string(payload))
 				return
 			}
 			// Async POST — don't block the WS read loop.
@@ -126,23 +215,17 @@ func main() {
 					"tokens", resp.Usage.TotalTokens,
 					"narrative_len", len(narrative),
 				)
-				// Push the narrative to Mock UE so the operator can see
-				// what the NPC is "saying" in real time.
 				if narrative != "" {
-					if err := ws.Broadcast("narrative", map[string]any{
+					if err := ws.SendEnvelope(agentID, "narrative", map[string]any{
 						"text": narrative,
 					}); err != nil {
-						logger.Debug("narrative push to mock ue failed", "err", err)
+						logger.Debug("narrative push failed", "err", err)
 					}
 				}
 			}()
-		case wsserver.EventDayStarted:
-			hc.ResetSession()
-			logger.Info("day started event received")
-		case wsserver.EventDayEnded:
-			logger.Info("day ended event received")
+
 		default:
-			logger.Debug("unknown event", "name", name)
+			logger.Debug("unhandled message type", "type", msgType, "agent_id", agentID)
 		}
 	})
 
@@ -161,8 +244,7 @@ func main() {
 	}
 }
 
-// runHTTP serves the MCP server over Streamable HTTP and adds a /status
-// endpoint for observability.
+// runHTTP serves the MCP server over Streamable HTTP + a /status endpoint.
 func runHTTP(ctx context.Context, logger *slog.Logger, server *mcp.Server, addr string, allowAnyOrigin bool, apiKey string, ws *wsserver.Server, hc *hermes.Client) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/status", func(w http.ResponseWriter, _ *http.Request) {
@@ -196,3 +278,6 @@ func runStdio(ctx context.Context, logger *slog.Logger, server *mcp.Server) {
 		os.Exit(1)
 	}
 }
+
+// ensure ws satisfies the tools.Executor interface at compile time.
+var _ tools.Executor = (*wsserver.Server)(nil)

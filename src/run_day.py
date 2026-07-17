@@ -8,7 +8,7 @@ Gateway (HTTP) and routes Hermes tool calls back to Mock UE.
 
 Prerequisites:
   1. Hermes Gateway running: docker compose -f docker/docker-compose.yml up -d
-  2. agenttown-mcp running:  agenttown-mcp --http :8760 --ws :9000
+  2. agenttown-mcp running:  agenttown-mcp --http :8760 --ws :9090
 
 Usage:
     python src/run_day.py
@@ -44,7 +44,7 @@ async def _run(args):
 
 def main():
     parser = argparse.ArgumentParser(description="AgentTown Mock UE — Run a game day")
-    parser.add_argument("--mcp-ws", default="ws://localhost:9000/ws",
+    parser.add_argument("--mcp-ws", default="ws://localhost:9090/ws",
                         help="agenttown-mcp WebSocket URL")
     parser.add_argument("--speed", type=float, default=60.0,
                         help="Time acceleration (1 real-sec = N game-sec)")
@@ -69,7 +69,7 @@ def main():
         print(f"[OK] MCP reachable: {health_url}")
     except Exception as e:
         print(f"[ERROR] MCP not reachable at {health_url}: {e}")
-        print("Start MCP first:  agenttown-mcp --http :8760 --ws :9000")
+        print("Start MCP first:  agenttown-mcp --http :8760 --ws :9090")
         sys.exit(1)
 
     asyncio.run(_run(args))

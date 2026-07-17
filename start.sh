@@ -88,7 +88,7 @@ done
 
 # ─── 健康检查函数 ──────────────────────────────────────────────
 check_mcp_http() { $WSL curl -sf http://localhost:8760/healthz >/dev/null 2>&1; }
-check_mcp_ws()   { $WSL curl -sf http://localhost:9000/healthz >/dev/null 2>&1; }
+check_mcp_ws()   { $WSL curl -sf http://localhost:9090/healthz >/dev/null 2>&1; }
 check_hermes()   { curl -sf http://localhost:8642/health >/dev/null 2>&1; }
 
 wait_for() {
@@ -148,7 +148,7 @@ start_mcp() {
 #!/bin/bash
 pkill -x agenttown-mcp 2>/dev/null
 sleep 1
-setsid ~/agenttown-mcp --http :8760 --ws :9000 --hermes-url http://localhost:8642 > /mnt/d/SmartNPC_v3/logs/mcp.log 2>&1 &
+setsid ~/agenttown-mcp --http :8760 --ws :9090 --hermes-url http://localhost:8642 > /mnt/d/SmartNPC_v3/logs/mcp.log 2>&1 &
 disown
 sleep 2
 LAUNCHER
@@ -158,7 +158,7 @@ chmod +x ~/start_mcp.sh'
     $WSL_BASH 'bash ~/start_mcp.sh'
 
     wait_for "MCP HTTP (:8760)" check_mcp_http 20
-    wait_for "MCP WS (:9000)" check_mcp_ws 10
+    wait_for "MCP WS (:9090)" check_mcp_ws 10
 }
 
 # ─── 步骤 2: 启动 Hermes ──────────────────────────────────────

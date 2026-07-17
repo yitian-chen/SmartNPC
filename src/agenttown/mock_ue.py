@@ -1,22 +1,19 @@
 """
-Mock UE Bridge (async) — M-5 of Phase 1 work checklist.
+Mock UE Bridge (async) — simulates the UE5 process per the AgentTown
+communication protocol (docs/AgentTown_CommProtocol_Values.md).
 
-Simulates the UE game world for a single NPC (H-01 老陈).
-Connects to agenttown-mcp via WebSocket, pushes JSON perception snapshots,
-and handles inbound tool-call requests concurrently.
+Mock UE is the WebSocket CLIENT; agenttown-mcp is the server. All messages
+use the 7-field envelope. Mock UE owns physical + spatial state (UE side)
+and reports it via state_report (authoritative) + perception_update delta.
 
-Architecture (post-MCP):
-    Mock UE (Python, async)  ──ws──→  agenttown-mcp (Go)  ──http──→  Hermes Gateway
-       • perception_update event          • NL conversion + POST /v1/responses
-       • tool request/response            • MCP tool registration + console log
-
-Tasks covered:
-  5.1  Mock message receiver    — handle inbound tool Requests from MCP
-  5.2  Mock execution timing    — simulate action duration by type
-  5.3  Mock perception push     — timed perception_update events to MCP
-  5.4  Zone simulation          — auto-detect zone from coordinates
-  5.5  Time acceleration        — configurable game-time speed
-  5.6  Scenario injection       — load preset events from YAML
+Message flow:
+  - On connect: agent_registered
+  - Every 5s: heartbeat (agent_id="system")
+  - Periodically: perception_update (spatial + environment)
+  - On physical change >threshold / every 15s: state_report
+  - Inbound action_command → action_started (ACK ≤2s) → action_completed
+  - Inbound stop_action → validate action_id → interrupted / STOP_ID_MISMATCH
+  - Inbound scan_area → immediate perception_update
 """
 
 import asyncio
@@ -34,76 +31,134 @@ import yaml
 
 logger = logging.getLogger("agenttown.mock_ue")
 
-# ─── Constants ──────────────────────────────────────────────────
+# ─── Protocol constants (mirror pkg/protocol) ──────────────────
+PROTOCOL_VERSION = "1.0"
+SYSTEM_AGENT_ID = "system"
 
-# Action durations in game-minutes
-ACTION_DURATIONS: Dict[str, float] = {
-    "move_to": 2,           # 2 game-min per zone transition
-    "turn_to": 0.1,
-    "work_assemble": 0,     # uses explicit duration_min param
-    "interact_with": 5,     # 5 game-min default
-    "charge_at": 0,
-    "self_check": 1,
-    "speak": 0.5,
-    "emote": 0.1,
-    "wait": 0,
-    "update_plan": 0,
-}
+TYPE_PERCEPTION_UPDATE = "perception_update"
+TYPE_ACTION_COMMAND = "action_command"
+TYPE_ACTION_STARTED = "action_started"
+TYPE_ACTION_COMPLETED = "action_completed"
+TYPE_STOP_ACTION = "stop_action"
+TYPE_STATE_REPORT = "state_report"
+TYPE_AGENT_REGISTERED = "agent_registered"
+TYPE_AGENT_UNREGISTERED = "agent_unregistered"
+TYPE_HEARTBEAT = "heartbeat"
+TYPE_ERROR = "error"
+TYPE_SCAN_AREA = "scan_area"
+TYPE_NARRATIVE = "narrative"  # MCP → Mock UE, display only
 
-# Default zone boundaries (x_min, x_max, y_min, y_max)
+# cmd constants
+CMD_MOVE_TO = "MoveTo"
+CMD_TURN_TO = "TurnTo"
+CMD_PLAY_ANIMATION = "PlayAnimation"
+CMD_SPEAK = "Speak"
+CMD_EMOTE = "Emote"
+CMD_WAIT = "Wait"
+CMD_INTERACT = "InteractSmartObject"
+CMD_EXECUTE_COMPOSITE = "ExecuteComposite"
+CMD_STOP = "Stop"
+
+# result constants
+RESULT_SUCCESS = "success"
+RESULT_FAILED = "failed"
+RESULT_INTERRUPTED = "interrupted"
+
+# error codes
+ERR_STOP_ID_MISMATCH = "STOP_ID_MISMATCH"
+ERR_ACTION_FAILED = "ACTION_FAILED"
+
+# ─── World geometry (UE5 centimeters; small sim coords ×100) ────
+SCALE = 100.0  # convert legacy small coords to cm
+
+# Zone bounding boxes in cm (x_min, x_max, y_min, y_max)
 ZONE_BOUNDS: Dict[str, Tuple[float, float, float, float]] = {
-    "main_workshop": (150, 250, 50, 150),
-    "central_plaza": (80, 150, 80, 150),
-    "charging_station": (200, 250, 50, 100),
+    "main_workshop": (15000, 25000, 5000, 15000),
+    "central_plaza": (8000, 15000, 8000, 15000),
+    "charging_station": (20000, 25000, 5000, 10000),
 }
 
-# Zone entry points
+# Zone entry points in cm [X, Y, Z]
 ZONE_ENTRIES: Dict[str, List[float]] = {
-    "main_workshop": [160, 100, 0],
-    "central_plaza": [100, 100, 0],
-    "charging_station": [215, 85, 0],
+    "main_workshop": [16000, 10000, 0],
+    "central_plaza": [10000, 10000, 0],
+    "charging_station": [21500, 8500, 0],
 }
 
-# Location interaction points
+# Location interaction points in cm [X, Y, Z]
 LOCATION_POINTS: Dict[str, List[float]] = {
-    "workbench_01": [195, 105, 0],
-    "charging_station_01": [215, 85, 0],
+    "workbench_01": [19500, 10500, 0],
+    "charging_station_01": [21500, 8500, 0],
 }
 
-# WS frame type constants (mirror of Go wsserver/protocol.go)
-TYPE_REQUEST = "request"
-TYPE_RESPONSE = "response"
-TYPE_EVENT = "event"
+# Object metadata for nearby_objects
+OBJECT_META: Dict[str, Dict[str, Any]] = {
+    "workbench_01": {"name": "工作台一号", "available_actions": ["assemble", "inspect"]},
+    "charging_station_01": {"name": "充电桩一号", "available_actions": ["charge", "inspect"]},
+}
 
-EVENT_PERCEPTION_UPDATE = "perception_update"
-EVENT_DAY_STARTED = "day_started"
-EVENT_DAY_ENDED = "day_ended"
+# Nearby objects per zone
+ZONE_OBJECTS: Dict[str, List[str]] = {
+    "main_workshop": ["workbench_01", "charging_station_01"],
+    "central_plaza": [],
+    "charging_station": ["charging_station_01"],
+}
+
+# Composite action nominal durations (seconds) when not given explicitly
+COMPOSITE_DEFAULT_SEC = 1800.0  # 30 min
+
+# Physical-state delta thresholds (约定5)
+DELTA_THRESHOLD = {"energy": 5.0, "fatigue": 5.0, "health": 5.0, "joint_wear": 1.0}
+
+# state_report fallback interval (seconds, real)
+STATE_REPORT_INTERVAL_SEC = 15.0
+
+# heartbeat interval (seconds, real)
+HEARTBEAT_INTERVAL_SEC = 5.0
+
+
+@dataclass
+class PhysicalState:
+    """UE-owned physical state (四项)."""
+    energy: float = 100.0
+    fatigue: float = 0.0
+    joint_wear: float = 0.0
+    health: float = 100.0
+
+    def as_dict(self) -> Dict[str, float]:
+        return {
+            "energy": round(self.energy, 1),
+            "fatigue": round(self.fatigue, 1),
+            "joint_wear": round(self.joint_wear, 1),
+            "health": round(self.health, 1),
+        }
 
 
 @dataclass
 class NPCState:
-    """Tracks a single NPC's world state."""
+    """UE-owned spatial + physical state for one NPC."""
     agent_id: str = "H-01"
     name: str = "老陈"
-    position: List[float] = field(default_factory=lambda: [200, 100, 0])
+    agent_type: str = "humanoid"
+    ue5_ref: str = "BP_HumanoidRobot_H01"
+    position: List[float] = field(default_factory=lambda: [20000.0, 10000.0, 0.0])  # cm
+    rotation: List[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])  # [Pitch,Yaw,Roll]
     current_zone: str = "main_workshop"
-    energy: float = 100.0
-    fatigue: float = 0.0
-    holding: Optional[str] = None
-    current_action: Optional[str] = None
-    # Busy state: when set, the NPC is occupied with a long-running action
-    # (work_assemble, charge_at) until game time reaches busy_until_min.
-    # The perception loop naturally advances time; when it passes
-    # busy_until_min, the action completes. While busy, disruptive actions
-    # (move_to, interact_with, etc.) are rejected.
-    busy_until_min: Optional[int] = None   # absolute game time in minutes
-    busy_action: Optional[str] = None      # e.g. "work_assemble(workbench_01)"
+    current_location: Optional[str] = None
+    physical: PhysicalState = field(default_factory=PhysicalState)
+    current_animation: str = "idle"
+    current_emote: Optional[str] = None
+    # Busy state for long-running actions
+    busy_action_id: Optional[str] = None
+    busy_cmd: Optional[str] = None
+    busy_until_min: Optional[int] = None  # absolute game-minute
+    busy_started_ms: Optional[int] = None
 
 
 @dataclass
 class GameTime:
     """Simulated game time with acceleration."""
-    speed: float = 60.0    # 1 real-sec = 60 game-sec (1 game-min)
+    speed: float = 60.0
     day: int = 1
     hour: int = 6
     minute: int = 0
@@ -116,9 +171,12 @@ class GameTime:
     def display(self) -> str:
         return f"Day{self.day} {self.hour:02d}:{self.minute:02d}"
 
+    @property
+    def time_of_day(self) -> str:
+        return f"{self.hour:02d}:{self.minute:02d}"
+
     def advance(self, game_minutes: float):
-        total = self.total_minutes + game_minutes
-        total = int(total)
+        total = int(self.total_minutes + game_minutes)
         self.hour = (total // 60) % 24
         self.minute = total % 60
         if self.hour == 0 and self.minute == 0 and total > 0:
@@ -126,22 +184,13 @@ class GameTime:
 
 
 class MockUE:
-    """
-    Async Mock UE Bridge — drives a single NPC through a day.
-
-    Connects to agenttown-mcp via WebSocket. Pushes JSON perception
-    snapshots; handles inbound tool-call requests concurrently.
-
-    Usage:
-        mock = MockUE(mcp_ws_url="ws://localhost:9000/ws")
-        await mock.run_day()
-    """
+    """Async Mock UE client speaking the AgentTown WebSocket protocol."""
 
     def __init__(
         self,
-        mcp_ws_url: str = "ws://localhost:9000/ws",
-        time_speed: float = 60.0,       # 1 real-sec = 1 game-min
-        perception_interval: int = 15,   # game-min between perception pushes
+        mcp_ws_url: str = "ws://localhost:9090/ws",
+        time_speed: float = 300.0,
+        perception_interval: int = 30,   # game-minutes between perception pushes
         scenario_file: Optional[str] = None,
         log_dir: str = "logs",
     ):
@@ -149,585 +198,463 @@ class MockUE:
         self.perception_interval = perception_interval
         self.log_dir = log_dir
 
-        # World state
         self.npc = NPCState()
         self.time = GameTime(speed=time_speed)
-        self.action_log: List[Dict] = []
-        self.current_plan: Optional[str] = None
 
-        # Completion message from the last busy-action check (consumed by
-        # _build_snapshot so the LLM sees "work complete" in the perception).
-        self._last_completion: Optional[str] = None
-
-        # WebSocket connection (set in run_day)
         self._ws = None
+        self._seq = 0
+        self._started_ms = int(_time.time() * 1000)
+
+        # Physical values last reported via state_report (for delta calc)
+        self._last_reported = PhysicalState()
 
         # Scenario injection
         self.scenarios: List[Dict] = []
         if scenario_file:
             self._load_scenarios(scenario_file)
 
-        # Setup logging
+        self.action_log: List[Dict] = []
+
         os.makedirs(log_dir, exist_ok=True)
         self._setup_logging()
 
-    # ─── WebSocket I/O ────────────────────────────────────────
+    # ─── Envelope send helpers ────────────────────────────────
 
-    async def _send_frame(self, frame: Dict[str, Any]):
-        """Send a JSON frame over the WebSocket."""
+    def _next_seq(self) -> int:
+        self._seq += 1
+        return self._seq
+
+    async def _send(self, msg_type: str, agent_id: str, payload: Dict[str, Any]):
+        """Wrap payload in the 7-field envelope and send."""
         if self._ws is None:
-            logger.warning("send_frame called with no WS connection")
+            logger.warning("send with no WS connection")
             return
-        payload = json.dumps(frame, ensure_ascii=False)
-        await self._ws.send(payload)
-        logger.debug(f"[WS→] {frame.get('type')} {frame.get('name') or frame.get('action', '')[:30]}")
-
-    async def _send_event(self, name: str, data: Dict[str, Any]):
-        """Push an event frame to MCP."""
-        frame = {
-            "type": TYPE_EVENT,
-            "name": name,
-            "data": data,
+        env = {
+            "version": PROTOCOL_VERSION,
+            "msg_id": str(uuid.uuid4()),
+            "seq": self._next_seq(),
             "timestamp": int(_time.time() * 1000),
+            "type": msg_type,
+            "agent_id": agent_id,
+            "payload": payload,
         }
-        await self._send_frame(frame)
+        await self._ws.send(json.dumps(env, ensure_ascii=False))
+        logger.debug(f"[WS→] {msg_type} seq={env['seq']}")
 
-    async def _send_response(self, request_id: str, ok: bool, data: Any = None, error: Optional[Dict] = None):
-        """Send a response frame correlated to a request ID."""
-        frame: Dict[str, Any] = {
-            "type": TYPE_RESPONSE,
-            "id": request_id,
-            "ok": ok,
-        }
-        if data is not None:
-            frame["data"] = data
-        if error is not None:
-            frame["error"] = error
-        await self._send_frame(frame)
+    # ─── Lifecycle messages ───────────────────────────────────
 
-    # ─── 5.3 Perception Push ──────────────────────────────────
+    async def _send_agent_registered(self):
+        await self._send(TYPE_AGENT_REGISTERED, self.npc.agent_id, {
+            "agent_type": self.npc.agent_type,
+            "ue5_ref": self.npc.ue5_ref,
+            "initial_position": list(self.npc.position),
+            "initial_zone": self.npc.current_zone,
+        })
 
-    async def _push_perception(self, phase: str = "perception"):
-        """Build a perception snapshot and push it as an event to MCP."""
-        snapshot = self._build_snapshot(phase)
-        await self._send_event(EVENT_PERCEPTION_UPDATE, snapshot)
-        logger.info(f"[PERCEPTION] {self.time.display} | zone={self.npc.current_zone} | energy={self.npc.energy:.0f}%")
+    async def _send_agent_unregistered(self, reason: str):
+        await self._send(TYPE_AGENT_UNREGISTERED, self.npc.agent_id, {"reason": reason})
 
-    def _build_snapshot(self, phase: str) -> Dict[str, Any]:
-        """Build a PerceptionSnapshot dict matching MCP's expected schema."""
-        nearby = self._get_nearby_objects()
-        event_line = self._match_scenario()
-        # If a busy action just completed, surface that as the event line
-        # so the LLM sees the completion in the perception.
-        completion = getattr(self, "_last_completion", None)
-        if completion and not event_line:
-            event_line = completion
-        elif completion and event_line:
-            event_line = f"{event_line}\n{completion}"
+    async def _send_heartbeat(self):
+        uptime = (int(_time.time() * 1000) - self._started_ms) // 1000
+        await self._send(TYPE_HEARTBEAT, SYSTEM_AGENT_ID, {"uptime_sec": uptime})
+
+    # ─── perception_update ────────────────────────────────────
+
+    async def _send_perception(self):
+        payload = self._build_perception()
+        await self._send(TYPE_PERCEPTION_UPDATE, self.npc.agent_id, payload)
+        logger.info(f"[PERCEPTION] {self.time.display} | zone={self.npc.current_zone} | energy={self.npc.physical.energy:.0f}%")
+
+    def _build_perception(self) -> Dict[str, Any]:
+        """Build a perception_update payload per §2.3."""
+        # Physical delta: only include values that changed over threshold.
+        delta = {}
+        for key, thr in DELTA_THRESHOLD.items():
+            cur = getattr(self.npc.physical, key)
+            last = getattr(self._last_reported, key)
+            if abs(cur - last) >= thr:
+                delta[key] = round(cur, 1)
 
         return {
-            "agent_id": self.npc.agent_id,
-            "phase": phase,
-            "time": {
-                "day": self.time.day,
-                "hour": self.time.hour,
-                "minute": self.time.minute,
-                "display": self.time.display,
+            "location": {
+                "position": list(self.npc.position),
+                "rotation": list(self.npc.rotation),
+                "current_zone": self.npc.current_zone,
+                "current_location": self.npc.current_location,
             },
-            "position": list(self.npc.position),
-            "zone": self.npc.current_zone,
-            "energy": round(self.npc.energy, 1),
-            "fatigue": round(self.npc.fatigue, 1),
-            "holding": self.npc.holding,
-            "current_action": self.npc.current_action,
-            "nearby_objects": nearby,
-            "event": event_line,
-            "busy": self._busy_status_text(),
+            "physical_state_delta": delta if delta else None,
+            "visible_agents": [],   # Phase 1: single NPC
+            "nearby_objects": self._nearby_objects(),
+            "audible_events": [],   # Phase 1: none
+            "current_animation": self.npc.current_animation,
+            "current_emote": self.npc.current_emote,
+            "environment": {
+                "time_of_day": self.time.time_of_day,
+                "weather": "clear",
+            },
         }
 
-    def _get_nearby_objects(self) -> List[str]:
-        """Determine nearby objects based on zone."""
-        zone = self.npc.current_zone
-        objects = {
-            "main_workshop": ["workbench_01 (工作台)", "charging_station_01 (充电桩)"],
-            "central_plaza": ["充电站"],
-            "charging_station": ["charging_station_01 (充电桩)"],
-        }
-        return objects.get(zone, [])
+    def _nearby_objects(self) -> List[Dict[str, Any]]:
+        objs = []
+        for oid in ZONE_OBJECTS.get(self.npc.current_zone, []):
+            meta = OBJECT_META.get(oid, {})
+            objs.append({
+                "id": oid,
+                "name": meta.get("name", oid),
+                "distance": 8.0,
+                "state": "idle",
+                "available_actions": meta.get("available_actions", []),
+            })
+        return objs
 
-    # ─── 5.1 / 5.2 Tool Request Handler ──────────────────────
+    # ─── state_report (authoritative physical channel) ────────
 
-    async def _handle_request(self, msg: Dict[str, Any]):
-        """
-        Handle an inbound tool Request frame from MCP.
-        Executes the action locally and sends back a Response.
-        """
-        req_id = msg.get("id", "")
-        action = msg.get("action", "")
-        params = msg.get("params", {}) or {}
-
-        logger.info(f"[TOOL←] {action} | params={params}")
-
-        try:
-            result = self.execute_action(action, params)
-            await self._send_response(req_id, ok=True, data=result)
-        except Exception as e:
-            logger.error(f"[TOOL] {action} failed: {e}", exc_info=True)
-            await self._send_response(
-                req_id,
-                ok=False,
-                error={"code": "execution_error", "message": str(e)},
-            )
-
-    def execute_action(self, action: str, params: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Simulate action execution. Returns an ActionResult dict.
-
-        IMPORTANT: Game time is NEVER advanced here. The perception loop
-        is the sole driver of game time (via time.advance(perception_interval)
-        each tick). Actions report their nominal duration for the LLM's
-        information, but the actual time passes naturally via the perception
-        loop.
-
-        Long-running actions (work_assemble, charge_at) set a "busy" state
-        — the NPC stays in place until the perception loop advances time
-        past busy_until_min. Short actions are instant in game time.
-
-        While busy, disruptive actions (move_to, interact_with, etc.) are
-        rejected so the NPC doesn't teleport away mid-work.
-        """
-        # ─── Busy guard ────────────────────────────────────────
-        DISRUPTIVE = {"move_to", "turn_to", "interact_with", "work_assemble", "charge_at", "wait"}
-        if self.npc.busy_until_min is not None and action in DISRUPTIVE:
-            remaining = max(0, self.npc.busy_until_min - self.time.total_minutes)
-            busy_name = self.npc.busy_action or "busy"
-            raise ValueError(
-                f"NPC is busy with {busy_name!r} ({remaining} game-min remaining). "
-                f"Cannot {action} now. Wait for the current task to finish or interrupt it first."
-            )
-
-        duration = ACTION_DURATIONS.get(action, 1.0)
-        message_parts: List[str] = []
-        include_state = False
-
-        if action == "move_to":
-            target = params.get("target", "")
-            if not target:
-                raise ValueError("target is required")
-            if self._already_at_target(target):
-                message_parts.append(f"already at {target}")
-            else:
-                moved = self._simulate_move(target)
-                if moved:
-                    message_parts.append(f"arrived at {target}")
-                else:
-                    raise ValueError(
-                        f"unknown target: {target!r}. "
-                        f"Valid zones: {sorted(ZONE_ENTRIES.keys())}. "
-                        f"Valid locations: {sorted(LOCATION_POINTS.keys())}."
-                    )
-            include_state = True
-
-        elif action == "turn_to":
-            target = params.get("target", "")
-            message_parts.append(f"facing {target}")
-
-        elif action == "work_assemble":
-            duration = params.get("duration_min", 30)
-            target = params.get("target", "")
-            self.npc.busy_until_min = self.time.total_minutes + int(duration)
-            self.npc.busy_action = f"work_assemble({target})"
-            self.npc.fatigue = min(100, self.npc.fatigue + duration * 0.3)
-            message_parts.append(f"started work at {target}, will finish in {duration} game-min")
-            self.npc.current_action = f"work_assemble({target})"
-            self._log_action(action, params, duration)
-            return {
-                "action": action,
-                "duration_game_min": round(duration, 2),
-                "message": "; ".join(message_parts),
-                "busy": True,
-                "will_complete_at": self._minutes_to_display(self.npc.busy_until_min),
+    async def _send_state_report(self):
+        payload: Dict[str, Any] = {"physical_state": self.npc.physical.as_dict()}
+        if self.npc.busy_action_id is not None:
+            payload["current_task_progress"] = {
+                "action_id": self.npc.busy_action_id,
+                "progress": self._busy_progress(),
             }
+        await self._send(TYPE_STATE_REPORT, self.npc.agent_id, payload)
+        # Snapshot the reported values for delta calc.
+        self._last_reported = PhysicalState(**self.npc.physical.as_dict())
+        logger.info(f"[STATE] energy={self.npc.physical.energy:.0f} fatigue={self.npc.physical.fatigue:.0f} "
+                    f"wear={self.npc.physical.joint_wear:.0f} health={self.npc.physical.health:.0f}")
 
-        elif action == "interact_with":
-            obj = params.get("object_id", "")
-            verb = params.get("action", "")
-            if not obj:
-                raise ValueError("object_id is required")
-            if obj in ZONE_ENTRIES or obj in ZONE_BOUNDS:
-                raise ValueError(
-                    f"{obj!r} is a zone, not an object. "
-                    f"Use interact_with with an object_id from: {sorted(LOCATION_POINTS.keys())}. "
-                    f"To travel to a zone, use move_to instead."
-                )
-            if obj not in LOCATION_POINTS:
-                raise ValueError(
-                    f"unknown object_id: {obj!r}. "
-                    f"Valid objects: {sorted(LOCATION_POINTS.keys())}."
-                )
-            message_parts.append(f"{verb} on {obj}")
-
-        elif action == "charge_at":
-            duration = params.get("duration_min", 30)
-            station = params.get("station_id", "")
-            self.npc.busy_until_min = self.time.total_minutes + int(duration)
-            self.npc.busy_action = f"charge_at({station})"
-            message_parts.append(f"started charging at {station}, will finish in {duration} game-min")
-            self.npc.current_action = f"charge_at({station})"
-            self._log_action(action, params, duration)
-            return {
-                "action": action,
-                "duration_game_min": round(duration, 2),
-                "message": "; ".join(message_parts),
-                "busy": True,
-                "will_complete_at": self._minutes_to_display(self.npc.busy_until_min),
-            }
-
-        elif action == "self_check":
-            message_parts.append("all systems nominal")
-            include_state = True
-
-        elif action == "speak":
-            text = params.get("text", "")
-            to = params.get("to", "")
-            message_parts.append(f"said to {to or 'nearby'}: {text[:40]}")
-
-        elif action == "emote":
-            emotion = params.get("emotion", "")
-            message_parts.append(f"emoted {emotion}")
-
-        elif action == "wait":
-            duration = params.get("seconds", 5) / 60.0
-            message_parts.append(f"waited {params.get('seconds', 5)}s")
-
-        elif action == "update_plan":
-            self.current_plan = params.get("plan", "")
-            message_parts.append("plan updated")
-            self._log_action(action, params, 0)
-            return {
-                "action": action,
-                "duration_game_min": 0,
-                "message": "; ".join(message_parts),
-            }
-
-        # Universal energy consumption for short actions.
-        # Time is NOT advanced here — only the perception loop advances time.
-        self.npc.energy = max(0, self.npc.energy - duration * 0.1)
-        self.npc.current_action = f"{action}({params.get('target', '') or params.get('object_id', '')})"
-
-        self._log_action(action, params, duration)
-        return self._build_action_result(action, duration, message_parts, include_state=include_state)
-
-    def _build_action_result(
-        self,
-        action: str,
-        duration: float,
-        messages: List[str],
-        extra: Optional[Dict[str, Any]] = None,
-        include_state: bool = False,
-    ) -> Dict[str, Any]:
-        """
-        Build the standard ActionResult envelope.
-
-        include_state controls whether new_state is included. Set True only
-        for actions that change physical state the LLM needs to see in the
-        tool result (move_to, charge_at). Stateless actions (speak, emote,
-        wait, etc.) omit it to keep the chained context small.
-        """
-        result: Dict[str, Any] = {
-            "action": action,
-            "duration_game_min": round(duration, 2),
-            "message": "; ".join(messages) if messages else "ok",
-        }
-        if include_state:
-            result["new_state"] = self._state_snapshot()
-        if extra:
-            result.update(extra)
-        return result
-
-    def _state_snapshot(self) -> Dict[str, Any]:
-        """Return current NPC state for inclusion in ActionResult."""
-        return {
-            "position": list(self.npc.position),
-            "zone": self.npc.current_zone,
-            "energy": round(self.npc.energy, 1),
-            "fatigue": round(self.npc.fatigue, 1),
-            "current_action": self.npc.current_action,
-        }
-
-    def _log_action(self, action: str, params: Dict[str, Any], duration: float):
-        """Append to action_log and log."""
-        entry = {
-            "time": self.time.display,
-            "action": action,
-            "params": params,
-            "duration_game_min": duration,
-            "result": "success",
-        }
-        self.action_log.append(entry)
-        logger.info(
-            f"[ACTION] {self.time.display} | {action} | "
-            f"{duration:.1f}min | zone={self.npc.current_zone} | energy={self.npc.energy:.0f}%"
-        )
-
-    def _simulate_move(self, target: str) -> bool:
-        """Move NPC to a zone entry or location point. Returns True if moved."""
-        dest = ZONE_ENTRIES.get(target) or LOCATION_POINTS.get(target)
-        if not dest:
-            return False
-        self.npc.position = list(dest)
-        new_zone = self._resolve_zone(self.npc.position)
-        if new_zone != self.npc.current_zone:
-            old = self.npc.current_zone
-            self.npc.current_zone = new_zone
-            logger.info(f"[ZONE] {old} → {new_zone}")
-        return True
-
-    def _already_at_target(self, target: str) -> bool:
-        """Check if the NPC is already at the given target (zone or location)."""
-        if target == self.npc.current_zone:
-            return True
-        loc = LOCATION_POINTS.get(target)
-        if loc is not None:
-            return self._resolve_zone(loc) == self.npc.current_zone
+    def _physical_changed_over_threshold(self) -> bool:
+        for key, thr in DELTA_THRESHOLD.items():
+            if abs(getattr(self.npc.physical, key) - getattr(self._last_reported, key)) >= thr:
+                return True
         return False
 
-    def _minutes_to_display(self, total_min: int) -> str:
-        """Convert absolute game-time minutes to a Day{N} HH:MM display."""
-        day = self.time.day
-        # Handle day roll-over during long busy periods.
-        total = total_min
-        while total >= 24 * 60:
-            total -= 24 * 60
-            day += 1
-        return f"Day{day} {total // 60:02d}:{total % 60:02d}"
-
-    def _check_busy_completion(self) -> Optional[str]:
-        """
-        Called from the perception loop each tick. If the NPC is busy and
-        game time has reached/exceeded busy_until_min, complete the action:
-        apply final state changes (energy gain for charge_at, etc.), clear
-        the busy state, and return a completion message for the perception.
-        Returns None if not busy or not yet complete.
-        """
-        if self.npc.busy_until_min is None:
-            return None
-        if self.time.total_minutes < self.npc.busy_until_min:
-            return None
-
-        busy_name = self.npc.busy_action or "task"
-        elapsed = self.npc.busy_until_min - (self.npc.busy_until_min - 0)  # placeholder
-        message = f"{busy_name} 完成"
-
-        # Apply completion effects based on the action type.
-        if busy_name.startswith("charge_at"):
-            # Restore energy based on the elapsed time.
-            # busy_until_min - start = duration; energy gain = duration * 2.
-            # We don't store the start explicitly, but the action set the
-            # fatigue/energy. Apply the gain now.
-            # Estimate duration from the busy_action metadata.
-            # For simplicity, cap energy at 100.
-            self.npc.energy = min(100, self.npc.energy + 20)  # approximate gain
-            message = f"充电完成, 电池 {self.npc.energy:.0f}%"
-        elif busy_name.startswith("work_assemble"):
-            message = f"{busy_name} 完成"
-
-        # Clear busy state
-        self.npc.busy_until_min = None
-        self.npc.busy_action = None
-        self.npc.current_action = None
-        logger.info(f"[BUSY] {message}")
-        return message
-
-    def _busy_status_text(self) -> Optional[str]:
-        """Return a perception-line describing the current busy state, or None."""
-        if self.npc.busy_until_min is None:
-            return None
+    def _busy_progress(self) -> float:
+        if self.npc.busy_until_min is None or self.npc.busy_started_ms is None:
+            return 0.0
+        # Progress by game-time elapsed toward completion.
+        # Approximate: 1 - remaining/total is hard without total; use time.
         remaining = max(0, self.npc.busy_until_min - self.time.total_minutes)
-        return f"你正在{self.npc.busy_action}，预计还需{remaining}游戏分钟完成。"
+        return 0.0 if remaining > 0 else 1.0
 
-    # ─── 5.4 Zone Resolution ──────────────────────────────────
+    # ─── Inbound message handling ─────────────────────────────
+
+    async def _handle_envelope(self, env: Dict[str, Any]):
+        msg_type = env.get("type", "")
+        payload = env.get("payload", {}) or {}
+
+        if msg_type == TYPE_ACTION_COMMAND:
+            await self._handle_action_command(payload)
+        elif msg_type == TYPE_STOP_ACTION:
+            await self._handle_stop_action(payload)
+        elif msg_type == TYPE_SCAN_AREA:
+            await self._send_perception()
+        elif msg_type == TYPE_NARRATIVE:
+            text = payload.get("text", "")
+            if text:
+                print(f"\n  [{self.time.display}] {text[:500]}")
+                logger.info(f"[NARRATIVE] {text}")
+        else:
+            logger.debug(f"[WS←] unhandled type: {msg_type}")
+
+    async def _handle_action_command(self, payload: Dict[str, Any]):
+        action_id = payload.get("action_id", "")
+        cmd = payload.get("cmd", "")
+        params = payload.get("params", {}) or {}
+
+        logger.info(f"[CMD←] {cmd} action_id={action_id} params={params}")
+
+        # Busy guard: reject disruptive commands while busy.
+        DISRUPTIVE = {CMD_MOVE_TO, CMD_TURN_TO, CMD_INTERACT, CMD_EXECUTE_COMPOSITE, CMD_WAIT}
+        if self.npc.busy_action_id is not None and cmd in DISRUPTIVE:
+            remaining = max(0, (self.npc.busy_until_min or 0) - self.time.total_minutes)
+            await self._send_action_started(
+                action_id, accepted=False, estimated_sec=None,
+                reject_reason=f"busy with {self.npc.busy_cmd} ({remaining} game-min remaining)",
+            )
+            return
+
+        # Determine estimated duration and whether it's a long (busy) action.
+        est_sec, is_busy = self._estimate_duration(cmd, params)
+
+        # ACK within 2s (约定8).
+        await self._send_action_started(action_id, accepted=True, estimated_sec=est_sec)
+
+        if is_busy:
+            # Set busy state; completion happens when game time advances past
+            # busy_until_min (checked in the perception loop).
+            game_min = est_sec / 60.0 * self.time.speed / 60.0  # est_sec is real→game
+            # Simpler: treat est_sec as game-seconds for the sim; convert to game-min.
+            busy_game_min = max(1, int(est_sec / 60.0))
+            self.npc.busy_action_id = action_id
+            self.npc.busy_cmd = cmd
+            self.npc.busy_until_min = self.time.total_minutes + busy_game_min
+            self.npc.busy_started_ms = int(_time.time() * 1000)
+            self.npc.current_animation = "work"
+            self._apply_command_effects(cmd, params, starting=True)
+        else:
+            # Short action: apply effects immediately and complete now.
+            self._apply_command_effects(cmd, params, starting=False)
+            await self._send_action_completed(action_id, RESULT_SUCCESS, 0, 1.0)
+
+    async def _handle_stop_action(self, payload: Dict[str, Any]):
+        req_id = payload.get("action_id", "")
+        cur = self.npc.busy_action_id
+        if cur is not None and cur == req_id:
+            # Match → interrupt.
+            progress = self._busy_progress()
+            self._clear_busy()
+            await self._send_action_completed(req_id, RESULT_INTERRUPTED, 0, progress,
+                                              details={"reason": "stop_action received"})
+        else:
+            # Mismatch → ignore + error (约定9).
+            await self._send_error(ERR_STOP_ID_MISMATCH,
+                                   "stop_action id does not match current action",
+                                   action_id=req_id,
+                                   context={"requested": req_id, "current": cur})
+
+    # ─── Action effects ───────────────────────────────────────
+
+    def _estimate_duration(self, cmd: str, params: Dict[str, Any]) -> Tuple[float, bool]:
+        """Return (estimated_duration_sec, is_long_running)."""
+        if cmd == CMD_EXECUTE_COMPOSITE:
+            dur = float(params.get("duration_sec", COMPOSITE_DEFAULT_SEC))
+            return dur, True
+        if cmd == CMD_WAIT:
+            return float(params.get("duration_sec", 5)), False
+        if cmd == CMD_MOVE_TO:
+            return 120.0, False   # ~2 min walk
+        if cmd == CMD_INTERACT:
+            return 300.0, False   # ~5 min
+        # TurnTo/Speak/Emote/Stop: near-instant
+        return 1.0, False
+
+    def _apply_command_effects(self, cmd: str, params: Dict[str, Any], starting: bool):
+        """Mutate NPC state for a command. Does NOT advance game time."""
+        if cmd == CMD_MOVE_TO:
+            target = params.get("target", "")
+            self._move_to(target)
+        elif cmd == CMD_TURN_TO:
+            self.npc.rotation[1] = (self.npc.rotation[1] + 90.0) % 360.0
+        elif cmd == CMD_SPEAK:
+            content = params.get("content", "")
+            logger.info(f"[SPEAK] {content[:60]}")
+        elif cmd == CMD_EMOTE:
+            emotion = params.get("emotion", "")
+            mode = params.get("mode", "oneshot")
+            if mode == "sustained":
+                self.npc.current_emote = emotion
+            else:
+                self.npc.current_emote = None
+        elif cmd == CMD_EXECUTE_COMPOSITE:
+            name = params.get("name", "")
+            if name == "charge_at":
+                pass  # energy restored gradually in loop
+            elif name in ("work_assemble", "archive_research", "repair_target"):
+                pass  # fatigue accrues in loop
+        # Physical drain applied gradually in perception loop.
+
+    def _move_to(self, target: str) -> bool:
+        dest = ZONE_ENTRIES.get(target) or LOCATION_POINTS.get(target)
+        if not dest:
+            logger.warning(f"[MOVE] unknown target {target!r}")
+            return False
+        old_pos = self.npc.position
+        # Face the movement direction (yaw).
+        dx, dy = dest[0] - old_pos[0], dest[1] - old_pos[1]
+        if dx or dy:
+            import math
+            self.npc.rotation[1] = (math.degrees(math.atan2(dy, dx))) % 360.0
+        self.npc.position = list(dest)
+        if target in LOCATION_POINTS:
+            self.npc.current_location = target
+        new_zone = self._resolve_zone(self.npc.position)
+        if new_zone != self.npc.current_zone:
+            logger.info(f"[ZONE] {self.npc.current_zone} → {new_zone}")
+            self.npc.current_zone = new_zone
+        return True
 
     def _resolve_zone(self, pos: List[float]) -> str:
-        """Find which zone contains the given position."""
         x, y = pos[0], pos[1]
         for name, (xmin, xmax, ymin, ymax) in ZONE_BOUNDS.items():
             if xmin <= x <= xmax and ymin <= y <= ymax:
                 return name
         return self.npc.current_zone
 
-    # ─── 5.6 Scenario Injection ───────────────────────────────
+    def _clear_busy(self):
+        self.npc.busy_action_id = None
+        self.npc.busy_cmd = None
+        self.npc.busy_until_min = None
+        self.npc.busy_started_ms = None
+        self.npc.current_animation = "idle"
+
+    # ─── ACK / completed / error senders ──────────────────────
+
+    async def _send_action_started(self, action_id: str, accepted: bool,
+                                   estimated_sec: Optional[float], reject_reason: str = ""):
+        payload: Dict[str, Any] = {
+            "action_id": action_id,
+            "accepted": accepted,
+            "estimated_duration_sec": estimated_sec,
+        }
+        if reject_reason:
+            payload["reject_reason"] = reject_reason
+        await self._send(TYPE_ACTION_STARTED, self.npc.agent_id, payload)
+
+    async def _send_action_completed(self, action_id: str, result: str,
+                                    duration_ms: int, progress: float,
+                                    details: Optional[Dict] = None):
+        await self._send(TYPE_ACTION_COMPLETED, self.npc.agent_id, {
+            "action_id": action_id,
+            "result": result,
+            "duration_ms": duration_ms,
+            "progress": progress,
+            "details": details or {},
+        })
+        self.action_log.append({"time": self.time.display, "action_id": action_id, "result": result})
+
+    async def _send_error(self, code: str, message: str, action_id: str = "",
+                        context: Optional[Dict] = None):
+        payload: Dict[str, Any] = {"error_code": code, "message": message}
+        if action_id:
+            payload["action_id"] = action_id
+        if context:
+            payload["context"] = context
+        await self._send(TYPE_ERROR, self.npc.agent_id, payload)
+
+    # ─── Scenario injection ───────────────────────────────────
 
     def _load_scenarios(self, filepath: str):
-        """Load preset events from YAML."""
         with open(filepath, "r", encoding="utf-8") as f:
             data = yaml.safe_load(f) or {}
         self.scenarios = data.get("events", [])
         logger.info(f"Loaded {len(self.scenarios)} scenarios from {filepath}")
 
-    def _match_scenario(self) -> Optional[str]:
-        """
-        Return the description of the first unfired scenario whose trigger
-        time matches the current game time, or None.
-        """
-        current = (self.time.hour, self.time.minute)
-        for evt in self.scenarios:
-            if evt.get("_fired"):
-                continue
-            h = int(evt.get("hour", 0))
-            m = int(evt.get("minute", 0))
-            if (h, m) == current:
-                evt["_fired"] = True
-                desc = evt.get("description", "")
-                logger.info(f"[EVENT] {self.time.display} | {desc}")
-                return desc
-        return None
-
-    # ─── Main Loop ─────────────────────────────────────────────
+    # ─── Main loop ─────────────────────────────────────────────
 
     async def run_day(self, start_hour: int = 6, end_hour: int = 22):
-        """
-        Run one full game day from start_hour to end_hour.
-
-        Two concurrent tasks:
-          1. Perception loop: advance time, push perception_update events
-          2. WS read loop: handle inbound tool Requests
-        """
         self.time.hour = start_hour
         self.time.minute = 0
 
         logger.info(f"=== Day {self.time.day} start ===")
         print(f"\n{'='*60}")
-        print(f"  Mock UE (async) — Day {self.time.day} ({start_hour:02d}:00 - {end_hour:02d}:00)")
+        print(f"  Mock UE — Day {self.time.day} ({start_hour:02d}:00 - {end_hour:02d}:00)")
         print(f"  NPC: {self.npc.name} ({self.npc.agent_id})")
         print(f"  MCP WS: {self.mcp_ws_url}")
-        print(f"  Time speed: {self.time.speed}x")
-        print(f"  Perception interval: {self.perception_interval} game-min")
+        print(f"  Time speed: {self.time.speed}x | interval: {self.perception_interval} game-min")
         print(f"{'='*60}\n")
 
-        # Connect to MCP WebSocket
         try:
             self._ws = await websockets.connect(self.mcp_ws_url, max_size=1 << 20)
             logger.info(f"connected to MCP at {self.mcp_ws_url}")
         except Exception as e:
             logger.error(f"failed to connect to MCP: {e}")
             print(f"[ERROR] Cannot connect to MCP at {self.mcp_ws_url}: {e}")
-            print("Start MCP first: run agenttown-mcp --http :8760 --ws :9000")
             return
 
         try:
-            # Signal day start — MCP will reset Hermes session
-            await self._send_event(EVENT_DAY_STARTED, {"day": self.time.day})
-            # First perception with phase=day_start
-            await self._push_perception(phase="day_start")
+            # Register (triggers Hermes session reset on MCP side).
+            await self._send_agent_registered()
+            # Initial state + perception.
+            await self._send_state_report()
+            await self._send_perception()
 
-            # Run perception loop and WS read loop concurrently
             await asyncio.gather(
                 self._perception_loop(end_hour),
-                self._ws_read_loop(),
+                self._heartbeat_loop(),
+                self._read_loop(),
             )
         finally:
-            # Signal day end
-            await self._send_event(EVENT_DAY_ENDED, {"day": self.time.day})
-            await self._push_perception(phase="day_end")
+            try:
+                await self._send_agent_unregistered("actor_destroyed")
+            except Exception:
+                pass
             await self._ws.close()
             logger.info("disconnected from MCP")
 
         print(f"\n{'='*60}")
-        print(f"  Day {self.time.day} complete  |  {len(self.action_log)} tool calls")
-        print(f"  Final zone: {self.npc.current_zone}  |  Energy: {self.npc.energy:.0f}%")
+        print(f"  Day {self.time.day} complete | {len(self.action_log)} actions")
+        print(f"  Final zone: {self.npc.current_zone} | energy: {self.npc.physical.energy:.0f}%")
         print(f"{'='*60}\n")
 
     async def _perception_loop(self, end_hour: int):
-        """Advance game time and push perception at regular intervals."""
+        last_state_report = _time.monotonic()
         while self.time.hour < end_hour:
-            # Advance game time by the perception interval. This is the
-            # ONLY driver of game time for long-running actions — the NPC
-            # stays in place while busy, and time naturally passes.
+            # Advance game time — SOLE time driver.
             self.time.advance(self.perception_interval)
 
-            # Check if a busy action (work_assemble, charge_at) just
-            # completed. If so, the completion message is included in
-            # this perception push via the snapshot's "event" field.
-            completion = self._check_busy_completion()
-            if completion:
-                # Stash the completion message so _build_snapshot can
-                # surface it as an event line.
-                self._last_completion = completion
-            else:
-                self._last_completion = None
+            # Busy completion check.
+            if self.npc.busy_action_id is not None and self.time.total_minutes >= (self.npc.busy_until_min or 0):
+                action_id = self.npc.busy_action_id
+                started = self.npc.busy_started_ms or int(_time.time() * 1000)
+                self._clear_busy()
+                await self._send_action_completed(
+                    action_id, RESULT_SUCCESS,
+                    int(_time.time() * 1000) - started, 1.0,
+                )
 
-            # While busy, apply gradual energy/fatigue changes so the
-            # NPC's state evolves during long work sessions.
-            if self.npc.busy_until_min is not None:
-                # Working drains energy faster; charging restores it.
-                if self.npc.busy_action and self.npc.busy_action.startswith("charge_at"):
-                    self.npc.energy = min(100, self.npc.energy + self.perception_interval * 2)
-                else:
-                    self.npc.energy = max(0, self.npc.energy - self.perception_interval * 0.1)
-                    self.npc.fatigue = min(100, self.npc.fatigue + self.perception_interval * 0.3)
-            else:
-                # Idle decay
-                self.npc.energy = max(0, self.npc.energy - 0.5)
-                self.npc.fatigue = min(100, self.npc.fatigue + 0.3)
+            # Physical evolution.
+            self._evolve_physical()
 
-            # Push perception snapshot
-            await self._push_perception(phase="perception")
+            # state_report: on threshold change or every 15s fallback.
+            now = _time.monotonic()
+            if self._physical_changed_over_threshold() or (now - last_state_report) >= STATE_REPORT_INTERVAL_SEC:
+                await self._send_state_report()
+                last_state_report = now
 
-            # Real-time pacing: speed=60 means 1 real-sec = 1 game-min;
-            # perception_interval=30 game-min at speed 300 → 6 real-sec.
-            # No artificial cap — the speed parameter controls the pace.
+            # Perception push.
+            await self._send_perception()
+
+            # Real-time pacing (speed controls the pace, no artificial cap).
             real_delay = self.perception_interval / max(self.time.speed, 1) * 60
             await asyncio.sleep(real_delay)
 
-    async def _ws_read_loop(self):
-        """Read WebSocket frames and dispatch Requests."""
+    def _evolve_physical(self):
+        """Gradually change physical state based on current activity."""
+        p = self.npc.physical
+        interval = self.perception_interval
+        if self.npc.busy_cmd == CMD_EXECUTE_COMPOSITE and self.npc.busy_action_id:
+            # Charging vs working determined loosely; charge_at busy raises energy.
+            # We don't track composite name post-start here; approximate by wear.
+            p.energy = max(0, p.energy - interval * 0.05)
+            p.fatigue = min(100, p.fatigue + interval * 0.2)
+            p.joint_wear = min(100, p.joint_wear + interval * 0.05)
+        else:
+            p.energy = max(0, p.energy - interval * 0.02)
+            p.fatigue = min(100, p.fatigue + interval * 0.05)
+
+    async def _heartbeat_loop(self):
+        while True:
+            await asyncio.sleep(HEARTBEAT_INTERVAL_SEC)
+            try:
+                await self._send_heartbeat()
+            except Exception:
+                return
+
+    async def _read_loop(self):
         if self._ws is None:
             return
         try:
             async for raw in self._ws:
                 try:
-                    msg = json.loads(raw)
+                    env = json.loads(raw)
                 except json.JSONDecodeError:
-                    logger.warning(f"[WS←] non-JSON frame: {raw[:100]}")
+                    logger.warning(f"[WS←] non-JSON: {raw[:100]}")
                     continue
-
-                msg_type = msg.get("type", "")
-                if msg_type == TYPE_REQUEST:
-                    # Tool call from MCP — handle it (may take time; run concurrently)
-                    asyncio.create_task(self._handle_request(msg))
-                elif msg_type == TYPE_EVENT:
-                    name = msg.get("name", "")
-                    if name == "narrative":
-                        # Hermes narrative text pushed from MCP — display + log
-                        data = msg.get("data", {})
-                        text = data.get("text", "") if isinstance(data, dict) else ""
-                        if text:
-                            print(f"\n  [{self.time.display}] {text[:500]}")
-                            if len(text) > 500:
-                                print(f"  ... ({len(text)} chars)")
-                            logger.info(f"[NARRATIVE] {text}")
-                    else:
-                        logger.debug(f"[WS←] event: {name}")
-                else:
-                    logger.debug(f"[WS←] unknown frame type: {msg_type}")
+                asyncio.create_task(self._handle_envelope(env))
         except websockets.ConnectionClosed:
             logger.info("WS connection closed")
         except Exception as e:
-            logger.error(f"WS read loop error: {e}", exc_info=True)
+            logger.error(f"read loop error: {e}", exc_info=True)
 
     # ─── Logging ──────────────────────────────────────────────
 
     def _setup_logging(self):
-        """Configure file + console logger."""
         log_file = os.path.join(
             self.log_dir,
             f"day{self.time.day}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
         )
         handler = logging.FileHandler(log_file, encoding="utf-8")
-        handler.setFormatter(logging.Formatter(
-            "%(asctime)s [%(levelname)s] %(message)s"
-        ))
+        handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
         logger.addHandler(handler)
         logger.setLevel(logging.DEBUG)
         console = logging.StreamHandler()
@@ -736,23 +663,11 @@ class MockUE:
         logger.addHandler(console)
         logger.info(f"Logging to {log_file}")
 
-    # ─── Report ───────────────────────────────────────────────
-
     def print_report(self):
-        """Print end-of-day tool-call summary."""
         print(f"\n{'='*60}")
-        print(f"  Day {self.time.day} — Tool Call Report")
+        print(f"  Day {self.time.day} — Action Report")
         print(f"{'='*60}")
-        print(f"  {'Time':<12} {'Action':<18} {'Target':<20} {'Dur(min)':<10}")
-        print(f"  {'-'*60}")
-        for entry in self.action_log:
-            target = entry.get("params", {}).get("target") or entry.get("params", {}).get("object_id", "")
-            print(
-                f"  {entry['time']:<12} "
-                f"{entry['action']:<18} "
-                f"{str(target):<20} "
-                f"{entry['duration_game_min']:<10.1f}"
-            )
-        print(f"  {'-'*60}")
-        print(f"  Total tool calls: {len(self.action_log)}")
+        for e in self.action_log:
+            print(f"  {e['time']:<12} {e['action_id']:<20} {e['result']}")
+        print(f"  Total: {len(self.action_log)}")
         print(f"{'='*60}\n")
