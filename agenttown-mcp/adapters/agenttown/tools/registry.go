@@ -40,6 +40,7 @@ func RegisterAll(s *mcp.Server, ex Executor, logger *slog.Logger) {
 	if logger == nil {
 		logger = slog.Default()
 	}
+	setToolsLogger(logger)
 	registerComposite(s, ex, logger)
 	registerAtomic(s, ex, logger)
 }

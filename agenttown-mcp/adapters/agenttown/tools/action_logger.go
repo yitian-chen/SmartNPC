@@ -2,55 +2,42 @@ package tools
 
 import (
 	"encoding/json"
-	"fmt"
 	"log/slog"
-	"os"
-	"path/filepath"
 	"sync"
-	"time"
 )
 
-// toolCallLog is the structured logger that records every tool invocation
-// to logs/mcp/tool_calls.log (one JSON line per call). Mirrors the SmartNPC
-// logToolCall pattern.
+// toolsLogger is set by RegisterAll and used by logToolCall to emit
+// tool invocation records through the MCP's main structured logger
+// (which writes to stderr, redirected to logs/mcp.log via 2>&1).
+// When nil, logToolCall is a no-op (e.g. during tests without a logger).
 var (
-	toolLogOnce sync.Once
-	toolLogger  *slog.Logger
-	toolLogFile *os.File
+	toolsLoggerMu sync.Mutex
+	toolsLogger   *slog.Logger
 )
 
-// initToolLogger lazily opens the tool_calls.log file. Safe to call from
-// multiple tool handlers; the first call wins.
-func initToolLogger() {
-	toolLogOnce.Do(func() {
-		dir := "logs/mcp"
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			// Fall back to the default logger; we don't want log setup
-			// failures to break tool calls.
-			toolLogger = slog.Default()
-			return
-		}
-		fname := filepath.Join(dir, "tool_calls.log")
-		f, err := os.OpenFile(fname, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
-		if err != nil {
-			toolLogger = slog.Default()
-			return
-		}
-		toolLogFile = f
-		toolLogger = slog.New(slog.NewJSONHandler(f, &slog.HandlerOptions{}))
-	})
+// setToolsLogger stores the logger for tool call logging. Idempotent;
+// the first call wins.
+func setToolsLogger(l *slog.Logger) {
+	toolsLoggerMu.Lock()
+	defer toolsLoggerMu.Unlock()
+	if toolsLogger == nil {
+		toolsLogger = l
+	}
 }
 
-// logToolCall writes a structured record of a tool invocation. Called at
-// the start of every tool handler, before the Mock UE round-trip.
+// logToolCall writes a structured record of a tool invocation through
+// the MCP's main logger so the record appears in the unified log stream
+// (logs/mcp.log) alongside WS and Hermes communication entries.
 func logToolCall(name string, input any) {
-	initToolLogger()
+	toolsLoggerMu.Lock()
+	l := toolsLogger
+	toolsLoggerMu.Unlock()
+	if l == nil {
+		return
+	}
 	payload, _ := json.Marshal(input)
-	toolLogger.Info("tool_call",
+	l.Info("[Hermes→MCP/TOOL]",
 		"tool", name,
 		"input", string(payload),
-		"ts", time.Now().UTC().Format(time.RFC3339Nano),
 	)
-	// Also emit to stderr so the operator sees calls in real time.
-	fmt.Fprintf(os.Stderr, "[Hermes→MCP/TOOL] %s | %s\n", name, string(payload))
 }
