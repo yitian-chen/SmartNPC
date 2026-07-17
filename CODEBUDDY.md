@@ -261,6 +261,7 @@ cp .env.example .env
 格式：`<type>(<scope>): <subject>`（祈使句）
 - type：`feat` / `fix` / `refactor` / `test` / `docs` / `chore` / `perf`
 - scope：`protocol` / `mcp` / `mock-ue` / `hermes` / `skill-md` / `docker` / `config`
+- **提交信息（subject 和 body）使用中文**
 
 用户没明说"commit"时不要主动 commit。
 
