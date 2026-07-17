@@ -714,13 +714,14 @@ class MockUE:
                 elif msg_type == TYPE_EVENT:
                     name = msg.get("name", "")
                     if name == "narrative":
-                        # Hermes narrative text pushed from MCP — display it
+                        # Hermes narrative text pushed from MCP — display + log
                         data = msg.get("data", {})
                         text = data.get("text", "") if isinstance(data, dict) else ""
                         if text:
                             print(f"\n  [{self.time.display}] {text[:500]}")
                             if len(text) > 500:
                                 print(f"  ... ({len(text)} chars)")
+                            logger.info(f"[NARRATIVE] {text}")
                     else:
                         logger.debug(f"[WS←] event: {name}")
                 else:

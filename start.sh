@@ -138,8 +138,9 @@ start_mcp() {
   wsl cp /mnt/c/Users/yitianchen/AppData/Local/Temp/agenttown-mcp-linux ~/agenttown-mcp"
     fi
 
-    # 清空旧日志
-    $WSL_BASH 'echo "" > /tmp/mcp.log'
+    # 清空旧日志（MCP 日志写到项目 logs/ 目录）
+    mkdir -p "$PROJECT_DIR/logs"
+    $WSL_BASH 'echo "" > /mnt/d/SmartNPC_v3/logs/mcp.log 2>/dev/null'
 
     # 在 WSL 内创建启动脚本（setsid + disown 确保 MCP 进程在 WSL 会话
     # 结束后仍能存活——直接 `wsl bash -c "cmd &"` 会在 wsl 返回时杀掉子进程）
@@ -147,7 +148,7 @@ start_mcp() {
 #!/bin/bash
 pkill -x agenttown-mcp 2>/dev/null
 sleep 1
-setsid ~/agenttown-mcp --http :8760 --ws :9000 --hermes-url http://localhost:8642 > /tmp/mcp.log 2>&1 &
+setsid ~/agenttown-mcp --http :8760 --ws :9000 --hermes-url http://localhost:8642 > /mnt/d/SmartNPC_v3/logs/mcp.log 2>&1 &
 disown
 sleep 2
 LAUNCHER
@@ -180,7 +181,7 @@ start_hermes() {
     info "Waiting for Hermes to discover MCP tools..."
     local elapsed=0
     while [ $elapsed -lt 40 ]; do
-        if $WSL_BASH 'tail -10 /tmp/mcp.log 2>/dev/null | grep -q "session initialized"'; then
+        if $WSL_BASH 'tail -10 /mnt/d/SmartNPC_v3/logs/mcp.log 2>/dev/null | grep -q "session initialized"'; then
             ok "Hermes connected to MCP"
             sleep 2  # 给 Hermes 额外时间完成工具注册
             return 0
@@ -190,7 +191,7 @@ start_hermes() {
     echo ""
     fail "Hermes did not connect to MCP within 40s. Check:
   $WSL docker logs agenttown-h01 2>&1 | grep -i mcp
-  $WSL tail -20 /tmp/mcp.log"
+  $WSL tail -20 /mnt/d/SmartNPC_v3/logs/mcp.log"
 }
 
 # ─── 步骤 3: 启动 Mock UE ─────────────────────────────────────
