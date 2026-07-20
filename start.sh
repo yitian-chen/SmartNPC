@@ -159,27 +159,41 @@ start_mcp() {
     # 强制交叉编译 + 部署最新 MCP 二进制到 WSL 的 ~/agenttown-mcp。
     # 编译失败或 Go 编译器找不到时直接 fail 退出，避免误用旧二进制
     # 跑出新行为与代码不一致的日志。
-    # Locate the Go compiler. Try: PATH, env vars, known MINGW mount
-    # paths, user-local SDK dirs. From PowerShell-launched bash the
-    # MINGW drive mounts (/d/, /c/) may not exist, so the check is
-    # best-effort.
-    GO_BIN=""
-    if command -v go &>/dev/null; then
+    #
+    # Locate the Go compiler. Search order:
+    #   1. $GO_BIN env var (explicit user override — recommended when
+    #      launching from PowerShell, where PATH may not include Go)
+    #   2. `command -v go` (PATH lookup)
+    #   3. $GOROOT/bin/go
+    #   4. Common MINGW mount paths (/d/Go/bin/go etc.) — also try the
+    #      .exe variant because Windows Go installs ship as go.exe and
+    #      WSL/bash needs the explicit suffix to exec it.
+    #   5. User-local SDK dirs (~/go/bin/go, ~/sdk/*/bin/go)
+    # NOTE: do NOT reset GO_BIN to "" before reading the env var, or the
+    # user's override will be silently discarded.
+    if [ -n "${GO_BIN:-}" ] && [ -x "$GO_BIN" ]; then
+        : # explicit override, use as-is
+    elif command -v go &>/dev/null; then
         GO_BIN="$(command -v go)"
-    fi
-    if [ -z "$GO_BIN" ] || [ ! -x "$GO_BIN" ]; then
+    else
         for p in \
-            "${GOROOT:+$GOROOT/bin/go}" \
-            /d/Go/bin/go /c/Go/bin/go /e/Go/bin/go \
-            "$HOME/go/bin/go" "$HOME/sdk/"*/bin/go; do
+            "${GOROOT:+$GOROOT/bin/go}" "${GOROOT:+$GOROOT/bin/go.exe}" \
+            /d/Go/bin/go /d/Go/bin/go.exe \
+            /c/Go/bin/go /c/Go/bin/go.exe \
+            /e/Go/bin/go /e/Go/bin/go.exe \
+            "$HOME/go/bin/go" "$HOME/go/bin/go.exe" \
+            "$HOME/sdk/"*/bin/go "$HOME/sdk/"*/bin/go.exe; do
             if [ -x "$p" ]; then GO_BIN="$p"; break; fi
         done
     fi
 
     if [ -z "$GO_BIN" ] || [ ! -x "$GO_BIN" ]; then
         fail "Go compiler not found. Install Go or set GO_BIN env var.
-  Tried: PATH, \${GOROOT}/bin/go, /d/Go/bin/go, /c/Go/bin/go, /e/Go/bin/go,
-         \$HOME/go/bin/go, \$HOME/sdk/*/bin/go"
+  Recommended (PowerShell):  \$env:GO_BIN = 'D:\Go\bin\go.exe'
+  Recommended (Git Bash):    GO_BIN=/d/Go/bin/go bash start.sh
+  Tried: \$GO_BIN, PATH, \${GOROOT}/bin/go,
+         /d/Go/bin/go, /c/Go/bin/go, /e/Go/bin/go,
+         \$HOME/go/bin/go, \$HOME/sdk/*/bin/go (and .exe variants)"
     fi
 
     info "Building MCP (linux/amd64, CGO disabled)..."
