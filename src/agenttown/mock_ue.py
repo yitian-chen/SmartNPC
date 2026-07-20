@@ -232,6 +232,7 @@ class MockUE:
         self._send_buffer: List[Dict[str, Any]] = []  # {seq, frame, at}
         self._connected = False
         self._stop = False
+        self._ws_ready = asyncio.Event()  # signals first WS connection established
 
         # Physical values last reported via state_report (for delta calc)
         self._last_reported = PhysicalState()
@@ -777,6 +778,7 @@ class MockUE:
             try:
                 self._ws = await websockets.connect(self.mcp_ws_url, max_size=1 << 20)
                 self._connected = True
+                self._ws_ready.set()
                 backoff = RECONNECT_BASE_SEC
                 if first:
                     logger.info(f"connected to MCP at {self.mcp_ws_url}")
@@ -818,7 +820,9 @@ class MockUE:
     async def _perception_loop(self, end_hour: int):
         last_state_report = _time.monotonic()
 
-        # Send initial perception at start_hour:00 before first time advance.
+        # Wait for first WS connection before sending the initial perception,
+        # so 06:00 reaches MCP instead of being dropped.
+        await self._ws_ready.wait()
         await self._send_perception()
 
         while self.time.hour < end_hour:
