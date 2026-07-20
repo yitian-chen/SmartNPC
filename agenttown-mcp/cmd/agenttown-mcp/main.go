@@ -364,6 +364,19 @@ func (a *agentContext) disarmScan(scanID string) {
 	a.mu.Unlock()
 }
 
+func (a *agentContext) retryCurrentSnapshotOnError() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.stopped || a.latestPerception == nil {
+		return false
+	}
+	a.pendingPerception = cloneRawMessage(a.latestPerception)
+	a.pendingReasons = mergeUnique(a.pendingReasons, "上游错误恢复重试")
+	// clear any stale scan followup — this is a fresh decision
+	a.pendingScanFollowup = false
+	return true
+}
+
 func (a *agentContext) recordActionStarted(actionID, cmd string, params map[string]any, decisionEpoch int64) {
 	encoded, _ := json.Marshal(params)
 	a.mu.Lock()
@@ -488,6 +501,15 @@ func runPerceptionWorker(
 			if ctx.Err() != nil {
 				logger.Info("Hermes request canceled", "agent_id", agentID)
 				return
+			}
+			if errors.Is(err, hermes.ErrUpstreamError) {
+				// The session was already cleared by the client; immediately
+				// retry with the same snapshot so that the NPC gets a clean
+				// decision turn without waiting for the next external event.
+				logger.Warn("[Hermes→MCP] upstream error — retrying with fresh session", "agent_id", agentID)
+				if ac.retryCurrentSnapshotOnError() {
+					continue
+				}
 			}
 			logger.Error("hermes send failed", "agent_id", agentID, "err", err)
 			continue

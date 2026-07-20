@@ -192,6 +192,7 @@ func (c *Client) doSend(ctx context.Context, input string) (*Response, error) {
 			"narrative", truncate(narrative, 200),
 			"prev_id", c.prevResponseID)
 		c.prevResponseID = "" // break the chain
+		c.pendingSummary = "" // don't carry error text into the next turn
 		c.turnCount = 0
 		return &hr, ErrUpstreamError
 	}
