@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -42,18 +43,30 @@ import (
 
 var version = "0.1.0-dev"
 
-// agentContext holds per-agent state accumulated between perception turns.
-// Perception delivery uses a latest-wins queue: at most one Hermes request is
-// in flight per agent, and while it runs only the newest pending perception is
-// retained. This prevents fast UE updates from building an unbounded backlog.
+// agentContext holds per-agent state accumulated between decision turns.
+// Delivery uses a latest-wins queue: at most one Hermes request is in flight
+// per agent, pending trigger reasons merge, and only the newest perception is
+// retained while that request runs.
 type agentContext struct {
-	mu                sync.Mutex
-	latestPhysical    *protocol.PhysicalState
-	pendingCompletion []string // human-readable completion lines
-	pendingPerception json.RawMessage
-	wake              chan struct{}
-	cancel            context.CancelFunc
-	stopped           bool
+	mu                      sync.Mutex
+	latestPhysical          *protocol.PhysicalState
+	latestPerception        json.RawMessage
+	currentTask             *protocol.CurrentTaskProgress
+	observedSnapshot        *observedSnapshot
+	pendingPerception       json.RawMessage
+	pendingReasons          []string
+	recentEnvironmentEvents []string
+	wake                    chan struct{}
+	cancel                  context.CancelFunc
+	stopped                 bool
+}
+
+type decisionWork struct {
+	perception  json.RawMessage
+	physical    *protocol.PhysicalState
+	currentTask *protocol.CurrentTaskProgress
+	reasons     []string
+	extras      []string
 }
 
 func newAgentContext(parent context.Context) (*agentContext, context.Context) {
@@ -64,57 +77,133 @@ func newAgentContext(parent context.Context) (*agentContext, context.Context) {
 	}, ctx
 }
 
-func (a *agentContext) addCompletion(line string) {
+// observePerception stores every valid payload as the latest world state. A
+// decision is queued only when the comparable snapshot crosses a gate. If a
+// decision is already pending, even a non-triggering update replaces its
+// payload so the worker always receives the newest perception.
+func (a *agentContext) observePerception(payload json.RawMessage) ([]string, bool, error) {
+	perceptionPayload, snapshot, err := parsePerceptionSnapshot(payload)
+	if err != nil {
+		return nil, false, err
+	}
+
 	a.mu.Lock()
-	a.pendingCompletion = append(a.pendingCompletion, line)
+	if a.stopped {
+		a.mu.Unlock()
+		return nil, false, nil
+	}
+	reasons := perceptionTriggerReasons(perceptionPayload, snapshot, a.observedSnapshot)
+	a.observedSnapshot = &snapshot
+	a.latestPerception = cloneRawMessage(payload)
+	if containsReason(reasons, reasonAudibleEvent) {
+		a.recentEnvironmentEvents = append(a.recentEnvironmentEvents, audibleEventExtras(perceptionPayload.AudibleEvents)...)
+	}
+	replaced := a.pendingPerception != nil
+	if len(reasons) > 0 {
+		a.pendingReasons = mergeUnique(a.pendingReasons, reasons...)
+	}
+	shouldWake := len(a.pendingReasons) > 0
+	if shouldWake {
+		a.pendingPerception = cloneRawMessage(a.latestPerception)
+	}
 	a.mu.Unlock()
+	if shouldWake {
+		a.signal()
+	}
+	return reasons, replaced, nil
 }
 
-func (a *agentContext) drainCompletions() []string {
+// updateState stores authoritative physical/task state and queues a decision
+// only for task lifecycle changes or physical alert-band crossings.
+func (a *agentContext) updateState(report protocol.StateReportPayload) []string {
 	a.mu.Lock()
-	defer a.mu.Unlock()
-	c := a.pendingCompletion
-	a.pendingCompletion = nil
-	return c
-}
+	if a.stopped {
+		a.mu.Unlock()
+		return nil
+	}
 
-func (a *agentContext) setPhysical(p protocol.PhysicalState) {
-	a.mu.Lock()
-	a.latestPhysical = &p
+	reasons := taskLifecycleReasons(a.currentTask, report.CurrentTaskProgress)
+	if a.latestPhysical != nil {
+		reasons = append(reasons, physicalCrossingReasons(*a.latestPhysical, report.PhysicalState)...)
+	}
+	physical := report.PhysicalState
+	a.latestPhysical = &physical
+	a.currentTask = cloneTask(report.CurrentTaskProgress)
+	a.queueDecisionLocked(reasons, nil)
 	a.mu.Unlock()
+	if len(reasons) > 0 {
+		a.signal()
+	}
+	return reasons
 }
 
-func (a *agentContext) physical() *protocol.PhysicalState {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return a.latestPhysical
+func (a *agentContext) recordActionCompletion(completion protocol.ActionCompletedPayload) bool {
+	details, _ := json.Marshal(completion.Details)
+	extra := fmt.Sprintf("动作完成 action_id=%s result=%s progress=%g details=%s",
+		completion.ActionID, completion.Result, completion.Progress, details)
+	reason := fmt.Sprintf("动作完成:%s", completion.ActionID)
+	return a.queueExternalEvent(reason, extra)
 }
 
-// enqueuePerception replaces any queued (not currently processing) perception
-// and wakes the worker. It returns true when an older queued perception was
-// replaced.
-func (a *agentContext) enqueuePerception(payload json.RawMessage) bool {
+func (a *agentContext) recordEventNotification(event protocol.EventNotificationPayload) bool {
+	details, _ := json.Marshal(event.Event)
+	extra := fmt.Sprintf("环境事件 event_id=%s perception_level=%s event=%s",
+		event.EventID, event.PerceptionLevel, details)
+	reason := fmt.Sprintf("事件通知:%s", event.EventID)
+	return a.queueExternalEvent(reason, extra)
+}
+
+func (a *agentContext) queueExternalEvent(reason, extra string) bool {
 	a.mu.Lock()
 	if a.stopped {
 		a.mu.Unlock()
 		return false
 	}
-	replaced := a.pendingPerception != nil
-	a.pendingPerception = append(a.pendingPerception[:0], payload...)
+	a.queueDecisionLocked([]string{reason}, []string{extra})
+	queued := a.pendingPerception != nil
 	a.mu.Unlock()
+	if queued {
+		a.signal()
+	}
+	return queued
+}
+
+func (a *agentContext) queueDecisionLocked(reasons, extras []string) {
+	a.pendingReasons = mergeUnique(a.pendingReasons, reasons...)
+	for _, extra := range extras {
+		if extra != "" {
+			a.recentEnvironmentEvents = append(a.recentEnvironmentEvents, extra)
+		}
+	}
+	if len(a.pendingReasons) > 0 && a.latestPerception != nil {
+		a.pendingPerception = cloneRawMessage(a.latestPerception)
+	}
+}
+
+func (a *agentContext) takeDecision() *decisionWork {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.pendingPerception == nil {
+		return nil
+	}
+	work := &decisionWork{
+		perception:  cloneRawMessage(a.pendingPerception),
+		physical:    clonePhysical(a.latestPhysical),
+		currentTask: cloneTask(a.currentTask),
+		reasons:     append([]string(nil), a.pendingReasons...),
+		extras:      append([]string(nil), a.recentEnvironmentEvents...),
+	}
+	a.pendingPerception = nil
+	a.pendingReasons = nil
+	a.recentEnvironmentEvents = nil
+	return work
+}
+
+func (a *agentContext) signal() {
 	select {
 	case a.wake <- struct{}{}:
 	default:
 	}
-	return replaced
-}
-
-func (a *agentContext) takePerception() json.RawMessage {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	payload := a.pendingPerception
-	a.pendingPerception = nil
-	return payload
 }
 
 func (a *agentContext) stop() {
@@ -124,10 +213,80 @@ func (a *agentContext) stop() {
 		return
 	}
 	a.stopped = true
+	a.latestPerception = nil
 	a.pendingPerception = nil
+	a.pendingReasons = nil
+	a.recentEnvironmentEvents = nil
 	cancel := a.cancel
 	a.mu.Unlock()
 	cancel()
+}
+
+func cloneRawMessage(payload json.RawMessage) json.RawMessage {
+	return append(json.RawMessage(nil), payload...)
+}
+
+func clonePhysical(physical *protocol.PhysicalState) *protocol.PhysicalState {
+	if physical == nil {
+		return nil
+	}
+	copy := *physical
+	return &copy
+}
+
+func cloneTask(task *protocol.CurrentTaskProgress) *protocol.CurrentTaskProgress {
+	if task == nil {
+		return nil
+	}
+	copy := *task
+	return &copy
+}
+
+func containsReason(reasons []string, target string) bool {
+	for _, reason := range reasons {
+		if reason == target {
+			return true
+		}
+	}
+	return false
+}
+
+func taskLifecycleReasons(previous, current *protocol.CurrentTaskProgress) []string {
+	switch {
+	case previous == nil && current != nil:
+		return []string{fmt.Sprintf("任务开始:%s", current.ActionID)}
+	case previous != nil && current == nil:
+		return []string{fmt.Sprintf("任务结束:%s", previous.ActionID)}
+	case previous != nil && current != nil && previous.ActionID != current.ActionID:
+		return []string{fmt.Sprintf("任务切换:%s→%s", previous.ActionID, current.ActionID)}
+	default:
+		return nil
+	}
+}
+
+func physicalCrossingReasons(previous, current protocol.PhysicalState) []string {
+	checks := []struct {
+		name     string
+		wasAlert bool
+		isAlert  bool
+	}{
+		{name: "energy<=25", wasAlert: previous.Energy <= 25, isAlert: current.Energy <= 25},
+		{name: "fatigue>=80", wasAlert: previous.Fatigue >= 80, isAlert: current.Fatigue >= 80},
+		{name: "joint_wear>=80", wasAlert: previous.JointWear >= 80, isAlert: current.JointWear >= 80},
+		{name: "health<=50", wasAlert: previous.Health <= 50, isAlert: current.Health <= 50},
+	}
+	reasons := make([]string, 0, len(checks))
+	for _, check := range checks {
+		if check.wasAlert == check.isAlert {
+			continue
+		}
+		direction := "离开"
+		if check.isAlert {
+			direction = "进入"
+		}
+		reasons = append(reasons, fmt.Sprintf("物理状态%s警戒带:%s", direction, check.name))
+	}
+	return reasons
 }
 
 // runPerceptionWorker serially sends perceptions to Hermes. While one request
@@ -149,16 +308,16 @@ func runPerceptionWorker(
 		case <-ac.wake:
 		}
 
-		payload := ac.takePerception()
-		if payload == nil {
+		work := ac.takeDecision()
+		if work == nil {
 			continue
 		}
-		extras := ac.drainCompletions()
-		text := perception.Format(payload, ac.physical(), extras)
+		text := perception.Format(work.perception, work.physical, work.extras)
 		if text == "" {
-			logger.Warn("perception format returned empty", "agent_id", agentID, "raw", string(payload))
+			logger.Warn("perception format returned empty", "agent_id", agentID, "raw", string(work.perception))
 			continue
 		}
+		text = formatDecisionPrompt(text, work.reasons, work.currentTask)
 		display := text
 		if len(display) > 500 {
 			display = display[:500] + "..."
@@ -191,6 +350,18 @@ func runPerceptionWorker(
 			}
 		}
 	}
+}
+
+func formatDecisionPrompt(perceptionText string, reasons []string, task *protocol.CurrentTaskProgress) string {
+	lines := []string{"[决策触发原因] " + strings.Join(reasons, "；")}
+	if task == nil {
+		lines = append(lines, "[当前任务] 无")
+	} else {
+		lines = append(lines, fmt.Sprintf("[当前任务] action_id=%s progress=%g", task.ActionID, task.Progress))
+	}
+	lines = append(lines, perceptionText)
+	lines = append(lines, "【决策约束】每轮只选择一个主行为；不要同时发起多个主行为。")
+	return strings.Join(lines, "\n")
 }
 
 func main() {
@@ -316,29 +487,49 @@ func main() {
 				logger.Warn("state_report parse failed", "err", err)
 				return
 			}
-			getAgent(agentID).setPhysical(sr.PhysicalState)
+			reasons := getAgent(agentID).updateState(sr)
 			logger.Info("state_report", "agent_id", agentID,
 				"energy", sr.PhysicalState.Energy, "fatigue", sr.PhysicalState.Fatigue,
-				"joint_wear", sr.PhysicalState.JointWear, "health", sr.PhysicalState.Health)
+				"joint_wear", sr.PhysicalState.JointWear, "health", sr.PhysicalState.Health,
+				"decision_reasons", reasons)
 
 		case protocol.TypeActionCompleted:
-			var ac protocol.ActionCompletedPayload
-			if err := json.Unmarshal(payload, &ac); err != nil {
+			var completed protocol.ActionCompletedPayload
+			if err := json.Unmarshal(payload, &completed); err != nil {
 				logger.Warn("action_completed parse failed", "err", err)
 				return
 			}
-			line := fmt.Sprintf("动作 %s 已完成（%s）", ac.ActionID, ac.Result)
-			getAgent(agentID).addCompletion(line)
+			queued := getAgent(agentID).recordActionCompletion(completed)
 			logger.Info("action_completed", "agent_id", agentID,
-				"action_id", ac.ActionID, "result", ac.Result, "progress", ac.Progress)
+				"action_id", completed.ActionID, "result", completed.Result,
+				"progress", completed.Progress, "decision_queued", queued)
+
+		case protocol.TypeEventNotification:
+			var event protocol.EventNotificationPayload
+			if err := json.Unmarshal(payload, &event); err != nil {
+				logger.Warn("event_notification parse failed", "err", err)
+				return
+			}
+			queued := getAgent(agentID).recordEventNotification(event)
+			logger.Info("event_notification", "agent_id", agentID,
+				"event_id", event.EventID, "perception_level", event.PerceptionLevel,
+				"decision_queued", queued)
 
 		case protocol.TypeError:
 			logger.Warn("error from mock ue", "agent_id", agentID, "payload", string(payload))
 
 		case protocol.TypePerceptionUpdate:
 			ac := getAgent(agentID)
-			if ac.enqueuePerception(payload) {
+			reasons, replaced, err := ac.observePerception(payload)
+			if err != nil {
+				logger.Warn("perception_update parse failed", "agent_id", agentID, "err", err)
+				return
+			}
+			if replaced {
 				logger.Info("perception coalesced (older pending update replaced)", "agent_id", agentID)
+			}
+			if len(reasons) > 0 {
+				logger.Info("perception decision triggered", "agent_id", agentID, "reasons", reasons)
 			}
 
 		default:

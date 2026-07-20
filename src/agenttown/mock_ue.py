@@ -24,7 +24,7 @@ import time as _time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import websockets
 import yaml
@@ -233,8 +233,11 @@ class MockUE:
         # Physical values last reported via state_report (for delta calc)
         self._last_reported = PhysicalState()
 
-        # Scenario injection
-        self.scenarios: List[Dict] = []
+        # Scenario injection. Crossed events wait here until exactly one
+        # perception consumes them; indices prevent reinjection.
+        self.scenarios: List[Dict[str, Any]] = []
+        self._injected_scenario_events: Set[int] = set()
+        self._pending_audible_events: List[Dict[str, Any]] = []
         if scenario_file:
             self._load_scenarios(scenario_file)
 
@@ -362,6 +365,9 @@ class MockUE:
             if abs(cur - last) >= thr:
                 delta[key] = round(cur, 1)
 
+        audible_events = self._pending_audible_events
+        self._pending_audible_events = []
+
         return {
             "location": {
                 "position": list(self.npc.position),
@@ -372,7 +378,7 @@ class MockUE:
             "physical_state_delta": delta if delta else None,
             "visible_agents": [],   # Phase 1: single NPC
             "nearby_objects": self._nearby_objects(),
-            "audible_events": [],   # Phase 1: none
+            "audible_events": audible_events,
             "current_animation": self.npc.current_animation,
             "current_emote": self.npc.current_emote,
             "environment": {
@@ -639,6 +645,27 @@ class MockUE:
         self.scenarios = data.get("events", [])
         logger.info(f"Loaded {len(self.scenarios)} scenarios from {filepath}")
 
+    def _queue_crossed_scenario_events(self, previous_min: int, current_min: int):
+        """Queue scenario events crossed by the sole game-time driver.
+
+        The interval may skip over an event's exact minute, so events are
+        selected from (previous_min, current_min]. Each event is injected once
+        and consumed by the next perception_update as an audible event.
+        """
+        for index, event in enumerate(self.scenarios):
+            if index in self._injected_scenario_events:
+                continue
+            event_min = int(event.get("hour", 0)) * 60 + int(event.get("minute", 0))
+            if previous_min < event_min <= current_min:
+                description = str(event.get("description", "")).strip()
+                self._pending_audible_events.append({
+                    "type": "scenario",
+                    "source": "world_director",
+                    "content": description,
+                })
+                self._injected_scenario_events.add(index)
+                logger.info(f"[SCENARIO] {event_min // 60:02d}:{event_min % 60:02d} {description}")
+
     # ─── Main loop ─────────────────────────────────────────────
 
     async def run_day(self, start_hour: int = 6, end_hour: int = 22):
@@ -737,7 +764,9 @@ class MockUE:
         last_state_report = _time.monotonic()
         while self.time.hour < end_hour:
             # Advance game time — SOLE time driver.
+            previous_min = self.time.total_minutes
             self.time.advance(self.perception_interval)
+            self._queue_crossed_scenario_events(previous_min, self.time.total_minutes)
 
             # Busy completion check.
             if self.npc.busy_action_id is not None and self.time.total_minutes >= (self.npc.busy_until_min or 0):
