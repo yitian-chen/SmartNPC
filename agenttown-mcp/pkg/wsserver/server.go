@@ -26,7 +26,7 @@ const (
 
 // Send-buffer retention for reconnect replay (约定11, §4.2).
 const (
-	sendBufferMaxLen = 200             // keep at most 200 discrete messages
+	sendBufferMaxLen = 200              // keep at most 200 discrete messages
 	sendBufferMaxAge = 60 * time.Second // or messages from the last 60s
 )
 
@@ -80,13 +80,18 @@ type Server struct {
 
 	mu      sync.RWMutex
 	conn    *websocket.Conn
-	pending map[string]chan *pendingResult // keyed by action_id (msg correlation)
+	pending map[string]*pendingCall // keyed by action_id (msg correlation)
 
-	bufMu     sync.Mutex
-	sendBuf   []bufferedMsg // rolling buffer of discrete outbound messages
+	bufMu   sync.Mutex
+	sendBuf []bufferedMsg // rolling buffer of discrete outbound messages
 
 	handlerMu sync.RWMutex
 	handler   MessageHandler
+}
+
+type pendingCall struct {
+	agentID string
+	ch      chan *pendingResult
 }
 
 // pendingResult carries a correlated response back to a waiting Call.
@@ -109,7 +114,7 @@ func New(opts Options) *Server {
 		addr:        opts.Addr,
 		log:         opts.Logger,
 		callTimeout: opts.CallTimeout,
-		pending:     make(map[string]chan *pendingResult),
+		pending:     make(map[string]*pendingCall),
 	}
 }
 
@@ -238,7 +243,7 @@ func (s *Server) readLoop(ctx context.Context, c *websocket.Conn) {
 				s.log.Warn("action_started parse failed", "err", err)
 				continue
 			}
-			s.deliverACK(&ack)
+			s.deliverACK(env.AgentID, &ack)
 		case protocol.TypeResync:
 			// Peer told us the last seq it received — replay what it missed.
 			var rs protocol.ResyncPayload
@@ -276,15 +281,21 @@ func (s *Server) observeInboundSeq(seq int64) {
 }
 
 // deliverACK hands an action_started to the goroutine waiting on its action_id.
-func (s *Server) deliverACK(ack *protocol.ActionStartedPayload) {
+func (s *Server) deliverACK(agentID string, ack *protocol.ActionStartedPayload) {
 	s.mu.RLock()
-	ch, ok := s.pending[ack.ActionID]
+	pending, ok := s.pending[ack.ActionID]
 	s.mu.RUnlock()
 	if !ok {
 		s.log.Warn("[UE→MCP/ACK] action_started with no pending caller", "action_id", ack.ActionID)
 		return
 	}
-	s.log.Info("[UE→MCP/ACK]", "action_id", ack.ActionID, "accepted", ack.Accepted, "est_duration_sec", ack.EstimatedDurationSec)
+	if pending.agentID != agentID {
+		s.log.Warn("[UE→MCP/ACK] agent_id mismatch",
+			"action_id", ack.ActionID, "expected_agent_id", pending.agentID, "actual_agent_id", agentID)
+		return
+	}
+	ch := pending.ch
+	s.log.Info("[UE→MCP/ACK]", "agent_id", agentID, "action_id", ack.ActionID, "accepted", ack.Accepted, "est_duration_sec", ack.EstimatedDurationSec)
 	result := &pendingResult{started: ack}
 	if !ack.Accepted {
 		result.errMsg = ack.RejectReason
@@ -458,7 +469,7 @@ func (s *Server) Call(ctx context.Context, agentID, cmd string, params map[strin
 	ch := make(chan *pendingResult, 1)
 
 	s.mu.Lock()
-	s.pending[actionID] = ch
+	s.pending[actionID] = &pendingCall{agentID: agentID, ch: ch}
 	s.mu.Unlock()
 	defer func() {
 		s.mu.Lock()

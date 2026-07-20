@@ -132,6 +132,37 @@ func TestLocalSummary_ContainsOnlyAuthoritativeState(t *testing.T) {
 	}
 }
 
+func TestAgentContext_DecisionEpochLifecycle(t *testing.T) {
+	ac, _ := newAgentContext(context.Background(), 7)
+	agentEpoch, decisionEpoch, ok := ac.beginDecision()
+	if !ok || agentEpoch != 7 || decisionEpoch != 1 {
+		t.Fatalf("beginDecision=(%d,%d,%v)", agentEpoch, decisionEpoch, ok)
+	}
+	if err := ac.validateDecision(decisionEpoch); err != nil {
+		t.Fatalf("current decision rejected: %v", err)
+	}
+	ac.endDecision(decisionEpoch)
+	if err := ac.validateDecision(decisionEpoch); err == nil || !strings.Contains(err.Error(), "stale") {
+		t.Fatalf("inactive decision was not stale: %v", err)
+	}
+	_, nextEpoch, _ := ac.beginDecision()
+	if nextEpoch != 2 {
+		t.Fatalf("next epoch=%d, want 2", nextEpoch)
+	}
+	if err := ac.validateDecision(1); err == nil || !strings.Contains(err.Error(), "stale") {
+		t.Fatalf("old epoch was not rejected: %v", err)
+	}
+}
+
+func TestAgentContext_StopMakesAgentOffline(t *testing.T) {
+	ac, _ := newAgentContext(context.Background())
+	_, epoch, _ := ac.beginDecision()
+	ac.stop()
+	if err := ac.validateDecision(epoch); err == nil || !strings.Contains(err.Error(), "offline") {
+		t.Fatalf("stopped agent validation=%v, want offline", err)
+	}
+}
+
 func TestAgentContext_StopClearsPendingDecision(t *testing.T) {
 	ac, ctx := newAgentContext(context.Background())
 	_, _, _ = ac.observePerception(perceptionJSON("06:30", "main_workshop", "", "clear", nil))

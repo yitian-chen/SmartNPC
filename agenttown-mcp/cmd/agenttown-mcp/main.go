@@ -19,6 +19,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -49,6 +50,10 @@ var version = "0.1.0-dev"
 // retained while that request runs.
 type agentContext struct {
 	mu                       sync.Mutex
+	online                   bool
+	agentEpoch               int64
+	decisionEpoch            int64
+	decisionActive           bool
 	latestPhysical           *protocol.PhysicalState
 	latestPerception         json.RawMessage
 	currentTask              *protocol.CurrentTaskProgress
@@ -72,11 +77,15 @@ type decisionWork struct {
 	localSummary string
 }
 
-func newAgentContext(parent context.Context) (*agentContext, context.Context) {
+func newAgentContext(parent context.Context, epochs ...int64) (*agentContext, context.Context) {
 	ctx, cancel := context.WithCancel(parent)
+	agentEpoch := int64(1)
+	if len(epochs) > 0 {
+		agentEpoch = epochs[0]
+	}
 	return &agentContext{
-		wake:   make(chan struct{}, 1),
-		cancel: cancel,
+		online: true, agentEpoch: agentEpoch,
+		wake: make(chan struct{}, 1), cancel: cancel,
 	}, ctx
 }
 
@@ -150,10 +159,25 @@ func (a *agentContext) recordActionCompletion(completion protocol.ActionComplete
 		completion.ActionID, completion.Result, completion.Progress, details)
 	reason := fmt.Sprintf("动作完成:%s", completion.ActionID)
 	a.mu.Lock()
-	a.recentActions = appendRolling(a.recentActions, localActionSummary{
-		ActionID: completion.ActionID, Result: completion.Result,
-		DurationMs: completion.DurationMs, Progress: completion.Progress,
-	}, 8)
+	updated := false
+	for i := len(a.recentActions) - 1; i >= 0; i-- {
+		if a.recentActions[i].ActionID == completion.ActionID {
+			a.recentActions[i].Result = completion.Result
+			a.recentActions[i].DurationMs = completion.DurationMs
+			a.recentActions[i].Progress = completion.Progress
+			updated = true
+			break
+		}
+	}
+	if !updated {
+		a.recentActions = appendRolling(a.recentActions, localActionSummary{
+			ActionID: completion.ActionID, Result: completion.Result,
+			DurationMs: completion.DurationMs, Progress: completion.Progress,
+		}, 8)
+	}
+	if a.currentTask != nil && a.currentTask.ActionID == completion.ActionID {
+		a.currentTask = nil
+	}
 	a.mu.Unlock()
 	return a.queueExternalEvent(reason, extra)
 }
@@ -233,6 +257,8 @@ func (a *agentContext) stop() {
 		return
 	}
 	a.stopped = true
+	a.online = false
+	a.decisionActive = false
 	a.latestPerception = nil
 	a.pendingPerception = nil
 	a.pendingReasons = nil
@@ -240,6 +266,50 @@ func (a *agentContext) stop() {
 	cancel := a.cancel
 	a.mu.Unlock()
 	cancel()
+}
+
+func (a *agentContext) beginDecision() (agentEpoch, decisionEpoch int64, ok bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.stopped || !a.online {
+		return 0, 0, false
+	}
+	a.decisionEpoch++
+	a.decisionActive = true
+	return a.agentEpoch, a.decisionEpoch, true
+}
+
+func (a *agentContext) endDecision(epoch int64) {
+	a.mu.Lock()
+	if a.decisionEpoch == epoch {
+		a.decisionActive = false
+	}
+	a.mu.Unlock()
+}
+
+func (a *agentContext) validateDecision(epoch int64) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	switch {
+	case a.stopped || !a.online:
+		return errors.New("agent offline")
+	case epoch <= 0:
+		return errors.New("missing decision_epoch")
+	case !a.decisionActive || epoch != a.decisionEpoch:
+		return fmt.Errorf("stale decision_epoch: got %d, current %d", epoch, a.decisionEpoch)
+	default:
+		return nil
+	}
+}
+
+func (a *agentContext) recordActionStarted(actionID, cmd string, params map[string]any, decisionEpoch int64) {
+	encoded, _ := json.Marshal(params)
+	a.mu.Lock()
+	a.recentActions = appendRolling(a.recentActions, localActionSummary{
+		ActionID: actionID, Cmd: cmd, Params: string(encoded),
+		DecisionEpoch: decisionEpoch, Result: "started",
+	}, 8)
+	a.mu.Unlock()
 }
 
 func cloneRawMessage(payload json.RawMessage) json.RawMessage {
@@ -332,19 +402,26 @@ func runPerceptionWorker(
 		if work == nil {
 			continue
 		}
+		agentEpoch, decisionEpoch, ok := ac.beginDecision()
+		if !ok {
+			continue
+		}
 		text := perception.Format(work.perception, work.physical, work.extras)
 		if text == "" {
+			ac.endDecision(decisionEpoch)
 			logger.Warn("perception format returned empty", "agent_id", agentID, "raw", string(work.perception))
 			continue
 		}
-		text = formatDecisionPrompt(text, work.reasons, work.currentTask)
+		text = formatDecisionPrompt(text, agentID, agentEpoch, decisionEpoch, work.reasons, work.currentTask)
 		display := text
 		if len(display) > 500 {
 			display = display[:500] + "..."
 		}
-		logger.Info("[MCP→Hermes/PERCEPTION]", "agent_id", agentID, "text", display)
+		logger.Info("[MCP→Hermes/PERCEPTION]", "agent_id", agentID,
+			"agent_epoch", agentEpoch, "decision_epoch", decisionEpoch, "text", display)
 
 		resp, err := hc.SendWithSummary(ctx, text, work.localSummary)
+		ac.endDecision(decisionEpoch)
 		if err != nil {
 			if ctx.Err() != nil {
 				logger.Info("Hermes request canceled", "agent_id", agentID)
@@ -372,8 +449,11 @@ func runPerceptionWorker(
 	}
 }
 
-func formatDecisionPrompt(perceptionText string, reasons []string, task *protocol.CurrentTaskProgress) string {
-	lines := []string{"[决策触发原因] " + strings.Join(reasons, "；")}
+func formatDecisionPrompt(perceptionText, agentID string, agentEpoch, decisionEpoch int64, reasons []string, task *protocol.CurrentTaskProgress) string {
+	lines := []string{
+		fmt.Sprintf("[decision_context] agent_id=%s agent_epoch=%d decision_epoch=%d", agentID, agentEpoch, decisionEpoch),
+		"[决策触发原因] " + strings.Join(reasons, "；"),
+	}
 	if task == nil {
 		lines = append(lines, "[当前任务] 无")
 	} else {
@@ -382,6 +462,44 @@ func formatDecisionPrompt(perceptionText string, reasons []string, task *protoco
 	lines = append(lines, perceptionText)
 	lines = append(lines, "【决策约束】每轮只选择一个主行为；不要同时发起多个主行为。")
 	return strings.Join(lines, "\n")
+}
+
+type guardedExecutor struct {
+	ws     *wsserver.Server
+	lookup func(string) *agentContext
+}
+
+func (g *guardedExecutor) validate(agentID string, decisionEpoch int64) (*agentContext, error) {
+	ac := g.lookup(agentID)
+	if ac == nil {
+		return nil, fmt.Errorf("unknown agent: %s", agentID)
+	}
+	if err := ac.validateDecision(decisionEpoch); err != nil {
+		return nil, err
+	}
+	if !g.ws.IsConnected() {
+		return nil, errors.New("UE disconnected")
+	}
+	return ac, nil
+}
+
+func (g *guardedExecutor) SendAction(ctx context.Context, agentID string, decisionEpoch int64, cmd string, params map[string]any) (*protocol.ActionStartedPayload, error) {
+	ac, err := g.validate(agentID, decisionEpoch)
+	if err != nil {
+		return nil, err
+	}
+	ack, err := g.ws.SendAction(ctx, agentID, cmd, params)
+	if err == nil && ack != nil {
+		ac.recordActionStarted(ack.ActionID, cmd, params, decisionEpoch)
+	}
+	return ack, err
+}
+
+func (g *guardedExecutor) RequestScan(ctx context.Context, agentID string, decisionEpoch int64) error {
+	if _, err := g.validate(agentID, decisionEpoch); err != nil {
+		return err
+	}
+	return g.ws.RequestScan(ctx, agentID)
 }
 
 func main() {
@@ -442,37 +560,29 @@ func main() {
 
 	// Per-agent context (Phase 1: single agent, but keyed for multi-NPC).
 	var agentsMu sync.Mutex
+	var nextAgentEpoch int64
 	agents := make(map[string]*agentContext)
-	createAgentLocked := func(id string) *agentContext {
-		a, workerCtx := newAgentContext(ctx)
-		agents[id] = a
-		go runPerceptionWorker(workerCtx, id, a, hc, ws, logger)
-		return a
-	}
-	getAgent := func(id string) *agentContext {
+	lookupAgent := func(id string) *agentContext {
 		agentsMu.Lock()
 		defer agentsMu.Unlock()
-		a, ok := agents[id]
-		if !ok {
-			a = createAgentLocked(id)
-		}
-		return a
+		return agents[id]
 	}
-	// registerAgent returns true if this is the first registration for the
-	// agent_id (a new day → session reset); false if it's a re-registration
-	// after reconnect (restore, don't reset — §4.2).
-	registerAgent := func(id string) bool {
+	registerAgent := func(id string) (*agentContext, bool) {
 		agentsMu.Lock()
 		defer agentsMu.Unlock()
-		if _, ok := agents[id]; ok {
-			return false
+		if ac, ok := agents[id]; ok {
+			return ac, false // reconnect: preserve current lifecycle and session
 		}
-		createAgentLocked(id)
-		return true
+		nextAgentEpoch++
+		ac, workerCtx := newAgentContext(ctx, nextAgentEpoch)
+		agents[id] = ac
+		go runPerceptionWorker(workerCtx, id, ac, hc, ws, logger)
+		return ac, true
 	}
 
-	// Register all tools. They call ws.SendAction/RequestScan.
-	tools.RegisterAll(server, ws, logger)
+	// All tools pass through the online/decision-epoch guard before WS send.
+	executor := &guardedExecutor{ws: ws, lookup: lookupAgent}
+	tools.RegisterAll(server, executor, logger)
 
 	// ─── Wire inbound message handler ──────────────────────────
 	ws.SetMessageHandler(func(_ context.Context, msgType, agentID string, payload json.RawMessage) {
@@ -481,11 +591,14 @@ func main() {
 			// First registration = new day → reset Hermes session.
 			// Re-registration after reconnect = restore, keep the session
 			// (§4.2: match by agent_id, don't wipe Agent Mind state).
-			if registerAgent(agentID) {
+			ac, isNew := registerAgent(agentID)
+			if isNew {
 				hc.ResetSession()
-				logger.Info("agent_registered (new day)", "agent_id", agentID, "payload", string(payload))
+				logger.Info("agent_registered (new day)", "agent_id", agentID,
+					"agent_epoch", ac.agentEpoch, "payload", string(payload))
 			} else {
-				logger.Info("agent_registered (reconnect, session kept)", "agent_id", agentID)
+				logger.Info("agent_registered (reconnect, session kept)", "agent_id", agentID,
+					"agent_epoch", ac.agentEpoch)
 			}
 
 		case protocol.TypeAgentUnregistered:
@@ -507,7 +620,12 @@ func main() {
 				logger.Warn("state_report parse failed", "err", err)
 				return
 			}
-			reasons := getAgent(agentID).updateState(sr)
+			ac := lookupAgent(agentID)
+			if ac == nil {
+				logger.Warn("state_report dropped for unregistered agent", "agent_id", agentID)
+				return
+			}
+			reasons := ac.updateState(sr)
 			logger.Info("state_report", "agent_id", agentID,
 				"energy", sr.PhysicalState.Energy, "fatigue", sr.PhysicalState.Fatigue,
 				"joint_wear", sr.PhysicalState.JointWear, "health", sr.PhysicalState.Health,
@@ -519,7 +637,12 @@ func main() {
 				logger.Warn("action_completed parse failed", "err", err)
 				return
 			}
-			queued := getAgent(agentID).recordActionCompletion(completed)
+			ac := lookupAgent(agentID)
+			if ac == nil {
+				logger.Warn("action_completed dropped for unregistered agent", "agent_id", agentID)
+				return
+			}
+			queued := ac.recordActionCompletion(completed)
 			logger.Info("action_completed", "agent_id", agentID,
 				"action_id", completed.ActionID, "result", completed.Result,
 				"progress", completed.Progress, "decision_queued", queued)
@@ -530,7 +653,12 @@ func main() {
 				logger.Warn("event_notification parse failed", "err", err)
 				return
 			}
-			queued := getAgent(agentID).recordEventNotification(event)
+			ac := lookupAgent(agentID)
+			if ac == nil {
+				logger.Warn("event_notification dropped for unregistered agent", "agent_id", agentID)
+				return
+			}
+			queued := ac.recordEventNotification(event)
 			logger.Info("event_notification", "agent_id", agentID,
 				"event_id", event.EventID, "perception_level", event.PerceptionLevel,
 				"decision_queued", queued)
@@ -539,7 +667,11 @@ func main() {
 			logger.Warn("error from mock ue", "agent_id", agentID, "payload", string(payload))
 
 		case protocol.TypePerceptionUpdate:
-			ac := getAgent(agentID)
+			ac := lookupAgent(agentID)
+			if ac == nil {
+				logger.Warn("perception_update dropped for unregistered agent", "agent_id", agentID)
+				return
+			}
 			reasons, replaced, err := ac.observePerception(payload)
 			if err != nil {
 				logger.Warn("perception_update parse failed", "agent_id", agentID, "err", err)
@@ -607,5 +739,5 @@ func runStdio(ctx context.Context, logger *slog.Logger, server *mcp.Server) {
 	}
 }
 
-// ensure ws satisfies the tools.Executor interface at compile time.
-var _ tools.Executor = (*wsserver.Server)(nil)
+// Ensure the guarded adapter satisfies the tools.Executor interface.
+var _ tools.Executor = (*guardedExecutor)(nil)

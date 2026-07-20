@@ -17,51 +17,59 @@ import (
 
 // MoveToInput — atomic: move to a semantic target.
 type MoveToInput struct {
-	AgentID string `json:"agent_id" jsonschema:"the NPC's id"`
-	Target  string `json:"target"   jsonschema:"semantic destination: zone id or location id, e.g. main_workshop, workbench_01"`
+	AgentID       string `json:"agent_id" jsonschema:"the NPC's id"`
+	DecisionEpoch int64  `json:"decision_epoch" jsonschema:"required epoch from the current decision_context"`
+	Target        string `json:"target"   jsonschema:"semantic destination: zone id or location id, e.g. main_workshop, workbench_01"`
 }
 
 // TurnToInput — atomic: face a target.
 type TurnToInput struct {
-	AgentID string `json:"agent_id" jsonschema:"the NPC's id"`
-	Target  string `json:"target"   jsonschema:"entity id to face"`
+	AgentID       string `json:"agent_id" jsonschema:"the NPC's id"`
+	DecisionEpoch int64  `json:"decision_epoch" jsonschema:"required epoch from the current decision_context"`
+	Target        string `json:"target"   jsonschema:"entity id to face"`
 }
 
 // SpeakInput — atomic: say something.
 type SpeakInput struct {
-	AgentID string `json:"agent_id" jsonschema:"the NPC's id"`
-	Content string `json:"content"  jsonschema:"what to say"`
-	Target  string `json:"target,omitempty" jsonschema:"target agent id (empty = to nearby)"`
+	AgentID       string `json:"agent_id" jsonschema:"the NPC's id"`
+	DecisionEpoch int64  `json:"decision_epoch" jsonschema:"required epoch from the current decision_context"`
+	Content       string `json:"content"  jsonschema:"what to say"`
+	Target        string `json:"target,omitempty" jsonschema:"target agent id (empty = to nearby)"`
 }
 
 // EmoteInput — atomic: express an emotion.
 type EmoteInput struct {
-	AgentID string `json:"agent_id" jsonschema:"the NPC's id"`
-	Emotion string `json:"emotion"  jsonschema:"emotion: happy|sad|worried|..."`
-	Mode    string `json:"mode,omitempty" jsonschema:"oneshot (play once) or sustained (hold until changed); default oneshot"`
+	AgentID       string `json:"agent_id" jsonschema:"the NPC's id"`
+	DecisionEpoch int64  `json:"decision_epoch" jsonschema:"required epoch from the current decision_context"`
+	Emotion       string `json:"emotion"  jsonschema:"emotion: happy|sad|worried|..."`
+	Mode          string `json:"mode,omitempty" jsonschema:"oneshot (play once) or sustained (hold until changed); default oneshot"`
 }
 
 // InteractInput — atomic: interact with a smart object.
 type InteractInput struct {
-	AgentID  string `json:"agent_id"  jsonschema:"the NPC's id"`
-	ObjectID string `json:"object_id" jsonschema:"smart object id, e.g. workbench_01"`
-	Action   string `json:"action"    jsonschema:"verb from the object's available_actions"`
+	AgentID       string `json:"agent_id" jsonschema:"the NPC's id"`
+	DecisionEpoch int64  `json:"decision_epoch" jsonschema:"required epoch from the current decision_context"`
+	ObjectID      string `json:"object_id" jsonschema:"smart object id, e.g. workbench_01"`
+	Action        string `json:"action"    jsonschema:"verb from the object's available_actions"`
 }
 
 // WaitInput — atomic: wait in place.
 type WaitInput struct {
-	AgentID     string  `json:"agent_id"     jsonschema:"the NPC's id"`
-	DurationSec float64 `json:"duration_sec" jsonschema:"wait duration in seconds"`
+	AgentID       string  `json:"agent_id" jsonschema:"the NPC's id"`
+	DecisionEpoch int64   `json:"decision_epoch" jsonschema:"required epoch from the current decision_context"`
+	DurationSec   float64 `json:"duration_sec" jsonschema:"wait duration in seconds"`
 }
 
 // ScanAreaInput — atomic: request an immediate perception snapshot.
 type ScanAreaInput struct {
-	AgentID string `json:"agent_id" jsonschema:"the NPC's id"`
+	AgentID       string `json:"agent_id" jsonschema:"the NPC's id"`
+	DecisionEpoch int64  `json:"decision_epoch" jsonschema:"required epoch from the current decision_context"`
 }
 
 // StopInput — atomic: stop the current action.
 type StopInput struct {
-	AgentID string `json:"agent_id" jsonschema:"the NPC's id"`
+	AgentID       string `json:"agent_id" jsonschema:"the NPC's id"`
+	DecisionEpoch int64  `json:"decision_epoch" jsonschema:"required epoch from the current decision_context"`
 }
 
 // registerAtomic installs the atomic-behavior tools.
@@ -75,14 +83,14 @@ func registerAtomic(s *mcp.Server, ex Executor, logger *slog.Logger) {
 			return nil, ackResult{}, fmt.Errorf("agent_id and target are required")
 		}
 		logToolCall("move_to", in)
-		ack, err := ex.SendAction(ctx, in.AgentID, protocol.CmdMoveTo, map[string]any{
+		ack, err := ex.SendAction(ctx, in.AgentID, in.DecisionEpoch, protocol.CmdMoveTo, map[string]any{
 			"target": in.Target,
 			"speed":  "walk",
 		})
 		if err != nil {
 			return nil, ackResult{}, fmt.Errorf("move_to: %w", err)
 		}
-		return nil, buildAckResult(ack), nil
+		return nil, buildAckResult(ack, in.DecisionEpoch), nil
 	})
 
 	// turn_to → TurnTo
@@ -94,13 +102,13 @@ func registerAtomic(s *mcp.Server, ex Executor, logger *slog.Logger) {
 			return nil, ackResult{}, fmt.Errorf("agent_id and target are required")
 		}
 		logToolCall("turn_to", in)
-		ack, err := ex.SendAction(ctx, in.AgentID, protocol.CmdTurnTo, map[string]any{
+		ack, err := ex.SendAction(ctx, in.AgentID, in.DecisionEpoch, protocol.CmdTurnTo, map[string]any{
 			"target": in.Target,
 		})
 		if err != nil {
 			return nil, ackResult{}, fmt.Errorf("turn_to: %w", err)
 		}
-		return nil, buildAckResult(ack), nil
+		return nil, buildAckResult(ack, in.DecisionEpoch), nil
 	})
 
 	// speak → Speak
@@ -112,7 +120,7 @@ func registerAtomic(s *mcp.Server, ex Executor, logger *slog.Logger) {
 			return nil, ackResult{}, fmt.Errorf("agent_id and content are required")
 		}
 		logToolCall("speak", in)
-		ack, err := ex.SendAction(ctx, in.AgentID, protocol.CmdSpeak, map[string]any{
+		ack, err := ex.SendAction(ctx, in.AgentID, in.DecisionEpoch, protocol.CmdSpeak, map[string]any{
 			"content":   in.Content,
 			"target":    in.Target,
 			"audio_url": nil,
@@ -120,7 +128,7 @@ func registerAtomic(s *mcp.Server, ex Executor, logger *slog.Logger) {
 		if err != nil {
 			return nil, ackResult{}, fmt.Errorf("speak: %w", err)
 		}
-		return nil, buildAckResult(ack), nil
+		return nil, buildAckResult(ack, in.DecisionEpoch), nil
 	})
 
 	// emote → Emote
@@ -136,14 +144,14 @@ func registerAtomic(s *mcp.Server, ex Executor, logger *slog.Logger) {
 			mode = "oneshot"
 		}
 		logToolCall("emote", in)
-		ack, err := ex.SendAction(ctx, in.AgentID, protocol.CmdEmote, map[string]any{
+		ack, err := ex.SendAction(ctx, in.AgentID, in.DecisionEpoch, protocol.CmdEmote, map[string]any{
 			"emotion": in.Emotion,
 			"mode":    mode,
 		})
 		if err != nil {
 			return nil, ackResult{}, fmt.Errorf("emote: %w", err)
 		}
-		return nil, buildAckResult(ack), nil
+		return nil, buildAckResult(ack, in.DecisionEpoch), nil
 	})
 
 	// interact → InteractSmartObject
@@ -155,14 +163,14 @@ func registerAtomic(s *mcp.Server, ex Executor, logger *slog.Logger) {
 			return nil, ackResult{}, fmt.Errorf("agent_id, object_id and action are required")
 		}
 		logToolCall("interact", in)
-		ack, err := ex.SendAction(ctx, in.AgentID, protocol.CmdInteractSmartObject, map[string]any{
+		ack, err := ex.SendAction(ctx, in.AgentID, in.DecisionEpoch, protocol.CmdInteractSmartObject, map[string]any{
 			"object_id": in.ObjectID,
 			"action":    in.Action,
 		})
 		if err != nil {
 			return nil, ackResult{}, fmt.Errorf("interact: %w", err)
 		}
-		return nil, buildAckResult(ack), nil
+		return nil, buildAckResult(ack, in.DecisionEpoch), nil
 	})
 
 	// wait → Wait
@@ -177,13 +185,13 @@ func registerAtomic(s *mcp.Server, ex Executor, logger *slog.Logger) {
 			return nil, ackResult{}, fmt.Errorf("duration_sec must be positive")
 		}
 		logToolCall("wait", in)
-		ack, err := ex.SendAction(ctx, in.AgentID, protocol.CmdWait, map[string]any{
+		ack, err := ex.SendAction(ctx, in.AgentID, in.DecisionEpoch, protocol.CmdWait, map[string]any{
 			"duration_sec": in.DurationSec,
 		})
 		if err != nil {
 			return nil, ackResult{}, fmt.Errorf("wait: %w", err)
 		}
-		return nil, buildAckResult(ack), nil
+		return nil, buildAckResult(ack, in.DecisionEpoch), nil
 	})
 
 	// scan_area → immediate perception request (not a cmd)
@@ -195,10 +203,10 @@ func registerAtomic(s *mcp.Server, ex Executor, logger *slog.Logger) {
 			return nil, ackResult{}, fmt.Errorf("agent_id is required")
 		}
 		logToolCall("scan_area", in)
-		if err := ex.RequestScan(ctx, in.AgentID); err != nil {
+		if err := ex.RequestScan(ctx, in.AgentID, in.DecisionEpoch); err != nil {
 			return nil, ackResult{}, fmt.Errorf("scan_area: %w", err)
 		}
-		return nil, ackResult{OK: true, Message: "perception requested"}, nil
+		return nil, ackResult{OK: true, DecisionEpoch: in.DecisionEpoch, Message: "perception requested"}, nil
 	})
 
 	// stop → Stop
@@ -210,10 +218,10 @@ func registerAtomic(s *mcp.Server, ex Executor, logger *slog.Logger) {
 			return nil, ackResult{}, fmt.Errorf("agent_id is required")
 		}
 		logToolCall("stop", in)
-		ack, err := ex.SendAction(ctx, in.AgentID, protocol.CmdStop, map[string]any{})
+		ack, err := ex.SendAction(ctx, in.AgentID, in.DecisionEpoch, protocol.CmdStop, map[string]any{})
 		if err != nil {
 			return nil, ackResult{}, fmt.Errorf("stop: %w", err)
 		}
-		return nil, buildAckResult(ack), nil
+		return nil, buildAckResult(ack, in.DecisionEpoch), nil
 	})
 }

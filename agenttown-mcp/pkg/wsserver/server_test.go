@@ -132,6 +132,30 @@ func TestReplayFrom_Rollover(t *testing.T) {
 	}
 }
 
+func TestDeliverACK_RejectsWrongAgent(t *testing.T) {
+	s := newTestServer()
+	ch := make(chan *pendingResult, 1)
+	s.pending["act_1"] = &pendingCall{agentID: "H-01", ch: ch}
+	ack := &protocol.ActionStartedPayload{ActionID: "act_1", Accepted: true}
+
+	s.deliverACK("H-02", ack)
+	select {
+	case <-ch:
+		t.Fatal("ACK from wrong agent was delivered")
+	default:
+	}
+
+	s.deliverACK("H-01", ack)
+	select {
+	case got := <-ch:
+		if got.started.ActionID != "act_1" {
+			t.Fatalf("wrong ACK delivered: %+v", got.started)
+		}
+	default:
+		t.Fatal("ACK from expected agent was not delivered")
+	}
+}
+
 // TestObserveInboundSeq verifies only-increasing tracking.
 func TestObserveInboundSeq(t *testing.T) {
 	s := newTestServer()

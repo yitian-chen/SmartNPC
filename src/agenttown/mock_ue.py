@@ -69,6 +69,7 @@ RESULT_INTERRUPTED = "interrupted"
 # error codes
 ERR_STOP_ID_MISMATCH = "STOP_ID_MISMATCH"
 ERR_ACTION_FAILED = "ACTION_FAILED"
+ERR_UNKNOWN_AGENT = "UNKNOWN_AGENT"
 
 # ─── World geometry (UE5 centimeters; small sim coords ×100) ────
 SCALE = 100.0  # convert legacy small coords to cm
@@ -435,6 +436,17 @@ class MockUE:
         msg_type = env.get("type", "")
         payload = env.get("payload", {}) or {}
         seq = env.get("seq", 0)
+        target_agent = env.get("agent_id", "")
+
+        agent_commands = {TYPE_ACTION_COMMAND, TYPE_STOP_ACTION, TYPE_SCAN_AREA, TYPE_NARRATIVE}
+        if msg_type in agent_commands and target_agent != self.npc.agent_id:
+            logger.warning(f"[MCP→UE] rejected {msg_type} for unknown agent={target_agent}")
+            await self._send_error(
+                ERR_UNKNOWN_AGENT,
+                "message agent_id does not match this actor",
+                context={"requested": target_agent, "current": self.npc.agent_id},
+            )
+            return
 
         # Track highest inbound seq for reconnect replay (约定11); resync/
         # event_lost are control messages and don't advance it.

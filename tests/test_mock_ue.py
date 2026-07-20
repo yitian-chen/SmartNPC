@@ -39,5 +39,30 @@ class ScenarioInjectionTests(unittest.TestCase):
         self.assertEqual(second["audible_events"], [])
 
 
+class AgentRoutingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_command_for_other_agent_is_rejected(self):
+        class FakeWS:
+            def __init__(self):
+                self.sent = []
+
+            async def send(self, frame):
+                self.sent.append(frame)
+
+        ue = MockUE(log_dir="logs")
+        ue._ws = FakeWS()
+        await ue._handle_envelope({
+            "type": "action_command",
+            "agent_id": "H-99",
+            "seq": 1,
+            "payload": {"action_id": "act_wrong", "cmd": "Wait", "params": {"duration_sec": 1}},
+        })
+        self.assertEqual(len(ue._ws.sent), 1)
+        import json
+        response = json.loads(ue._ws.sent[0])
+        self.assertEqual(response["type"], "error")
+        self.assertEqual(response["payload"]["error_code"], "UNKNOWN_AGENT")
+        self.assertEqual(ue.action_log, [])
+
+
 if __name__ == "__main__":
     unittest.main()

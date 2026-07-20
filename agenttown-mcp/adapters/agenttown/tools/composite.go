@@ -18,46 +18,53 @@ const secondsPerMinute = 60
 
 // WorkAssembleInput — composite: assemble at a workbench.
 type WorkAssembleInput struct {
-	AgentID     string  `json:"agent_id"     jsonschema:"the NPC's id, e.g. \"H-01\""`
-	Target      string  `json:"target"       jsonschema:"workbench id, e.g. workbench_01"`
-	DurationMin float64 `json:"duration_min" jsonschema:"work duration in minutes"`
+	AgentID       string  `json:"agent_id" jsonschema:"the NPC's id, e.g. \"H-01\""`
+	DecisionEpoch int64   `json:"decision_epoch" jsonschema:"required epoch from the current decision_context"`
+	Target        string  `json:"target"       jsonschema:"workbench id, e.g. workbench_01"`
+	DurationMin   float64 `json:"duration_min" jsonschema:"work duration in minutes"`
 }
 
 // PatrolRouteInput — composite: patrol a named route.
 type PatrolRouteInput struct {
-	AgentID string `json:"agent_id" jsonschema:"the NPC's id"`
-	RouteID string `json:"route_id" jsonschema:"route id to patrol"`
+	AgentID       string `json:"agent_id" jsonschema:"the NPC's id"`
+	DecisionEpoch int64  `json:"decision_epoch" jsonschema:"required epoch from the current decision_context"`
+	RouteID       string `json:"route_id" jsonschema:"route id to patrol"`
 }
 
 // ChargeAtInput — composite: charge at a station.
 type ChargeAtInput struct {
-	AgentID     string  `json:"agent_id"     jsonschema:"the NPC's id"`
-	StationID   string  `json:"station_id"   jsonschema:"charging station id, e.g. charging_station_01"`
-	DurationMin float64 `json:"duration_min" jsonschema:"charge duration in minutes"`
+	AgentID       string  `json:"agent_id" jsonschema:"the NPC's id"`
+	DecisionEpoch int64   `json:"decision_epoch" jsonschema:"required epoch from the current decision_context"`
+	StationID     string  `json:"station_id"   jsonschema:"charging station id, e.g. charging_station_01"`
+	DurationMin   float64 `json:"duration_min" jsonschema:"charge duration in minutes"`
 }
 
 // RepairTargetInput — composite: repair another agent.
 type RepairTargetInput struct {
-	AgentID       string `json:"agent_id"        jsonschema:"the NPC's id"`
+	AgentID       string `json:"agent_id" jsonschema:"the NPC's id"`
+	DecisionEpoch int64  `json:"decision_epoch" jsonschema:"required epoch from the current decision_context"`
 	TargetAgentID string `json:"target_agent_id" jsonschema:"the agent to repair"`
 }
 
 // SocialChatWithInput — composite: chat with another agent.
 type SocialChatWithInput struct {
-	AgentID       string `json:"agent_id"        jsonschema:"the NPC's id"`
+	AgentID       string `json:"agent_id" jsonschema:"the NPC's id"`
+	DecisionEpoch int64  `json:"decision_epoch" jsonschema:"required epoch from the current decision_context"`
 	TargetAgentID string `json:"target_agent_id" jsonschema:"the agent to chat with"`
 }
 
 // RestIdleInput — composite: rest/idle for a while.
 type RestIdleInput struct {
-	AgentID     string  `json:"agent_id"     jsonschema:"the NPC's id"`
-	DurationMin float64 `json:"duration_min" jsonschema:"rest duration in minutes"`
+	AgentID       string  `json:"agent_id" jsonschema:"the NPC's id"`
+	DecisionEpoch int64   `json:"decision_epoch" jsonschema:"required epoch from the current decision_context"`
+	DurationMin   float64 `json:"duration_min" jsonschema:"rest duration in minutes"`
 }
 
 // ArchiveResearchInput — composite: do archive research.
 type ArchiveResearchInput struct {
-	AgentID     string  `json:"agent_id"     jsonschema:"the NPC's id"`
-	DurationMin float64 `json:"duration_min" jsonschema:"research duration in minutes"`
+	AgentID       string  `json:"agent_id" jsonschema:"the NPC's id"`
+	DecisionEpoch int64   `json:"decision_epoch" jsonschema:"required epoch from the current decision_context"`
+	DurationMin   float64 `json:"duration_min" jsonschema:"research duration in minutes"`
 }
 
 // registerComposite installs the composite-behavior tools.
@@ -71,7 +78,7 @@ func registerComposite(s *mcp.Server, ex Executor, logger *slog.Logger) {
 			return nil, ackResult{}, fmt.Errorf("agent_id and target are required")
 		}
 		logToolCall("work_assemble", in)
-		ack, err := ex.SendAction(ctx, in.AgentID, protocol.CmdExecuteComposite, map[string]any{
+		ack, err := ex.SendAction(ctx, in.AgentID, in.DecisionEpoch, protocol.CmdExecuteComposite, map[string]any{
 			"name":         "work_assemble",
 			"target":       in.Target,
 			"duration_sec": in.DurationMin * secondsPerMinute,
@@ -79,7 +86,7 @@ func registerComposite(s *mcp.Server, ex Executor, logger *slog.Logger) {
 		if err != nil {
 			return nil, ackResult{}, fmt.Errorf("work_assemble: %w", err)
 		}
-		return nil, buildAckResult(ack), nil
+		return nil, buildAckResult(ack, in.DecisionEpoch), nil
 	})
 
 	// patrol_route
@@ -91,14 +98,14 @@ func registerComposite(s *mcp.Server, ex Executor, logger *slog.Logger) {
 			return nil, ackResult{}, fmt.Errorf("agent_id and route_id are required")
 		}
 		logToolCall("patrol_route", in)
-		ack, err := ex.SendAction(ctx, in.AgentID, protocol.CmdExecuteComposite, map[string]any{
+		ack, err := ex.SendAction(ctx, in.AgentID, in.DecisionEpoch, protocol.CmdExecuteComposite, map[string]any{
 			"name":     "patrol_route",
 			"route_id": in.RouteID,
 		})
 		if err != nil {
 			return nil, ackResult{}, fmt.Errorf("patrol_route: %w", err)
 		}
-		return nil, buildAckResult(ack), nil
+		return nil, buildAckResult(ack, in.DecisionEpoch), nil
 	})
 
 	// charge_at
@@ -110,7 +117,7 @@ func registerComposite(s *mcp.Server, ex Executor, logger *slog.Logger) {
 			return nil, ackResult{}, fmt.Errorf("agent_id and station_id are required")
 		}
 		logToolCall("charge_at", in)
-		ack, err := ex.SendAction(ctx, in.AgentID, protocol.CmdExecuteComposite, map[string]any{
+		ack, err := ex.SendAction(ctx, in.AgentID, in.DecisionEpoch, protocol.CmdExecuteComposite, map[string]any{
 			"name":         "charge_at",
 			"station_id":   in.StationID,
 			"duration_sec": in.DurationMin * secondsPerMinute,
@@ -118,7 +125,7 @@ func registerComposite(s *mcp.Server, ex Executor, logger *slog.Logger) {
 		if err != nil {
 			return nil, ackResult{}, fmt.Errorf("charge_at: %w", err)
 		}
-		return nil, buildAckResult(ack), nil
+		return nil, buildAckResult(ack, in.DecisionEpoch), nil
 	})
 
 	// repair_target
@@ -130,14 +137,14 @@ func registerComposite(s *mcp.Server, ex Executor, logger *slog.Logger) {
 			return nil, ackResult{}, fmt.Errorf("agent_id and target_agent_id are required")
 		}
 		logToolCall("repair_target", in)
-		ack, err := ex.SendAction(ctx, in.AgentID, protocol.CmdExecuteComposite, map[string]any{
+		ack, err := ex.SendAction(ctx, in.AgentID, in.DecisionEpoch, protocol.CmdExecuteComposite, map[string]any{
 			"name":            "repair_target",
 			"target_agent_id": in.TargetAgentID,
 		})
 		if err != nil {
 			return nil, ackResult{}, fmt.Errorf("repair_target: %w", err)
 		}
-		return nil, buildAckResult(ack), nil
+		return nil, buildAckResult(ack, in.DecisionEpoch), nil
 	})
 
 	// social_chat_with
@@ -149,14 +156,14 @@ func registerComposite(s *mcp.Server, ex Executor, logger *slog.Logger) {
 			return nil, ackResult{}, fmt.Errorf("agent_id and target_agent_id are required")
 		}
 		logToolCall("social_chat_with", in)
-		ack, err := ex.SendAction(ctx, in.AgentID, protocol.CmdExecuteComposite, map[string]any{
+		ack, err := ex.SendAction(ctx, in.AgentID, in.DecisionEpoch, protocol.CmdExecuteComposite, map[string]any{
 			"name":            "social_chat_with",
 			"target_agent_id": in.TargetAgentID,
 		})
 		if err != nil {
 			return nil, ackResult{}, fmt.Errorf("social_chat_with: %w", err)
 		}
-		return nil, buildAckResult(ack), nil
+		return nil, buildAckResult(ack, in.DecisionEpoch), nil
 	})
 
 	// rest_idle
@@ -168,14 +175,14 @@ func registerComposite(s *mcp.Server, ex Executor, logger *slog.Logger) {
 			return nil, ackResult{}, fmt.Errorf("agent_id is required")
 		}
 		logToolCall("rest_idle", in)
-		ack, err := ex.SendAction(ctx, in.AgentID, protocol.CmdExecuteComposite, map[string]any{
+		ack, err := ex.SendAction(ctx, in.AgentID, in.DecisionEpoch, protocol.CmdExecuteComposite, map[string]any{
 			"name":         "rest_idle",
 			"duration_sec": in.DurationMin * secondsPerMinute,
 		})
 		if err != nil {
 			return nil, ackResult{}, fmt.Errorf("rest_idle: %w", err)
 		}
-		return nil, buildAckResult(ack), nil
+		return nil, buildAckResult(ack, in.DecisionEpoch), nil
 	})
 
 	// archive_research
@@ -187,13 +194,13 @@ func registerComposite(s *mcp.Server, ex Executor, logger *slog.Logger) {
 			return nil, ackResult{}, fmt.Errorf("agent_id is required")
 		}
 		logToolCall("archive_research", in)
-		ack, err := ex.SendAction(ctx, in.AgentID, protocol.CmdExecuteComposite, map[string]any{
+		ack, err := ex.SendAction(ctx, in.AgentID, in.DecisionEpoch, protocol.CmdExecuteComposite, map[string]any{
 			"name":         "archive_research",
 			"duration_sec": in.DurationMin * secondsPerMinute,
 		})
 		if err != nil {
 			return nil, ackResult{}, fmt.Errorf("archive_research: %w", err)
 		}
-		return nil, buildAckResult(ack), nil
+		return nil, buildAckResult(ack, in.DecisionEpoch), nil
 	})
 }

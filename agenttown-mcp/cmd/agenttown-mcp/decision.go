@@ -42,10 +42,13 @@ type keyedValue struct {
 }
 
 type localActionSummary struct {
-	ActionID   string  `json:"action_id"`
-	Result     string  `json:"result"`
-	DurationMs int64   `json:"duration_ms"`
-	Progress   float64 `json:"progress"`
+	ActionID      string  `json:"action_id"`
+	Cmd           string  `json:"cmd,omitempty"`
+	Params        string  `json:"params,omitempty"`
+	DecisionEpoch int64   `json:"decision_epoch,omitempty"`
+	Result        string  `json:"result"`
+	DurationMs    int64   `json:"duration_ms"`
+	Progress      float64 `json:"progress"`
 }
 
 type localStateSummary struct {

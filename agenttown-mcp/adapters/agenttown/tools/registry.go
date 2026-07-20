@@ -27,12 +27,12 @@ import (
 type Executor interface {
 	// SendAction sends an action_command (cmd + params) for the given agent
 	// and waits for the action_started ACK. Returns the ACK.
-	SendAction(ctx context.Context, agentID, cmd string, params map[string]any) (*protocol.ActionStartedPayload, error)
+	SendAction(ctx context.Context, agentID string, decisionEpoch int64, cmd string, params map[string]any) (*protocol.ActionStartedPayload, error)
 
 	// RequestScan asks Mock UE to emit an immediate perception_update for
 	// the given agent (backs the scan_area tool). Returns after the request
 	// is sent.
-	RequestScan(ctx context.Context, agentID string) error
+	RequestScan(ctx context.Context, agentID string, decisionEpoch int64) error
 }
 
 // RegisterAll installs all AgentTown tools onto the given mcp.Server.
@@ -51,14 +51,15 @@ func RegisterAll(s *mcp.Server, ex Executor, logger *slog.Logger) {
 // completion arrives later via perception.
 type ackResult struct {
 	OK                   bool     `json:"ok"                     jsonschema:"true if the action was accepted by UE"`
+	DecisionEpoch        int64    `json:"decision_epoch"         jsonschema:"decision epoch accepted by MCP"`
 	ActionID             string   `json:"action_id"              jsonschema:"the action's unique id"`
 	EstimatedDurationSec *float64 `json:"estimated_duration_sec" jsonschema:"UE's estimate of how long the action takes (seconds)"`
 	Message              string   `json:"message,omitempty"      jsonschema:"human-readable status"`
 }
 
 // buildAckResult constructs the standard output from an ACK.
-func buildAckResult(ack *protocol.ActionStartedPayload) ackResult {
-	r := ackResult{OK: true}
+func buildAckResult(ack *protocol.ActionStartedPayload, decisionEpoch int64) ackResult {
+	r := ackResult{OK: true, DecisionEpoch: decisionEpoch}
 	if ack != nil {
 		r.ActionID = ack.ActionID
 		r.EstimatedDurationSec = ack.EstimatedDurationSec
