@@ -70,10 +70,12 @@ sequenceDiagram
 ### 一键启动
 
 ```bash
-bash start.sh                    # 全部重启 + 完整一天 (06:00-22:00)
-bash start.sh --quick            # 快速测试 (06:00-10:00, 600x 加速)
-bash start.sh --start 6 --end 12 --speed 600 --interval 15  # 自定义参数
-SKIP_MCP_BUILD=1 bash start.sh   # 跳过 Go 编译，用已有二进制
+bash start.sh normal             # 完整日：06:00-22:00, 300x
+bash start.sh behavior           # 行为联调：06:00-18:00, 60x, 场景事件
+bash start.sh quick-smoke        # 协议烟测：06:00-10:00, 600x
+bash start.sh --quick            # quick-smoke 兼容别名
+bash start.sh behavior --speed 100 --end 12  # 模式参数覆盖
+SKIP_MCP_BUILD=1 bash start.sh normal        # 跳过 Go 编译
 ```
 
 `start.sh` 执行顺序：**先停全部 → 编译+部署 MCP → 启动 MCP → 启动 Hermes → 启动 Mock UE → 仿真结束后合并日志**。每步健康检查通过才继续。
@@ -206,7 +208,7 @@ energy / fatigue / joint_wear / health，通过 `state_report` 权威通道上�
 
 ## MCP 工具
 
-所有工具在 `agenttown-mcp/adapters/agenttown/tools/`，15 个工具全部以 `agent_id` 为第一参数。Hermes 侧工具名为 `mcp__agenttown__<tool_name>`（双下划线）。
+所有工具在 `agenttown-mcp/adapters/agenttown/tools/`。15 个工具均以 `agent_id` 为第一参数、`decision_epoch` 为第二个必填参数。Hermes 侧工具名为 `mcp__agenttown__<tool_name>`（双下划线）。
 
 ### 复合行为工具（→ `ExecuteComposite` cmd）
 
@@ -238,7 +240,7 @@ energy / fatigue / joint_wear / health，通过 `state_report` 权威通道上�
 ### 新增工具硬约束
 
 - 命名 `<verb>` 或 `<verb>_<noun>`，全小写下划线
-- `agent_id` 为第一参数
+- `agent_id` 为第一参数，`decision_epoch` 为第二个必填参数
 - Input/Output struct 带 `json` + `jsonschema` tag
 - Output 首字段 `OK bool`
 - Handler 第一个返回值传 `nil`，让 SDK 用 Output 填充 content
@@ -294,11 +296,21 @@ sequenceDiagram
 - 缓冲滚动丢失则发 `event_lost` 告警
 - MCP 侧：首次 `agent_registered` 触发 Hermes 会话重置，重连再注册保留会话
 
+### 事件驱动决策与 epoch
+
+- 所有 perception 都更新最新世界缓存，但只有首次感知、动作完成、任务生命周期、关键环境变化、场景事件或物理警戒带变化才调用 Hermes
+- 纯时间变化、相同 scan_area、busy progress 普通变化不触发决策
+- Hermes 在途时合并触发原因，并只保留最新世界快照
+- 每次实际决策生成单调递增 `decision_epoch`；全部 15 个工具必须携带当前 `[decision_context]` 中的 epoch
+- guarded executor 在发送 UE 前校验 Agent 已注册、在线、decision_epoch 当前有效且 WebSocket 已连接
+- `agent_unregistered` 立即失效当前决策；迟到工具调用被拒绝
+
 ### Hermes 会话管理
 
 - `hermes.Client` 通过 `previous_response_id` 链式维护会话
 - 每天首次 `agent_registered` 触发 `ResetSession()`，开启新会话
-- token 超 50K 阈值时自动摘要重置（`summarizeAndReset`）
+- token 超 50K 时立即断链并保存本地结构化摘要；不再额外调用 LLM 摘要
+- 本地摘要只含时间位置、物理状态、当前任务、最近动作和环境事件，不保存 Hermes 叙事
 - **上游错误检测**：Hermes 将上游 LLM API 错误（如 HTTP 400 empty tool_calls）包装为 200 响应返回。MCP 检测 `tokens=0` + narrative 以 `HTTP 4`/`HTTP 5` 开头时，清空 `prevResponseID` 断链，返回 `ErrUpstreamError`，下一轮以全新会话开始
 
 ### 感知格式化

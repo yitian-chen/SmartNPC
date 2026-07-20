@@ -55,31 +55,50 @@ else
     DOCKER_ENV_FILE="$PROJECT_DIR/.env"
 fi
 
-MOCK_START=6
-MOCK_END=22
-MOCK_SPEED=300
-MOCK_INTERVAL=30
-MOCK_SCENARIO=""
+MODE="normal"
+if [[ $# -gt 0 ]]; then
+    case "$1" in
+        normal|behavior|quick-smoke) MODE="$1"; shift ;;
+    esac
+fi
+
+apply_mode() {
+    case "$MODE" in
+        normal)
+            MOCK_START=6; MOCK_END=22; MOCK_SPEED=300; MOCK_INTERVAL=30; MOCK_SCENARIO="" ;;
+        behavior)
+            MOCK_START=6; MOCK_END=18; MOCK_SPEED=60; MOCK_INTERVAL=15
+            MOCK_SCENARIO="$PROJECT_DIR/assets/scenarios_sample.yaml" ;;
+        quick-smoke)
+            MOCK_START=6; MOCK_END=10; MOCK_SPEED=600; MOCK_INTERVAL=30; MOCK_SCENARIO="" ;;
+        *) fail "Unknown mode: $MODE" ;;
+    esac
+}
+apply_mode
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --quick)
-            MOCK_START=6; MOCK_END=10; MOCK_SPEED=600; MOCK_INTERVAL=30
-            shift ;;
+            MODE="quick-smoke"; apply_mode; shift ;;
         --start)    MOCK_START="$2"; shift 2 ;;
         --end)      MOCK_END="$2"; shift 2 ;;
         --speed)    MOCK_SPEED="$2"; shift 2 ;;
         --interval) MOCK_INTERVAL="$2"; shift 2 ;;
         --scenario) MOCK_SCENARIO="$2"; shift 2 ;;
         -h|--help)
-            echo "Usage: bash start.sh [OPTIONS]"
+            echo "Usage: bash start.sh [normal|behavior|quick-smoke] [OPTIONS]"
             echo ""
-            echo "Options:"
-            echo "  --quick         Quick test: 06:00-10:00, speed 600x"
-            echo "  --start HOUR    Start hour (default: 6)"
-            echo "  --end HOUR      End hour (default: 22)"
-            echo "  --speed N       Time acceleration (default: 300)"
-            echo "  --interval MIN  Perception interval in game-min (default: 30)"
+            echo "Modes:"
+            echo "  normal       06:00-22:00, speed 300x, interval 30"
+            echo "  behavior     06:00-18:00, speed 60x, interval 15, sample scenario"
+            echo "  quick-smoke  06:00-10:00, speed 600x, interval 30"
+            echo ""
+            echo "Options (override mode defaults):"
+            echo "  --quick         Compatibility alias for quick-smoke"
+            echo "  --start HOUR    Start hour"
+            echo "  --end HOUR      End hour"
+            echo "  --speed N       Time acceleration"
+            echo "  --interval MIN  Perception interval in game-min"
             echo "  --scenario FILE Scenario injection YAML file"
             exit 0 ;;
         *) warn "Unknown option: $1"; shift ;;
@@ -252,6 +271,7 @@ start_mock_ue() {
     check_hermes   && ok "  Hermes reachable"   || fail "  Hermes unreachable"
 
     local args=(
+        "--mode" "$MODE"
         "--start" "$MOCK_START"
         "--end" "$MOCK_END"
         "--speed" "$MOCK_SPEED"
@@ -262,6 +282,7 @@ start_mock_ue() {
     echo ""
     echo "============================================================"
     echo "  AgentTown_v3 — Day Simulation"
+    echo "  Mode: ${MODE}"
     echo "  Time: ${MOCK_START}:00 - ${MOCK_END}:00 | Speed: ${MOCK_SPEED}x"
     echo "  Perception interval: ${MOCK_INTERVAL} game-min"
     [ -n "$MOCK_SCENARIO" ] && echo "  Scenario: $MOCK_SCENARIO"
@@ -278,7 +299,24 @@ start_mock_ue() {
             fail "Python not found. Install it: sudo apt install python3 python3-pip"
         fi
     fi
-    $py_cmd "$MOCK_UE_SCRIPT" "${args[@]}"
+
+    # Windows Python does not understand MSYS paths reliably when bash was
+    # launched from PowerShell (it may turn /d/... into D:\d\...). Convert
+    # script/scenario paths explicitly before invoking it.
+    local script_arg="$MOCK_UE_SCRIPT"
+    if command -v cygpath &>/dev/null; then
+        script_arg="$(cygpath -w "$MOCK_UE_SCRIPT")"
+        if [ -n "$MOCK_SCENARIO" ]; then
+            local scenario_win
+            scenario_win="$(cygpath -w "$MOCK_SCENARIO")"
+            for i in "${!args[@]}"; do
+                [ "${args[$i]}" = "$MOCK_SCENARIO" ] && args[$i]="$scenario_win"
+            done
+        fi
+    fi
+    if ! "$py_cmd" "$script_arg" "${args[@]}"; then
+        fail "Mock UE simulation failed"
+    fi
 
     # ── Merge Mock UE day log into the unified mcp.log ──────────
     # The Mock UE writes to logs/day1_*.log (Windows-side Python).

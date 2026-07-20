@@ -209,12 +209,14 @@ class MockUE:
     def __init__(
         self,
         mcp_ws_url: str = "ws://localhost:9090/ws",
+        mode: str = "normal",
         time_speed: float = 300.0,
         perception_interval: int = 30,   # game-minutes between perception pushes
         scenario_file: Optional[str] = None,
         log_dir: str = "logs",
     ):
         self.mcp_ws_url = mcp_ws_url
+        self.mode = mode
         self.perception_interval = perception_interval
         self.log_dir = log_dir
 
@@ -689,6 +691,7 @@ class MockUE:
         print(f"  Mock UE — Day {self.time.day} ({start_hour:02d}:00 - {end_hour:02d}:00)")
         print(f"  NPC: {self.npc.name} ({self.npc.agent_id})")
         print(f"  MCP WS: {self.mcp_ws_url}")
+        print(f"  Mode: {self.mode}")
         print(f"  Time speed: {self.time.speed}x | interval: {self.perception_interval} game-min")
         print(f"{'='*60}\n")
 

@@ -29,6 +29,7 @@ from agenttown.mock_ue import MockUE
 async def _run(args):
     mock = MockUE(
         mcp_ws_url=args.mcp_ws,
+        mode=args.mode,
         time_speed=args.speed,
         perception_interval=args.interval,
         scenario_file=args.scenario,
@@ -46,6 +47,8 @@ def main():
     parser = argparse.ArgumentParser(description="AgentTown Mock UE — Run a game day")
     parser.add_argument("--mcp-ws", default="ws://localhost:9090/ws",
                         help="agenttown-mcp WebSocket URL")
+    parser.add_argument("--mode", choices=("normal", "behavior", "quick-smoke"), default="normal",
+                        help="simulation mode label (parameters are supplied separately)")
     parser.add_argument("--speed", type=float, default=60.0,
                         help="Time acceleration (1 real-sec = N game-sec)")
     parser.add_argument("--start", type=int, default=6,
