@@ -202,6 +202,28 @@ class GameTime:
             self.day += 1
 
 
+class _AppendHandler(logging.Handler):
+    """File handler that opens/writes/closes per log entry.
+
+    Unlike logging.FileHandler (which keeps the file handle open), this
+    handler re-opens the file in append mode for each emit() call. This
+    avoids concurrent-write corruption when another process (the MCP via
+    WSL shell redirection) is writing to the same file.
+    """
+
+    def __init__(self, path: str):
+        super().__init__()
+        self._path = path
+
+    def emit(self, record):
+        try:
+            msg = self.format(record)
+            with open(self._path, "a", encoding="utf-8") as f:
+                f.write(msg + "\n")
+        except Exception:
+            self.handleError(record)
+
+
 class MockUE:
     """Async Mock UE client speaking the AgentTown WebSocket protocol."""
 
@@ -823,7 +845,13 @@ class MockUE:
         console.setFormatter(logging.Formatter("[%(levelname)s] %(message)s"))
         console.setLevel(logging.INFO)
         logger.addHandler(console)
+
         logger.info(f"Logging to {log_file}")
+        # The day log file is merged into logs/mcp.log by start.sh after
+        # the simulation finishes — concurrent writes from both the WSL
+        # MCP process and Windows Python corrupt each other due to drvfs
+        # not honouring O_APPEND on /mnt/d volumes.
+        self._day_log_file = log_file
 
     def print_report(self):
         print(f"\n{'='*60}")

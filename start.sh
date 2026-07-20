@@ -185,11 +185,13 @@ start_mcp() {
 
     # 在 WSL 内创建启动脚本（setsid + disown 确保 MCP 进程在 WSL 会话
     # 结束后仍能存活——直接 `wsl bash -c "cmd &"` 会在 wsl 返回时杀掉子进程）
+    # 重要：使用 >> (追加模式) 而非 > (截断模式)，这样 Mock UE (Python, Windows)
+    # 也能以 append 模式写入同一个文件，两个进程的日志不会互相覆盖。
     $WSL_BASH 'cat > ~/start_mcp.sh << "LAUNCHER"
 #!/bin/bash
 pkill -x agenttown-mcp 2>/dev/null
 sleep 1
-setsid /home/yitianchen/agenttown-mcp --http :8760 --ws :9090 --hermes-url http://localhost:8642 > /mnt/d/SmartNPC_v3/logs/mcp.log 2>&1 &
+setsid /home/yitianchen/agenttown-mcp --http :8760 --ws :9090 --hermes-url http://localhost:8642 >> /mnt/d/SmartNPC_v3/logs/mcp.log 2>&1 &
 disown
 sleep 2
 LAUNCHER
@@ -277,6 +279,25 @@ start_mock_ue() {
         fi
     fi
     $py_cmd "$MOCK_UE_SCRIPT" "${args[@]}"
+
+    # ── Merge Mock UE day log into the unified mcp.log ──────────
+    # The Mock UE writes to logs/day1_*.log (Windows-side Python).
+    # The MCP writes to logs/mcp.log (WSL-side Go via shell redirection).
+    # Concurrent writes to the same file corrupt each other (drvfs doesn't
+    # honour O_APPEND), so we merge AFTER the simulation finishes.
+    local latest_day_log
+    latest_day_log=$(ls -t "$PROJECT_DIR/logs/day"*.log 2>/dev/null | head -1)
+    if [ -n "$latest_day_log" ] && [ -f "$latest_day_log" ]; then
+        info "Merging Mock UE log into mcp.log..."
+        {
+            echo ""
+            echo "===== Mock UE Day Log ($(basename "$latest_day_log")) ====="
+            sed 's/^/[MockUE] /' "$latest_day_log"
+            echo "===== End Mock UE Day Log ====="
+            echo ""
+        } >> "$PROJECT_DIR/logs/mcp.log"
+        ok "Unified log at logs/mcp.log (Mock UE + MCP + Hermes)"
+    fi
 }
 
 # ─── 主流程 ────────────────────────────────────────────────────
