@@ -25,7 +25,7 @@ import (
 
 // DefaultTokenThreshold is the point at which the client auto-summarizes
 // and resets the session.
-const DefaultTokenThreshold = 50000
+const DefaultTokenThreshold = 80000
 
 // ErrUpstreamError indicates Hermes returned a response that wraps an
 // upstream LLM API error (e.g., HTTP 400 from the model provider). The
