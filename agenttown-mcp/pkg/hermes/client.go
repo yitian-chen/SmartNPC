@@ -27,6 +27,13 @@ import (
 // and resets the session.
 const DefaultTokenThreshold = 50000
 
+// ErrUpstreamError indicates Hermes returned a response that wraps an
+// upstream LLM API error (e.g., HTTP 400 from the model provider). The
+// response body is HTTP 200 but the narrative contains the error text
+// and token usage is zero. The session is automatically reset to break
+// the corrupted conversation chain.
+var ErrUpstreamError = errors.New("hermes upstream error")
+
 // Config configures the Client.
 type Config struct {
 	URL    string
@@ -169,6 +176,21 @@ func (c *Client) doSend(ctx context.Context, input string) (*Response, error) {
 		return nil, fmt.Errorf("unmarshal response: %w", err)
 	}
 
+	// Detect upstream LLM errors wrapped in a 200 response. Hermes catches
+	// upstream API errors (e.g., HTTP 400 "Invalid 'tool_calls': empty
+	// array") and returns them as 200 with the error text as the narrative
+	// and zero token usage. If we chain to such a response, every subsequent
+	// call inherits the corrupted conversation history and keeps failing.
+	if isUpstreamError(&hr) {
+		narrative := hr.ExtractText()
+		c.log.Warn("[Hermes→MCP] upstream error detected, resetting session",
+			"narrative", truncate(narrative, 200),
+			"prev_id", c.prevResponseID)
+		c.prevResponseID = "" // break the chain
+		c.turnCount = 0
+		return &hr, ErrUpstreamError
+	}
+
 	if hr.ID != "" {
 		c.prevResponseID = hr.ID
 	}
@@ -177,11 +199,46 @@ func (c *Client) doSend(ctx context.Context, input string) (*Response, error) {
 	return &hr, nil
 }
 
+// isUpstreamError checks whether the Hermes response wraps an upstream
+// LLM API error rather than a genuine assistant narrative.
+func isUpstreamError(r *Response) bool {
+	// Error responses have zero token usage (no LLM call was made).
+	if r.Usage.TotalTokens == 0 && r.Status == "completed" {
+		text := r.ExtractText()
+		if text == "" {
+			return false
+		}
+		// Common upstream error patterns returned by Hermes as narrative.
+		for _, prefix := range []string{"HTTP 4", "HTTP 5", "Invalid '", "Error:", "error:"} {
+			if strings.HasPrefix(text, prefix) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// truncate returns s truncated to maxLen characters with "..." appended.
+func truncate(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
+}
+
 // summarizeAndReset asks Hermes for a brief summary, then resets the
 // session. Caller MUST hold sendMu.
 func (c *Client) summarizeAndReset(ctx context.Context) error {
 	resp, err := c.doSend(ctx, "请用100字以内总结今天到目前为止发生的事，包括你做了什么、见了谁、有什么重要发现。只输出总结，不要其他内容。")
 	if err != nil {
+		if errors.Is(err, ErrUpstreamError) {
+			// Can't summarize — the conversation history is corrupted.
+			// Reset without a summary so the next turn starts fresh.
+			c.prevResponseID = ""
+			c.turnCount = 0
+			c.log.Warn("summarize failed (upstream error), resetting session without summary")
+			return nil
+		}
 		return fmt.Errorf("summarize send: %w", err)
 	}
 
