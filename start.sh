@@ -274,7 +274,19 @@ start_hermes() {
     # build-hermes.sh 通过 HERMES_SOURCE 环境变量定位 Hermes 源码
     # （默认 /mnt/c/Users/yitianchen/AppData/Local/hermes/hermes-agent）。
     # Docker 在 WSL 内运行，所以脚本要在 WSL 里执行。
-    HERMES_BUILD_SCRIPT_WSL=$(MSYS_NO_PATHCONV=1 $WSL wslpath -u "$HERMES_BUILD_SCRIPT" 2>/dev/null || echo "/mnt/d/SmartNPC_v3/docker/build-hermes.sh")
+    #
+    # 路径处理：脚本可能在两种环境下被调用，路径风格不同：
+    #   - Git Bash (MINGW): $PROJECT_DIR 是 /d/SmartNPC_v3 风格，需要
+    #     wslpath 转成 /mnt/d/SmartNPC_v3 才能给 WSL 用
+    #   - WSL bash: $PROJECT_DIR 已经是 /mnt/d/SmartNPC_v3 风格，直接用
+    # 通过检测开头是否 /mnt/ 来判断，避免重复加前缀。
+    case "$HERMES_BUILD_SCRIPT" in
+        /mnt/*)
+            HERMES_BUILD_SCRIPT_WSL="$HERMES_BUILD_SCRIPT" ;;
+        *)
+            HERMES_BUILD_SCRIPT_WSL=$(MSYS_NO_PATHCONV=1 $WSL wslpath -u "$HERMES_BUILD_SCRIPT" 2>/dev/null \
+                || echo "/mnt/d/SmartNPC_v3/docker/build-hermes.sh") ;;
+    esac
     MSYS_NO_PATHCONV=1 $WSL_BASH "bash '$HERMES_BUILD_SCRIPT_WSL'" \
         || fail "Hermes Docker image build failed"
 
