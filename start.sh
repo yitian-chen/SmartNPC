@@ -13,9 +13,15 @@
 #
 # 前置：
 #   - WSL 已安装且 Docker 可用
-#   - ~/agenttown-mcp 二进制存在（Go 交叉编译产物）
+#   - Go 编译器可访问（PATH 中有 go，或位于 /d/Go/bin/go）
+#   - Hermes 源码在默认位置或通过 HERMES_SOURCE 环境变量指定
 #   - Python 3.10+，已安装 websockets, pyyaml
 #   - d:/SmartNPC_v3/.env 存在且配置了 HERMES_AGENT_API_KEY
+#
+# 每次 start.sh 都会强制重建以下组件（不再支持跳过）：
+#   - MCP Go 二进制：交叉编译 linux/amd64 + 跑 cmd/agenttown-mcp 单元测试
+#   - Hermes Docker 镜像：从本地 Hermes 源码 docker build
+# Mock UE 是 Python 脚本，每次执行即加载最新代码，无需编译。
 
 set -uo pipefail
 
@@ -150,53 +156,50 @@ stop_all() {
 start_mcp() {
     info "=== Step 1: Start agenttown-mcp ==="
 
-    # 自动交叉编译 + 部署最新 MCP 二进制到 WSL 的 ~/agenttown-mcp。
-    # 跳过重编译则传 --no-build 标志。
-    if [ "${SKIP_MCP_BUILD:-0}" = "1" ]; then
-        warn "--no-build: skipping MCP build, using existing binary"
-    else
-        # Locate the Go compiler. Try: PATH, env vars, known MINGW mount
-        # paths, user-local SDK dirs. From PowerShell-launched bash the
-        # MINGW drive mounts (/d/, /c/) may not exist, so the check is
-        # best-effort.
-        GO_BIN=""
-        if command -v go &>/dev/null; then
-            GO_BIN="$(command -v go)"
-        fi
-        if [ -z "$GO_BIN" ] || [ ! -x "$GO_BIN" ]; then
-            for p in \
-                "${GOROOT:+$GOROOT/bin/go}" \
-                /d/Go/bin/go /c/Go/bin/go /e/Go/bin/go \
-                "$HOME/go/bin/go" "$HOME/sdk/"*/bin/go; do
-                if [ -x "$p" ]; then GO_BIN="$p"; break; fi
-            done
-        fi
-
-        if [ -n "$GO_BIN" ] && [ -x "$GO_BIN" ]; then
-            info "Building MCP (linux/amd64, CGO disabled)..."
-            "$GO_BIN" version
-
-            mkdir -p "$PROJECT_DIR/agenttown-mcp/tmp"
-            (cd "$PROJECT_DIR/agenttown-mcp" && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 "$GO_BIN" build -o tmp/agenttown-mcp-linux ./cmd/agenttown-mcp) \
-                || fail "Go cross-compile failed"
-            info "Deploying to WSL ~/agenttown-mcp..."
-            # Remove stale binary first (avoids "text file busy").
-            MSYS_NO_PATHCONV=1 $WSL rm -f /home/yitianchen/agenttown-mcp
-            MSYS_NO_PATHCONV=1 $WSL cp /mnt/d/SmartNPC_v3/agenttown-mcp/tmp/agenttown-mcp-linux /home/yitianchen/agenttown-mcp \
-                || fail "Failed to copy binary to WSL ~/agenttown-mcp"
-            MSYS_NO_PATHCONV=1 $WSL chmod +x /home/yitianchen/agenttown-mcp
-            ok "MCP binary deployed"
-        else
-            # Go not found — skip the build, rely on existing binary.
-            warn "Go compiler not found, skipping build"
-            if ! MSYS_NO_PATHCONV=1 $WSL test -x /home/yitianchen/agenttown-mcp; then
-                fail "Go not found and no existing MCP binary in WSL.
-  Build once from Git Bash:   bash start.sh
-  Or set env var:             GO_BIN=D:/Go/bin/go.exe bash start.sh"
-            fi
-            ok "Using existing MCP binary (build skipped)"
-        fi
+    # 强制交叉编译 + 部署最新 MCP 二进制到 WSL 的 ~/agenttown-mcp。
+    # 编译失败或 Go 编译器找不到时直接 fail 退出，避免误用旧二进制
+    # 跑出新行为与代码不一致的日志。
+    # Locate the Go compiler. Try: PATH, env vars, known MINGW mount
+    # paths, user-local SDK dirs. From PowerShell-launched bash the
+    # MINGW drive mounts (/d/, /c/) may not exist, so the check is
+    # best-effort.
+    GO_BIN=""
+    if command -v go &>/dev/null; then
+        GO_BIN="$(command -v go)"
     fi
+    if [ -z "$GO_BIN" ] || [ ! -x "$GO_BIN" ]; then
+        for p in \
+            "${GOROOT:+$GOROOT/bin/go}" \
+            /d/Go/bin/go /c/Go/bin/go /e/Go/bin/go \
+            "$HOME/go/bin/go" "$HOME/sdk/"*/bin/go; do
+            if [ -x "$p" ]; then GO_BIN="$p"; break; fi
+        done
+    fi
+
+    if [ -z "$GO_BIN" ] || [ ! -x "$GO_BIN" ]; then
+        fail "Go compiler not found. Install Go or set GO_BIN env var.
+  Tried: PATH, \${GOROOT}/bin/go, /d/Go/bin/go, /c/Go/bin/go, /e/Go/bin/go,
+         \$HOME/go/bin/go, \$HOME/sdk/*/bin/go"
+    fi
+
+    info "Building MCP (linux/amd64, CGO disabled)..."
+    "$GO_BIN" version
+
+    mkdir -p "$PROJECT_DIR/agenttown-mcp/tmp"
+    (cd "$PROJECT_DIR/agenttown-mcp" && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 "$GO_BIN" build -o tmp/agenttown-mcp-linux ./cmd/agenttown-mcp) \
+        || fail "Go cross-compile failed"
+
+    info "Running MCP unit tests..."
+    (cd "$PROJECT_DIR/agenttown-mcp" && "$GO_BIN" test ./cmd/agenttown-mcp/ -count=1) \
+        || fail "MCP unit tests failed; refusing to deploy broken binary"
+
+    info "Deploying to WSL ~/agenttown-mcp..."
+    # Remove stale binary first (avoids "text file busy").
+    MSYS_NO_PATHCONV=1 $WSL rm -f /home/yitianchen/agenttown-mcp
+    MSYS_NO_PATHCONV=1 $WSL cp /mnt/d/SmartNPC_v3/agenttown-mcp/tmp/agenttown-mcp-linux /home/yitianchen/agenttown-mcp \
+        || fail "Failed to copy binary to WSL ~/agenttown-mcp"
+    MSYS_NO_PATHCONV=1 $WSL chmod +x /home/yitianchen/agenttown-mcp
+    ok "MCP binary deployed"
 
     # 清空旧日志（MCP 日志写到项目 logs/ 目录）
     mkdir -p "$PROJECT_DIR/logs"
@@ -230,6 +233,22 @@ start_hermes() {
     if [ ! -f "$ENV_FILE" ]; then
         fail ".env file not found at $ENV_FILE"
     fi
+
+    # 每次启动都从本地 Hermes 源码强制重建 Docker 镜像，确保 Hermes
+    # 仓库的任何改动（Python 代码、依赖、Dockerfile）立即生效。SOUL.md
+    # 与 SKILL.md 通过 volume 挂载（见 docker-compose.yml），改这两个
+    # 文件本身不需要重建镜像，但镜像重建不会跳过。
+    info "Rebuilding Hermes Docker image from source..."
+    HERMES_BUILD_SCRIPT="$PROJECT_DIR/docker/build-hermes.sh"
+    if [ ! -f "$HERMES_BUILD_SCRIPT" ]; then
+        fail "Hermes build script not found: $HERMES_BUILD_SCRIPT"
+    fi
+    # build-hermes.sh 通过 HERMES_SOURCE 环境变量定位 Hermes 源码
+    # （默认 /mnt/c/Users/yitianchen/AppData/Local/hermes/hermes-agent）。
+    # Docker 在 WSL 内运行，所以脚本要在 WSL 里执行。
+    HERMES_BUILD_SCRIPT_WSL=$(MSYS_NO_PATHCONV=1 $WSL wslpath -u "$HERMES_BUILD_SCRIPT" 2>/dev/null || echo "/mnt/d/SmartNPC_v3/docker/build-hermes.sh")
+    MSYS_NO_PATHCONV=1 $WSL_BASH "bash '$HERMES_BUILD_SCRIPT_WSL'" \
+        || fail "Hermes Docker image build failed"
 
     info "Starting Hermes via docker compose..."
     # MSYS_NO_PATHCONV=1 prevents Git Bash from mangling WSL paths
