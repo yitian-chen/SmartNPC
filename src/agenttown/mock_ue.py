@@ -820,10 +820,12 @@ class MockUE:
     async def _perception_loop(self, end_hour: int):
         last_state_report = _time.monotonic()
 
-        # Wait for first WS connection before sending the initial perception,
-        # so 06:00 reaches MCP instead of being dropped.
+        # Wait for first WS connection so the initial 06:00 perception (sent
+        # by _connection_manager on connect) reaches MCP. We do NOT send a
+        # separate perception here — _connection_manager already pushed one
+        # as part of the (re)connect handshake, and a duplicate 06:00 frame
+        # wastes an LLM turn.
         await self._ws_ready.wait()
-        await self._send_perception()
 
         while self.time.hour < end_hour:
             # Advance game time — SOLE time driver.
