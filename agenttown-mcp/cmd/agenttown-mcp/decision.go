@@ -41,6 +41,23 @@ type keyedValue struct {
 	Value string `json:"value"`
 }
 
+type localActionSummary struct {
+	ActionID   string  `json:"action_id"`
+	Result     string  `json:"result"`
+	DurationMs int64   `json:"duration_ms"`
+	Progress   float64 `json:"progress"`
+}
+
+type localStateSummary struct {
+	TimeOfDay         string                        `json:"time_of_day,omitempty"`
+	Zone              string                        `json:"zone,omitempty"`
+	Location          string                        `json:"location,omitempty"`
+	Physical          *protocol.PhysicalState       `json:"physical_state,omitempty"`
+	CurrentTask       *protocol.CurrentTaskProgress `json:"current_task,omitempty"`
+	RecentActions     []localActionSummary          `json:"recent_actions,omitempty"`
+	EnvironmentEvents []string                      `json:"environment_events,omitempty"`
+}
+
 // parsePerceptionSnapshot validates a perception payload and builds the
 // comparable projection used by the decision gate.
 func parsePerceptionSnapshot(payload json.RawMessage) (*protocol.PerceptionPayload, observedSnapshot, error) {
@@ -172,9 +189,54 @@ func optionalString(value *string) string {
 	return "<value>" + *value
 }
 
+func summaryOptional(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
+}
+
 func canonicalJSON(value any) string {
 	encoded, _ := json.Marshal(value)
 	return string(encoded)
+}
+
+func buildLocalSummary(
+	perceptionPayload json.RawMessage,
+	physical *protocol.PhysicalState,
+	task *protocol.CurrentTaskProgress,
+	actions []localActionSummary,
+	events []string,
+) string {
+	var p protocol.PerceptionPayload
+	_ = json.Unmarshal(perceptionPayload, &p)
+	summary := localStateSummary{
+		TimeOfDay:         p.Environment.TimeOfDay,
+		Zone:              summaryOptional(p.Location.CurrentZone),
+		Location:          summaryOptional(p.Location.CurrentLocation),
+		Physical:          clonePhysical(physical),
+		CurrentTask:       cloneTask(task),
+		RecentActions:     append([]localActionSummary(nil), actions...),
+		EnvironmentEvents: append([]string(nil), events...),
+	}
+	encoded, _ := json.Marshal(summary)
+	return string(encoded)
+}
+
+func truncateText(value string, maxRunes int) string {
+	runes := []rune(value)
+	if len(runes) <= maxRunes {
+		return value
+	}
+	return string(runes[:maxRunes]) + "..."
+}
+
+func appendRolling[T any](items []T, value T, max int) []T {
+	items = append(items, value)
+	if len(items) > max {
+		items = append([]T(nil), items[len(items)-max:]...)
+	}
+	return items
 }
 
 func mergeUnique(dst []string, values ...string) []string {

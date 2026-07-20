@@ -48,25 +48,28 @@ var version = "0.1.0-dev"
 // per agent, pending trigger reasons merge, and only the newest perception is
 // retained while that request runs.
 type agentContext struct {
-	mu                      sync.Mutex
-	latestPhysical          *protocol.PhysicalState
-	latestPerception        json.RawMessage
-	currentTask             *protocol.CurrentTaskProgress
-	observedSnapshot        *observedSnapshot
-	pendingPerception       json.RawMessage
-	pendingReasons          []string
-	recentEnvironmentEvents []string
-	wake                    chan struct{}
-	cancel                  context.CancelFunc
-	stopped                 bool
+	mu                       sync.Mutex
+	latestPhysical           *protocol.PhysicalState
+	latestPerception         json.RawMessage
+	currentTask              *protocol.CurrentTaskProgress
+	observedSnapshot         *observedSnapshot
+	pendingPerception        json.RawMessage
+	pendingReasons           []string
+	recentEnvironmentEvents  []string // pending extras for the next decision
+	summaryEnvironmentEvents []string // rolling authoritative environment history
+	recentActions            []localActionSummary
+	wake                     chan struct{}
+	cancel                   context.CancelFunc
+	stopped                  bool
 }
 
 type decisionWork struct {
-	perception  json.RawMessage
-	physical    *protocol.PhysicalState
-	currentTask *protocol.CurrentTaskProgress
-	reasons     []string
-	extras      []string
+	perception   json.RawMessage
+	physical     *protocol.PhysicalState
+	currentTask  *protocol.CurrentTaskProgress
+	reasons      []string
+	extras       []string
+	localSummary string
 }
 
 func newAgentContext(parent context.Context) (*agentContext, context.Context) {
@@ -96,7 +99,11 @@ func (a *agentContext) observePerception(payload json.RawMessage) ([]string, boo
 	a.observedSnapshot = &snapshot
 	a.latestPerception = cloneRawMessage(payload)
 	if containsReason(reasons, reasonAudibleEvent) {
-		a.recentEnvironmentEvents = append(a.recentEnvironmentEvents, audibleEventExtras(perceptionPayload.AudibleEvents)...)
+		events := audibleEventExtras(perceptionPayload.AudibleEvents)
+		a.recentEnvironmentEvents = append(a.recentEnvironmentEvents, events...)
+		for _, event := range events {
+			a.summaryEnvironmentEvents = appendRolling(a.summaryEnvironmentEvents, truncateText(event, 256), 8)
+		}
 	}
 	replaced := a.pendingPerception != nil
 	if len(reasons) > 0 {
@@ -142,6 +149,12 @@ func (a *agentContext) recordActionCompletion(completion protocol.ActionComplete
 	extra := fmt.Sprintf("动作完成 action_id=%s result=%s progress=%g details=%s",
 		completion.ActionID, completion.Result, completion.Progress, details)
 	reason := fmt.Sprintf("动作完成:%s", completion.ActionID)
+	a.mu.Lock()
+	a.recentActions = appendRolling(a.recentActions, localActionSummary{
+		ActionID: completion.ActionID, Result: completion.Result,
+		DurationMs: completion.DurationMs, Progress: completion.Progress,
+	}, 8)
+	a.mu.Unlock()
 	return a.queueExternalEvent(reason, extra)
 }
 
@@ -150,6 +163,9 @@ func (a *agentContext) recordEventNotification(event protocol.EventNotificationP
 	extra := fmt.Sprintf("环境事件 event_id=%s perception_level=%s event=%s",
 		event.EventID, event.PerceptionLevel, details)
 	reason := fmt.Sprintf("事件通知:%s", event.EventID)
+	a.mu.Lock()
+	a.summaryEnvironmentEvents = appendRolling(a.summaryEnvironmentEvents, truncateText(extra, 256), 8)
+	a.mu.Unlock()
 	return a.queueExternalEvent(reason, extra)
 }
 
@@ -193,6 +209,10 @@ func (a *agentContext) takeDecision() *decisionWork {
 		reasons:     append([]string(nil), a.pendingReasons...),
 		extras:      append([]string(nil), a.recentEnvironmentEvents...),
 	}
+	work.localSummary = buildLocalSummary(
+		work.perception, work.physical, work.currentTask,
+		a.recentActions, a.summaryEnvironmentEvents,
+	)
 	a.pendingPerception = nil
 	a.pendingReasons = nil
 	a.recentEnvironmentEvents = nil
@@ -324,7 +344,7 @@ func runPerceptionWorker(
 		}
 		logger.Info("[MCP→Hermes/PERCEPTION]", "agent_id", agentID, "text", display)
 
-		resp, err := hc.Send(ctx, text)
+		resp, err := hc.SendWithSummary(ctx, text, work.localSummary)
 		if err != nil {
 			if ctx.Err() != nil {
 				logger.Info("Hermes request canceled", "agent_id", agentID)

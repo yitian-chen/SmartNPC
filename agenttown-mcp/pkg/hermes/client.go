@@ -57,9 +57,8 @@ type Client struct {
 	http *http.Client
 	log  *slog.Logger
 
-	// sendMu serializes the entire Send → doSend → summarizeAndReset
-	// cycle. Held for the full duration of a Hermes round-trip (up to
-	// 120s). This is intentional — we never want concurrent calls.
+	// sendMu serializes the entire Send → doSend cycle. Held for the full
+	// Hermes round-trip so previous_response_id cannot race.
 	sendMu         sync.Mutex
 	prevResponseID string
 	pendingSummary string
@@ -81,27 +80,30 @@ func New(cfg Config) *Client {
 	}
 }
 
-// Send POSTs the given input to Hermes /v1/responses and returns the
-// response. The call is serialized — if another Send is in flight,
-// this call blocks until it completes.
-//
-// If the token count exceeds the threshold after this call, it
-// automatically triggers a summarize-and-reset cycle (also serialized).
+// Send posts input without a caller-provided local summary. Production
+// decision workers should use SendWithSummary so token resets preserve the
+// latest authoritative world state without another LLM request.
 func (c *Client) Send(ctx context.Context, input string) (*Response, error) {
+	return c.SendWithSummary(ctx, input, "")
+}
+
+// SendWithSummary POSTs input to Hermes and uses localSummary if the token
+// threshold requires a session reset. The reset is local and immediate: it
+// never makes a second LLM request, so the current response is not delayed by
+// summarization and assistant narratives cannot leak into authoritative state.
+func (c *Client) SendWithSummary(ctx context.Context, input, localSummary string) (*Response, error) {
 	c.sendMu.Lock()
 	defer c.sendMu.Unlock()
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 
-	// If there's a pending summary from a previous reset, prepend it.
 	fullInput := input
 	summary := c.pendingSummary
 	c.pendingSummary = ""
 	c.turnCount++
-
 	if summary != "" {
-		fullInput = "[今日纪要] " + summary + "\n\n" + input
+		fullInput = "[本地状态摘要] " + summary + "\n\n" + input
 	}
 
 	resp, err := c.doSend(ctx, fullInput)
@@ -109,18 +111,16 @@ func (c *Client) Send(ctx context.Context, input string) (*Response, error) {
 		return resp, err
 	}
 
-	// Check if we need to summarize and reset.
 	if resp.Usage.TotalTokens > c.cfg.TokenThreshold {
-		c.log.Info("token threshold exceeded, auto-summarizing",
+		c.prevResponseID = ""
+		c.pendingSummary = localSummary
+		c.turnCount = 0
+		c.log.Info("token threshold exceeded, session reset with local structured summary",
 			"tokens", resp.Usage.TotalTokens,
 			"threshold", c.cfg.TokenThreshold,
-			"turn", c.turnCount,
+			"summary_bytes", len(localSummary),
 		)
-		if err := c.summarizeAndReset(ctx); err != nil {
-			c.log.Warn("auto-summarize failed, continuing with current session", "err", err)
-		}
 	}
-
 	return resp, nil
 }
 
@@ -229,40 +229,6 @@ func truncate(s string, maxLen int) string {
 		return s
 	}
 	return s[:maxLen] + "..."
-}
-
-// summarizeAndReset asks Hermes for a brief summary, then resets the
-// session. Caller MUST hold sendMu.
-func (c *Client) summarizeAndReset(ctx context.Context) error {
-	resp, err := c.doSend(ctx, "请用100字以内总结今天到目前为止发生的事，包括你做了什么、见了谁、有什么重要发现。只输出总结，不要其他内容。")
-	if err != nil {
-		if errors.Is(err, ErrUpstreamError) {
-			// Can't summarize — the conversation history is corrupted.
-			// Reset without a summary so the next turn starts fresh.
-			c.prevResponseID = ""
-			c.turnCount = 0
-			c.log.Warn("summarize failed (upstream error), resetting session without summary")
-			return nil
-		}
-		return fmt.Errorf("summarize send: %w", err)
-	}
-
-	summary := resp.ExtractText()
-	if summary == "" {
-		return errors.New("summary was empty")
-	}
-
-	if len(summary) > 500 {
-		summary = summary[:500]
-	}
-
-	// Reset the session — next Send will start a fresh conversation.
-	c.prevResponseID = ""
-	c.pendingSummary = summary
-	c.turnCount = 0
-
-	c.log.Info("session reset with summary", "summary_len", len(summary), "summary", summary)
-	return nil
 }
 
 // ResetSession clears the session state. Safe to call from any goroutine.

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/AgentTown/agenttown-mcp/pkg/protocol"
@@ -108,6 +109,26 @@ func TestAgentContext_PhysicalThresholdCrossing(t *testing.T) {
 	reasons := ac.updateState(protocol.StateReportPayload{PhysicalState: protocol.PhysicalState{Energy: 24, Fatigue: 20, JointWear: 10, Health: 100}})
 	if len(reasons) != 1 || reasons[0] != "物理状态进入警戒带:energy<=25" {
 		t.Fatalf("threshold reasons=%v", reasons)
+	}
+}
+
+func TestLocalSummary_ContainsOnlyAuthoritativeState(t *testing.T) {
+	physical := &protocol.PhysicalState{Energy: 80, Fatigue: 20, JointWear: 3, Health: 100}
+	task := &protocol.CurrentTaskProgress{ActionID: "act_1", Progress: 0.5}
+	summary := buildLocalSummary(
+		perceptionJSON("08:00", "main_workshop", "workbench_01", "clear", nil),
+		physical,
+		task,
+		[]localActionSummary{{ActionID: "act_0", Result: "success", Progress: 1}},
+		[]string{"传送带异常"},
+	)
+	for _, want := range []string{"08:00", "main_workshop", "act_0", "传送带异常"} {
+		if !strings.Contains(summary, want) {
+			t.Errorf("summary missing %q: %s", want, summary)
+		}
+	}
+	if strings.Contains(summary, "narrative") || strings.Contains(summary, "assistant") {
+		t.Fatalf("summary contains non-authoritative narrative field: %s", summary)
 	}
 }
 
