@@ -114,6 +114,7 @@ func (a *agentContext) observePerception(payload json.RawMessage) ([]string, boo
 	if matchedScanResponse {
 		a.pendingScanID = "" // consume once: duplicate scan responses are ordinary snapshots
 		a.pendingScanFollowup = true
+		a.decisionActive = false // immediately invalidate the current turn's epoch
 		reasons = mergeUnique(reasons, reasonScanResponse)
 	}
 	a.observedSnapshot = &snapshot

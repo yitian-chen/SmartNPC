@@ -92,11 +92,17 @@ func TestAgentContext_MatchingScanResponseForcesExactlyOneDecision(t *testing.T)
 	if err := ac.armScan(epoch, "scan_1"); err != nil {
 		t.Fatal(err)
 	}
-	ac.endDecision(epoch)
 
+	// Scan response arrives while the scan-initiating decision is still active.
+	// The epoch must be invalidated so that later tool calls from the same turn
+	// are rejected by validateDecision.
 	reasons, _, err := ac.observePerception(perceptionWithScanID(base, "scan_1"))
 	if err != nil || !containsReason(reasons, reasonScanResponse) {
 		t.Fatalf("scan response reasons=%v err=%v", reasons, err)
+	}
+	// The active epoch must be invalidated immediately.
+	if ac.validateDecision(epoch) == nil {
+		t.Fatal("epoch was not invalidated after scan response consumed pendingScanID")
 	}
 	work := ac.takeDecision()
 	if work == nil || !work.scanFollowup {
@@ -118,7 +124,6 @@ func TestAgentContext_UnmatchedScanDoesNotConsumePendingToken(t *testing.T) {
 	if err := ac.armScan(epoch, "scan_1"); err != nil {
 		t.Fatal(err)
 	}
-	ac.endDecision(epoch)
 
 	reasons, _, _ := ac.observePerception(perceptionWithScanID(base, "scan_other"))
 	if len(reasons) != 0 {
