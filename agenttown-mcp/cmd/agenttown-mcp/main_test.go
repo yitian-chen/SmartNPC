@@ -94,15 +94,15 @@ func TestAgentContext_MatchingScanResponseForcesExactlyOneDecision(t *testing.T)
 	}
 
 	// Scan response arrives while the scan-initiating decision is still active.
-	// The epoch must be invalidated so that later tool calls from the same turn
-	// are rejected by validateDecision.
+	// The current turn must stay active so that subsequent tool_calls from the
+	// same LLM response (e.g. scan_area → move_to) are accepted with the
+	// original epoch. The scan-followup is queued for the next turn.
 	reasons, _, err := ac.observePerception(perceptionWithScanID(base, "scan_1"))
 	if err != nil || !containsReason(reasons, reasonScanResponse) {
 		t.Fatalf("scan response reasons=%v err=%v", reasons, err)
 	}
-	// The active epoch must be invalidated immediately.
-	if ac.validateDecision(epoch) == nil {
-		t.Fatal("epoch was not invalidated after scan response consumed pendingScanID")
+	if err := ac.validateDecision(epoch); err != nil {
+		t.Fatalf("current epoch was invalidated after scan response, blocking same-turn tool calls: %v", err)
 	}
 	work := ac.takeDecision()
 	if work == nil || !work.scanFollowup {
@@ -137,7 +137,7 @@ func TestAgentContext_UnmatchedScanDoesNotConsumePendingToken(t *testing.T) {
 	}
 }
 
-func TestAgentContext_PendingScanInvalidatesRemainingToolTurn(t *testing.T) {
+func TestAgentContext_PendingScanDoesNotBlockSameTurnToolCalls(t *testing.T) {
 	ac, _ := newAgentContext(context.Background())
 	_, epoch, ok := ac.beginDecision()
 	if !ok {
@@ -146,8 +146,12 @@ func TestAgentContext_PendingScanInvalidatesRemainingToolTurn(t *testing.T) {
 	if err := ac.armScan(epoch, "scan_1"); err != nil {
 		t.Fatal(err)
 	}
-	if err := ac.validateDecision(epoch); err == nil || !strings.Contains(err.Error(), "scan response pending") {
-		t.Fatalf("post-scan tool call was not rejected: %v", err)
+	// While the scan response has not arrived yet, the LLM may issue another
+	// tool_call in the same response. It must still be accepted with the
+	// current epoch — rejecting it caused Hermes' circuit breaker to trip
+	// after 3 stale rejections.
+	if err := ac.validateDecision(epoch); err != nil {
+		t.Fatalf("post-scan tool call was rejected: %v", err)
 	}
 }
 

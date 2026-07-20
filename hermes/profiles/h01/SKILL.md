@@ -31,5 +31,5 @@ AgentTown 工具由 MCP 提供，名称前缀为 `mcp__agenttown__`。
 | `emote` | emotion, mode(可空) |
 | `interact` | object_id, action |
 | `wait` | duration_sec |
-| `scan_area` | 无；扫描会结束当前工具轮。调用后不要再调任何工具，等待系统以最新扫描结果发起下一轮 decision_context；收到该轮后选择一个非扫描主行为 |
+| `scan_area` | 无；扫描用于补充感知。可在同一工具轮内与其他工具一起调用（如 scan_area 后再 move_to）；扫描结果会触发下一轮 decision_context，届时选择一个非扫描主行为 |
 | `stop` | 无 |

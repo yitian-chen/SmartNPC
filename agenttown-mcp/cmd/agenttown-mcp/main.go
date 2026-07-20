@@ -112,9 +112,17 @@ func (a *agentContext) observePerception(payload json.RawMessage) ([]string, boo
 	reasons := perceptionTriggerReasons(perceptionPayload, snapshot, a.observedSnapshot)
 	matchedScanResponse := perceptionPayload.ScanID != "" && perceptionPayload.ScanID == a.pendingScanID
 	if matchedScanResponse {
+		// Consume the token and mark a scan-followup decision as pending so
+		// the perception worker starts a fresh turn once the current turn
+		// finishes. We deliberately do NOT clear decisionActive here: doing
+		// so would reject subsequent tool_calls that the LLM may issue in
+		// the same response (e.g., scan_area → move_to), which used to
+		// trigger Hermes' circuit breaker after 3 stale rejections. The
+		// current turn keeps running with its original epoch; the new
+		// epoch is bumped only when runPerceptionWorker calls
+		// beginDecisionWithScan for the follow-up turn.
 		a.pendingScanID = "" // consume once: duplicate scan responses are ordinary snapshots
 		a.pendingScanFollowup = true
-		a.decisionActive = false // immediately invalidate the current turn's epoch
 		reasons = mergeUnique(reasons, reasonScanResponse)
 	}
 	a.observedSnapshot = &snapshot
@@ -327,11 +335,6 @@ func (a *agentContext) validateDecision(epoch int64) error {
 		return errors.New("missing decision_epoch")
 	case !a.decisionActive || epoch != a.decisionEpoch:
 		return fmt.Errorf("stale decision_epoch: got %d, current %d", epoch, a.decisionEpoch)
-	case a.pendingScanID != "":
-		// A scan ends the current tool turn. The correlated perception will
-		// begin a fresh decision, so later tool calls from this old turn must
-		// not act on pre-scan information.
-		return errors.New("scan response pending; wait for the next decision")
 	default:
 		return nil
 	}
