@@ -42,13 +42,26 @@ import (
 
 var version = "0.1.0-dev"
 
-// agentContext holds per-agent state the MCP layer accumulates between
-// perception turns: the latest physical state (from state_report) and any
-// pending action completions to fold into the next perception narrative.
+// agentContext holds per-agent state accumulated between perception turns.
+// Perception delivery uses a latest-wins queue: at most one Hermes request is
+// in flight per agent, and while it runs only the newest pending perception is
+// retained. This prevents fast UE updates from building an unbounded backlog.
 type agentContext struct {
 	mu                sync.Mutex
 	latestPhysical    *protocol.PhysicalState
 	pendingCompletion []string // human-readable completion lines
+	pendingPerception json.RawMessage
+	wake              chan struct{}
+	cancel            context.CancelFunc
+	stopped           bool
+}
+
+func newAgentContext(parent context.Context) (*agentContext, context.Context) {
+	ctx, cancel := context.WithCancel(parent)
+	return &agentContext{
+		wake:   make(chan struct{}, 1),
+		cancel: cancel,
+	}, ctx
 }
 
 func (a *agentContext) addCompletion(line string) {
@@ -77,18 +90,121 @@ func (a *agentContext) physical() *protocol.PhysicalState {
 	return a.latestPhysical
 }
 
+// enqueuePerception replaces any queued (not currently processing) perception
+// and wakes the worker. It returns true when an older queued perception was
+// replaced.
+func (a *agentContext) enqueuePerception(payload json.RawMessage) bool {
+	a.mu.Lock()
+	if a.stopped {
+		a.mu.Unlock()
+		return false
+	}
+	replaced := a.pendingPerception != nil
+	a.pendingPerception = append(a.pendingPerception[:0], payload...)
+	a.mu.Unlock()
+	select {
+	case a.wake <- struct{}{}:
+	default:
+	}
+	return replaced
+}
+
+func (a *agentContext) takePerception() json.RawMessage {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	payload := a.pendingPerception
+	a.pendingPerception = nil
+	return payload
+}
+
+func (a *agentContext) stop() {
+	a.mu.Lock()
+	if a.stopped {
+		a.mu.Unlock()
+		return
+	}
+	a.stopped = true
+	a.pendingPerception = nil
+	cancel := a.cancel
+	a.mu.Unlock()
+	cancel()
+}
+
+// runPerceptionWorker serially sends perceptions to Hermes. While one request
+// is in flight, enqueuePerception overwrites the pending slot, so after the
+// request completes the worker processes only the newest world state.
+func runPerceptionWorker(
+	ctx context.Context,
+	agentID string,
+	ac *agentContext,
+	hc *hermes.Client,
+	ws *wsserver.Server,
+	logger *slog.Logger,
+) {
+	for {
+		select {
+		case <-ctx.Done():
+			logger.Info("perception worker stopped", "agent_id", agentID)
+			return
+		case <-ac.wake:
+		}
+
+		payload := ac.takePerception()
+		if payload == nil {
+			continue
+		}
+		extras := ac.drainCompletions()
+		text := perception.Format(payload, ac.physical(), extras)
+		if text == "" {
+			logger.Warn("perception format returned empty", "agent_id", agentID, "raw", string(payload))
+			continue
+		}
+		display := text
+		if len(display) > 500 {
+			display = display[:500] + "..."
+		}
+		logger.Info("[MCP→Hermes/PERCEPTION]", "agent_id", agentID, "text", display)
+
+		resp, err := hc.Send(ctx, text)
+		if err != nil {
+			if ctx.Err() != nil {
+				logger.Info("Hermes request canceled", "agent_id", agentID)
+				return
+			}
+			logger.Error("hermes send failed", "agent_id", agentID, "err", err)
+			continue
+		}
+		narrative := resp.ExtractText()
+		disp := narrative
+		if len(disp) > 500 {
+			disp = disp[:500] + "..."
+		}
+		logger.Info("[Hermes→MCP/RESPONSE]",
+			"agent_id", agentID,
+			"tokens", resp.Usage.TotalTokens,
+			"narrative_len", len(narrative),
+			"narrative", disp,
+		)
+		if narrative != "" {
+			if err := ws.SendEnvelope(agentID, "narrative", map[string]any{"text": narrative}); err != nil {
+				logger.Debug("narrative push failed", "agent_id", agentID, "err", err)
+			}
+		}
+	}
+}
+
 func main() {
 	log.EnableUTF8Console()
 
 	var (
-		showVersion  = flag.Bool("version", false, "print version and exit")
-		logLevel     = flag.String("log-level", "info", "log level: debug|info|warn|error")
-		httpAddr     = flag.String("http", ":8760", "MCP Streamable HTTP addr (empty = stdio)")
-		wsAddr       = flag.String("ws", ":9090", "WebSocket server addr for Mock UE")
-		hermesURL    = flag.String("hermes-url", "http://localhost:8642", "Hermes Gateway base URL")
-		hermesAPIKey = flag.String("hermes-api-key", "agenttown-test-key", "Hermes Gateway bearer token")
-		hermesModel  = flag.String("hermes-model", "deepseek-v4-flash", "Hermes model name")
-		mcpAPIKey    = flag.String("mcp-api-key", "", "if set, require this Bearer token on /mcp")
+		showVersion        = flag.Bool("version", false, "print version and exit")
+		logLevel           = flag.String("log-level", "info", "log level: debug|info|warn|error")
+		httpAddr           = flag.String("http", ":8760", "MCP Streamable HTTP addr (empty = stdio)")
+		wsAddr             = flag.String("ws", ":9090", "WebSocket server addr for Mock UE")
+		hermesURL          = flag.String("hermes-url", "http://localhost:8642", "Hermes Gateway base URL")
+		hermesAPIKey       = flag.String("hermes-api-key", "agenttown-test-key", "Hermes Gateway bearer token")
+		hermesModel        = flag.String("hermes-model", "deepseek-v4-flash", "Hermes model name")
+		mcpAPIKey          = flag.String("mcp-api-key", "", "if set, require this Bearer token on /mcp")
 		httpAllowAnyOrigin = flag.Bool("http-allow-any-origin", true,
 			"disable origin / localhost restrictions so cross-host clients can connect")
 	)
@@ -136,13 +252,18 @@ func main() {
 	// Per-agent context (Phase 1: single agent, but keyed for multi-NPC).
 	var agentsMu sync.Mutex
 	agents := make(map[string]*agentContext)
+	createAgentLocked := func(id string) *agentContext {
+		a, workerCtx := newAgentContext(ctx)
+		agents[id] = a
+		go runPerceptionWorker(workerCtx, id, a, hc, ws, logger)
+		return a
+	}
 	getAgent := func(id string) *agentContext {
 		agentsMu.Lock()
 		defer agentsMu.Unlock()
 		a, ok := agents[id]
 		if !ok {
-			a = &agentContext{}
-			agents[id] = a
+			a = createAgentLocked(id)
 		}
 		return a
 	}
@@ -155,7 +276,7 @@ func main() {
 		if _, ok := agents[id]; ok {
 			return false
 		}
-		agents[id] = &agentContext{}
+		createAgentLocked(id)
 		return true
 	}
 
@@ -178,9 +299,13 @@ func main() {
 
 		case protocol.TypeAgentUnregistered:
 			agentsMu.Lock()
+			ac := agents[agentID]
 			delete(agents, agentID)
 			agentsMu.Unlock()
-			logger.Info("agent_unregistered", "agent_id", agentID)
+			if ac != nil {
+				ac.stop()
+			}
+			logger.Info("agent_unregistered", "agent_id", agentID, "perception_queue_cleared", true)
 
 		case protocol.TypeHeartbeat:
 			logger.Debug("heartbeat", "agent_id", agentID)
@@ -212,45 +337,9 @@ func main() {
 
 		case protocol.TypePerceptionUpdate:
 			ac := getAgent(agentID)
-			// Fold pending completions + latest physical state into the
-			// narrative context.
-			extras := ac.drainCompletions()
-			text := perception.Format(payload, ac.physical(), extras)
-			if text == "" {
-				logger.Warn("perception format returned empty", "raw", string(payload))
-				return
+			if ac.enqueuePerception(payload) {
+				logger.Info("perception coalesced (older pending update replaced)", "agent_id", agentID)
 			}
-			// Log the formatted perception narrative being handed to Hermes.
-			display := text
-			if len(display) > 500 {
-				display = display[:500] + "..."
-			}
-			logger.Info("[MCP→Hermes/PERCEPTION]", "agent_id", agentID, "text", display)
-			// Async POST — don't block the WS read loop.
-			go func() {
-				resp, err := hc.Send(context.Background(), text)
-				if err != nil {
-					logger.Error("hermes send failed", "err", err)
-					return
-				}
-				narrative := resp.ExtractText()
-				disp := narrative
-				if len(disp) > 500 {
-					disp = disp[:500] + "..."
-				}
-				logger.Info("[Hermes→MCP/RESPONSE]",
-					"tokens", resp.Usage.TotalTokens,
-					"narrative_len", len(narrative),
-					"narrative", disp,
-				)
-				if narrative != "" {
-					if err := ws.SendEnvelope(agentID, "narrative", map[string]any{
-						"text": narrative,
-					}); err != nil {
-						logger.Debug("narrative push failed", "err", err)
-					}
-				}
-			}()
 
 		default:
 			logger.Debug("unhandled message type", "type", msgType, "agent_id", agentID)

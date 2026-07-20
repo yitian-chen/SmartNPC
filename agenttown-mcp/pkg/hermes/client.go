@@ -60,10 +60,10 @@ type Client struct {
 	// sendMu serializes the entire Send → doSend → summarizeAndReset
 	// cycle. Held for the full duration of a Hermes round-trip (up to
 	// 120s). This is intentional — we never want concurrent calls.
-	sendMu          sync.Mutex
-	prevResponseID  string
-	pendingSummary  string
-	turnCount       int
+	sendMu         sync.Mutex
+	prevResponseID string
+	pendingSummary string
+	turnCount      int
 }
 
 // New creates a Client.
@@ -90,6 +90,9 @@ func New(cfg Config) *Client {
 func (c *Client) Send(ctx context.Context, input string) (*Response, error) {
 	c.sendMu.Lock()
 	defer c.sendMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 
 	// If there's a pending summary from a previous reset, prepend it.
 	fullInput := input
@@ -136,7 +139,9 @@ func (c *Client) doSend(ctx context.Context, input string) (*Response, error) {
 		return nil, fmt.Errorf("marshal request: %w", err)
 	}
 
-	postCtx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	// Derive the request timeout from the caller's context so unregistering an
+	// agent can cancel its in-flight Hermes request immediately.
+	postCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
 	defer cancel()
 
 	url := strings.TrimRight(c.cfg.URL, "/") + "/v1/responses"
