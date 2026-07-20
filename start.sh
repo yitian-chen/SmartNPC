@@ -178,24 +178,36 @@ start_mcp() {
     elif command -v go &>/dev/null; then
         GO_BIN="$(command -v go)"
     else
+        # Fallback paths cover three layouts:
+        #   - Linux Go installed via package manager or tarball: /usr/local/go/bin/go
+        #   - Linux Go installed in user home: ~/go-sdk/bin/go, ~/go/bin/go
+        #   - Windows Go accessed from Git Bash: /d/Go/bin/go(.exe)
+        #   - Windows Go accessed from WSL bash: /mnt/d/Go/bin/go.exe
+        # The .exe variants are required when a Windows Go is invoked from
+        # WSL bash (Linux needs the explicit suffix to exec a Windows binary).
         for p in \
             "${GOROOT:+$GOROOT/bin/go}" "${GOROOT:+$GOROOT/bin/go.exe}" \
+            /usr/local/go/bin/go \
+            "$HOME/go-sdk/bin/go" \
+            "$HOME/go/bin/go" "$HOME/go/bin/go.exe" \
+            "$HOME/sdk/"*/bin/go "$HOME/sdk/"*/bin/go.exe \
             /d/Go/bin/go /d/Go/bin/go.exe \
             /c/Go/bin/go /c/Go/bin/go.exe \
             /e/Go/bin/go /e/Go/bin/go.exe \
-            "$HOME/go/bin/go" "$HOME/go/bin/go.exe" \
-            "$HOME/sdk/"*/bin/go "$HOME/sdk/"*/bin/go.exe; do
+            /mnt/d/Go/bin/go.exe /mnt/c/Go/bin/go.exe /mnt/e/Go/bin/go.exe; do
             if [ -x "$p" ]; then GO_BIN="$p"; break; fi
         done
     fi
 
     if [ -z "$GO_BIN" ] || [ ! -x "$GO_BIN" ]; then
         fail "Go compiler not found. Install Go or set GO_BIN env var.
+  Recommended (WSL bash):    sudo apt install golang-go  (or download from go.dev)
   Recommended (PowerShell):  \$env:GO_BIN = 'D:\Go\bin\go.exe'
   Recommended (Git Bash):    GO_BIN=/d/Go/bin/go bash start.sh
-  Tried: \$GO_BIN, PATH, \${GOROOT}/bin/go,
+  Tried: \$GO_BIN, PATH, \${GOROOT}/bin/go, /usr/local/go/bin/go,
+         ~/go-sdk/bin/go, ~/go/bin/go, ~/sdk/*/bin/go,
          /d/Go/bin/go, /c/Go/bin/go, /e/Go/bin/go,
-         \$HOME/go/bin/go, \$HOME/sdk/*/bin/go (and .exe variants)"
+         /mnt/d/Go/bin/go.exe, /mnt/c/Go/bin/go.exe (and .exe variants)"
     fi
 
     info "Building MCP (linux/amd64, CGO disabled)..."
