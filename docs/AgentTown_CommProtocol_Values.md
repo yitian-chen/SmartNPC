@@ -237,12 +237,17 @@ graph TB
 | `action_started` | UE → Agent | **动作已接收并开始执行的回执（ACK）** | UE 收到 action_command 并成功启动后立即回 |
 | `action_completed` | UE → Agent | 动作完成回调 | MoveTo 完成 / StateTree 完成 |
 | `stop_action` | Agent → UE | 停止当前动作 | 反应层决定打断 |
+| `scan_area` | Agent → UE | 请求即时感知推送（携带 scan_id 关联响应） | scan_area 工具调用时，触发一次即时 perception_update |
 | `event_notification` | Agent → Agent | 事件通知（内部路由） | Director 投放事件 |
 | `state_report` | UE → Agent | 物理状态上报（**物理状态的权威通道**） | 状态变化超阈值 / 每 15 秒兜底 |
 | `agent_registered` | UE → Agent | 机器人上线 | RobotActor BeginPlay |
 | `agent_unregistered` | UE → Agent | 机器人下线 | RobotActor EndPlay |
 | `heartbeat` | 双向 | 心跳保活 | 每 5 秒 |
 | `error` | 双向 | 错误上报 | 异常情况 |
+| `resync` | 双向 | 重连 seq 交换 | 重连后交换最后成功接收的 seq（详见 §4.2） |
+| `event_lost` | Agent → UE | 缓冲滚动丢失告警 | 重连时缓冲已滚动超出对方请求的 seq（详见 §4.2） |
+
+> **控制消息补充**：`scan_area`、`resync`、`event_lost` 为协议级控制消息，承载工具触发/重连协调逻辑，不属于 Agent-UE 的业务消息范畴。
 
 > **约定 5（感知 vs 状态分工，消除 #6 冗余）**：
 > - `perception_update` 负责**空间与环境感知**（position/rotation/zone/visible_agents/nearby_objects/audible_events/environment），**默认不携带 physical_state**；仅当某项物理数值自上次上报变化 ≥ 阈值（energy/fatigue/health 变化 ≥5，joint_wear 变化 ≥1）时，在 perception_update 中附带该变化项。
@@ -300,7 +305,8 @@ graph TB
     "environment": {
       "time_of_day": "14:23",
       "weather": "clear"
-    }
+    },
+    "scan_id": "scan_001"
   }
 }
 ```
@@ -318,6 +324,7 @@ graph TB
 | current_animation | string | 当前播放的动画 |
 | current_emote | string/null | **当前正在表现的情绪状态**（持续型 emote 的回报，供 Agent 感知"我此刻的情绪表现"，解决 #4 情绪一致性） |
 | environment | object | 环境信息 |
+| scan_id | string (可选) | 用于关联 `scan_area` 请求与即时感知响应（由 MCP 层注入，仅即时扫描感知携带，常规定期感知为空） |
 
 #### action_command（Agent → UE）
 
@@ -464,6 +471,28 @@ graph TB
 > - **匹配** → UE 停止该动作，回 `action_completed {result: "interrupted", progress: ...}`。
 > - **不匹配**（目标动作已完成或已被新动作替换）→ UE **忽略该 stop**，并回一条 `error {error_code: "STOP_ID_MISMATCH", context: {requested: act_010, current: act_012}}`，避免误停新动作。
 > - Agent 侧收到 mismatch error 后，以最新的 action 状态为准重新决策，不重复发送 stop。
+
+#### scan_area（Agent → UE）
+
+```json
+{
+  "version": "1.0",
+  "msg_id": "uuid-010",
+  "seq": 2011,
+  "timestamp": 1719456040000,
+  "type": "scan_area",
+  "agent_id": "H-01",
+  "payload": {
+    "scan_id": "scan_001"
+  }
+}
+```
+
+| payload 字段 | 类型 | 说明 |
+|--------------|------|------|
+| scan_id | string | 由 MCP 层生成的唯一 ID，用于关联本次请求与对应的即时 perception_update 响应 |
+
+> **说明**：`scan_area` 是 scan_area 工具对应的协议消息，触发 UE 立即为指定 agent 生成一次 `perception_update`。该消息为 fire-and-forget（不期望 ACK 回执）；响应的 `perception_update` 中会回传相同的 `scan_id`，使 Agent 侧能够将即时感知与后续决策关联。
 
 #### event_notification（Agent 内部路由）
 
