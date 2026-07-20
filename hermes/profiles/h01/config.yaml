@@ -1,9 +1,3 @@
-# H-01 老陈 — Hermes Agent 配置
-#
-# 一期：单 Agent，通过 MCP 连接 agenttown-mcp（Go）。
-# agenttown-mcp 注册 10 个游戏工具，Hermes 作为 MCP 客户端调用。
-
-# ─── LLM Provider ───────────────────────────────────────────────
 model:
   provider: custom:agenttown
   default: deepseek-v4-flash
@@ -20,32 +14,24 @@ providers:
     api_mode: chat_completions
     discover_models: false
 
-# ─── REST Gateway ───────────────────────────────────────────────
+agent:
+  tool_use_enforcement: true
+
+compression:
+  enabled: true
+  threshold: 0.3
+  target_ratio: 0.25
+  protect_last_n: 12
+  hygiene_hard_message_limit: 80
+
+_config_version: 33
 API_SERVER_ENABLED: true
 API_SERVER_KEY: agenttown-test-key
 API_SERVER_HOST: 0.0.0.0
 API_SERVER_PORT: 8642
 API_SERVER_MODEL_NAME: h01
 
-# ─── Compression ────────────────────────────────────────────────
-compression:
-  enabled: true
-  threshold: 0.30
-  target_ratio: 0.25
-  protect_last_n: 12
-  hygiene_hard_message_limit: 80
-
-# ─── Agent ──────────────────────────────────────────────────────
-agent:
-  tool_use_enforcement: true
-
-# ─── MCP Servers ────────────────────────────────────────────────
-# Hermes connects to agenttown-mcp (Go) running on the host.
-# Tools are registered as mcp_agenttown_<tool_name> (e.g. mcp_agenttown_move_to).
-# host.docker.internal resolves to the WSL host via extra_hosts in docker-compose.
 mcp_servers:
   agenttown:
-    url: "http://host.docker.internal:8760/mcp"
-    timeout: 180
-    connect_timeout: 60
-
+    url: http://host.docker.internal:8760/mcp
+    enabled: true

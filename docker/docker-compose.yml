@@ -17,6 +17,11 @@ services:
     volumes:
       - hermes-data:/opt/data
       - ../hermes/profiles/h01:/opt/data/profiles/h01
+    # H-01 only needs its SOUL/SKILL plus AgentTown MCP tools. Hide the
+    # profile's large generic skills tree at runtime without deleting it from
+    # the host, preventing dozens of unrelated skills from entering context.
+    tmpfs:
+      - /opt/data/profiles/h01/skills
     environment:
       # Gateway 一期关闭外部门控，接受所有请求
       - GATEWAY_ALLOW_ALL_USERS=true
