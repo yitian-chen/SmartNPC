@@ -817,6 +817,10 @@ class MockUE:
 
     async def _perception_loop(self, end_hour: int):
         last_state_report = _time.monotonic()
+
+        # Send initial perception at start_hour:00 before first time advance.
+        await self._send_perception()
+
         while self.time.hour < end_hour:
             # Advance game time — SOLE time driver.
             previous_min = self.time.total_minutes
