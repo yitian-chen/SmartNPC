@@ -512,7 +512,7 @@ func main() {
 		wsAddr             = flag.String("ws", ":9090", "WebSocket server addr for Mock UE")
 		hermesURL          = flag.String("hermes-url", "http://localhost:8642", "Hermes Gateway base URL")
 		hermesAPIKey       = flag.String("hermes-api-key", "agenttown-test-key", "Hermes Gateway bearer token")
-		hermesModel        = flag.String("hermes-model", "deepseek-v4-flash", "Hermes model name")
+		hermesModel        = flag.String("hermes-model", "deepseek-v4-pro", "Hermes model name")
 		mcpAPIKey          = flag.String("mcp-api-key", "", "if set, require this Bearer token on /mcp")
 		httpAllowAnyOrigin = flag.Bool("http-allow-any-origin", true,
 			"disable origin / localhost restrictions so cross-host clients can connect")

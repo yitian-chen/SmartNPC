@@ -1,6 +1,6 @@
 model:
   provider: custom:agenttown
-  default: deepseek-v4-flash
+  default: deepseek-v4-pro
   base_url: https://api.deepseek.com
   api_mode: chat_completions
   context_length: 128000
@@ -10,7 +10,7 @@ providers:
     name: agenttown
     base_url: https://api.deepseek.com
     key_env: HERMES_AGENT_API_KEY
-    default_model: deepseek-v4-flash
+    default_model: deepseek-v4-pro
     api_mode: chat_completions
     discover_models: false
 
