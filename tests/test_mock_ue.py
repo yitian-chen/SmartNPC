@@ -63,6 +63,52 @@ class AgentRoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response["payload"]["error_code"], "UNKNOWN_AGENT")
         self.assertEqual(ue.action_log, [])
 
+    async def test_unknown_route_is_action_failed(self):
+        class FakeWS:
+            def __init__(self):
+                self.sent = []
+
+            async def send(self, frame):
+                self.sent.append(frame)
+
+        ue = MockUE(log_dir="logs")
+        ue._ws = FakeWS()
+        await ue._handle_envelope({
+            "type": "action_command",
+            "agent_id": "H-01",
+            "seq": 1,
+            "payload": {"action_id": "act_patrol", "cmd": "ExecuteComposite",
+                        "params": {"name": "patrol_route", "route_id": "morning_patrol"}},
+        })
+        import json
+        self.assertGreaterEqual(len(ue._ws.sent), 1)
+        ack = json.loads(ue._ws.sent[0])
+        self.assertEqual(ack["type"], "action_started")
+        self.assertEqual(ack["payload"]["accepted"], False)
+        self.assertIn("unknown patrol route", ack["payload"]["reject_reason"])
+
+    async def test_unknown_move_target_is_rejected(self):
+        class FakeWS:
+            def __init__(self):
+                self.sent = []
+
+            async def send(self, frame):
+                self.sent.append(frame)
+
+        ue = MockUE(log_dir="logs")
+        ue._ws = FakeWS()
+        await ue._handle_envelope({
+            "type": "action_command",
+            "agent_id": "H-01",
+            "seq": 1,
+            "payload": {"action_id": "act_move", "cmd": "MoveTo",
+                        "params": {"target": "narnia"}},
+        })
+        import json
+        ack = json.loads(ue._ws.sent[0])
+        self.assertEqual(ack["type"], "action_started")
+        self.assertEqual(ack["payload"]["accepted"], False)
+
     async def test_scan_area_echoes_scan_id_once(self):
         class FakeWS:
             def __init__(self):

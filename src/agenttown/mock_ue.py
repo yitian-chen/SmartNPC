@@ -494,6 +494,17 @@ class MockUE:
 
         logger.info(f"[MCP→UE/CMD] {cmd} action_id={action_id} params={json.dumps(params, ensure_ascii=False)}")
 
+        # Validate that the command references known world entities.
+        invalid_reason = self._validate_target(cmd, params)
+        if invalid_reason:
+            await self._send_action_started(
+                action_id, accepted=False, estimated_sec=None,
+                reject_reason=invalid_reason,
+            )
+            await self._send_error(ERR_ACTION_FAILED, invalid_reason,
+                                   action_id=action_id, context={"cmd": cmd, "params": params})
+            return
+
         # Busy guard: reject disruptive commands while busy.
         DISRUPTIVE = {CMD_MOVE_TO, CMD_TURN_TO, CMD_INTERACT, CMD_EXECUTE_COMPOSITE, CMD_WAIT}
         if self.npc.busy_action_id is not None and cmd in DISRUPTIVE:
@@ -526,6 +537,33 @@ class MockUE:
             # Short action: apply effects immediately and complete now.
             self._apply_command_effects(cmd, params, starting=False)
             await self._send_action_completed(action_id, RESULT_SUCCESS, 0, 1.0)
+
+    def _validate_target(self, cmd: str, params: Dict[str, Any]) -> str:
+        """Return a non-empty rejection reason when targeting a non‑existent
+        zone, location, object, or route.  An empty return means valid."""
+        if cmd == CMD_MOVE_TO:
+            target = params.get("target", "")
+            if target and not (target in ZONE_ENTRIES or target in LOCATION_POINTS):
+                return f"unknown move target: {target} (available: zones={list(ZONE_ENTRIES)}, locations={list(LOCATION_POINTS)})"
+        elif cmd == CMD_INTERACT:
+            obj = params.get("object_id", "")
+            if obj and obj not in OBJECT_META:
+                return f"unknown object: {obj} (available: {list(OBJECT_META)})"
+        elif cmd == CMD_EXECUTE_COMPOSITE:
+            name = params.get("name", "")
+            if name == "patrol_route":
+                route = params.get("route_id", "")
+                if route and not (route in ZONE_ENTRIES or route in LOCATION_POINTS):
+                    return f"unknown patrol route: {route}"
+            elif name == "work_assemble":
+                target = params.get("target", "")
+                if target and target not in OBJECT_META:
+                    return f"unknown workbench: {target}"
+            elif name == "charge_at":
+                station = params.get("station_id", "")
+                if station and not (station in ZONE_ENTRIES or station in LOCATION_POINTS):
+                    return f"unknown charging station: {station}"
+        return ""
 
     async def _handle_stop_action(self, payload: Dict[str, Any]):
         req_id = payload.get("action_id", "")
