@@ -169,9 +169,11 @@ start_mcp() {
     #      .exe variant because Windows Go installs ship as go.exe and
     #      WSL/bash needs the explicit suffix to exec it.
     #   5. User-local SDK dirs (~/go/bin/go, ~/sdk/*/bin/go)
-    # NOTE: do NOT reset GO_BIN to "" before reading the env var, or the
-    # user's override will be silently discarded.
-    if [ -n "${GO_BIN:-}" ] && [ -x "$GO_BIN" ]; then
+    # NOTE: use ${GO_BIN:-} (not $GO_BIN) because `set -u` is in effect;
+    # assigning `GO_BIN="${GO_BIN:-}"` preserves a user-supplied value
+    # while ensuring the variable is bound when no override was given.
+    GO_BIN="${GO_BIN:-}"
+    if [ -n "$GO_BIN" ] && [ -x "$GO_BIN" ]; then
         : # explicit override, use as-is
     elif command -v go &>/dev/null; then
         GO_BIN="$(command -v go)"
