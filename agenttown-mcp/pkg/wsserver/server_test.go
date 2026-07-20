@@ -132,6 +132,25 @@ func TestReplayFrom_Rollover(t *testing.T) {
 	}
 }
 
+func TestRequestScan_SendsScanID(t *testing.T) {
+	s := newTestServer()
+	srvConn, cliConn := wsPipe(t, s)
+	defer srvConn.Close(websocket.StatusNormalClosure, "")
+	defer cliConn.Close(websocket.StatusNormalClosure, "")
+
+	if err := s.RequestScan(context.Background(), "H-01", "scan_123"); err != nil {
+		t.Fatal(err)
+	}
+	env := readEnvelope(t, cliConn)
+	if env.Type != protocol.TypeScanArea || env.AgentID != "H-01" {
+		t.Fatalf("scan envelope=%+v", env)
+	}
+	var payload protocol.ScanAreaPayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil || payload.ScanID != "scan_123" {
+		t.Fatalf("scan payload=%+v err=%v", payload, err)
+	}
+}
+
 func TestDeliverACK_RejectsWrongAgent(t *testing.T) {
 	s := newTestServer()
 	ch := make(chan *pendingResult, 1)

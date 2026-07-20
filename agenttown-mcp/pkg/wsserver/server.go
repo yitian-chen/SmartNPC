@@ -520,7 +520,8 @@ func (s *Server) SendAction(ctx context.Context, agentID, cmd string, params map
 }
 
 // RequestScan asks Mock UE to emit an immediate perception_update for the
-// given agent. Backs the scan_area tool. Fire-and-forget (no ACK expected).
-func (s *Server) RequestScan(ctx context.Context, agentID string) error {
-	return s.SendEnvelope(agentID, protocol.TypeScanArea, map[string]any{})
+// given agent. scanID is echoed by that response to correlate a one-shot
+// scan follow-up decision. Fire-and-forget (no ACK expected).
+func (s *Server) RequestScan(ctx context.Context, agentID, scanID string) error {
+	return s.SendEnvelope(agentID, protocol.TypeScanArea, protocol.ScanAreaPayload{ScanID: scanID})
 }

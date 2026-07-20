@@ -7,14 +7,17 @@ package protocol
 
 // PerceptionPayload is the payload of a perception_update message.
 type PerceptionPayload struct {
-	Location           Location            `json:"location"`
-	PhysicalStateDelta map[string]float64  `json:"physical_state_delta,omitempty"` // only changed values over threshold
-	VisibleAgents      []VisibleAgent      `json:"visible_agents"`
-	NearbyObjects      []NearbyObject      `json:"nearby_objects"`
-	AudibleEvents      []AudibleEvent      `json:"audible_events"`
-	CurrentAnimation   string              `json:"current_animation"`
-	CurrentEmote       *string             `json:"current_emote"`
-	Environment        Environment         `json:"environment"`
+	Location           Location           `json:"location"`
+	PhysicalStateDelta map[string]float64 `json:"physical_state_delta,omitempty"` // only changed values over threshold
+	VisibleAgents      []VisibleAgent     `json:"visible_agents"`
+	NearbyObjects      []NearbyObject     `json:"nearby_objects"`
+	AudibleEvents      []AudibleEvent     `json:"audible_events"`
+	CurrentAnimation   string             `json:"current_animation"`
+	CurrentEmote       *string            `json:"current_emote"`
+	Environment        Environment        `json:"environment"`
+	// ScanID correlates an immediate scan_area request with its one-shot
+	// perception response. It is transport metadata, not world state.
+	ScanID string `json:"scan_id,omitempty"`
 }
 
 // Location is the spatial state block of a perception.
@@ -56,6 +59,14 @@ type Environment struct {
 	Weather   string `json:"weather"`
 }
 
+// ─── scan_area (Agent → UE control) ─────────────────────────────
+
+// ScanAreaPayload correlates a scan request with the immediate perception
+// response through ScanID. It is an MCP/UE bridge control payload.
+type ScanAreaPayload struct {
+	ScanID string `json:"scan_id"`
+}
+
 // ─── action_command (Agent → UE) ────────────────────────────────
 
 // ActionCommandPayload is the payload of an action_command message.
@@ -69,10 +80,10 @@ type ActionCommandPayload struct {
 
 // ActionStartedPayload is the ACK for an action_command.
 type ActionStartedPayload struct {
-	ActionID              string   `json:"action_id"`
-	Accepted              bool     `json:"accepted"`
-	EstimatedDurationSec  *float64 `json:"estimated_duration_sec"`
-	RejectReason          string   `json:"reject_reason,omitempty"`
+	ActionID             string   `json:"action_id"`
+	Accepted             bool     `json:"accepted"`
+	EstimatedDurationSec *float64 `json:"estimated_duration_sec"`
+	RejectReason         string   `json:"reject_reason,omitempty"`
 }
 
 // ─── action_completed (UE → Agent) ──────────────────────────────

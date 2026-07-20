@@ -63,6 +63,42 @@ class AgentRoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response["payload"]["error_code"], "UNKNOWN_AGENT")
         self.assertEqual(ue.action_log, [])
 
+    async def test_scan_area_echoes_scan_id_once(self):
+        class FakeWS:
+            def __init__(self):
+                self.sent = []
+
+            async def send(self, frame):
+                self.sent.append(frame)
+
+        ue = MockUE(log_dir="logs")
+        ue._ws = FakeWS()
+        await ue._handle_envelope({
+            "type": "scan_area",
+            "agent_id": "H-01",
+            "seq": 1,
+            "payload": {"scan_id": "scan_123"},
+        })
+        import json
+        response = json.loads(ue._ws.sent[-1])
+        self.assertEqual(response["type"], "perception_update")
+        self.assertEqual(response["payload"]["scan_id"], "scan_123")
+
+    async def test_periodic_perception_has_no_scan_id(self):
+        class FakeWS:
+            def __init__(self):
+                self.sent = []
+
+            async def send(self, frame):
+                self.sent.append(frame)
+
+        ue = MockUE(log_dir="logs")
+        ue._ws = FakeWS()
+        await ue._send_perception()
+        import json
+        response = json.loads(ue._ws.sent[-1])
+        self.assertNotIn("scan_id", response["payload"])
+
 
 if __name__ == "__main__":
     unittest.main()

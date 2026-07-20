@@ -353,8 +353,10 @@ class MockUE:
 
     # ─── perception_update ────────────────────────────────────
 
-    async def _send_perception(self):
+    async def _send_perception(self, scan_id: Optional[str] = None):
         payload = self._build_perception()
+        if scan_id:
+            payload["scan_id"] = scan_id
         await self._send(TYPE_PERCEPTION_UPDATE, self.npc.agent_id, payload)
         logger.info(f"[PERCEPTION] {self.time.display} | zone={self.npc.current_zone} | energy={self.npc.physical.energy:.0f}%")
 
@@ -472,7 +474,7 @@ class MockUE:
         elif msg_type == TYPE_STOP_ACTION:
             await self._handle_stop_action(payload)
         elif msg_type == TYPE_SCAN_AREA:
-            await self._send_perception()
+            await self._send_perception(payload.get("scan_id"))
         elif msg_type == TYPE_RESYNC:
             peer_last = int(payload.get("last_received_seq", 0))
             await self._replay_from(peer_last)

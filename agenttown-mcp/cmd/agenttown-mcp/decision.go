@@ -20,6 +20,7 @@ const (
 	reasonNearbyObjectActionsChanged = "附近物体可用动作变化"
 	reasonAudibleEvent               = "听觉事件"
 	reasonWeatherChanged             = "天气变化"
+	reasonScanResponse               = "主动扫描响应"
 )
 
 // observedSnapshot contains only perception fields that can trigger a new

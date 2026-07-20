@@ -24,6 +24,14 @@ func perceptionJSON(timeOfDay, zone, location, weather string, audible []protoco
 	return raw
 }
 
+func perceptionWithScanID(raw json.RawMessage, scanID string) json.RawMessage {
+	var payload protocol.PerceptionPayload
+	_ = json.Unmarshal(raw, &payload)
+	payload.ScanID = scanID
+	out, _ := json.Marshal(payload)
+	return out
+}
+
 func TestAgentContext_PerceptionGateAndLatestWins(t *testing.T) {
 	ac, _ := newAgentContext(context.Background())
 	first := perceptionJSON("06:30", "main_workshop", "", "clear", nil)
@@ -68,6 +76,81 @@ func TestAgentContext_ImportantChangesTrigger(t *testing.T) {
 	reasons, _, _ = ac.observePerception(perceptionJSON("07:00", "central_plaza", "plaza", "rain", audible))
 	if len(reasons) != 0 {
 		t.Fatalf("identical scan retriggered decision: %v", reasons)
+	}
+}
+
+func TestAgentContext_MatchingScanResponseForcesExactlyOneDecision(t *testing.T) {
+	ac, _ := newAgentContext(context.Background())
+	base := perceptionJSON("07:00", "main_workshop", "", "clear", nil)
+	_, _, _ = ac.observePerception(base)
+	_ = ac.takeDecision()
+
+	_, epoch, ok := ac.beginDecision()
+	if !ok {
+		t.Fatal("could not start decision")
+	}
+	if err := ac.armScan(epoch, "scan_1"); err != nil {
+		t.Fatal(err)
+	}
+	ac.endDecision(epoch)
+
+	reasons, _, err := ac.observePerception(perceptionWithScanID(base, "scan_1"))
+	if err != nil || !containsReason(reasons, reasonScanResponse) {
+		t.Fatalf("scan response reasons=%v err=%v", reasons, err)
+	}
+	work := ac.takeDecision()
+	if work == nil || !work.scanFollowup {
+		t.Fatalf("scan response did not create scan follow-up: %#v", work)
+	}
+
+	reasons, _, err = ac.observePerception(perceptionWithScanID(base, "scan_1"))
+	if err != nil || len(reasons) != 0 || ac.takeDecision() != nil {
+		t.Fatalf("duplicate scan response retriggered: reasons=%v err=%v", reasons, err)
+	}
+}
+
+func TestAgentContext_UnmatchedScanDoesNotConsumePendingToken(t *testing.T) {
+	ac, _ := newAgentContext(context.Background())
+	base := perceptionJSON("07:00", "main_workshop", "", "clear", nil)
+	_, _, _ = ac.observePerception(base)
+	_ = ac.takeDecision()
+	_, epoch, _ := ac.beginDecision()
+	if err := ac.armScan(epoch, "scan_1"); err != nil {
+		t.Fatal(err)
+	}
+	ac.endDecision(epoch)
+
+	reasons, _, _ := ac.observePerception(perceptionWithScanID(base, "scan_other"))
+	if len(reasons) != 0 {
+		t.Fatalf("unmatched scan triggered: %v", reasons)
+	}
+	ac.mu.Lock()
+	pending := ac.pendingScanID
+	ac.mu.Unlock()
+	if pending != "scan_1" {
+		t.Fatalf("unmatched scan consumed token: %q", pending)
+	}
+}
+
+func TestAgentContext_PendingScanInvalidatesRemainingToolTurn(t *testing.T) {
+	ac, _ := newAgentContext(context.Background())
+	_, epoch, ok := ac.beginDecision()
+	if !ok {
+		t.Fatal("could not start decision")
+	}
+	if err := ac.armScan(epoch, "scan_1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := ac.validateDecision(epoch); err == nil || !strings.Contains(err.Error(), "scan response pending") {
+		t.Fatalf("post-scan tool call was not rejected: %v", err)
+	}
+}
+
+func TestAgentContext_ScanFollowupRejectsRecursiveScan(t *testing.T) {
+	ac, _ := newAgentContext(context.Background())
+	_, epoch, _ := ac.beginDecisionWithScan(true)
+	if err := ac.armScan(epoch, "scan_recursive"); err == nil || !strings.Contains(err.Error(), "scan-response") {
+		t.Fatalf("recursive scan was not rejected: %v", err)
 	}
 }
 

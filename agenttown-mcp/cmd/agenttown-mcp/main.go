@@ -31,6 +31,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/AgentTown/agenttown-mcp/adapters/agenttown/perception"
@@ -54,6 +55,9 @@ type agentContext struct {
 	agentEpoch               int64
 	decisionEpoch            int64
 	decisionActive           bool
+	activeScanFollowup       bool
+	pendingScanID            string
+	pendingScanFollowup      bool
 	latestPhysical           *protocol.PhysicalState
 	latestPerception         json.RawMessage
 	currentTask              *protocol.CurrentTaskProgress
@@ -75,6 +79,7 @@ type decisionWork struct {
 	reasons      []string
 	extras       []string
 	localSummary string
+	scanFollowup bool
 }
 
 func newAgentContext(parent context.Context, epochs ...int64) (*agentContext, context.Context) {
@@ -105,6 +110,12 @@ func (a *agentContext) observePerception(payload json.RawMessage) ([]string, boo
 		return nil, false, nil
 	}
 	reasons := perceptionTriggerReasons(perceptionPayload, snapshot, a.observedSnapshot)
+	matchedScanResponse := perceptionPayload.ScanID != "" && perceptionPayload.ScanID == a.pendingScanID
+	if matchedScanResponse {
+		a.pendingScanID = "" // consume once: duplicate scan responses are ordinary snapshots
+		a.pendingScanFollowup = true
+		reasons = mergeUnique(reasons, reasonScanResponse)
+	}
 	a.observedSnapshot = &snapshot
 	a.latestPerception = cloneRawMessage(payload)
 	if containsReason(reasons, reasonAudibleEvent) {
@@ -227,11 +238,12 @@ func (a *agentContext) takeDecision() *decisionWork {
 		return nil
 	}
 	work := &decisionWork{
-		perception:  cloneRawMessage(a.pendingPerception),
-		physical:    clonePhysical(a.latestPhysical),
-		currentTask: cloneTask(a.currentTask),
-		reasons:     append([]string(nil), a.pendingReasons...),
-		extras:      append([]string(nil), a.recentEnvironmentEvents...),
+		perception:   cloneRawMessage(a.pendingPerception),
+		physical:     clonePhysical(a.latestPhysical),
+		currentTask:  cloneTask(a.currentTask),
+		reasons:      append([]string(nil), a.pendingReasons...),
+		extras:       append([]string(nil), a.recentEnvironmentEvents...),
+		scanFollowup: a.pendingScanFollowup,
 	}
 	work.localSummary = buildLocalSummary(
 		work.perception, work.physical, work.currentTask,
@@ -239,6 +251,7 @@ func (a *agentContext) takeDecision() *decisionWork {
 	)
 	a.pendingPerception = nil
 	a.pendingReasons = nil
+	a.pendingScanFollowup = false
 	a.recentEnvironmentEvents = nil
 	return work
 }
@@ -259,6 +272,9 @@ func (a *agentContext) stop() {
 	a.stopped = true
 	a.online = false
 	a.decisionActive = false
+	a.activeScanFollowup = false
+	a.pendingScanID = ""
+	a.pendingScanFollowup = false
 	a.latestPerception = nil
 	a.pendingPerception = nil
 	a.pendingReasons = nil
@@ -279,10 +295,23 @@ func (a *agentContext) beginDecision() (agentEpoch, decisionEpoch int64, ok bool
 	return a.agentEpoch, a.decisionEpoch, true
 }
 
+func (a *agentContext) beginDecisionWithScan(scanFollowup bool) (agentEpoch, decisionEpoch int64, ok bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.stopped || !a.online {
+		return 0, 0, false
+	}
+	a.decisionEpoch++
+	a.decisionActive = true
+	a.activeScanFollowup = scanFollowup
+	return a.agentEpoch, a.decisionEpoch, true
+}
+
 func (a *agentContext) endDecision(epoch int64) {
 	a.mu.Lock()
 	if a.decisionEpoch == epoch {
 		a.decisionActive = false
+		a.activeScanFollowup = false
 	}
 	a.mu.Unlock()
 }
@@ -297,9 +326,41 @@ func (a *agentContext) validateDecision(epoch int64) error {
 		return errors.New("missing decision_epoch")
 	case !a.decisionActive || epoch != a.decisionEpoch:
 		return fmt.Errorf("stale decision_epoch: got %d, current %d", epoch, a.decisionEpoch)
+	case a.pendingScanID != "":
+		// A scan ends the current tool turn. The correlated perception will
+		// begin a fresh decision, so later tool calls from this old turn must
+		// not act on pre-scan information.
+		return errors.New("scan response pending; wait for the next decision")
 	default:
 		return nil
 	}
+}
+
+func (a *agentContext) armScan(decisionEpoch int64, scanID string) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	switch {
+	case a.stopped || !a.online:
+		return errors.New("agent offline")
+	case decisionEpoch <= 0:
+		return errors.New("missing decision_epoch")
+	case !a.decisionActive || decisionEpoch != a.decisionEpoch:
+		return fmt.Errorf("stale decision_epoch: got %d, current %d", decisionEpoch, a.decisionEpoch)
+	case a.activeScanFollowup:
+		return errors.New("scan_area unavailable during scan-response decision")
+	case a.pendingScanID != "":
+		return errors.New("scan_area already pending")
+	}
+	a.pendingScanID = scanID
+	return nil
+}
+
+func (a *agentContext) disarmScan(scanID string) {
+	a.mu.Lock()
+	if a.pendingScanID == scanID {
+		a.pendingScanID = ""
+	}
+	a.mu.Unlock()
 }
 
 func (a *agentContext) recordActionStarted(actionID, cmd string, params map[string]any, decisionEpoch int64) {
@@ -402,7 +463,7 @@ func runPerceptionWorker(
 		if work == nil {
 			continue
 		}
-		agentEpoch, decisionEpoch, ok := ac.beginDecision()
+		agentEpoch, decisionEpoch, ok := ac.beginDecisionWithScan(work.scanFollowup)
 		if !ok {
 			continue
 		}
@@ -496,10 +557,21 @@ func (g *guardedExecutor) SendAction(ctx context.Context, agentID string, decisi
 }
 
 func (g *guardedExecutor) RequestScan(ctx context.Context, agentID string, decisionEpoch int64) error {
-	if _, err := g.validate(agentID, decisionEpoch); err != nil {
+	ac, err := g.validate(agentID, decisionEpoch)
+	if err != nil {
 		return err
 	}
-	return g.ws.RequestScan(ctx, agentID)
+	scanID := "scan_" + uuid.NewString()
+	// Arm before writing: Mock UE can respond immediately, so registering the
+	// token after the send would race the matching perception_update.
+	if err := ac.armScan(decisionEpoch, scanID); err != nil {
+		return err
+	}
+	if err := g.ws.RequestScan(ctx, agentID, scanID); err != nil {
+		ac.disarmScan(scanID)
+		return err
+	}
+	return nil
 }
 
 func main() {

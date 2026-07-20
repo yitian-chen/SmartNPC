@@ -62,6 +62,29 @@ func TestEnvelopeRoundTrip(t *testing.T) {
 }
 
 // TestActionLifecyclePayloads verifies command/started/completed payloads.
+func TestScanAreaPayloadAndPerceptionScanID(t *testing.T) {
+	request := ScanAreaPayload{ScanID: "scan_123"}
+	raw, err := json.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var gotRequest ScanAreaPayload
+	if err := json.Unmarshal(raw, &gotRequest); err != nil || gotRequest.ScanID != "scan_123" {
+		t.Fatalf("scan request round-trip: %+v err=%v", gotRequest, err)
+	}
+
+	payload := PerceptionPayload{ScanID: "scan_123"}
+	raw, _ = json.Marshal(payload)
+	var gotPerception PerceptionPayload
+	if err := json.Unmarshal(raw, &gotPerception); err != nil || gotPerception.ScanID != "scan_123" {
+		t.Fatalf("scan perception round-trip: %+v err=%v", gotPerception, err)
+	}
+	var legacy PerceptionPayload
+	if err := json.Unmarshal([]byte(`{"location":{},"environment":{}}`), &legacy); err != nil || legacy.ScanID != "" {
+		t.Fatalf("legacy perception compatibility: %+v err=%v", legacy, err)
+	}
+}
+
 func TestActionLifecyclePayloads(t *testing.T) {
 	cmd := ActionCommandPayload{
 		ActionID: "act_001",
@@ -93,7 +116,7 @@ func TestActionLifecyclePayloads(t *testing.T) {
 // TestStateReportPayload verifies the four physical values.
 func TestStateReportPayload(t *testing.T) {
 	sr := StateReportPayload{
-		PhysicalState: PhysicalState{Energy: 20, Fatigue: 70, JointWear: 85, Health: 90},
+		PhysicalState:       PhysicalState{Energy: 20, Fatigue: 70, JointWear: 85, Health: 90},
 		CurrentTaskProgress: &CurrentTaskProgress{ActionID: "act_010", Progress: 0.6},
 	}
 	raw, _ := json.Marshal(sr)
