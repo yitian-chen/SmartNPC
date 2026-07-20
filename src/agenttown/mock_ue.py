@@ -202,28 +202,6 @@ class GameTime:
             self.day += 1
 
 
-class _AppendHandler(logging.Handler):
-    """File handler that opens/writes/closes per log entry.
-
-    Unlike logging.FileHandler (which keeps the file handle open), this
-    handler re-opens the file in append mode for each emit() call. This
-    avoids concurrent-write corruption when another process (the MCP via
-    WSL shell redirection) is writing to the same file.
-    """
-
-    def __init__(self, path: str):
-        super().__init__()
-        self._path = path
-
-    def emit(self, record):
-        try:
-            msg = self.format(record)
-            with open(self._path, "a", encoding="utf-8") as f:
-                f.write(msg + "\n")
-        except Exception:
-            self.handleError(record)
-
-
 class MockUE:
     """Async Mock UE client speaking the AgentTown WebSocket protocol."""
 
