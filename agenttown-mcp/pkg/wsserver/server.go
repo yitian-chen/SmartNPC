@@ -80,6 +80,7 @@ type Server struct {
 
 	mu      sync.RWMutex
 	conn    *websocket.Conn
+	lastHeartbeatAt time.Time // 最近收到 UE 心跳的时间（mu 保护），用于 15s 超时检测
 	pending map[string]*pendingCall // keyed by action_id (msg correlation)
 
 	bufMu   sync.Mutex
@@ -181,6 +182,15 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 
 	s.log.Info("mock ue connected", "remote", r.RemoteAddr)
 
+	// 初始化心跳时间戳，启出站心跳 ticker（约定 §5.2：双向每 5s + 15s 超时）
+	s.mu.Lock()
+	s.lastHeartbeatAt = time.Now()
+	s.mu.Unlock()
+
+	hbCtx, hbCancel := context.WithCancel(context.Background())
+	defer hbCancel()
+	go s.heartbeatLoop(hbCtx)
+
 	// Phase 7: on (re)connect, tell the peer the last inbound seq we saw so
 	// it can replay anything we missed. Also proactively replay our own
 	// buffered discrete messages once the peer sends its resync.
@@ -228,7 +238,10 @@ func (s *Server) readLoop(ctx context.Context, c *websocket.Conn) {
 		// fully visible in sim.log.
 		switch env.Type {
 		case protocol.TypeHeartbeat:
-			// silent — don't log
+			// 更新心跳时间戳（用于 15s 超时检测），保持静默不日志
+			s.mu.Lock()
+			s.lastHeartbeatAt = time.Now()
+			s.mu.Unlock()
 		default:
 			s.log.Info("[UE→MCP]", "type", env.Type, "seq", env.Seq, "agent_id", env.AgentID, "payload", string(env.Payload))
 		}
@@ -529,4 +542,36 @@ func (s *Server) SendAction(ctx context.Context, agentID, cmd string, params map
 // scan follow-up decision. Fire-and-forget (no ACK expected).
 func (s *Server) RequestScan(ctx context.Context, agentID, scanID string) error {
 	return s.SendEnvelope(agentID, protocol.TypeScanArea, protocol.ScanAreaPayload{ScanID: scanID})
+}
+
+// heartbeatLoop 每 5s 发出站心跳，并检测 UE 心跳是否超时（约定 §5.2）。
+// 15s 未收到 UE 心跳则主动关闭连接，触发 UE 侧重连。
+// ctx 取消时退出（连接关闭时通过 hbCancel 触发）。
+func (s *Server) heartbeatLoop(ctx context.Context) {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			// 发出站心跳（agent_id="system"）
+			if err := s.SendEnvelope(protocol.SystemAgentID, protocol.TypeHeartbeat, protocol.HeartbeatPayload{}); err != nil {
+				s.log.Debug("heartbeat send failed", "err", err)
+			}
+			// 检测 UE 心跳响应超时（15s）
+			s.mu.RLock()
+			last := s.lastHeartbeatAt
+			s.mu.RUnlock()
+			if time.Since(last) > 15*time.Second {
+				s.log.Warn("UE heartbeat timeout (>15s), closing connection", "last_heartbeat", last)
+				s.mu.Lock()
+				if s.conn != nil {
+					_ = s.conn.Close(websocket.StatusPolicyViolation, "heartbeat timeout")
+				}
+				s.mu.Unlock()
+				return
+			}
+		}
+	}
 }
