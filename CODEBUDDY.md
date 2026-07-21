@@ -95,11 +95,23 @@ go test ./adapters/agenttown/perception/ -v -count=1        # 感知格式化测
 
 **统一日志文件**：`logs/YYYY-MM-DD/sim.log`（MCP 进程独占写入，JSON Lines 格式，含 UE + MCP + Hermes 三层全链路；`YYYY-MM-DD` 为仿真启动日期）
 
-```bash
-# 查看统一日志
-cat logs/YYYY-MM-DD/sim.log | python -m json.tool  # 格式化 JSON 行
+**推荐：用 `scripts/pretty_log.py` 可读化查看**（每条 JSON 渲染为多行，方向标记着色，长字段按行展开）：
 
-# 按数据流转方向过滤
+```bash
+python scripts/pretty_log.py                       # 查看今天的 sim.log（渲染式）
+python scripts/pretty_log.py 2026-07-20            # 指定日期
+python scripts/pretty_log.py -f PERCEPTION -n 5    # 最近 5 条 MCP→Hermes 感知原文
+python scripts/pretty_log.py -f RESPONSE -n 5      # 最近 5 条 Hermes 响应
+python scripts/pretty_log.py -f UE→MCP -n 10       # 最近 10 条 UE→MCP
+python scripts/pretty_log.py --raw                 # 原始 JSON（grep/awk 友好）
+python scripts/pretty_log.py --no-color > out.txt  # 输出到文件
+```
+
+方向过滤器（`-f`）简写：`UE→MCP` / `MCP→UE` / `PERCEPTION` / `RESPONSE` / `TOOL` / `HEARTBEAT`。heartbeat 默认隐藏。
+
+**原始 grep（不渲染，单行 JSON）**：
+
+```bash
 grep '\[UE→MCP\]' logs/YYYY-MM-DD/sim.log           # Mock UE → MCP（感知/状态/动作完成）
 grep '\[MCP→UE\]' logs/YYYY-MM-DD/sim.log           # MCP → Mock UE（动作命令/叙事）
 grep '\[MCP→Hermes/PERCEPTION\]' logs/YYYY-MM-DD/sim.log  # MCP → Hermes（感知文本）
