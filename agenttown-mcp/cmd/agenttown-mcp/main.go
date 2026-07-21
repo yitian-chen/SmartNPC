@@ -490,13 +490,9 @@ func runPerceptionWorker(
 			logger.Warn("perception format returned empty", "agent_id", agentID, "raw", string(work.perception))
 			continue
 		}
-		text = formatDecisionPrompt(text, agentID, agentEpoch, decisionEpoch, work.reasons, work.currentTask)
-		display := text
-		if len(display) > 200 {
-			display = display[:200] + "..."
-		}
-		logger.Info("[MCP→Hermes/PERCEPTION]", "agent_id", agentID,
-			"agent_epoch", agentEpoch, "decision_epoch", decisionEpoch, "text", display)
+	text = formatDecisionPrompt(text, agentID, agentEpoch, decisionEpoch, work.reasons, work.currentTask)
+	logger.Info("[MCP→Hermes/PERCEPTION]", "agent_id", agentID,
+		"agent_epoch", agentEpoch, "decision_epoch", decisionEpoch, "text", text)
 
 		resp, err := hc.SendWithSummary(ctx, text, work.localSummary)
 		ac.endDecision(decisionEpoch)
