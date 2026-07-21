@@ -68,6 +68,7 @@ type agentContext struct {
 	summaryEnvironmentEvents []string // rolling authoritative environment history
 	recentActions            []localActionSummary
 	currentActionID          string // 当前执行中的 action_id（mu 保护），空表示无执行中动作；用于 stop_action ID 匹配（约定9）
+	pendingActionTimeouts    map[string]*time.Timer // action_id → 超时 timer（mu 保护），约定 §5.2 action_completed 1.5× 估值超时
 	wake                     chan struct{}
 	cancel                   context.CancelFunc
 	stopped                  bool
@@ -91,7 +92,8 @@ func newAgentContext(parent context.Context, epochs ...int64) (*agentContext, co
 	}
 	return &agentContext{
 		online: true, agentEpoch: agentEpoch,
-		wake: make(chan struct{}, 1), cancel: cancel,
+		wake:                  make(chan struct{}, 1), cancel: cancel,
+		pendingActionTimeouts: make(map[string]*time.Timer),
 	}, ctx
 }
 
@@ -202,6 +204,11 @@ func (a *agentContext) recordActionCompletion(completion protocol.ActionComplete
 	if a.currentActionID == completion.ActionID {
 		a.currentActionID = "" // 动作完成，清空当前 action 追踪
 	}
+	// 取消 action_completed 超时 timer（约定 §5.2）
+	if timer, ok := a.pendingActionTimeouts[completion.ActionID]; ok {
+		timer.Stop()
+		delete(a.pendingActionTimeouts, completion.ActionID)
+	}
 	a.mu.Unlock()
 	return a.queueExternalEvent(reason, extra)
 }
@@ -293,6 +300,11 @@ func (a *agentContext) stop() {
 	a.pendingReasons = nil
 	a.recentEnvironmentEvents = nil
 	a.currentActionID = "" // agent 下线时清空（避免残留）
+	// 停止所有 pending action 超时 timer
+	for _, timer := range a.pendingActionTimeouts {
+		timer.Stop()
+	}
+	a.pendingActionTimeouts = make(map[string]*time.Timer)
 	cancel := a.cancel
 	a.mu.Unlock()
 	cancel()
@@ -582,6 +594,8 @@ func (g *guardedExecutor) SendAction(ctx context.Context, agentID string, decisi
 	ack, err := g.ws.SendAction(ctx, agentID, cmd, params)
 	if err == nil && ack != nil {
 		ac.recordActionStarted(ack.ActionID, cmd, params, decisionEpoch)
+		// 注册 action_completed 超时 timer（约定 §5.2：estimated_duration × 1.5）
+		ac.armActionTimeout(ack.ActionID, ack.EstimatedDurationSec, g.ws, agentID, g.lookup)
 	}
 	return ack, err
 }
@@ -634,6 +648,57 @@ func (g *guardedExecutor) SendStopAction(_ context.Context, agentID, actionID st
 		return errors.New("UE disconnected")
 	}
 	return g.ws.SendStopAction(agentID, actionID)
+}
+
+// armActionTimeout 注册 action_completed 超时 timer（约定 §5.2）。
+// 超时时长 = estimated_duration_sec × 1.5；est 为 nil 或 ≤0 时默认 60s。
+// 超时回调：发 stop_action 停止该动作 + 日志警告 + 触发重新决策。
+func (a *agentContext) armActionTimeout(
+	actionID string,
+	estDurationSec *float64,
+	ws *wsserver.Server,
+	agentID string,
+	lookup func(string) *agentContext,
+) {
+	timeout := 60 * time.Second // 默认
+	if estDurationSec != nil && *estDurationSec > 0 {
+		timeout = time.Duration(*estDurationSec * 1.5 * float64(time.Second))
+		// 设下限 5s 避免估算过短导致误超时
+		if timeout < 5*time.Second {
+			timeout = 5 * time.Second
+		}
+	}
+
+	timer := time.AfterFunc(timeout, func() {
+		logger := slog.Default()
+		logger.Warn("action_completed timeout, sending stop_action",
+			"agent_id", agentID, "action_id", actionID, "timeout", timeout)
+		// 发 stop_action 停止该动作
+		if err := ws.SendStopAction(agentID, actionID); err != nil {
+			logger.Error("stop_action send failed on action timeout", "err", err)
+		}
+		// 清除本地追踪并触发重新决策
+		ac := lookup(agentID)
+		if ac != nil {
+			ac.mu.Lock()
+			ac.currentActionID = ""
+			delete(ac.pendingActionTimeouts, actionID)
+			ac.mu.Unlock()
+			// 触发重新决策（下次 perception 会处理）
+			select {
+			case ac.wake <- struct{}{}:
+			default:
+			}
+		}
+	})
+
+	a.mu.Lock()
+	// 如果已有同 action_id 的 timer，先 stop 旧的
+	if old, ok := a.pendingActionTimeouts[actionID]; ok {
+		old.Stop()
+	}
+	a.pendingActionTimeouts[actionID] = timer
+	a.mu.Unlock()
 }
 
 func main() {
