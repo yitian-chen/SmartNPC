@@ -34,6 +34,7 @@ async def _run(args):
         perception_interval=args.interval,
         scenario_file=args.scenario,
         log_dir=args.log_dir,
+        world_kb_path=args.world_kb,
     )
     try:
         await mock.run_day(start_hour=args.start, end_hour=args.end)
@@ -62,6 +63,9 @@ def main():
     parser.add_argument("--log-dir", default="logs",
                         help="Directory for Mock UE day logs "
                              "(start.sh passes logs/YYYY-MM-DD)")
+    parser.add_argument("--world-kb", default="assets/world_kb.yaml",
+                        help="Path to world_kb.yaml (single source of truth for "
+                             "zone/location/object data, shared with agenttown-mcp)")
 
     args = parser.parse_args()
 

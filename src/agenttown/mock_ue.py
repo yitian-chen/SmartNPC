@@ -74,38 +74,155 @@ ERR_UNKNOWN_AGENT = "UNKNOWN_AGENT"
 # ─── World geometry (UE5 centimeters; small sim coords ×100) ────
 SCALE = 100.0  # convert legacy small coords to cm
 
-# Zone bounding boxes in cm (x_min, x_max, y_min, y_max)
-ZONE_BOUNDS: Dict[str, Tuple[float, float, float, float]] = {
-    "main_workshop": (15000, 25000, 5000, 15000),
-    "central_plaza": (8000, 15000, 8000, 15000),
-    "charging_station": (20000, 25000, 5000, 10000),
-}
+# World geometry now loaded from assets/world_kb.yaml via load_world_kb().
+# See WorldKB dataclass below and MockUE.__init__.
 
-# Zone entry points in cm [X, Y, Z]
-ZONE_ENTRIES: Dict[str, List[float]] = {
-    "main_workshop": [16000, 10000, 0],
-    "central_plaza": [10000, 10000, 0],
-    "charging_station": [21500, 8500, 0],
-}
 
-# Location interaction points in cm [X, Y, Z]
-LOCATION_POINTS: Dict[str, List[float]] = {
-    "workbench_01": [19500, 10500, 0],
-    "charging_station_01": [21500, 8500, 0],
-}
+@dataclass
+class ZoneInfo:
+    """One zone entry from world_kb.yaml."""
+    id: str
+    name: str
+    entry_point: List[float]
+    bounds: Tuple[float, float, float, float]  # (x_min, x_max, y_min, y_max)
+    locations: List[str] = field(default_factory=list)
 
-# Object metadata for nearby_objects
-OBJECT_META: Dict[str, Dict[str, Any]] = {
-    "workbench_01": {"name": "工作台一号", "available_actions": ["assemble", "inspect"]},
-    "charging_station_01": {"name": "充电桩一号", "available_actions": ["charge", "inspect"]},
-}
 
-# Nearby objects per zone
-ZONE_OBJECTS: Dict[str, List[str]] = {
-    "main_workshop": ["workbench_01", "charging_station_01"],
-    "central_plaza": [],
-    "charging_station": ["charging_station_01"],
-}
+@dataclass
+class LocationInfo:
+    """One location entry from world_kb.yaml."""
+    id: str
+    name: str
+    zone: str
+    position: List[float]
+    interaction_point: List[float]
+    interaction_radius: float
+    available_actions: List[str] = field(default_factory=list)
+
+
+@dataclass
+class ObjectInfo:
+    """One object entry from world_kb.yaml (mirrors a location for now)."""
+    id: str
+    available_actions: List[str] = field(default_factory=list)
+
+
+@dataclass
+class WorldKB:
+    """In-memory World Knowledge Base loaded from world_kb.yaml.
+
+    Replaces the previous module-level hardcoded dicts (ZONE_BOUNDS,
+    ZONE_ENTRIES, LOCATION_POINTS, OBJECT_META, ZONE_OBJECTS). The YAML
+    file is the single source of truth — agenttown-mcp loads the same
+    file, so UE-side and MCP-side semantic→coordinate mappings cannot
+    drift.
+    """
+    zones: Dict[str, ZoneInfo] = field(default_factory=dict)
+    locations: Dict[str, LocationInfo] = field(default_factory=dict)
+    objects: Dict[str, ObjectInfo] = field(default_factory=dict)
+
+    def zone_entry(self, zone_id: str) -> Optional[List[float]]:
+        z = self.zones.get(zone_id)
+        return list(z.entry_point) if z else None
+
+    def location_point(self, loc_id: str) -> Optional[List[float]]:
+        loc = self.locations.get(loc_id)
+        return list(loc.interaction_point) if loc else None
+
+    def resolve_position(self, target: str) -> Optional[List[float]]:
+        """Resolve a semantic ID to a coordinate. Zones use entry_point,
+        locations use interaction_point. Returns None if unknown."""
+        return self.zone_entry(target) or self.location_point(target)
+
+    def is_target(self, target: str) -> bool:
+        return target in self.zones or target in self.locations
+
+    def which_zone(self, pos: List[float]) -> str:
+        """Reverse-lookup zone by position via AABB (X/Y only)."""
+        x, y = pos[0], pos[1]
+        for zid, z in self.zones.items():
+            xmin, xmax, ymin, ymax = z.bounds
+            if xmin <= x <= xmax and ymin <= y <= ymax:
+                return zid
+        return ""
+
+    def which_location(self, pos: List[float]) -> Optional[str]:
+        """Reverse-lookup location by position via interaction_radius (X/Y only)."""
+        x, y = pos[0], pos[1]
+        for lid, loc in self.locations.items():
+            if loc.interaction_radius <= 0:
+                continue
+            dx, dy = x - loc.position[0], y - loc.position[1]
+            if (dx * dx + dy * dy) <= loc.interaction_radius * loc.interaction_radius:
+                return lid
+        return None
+
+    def objects_in_zone(self, zone_id: str) -> List[str]:
+        """Return location/object IDs registered under a zone."""
+        return list(self.zones.get(zone_id, ZoneInfo(id="", name="", entry_point=[], bounds=(0, 0, 0, 0))).locations)
+
+
+def load_world_kb(path: str) -> WorldKB:
+    """Load world_kb.yaml into a WorldKB instance.
+
+    Raises FileNotFoundError / ValueError on structural errors. Callers
+    should treat any exception as fatal — Mock UE cannot resolve semantic
+    targets or generate nearby_objects without a valid KB.
+    """
+    with open(path, "r", encoding="utf-8") as f:
+        data = yaml.safe_load(f)
+
+    kb = WorldKB()
+    for raw_zone in data.get("zones", []) or []:
+        zid = raw_zone.get("id", "")
+        if not zid:
+            raise ValueError(f"zone missing id in {path}: {raw_zone}")
+        if zid in kb.zones:
+            raise ValueError(f"duplicate zone id {zid!r} in {path}")
+        bounds_raw = raw_zone.get("ue5_bounds", {}) or {}
+        center = bounds_raw.get("center", [0, 0, 0])
+        half = bounds_raw.get("half_size", [0, 0, 0])
+        # AABB: (x_min, x_max, y_min, y_max) — Z ignored for flat worlds.
+        bounds = (
+            center[0] - half[0], center[0] + half[0],
+            center[1] - half[1], center[1] + half[1],
+        )
+        kb.zones[zid] = ZoneInfo(
+            id=zid,
+            name=raw_zone.get("name", zid),
+            entry_point=list(raw_zone.get("entry_point", [0, 0, 0])),
+            bounds=bounds,
+            locations=list(raw_zone.get("locations", []) or []),
+        )
+
+    for raw_loc in data.get("locations", []) or []:
+        lid = raw_loc.get("id", "")
+        if not lid:
+            raise ValueError(f"location missing id in {path}: {raw_loc}")
+        if lid in kb.locations:
+            raise ValueError(f"duplicate location id {lid!r} in {path}")
+        kb.locations[lid] = LocationInfo(
+            id=lid,
+            name=raw_loc.get("name", lid),
+            zone=raw_loc.get("zone", ""),
+            position=list(raw_loc.get("position", [0, 0, 0])),
+            interaction_point=list(raw_loc.get("interaction_point", [0, 0, 0])),
+            interaction_radius=float(raw_loc.get("interaction_radius", 0)),
+            available_actions=list(raw_loc.get("available_actions", []) or []),
+        )
+
+    for raw_obj in data.get("objects", []) or []:
+        oid = raw_obj.get("id", "")
+        if not oid:
+            raise ValueError(f"object missing id in {path}: {raw_obj}")
+        if oid in kb.objects:
+            raise ValueError(f"duplicate object id {oid!r} in {path}")
+        kb.objects[oid] = ObjectInfo(
+            id=oid,
+            available_actions=list(raw_obj.get("available_actions", []) or []),
+        )
+
+    return kb
 
 # Composite action nominal durations (seconds) when not given explicitly
 COMPOSITE_DEFAULT_SEC = 1800.0  # 30 min
@@ -214,13 +331,26 @@ class MockUE:
         perception_interval: int = 30,   # game-minutes between perception pushes
         scenario_file: Optional[str] = None,
         log_dir: str = "logs",
+        world_kb_path: str = "assets/world_kb.yaml",
     ):
         self.mcp_ws_url = mcp_ws_url
         self.mode = mode
         self.perception_interval = perception_interval
         self.log_dir = log_dir
 
-        self.npc = NPCState()
+        # World KB — single source of truth for zone/location/object data.
+        # Fail-fast: Mock UE cannot resolve semantic targets without it.
+        try:
+            self.kb = load_world_kb(world_kb_path)
+        except Exception as e:
+            raise SystemExit(f"[FATAL] failed to load world_kb from {world_kb_path!r}: {e}")
+        logger.info(f"[KB] loaded {len(self.kb.zones)} zones, {len(self.kb.locations)} locations, "
+                    f"{len(self.kb.objects)} objects from {world_kb_path}")
+
+        # Seed NPC defaults. KB does not yet expose agent defaults, so we
+        # use the long-standing defaults (H-01 in main_workshop). When KB
+        # gains agent entries, this can be driven from there.
+        self.npc = NPCState(current_zone="main_workshop", position=[20000.0, 10000.0, 0.0])
         self.time = GameTime(speed=time_speed)
 
         self._ws = None
@@ -391,14 +521,18 @@ class MockUE:
 
     def _nearby_objects(self) -> List[Dict[str, Any]]:
         objs = []
-        for oid in ZONE_OBJECTS.get(self.npc.current_zone, []):
-            meta = OBJECT_META.get(oid, {})
+        for oid in self.kb.objects_in_zone(self.npc.current_zone):
+            loc = self.kb.locations.get(oid)
+            obj = self.kb.objects.get(oid)
+            # Prefer location name (中文), fall back to ID.
+            name = (loc.name if loc else "") or oid
+            actions = (loc.available_actions if loc else None) or (obj.available_actions if obj else [])
             objs.append({
                 "id": oid,
-                "name": meta.get("name", oid),
+                "name": name,
                 "distance": 8.0,
                 "state": "idle",
-                "available_actions": meta.get("available_actions", []),
+                "available_actions": list(actions),
             })
         return objs
 
@@ -536,26 +670,30 @@ class MockUE:
         """Return a non-empty rejection reason when targeting a non‑existent
         zone, location, object, or route.  An empty return means valid."""
         if cmd == CMD_MOVE_TO:
-            target = params.get("target", "")
-            if target and not (target in ZONE_ENTRIES or target in LOCATION_POINTS):
-                return f"unknown move target: {target} (available: zones={list(ZONE_ENTRIES)}, locations={list(LOCATION_POINTS)})"
+            # move_to (方案 A): MCP 层已解析坐标，UE 只校验 dest 是 3 元数组。
+            dest = params.get("dest")
+            if not isinstance(dest, list) or len(dest) != 3:
+                return f"move_to requires dest:[x,y,z], got: {dest!r}"
+            for v in dest:
+                if not isinstance(v, (int, float)):
+                    return f"move_to dest entries must be numeric, got: {dest!r}"
         elif cmd == CMD_INTERACT:
             obj = params.get("object_id", "")
-            if obj and obj not in OBJECT_META:
-                return f"unknown object: {obj} (available: {list(OBJECT_META)})"
+            if obj and obj not in self.kb.objects:
+                return f"unknown object: {obj} (available: {list(self.kb.objects)})"
         elif cmd == CMD_EXECUTE_COMPOSITE:
             name = params.get("name", "")
             if name == "patrol_route":
                 route = params.get("route_id", "")
-                if route and not (route in ZONE_ENTRIES or route in LOCATION_POINTS):
+                if route and not self.kb.is_target(route):
                     return f"unknown patrol route: {route}"
             elif name == "work_assemble":
                 target = params.get("target", "")
-                if target and target not in OBJECT_META:
+                if target and target not in self.kb.objects:
                     return f"unknown workbench: {target}"
             elif name == "charge_at":
                 station = params.get("station_id", "")
-                if station and not (station in ZONE_ENTRIES or station in LOCATION_POINTS):
+                if station and not self.kb.is_target(station):
                     return f"unknown charging station: {station}"
         return ""
 
@@ -595,8 +733,13 @@ class MockUE:
     def _apply_command_effects(self, cmd: str, params: Dict[str, Any], starting: bool):
         """Mutate NPC state for a command. Does NOT advance game time."""
         if cmd == CMD_MOVE_TO:
+            # 方案 A: MCP 已解析坐标，UE 直接用 dest。
+            # target+kind 是 metadata，用于精确设置 current_location。
+            dest = params.get("dest")
             target = params.get("target", "")
-            self._move_to(target)
+            kind = params.get("kind", "")
+            if isinstance(dest, list) and len(dest) == 3:
+                self._move_to(list(dest), target=target or None, kind=kind or None)
         elif cmd == CMD_TURN_TO:
             self.npc.rotation[1] = (self.npc.rotation[1] + 90.0) % 360.0
         elif cmd == CMD_SPEAK:
@@ -617,10 +760,16 @@ class MockUE:
                 pass  # fatigue accrues in loop
         # Physical drain applied gradually in perception loop.
 
-    def _move_to(self, target: str) -> bool:
-        dest = ZONE_ENTRIES.get(target) or LOCATION_POINTS.get(target)
-        if not dest:
-            logger.warning(f"[MOVE] unknown target {target!r}")
+    def _move_to(self, dest: List[float], target: Optional[str] = None, kind: Optional[str] = None) -> bool:
+        """Move NPC to dest coordinate.
+
+        方案 A: dest 是权威坐标（MCP 层解析自 world_kb.yaml）。
+        target+kind 是 metadata：
+          - kind=="location" 且 target 非空 → 直接设置 current_location = target
+          - 否则用 _resolve_location(pos) 基于坐标距离反推
+        """
+        if not dest or len(dest) != 3:
+            logger.warning(f"[MOVE] invalid dest {dest!r}")
             return False
         old_pos = self.npc.position
         # Face the movement direction (yaw).
@@ -629,20 +778,23 @@ class MockUE:
             import math
             self.npc.rotation[1] = (math.degrees(math.atan2(dy, dx))) % 360.0
         self.npc.position = list(dest)
-        if target in LOCATION_POINTS:
+
+        # Resolve current_location: prefer explicit metadata, else reverse-lookup.
+        if kind == "location" and target:
             self.npc.current_location = target
-        new_zone = self._resolve_zone(self.npc.position)
-        if new_zone != self.npc.current_zone:
+        else:
+            self.npc.current_location = self.kb.which_location(self.npc.position)
+
+        # Resolve current_zone via AABB reverse-lookup.
+        new_zone = self.kb.which_zone(self.npc.position)
+        if new_zone and new_zone != self.npc.current_zone:
             logger.info(f"[ZONE] {self.npc.current_zone} → {new_zone}")
             self.npc.current_zone = new_zone
         return True
 
     def _resolve_zone(self, pos: List[float]) -> str:
-        x, y = pos[0], pos[1]
-        for name, (xmin, xmax, ymin, ymax) in ZONE_BOUNDS.items():
-            if xmin <= x <= xmax and ymin <= y <= ymax:
-                return name
-        return self.npc.current_zone
+        """Deprecated wrapper kept for backward compat — delegates to KB."""
+        return self.kb.which_zone(pos) or self.npc.current_zone
 
     def _clear_busy(self):
         self.npc.busy_action_id = None
