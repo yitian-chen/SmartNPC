@@ -544,6 +544,16 @@ func (s *Server) RequestScan(ctx context.Context, agentID, scanID string) error 
 	return s.SendEnvelope(agentID, protocol.TypeScanArea, protocol.ScanAreaPayload{ScanID: scanID})
 }
 
+// SendStopAction 发送 stop_action 控制消息停止指定 action（约定9）。
+// UE 侧应比对 action_id 与当前执行的 action_id，不匹配回 error{code:STOP_ID_MISMATCH}。
+// fire-and-forget：stop_action 是控制消息，不等 ACK。
+// TypeStopAction 已在 discreteReplayTypes 中，会进 sendBuf 重放。
+func (s *Server) SendStopAction(agentID, actionID string) error {
+	return s.SendEnvelope(agentID, protocol.TypeStopAction, protocol.StopActionPayload{
+		ActionID: actionID,
+	})
+}
+
 // heartbeatLoop 每 5s 发出站心跳，并检测 UE 心跳是否超时（约定 §5.2）。
 // 15s 未收到 UE 心跳则主动关闭连接，触发 UE 侧重连。
 // ctx 取消时退出（连接关闭时通过 hbCancel 触发）。

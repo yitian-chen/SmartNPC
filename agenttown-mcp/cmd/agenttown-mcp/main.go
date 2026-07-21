@@ -67,6 +67,7 @@ type agentContext struct {
 	recentEnvironmentEvents  []string // pending extras for the next decision
 	summaryEnvironmentEvents []string // rolling authoritative environment history
 	recentActions            []localActionSummary
+	currentActionID          string // 当前执行中的 action_id（mu 保护），空表示无执行中动作；用于 stop_action ID 匹配（约定9）
 	wake                     chan struct{}
 	cancel                   context.CancelFunc
 	stopped                  bool
@@ -198,6 +199,9 @@ func (a *agentContext) recordActionCompletion(completion protocol.ActionComplete
 	if a.currentTask != nil && a.currentTask.ActionID == completion.ActionID {
 		a.currentTask = nil
 	}
+	if a.currentActionID == completion.ActionID {
+		a.currentActionID = "" // 动作完成，清空当前 action 追踪
+	}
 	a.mu.Unlock()
 	return a.queueExternalEvent(reason, extra)
 }
@@ -288,6 +292,7 @@ func (a *agentContext) stop() {
 	a.pendingPerception = nil
 	a.pendingReasons = nil
 	a.recentEnvironmentEvents = nil
+	a.currentActionID = "" // agent 下线时清空（避免残留）
 	cancel := a.cancel
 	a.mu.Unlock()
 	cancel()
@@ -383,6 +388,7 @@ func (a *agentContext) retryCurrentSnapshotOnError() bool {
 func (a *agentContext) recordActionStarted(actionID, cmd string, params map[string]any, decisionEpoch int64) {
 	encoded, _ := json.Marshal(params)
 	a.mu.Lock()
+	a.currentActionID = actionID // 追踪当前执行中的 action（约定9 stop_action ID 匹配）
 	a.recentActions = appendRolling(a.recentActions, localActionSummary{
 		ActionID: actionID, Cmd: cmd, Params: string(encoded),
 		DecisionEpoch: decisionEpoch, Result: "started",
@@ -596,6 +602,38 @@ func (g *guardedExecutor) RequestScan(ctx context.Context, agentID string, decis
 		return err
 	}
 	return nil
+}
+
+// LookupCurrentActionID 返回 agent 当前执行中的 action_id，空表示无动作。
+// 用于 stop 工具实现约定9 的 stop_action ID 匹配。
+func (g *guardedExecutor) LookupCurrentActionID(agentID string) string {
+	ac := g.lookup(agentID)
+	if ac == nil {
+		return ""
+	}
+	ac.mu.Lock()
+	defer ac.mu.Unlock()
+	return ac.currentActionID
+}
+
+// ClearCurrentActionID 清除 agent 的当前动作追踪（stop_action 发送后调用）。
+func (g *guardedExecutor) ClearCurrentActionID(agentID string) {
+	ac := g.lookup(agentID)
+	if ac == nil {
+		return
+	}
+	ac.mu.Lock()
+	ac.currentActionID = ""
+	ac.mu.Unlock()
+}
+
+// SendStopAction 发送 stop_action 控制消息到 UE（约定9）。
+// fire-and-forget：不等 ACK，UE 侧比对 action_id 匹配才执行。
+func (g *guardedExecutor) SendStopAction(_ context.Context, agentID, actionID string) error {
+	if !g.ws.IsConnected() {
+		return errors.New("UE disconnected")
+	}
+	return g.ws.SendStopAction(agentID, actionID)
 }
 
 func main() {

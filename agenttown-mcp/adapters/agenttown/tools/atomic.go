@@ -209,19 +209,36 @@ func registerAtomic(s *mcp.Server, ex Executor, logger *slog.Logger) {
 		return nil, ackResult{OK: true, DecisionEpoch: in.DecisionEpoch, Message: "perception requested"}, nil
 	})
 
-	// stop → Stop
+	// stop → StopAction（约定9：带 action_id 的 stop_action 控制消息）
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "stop",
-		Description: "Stop the current action.",
+		Description: "Stop the current action. No-op if no action is running.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in StopInput) (*mcp.CallToolResult, ackResult, error) {
 		if in.AgentID == "" {
 			return nil, ackResult{}, fmt.Errorf("agent_id is required")
 		}
 		logToolCall("stop", in.AgentID, in.DecisionEpoch, in)
-		ack, err := ex.SendAction(ctx, in.AgentID, in.DecisionEpoch, protocol.CmdStop, map[string]any{})
-		if err != nil {
+
+		// 查询当前执行中的 action_id
+		currentActionID := ex.LookupCurrentActionID(in.AgentID)
+		if currentActionID == "" {
+			// 无执行中动作，直接返回成功（no-op）
+			return &mcp.CallToolResult{
+				Content: []mcp.Content{&mcp.TextContent{Text: "no action running"}},
+			}, ackResult{OK: true, DecisionEpoch: in.DecisionEpoch, Message: "no action running"}, nil
+		}
+
+		// 发送 stop_action 消息（带 action_id，约定9）
+		if err := ex.SendStopAction(ctx, in.AgentID, currentActionID); err != nil {
 			return nil, ackResult{}, fmt.Errorf("stop: %w", err)
 		}
-		return nil, buildAckResult(ack, in.DecisionEpoch), nil
+
+		// 清除本地追踪（UE 侧会回 action_completed 或 STOP_ID_MISMATCH error）
+		ex.ClearCurrentActionID(in.AgentID)
+
+		msg := fmt.Sprintf("stop_action sent for action_id=%s", currentActionID)
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{&mcp.TextContent{Text: msg}},
+		}, ackResult{OK: true, DecisionEpoch: in.DecisionEpoch, ActionID: currentActionID, Message: msg}, nil
 	})
 }

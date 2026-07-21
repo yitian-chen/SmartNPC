@@ -33,6 +33,19 @@ type Executor interface {
 	// the given agent (backs the scan_area tool). Returns after the request
 	// is sent.
 	RequestScan(ctx context.Context, agentID string, decisionEpoch int64) error
+
+	// LookupCurrentActionID returns the action_id currently executing for
+	// the agent (empty if none). Used by the stop tool for stop_action ID
+	// matching (约定9).
+	LookupCurrentActionID(agentID string) string
+
+	// ClearCurrentActionID clears the local tracking of the current action
+	// (called after sending stop_action).
+	ClearCurrentActionID(agentID string)
+
+	// SendStopAction sends a stop_action control message to UE for the
+	// given action_id (约定9). Fire-and-forget — no ACK expected.
+	SendStopAction(ctx context.Context, agentID, actionID string) error
 }
 
 // RegisterAll installs all AgentTown tools onto the given mcp.Server.
