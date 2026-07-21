@@ -1036,12 +1036,12 @@ UE 推来的 `perception_update` / `event_notification` / `action_started` / `ac
 
 ### 6.3 感知语义化（在 MCP 层）
 
-感知翻译在 MCP 层内完成，Agent 拿到的是"成品叙事"。当前实现为**单层翻译**：直接读取 UE 推来的 `perception_update.payload` 中已有的 `current_zone` / `current_location` / `visible_agents` / `nearby_objects` 等结构化字段，拼成第一人称中文叙事。
+感知翻译在 MCP 层内完成，Agent 拿到的是"成品叙事"。当前实现为**单层翻译 + KB 兜底**：直接读取 UE 推来的 `perception_update.payload` 中已有的 `current_zone` / `current_location` / `visible_agents` / `nearby_objects` 等结构化字段，拼成第一人称中文叙事。MCP 层启动时加载 `world_kb.yaml`，叙事中的 zone 名和 object 名优先从 KB 查询中文名（如 `main_workshop` → "主生产车间"），UE payload 字段作为 fallback（KB 未命中或为 nil 时回退到原始 ID）。
 
 ```
 UE perception_update.payload  →  MCP 层语义化  →  第一人称叙事
-current_zone: "main_workshop"   "你在main_workshop"        "你在main_workshop。
-nearby_objects: [工作台一号]    "附近可用: 工作台一号"      附近可用: 工作台一号(assemble/inspect)。
+current_zone: "main_workshop"   KB 查询 → "主生产车间"      "你在主生产车间。
+nearby_objects: [工作台一号]    UE Name 优先 / KB 兜底      附近可用: 工作台一号(assemble/inspect)。
 physical_state: {energy:100}    "电池100%"                 电池100% ，疲劳0，关节磨损0，健康100。"
 ```
 
@@ -1054,7 +1054,7 @@ MCP 层语义化后通过 HTTP POST 推送给 Hermes 的实际 payload 示例（
 }
 ```
 
-> **说明**：当前实现不依赖外部 `world_kb.yaml` 文件 —— UE 推来的 perception_update 已携带语义化的 zone 名称（如 "main_workshop"）和物体名（如 "工作台一号"），MCP 层只需拼装成自然语言。原设计的"坐标→地点名"翻译（需要查 KB）目前由 UE 侧在生成 perception_update 时完成。
+> **说明**：MCP 层启动时加载 `assets/world_kb.yaml`（fail-fast，路径可通过 `--world-kb` flag 配置），叙事中的 zone 名和 object 名优先从 KB 查询中文名，UE payload 字段作为 fallback。原设计的"坐标→地点名"翻译（需要查 KB）现已部分回归 MCP 层：`move_to` 工具的语义目标解析由 MCP 层查 KB 完成（见 §6.4），UE 侧不再做语义→坐标翻译；但 UE 仍在 `perception_update` 中推送语义化字段名（如 `current_zone: "main_workshop"`），MCP 层用 KB 把它翻译成中文名呈现给 LLM。
 >
 > **`[decision_context]` 头部**：MCP 层在叙事文本前拼接的决策上下文，含 `agent_id` / `agent_epoch` / `decision_epoch` / 触发原因 / 当前任务，用于 LLM 区分轮次与上下文。
 
@@ -1083,7 +1083,7 @@ Tools 参照子系统6，**复合行为 + 必要原子行为均开放给 LLM 调
 
 | MCP Tool | 参数 | 翻译为 action_command |
 |----------|------|----------------------|
-| `move_to` | agent_id, decision_epoch, target（语义ID） | MoveTo {target, speed:"walk"}（UE 侧解析坐标） |
+| `move_to` | agent_id, decision_epoch, target（语义ID） | MoveTo {dest:[x,y,z], target, kind, speed:"walk"}（MCP 层查 world_kb.yaml 解析坐标，方案 A） |
 | `turn_to` | agent_id, decision_epoch, target | TurnTo {target} |
 | `speak` | agent_id, decision_epoch, content, target | Speak {content, target, audio_url:null}（TTS 未接入，见约定6a） |
 | `emote` | agent_id, decision_epoch, emotion, mode | Emote {emotion, mode} |
@@ -1092,7 +1092,7 @@ Tools 参照子系统6，**复合行为 + 必要原子行为均开放给 LLM 调
 | `scan_area` | agent_id, decision_epoch | scan_area 控制消息（请求一次即时 perception_update） |
 | `stop` | agent_id, decision_epoch | action_command {cmd:"Stop"}（停止当前所有动作） |
 
-> **语义目标解析**：原子 tool 接受**语义目标**（如 `move_to(target="workbench_01")`），由 UE 侧解析为坐标并执行。Agent 无需接触任何坐标。
+> **语义目标解析（方案 A）**：`move_to` 接受**语义目标**（如 `move_to(target="workbench_01")`），由 **MCP 层查 `world_kb.yaml`** 解析为坐标（zone 用 `entry_point`，location 用 `interaction_point`），下发 `action_command` 携带 `{dest:[x,y,z], target, kind, speed}` —— `dest` 是权威坐标，`target`+`kind` 是 metadata 供 UE 反推 `current_location`（`kind=="location"` 时直接用 target，否则 UE 用坐标距离 `interaction_radius` 反推）。UE 侧不再做语义→坐标翻译。其他原子工具（`turn_to`/`interact`）和复合工具（`work_assemble`/`patrol_route`/`charge_at`）仍透传语义 ID，由 UE 侧解析。
 >
 > **`stop` 工具实现说明**：当前 `stop` 工具翻译为 `action_command{cmd:"Stop"}` 空 params，而非协议 §2.3 定义的 `stop_action` 消息。这意味着停止动作不带 `action_id` 匹配校验（约定9 的竞态保护未实现）。后续若需精确停止特定动作，应改为发 `stop_action` 消息并携带 action_id。
 
