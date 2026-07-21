@@ -241,8 +241,49 @@ def _looks_like_date(s: str) -> bool:
         return False
 
 
+# ── 游戏时间提取 ──────────────────────────────────────────────────────
+import re as _re
+
+# perception text 中「时间HH:MM」模式
+_TIME_IN_TEXT = _re.compile(r"时间(\d{1,2}:\d{2})")
+# payload.environment.time_of_day（JSON 字符串里）
+_TIME_IN_PAYLOAD = _re.compile(r'"time_of_day"\s*:\s*"(\d{1,2}:\d{2})"')
+
+
+def _extract_game_time(rec: dict) -> str:
+    """从日志记录提取游戏时间（HH:MM）。无则返回空字符串。
+
+    两个来源：
+    1. [MCP→Hermes/PERCEPTION] 的 text 字段：匹配「时间HH:MM」
+    2. [UE→MCP] perception_update 的 payload.environment.time_of_day
+    """
+    msg = str(rec.get("msg", ""))
+    # 来源 1：perception text
+    if "PERCEPTION" in msg:
+        text = rec.get("text", "")
+        if isinstance(text, str):
+            m = _TIME_IN_TEXT.search(text)
+            if m:
+                return m.group(1)
+        return ""
+    # 来源 2：UE→MCP 的 perception_update payload
+    if "UE→MCP" in msg and rec.get("type") == "perception_update":
+        payload = rec.get("payload", "")
+        if isinstance(payload, str):
+            m = _TIME_IN_PAYLOAD.search(payload)
+            if m:
+                return m.group(1)
+        elif isinstance(payload, dict):
+            env = payload.get("environment", {})
+            if isinstance(env, dict):
+                tod = env.get("time_of_day", "")
+                if isinstance(tod, str) and tod:
+                    return tod
+    return ""
+
+
 def _collect_records(log_path: Path, filt: str | None, tail: int | None) -> list[dict]:
-    """读取日志文件，返回匹配的记录列表（已解析为 dict）。"""
+    """读取日志文件，返回匹配的记录列表（已解析为 dict，含 game_time）。"""
     f_lower = (filt or "").lower()
     explicit_heartbeat = f_lower == "heartbeat"
     matched: list[dict] = []
@@ -261,6 +302,8 @@ def _collect_records(log_path: Path, filt: str | None, tail: int | None) -> list
                 continue
             if _hide_heartbeat(rec, explicit_heartbeat):
                 continue
+            # 提取游戏时间（仅记录本身有则填充，不做相邻填充）
+            rec["_game_time"] = _extract_game_time(rec)
             matched.append(rec)
     if tail is not None and tail > 0:
         matched = matched[-tail:]
@@ -322,6 +365,14 @@ body {{
   width: 240px;
 }}
 .toolbar input:focus {{ outline: 1px solid var(--accent); border-color: var(--accent); }}
+.toolbar select {{
+  background: var(--bg); color: var(--fg);
+  border: 1px solid var(--border);
+  padding: 3px 8px; border-radius: 3px;
+  font-family: inherit; font-size: 12px;
+  cursor: pointer;
+}}
+.toolbar select:focus {{ outline: 1px solid var(--accent); border-color: var(--accent); }}
 .filter-btn {{
   background: transparent; color: var(--fg-dim);
   border: 1px solid var(--border);
@@ -357,6 +408,12 @@ body {{
 .entry.level-WARN .entry-header {{ border-left-color: var(--warn); }}
 .entry.level-ERROR .entry-header {{ border-left-color: var(--error); }}
 .entry-time {{ color: var(--time); flex-shrink: 0; }}
+.entry-game-time {{
+  color: var(--time); background: rgba(78, 201, 176, 0.1);
+  padding: 1px 6px; border-radius: 3px;
+  font-size: 11px; flex-shrink: 0;
+  border: 1px solid rgba(78, 201, 176, 0.3);
+}}
 .entry-level {{ width: 44px; flex-shrink: 0; font-weight: bold; }}
 .entry.level-INFO .entry-level {{ color: var(--info); }}
 .entry.level-WARN .entry-level {{ color: var(--warn); }}
@@ -402,6 +459,9 @@ body {{
   <button class="filter-btn" data-filter="PERCEPTION">PERCEPTION</button>
   <button class="filter-btn" data-filter="RESPONSE">RESPONSE</button>
   <button class="filter-btn" data-filter="TOOL">TOOL</button>
+  <select id="game-time-filter" title="按游戏时间过滤">
+    <option value="ALL">游戏时间：全部</option>
+  </select>
   <span class="stats" id="stats"></span>
 </div>
 <div class="container" id="container">{entries}</div>
@@ -409,17 +469,35 @@ body {{
 const entries = document.querySelectorAll('.entry');
 const stats = document.getElementById('stats');
 const search = document.getElementById('search');
+const gameTimeFilter = document.getElementById('game-time-filter');
 let currentFilter = 'ALL';
 let currentSearch = '';
+let currentGameTime = 'ALL';
+
+// 收集所有出现过的游戏时间，填充下拉框
+(function() {{
+  const times = new Set();
+  entries.forEach(e => {{
+    const gt = e.dataset.gametime || '';
+    if (gt) times.add(gt);
+  }});
+  const sorted = Array.from(times).sort();
+  sorted.forEach(t => {{
+    const opt = document.createElement('option');
+    opt.value = t;
+    opt.textContent = t;
+    gameTimeFilter.appendChild(opt);
+  }});
+}})();
 
 function applyFilters() {{
   let visible = 0;
   entries.forEach(e => {{
     const dir = e.dataset.direction || '';
     const text = e.dataset.searchtext || '';
+    const gt = e.dataset.gametime || '';
     let show = true;
     if (currentFilter !== 'ALL') {{
-      // 过滤器匹配方向简写
       const filterMap = {{
         'UE→MCP': 'UE→MCP',
         'MCP→UE': 'MCP→UE',
@@ -429,6 +507,9 @@ function applyFilters() {{
       }};
       const full = filterMap[currentFilter] || currentFilter;
       show = dir.includes(full);
+    }}
+    if (show && currentGameTime !== 'ALL') {{
+      show = gt === currentGameTime;
     }}
     if (show && currentSearch) {{
       try {{
@@ -449,6 +530,11 @@ document.querySelectorAll('.filter-btn').forEach(btn => {{
     currentFilter = btn.dataset.filter;
     applyFilters();
   }});
+}});
+
+gameTimeFilter.addEventListener('change', () => {{
+  currentGameTime = gameTimeFilter.value;
+  applyFilters();
 }});
 
 search.addEventListener('input', () => {{
@@ -524,7 +610,7 @@ def _entry_html(rec: dict) -> str:
     # 搜索文本：合并所有字段的字符串值
     search_parts = [msg]
     for k, v in rec.items():
-        if k in ("time", "level", "msg", "source"):
+        if k in ("time", "level", "msg", "source", "_game_time"):
             continue
         if isinstance(v, str):
             search_parts.append(v)
@@ -535,8 +621,11 @@ def _entry_html(rec: dict) -> str:
                 search_parts.append(str(v))
     search_text = " ".join(search_parts)
 
+    # 游戏时间（仅 perception_update / PERCEPTION 有）
+    game_time = rec.get("_game_time", "")
+
     # body：所有字段
-    skip = {"time", "level", "msg", "source"}
+    skip = {"time", "level", "msg", "source", "_game_time"}
     body_parts = []
     for k in rec:
         if k in skip:
@@ -569,12 +658,14 @@ def _entry_html(rec: dict) -> str:
     return (
         f'<div class="entry {css_dir} level-{level}" '
         f'data-direction="{_html.escape(direction)}" '
+        f'data-gametime="{_html.escape(game_time)}" '
         f'data-searchtext="{_html.escape(search_text)}">'
         f'<div class="entry-header">'
         f'<span class="entry-time">{_html.escape(time_s)}</span>'
         f'<span class="entry-level">{_html.escape(level)}</span>'
         f'<span class="entry-msg">{_html.escape(msg)}</span>'
-        f'<span class="entry-meta">{_html.escape(meta_s)}</span>'
+        + (f'<span class="entry-game-time">🎮 {_html.escape(game_time)}</span>' if game_time else '')
+        + f'<span class="entry-meta">{_html.escape(meta_s)}</span>'
         f'</div>'
         f'<div class="entry-body">{body_s}</div>'
         f'</div>'
