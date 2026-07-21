@@ -958,7 +958,7 @@ sequenceDiagram
 |------|----------|------------|
 | action_started 等待（ACK） | 2 秒 | 未收到 ACK，认为指令丢失 → 重发一次；再失败则重新决策 |
 | action_completed 等待 | `estimated_duration_sec × 1.5`（无估值时默认 60 秒） | 认为动作卡死 → 发 stop_action + 重新决策 |
-| LLM 调用 | 10 秒 | 重试 → 降级 |
+| LLM 调用 | 120 秒（DeepSeek 自部署响应较慢，10s 易误超时；可配置） | 重试 → 降级 |
 | 心跳响应 | 15 秒 | 认为断线 |
 | 重连尝试 | 3 秒间隔，指数退避到 30 秒 | 持续重试 |
 
