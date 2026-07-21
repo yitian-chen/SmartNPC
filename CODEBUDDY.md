@@ -98,14 +98,26 @@ go test ./adapters/agenttown/perception/ -v -count=1        # 感知格式化测
 **推荐：用 `scripts/pretty_log.py` 可读化查看**（每条 JSON 渲染为多行，方向标记着色，长字段按行展开）：
 
 ```bash
-python scripts/pretty_log.py                       # 查看今天的 sim.log（渲染式）
-python scripts/pretty_log.py 2026-07-20            # 指定日期
-python scripts/pretty_log.py -f PERCEPTION -n 5    # 最近 5 条 MCP→Hermes 感知原文
-python scripts/pretty_log.py -f RESPONSE -n 5      # 最近 5 条 Hermes 响应
-python scripts/pretty_log.py -f UE→MCP -n 10       # 最近 10 条 UE→MCP
-python scripts/pretty_log.py --raw                 # 原始 JSON（grep/awk 友好）
-python scripts/pretty_log.py --no-color > out.txt  # 输出到文件
+# HTML 报告（推荐，自动打开浏览器，可折叠/搜索/过滤）
+python scripts/pretty_log.py --html                       # 今天的日志
+python scripts/pretty_log.py --html 2026-07-20            # 指定日期
+python scripts/pretty_log.py --html -f PERCEPTION -n 50   # 最近 50 条 PERCEPTION
+python scripts/pretty_log.py --html -o report.html        # 指定输出路径
+python scripts/pretty_log.py --html --no-open             # 生成但不自动打开
+
+# 终端渲染
+python scripts/pretty_log.py                              # 查看今天的 sim.log
+python scripts/pretty_log.py -f PERCEPTION -n 5           # 最近 5 条 MCP→Hermes 感知原文
+python scripts/pretty_log.py -f RESPONSE -n 5             # 最近 5 条 Hermes 响应
+python scripts/pretty_log.py --raw                        # 原始 JSON（grep/awk 友好）
 ```
+
+`--html` 模式生成独立 HTML 文件（默认 `logs/YYYY-MM-DD/sim_report.html`），自动打开浏览器，支持：
+- 点击条目展开/折叠详情
+- 顶部按钮按方向过滤（UE→MCP / MCP→UE / PERCEPTION / RESPONSE / TOOL）
+- 搜索框（支持正则）
+- 长字段（perception text / payload）自然换行，不受终端宽度限制
+- 暗色主题，方向标记彩色高亮
 
 方向过滤器（`-f`）简写：`UE→MCP` / `MCP→UE` / `PERCEPTION` / `RESPONSE` / `TOOL` / `HEARTBEAT`。heartbeat 默认隐藏。
 
