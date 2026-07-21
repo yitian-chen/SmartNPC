@@ -19,6 +19,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/AgentTown/agenttown-mcp/pkg/protocol"
+	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
 )
 
 // Executor is the interface tools use to send an action_command and await
@@ -49,13 +50,18 @@ type Executor interface {
 }
 
 // RegisterAll installs all AgentTown tools onto the given mcp.Server.
-func RegisterAll(s *mcp.Server, ex Executor, logger *slog.Logger) {
+//
+// kb is the loaded World KB, used by atomic tools (currently move_to) to
+// resolve semantic targets to coordinates before dispatching to UE. May be
+// nil in tests that don't exercise target resolution — nil-safe methods on
+// KB return zero values.
+func RegisterAll(s *mcp.Server, ex Executor, kb *worldkb.KB, logger *slog.Logger) {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	setToolsLogger(logger)
 	registerComposite(s, ex, logger)
-	registerAtomic(s, ex, logger)
+	registerAtomic(s, ex, kb, logger)
 }
 
 // ackResult is the common output shape all tools return: it echoes the

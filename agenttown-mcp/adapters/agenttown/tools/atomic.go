@@ -8,6 +8,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/AgentTown/agenttown-mcp/pkg/protocol"
+	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
 )
 
 // Atomic tools (§6.4) translate to their corresponding cmd. Each carries
@@ -73,18 +74,31 @@ type StopInput struct {
 }
 
 // registerAtomic installs the atomic-behavior tools.
-func registerAtomic(s *mcp.Server, ex Executor, logger *slog.Logger) {
+func registerAtomic(s *mcp.Server, ex Executor, kb *worldkb.KB, logger *slog.Logger) {
 	// move_to → MoveTo
+	//
+	// Semantic target resolution (方案 A): the LLM still passes a semantic
+	// ID (e.g. "workbench_01") as `target`, but the MCP layer translates it
+	// to a coordinate via the World KB before dispatching to UE. UE receives
+	// {dest, target, kind, speed} — `dest` is the authoritative coordinate,
+	// `target`+`kind` are metadata so UE can reverse-lookup current_location
+	// without maintaining its own semantic→coordinate map.
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "move_to",
-		Description: "Move to a semantic destination (zone or location id). The world resolves coordinates.",
+		Description: "Move to a semantic destination (zone or location id). The MCP layer resolves it to a coordinate via the World KB.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in MoveToInput) (*mcp.CallToolResult, ackResult, error) {
 		if in.AgentID == "" || in.Target == "" {
 			return nil, ackResult{}, fmt.Errorf("agent_id and target are required")
 		}
 		logToolCall("move_to", in.AgentID, in.DecisionEpoch, in)
+		coord, kind, err := kb.GetPosition(in.Target)
+		if err != nil {
+			return nil, ackResult{}, fmt.Errorf("move_to: %w", err)
+		}
 		ack, err := ex.SendAction(ctx, in.AgentID, in.DecisionEpoch, protocol.CmdMoveTo, map[string]any{
+			"dest":   []float64{coord[0], coord[1], coord[2]},
 			"target": in.Target,
+			"kind":   kind,
 			"speed":  "walk",
 		})
 		if err != nil {

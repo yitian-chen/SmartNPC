@@ -40,6 +40,7 @@ import (
 	"github.com/AgentTown/agenttown-mcp/pkg/hermes"
 	"github.com/AgentTown/agenttown-mcp/pkg/protocol"
 	"github.com/AgentTown/agenttown-mcp/pkg/transport"
+	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
 	"github.com/AgentTown/agenttown-mcp/pkg/wsserver"
 )
 
@@ -486,6 +487,7 @@ func runPerceptionWorker(
 	ac *agentContext,
 	hc *hermes.Client,
 	ws *wsserver.Server,
+	kb *worldkb.KB,
 	logger *slog.Logger,
 ) {
 	for {
@@ -519,7 +521,7 @@ func runPerceptionWorker(
 		if !ok {
 			continue
 		}
-		text := perception.Format(work.perception, work.physical, work.extras)
+		text := perception.Format(work.perception, work.physical, work.extras, kb)
 		if text == "" {
 			ac.endDecision(decisionEpoch)
 			logger.Warn("perception format returned empty", "agent_id", agentID, "raw", string(work.perception))
@@ -777,6 +779,7 @@ func main() {
 		mcpAPIKey          = flag.String("mcp-api-key", "", "if set, require this Bearer token on /mcp")
 		httpAllowAnyOrigin = flag.Bool("http-allow-any-origin", true,
 			"disable origin / localhost restrictions so cross-host clients can connect")
+		worldKBPath = flag.String("world-kb", "assets/world_kb.yaml", "path to world_kb.yaml (required, fail-fast on error)")
 	)
 	flag.Parse()
 	if *showVersion {
@@ -819,6 +822,24 @@ func main() {
 		Logger: logger,
 	})
 
+	// ─── Load World KB (fail-fast) ─────────────────────────────
+	// The KB is the semantic→coordinate dictionary shared with Mock UE.
+	// Without it, move_to cannot translate semantic targets to coordinates,
+	// so a load failure is fatal. Loaded before registering agents so the
+	// perception worker can safely close over it.
+	kb, err := worldkb.Load(*worldKBPath)
+	if err != nil {
+		logger.Error("failed to load world_kb", "path", *worldKBPath, "err", err)
+		os.Exit(1)
+	}
+	logger.Info("world kb loaded",
+		"path", *worldKBPath,
+		"zones", len(kb.Zones),
+		"locations", len(kb.Locations),
+		"objects", len(kb.Objects),
+		"agents", len(kb.Agents),
+	)
+
 	// Per-agent context (Phase 1: single agent, but keyed for multi-NPC).
 	var agentsMu sync.Mutex
 	var nextAgentEpoch int64
@@ -837,13 +858,13 @@ func main() {
 		nextAgentEpoch++
 		ac, workerCtx := newAgentContext(ctx, nextAgentEpoch)
 		agents[id] = ac
-		go runPerceptionWorker(workerCtx, id, ac, hc, ws, logger)
+		go runPerceptionWorker(workerCtx, id, ac, hc, ws, kb, logger)
 		return ac, true
 	}
 
 	// All tools pass through the online/decision-epoch guard before WS send.
 	executor := &guardedExecutor{ws: ws, lookup: lookupAgent}
-	tools.RegisterAll(server, executor, logger)
+	tools.RegisterAll(server, executor, kb, logger)
 
 	// ─── Wire inbound message handler ──────────────────────────
 	ws.SetMessageHandler(func(_ context.Context, msgType, agentID string, payload json.RawMessage) {
