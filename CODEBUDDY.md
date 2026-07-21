@@ -132,9 +132,15 @@ grep '\[Hermes→MCP/TOOL\]' logs/YYYY-MM-DD/sim.log       # Hermes 调用的工
 grep 'perception decision triggered' logs/YYYY-MM-DD/sim.log  # LLM 决策触发点
 grep 'state_report' logs/YYYY-MM-DD/sim.log         # 状态报告摘要
 
+# 按决策轮次关联：PERCEPTION / TOOL / RESPONSE 共享 agent_id + decision_epoch
+# 例如查看 decision_epoch=1 的完整链路：
+grep '"decision_epoch":1' logs/YYYY-MM-DD/sim.log   # 同一轮次的 PERCEPTION/TOOL/RESPONSE
+
 # Hermes 容器日志（独立，不进 sim.log）
 wsl docker logs -f agenttown-h01
 ```
+
+**轮次关联**：`[MCP→Hermes/PERCEPTION]`、`[Hermes→MCP/TOOL]`、`[Hermes→MCP/RESPONSE]` 三种日志都带结构化字段 `agent_id` 和 `decision_epoch`，匹配这两个字段即可关联同一次决策回合的输入 prompt、工具调用、LLM 响应。同一 `decision_epoch` 的 TOOL 可能出现在 RESPONSE 之前（Hermes 在 LLM 流式输出时实时回调工具，而 RESPONSE 日志在 HTTP 响应完成后才写）。
 
 Mock UE 不再写独立日志文件，但控制台仍输出 `[PERCEPTION]`/`[STATE]`/`[SPEAK]` 等人类可读摘要供实时观察。
 

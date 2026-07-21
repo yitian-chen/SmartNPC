@@ -520,6 +520,8 @@ func runPerceptionWorker(
 		}
 		logger.Info("[Hermes→MCP/RESPONSE]",
 			"agent_id", agentID,
+			"agent_epoch", agentEpoch,
+			"decision_epoch", decisionEpoch,
 			"tokens", resp.Usage.TotalTokens,
 			"narrative_len", len(narrative),
 			"narrative", disp,

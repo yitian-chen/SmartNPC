@@ -77,7 +77,7 @@ func registerComposite(s *mcp.Server, ex Executor, logger *slog.Logger) {
 		if in.AgentID == "" || in.Target == "" {
 			return nil, ackResult{}, fmt.Errorf("agent_id and target are required")
 		}
-		logToolCall("work_assemble", in)
+		logToolCall("work_assemble", in.AgentID, in.DecisionEpoch, in)
 		ack, err := ex.SendAction(ctx, in.AgentID, in.DecisionEpoch, protocol.CmdExecuteComposite, map[string]any{
 			"name":         "work_assemble",
 			"target":       in.Target,
@@ -97,7 +97,7 @@ func registerComposite(s *mcp.Server, ex Executor, logger *slog.Logger) {
 		if in.AgentID == "" || in.RouteID == "" {
 			return nil, ackResult{}, fmt.Errorf("agent_id and route_id are required")
 		}
-		logToolCall("patrol_route", in)
+		logToolCall("patrol_route", in.AgentID, in.DecisionEpoch, in)
 		ack, err := ex.SendAction(ctx, in.AgentID, in.DecisionEpoch, protocol.CmdExecuteComposite, map[string]any{
 			"name":     "patrol_route",
 			"route_id": in.RouteID,
@@ -116,7 +116,7 @@ func registerComposite(s *mcp.Server, ex Executor, logger *slog.Logger) {
 		if in.AgentID == "" || in.StationID == "" {
 			return nil, ackResult{}, fmt.Errorf("agent_id and station_id are required")
 		}
-		logToolCall("charge_at", in)
+		logToolCall("charge_at", in.AgentID, in.DecisionEpoch, in)
 		ack, err := ex.SendAction(ctx, in.AgentID, in.DecisionEpoch, protocol.CmdExecuteComposite, map[string]any{
 			"name":         "charge_at",
 			"station_id":   in.StationID,
@@ -136,7 +136,7 @@ func registerComposite(s *mcp.Server, ex Executor, logger *slog.Logger) {
 		if in.AgentID == "" || in.TargetAgentID == "" {
 			return nil, ackResult{}, fmt.Errorf("agent_id and target_agent_id are required")
 		}
-		logToolCall("repair_target", in)
+		logToolCall("repair_target", in.AgentID, in.DecisionEpoch, in)
 		ack, err := ex.SendAction(ctx, in.AgentID, in.DecisionEpoch, protocol.CmdExecuteComposite, map[string]any{
 			"name":            "repair_target",
 			"target_agent_id": in.TargetAgentID,
@@ -155,7 +155,7 @@ func registerComposite(s *mcp.Server, ex Executor, logger *slog.Logger) {
 		if in.AgentID == "" || in.TargetAgentID == "" {
 			return nil, ackResult{}, fmt.Errorf("agent_id and target_agent_id are required")
 		}
-		logToolCall("social_chat_with", in)
+		logToolCall("social_chat_with", in.AgentID, in.DecisionEpoch, in)
 		ack, err := ex.SendAction(ctx, in.AgentID, in.DecisionEpoch, protocol.CmdExecuteComposite, map[string]any{
 			"name":            "social_chat_with",
 			"target_agent_id": in.TargetAgentID,
@@ -174,7 +174,7 @@ func registerComposite(s *mcp.Server, ex Executor, logger *slog.Logger) {
 		if in.AgentID == "" {
 			return nil, ackResult{}, fmt.Errorf("agent_id is required")
 		}
-		logToolCall("rest_idle", in)
+		logToolCall("rest_idle", in.AgentID, in.DecisionEpoch, in)
 		ack, err := ex.SendAction(ctx, in.AgentID, in.DecisionEpoch, protocol.CmdExecuteComposite, map[string]any{
 			"name":         "rest_idle",
 			"duration_sec": in.DurationMin * secondsPerMinute,
@@ -193,7 +193,7 @@ func registerComposite(s *mcp.Server, ex Executor, logger *slog.Logger) {
 		if in.AgentID == "" {
 			return nil, ackResult{}, fmt.Errorf("agent_id is required")
 		}
-		logToolCall("archive_research", in)
+		logToolCall("archive_research", in.AgentID, in.DecisionEpoch, in)
 		ack, err := ex.SendAction(ctx, in.AgentID, in.DecisionEpoch, protocol.CmdExecuteComposite, map[string]any{
 			"name":         "archive_research",
 			"duration_sec": in.DurationMin * secondsPerMinute,

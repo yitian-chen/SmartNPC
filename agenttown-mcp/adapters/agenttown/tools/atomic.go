@@ -82,7 +82,7 @@ func registerAtomic(s *mcp.Server, ex Executor, logger *slog.Logger) {
 		if in.AgentID == "" || in.Target == "" {
 			return nil, ackResult{}, fmt.Errorf("agent_id and target are required")
 		}
-		logToolCall("move_to", in)
+		logToolCall("move_to", in.AgentID, in.DecisionEpoch, in)
 		ack, err := ex.SendAction(ctx, in.AgentID, in.DecisionEpoch, protocol.CmdMoveTo, map[string]any{
 			"target": in.Target,
 			"speed":  "walk",
@@ -101,7 +101,7 @@ func registerAtomic(s *mcp.Server, ex Executor, logger *slog.Logger) {
 		if in.AgentID == "" || in.Target == "" {
 			return nil, ackResult{}, fmt.Errorf("agent_id and target are required")
 		}
-		logToolCall("turn_to", in)
+		logToolCall("turn_to", in.AgentID, in.DecisionEpoch, in)
 		ack, err := ex.SendAction(ctx, in.AgentID, in.DecisionEpoch, protocol.CmdTurnTo, map[string]any{
 			"target": in.Target,
 		})
@@ -119,7 +119,7 @@ func registerAtomic(s *mcp.Server, ex Executor, logger *slog.Logger) {
 		if in.AgentID == "" || in.Content == "" {
 			return nil, ackResult{}, fmt.Errorf("agent_id and content are required")
 		}
-		logToolCall("speak", in)
+		logToolCall("speak", in.AgentID, in.DecisionEpoch, in)
 		ack, err := ex.SendAction(ctx, in.AgentID, in.DecisionEpoch, protocol.CmdSpeak, map[string]any{
 			"content":   in.Content,
 			"target":    in.Target,
@@ -143,7 +143,7 @@ func registerAtomic(s *mcp.Server, ex Executor, logger *slog.Logger) {
 		if mode == "" {
 			mode = "oneshot"
 		}
-		logToolCall("emote", in)
+		logToolCall("emote", in.AgentID, in.DecisionEpoch, in)
 		ack, err := ex.SendAction(ctx, in.AgentID, in.DecisionEpoch, protocol.CmdEmote, map[string]any{
 			"emotion": in.Emotion,
 			"mode":    mode,
@@ -162,7 +162,7 @@ func registerAtomic(s *mcp.Server, ex Executor, logger *slog.Logger) {
 		if in.AgentID == "" || in.ObjectID == "" || in.Action == "" {
 			return nil, ackResult{}, fmt.Errorf("agent_id, object_id and action are required")
 		}
-		logToolCall("interact", in)
+		logToolCall("interact", in.AgentID, in.DecisionEpoch, in)
 		ack, err := ex.SendAction(ctx, in.AgentID, in.DecisionEpoch, protocol.CmdInteractSmartObject, map[string]any{
 			"object_id": in.ObjectID,
 			"action":    in.Action,
@@ -184,7 +184,7 @@ func registerAtomic(s *mcp.Server, ex Executor, logger *slog.Logger) {
 		if in.DurationSec <= 0 {
 			return nil, ackResult{}, fmt.Errorf("duration_sec must be positive")
 		}
-		logToolCall("wait", in)
+		logToolCall("wait", in.AgentID, in.DecisionEpoch, in)
 		ack, err := ex.SendAction(ctx, in.AgentID, in.DecisionEpoch, protocol.CmdWait, map[string]any{
 			"duration_sec": in.DurationSec,
 		})
@@ -202,7 +202,7 @@ func registerAtomic(s *mcp.Server, ex Executor, logger *slog.Logger) {
 		if in.AgentID == "" {
 			return nil, ackResult{}, fmt.Errorf("agent_id is required")
 		}
-		logToolCall("scan_area", in)
+		logToolCall("scan_area", in.AgentID, in.DecisionEpoch, in)
 		if err := ex.RequestScan(ctx, in.AgentID, in.DecisionEpoch); err != nil {
 			return nil, ackResult{}, fmt.Errorf("scan_area: %w", err)
 		}
@@ -217,7 +217,7 @@ func registerAtomic(s *mcp.Server, ex Executor, logger *slog.Logger) {
 		if in.AgentID == "" {
 			return nil, ackResult{}, fmt.Errorf("agent_id is required")
 		}
-		logToolCall("stop", in)
+		logToolCall("stop", in.AgentID, in.DecisionEpoch, in)
 		ack, err := ex.SendAction(ctx, in.AgentID, in.DecisionEpoch, protocol.CmdStop, map[string]any{})
 		if err != nil {
 			return nil, ackResult{}, fmt.Errorf("stop: %w", err)
