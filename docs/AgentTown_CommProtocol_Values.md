@@ -340,7 +340,7 @@ graph TB
     "action_id": "act_001",
     "cmd": "MoveTo",
     "params": {
-      "dest": [160.0, 100.0, 0.0],
+      "target": "workbench_01",
       "speed": "walk"
     }
   }
@@ -353,20 +353,22 @@ graph TB
 
 | cmd | params | 说明 |
 |-----|--------|------|
-| `MoveTo` | {dest: [x,y,z], speed: "walk"\|"run"} | 原子：移动到坐标 |
-| `TurnTo` | {target: agent_id} 或 {direction: [dx,dy,dz]} | 原子：转向 |
+| `MoveTo` | {target: string, speed: "walk"\|"run"} | 原子：移动到语义目标（zone 或 location id，由 UE 侧解析为坐标） |
+| `TurnTo` | {target: agent_id} | 原子：转向目标 agent |
 | `PlayAnimation` | {anim_id: string, duration_sec: float} | 原子：播动画 |
 | `Speak` | {content: string, target: agent_id, audio_url: string\|null} | 原子：说话（audio_url 见约定6） |
 | `Emote` | {emotion: "happy"\|"sad"\|"worried"\|..., mode: "oneshot"\|"sustained"} | 原子：情绪表达（mode 见约定7） |
 | `Wait` | {duration_sec: float} | 原子：等待 |
 | `InteractSmartObject` | {object_id: string, action: string} | 原子：交互物件 |
-| `ExecuteComposite` | {name: string, params: {...}} | 复合：启动 StateTree |
+| `ExecuteComposite` | {name: string, target: string, duration_sec: float, ...} | 复合：启动 StateTree（参数平铺，详见下方示例） |
 | `Stop` | {} | 停止当前所有动作 |
 
 > **约定 6（Speak/TTS）**：`audio_url` 由 **Agent 侧预生成**（调用 TTS 服务后填入 URL）；若为 `null` 或 UE 侧拉取音频失败，UE **降级为纯字幕显示**，不阻塞动作。
 > **约定 7（Emote 模式）**：`mode="oneshot"` 为一次性表情（播完即止）；`mode="sustained"` 为持续情绪状态（UE 保持该情绪表现，并在 perception_update 的 `current_emote` 回报，直到下一个 sustained emote 或显式清除）。
 
-**ExecuteComposite 示例**：
+> **约定 6a（实现现状）**：当前第一期实现中，MCP 层 **未接入 TTS 服务**，`Speak` 工具始终填 `audio_url: null`，UE 侧仅做纯字幕显示。TTS 链路留待后续接入。
+
+**ExecuteComposite 示例**（参数平铺在 params 内，不嵌套 params 子对象）：
 
 ```json
 {
@@ -379,6 +381,12 @@ graph TB
   }
 }
 ```
+
+> **复合动作参数说明**：不同复合动作的 params 字段因 `name` 而异，常见字段：
+> - `work_assemble` / `charge_at` / `rest_idle` / `archive_research`：`target`（可选）+ `duration_sec`
+> - `patrol_route`：`route_id`
+> - `repair_target` / `social_chat_with`：`target_agent_id`
+> 全部为语义 ID（zone/location/agent_id），由 UE 侧解析为具体坐标或对象引用。
 
 #### action_started（UE → Agent，动作接收回执 ACK）
 
@@ -984,10 +992,9 @@ graph LR
         WSC["AgentBridgeClient (WebSocket)"]
     end
     subgraph MCP["MCP 层 (Adapter + Semantic + Tools)"]
-        WSS["WebSocket Client<br/>连UE, 收发协议消息"]
-        KB["World KB<br/>(加载 world_kb.yaml)"]
-        SEM["Semantic Engine<br/>坐标→地点名→第一人称叙事"]
-        NOTIFY["MCP Notification/SSE<br/>主动推送感知/事件给Agent"]
+        WSS["WebSocket Server<br/>收发协议消息"]
+        SEM["Semantic Engine<br/>zone/location → 第一人称叙事"]
+        PUSH["HTTP POST<br/>直推 Hermes /v1/responses"]
         TOOLS["MCP Tools<br/>复合+原子行为 (带agent_id)"]
     end
     subgraph AG["Agent (Hermes)"]
@@ -996,110 +1003,115 @@ graph LR
 
     WSC <-->|"WebSocket JSON<br/>(本文协议)"| WSS
     WSS --> SEM
-    KB --> SEM
-    SEM --> NOTIFY
-    NOTIFY -->|"push (SSE)"| MIND
+    SEM --> PUSH
+    PUSH -->|"HTTP POST<br/>/v1/responses"| MIND
     MIND -->|"call tool (agent_id)"| TOOLS
     TOOLS -->|"翻译为 action_command"| WSS
 ```
 
 | 职责 | 说明 |
 |------|------|
-| **协议适配** | 作为 WebSocket 客户端连接 UE 的 `AgentBridgeClient`，收发本文第二章定义的所有协议消息 |
-| **感知语义化** | 加载 World KB，将原始感知（坐标/ID）翻译为**地点名→第一人称叙事**（认知层），全部在 MCP 层完成 |
-| **感知推送** | 通过 **MCP 通知 / SSE** 主动把语义化后的感知与事件推给 Agent（不依赖 Agent 轮询） |
+| **协议适配** | 作为 WebSocket 服务端接收 UE 的 `AgentBridgeClient` 连接，收发本文第二章定义的所有协议消息 |
+| **感知语义化** | 将原始感知（zone/location ID）翻译为**第一人称叙事**（认知层），在 MCP 层完成 |
+| **感知推送** | 通过 **HTTP POST 直推** Hermes Gateway 的 `/v1/responses` 端点，把语义化后的感知送入 Agent（不依赖 MCP 通知 / SSE） |
 | **工具暴露** | 向 Agent 暴露**复合 + 原子行为** MCP Tools，调用时翻译为 `action_command` 下发 UE |
 
-> **核心权衡**：本文 WebSocket 协议是"UE 主动推送"范式，MCP 是"Agent 调用工具"范式。MCP 层通过 **SSE 推送（感知方向）+ Tool 调用（动作方向）** 弥合两种范式——感知走推送，动作走工具，方向清晰。
+> **核心权衡**：本文 WebSocket 协议是"UE 主动推送"范式，MCP 是"Agent 调用工具"范式。MCP 层通过 **HTTP POST 推送（感知方向）+ Tool 调用（动作方向）** 弥合两种范式——感知走 HTTP 推送，动作走工具，方向清晰。
+>
+> **实现说明**：原设计拟用 MCP server notification / SSE 推送感知给 Agent，但 Hermes Gateway 的接入形态是 HTTP `/v1/responses`（OpenAI Responses API 风格），不支持作为 MCP 客户端订阅 SSE 流。因此第一期改为 MCP 层主动向 Hermes Gateway 发起 HTTP POST，把感知叙事作为 `input` 字段送入。Tool 调用方向仍走标准 MCP（Hermes 作为 MCP 客户端连 MCP Server 的 `/mcp` 端点）。
 
-### 6.2 感知送达：MCP 通知 / SSE 推送
+### 6.2 感知送达：HTTP POST 直推 Hermes
 
-UE 推来的 `perception_update` / `event_notification` / `action_started` / `action_completed` / `state_report`，经 MCP 层语义化后，**通过 MCP 的 server 通知 / SSE 主动推送**给 Agent，而非等待 Agent 轮询。
+UE 推来的 `perception_update` / `event_notification` / `action_started` / `action_completed` / `state_report`，经 MCP 层语义化后，**通过 HTTP POST 发送给 Hermes Gateway**（`POST /v1/responses`），作为一次 LLM 决策的输入 prompt。
 
 | UE 协议消息 | MCP 层处理 | 推送给 Agent 的形式 |
 |-------------|-----------|--------------------|
-| `perception_update` | 语义化为第一人称叙事 | SSE 通知：`perception`（含叙事文本） |
-| `event_notification` | 语义化事件描述 | SSE 通知：`event`（紧急事件即时推送，供反应层打断） |
-| `action_started` | 透传 | SSE 通知：`action_ack` |
-| `action_completed` | 透传（含 result/progress） | SSE 通知：`action_result` |
-| `state_report` | 附加到感知上下文 | 随下次 `perception` 通知携带 |
+| `perception_update` | 语义化为第一人称叙事 | HTTP POST `input` 字段：叙事文本（触发一次 LLM 决策） |
+| `event_notification` | 语义化事件描述 | 折入下次 perception 叙事文本携带 |
+| `action_started` | 作为 Tool 调用返回值给 LLM | 工具调用 ACK 结果（不单独推送） |
+| `action_completed` | 折入下次 perception 叙事 | 下次 perception 文本中追加 `[动作完成 action_id=... result=...]` 行 |
+| `state_report` | 缓存到 `latestPhysical` | 下次 perception 文本拼接时携带物理状态 |
 
-> **反应层打断**：`event`（紧急事件）通过 SSE 即时推送，保证反应层能及时收到并决定是否打断当前动作。
+> **反应层打断**：当前第一期实现中，`event_notification`（紧急事件）并未走独立即时推送通道，而是折入下次 perception 叙事。这牺牲了反应层的实时打断能力，但简化了链路。后续若需实时打断，可考虑额外引入 SSE 通道或 Tool 调用回调。
 
-### 6.3 感知语义化（全部在 MCP 层）
+### 6.3 感知语义化（在 MCP 层）
 
-三层感知翻译（对应子系统5）**全部在 MCP 层内完成**，Agent 拿到的是"成品叙事"：
+感知翻译在 MCP 层内完成，Agent 拿到的是"成品叙事"。当前实现为**单层翻译**：直接读取 UE 推来的 `perception_update.payload` 中已有的 `current_zone` / `current_location` / `visible_agents` / `nearby_objects` 等结构化字段，拼成第一人称中文叙事。
 
 ```
-Layer1 原始感知(UE)  →  Layer2 语义(查World KB)  →  Layer3 认知(第一人称叙事)
-[245.3,128.7,0]        "档案馆修理台"              "你现在在档案馆的修理台旁..."
-K-03 distance=2.1      "K-03 三条腿"              "你看到 K-03 三条腿(你最亲近的伙伴)就在旁边"
+UE perception_update.payload  →  MCP 层语义化  →  第一人称叙事
+current_zone: "main_workshop"   "你在main_workshop"        "你在main_workshop。
+nearby_objects: [工作台一号]    "附近可用: 工作台一号"      附近可用: 工作台一号(assemble/inspect)。
+physical_state: {energy:100}    "电池100%"                 电池100% ，疲劳0，关节磨损0，健康100。"
 ```
 
-MCP 层语义化后推送给 Agent 的示例（叙事文本 + 结构化附带）：
+MCP 层语义化后通过 HTTP POST 推送给 Hermes 的实际 payload 示例（第一期实现，叙事文本作为 `input` 字段）：
 
 ```json
 {
-  "notify_type": "perception",
-  "agent_id": "H-03",
-  "narrative": "你现在在档案馆的修理台旁。时间 14:23。\n你看到：K-03 三条腿（你最亲近的伙伴）就在旁边，正在休息。\n你附近可用：修理台（闲置）、档案终端（闲置）。\n你听到：D-02 小八在广场广播：\"K-03 出事了！\"",
-  "structured": {
-    "current_zone": "archive_room",
-    "current_location": "repair_table",
-    "visible_agents": ["K-03"],
-    "usable_objects": ["repair_table", "archive_terminal"]
-  }
+  "model": "h01",
+  "input": "[decision_context] agent_id=H-01 agent_epoch=1 decision_epoch=1\n[决策触发原因] 首次感知\n[当前任务] 无\n[感知] 清晨，时间06:00。\n你在main_workshop。\n电池100% ，疲劳0，关节磨损0，健康100。\n附近可用: 工作台一号(assemble/inspect), 充电桩一号(charge/inspect)。\n你现在想做什么？\n\n【重要】执行任何动作时必须调用对应的 MCP 工具..."
 }
 ```
 
-> `narrative` 供 LLM 直接理解；`structured` 供 Agent 需要精确判断时使用（如距离/可用动作校验）。
+> **说明**：当前实现不依赖外部 `world_kb.yaml` 文件 —— UE 推来的 perception_update 已携带语义化的 zone 名称（如 "main_workshop"）和物体名（如 "工作台一号"），MCP 层只需拼装成自然语言。原设计的"坐标→地点名"翻译（需要查 KB）目前由 UE 侧在生成 perception_update 时完成。
+>
+> **`[decision_context]` 头部**：MCP 层在叙事文本前拼接的决策上下文，含 `agent_id` / `agent_epoch` / `decision_epoch` / 触发原因 / 当前任务，用于 LLM 区分轮次与上下文。
 
-### 6.4 MCP Tools 定义（复合 + 原子，均带 agent_id）
+### 6.4 MCP Tools 定义（复合 + 原子，均带 agent_id + decision_epoch）
 
-Tools 参照子系统6，**复合行为 + 必要原子行为均开放给 LLM 调用**。**所有 tool 的第一个参数固定为 `agent_id`**（单 MCP Server 服务多 NPC 的隔离手段）。MCP 层收到调用后翻译为对应 `action_command` 下发 UE。
+Tools 参照子系统6，**复合行为 + 必要原子行为均开放给 LLM 调用**。**所有 tool 的前两个参数固定为 `agent_id` 和 `decision_epoch`**（单 MCP Server 服务多 NPC 的隔离手段 + 轮次关联）。MCP 层收到调用后翻译为对应 `action_command` 下发 UE。
+
+> **`decision_epoch` 参数说明**：每个 tool 调用携带当前决策轮次 ID（int64），用于：
+> - 在 MCP→UE 的 `action_command` 中标注是哪一轮决策产出的动作
+> - 在 sim.log 日志中关联 PERCEPTION / TOOL / RESPONSE 三种日志条目（同 `decision_epoch` 的记录属于同一决策回合）
+> - UE 侧可据此拒绝同一轮次的重复动作（如 "scan_area already pending"）
 
 **复合行为 Tools**（默认优先使用）：
 
 | MCP Tool | 参数 | 翻译为 action_command |
 |----------|------|----------------------|
-| `work_assemble` | agent_id, target, duration_min | ExecuteComposite {name:"work_assemble"} |
-| `patrol_route` | agent_id, route_id | ExecuteComposite {name:"patrol_route"} |
-| `charge_at` | agent_id, station_id, duration_min | ExecuteComposite {name:"charge_at"} |
-| `repair_target` | agent_id, target_agent_id | ExecuteComposite {name:"repair_target"} |
-| `social_chat_with` | agent_id, target_agent_id | ExecuteComposite {name:"social_chat_with"} |
-| `rest_idle` | agent_id, duration_min | ExecuteComposite {name:"rest_idle"} |
-| `archive_research` | agent_id, duration_min | ExecuteComposite {name:"archive_research"} |
+| `work_assemble` | agent_id, decision_epoch, target, duration_min | ExecuteComposite {name:"work_assemble"} |
+| `patrol_route` | agent_id, decision_epoch, route_id | ExecuteComposite {name:"patrol_route"} |
+| `charge_at` | agent_id, decision_epoch, station_id, duration_min | ExecuteComposite {name:"charge_at"} |
+| `repair_target` | agent_id, decision_epoch, target_agent_id | ExecuteComposite {name:"repair_target"} |
+| `social_chat_with` | agent_id, decision_epoch, target_agent_id | ExecuteComposite {name:"social_chat_with"} |
+| `rest_idle` | agent_id, decision_epoch, duration_min | ExecuteComposite {name:"rest_idle"} |
+| `archive_research` | agent_id, decision_epoch, duration_min | ExecuteComposite {name:"archive_research"} |
 
 **原子行为 Tools**（需精细控制时使用）：
 
 | MCP Tool | 参数 | 翻译为 action_command |
 |----------|------|----------------------|
-| `move_to` | agent_id, target（语义ID/描述） | MoveTo（MCP层查 World KB 解析坐标） |
-| `turn_to` | agent_id, target | TurnTo |
-| `speak` | agent_id, content, target | Speak（MCP层可调 TTS 填 audio_url） |
-| `emote` | agent_id, emotion, mode | Emote |
-| `interact` | agent_id, object_id, action | InteractSmartObject |
-| `wait` | agent_id, duration_sec | Wait |
-| `scan_area` | agent_id | 主动请求一次 perception_update |
-| `stop` | agent_id | Stop / stop_action |
+| `move_to` | agent_id, decision_epoch, target（语义ID） | MoveTo {target, speed:"walk"}（UE 侧解析坐标） |
+| `turn_to` | agent_id, decision_epoch, target | TurnTo {target} |
+| `speak` | agent_id, decision_epoch, content, target | Speak {content, target, audio_url:null}（TTS 未接入，见约定6a） |
+| `emote` | agent_id, decision_epoch, emotion, mode | Emote {emotion, mode} |
+| `interact` | agent_id, decision_epoch, object_id, action | InteractSmartObject {object_id, action} |
+| `wait` | agent_id, decision_epoch, duration_sec | Wait {duration_sec} |
+| `scan_area` | agent_id, decision_epoch | scan_area 控制消息（请求一次即时 perception_update） |
+| `stop` | agent_id, decision_epoch | action_command {cmd:"Stop"}（停止当前所有动作） |
 
-> **语义目标解析**：原子 tool 接受**语义目标**（如 `move_to(target="工作台")`），由 MCP 层查 World KB 的 `resolve_target` / `get_position` 解析为坐标，再填入 action_command 的 `dest`。Agent 无需接触任何坐标。
+> **语义目标解析**：原子 tool 接受**语义目标**（如 `move_to(target="workbench_01")`），由 UE 侧解析为坐标并执行。Agent 无需接触任何坐标。
+>
+> **`stop` 工具实现说明**：当前 `stop` 工具翻译为 `action_command{cmd:"Stop"}` 空 params，而非协议 §2.3 定义的 `stop_action` 消息。这意味着停止动作不带 `action_id` 匹配校验（约定9 的竞态保护未实现）。后续若需精确停止特定动作，应改为发 `stop_action` 消息并携带 action_id。
 
 ### 6.5 多 NPC 隔离：单 Server + agent_id 参数
 
 - **单个 MCP Server** 服务所有 NPC（第一期仅 1 个，但架构就绪）。
 - 每个 tool 调用**必须带 `agent_id`**，MCP 层据此翻译为对应 agent 的 `action_command`。
-- SSE 推送按 `agent_id` 分流：Agent 侧订阅自己 NPC 的感知/事件流。
-- **第一期**：只有 1 个 agent_id，流程完全打通即可；多 NPC 时无需改协议，仅扩展订阅路由。
+- MCP 侧按 `agent_id` 维护独立的 `agentContext`（worker goroutine + perception 队列 + latestPhysical 缓存），感知推送互不干扰。
+- **第一期实现局限**：Hermes Client 当前是全局单例，所有 agent 共享同一条 `prevResponseID` 会话链。这意味着多 NPC 场景下会话上下文未严格隔离 —— 单 NPC 场景无影响，扩展到多 NPC 时需改为按 agent_id 维护独立 Hermes 会话。
+- **第一期**：只有 1 个 agent_id，流程完全打通即可；多 NPC 时需补 Hermes 会话隔离，但无需改协议。
 
 ### 6.6 MCP 层与本协议的关系小结
 
 | 方向 | 范式 | 承载 |
 |------|------|------|
-| UE → Agent（感知/事件） | 推送 | WebSocket 协议消息 → 语义化 → **MCP SSE 通知** |
+| UE → Agent（感知/事件） | 推送 | WebSocket 协议消息 → 语义化 → **HTTP POST 到 Hermes /v1/responses** |
 | Agent → UE（动作） | 调用 | **MCP Tool 调用** → 翻译 → WebSocket `action_command` |
 
-> **结论**：MCP 层让本文定义的 WebSocket 协议对 Agent "隐形"——Agent 只看到"推来的叙事"和"可调的工具"，完全不感知底层坐标与协议细节。这既满足 Hermes 的 MCP 接入需求，又保持了 UE 端与协议层的独立与可复用。
+> **结论**：MCP 层让本文定义的 WebSocket 协议对 Agent "隐形"——Agent 只看到"送来的叙事"和"可调的工具"，完全不感知底层坐标与协议细节。这既满足 Hermes 的 MCP 接入需求，又保持了 UE 端与协议层的独立与可复用。
 
 ---
 
@@ -1130,10 +1142,10 @@ Tools 参照子系统6，**复合行为 + 必要原子行为均开放给 LLM 调
 | 项 | 答案 |
 |---|------|
 | 定位 | UE WebSocket 协议 ⟷ Agent(MCP) 的适配 + 语义化中枢 |
-| 感知送达 | MCP 通知 / SSE **推送**（含紧急事件即时推送供打断） |
-| 语义化 | **全部在 MCP 层**：坐标→地点名→第一人称叙事 |
-| Tools | 复合 + 原子行为，均开放给 LLM，**统一带 agent_id** |
-| 多 NPC | 单 MCP Server + agent_id 参数隔离 |
+| 感知送达 | **HTTP POST 直推** Hermes `/v1/responses`（第一期实现；原设计为 SSE，因 Hermes 接入形态调整） |
+| 语义化 | 在 MCP 层完成：zone/location ID → 第一人称叙事（单层翻译，UE 侧已提供语义名） |
+| Tools | 复合 + 原子行为，均开放给 LLM，**统一带 agent_id + decision_epoch** |
+| 多 NPC | 单 MCP Server + agent_id 参数隔离（第一期 Hermes 会话隔离待补） |
 
 ### 设计原则
 
@@ -1142,7 +1154,7 @@ Tools 参照子系统6，**复合行为 + 必要原子行为均开放给 LLM 调
 3. **时间与坐标单位统一**：时间戳毫秒，坐标厘米
 4. **动作生命周期可靠**：command → started(ACK) → completed，停止有 ID 匹配校验
 5. **数值归属清晰**：物理 UE 管，心理 Agent 管，不交叉
-6. **感知/动作范式分离**：感知走 SSE 推送，动作走 MCP Tool 调用
+6. **感知/动作范式分离**：感知走 HTTP POST 推送，动作走 MCP Tool 调用
 7. **容错优先**：断线重连 + seq 重放补偿、超时降级、失败/安全模式分级
 8. **可观测**：每条消息有 msg_id + seq，可追踪完整链路
 9. **MCP 层隔离底层**：Agent 只见叙事与工具，不感知坐标与协议细节
