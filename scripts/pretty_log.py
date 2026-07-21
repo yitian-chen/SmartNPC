@@ -21,6 +21,7 @@ sim.log 每行是一条 JSON，单行可能上千字（perception text 完整不
     python scripts/pretty_log.py --html -f PERCEPTION     # 只看 PERCEPTION
     python scripts/pretty_log.py --html -o report.html    # 指定输出路径
     python scripts/pretty_log.py --html --no-open         # 生成但不自动打开
+    python scripts/pretty_log.py --html --hermes          # 整合 Hermes 容器日志
 
     # 终端渲染
     python scripts/pretty_log.py                          # 查看今天的 sim.log
@@ -33,7 +34,14 @@ sim.log 每行是一条 JSON，单行可能上千字（perception text 完整不
     PERCEPTION  MCP→Hermes/PERCEPTION（传入 Hermes 的感知原文）
     RESPONSE    Hermes→MCP/RESPONSE（LLM 响应 + narrative）
     TOOL        Hermes→MCP/TOOL（Hermes 调用的工具）
+    HERMES      Hermes/internal（Hermes 容器内部日志：LLM 调用/工具错误/Turn 结束）
     HEARTBEAT   心跳（默认隐藏，可显式过滤查看）
+
+整合 Hermes 日志（--hermes）：
+    默认读取 hermes/profiles/h01/logs/agent.log（容器内 UTC，自动转 +08:00 合并排序）。
+    默认只保留 agent.conversation_loop / agent.tool_executor / run_agent /
+    POST /v1/responses 行，以及任何 ERROR/WARNING；其余噪声（插件注册、健康检查、
+    cron、housekeeping、gateway 生命周期）默认隐藏，加 --hermes-all 显示。
 
 依赖：仅 Python 3 标准库。
 """
@@ -63,6 +71,7 @@ _DIRECTION_ALIASES = {
     "PERCEPTION": "MCP→Hermes/PERCEPTION",
     "RESPONSE": "Hermes→MCP/RESPONSE",
     "TOOL": "Hermes→MCP/TOOL",
+    "HERMES": "Hermes/internal",
     "HEARTBEAT": "heartbeat",
 }
 
@@ -73,6 +82,7 @@ _DIRECTION_CSS = {
     "MCP→Hermes/PERCEPTION": "dir-perception",
     "Hermes→MCP/RESPONSE": "dir-response",
     "Hermes→MCP/TOOL": "dir-tool",
+    "Hermes/internal": "dir-hermes",
 }
 
 
@@ -179,7 +189,7 @@ def render_line(line: str, color: bool, show_source: bool = False) -> str:
 
     header = f"{time_s} {level} {msg_s}{source_s}"
 
-    skip = {"time", "level", "msg", "source"}
+    skip = {"time", "level", "msg", "source", "_direction", "_game_time", "_raw"}
     parts = [header]
     for k in rec:
         if k in skip:
@@ -191,7 +201,7 @@ def render_line(line: str, color: bool, show_source: bool = False) -> str:
             for pl in _format_value(v, color).splitlines():
                 parts.append(f"    {_color('payload', pl, color)}")
             continue
-        if k in ("text", "narrative") and isinstance(v, str):
+        if k in ("text", "narrative", "message") and isinstance(v, str):
             parts.append(f"  {_color('key', k, color)}:")
             for ln in v.split("\n"):
                 parts.append(f"    {ln}")
@@ -310,6 +320,208 @@ def _collect_records(log_path: Path, filt: str | None, tail: int | None) -> list
     return matched
 
 
+# ── Hermes 容器日志解析 ───────────────────────────────────────────────
+# agent.log 是 Python logging 文本格式，容器内 UTC，需转 +08:00 才能与 sim.log 对齐。
+# 示例：
+#   2026-07-21 08:05:31,426 INFO [sid] agent.conversation_loop: API call #1: ...
+#   2026-07-21 08:05:31,495 WARNING [sid] agent.tool_executor: Tool mcp__... returned error: ...
+#   2026-07-21 08:05:49,935 INFO aiohttp.access: 172.20.0.1 [...] "POST /v1/responses HTTP/1.1" 200 0 ...
+
+_HERMES_LINE = _re.compile(
+    r"^(?P<date>\d{4}-\d{2}-\d{2})\s+"
+    r"(?P<time>\d{2}:\d{2}:\d{2},\d+)\s+"
+    r"(?P<level>INFO|WARNING|WARN|ERROR|DEBUG)\s+"
+    r"(?P<rest>.*)$"
+)
+
+# Hermes 内部高价值模块白名单（其余默认隐藏，可用 --hermes-all 显示）
+_HERMES_KEEP_MODULES = (
+    "agent.conversation_loop",
+    "agent.tool_executor",
+    "run_agent",
+)
+_HERMES_KEEP_MSG_PATTERNS = (
+    "POST /v1/responses",
+    "Turn ended",
+    "API call #",
+    "returned error",
+    "Tool loop warning",
+)
+
+# 默认隐藏的噪声模块
+_HERMES_NOISE_MODULES = (
+    "hermes_cli.plugins",
+    "gateway.run",
+    "gateway.platforms",
+    "gateway.housekeeping",
+    "cron.scheduler_provider",
+    "aiohttp.access",
+    "tools.tirith_security",
+    "mcp.client.streamable_http",
+)
+
+
+def _hermes_to_iso(date: str, time: str) -> str:
+    """2026-07-21 + 08:05:31,426 (UTC) → 2026-07-21T16:05:31.426+08:00"""
+    try:
+        t = _dt.datetime.strptime(
+            f"{date} {time}", "%Y-%m-%d %H:%M:%S,%f"
+        ).replace(tzinfo=_dt.timezone.utc)
+        local = t.astimezone(_dt.timezone(_dt.timedelta(hours=8)))
+        # 2026-07-21T16:05:31.426000+08:00 — 与 sim.log 形态一致
+        return local.isoformat(timespec="milliseconds")
+    except ValueError:
+        return ""
+
+
+def _parse_hermes_line(line: str) -> dict | None:
+    """解析一行 Hermes agent.log → 标准 sim.log 记录 dict（含 _direction）。"""
+    m = _HERMES_LINE.match(line)
+    if not m:
+        return None
+    date = m.group("date")
+    time = m.group("time")
+    level = m.group("level").replace("WARNING", "WARN")
+    rest = m.group("rest")
+    iso = _hermes_to_iso(date, time)
+    if not iso:
+        return None
+
+    # 拆出 [session_id] 前缀（如果有）
+    session = ""
+    rest_stripped = rest
+    if rest.startswith("["):
+        end = rest.find("]")
+        if end > 0:
+            session = rest[1:end]
+            rest_stripped = rest[end + 1 :].lstrip()
+
+    # 拆出 module: body（模块名最后一个点号之后是消息体）
+    # 兼容 "agent.conversation_loop: ..." 和 "run_agent: ..." 两种形式
+    module = ""
+    body = rest_stripped
+    if ": " in rest_stripped:
+        head, _, tail_part = rest_stripped.partition(": ")
+        # head 形如 "agent.conversation_loop" / "run_agent" / "aiohttp.access"
+        # 不含空格即为模块名
+        if head and " " not in head:
+            module = head.strip()
+            body = tail_part
+
+    msg = "[Hermes/internal]"
+    fields: dict = {}
+    if session:
+        fields["session"] = session
+    if module:
+        fields["module"] = module
+    fields["message"] = body
+
+    # 对常见模式提取结构化字段（便于过滤/搜索）
+    # 1) API call #N: model=... in=... out=... total=... latency=... cache=...
+    api_m = _re.search(
+        r"API call #(\d+):\s+model=(\S+)\s+provider=(\S+)\s+in=(\d+)\s+out=(\d+)\s+total=(\d+)\s+latency=([\d.]+s)\s+cache=(\d+)/(\d+)",
+        body,
+    )
+    if api_m:
+        fields["api_call"] = int(api_m.group(1))
+        fields["model"] = api_m.group(2)
+        fields["provider"] = api_m.group(3)
+        fields["tokens_in"] = int(api_m.group(4))
+        fields["tokens_out"] = int(api_m.group(5))
+        fields["tokens_total"] = int(api_m.group(6))
+        fields["latency"] = api_m.group(7)
+        fields["cache"] = f"{api_m.group(8)}/{api_m.group(9)}"
+
+    # 2) Turn ended: reason=... model=... api_calls=X/Y budget=... tool_turns=... ...
+    turn_m = _re.search(
+        r"Turn ended:\s+reason=(\S+)\s+model=(\S+)\s+api_calls=(\d+)/(\d+)\s+budget=(\d+)/(\d+)\s+tool_turns=(\d+)",
+        body,
+    )
+    if turn_m:
+        fields["turn_reason"] = turn_m.group(1)
+        fields["model"] = turn_m.group(2)
+        fields["api_calls"] = int(turn_m.group(3))
+        fields["api_budget"] = int(turn_m.group(4))
+        fields["tool_turns"] = int(turn_m.group(7))
+
+    # 3) Tool ... returned error (X.XXs): {...}
+    tool_err_m = _re.match(
+        r"Tool\s+(?P<tool>\S+)\s+returned error\s+\((?P<dur>[\d.]+s)\):\s*(?P<detail>.+)",
+        body,
+    )
+    if tool_err_m:
+        fields["tool"] = tool_err_m.group("tool")
+        fields["duration"] = tool_err_m.group("dur")
+        detail = tool_err_m.group("detail")
+        # 尝试把 detail 解析为 JSON
+        try:
+            fields["error"] = json.loads(detail)
+        except json.JSONDecodeError:
+            fields["error"] = detail
+
+    rec = {
+        "time": iso,
+        "level": level,
+        "msg": msg,
+        **fields,
+    }
+    rec["_direction"] = "Hermes/internal"
+    rec["_game_time"] = ""  # Hermes 日志无游戏时间
+    return rec
+
+
+def _hermes_keep(rec: dict, keep_all: bool) -> bool:
+    """是否保留这条 Hermes 记录（默认白名单 + WARNING/ERROR）。"""
+    if keep_all:
+        return True
+    level = rec.get("level", "").upper()
+    if level in ("WARN", "ERROR"):
+        return True
+    module = rec.get("module", "")
+    body = rec.get("message", "")
+    if any(module.startswith(m) for m in _HERMES_KEEP_MODULES):
+        return True
+    if any(p in body for p in _HERMES_KEEP_MSG_PATTERNS):
+        return True
+    return False
+
+
+def _collect_hermes_records(
+    hermes_log: Path,
+    keep_all: bool,
+    filt: str | None,
+    time_range: tuple[str, str] | None = None,
+) -> list[dict]:
+    """读取 Hermes agent.log，返回标准化记录列表。
+
+    time_range: (start_iso, end_iso) — 仅保留该时间范围内的记录（含），None 表示全部。
+    """
+    if not hermes_log.exists():
+        return []
+    matched: list[dict] = []
+    start_iso, end_iso = time_range if time_range else ("", "")
+    with hermes_log.open("r", encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            line = line.rstrip("\n")
+            if not line:
+                continue
+            rec = _parse_hermes_line(line)
+            if rec is None:
+                continue
+            # 时间范围过滤（默认按 sim.log 范围同步）
+            t = rec.get("time", "")
+            if start_iso and t < start_iso:
+                continue
+            if end_iso and t > end_iso:
+                continue
+            if not _hermes_keep(rec, keep_all=keep_all):
+                continue
+            if filt and not _match_filter(rec, filt):
+                continue
+            matched.append(rec)
+    return matched
+
+
 # ── HTML 报告 ────────────────────────────────────────────────────────
 _HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang="zh-CN">
@@ -334,6 +546,7 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
   --perception: #ce9178;
   --response: #b5cea8;
   --tool: #dcdcaa;
+  --hermes: #d16969;
 }}
 * {{ box-sizing: border-box; }}
 body {{
@@ -405,6 +618,7 @@ body {{
 .entry.dir-perception .entry-header {{ border-left-color: var(--perception); }}
 .entry.dir-response .entry-header {{ border-left-color: var(--response); }}
 .entry.dir-tool .entry-header {{ border-left-color: var(--tool); }}
+.entry.dir-hermes .entry-header {{ border-left-color: var(--hermes); }}
 .entry.level-WARN .entry-header {{ border-left-color: var(--warn); }}
 .entry.level-ERROR .entry-header {{ border-left-color: var(--error); }}
 .entry-time {{ color: var(--time); flex-shrink: 0; }}
@@ -425,6 +639,7 @@ body {{
 .entry.dir-perception .entry-msg {{ color: var(--perception); }}
 .entry.dir-response .entry-msg {{ color: var(--response); }}
 .entry.dir-tool .entry-msg {{ color: var(--tool); }}
+.entry.dir-hermes .entry-msg {{ color: var(--hermes); }}
 .entry-meta {{ color: var(--fg-dim); font-size: 12px; margin-left: auto; }}
 .entry-body {{
   display: none;
@@ -459,6 +674,7 @@ body {{
   <button class="filter-btn" data-filter="PERCEPTION">PERCEPTION</button>
   <button class="filter-btn" data-filter="RESPONSE">RESPONSE</button>
   <button class="filter-btn" data-filter="TOOL">TOOL</button>
+  <button class="filter-btn" data-filter="HERMES">Hermes</button>
   <select id="game-time-filter" title="按游戏时间过滤">
     <option value="ALL">游戏时间：全部</option>
   </select>
@@ -504,6 +720,7 @@ function applyFilters() {{
         'PERCEPTION': 'MCP→Hermes/PERCEPTION',
         'RESPONSE': 'Hermes→MCP/RESPONSE',
         'TOOL': 'Hermes→MCP/TOOL',
+        'HERMES': 'Hermes/internal',
       }};
       const full = filterMap[currentFilter] || currentFilter;
       show = dir.includes(full);
@@ -564,6 +781,9 @@ applyFilters();
 
 def _direction_of(rec: dict) -> str:
     """返回消息的方向标识（用于 CSS 着色和过滤）。"""
+    # Hermes/internal 记录由解析器直接标记 _direction（msg 只是 [Hermes/internal]）
+    if rec.get("_direction") == "Hermes/internal":
+        return "Hermes/internal"
     msg = str(rec.get("msg", ""))
     for marker in _DIRECTION_CSS:
         if marker in msg:
@@ -602,7 +822,7 @@ def _entry_html(rec: dict) -> str:
 
     # header 上的简短 meta（agent_id / seq 等）
     meta_parts = []
-    for k in ("agent_id", "seq", "agent_epoch", "decision_epoch", "tokens"):
+    for k in ("agent_id", "seq", "agent_epoch", "decision_epoch", "tokens", "tokens_total", "api_call", "module"):
         if k in rec:
             meta_parts.append(f"{k}={rec[k]}")
     meta_s = " · ".join(meta_parts)
@@ -610,7 +830,7 @@ def _entry_html(rec: dict) -> str:
     # 搜索文本：合并所有字段的字符串值
     search_parts = [msg]
     for k, v in rec.items():
-        if k in ("time", "level", "msg", "source", "_game_time"):
+        if k in ("time", "level", "msg", "source", "_game_time", "_direction", "_raw"):
             continue
         if isinstance(v, str):
             search_parts.append(v)
@@ -625,7 +845,7 @@ def _entry_html(rec: dict) -> str:
     game_time = rec.get("_game_time", "")
 
     # body：所有字段
-    skip = {"time", "level", "msg", "source", "_game_time"}
+    skip = {"time", "level", "msg", "source", "_game_time", "_direction", "_raw"}
     body_parts = []
     for k in rec:
         if k in skip:
@@ -634,8 +854,8 @@ def _entry_html(rec: dict) -> str:
         css_class = "field-value"
         if k == "payload":
             css_class += " payload"
-        if k in ("text", "narrative"):
-            css_class += " " + k
+        if k in ("text", "narrative", "message", "error"):
+            css_class += " text"
         # 渲染值
         if isinstance(v, str) and k == "payload" and v.startswith("{"):
             try:
@@ -655,6 +875,14 @@ def _entry_html(rec: dict) -> str:
         )
     body_s = "\n".join(body_parts) if body_parts else '<div class="field"><span class="field-dim">（无额外字段）</span></div>'
 
+    # Hermes 记录：在 header 显示 message 摘要（截断 120 字）
+    header_msg = msg
+    if direction == "Hermes/internal":
+        body_msg = str(rec.get("message", ""))
+        if body_msg:
+            snippet = body_msg if len(body_msg) <= 120 else body_msg[:120] + "…"
+            header_msg = f"{msg} {snippet}"
+
     return (
         f'<div class="entry {css_dir} level-{level}" '
         f'data-direction="{_html.escape(direction)}" '
@@ -663,7 +891,7 @@ def _entry_html(rec: dict) -> str:
         f'<div class="entry-header">'
         f'<span class="entry-time">{_html.escape(time_s)}</span>'
         f'<span class="entry-level">{_html.escape(level)}</span>'
-        f'<span class="entry-msg">{_html.escape(msg)}</span>'
+        f'<span class="entry-msg">{_html.escape(header_msg)}</span>'
         + (f'<span class="entry-game-time">🎮 {_html.escape(game_time)}</span>' if game_time else '')
         + f'<span class="entry-meta">{_html.escape(meta_s)}</span>'
         f'</div>'
@@ -726,6 +954,20 @@ def main() -> int:
         action="store_true",
         help="生成 HTML 但不自动打开浏览器（仅 --html 模式）",
     )
+    ap.add_argument(
+        "--hermes",
+        action="store_true",
+        help="整合 Hermes 容器日志（hermes/profiles/h01/logs/agent.log）按时间合并",
+    )
+    ap.add_argument(
+        "--hermes-log",
+        help="Hermes 日志路径（默认 hermes/profiles/h01/logs/agent.log）",
+    )
+    ap.add_argument(
+        "--hermes-all",
+        action="store_true",
+        help="显示 Hermes 日志全部条目（默认只保留 LLM 决策相关 + WARNING/ERROR）",
+    )
     args = ap.parse_args()
 
     log_path = _resolve_log_path(args.path)
@@ -734,6 +976,46 @@ def main() -> int:
         return 1
 
     records = _collect_records(log_path, args.filter, args.tail)
+
+    # 整合 Hermes 日志
+    if args.hermes or args.hermes_log or args.hermes_all:
+        if args.hermes_log:
+            hermes_path = Path(args.hermes_log)
+        else:
+            # 默认位置：项目根 hermes/profiles/h01/logs/agent.log
+            # 从 sim.log 路径回推项目根（logs/YYYY-MM-DD/sim.log → ../..）
+            project_root = log_path.parent.parent.parent
+            hermes_path = project_root / "hermes" / "profiles" / "h01" / "logs" / "agent.log"
+        if not hermes_path.exists():
+            print(f"警告：Hermes 日志不存在：{hermes_path}", file=sys.stderr)
+        else:
+            # 计算 sim.log 的时间范围，前后扩展 5 分钟
+            # Hermes agent.log 是跨多天累积文件，默认只保留与 sim.log 同期条目
+            sim_times = [r.get("time", "") for r in records if r.get("time")]
+            time_range = None
+            if sim_times and not args.hermes_all:
+                start = min(sim_times)
+                end = max(sim_times)
+                # 前后各扩 5 分钟，捕捉 sim.log 边界外的相关条目
+                try:
+                    start_dt = _dt.datetime.fromisoformat(start)
+                    end_dt = _dt.datetime.fromisoformat(end)
+                    start = (start_dt - _dt.timedelta(minutes=5)).isoformat()
+                    end = (end_dt + _dt.timedelta(minutes=5)).isoformat()
+                    time_range = (start, end)
+                except ValueError:
+                    time_range = None
+            hermes_records = _collect_hermes_records(
+                hermes_path,
+                keep_all=args.hermes_all,
+                filt=args.filter,
+                time_range=time_range,
+            )
+            records = records + hermes_records
+            # 按时间戳升序合并排序
+            records.sort(key=lambda r: r.get("time", ""))
+            if args.tail is not None and args.tail > 0:
+                records = records[-args.tail:]
 
     # ── HTML 模式 ──
     if args.html:

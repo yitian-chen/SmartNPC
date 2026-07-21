@@ -104,6 +104,9 @@ python scripts/pretty_log.py --html 2026-07-20            # 指定日期
 python scripts/pretty_log.py --html -f PERCEPTION -n 50   # 最近 50 条 PERCEPTION
 python scripts/pretty_log.py --html -o report.html        # 指定输出路径
 python scripts/pretty_log.py --html --no-open             # 生成但不自动打开
+python scripts/pretty_log.py --html --hermes              # 整合 Hermes 容器日志（推荐）
+python scripts/pretty_log.py --html --hermes --hermes-all # 整合 Hermes 全部条目（含噪声）
+python scripts/pretty_log.py --html --hermes-log PATH     # 指定 Hermes 日志路径
 
 # 终端渲染
 python scripts/pretty_log.py                              # 查看今天的 sim.log
@@ -114,12 +117,20 @@ python scripts/pretty_log.py --raw                        # 原始 JSON（grep/a
 
 `--html` 模式生成独立 HTML 文件（默认 `logs/YYYY-MM-DD/sim_report.html`），自动打开浏览器，支持：
 - 点击条目展开/折叠详情
-- 顶部按钮按方向过滤（UE→MCP / MCP→UE / PERCEPTION / RESPONSE / TOOL）
+- 顶部按钮按方向过滤（UE→MCP / MCP→UE / PERCEPTION / RESPONSE / TOOL / Hermes）
 - 搜索框（支持正则）
 - 长字段（perception text / payload）自然换行，不受终端宽度限制
 - 暗色主题，方向标记彩色高亮
 
-方向过滤器（`-f`）简写：`UE→MCP` / `MCP→UE` / `PERCEPTION` / `RESPONSE` / `TOOL` / `HEARTBEAT`。heartbeat 默认隐藏。
+`--hermes` 模式整合 Hermes 容器日志（`hermes/profiles/h01/logs/agent.log`）：
+- Hermes 日志按时间戳与 sim.log 合并排序，统一展示
+- 容器内 UTC 时间自动转 +08:00，与 sim.log 对齐
+- 默认按 sim.log 时间范围过滤（前后扩展 5 分钟），仅保留同期条目
+- 默认只保留 LLM 决策相关条目（`agent.conversation_loop` / `agent.tool_executor` / `run_agent` / `POST /v1/responses`）以及所有 WARNING/ERROR，其余噪声默认隐藏
+- `--hermes-all` 显示全部条目（包括插件注册、健康检查、cron、housekeeping 等）
+- 新增 `Hermes/internal` 方向标签（红色边框）和 `Hermes` 过滤按钮
+
+方向过滤器（`-f`）简写：`UE→MCP` / `MCP→UE` / `PERCEPTION` / `RESPONSE` / `TOOL` / `HERMES` / `HEARTBEAT`。heartbeat 默认隐藏。
 
 **原始 grep（不渲染，单行 JSON）**：
 
