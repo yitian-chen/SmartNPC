@@ -13,22 +13,25 @@ import (
 	"strings"
 
 	"github.com/AgentTown/agenttown-mcp/pkg/protocol"
+	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
 )
 
 // Format converts a perception_update payload (JSON) into the NL text
 // Hermes receives. `physical` is the latest known physical state (from
 // state_report, may be nil). `extras` are additional lines to append
-// (e.g. action-completion notices). Returns "" on parse failure.
-func Format(payload json.RawMessage, physical *protocol.PhysicalState, extras []string) string {
+// (e.g. action-completion notices). `kb` is the loaded World KB (may be
+// nil — callers fall back to raw UE payload strings). Returns "" on parse
+// failure.
+func Format(payload json.RawMessage, physical *protocol.PhysicalState, extras []string, kb *worldkb.KB) string {
 	var p protocol.PerceptionPayload
 	if err := json.Unmarshal(payload, &p); err != nil {
 		return ""
 	}
-	return FormatPayload(&p, physical, extras)
+	return FormatPayload(&p, physical, extras, kb)
 }
 
 // FormatPayload is the typed entry point. Exposed for tests.
-func FormatPayload(p *protocol.PerceptionPayload, physical *protocol.PhysicalState, extras []string) string {
+func FormatPayload(p *protocol.PerceptionPayload, physical *protocol.PhysicalState, extras []string, kb *worldkb.KB) string {
 	if p == nil {
 		return ""
 	}
@@ -40,9 +43,21 @@ func FormatPayload(p *protocol.PerceptionPayload, physical *protocol.PhysicalSta
 	lines := make([]string, 0, 12)
 
 	// Location line.
+	// Zone display: prefer KB's Chinese name (e.g. "主生产车间") over the
+	// raw ID pushed by UE. Falls back to the raw string if KB is missing
+	// or the zone ID is unknown to it.
 	zone := "未知区域"
 	if p.Location.CurrentZone != nil && *p.Location.CurrentZone != "" {
-		zone = *p.Location.CurrentZone
+		zoneID := *p.Location.CurrentZone
+		if kb != nil {
+			if z := kb.GetZone(zoneID); z != nil && z.Name != "" {
+				zone = z.Name
+			} else {
+				zone = zoneID
+			}
+		} else {
+			zone = zoneID
+		}
 	}
 	lines = append(lines, fmt.Sprintf("[感知] %s，时间%s。", period, timeOfDay))
 	lines = append(lines, fmt.Sprintf("你在%s。", zone))
@@ -61,10 +76,23 @@ func FormatPayload(p *protocol.PerceptionPayload, physical *protocol.PhysicalSta
 	}
 
 	// Nearby objects.
+	// Object display: UE's Name takes precedence; if empty, fall back to
+	// the KB's location/object Name (also handles the case where UE only
+	// pushes the ID).
 	if len(p.NearbyObjects) > 0 {
 		names := make([]string, 0, len(p.NearbyObjects))
 		for _, o := range p.NearbyObjects {
 			label := o.Name
+			if label == "" && kb != nil {
+				if loc := kb.GetLocation(o.ID); loc != nil && loc.Name != "" {
+					label = loc.Name
+				} else if obj := kb.GetObject(o.ID); obj != nil {
+					// Objects don't have a Name field, fall back to ID.
+					label = o.ID
+				} else {
+					label = o.ID
+				}
+			}
 			if label == "" {
 				label = o.ID
 			}
