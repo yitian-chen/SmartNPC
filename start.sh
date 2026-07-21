@@ -235,9 +235,9 @@ start_mcp() {
     MSYS_NO_PATHCONV=1 $WSL chmod +x /home/yitianchen/agenttown-mcp
     ok "MCP binary deployed"
 
-    # 清空旧日志（MCP 日志写到项目 logs/YYYY-MM-DD/ 目录）
+    # 清空旧日志（MCP 日志写到项目 logs/YYYY-MM-DD/sim.log，独占写入）
     mkdir -p "$LOG_SUBDIR"
-    $WSL_BASH "echo '' > /mnt/d/SmartNPC_v3/logs/$LOG_DATE/mcp.log 2>/dev/null"
+    $WSL_BASH "echo '' > /mnt/d/SmartNPC_v3/logs/$LOG_DATE/sim.log 2>/dev/null"
 
     # 在 WSL 内创建启动脚本（setsid + disown 确保 MCP 进程在 WSL 会话
     # 结束后仍能存活——直接 `wsl bash -c "cmd &"` 会在 wsl 返回时杀掉子进程）
@@ -248,7 +248,7 @@ start_mcp() {
 #!/bin/bash
 pkill -x agenttown-mcp 2>/dev/null
 sleep 1
-setsid /home/yitianchen/agenttown-mcp --http :8760 --ws :9090 --hermes-url http://localhost:8642 >> /mnt/d/SmartNPC_v3/logs/$LOG_DATE/mcp.log 2>&1 &
+setsid /home/yitianchen/agenttown-mcp --http :8760 --ws :9090 --hermes-url http://localhost:8642 >> /mnt/d/SmartNPC_v3/logs/$LOG_DATE/sim.log 2>&1 &
 disown
 sleep 2
 LAUNCHER
@@ -309,7 +309,7 @@ start_hermes() {
     info "Waiting for Hermes to discover MCP tools..."
     local elapsed=0
     while [ $elapsed -lt 40 ]; do
-        if $WSL_BASH "tail -10 /mnt/d/SmartNPC_v3/logs/$LOG_DATE/mcp.log 2>/dev/null | grep -q 'session initialized'"; then
+        if $WSL_BASH "tail -10 /mnt/d/SmartNPC_v3/logs/$LOG_DATE/sim.log 2>/dev/null | grep -q 'session initialized'"; then
             ok "Hermes connected to MCP"
             sleep 2  # 给 Hermes 额外时间完成工具注册
             return 0
@@ -319,7 +319,7 @@ start_hermes() {
     echo ""
     fail "Hermes did not connect to MCP within 40s. Check:
   $WSL docker logs agenttown-h01 2>&1 | grep -i mcp
-  $WSL tail -20 /mnt/d/SmartNPC_v3/logs/$LOG_DATE/mcp.log"
+  $WSL tail -20 /mnt/d/SmartNPC_v3/logs/$LOG_DATE/sim.log"
 }
 
 # ─── 步骤 3: 启动 Mock UE ─────────────────────────────────────
@@ -385,25 +385,13 @@ start_mock_ue() {
         fail "Mock UE simulation failed"
     fi
 
-    # ── Merge Mock UE day log into the unified mcp.log ──────────
-    # The Mock UE writes to logs/YYYY-MM-DD/day1_*.log (Windows-side Python).
-    # The MCP writes to logs/YYYY-MM-DD/mcp.log (WSL-side Go via shell
-    # redirection). Concurrent writes to the same file corrupt each other
-    # (drvfs doesn't honour O_APPEND), so we merge AFTER the simulation
-    # finishes.
-    local latest_day_log
-    latest_day_log=$(ls -t "$LOG_SUBDIR/day"*.log 2>/dev/null | head -1)
-    if [ -n "$latest_day_log" ] && [ -f "$latest_day_log" ]; then
-        info "Merging Mock UE log into mcp.log..."
-        {
-            echo ""
-            echo "===== Mock UE Day Log ($(basename "$latest_day_log")) ====="
-            sed 's/^/[MockUE] /' "$latest_day_log"
-            echo "===== End Mock UE Day Log ====="
-            echo ""
-        } >> "$LOG_SUBDIR/mcp.log"
-        ok "Unified log at logs/$LOG_DATE/mcp.log (Mock UE + MCP + Hermes)"
-    fi
+    # ── Unified log ──────────────────────────────────────────────
+    # MCP is the sole writer of logs/YYYY-MM-DD/sim.log (JSON Lines).
+    # Mock UE no longer writes its own day1_*.log file — its events are
+    # captured by MCP's [UE→MCP] / [MCP→UE] logs, and human-readable
+    # summaries ([PERCEPTION]/[STATE]/[SPEAK]) go to Mock UE's console
+    # only. No post-run merge needed.
+    ok "Unified log at logs/$LOG_DATE/sim.log (UE + MCP + Hermes)"
 }
 
 # ─── 主流程 ────────────────────────────────────────────────────

@@ -93,26 +93,26 @@ go test ./adapters/agenttown/perception/ -v -count=1        # 感知格式化测
 
 ### 日志检查
 
-**统一日志文件**：`logs/YYYY-MM-DD/mcp.log`（`YYYY-MM-DD` 为仿真启动日期；仿真结束后自动合并 Mock UE 日志）
+**统一日志文件**：`logs/YYYY-MM-DD/sim.log`（MCP 进程独占写入，JSON Lines 格式，含 UE + MCP + Hermes 三层全链路；`YYYY-MM-DD` 为仿真启动日期）
 
 ```bash
-# 查看统一日志（含 MockUE + MCP + Hermes 全链路）
-cat logs/YYYY-MM-DD/mcp.log | python -m json.tool  # 格式化 JSON 行
+# 查看统一日志
+cat logs/YYYY-MM-DD/sim.log | python -m json.tool  # 格式化 JSON 行
 
-# 按通信方向过滤
-grep '\[UE→MCP\]' logs/YYYY-MM-DD/mcp.log           # Mock UE → MCP 的所有消息
-grep '\[MCP→UE\]' logs/YYYY-MM-DD/mcp.log           # MCP → Mock UE 的所有消息
-grep '\[MCP→Hermes\]' logs/YYYY-MM-DD/mcp.log       # MCP → Hermes 的感知文本
-grep '\[Hermes→MCP\]' logs/YYYY-MM-DD/mcp.log       # Hermes → MCP 的响应
-grep '\[Hermes→MCP/TOOL\]' logs/YYYY-MM-DD/mcp.log  # Hermes 调用的工具
-grep '\[MockUE\]' logs/YYYY-MM-DD/mcp.log           # Mock UE 侧摘要日志
+# 按数据流转方向过滤
+grep '\[UE→MCP\]' logs/YYYY-MM-DD/sim.log           # Mock UE → MCP（感知/状态/动作完成）
+grep '\[MCP→UE\]' logs/YYYY-MM-DD/sim.log           # MCP → Mock UE（动作命令/叙事）
+grep '\[MCP→Hermes/PERCEPTION\]' logs/YYYY-MM-DD/sim.log  # MCP → Hermes（感知文本）
+grep '\[Hermes→MCP/RESPONSE\]' logs/YYYY-MM-DD/sim.log   # Hermes → MCP（LLM 响应 + narrative）
+grep '\[Hermes→MCP/TOOL\]' logs/YYYY-MM-DD/sim.log       # Hermes 调用的工具
+grep 'perception decision triggered' logs/YYYY-MM-DD/sim.log  # LLM 决策触发点
+grep 'state_report' logs/YYYY-MM-DD/sim.log         # 状态报告摘要
 
-# Mock UE 独立日志（仿真过程中的实时日志）
-ls -t logs/YYYY-MM-DD/day1_*.log | head -1
-
-# Hermes 容器日志
+# Hermes 容器日志（独立，不进 sim.log）
 wsl docker logs -f agenttown-h01
 ```
+
+Mock UE 不再写独立日志文件，但控制台仍输出 `[PERCEPTION]`/`[STATE]`/`[SPEAK]` 等人类可读摘要供实时观察。
 
 ## 通信协议（v1.0）
 
@@ -258,7 +258,7 @@ energy / fatigue / joint_wear / health，通过 `state_report` 权威通道上�
 3. 启动 MCP → 等 `:8760` + `:9090` 就绪
 4. 启动 Hermes → 等 `:8642` 就绪 + MCP 日志出现 `session initialized`
 5. 启动 Mock UE → 预检查通过后运行
-6. 仿真结束后将 Mock UE 日志合并到 `logs/YYYY-MM-DD/mcp.log`
+6. 仿真日志统一写入 `logs/YYYY-MM-DD/sim.log`（MCP 独占，无需合并）
 
 ### Mock UE Busy 状态
 

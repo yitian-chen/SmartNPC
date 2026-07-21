@@ -492,8 +492,8 @@ func runPerceptionWorker(
 		}
 		text = formatDecisionPrompt(text, agentID, agentEpoch, decisionEpoch, work.reasons, work.currentTask)
 		display := text
-		if len(display) > 500 {
-			display = display[:500] + "..."
+		if len(display) > 200 {
+			display = display[:200] + "..."
 		}
 		logger.Info("[MCP→Hermes/PERCEPTION]", "agent_id", agentID,
 			"agent_epoch", agentEpoch, "decision_epoch", decisionEpoch, "text", display)
@@ -518,9 +518,9 @@ func runPerceptionWorker(
 			continue
 		}
 		narrative := resp.ExtractText()
-		disp := narrative
-		if len(disp) > 500 {
-			disp = disp[:500] + "..."
+		disp := strings.ReplaceAll(narrative, "\n", "\\n")
+		if len(disp) > 100 {
+			disp = disp[:100] + "..."
 		}
 		logger.Info("[Hermes→MCP/RESPONSE]",
 			"agent_id", agentID,

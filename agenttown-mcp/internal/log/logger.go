@@ -24,8 +24,9 @@ func New(level string) *slog.Logger {
 		lvl = slog.LevelInfo
 	}
 	h := slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{
-		Level:     lvl,
-		AddSource: true,
+		Level: lvl,
+		// AddSource 关闭：方向标记 [UE→MCP] 等已隐含来源，
+		// source 字段每条多 ~150 字节，对排查帮助有限。
 	})
 	return slog.New(h)
 }

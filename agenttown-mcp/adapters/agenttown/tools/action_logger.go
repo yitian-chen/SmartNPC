@@ -8,7 +8,7 @@ import (
 
 // toolsLogger is set by RegisterAll and used by logToolCall to emit
 // tool invocation records through the MCP's main structured logger
-// (which writes to stderr, redirected to logs/YYYY-MM-DD/mcp.log via 2>&1).
+// (which writes to stderr, redirected to logs/YYYY-MM-DD/sim.log via 2>&1).
 // When nil, logToolCall is a no-op (e.g. during tests without a logger).
 var (
 	toolsLoggerMu sync.Mutex
@@ -27,7 +27,7 @@ func setToolsLogger(l *slog.Logger) {
 
 // logToolCall writes a structured record of a tool invocation through
 // the MCP's main logger so the record appears in the unified log stream
-// (logs/YYYY-MM-DD/mcp.log) alongside WS and Hermes communication entries.
+// (logs/YYYY-MM-DD/sim.log) alongside WS and Hermes communication entries.
 func logToolCall(name string, input any) {
 	toolsLoggerMu.Lock()
 	l := toolsLogger

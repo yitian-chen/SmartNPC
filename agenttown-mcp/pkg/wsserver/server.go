@@ -222,10 +222,19 @@ func (s *Server) readLoop(ctx context.Context, c *websocket.Conn) {
 			continue
 		}
 
-		// Log every inbound message from UE at INFO (skip heartbeat to keep
-		// the log readable). Show the full payload so the reader can trace
-		// exactly what Mock UE sent.
-		if env.Type != protocol.TypeHeartbeat {
+		// Log inbound messages from UE. High-frequency types log a truncated
+		// payload (enough to see time_of_day/zone/energy at a glance);
+		// low-frequency types keep the full payload. Heartbeat is silent.
+		switch env.Type {
+		case protocol.TypePerceptionUpdate, protocol.TypeStateReport:
+			p := string(env.Payload)
+			if len(p) > 300 {
+				p = p[:300] + "..."
+			}
+			s.log.Info("[UE→MCP]", "type", env.Type, "seq", env.Seq, "agent_id", env.AgentID, "payload", p)
+		case protocol.TypeHeartbeat:
+			// silent — don't log
+		default:
 			s.log.Info("[UE→MCP]", "type", env.Type, "seq", env.Seq, "agent_id", env.AgentID, "payload", string(env.Payload))
 		}
 
@@ -351,13 +360,14 @@ func (s *Server) SendEnvelope(agentID, msgType string, payload any) error {
 		s.bufferOutbound(seq, frame)
 	}
 
-	// Log every outbound envelope at INFO (skip resync/heartbeat/scan_area
-	// for readability). Include the full payload so the reader can trace
-	// every command MCP issues to Mock UE.
-	if msgType != protocol.TypeResync && msgType != protocol.TypeHeartbeat && msgType != protocol.TypeScanArea && msgType != "narrative" {
+	// Log outbound envelopes. Full payload for low-frequency types;
+	// compact for heartbeat/resync (narrative text is logged separately
+	// at main.go:525 as [Hermes→MCP/RESPONSE]).
+	switch msgType {
+	case protocol.TypeHeartbeat, protocol.TypeResync:
+		s.log.Debug("[MCP→UE]", "type", msgType, "seq", seq, "agent_id", agentID)
+	default:
 		s.log.Info("[MCP→UE]", "type", msgType, "seq", seq, "agent_id", agentID, "payload", string(raw))
-	} else if msgType == protocol.TypeResync || msgType == "narrative" {
-		s.log.Debug("[MCP→UE]", "type", msgType, "seq", seq, "agent_id", agentID, "payload", string(raw))
 	}
 
 	return s.writeFrame(frame)

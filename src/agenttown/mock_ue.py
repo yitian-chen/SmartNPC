@@ -279,13 +279,9 @@ class MockUE:
         if msg_type in DISCRETE_REPLAY_TYPES:
             self._buffer_outbound(seq, frame)
         await self._ws.send(frame)
-        # Full raw log: show the complete envelope so the reader can trace every
-        # message Mock UE sends to the MCP. Heartbeat is throttled to DEBUG.
-        if msg_type == TYPE_HEARTBEAT:
-            logger.debug(f"[UE→MCP] {msg_type} seq={seq}")
-        else:
-            logger.info(f"[UE→MCP] {msg_type} seq={seq} agent={agent_id}\n"
-                        f"  payload={json.dumps(payload, ensure_ascii=False)}")
+        # MCP 侧 wsserver/server.go:229 已记录 [UE→MCP] 入站日志，
+        # Mock UE 不再重复记录出站消息（避免 ~90% 日志重复）。
+        # 控制台仍可通过 [PERCEPTION]/[STATE] 摘要观察仿真状态。
 
     def _buffer_outbound(self, seq: int, frame: str):
         """Append a discrete message to the rolling send buffer and evict old."""
@@ -459,16 +455,12 @@ class MockUE:
             if isinstance(seq, int) and seq > self._last_received_seq:
                 self._last_received_seq = seq
 
-        # Log every inbound message from MCP at INFO (except heartbeat at DEBUG).
+        # MCP 侧 wsserver/server.go:358 已记录 [MCP→UE] 出站日志，
+        # Mock UE 不再重复记录入站消息。仅 narrative 保留一条单行
+        # 预览（换行转义）供控制台实时观察 LLM 输出。
         if msg_type == TYPE_NARRATIVE:
-            text = payload.get("text", "")
-            logger.info(f"[MCP→UE/NARRATIVE] seq={seq}\n"
-                        f"  text={text[:500]}")
-        elif msg_type not in (TYPE_HEARTBEAT, TYPE_RESYNC, TYPE_EVENT_LOST):
-            logger.info(f"[MCP→UE] {msg_type} seq={seq}\n"
-                        f"  payload={json.dumps(payload, ensure_ascii=False)}")
-        elif msg_type in (TYPE_RESYNC, TYPE_EVENT_LOST):
-            logger.info(f"[MCP→UE] {msg_type} payload={payload}")
+            text = payload.get("text", "").replace("\n", "\\n")
+            logger.info(f"[MCP→UE/NARRATIVE] seq={seq} text={text[:100]}")
 
         if msg_type == TYPE_ACTION_COMMAND:
             await self._handle_action_command(payload)
@@ -493,7 +485,8 @@ class MockUE:
         cmd = payload.get("cmd", "")
         params = payload.get("params", {}) or {}
 
-        logger.info(f"[MCP→UE/CMD] {cmd} action_id={action_id} params={json.dumps(params, ensure_ascii=False)}")
+        # MCP 侧 wsserver/server.go:485 已记录 [MCP→UE/CMD]，不再重复。
+        # 仅在拒绝时记录原因（validate 失败的场景）。
 
         # Validate that the command references known world entities.
         invalid_reason = self._validate_target(cmd, params)
@@ -905,25 +898,16 @@ class MockUE:
     # ─── Logging ──────────────────────────────────────────────
 
     def _setup_logging(self):
-        log_file = os.path.join(
-            self.log_dir,
-            f"day{self.time.day}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
-        )
-        handler = logging.FileHandler(log_file, encoding="utf-8")
-        handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
-        logger.addHandler(handler)
-        logger.setLevel(logging.DEBUG)
+        # Mock UE no longer writes its own log file — the MCP process is
+        # the single source of truth for the unified sim.log (avoids
+        # drvfs O_APPEND issues and eliminates the ~90% duplication
+        # between day1_*.log and sim.log for [UE→MCP]/[MCP→UE] events).
+        # We keep a console handler so the operator can still watch
+        # [PERCEPTION]/[STATE]/[SPEAK] summaries in real time.
+        logger.setLevel(logging.INFO)
         console = logging.StreamHandler()
-        console.setFormatter(logging.Formatter("[%(levelname)s] %(message)s"))
-        console.setLevel(logging.INFO)
+        console.setFormatter(logging.Formatter("[MockUE] [%(levelname)s] %(message)s"))
         logger.addHandler(console)
-
-        logger.info(f"Logging to {log_file}")
-        # The day log file is merged into logs/YYYY-MM-DD/mcp.log by start.sh after
-        # the simulation finishes — concurrent writes from both the WSL
-        # MCP process and Windows Python corrupt each other due to drvfs
-        # not honouring O_APPEND on /mnt/d volumes.
-        self._day_log_file = log_file
 
     def print_report(self):
         print(f"\n{'='*60}")

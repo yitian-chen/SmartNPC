@@ -152,16 +152,9 @@ func (c *Client) doSend(ctx context.Context, input string) (*Response, error) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+c.cfg.APIKey)
 
-	inputLen := len(input)
-	// Log the raw input being sent to Hermes (truncate for readability
-	// since narratives can be long — full payload available in the log
-	// file if needed).
-	display := input
-	if inputLen > 2000 {
-		display = input[:2000] + "... (truncated)"
-	}
-	c.log.Info("[MCP→Hermes]", "len", inputLen, "prev_id", prev, "input", display)
-
+	// The perception text is logged at main.go:498 as
+	// [MCP→Hermes/PERCEPTION] with agent_epoch/decision_epoch context.
+	// Don't duplicate here.
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("http do: %w", err)
@@ -201,7 +194,8 @@ func (c *Client) doSend(ctx context.Context, input string) (*Response, error) {
 		c.prevResponseID = hr.ID
 	}
 
-	c.log.Info("[Hermes→MCP]", "id", hr.ID, "tokens", hr.Usage.TotalTokens, "status", hr.Status, "turn", c.turnCount)
+	// The response (tokens + narrative preview) is logged at main.go:525
+	// as [Hermes→MCP/RESPONSE]. Don't duplicate here.
 	return &hr, nil
 }
 

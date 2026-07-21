@@ -25,9 +25,12 @@ bash start.sh normal          # 完整一天 (06:00-22:00, 300x)
 ## 统一日志（按测试日期归档至 `logs/YYYY-MM-DD/`）
 
 ```bash
-cat logs/$(date +%Y-%m-%d)/mcp.log              # 含 MockUE + MCP + Hermes 全链路
-grep '\[Hermes→MCP/TOOL\]' logs/YYYY-MM-DD/mcp.log  # 工具调用
-grep '\[MCP→Hermes\]' logs/YYYY-MM-DD/mcp.log       # 感知推送
+cat logs/$(date +%Y-%m-%d)/sim.log               # 含 UE + MCP + Hermes 全链路
+grep '\[UE→MCP\]' logs/YYYY-MM-DD/sim.log         # UE → MCP 消息
+grep '\[MCP→Hermes/PERCEPTION\]' logs/YYYY-MM-DD/sim.log  # 感知推送
+grep '\[Hermes→MCP/RESPONSE\]' logs/YYYY-MM-DD/sim.log   # LLM 响应
+grep '\[Hermes→MCP/TOOL\]' logs/YYYY-MM-DD/sim.log       # 工具调用
+grep '\[MCP→UE\]' logs/YYYY-MM-DD/sim.log         # MCP → UE 命令
 ```
 
 ## 测试
