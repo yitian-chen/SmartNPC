@@ -919,7 +919,7 @@ class MockUE:
         logger.addHandler(console)
 
         logger.info(f"Logging to {log_file}")
-        # The day log file is merged into logs/mcp.log by start.sh after
+        # The day log file is merged into logs/YYYY-MM-DD/mcp.log by start.sh after
         # the simulation finishes — concurrent writes from both the WSL
         # MCP process and Windows Python corrupt each other due to drvfs
         # not honouring O_APPEND on /mnt/d volumes.

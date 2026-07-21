@@ -43,6 +43,12 @@ DOCKER_COMPOSE="$PROJECT_DIR/docker/docker-compose.yml"
 ENV_FILE="$PROJECT_DIR/.env"
 MOCK_UE_SCRIPT="$PROJECT_DIR/src/run_day.py"
 
+# ─── 日志目录（按测试日期归档到 logs/YYYY-MM-DD/）─────────────
+# 单一日期来源：start.sh 启动时计算一次，传给 MCP 启动器和 Mock UE，
+# 避免跨进程时钟漂移导致同一次仿真的日志被分到不同目录。
+LOG_DATE=$(date +%Y-%m-%d)
+LOG_SUBDIR="$PROJECT_DIR/logs/$LOG_DATE"
+
 # ─── 环境检测 ──────────────────────────────────────────────────
 # 检测是否在 WSL 内部运行。如果在 Windows Git Bash 中运行，
 # `wsl` 命令可用，需要通过它调用 WSL 内的工具。如果在 WSL 内部
@@ -229,23 +235,24 @@ start_mcp() {
     MSYS_NO_PATHCONV=1 $WSL chmod +x /home/yitianchen/agenttown-mcp
     ok "MCP binary deployed"
 
-    # 清空旧日志（MCP 日志写到项目 logs/ 目录）
-    mkdir -p "$PROJECT_DIR/logs"
-    $WSL_BASH 'echo "" > /mnt/d/SmartNPC_v3/logs/mcp.log 2>/dev/null'
+    # 清空旧日志（MCP 日志写到项目 logs/YYYY-MM-DD/ 目录）
+    mkdir -p "$LOG_SUBDIR"
+    $WSL_BASH "echo '' > /mnt/d/SmartNPC_v3/logs/$LOG_DATE/mcp.log 2>/dev/null"
 
     # 在 WSL 内创建启动脚本（setsid + disown 确保 MCP 进程在 WSL 会话
     # 结束后仍能存活——直接 `wsl bash -c "cmd &"` 会在 wsl 返回时杀掉子进程）
     # 重要：使用 >> (追加模式) 而非 > (截断模式)，这样 Mock UE (Python, Windows)
     # 也能以 append 模式写入同一个文件，两个进程的日志不会互相覆盖。
-    $WSL_BASH 'cat > ~/start_mcp.sh << "LAUNCHER"
+    # heredoc 不加引号，让 $LOG_DATE 在 host shell 展开后传入 WSL。
+    $WSL_BASH "cat > ~/start_mcp.sh << LAUNCHER
 #!/bin/bash
 pkill -x agenttown-mcp 2>/dev/null
 sleep 1
-setsid /home/yitianchen/agenttown-mcp --http :8760 --ws :9090 --hermes-url http://localhost:8642 >> /mnt/d/SmartNPC_v3/logs/mcp.log 2>&1 &
+setsid /home/yitianchen/agenttown-mcp --http :8760 --ws :9090 --hermes-url http://localhost:8642 >> /mnt/d/SmartNPC_v3/logs/$LOG_DATE/mcp.log 2>&1 &
 disown
 sleep 2
 LAUNCHER
-chmod +x ~/start_mcp.sh'
+chmod +x ~/start_mcp.sh"
 
     info "Starting MCP in WSL background..."
     $WSL_BASH 'bash ~/start_mcp.sh'
@@ -302,7 +309,7 @@ start_hermes() {
     info "Waiting for Hermes to discover MCP tools..."
     local elapsed=0
     while [ $elapsed -lt 40 ]; do
-        if $WSL_BASH 'tail -10 /mnt/d/SmartNPC_v3/logs/mcp.log 2>/dev/null | grep -q "session initialized"'; then
+        if $WSL_BASH "tail -10 /mnt/d/SmartNPC_v3/logs/$LOG_DATE/mcp.log 2>/dev/null | grep -q 'session initialized'"; then
             ok "Hermes connected to MCP"
             sleep 2  # 给 Hermes 额外时间完成工具注册
             return 0
@@ -312,7 +319,7 @@ start_hermes() {
     echo ""
     fail "Hermes did not connect to MCP within 40s. Check:
   $WSL docker logs agenttown-h01 2>&1 | grep -i mcp
-  $WSL tail -20 /mnt/d/SmartNPC_v3/logs/mcp.log"
+  $WSL tail -20 /mnt/d/SmartNPC_v3/logs/$LOG_DATE/mcp.log"
 }
 
 # ─── 步骤 3: 启动 Mock UE ─────────────────────────────────────
@@ -335,6 +342,7 @@ start_mock_ue() {
         "--end" "$MOCK_END"
         "--speed" "$MOCK_SPEED"
         "--interval" "$MOCK_INTERVAL"
+        "--log-dir" "$LOG_SUBDIR"
     )
     [ -n "$MOCK_SCENARIO" ] && args+=("--scenario" "$MOCK_SCENARIO")
 
@@ -378,12 +386,13 @@ start_mock_ue() {
     fi
 
     # ── Merge Mock UE day log into the unified mcp.log ──────────
-    # The Mock UE writes to logs/day1_*.log (Windows-side Python).
-    # The MCP writes to logs/mcp.log (WSL-side Go via shell redirection).
-    # Concurrent writes to the same file corrupt each other (drvfs doesn't
-    # honour O_APPEND), so we merge AFTER the simulation finishes.
+    # The Mock UE writes to logs/YYYY-MM-DD/day1_*.log (Windows-side Python).
+    # The MCP writes to logs/YYYY-MM-DD/mcp.log (WSL-side Go via shell
+    # redirection). Concurrent writes to the same file corrupt each other
+    # (drvfs doesn't honour O_APPEND), so we merge AFTER the simulation
+    # finishes.
     local latest_day_log
-    latest_day_log=$(ls -t "$PROJECT_DIR/logs/day"*.log 2>/dev/null | head -1)
+    latest_day_log=$(ls -t "$LOG_SUBDIR/day"*.log 2>/dev/null | head -1)
     if [ -n "$latest_day_log" ] && [ -f "$latest_day_log" ]; then
         info "Merging Mock UE log into mcp.log..."
         {
@@ -392,8 +401,8 @@ start_mock_ue() {
             sed 's/^/[MockUE] /' "$latest_day_log"
             echo "===== End Mock UE Day Log ====="
             echo ""
-        } >> "$PROJECT_DIR/logs/mcp.log"
-        ok "Unified log at logs/mcp.log (Mock UE + MCP + Hermes)"
+        } >> "$LOG_SUBDIR/mcp.log"
+        ok "Unified log at logs/$LOG_DATE/mcp.log (Mock UE + MCP + Hermes)"
     fi
 }
 

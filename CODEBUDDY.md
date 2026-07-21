@@ -93,22 +93,22 @@ go test ./adapters/agenttown/perception/ -v -count=1        # 感知格式化测
 
 ### 日志检查
 
-**统一日志文件**：`logs/mcp.log`（仿真结束后自动合并 Mock UE 日志）
+**统一日志文件**：`logs/YYYY-MM-DD/mcp.log`（`YYYY-MM-DD` 为仿真启动日期；仿真结束后自动合并 Mock UE 日志）
 
 ```bash
 # 查看统一日志（含 MockUE + MCP + Hermes 全链路）
-cat logs/mcp.log | python -m json.tool  # 格式化 JSON 行
+cat logs/YYYY-MM-DD/mcp.log | python -m json.tool  # 格式化 JSON 行
 
 # 按通信方向过滤
-grep '\[UE→MCP\]' logs/mcp.log           # Mock UE → MCP 的所有消息
-grep '\[MCP→UE\]' logs/mcp.log           # MCP → Mock UE 的所有消息
-grep '\[MCP→Hermes\]' logs/mcp.log       # MCP → Hermes 的感知文本
-grep '\[Hermes→MCP\]' logs/mcp.log       # Hermes → MCP 的响应
-grep '\[Hermes→MCP/TOOL\]' logs/mcp.log  # Hermes 调用的工具
-grep '\[MockUE\]' logs/mcp.log           # Mock UE 侧摘要日志
+grep '\[UE→MCP\]' logs/YYYY-MM-DD/mcp.log           # Mock UE → MCP 的所有消息
+grep '\[MCP→UE\]' logs/YYYY-MM-DD/mcp.log           # MCP → Mock UE 的所有消息
+grep '\[MCP→Hermes\]' logs/YYYY-MM-DD/mcp.log       # MCP → Hermes 的感知文本
+grep '\[Hermes→MCP\]' logs/YYYY-MM-DD/mcp.log       # Hermes → MCP 的响应
+grep '\[Hermes→MCP/TOOL\]' logs/YYYY-MM-DD/mcp.log  # Hermes 调用的工具
+grep '\[MockUE\]' logs/YYYY-MM-DD/mcp.log           # Mock UE 侧摘要日志
 
 # Mock UE 独立日志（仿真过程中的实时日志）
-ls -t logs/day1_*.log | head -1
+ls -t logs/YYYY-MM-DD/day1_*.log | head -1
 
 # Hermes 容器日志
 wsl docker logs -f agenttown-h01
@@ -258,7 +258,7 @@ energy / fatigue / joint_wear / health，通过 `state_report` 权威通道上�
 3. 启动 MCP → 等 `:8760` + `:9090` 就绪
 4. 启动 Hermes → 等 `:8642` 就绪 + MCP 日志出现 `session initialized`
 5. 启动 Mock UE → 预检查通过后运行
-6. 仿真结束后将 Mock UE 日志合并到 `logs/mcp.log`
+6. 仿真结束后将 Mock UE 日志合并到 `logs/YYYY-MM-DD/mcp.log`
 
 ### Mock UE Busy 状态
 

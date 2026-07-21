@@ -22,12 +22,12 @@ bash start.sh behavior        # 行为联调 (06:00-18:00, 60x, 带场景事件)
 bash start.sh normal          # 完整一天 (06:00-22:00, 300x)
 ```
 
-## 统一日志
+## 统一日志（按测试日期归档至 `logs/YYYY-MM-DD/`）
 
 ```bash
-cat logs/mcp.log              # 含 MockUE + MCP + Hermes 全链路
-grep '\[Hermes→MCP/TOOL\]' logs/mcp.log  # 工具调用
-grep '\[MCP→Hermes\]' logs/mcp.log       # 感知推送
+cat logs/$(date +%Y-%m-%d)/mcp.log              # 含 MockUE + MCP + Hermes 全链路
+grep '\[Hermes→MCP/TOOL\]' logs/YYYY-MM-DD/mcp.log  # 工具调用
+grep '\[MCP→Hermes\]' logs/YYYY-MM-DD/mcp.log       # 感知推送
 ```
 
 ## 测试

@@ -33,7 +33,7 @@ async def _run(args):
         time_speed=args.speed,
         perception_interval=args.interval,
         scenario_file=args.scenario,
-        log_dir="logs",
+        log_dir=args.log_dir,
     )
     try:
         await mock.run_day(start_hour=args.start, end_hour=args.end)
@@ -59,6 +59,9 @@ def main():
                         help="YAML file with preset events (scenario injection)")
     parser.add_argument("--interval", type=int, default=15,
                         help="Perception push interval (game-minutes)")
+    parser.add_argument("--log-dir", default="logs",
+                        help="Directory for Mock UE day logs "
+                             "(start.sh passes logs/YYYY-MM-DD)")
 
     args = parser.parse_args()
 
