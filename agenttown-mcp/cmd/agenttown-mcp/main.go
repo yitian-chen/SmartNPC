@@ -69,6 +69,8 @@ type agentContext struct {
 	recentActions            []localActionSummary
 	currentActionID          string // 当前执行中的 action_id（mu 保护），空表示无执行中动作；用于 stop_action ID 匹配（约定9）
 	pendingActionTimeouts    map[string]*time.Timer // action_id → 超时 timer（mu 保护），约定 §5.2 action_completed 1.5× 估值超时
+	llmFailures              int  // 连续 LLM 失败次数（mu 保护），约定 §5.3 安全模式
+	inSafeMode               bool // 是否处于安全模式（mu 保护），约定 §5.3
 	wake                     chan struct{}
 	cancel                   context.CancelFunc
 	stopped                  bool
@@ -498,6 +500,21 @@ func runPerceptionWorker(
 		if work == nil {
 			continue
 		}
+
+		// 安全模式检查（约定 §5.3）：连续 5 次 LLM 失败后进入安全模式，
+		// 不调 LLM，只发 idle wait，持续上报感知，等管理员介入重启 MCP。
+		if ac.IsInSafeMode() {
+			logger.Warn("[SafeMode] skipping LLM, sending idle wait", "agent_id", agentID)
+			if ws.IsConnected() {
+				// 发 idle wait 5 分钟（不调 LLM，避免持续失败循环）
+				if _, err := ws.SendAction(ctx, agentID, protocol.CmdWait, map[string]any{"duration_sec": 300}); err != nil {
+					logger.Debug("[SafeMode] idle wait send failed", "agent_id", agentID, "err", err)
+				}
+			}
+			// inSafeMode 保持 true，等管理员介入重启；llmFailures 已在 EnterSafeMode 清零
+			continue
+		}
+
 		agentEpoch, decisionEpoch, ok := ac.beginDecisionWithScan(work.scanFollowup)
 		if !ok {
 			continue
@@ -519,18 +536,32 @@ func runPerceptionWorker(
 				logger.Info("Hermes request canceled", "agent_id", agentID)
 				return
 			}
+			// 累加连续 LLM 失败次数（约定 §5.3 安全模式）
+			failures := ac.IncLLMFailures()
 			if errors.Is(err, hermes.ErrUpstreamError) {
 				// The session was already cleared by the client; immediately
 				// retry with the same snapshot so that the NPC gets a clean
 				// decision turn without waiting for the next external event.
-				logger.Warn("[Hermes→MCP] upstream error — retrying with fresh session", "agent_id", agentID)
+				logger.Warn("[Hermes→MCP] upstream error — retrying with fresh session",
+					"agent_id", agentID, "consecutive_failures", failures)
 				if ac.retryCurrentSnapshotOnError() {
 					continue
 				}
 			}
-			logger.Error("hermes send failed", "agent_id", agentID, "err", err)
+			// 连续 5 次失败进入安全模式（约定 §5.3）
+			if failures >= 5 {
+				ac.EnterSafeMode()
+				logger.Error("[SafeMode] entering safe mode after 5 consecutive LLM failures",
+					"agent_id", agentID, "failures", failures,
+					"hint", "restart MCP process to exit safe mode")
+				continue
+			}
+			logger.Error("hermes send failed", "agent_id", agentID, "err", err,
+				"consecutive_failures", failures)
 			continue
 		}
+		// LLM 调用成功，清零失败计数并退出安全模式（如果之前在安全模式）
+		ac.ResetLLMFailures()
 		narrative := resp.ExtractText()
 		disp := strings.ReplaceAll(narrative, "\n", "\\n")
 		if len(disp) > 100 {
@@ -699,6 +730,37 @@ func (a *agentContext) armActionTimeout(
 	}
 	a.pendingActionTimeouts[actionID] = timer
 	a.mu.Unlock()
+}
+
+// IncLLMFailures 累加连续 LLM 失败次数并返回累加后的值（约定 §5.3 安全模式）。
+func (a *agentContext) IncLLMFailures() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.llmFailures++
+	return a.llmFailures
+}
+
+// ResetLLMFailures 清零连续失败计数并退出安全模式（LLM 调用成功时调用）。
+func (a *agentContext) ResetLLMFailures() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.llmFailures = 0
+	a.inSafeMode = false
+}
+
+// EnterSafeMode 进入安全模式（不调 LLM，只发 idle，等管理员介入）。
+func (a *agentContext) EnterSafeMode() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.inSafeMode = true
+	a.llmFailures = 0 // 清零避免重复触发
+}
+
+// IsInSafeMode 返回是否处于安全模式。
+func (a *agentContext) IsInSafeMode() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.inSafeMode
 }
 
 func main() {
