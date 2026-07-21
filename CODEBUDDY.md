@@ -309,7 +309,7 @@ sequenceDiagram
 
 - `hermes.Client` 通过 `previous_response_id` 链式维护会话
 - 每天首次 `agent_registered` 触发 `ResetSession()`，开启新会话
-- token 超 50K 时立即断链并保存本地结构化摘要；不再额外调用 LLM 摘要
+- token 超 80K 时立即断链并保存本地结构化摘要；不再额外调用 LLM 摘要
 - 本地摘要只含时间位置、物理状态、当前任务、最近动作和环境事件，不保存 Hermes 叙事
 - **上游错误检测**：Hermes 将上游 LLM API 错误（如 HTTP 400 empty tool_calls）包装为 200 响应返回。MCP 检测 `tokens=0` + narrative 以 `HTTP 4`/`HTTP 5` 开头时，清空 `prevResponseID` 断链，返回 `ErrUpstreamError`，下一轮以全新会话开始
 
