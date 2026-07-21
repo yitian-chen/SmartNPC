@@ -222,16 +222,11 @@ func (s *Server) readLoop(ctx context.Context, c *websocket.Conn) {
 			continue
 		}
 
-		// Log inbound messages from UE. High-frequency types log a truncated
-		// payload (enough to see time_of_day/zone/energy at a glance);
-		// low-frequency types keep the full payload. Heartbeat is silent.
+		// Log inbound messages from UE. Heartbeat is silent; all other
+		// types (including high-frequency perception_update / state_report)
+		// log the full payload so scan_area results and state deltas are
+		// fully visible in sim.log.
 		switch env.Type {
-		case protocol.TypePerceptionUpdate, protocol.TypeStateReport:
-			p := string(env.Payload)
-			if len(p) > 300 {
-				p = p[:300] + "..."
-			}
-			s.log.Info("[UE→MCP]", "type", env.Type, "seq", env.Seq, "agent_id", env.AgentID, "payload", p)
 		case protocol.TypeHeartbeat:
 			// silent — don't log
 		default:
