@@ -972,7 +972,24 @@ class MockUE:
         # wastes an LLM turn.
         await self._ws_ready.wait()
 
+        # 固定节奏调度：以绝对时间点对齐，确保游戏时间均匀流动。
+        # 初始 06:00 perception 已由 _connection_manager 在连接握手时发送，
+        # 所以这里从当前时间起算，先 sleep 一个完整间隔再推进到 06:30，
+        # 避免 06:00/06:30 首次双发（间隔几乎为 0）。
+        #
+        # next_tick 固定累加，不受单次 perception 发送耗时或 Agent 侧
+        # scan 请求的影响 —— UE 端绝对掌控时间节奏。即使某次发送耗时
+        # 略长（网络抖动），下一次 tick 仍会对齐到预定时间点，长期
+        # 平均节奏恒定。
+        interval_real_sec = self.perception_interval / max(self.time.speed, 1) * 60
+        next_tick = _time.monotonic() + interval_real_sec
+
         while self.time.hour < end_hour:
+            # Sleep 到下一个固定时间点，确保节奏均匀。
+            now = _time.monotonic()
+            delay = max(0, next_tick - now)
+            await asyncio.sleep(delay)
+
             # Advance game time — SOLE time driver.
             previous_min = self.time.total_minutes
             self.time.advance(self.perception_interval)
@@ -1000,9 +1017,8 @@ class MockUE:
             # Perception push.
             await self._send_perception()
 
-            # Real-time pacing (speed controls the pace, no artificial cap).
-            real_delay = self.perception_interval / max(self.time.speed, 1) * 60
-            await asyncio.sleep(real_delay)
+            # 安排下一个 tick（固定累加，不受本次处理耗时影响）。
+            next_tick += interval_real_sec
 
     def _evolve_physical(self):
         """Gradually change physical state based on current activity."""
