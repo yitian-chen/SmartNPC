@@ -36,7 +36,7 @@ const strategicPromptTemplate = `[战略层/每日规划] 现在是仿真时间 
 
 示例：[{"time":"07:00-08:00","goal":"晨检车间设备"},{"time":"08:00-12:00","goal":"装配作业，盯紧小柯"}]`
 
-const hardcodedYesterdaySummary = "昨天在车间装配8小时，指导小柯分类零件，晚上充电站和铁牛聊了会儿，关节有点酸"
+const hardcodedYesterdaySummary = "昨天在车间装配8小时，整理了零件分类，晚上在充电站充电休息，关节有点酸。下班时小柯说明天请假一天，让我心里有点空落落的"
 
 // generateDailyPlan 调 LLM 生成当日计划，返回格式化字符串（每行 "时段: 目标"）。
 // 任一步失败均返回 ""，不阻塞仿真。
