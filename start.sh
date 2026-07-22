@@ -235,9 +235,10 @@ start_mcp() {
     MSYS_NO_PATHCONV=1 $WSL chmod +x /home/yitianchen/agenttown-mcp
     ok "MCP binary deployed"
 
-    # 清空旧日志（MCP 日志写到项目 logs/YYYY-MM-DD/sim.log，独占写入）
+    # sim.log 的清空由 run_day.py 在仿真开始时负责，确保每次仿真
+    # 日志从头开始，无论 MCP 是否重启。之前在这里清空依赖 MCP 重启，
+    # 直接跑 run_day.py 时日志会累积。
     mkdir -p "$LOG_SUBDIR"
-    $WSL_BASH "echo '' > /mnt/d/SmartNPC_v3/logs/$LOG_DATE/sim.log 2>/dev/null"
 
     # 在 WSL 内创建启动脚本（setsid + disown 确保 MCP 进程在 WSL 会话
     # 结束后仍能存活——直接 `wsl bash -c "cmd &"` 会在 wsl 返回时杀掉子进程）

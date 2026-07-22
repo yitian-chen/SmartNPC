@@ -82,6 +82,19 @@ def main():
         print("Start MCP first:  agenttown-mcp --http :8760 --ws :9090")
         sys.exit(1)
 
+    # 清空统一日志 sim.log，确保每次仿真的日志从头开始。
+    # sim.log 由 MCP 进程通过 bash ">>" 重定向写入 (O_APPEND)，截断文件后
+    # MCP 下次写入会从新文件末尾开始，不会产生空字节。
+    # 之前清空逻辑放在 start.sh 的 MCP 启动环节，但如果 MCP 没重启
+    # (直接跑 run_day.py) 日志会累积两次仿真的记录。
+    sim_log_path = os.path.join(args.log_dir, "sim.log")
+    try:
+        with open(sim_log_path, "w") as f:
+            f.write("")
+        print(f"[OK] Cleared log: {sim_log_path}")
+    except Exception as e:
+        print(f"[WARN] Failed to clear {sim_log_path}: {e}")
+
     asyncio.run(_run(args))
 
 
