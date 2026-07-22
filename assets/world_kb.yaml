@@ -47,6 +47,16 @@ zones:
     connected_to: [central_plaza]
     locations: [charging_station_01]
 
+  - id: rest_area
+    name: "休息厅"
+    description: "废弃货运升降井旁的公共休息区，充电、聊天、留言、聚会的场所"
+    ue5_bounds:
+      center: [15000, 11500, 0]          # 主车间与中央广场之间
+      half_size: [3000, 2500, 5000]
+    entry_point: [14000, 11000, 0]
+    connected_to: [main_workshop, central_plaza]
+    locations: [rest_bench_01]
+
 # ─── Locations（地点，由 Smart Object Actor 导出） ────────────────
 locations:
   - id: workbench_01
@@ -71,6 +81,17 @@ locations:
     available_actions: [charge, inspect]
     ue5_ref: "BP_ChargingStation_01"
 
+  - id: rest_bench_01
+    name: "休息长椅"
+    zone: rest_area
+    type: furniture
+    position: [15000, 11500, 0]
+    interaction_point: [14800, 11300, 0]
+    interaction_radius: 1500
+    facing: [0, 1, 0]
+    available_actions: [rest, inspect]
+    ue5_ref: "BP_RestBench_01"
+
 # ─── Objects（智能对象，与 Location 一一对应） ─────────────────────
 objects:
   - id: workbench_01
@@ -84,6 +105,12 @@ objects:
     required_role: []
     capacity: 1
     ue5_ref: "BP_ChargingStation_01"
+
+  - id: rest_bench_01
+    available_actions: [rest, inspect]
+    required_role: []
+    capacity: 2
+    ue5_ref: "BP_RestBench_01"
 
 # ─── Agents（园区内的 NPC 定义） ───────────────────────────────────
 agents:

@@ -34,14 +34,14 @@ func TestLoad_Sample(t *testing.T) {
 	if kb.Site.ID != "industrial_park" {
 		t.Errorf("Site.ID = %q", kb.Site.ID)
 	}
-	if len(kb.Zones) != 3 {
-		t.Errorf("len(Zones) = %d, want 3", len(kb.Zones))
+	if len(kb.Zones) != 4 {
+		t.Errorf("len(Zones) = %d, want 4", len(kb.Zones))
 	}
-	if len(kb.Locations) != 2 {
-		t.Errorf("len(Locations) = %d, want 2", len(kb.Locations))
+	if len(kb.Locations) != 3 {
+		t.Errorf("len(Locations) = %d, want 3", len(kb.Locations))
 	}
-	if len(kb.Objects) != 2 {
-		t.Errorf("len(Objects) = %d, want 2", len(kb.Objects))
+	if len(kb.Objects) != 3 {
+		t.Errorf("len(Objects) = %d, want 3", len(kb.Objects))
 	}
 	if len(kb.Agents) != 1 {
 		t.Errorf("len(Agents) = %d, want 1", len(kb.Agents))
@@ -51,11 +51,20 @@ func TestLoad_Sample(t *testing.T) {
 	if kb.GetZone("main_workshop") == nil {
 		t.Error("zoneByID missing main_workshop")
 	}
+	if kb.GetZone("rest_area") == nil {
+		t.Error("zoneByID missing rest_area")
+	}
 	if kb.GetLocation("workbench_01") == nil {
 		t.Error("locationByID missing workbench_01")
 	}
+	if kb.GetLocation("rest_bench_01") == nil {
+		t.Error("locationByID missing rest_bench_01")
+	}
 	if kb.GetObject("charging_station_01") == nil {
 		t.Error("objectByID missing charging_station_01")
+	}
+	if kb.GetObject("rest_bench_01") == nil {
+		t.Error("objectByID missing rest_bench_01")
 	}
 	if kb.GetAgent("H-01") == nil {
 		t.Error("agentByID missing H-01")
@@ -68,6 +77,12 @@ func TestLoad_Sample(t *testing.T) {
 	}
 	if l.InteractionRadius != 1500 {
 		t.Errorf("workbench_01 interaction_radius = %v, want 1500", l.InteractionRadius)
+	}
+
+	// rest_area zone entry_point resolves to a coordinate.
+	z := kb.GetZone("rest_area")
+	if z == nil || z.EntryPoint != [3]float64{14000, 11000, 0} {
+		t.Errorf("rest_area entry_point = %v, want [14000 11000 0]", z)
 	}
 }
 
