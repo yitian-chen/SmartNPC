@@ -72,6 +72,8 @@ type agentContext struct {
 	pendingActionTimeouts    map[string]*time.Timer // action_id → 超时 timer（mu 保护），约定 §5.2 action_completed 1.5× 估值超时
 	llmFailures              int  // 连续 LLM 失败次数（mu 保护），约定 §5.3 安全模式
 	inSafeMode               bool // 是否处于安全模式（mu 保护），约定 §5.3
+	dailyPlan                string        // mu 保护，战略层生成的每日计划（格式化字符串），空=未生成或失败
+	strategicHc              *hermes.Client // mu 保护，战略层专用 Hermes client（独立 session，不污染决策链）
 	wake                     chan struct{}
 	cancel                   context.CancelFunc
 	stopped                  bool
@@ -85,6 +87,7 @@ type decisionWork struct {
 	extras       []string
 	localSummary string
 	scanFollowup bool
+	dailyPlan    string
 }
 
 func newAgentContext(parent context.Context, epochs ...int64) (*agentContext, context.Context) {
@@ -267,10 +270,11 @@ func (a *agentContext) takeDecision() *decisionWork {
 		reasons:      append([]string(nil), a.pendingReasons...),
 		extras:       append([]string(nil), a.recentEnvironmentEvents...),
 		scanFollowup: a.pendingScanFollowup,
+		dailyPlan:    a.dailyPlan,
 	}
 	work.localSummary = buildLocalSummary(
 		work.perception, work.physical, work.currentTask,
-		a.recentActions, a.summaryEnvironmentEvents,
+		a.recentActions, a.summaryEnvironmentEvents, a.dailyPlan,
 	)
 	a.pendingPerception = nil
 	a.pendingReasons = nil
@@ -490,6 +494,13 @@ func runPerceptionWorker(
 	kb *worldkb.KB,
 	logger *slog.Logger,
 ) {
+	// 战略层：进入感知循环前生成当日计划。生成期间感知走 latest-wins
+	// 队列暂存，生成完毕后 for 循环立即处理最新感知。
+	plan := generateDailyPlan(ctx, ac.strategicHc, agentID, logger)
+	ac.mu.Lock()
+	ac.dailyPlan = plan
+	ac.mu.Unlock()
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -527,7 +538,7 @@ func runPerceptionWorker(
 			logger.Warn("perception format returned empty", "agent_id", agentID, "raw", string(work.perception))
 			continue
 		}
-	text = formatDecisionPrompt(text, agentID, agentEpoch, decisionEpoch, work.reasons, work.currentTask)
+	text = formatDecisionPrompt(text, agentID, agentEpoch, decisionEpoch, work.reasons, work.currentTask, work.dailyPlan)
 	logger.Info("[MCP→Hermes/PERCEPTION]", "agent_id", agentID,
 		"agent_epoch", agentEpoch, "decision_epoch", decisionEpoch, "text", text)
 
@@ -585,10 +596,13 @@ func runPerceptionWorker(
 	}
 }
 
-func formatDecisionPrompt(perceptionText, agentID string, agentEpoch, decisionEpoch int64, reasons []string, task *protocol.CurrentTaskProgress) string {
+func formatDecisionPrompt(perceptionText, agentID string, agentEpoch, decisionEpoch int64, reasons []string, task *protocol.CurrentTaskProgress, dailyPlan string) string {
 	lines := []string{
 		fmt.Sprintf("[decision_context] agent_id=%s agent_epoch=%d decision_epoch=%d", agentID, agentEpoch, decisionEpoch),
 		"[决策触发原因] " + strings.Join(reasons, "；"),
+	}
+	if dailyPlan != "" {
+		lines = append(lines, "[今日计划]\n"+dailyPlan)
 	}
 	if task == nil {
 		lines = append(lines, "[当前任务] 无")
@@ -857,6 +871,12 @@ func main() {
 		}
 		nextAgentEpoch++
 		ac, workerCtx := newAgentContext(ctx, nextAgentEpoch)
+		ac.strategicHc = hermes.New(hermes.Config{
+			URL:    *hermesURL,
+			APIKey: *hermesAPIKey,
+			Model:  *hermesModel,
+			Logger: logger,
+		})
 		agents[id] = ac
 		go runPerceptionWorker(workerCtx, id, ac, hc, ws, kb, logger)
 		return ac, true

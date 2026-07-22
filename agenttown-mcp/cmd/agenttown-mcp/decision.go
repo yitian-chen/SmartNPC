@@ -60,6 +60,7 @@ type localStateSummary struct {
 	CurrentTask       *protocol.CurrentTaskProgress `json:"current_task,omitempty"`
 	RecentActions     []localActionSummary          `json:"recent_actions,omitempty"`
 	EnvironmentEvents []string                      `json:"environment_events,omitempty"`
+	DailyPlan         string                        `json:"daily_plan,omitempty"`
 }
 
 // parsePerceptionSnapshot validates a perception payload and builds the
@@ -211,6 +212,7 @@ func buildLocalSummary(
 	task *protocol.CurrentTaskProgress,
 	actions []localActionSummary,
 	events []string,
+	dailyPlan string,
 ) string {
 	var p protocol.PerceptionPayload
 	_ = json.Unmarshal(perceptionPayload, &p)
@@ -222,6 +224,7 @@ func buildLocalSummary(
 		CurrentTask:       cloneTask(task),
 		RecentActions:     append([]localActionSummary(nil), actions...),
 		EnvironmentEvents: append([]string(nil), events...),
+		DailyPlan:         dailyPlan,
 	}
 	encoded, _ := json.Marshal(summary)
 	return string(encoded)

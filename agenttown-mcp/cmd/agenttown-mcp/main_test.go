@@ -213,6 +213,7 @@ func TestLocalSummary_ContainsOnlyAuthoritativeState(t *testing.T) {
 		task,
 		[]localActionSummary{{ActionID: "act_0", Result: "success", Progress: 1}},
 		[]string{"传送带异常"},
+		"", // dailyPlan — 测试不关心
 	)
 	for _, want := range []string{"08:00", "main_workshop", "act_0", "传送带异常"} {
 		if !strings.Contains(summary, want) {
