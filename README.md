@@ -19,7 +19,7 @@ Mock UE (Python)  ←→  agenttown-mcp (Go)  ←→  Hermes Gateway (Docker)
 cp .env.example .env          # 填入 HERMES_AGENT_API_KEY
 bash start.sh quick-smoke     # 协议烟测 (06:00-10:00, 600x)
 bash start.sh behavior        # 行为联调 (06:00-18:00, 60x, 带场景事件)
-bash start.sh normal          # 完整一天 (06:00-22:00, 300x)
+bash start.sh normal          # 完整一天 (06:00-22:00, 150x)
 ```
 
 ## 统一日志（按测试日期归档至 `logs/YYYY-MM-DD/`）

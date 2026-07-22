@@ -70,7 +70,7 @@ sequenceDiagram
 ### 一键启动
 
 ```bash
-bash start.sh normal             # 完整日：06:00-22:00, 300x
+bash start.sh normal             # 完整日：06:00-22:00, 150x
 bash start.sh behavior           # 行为联调：06:00-18:00, 60x, 场景事件
 bash start.sh quick-smoke        # 协议烟测：06:00-10:00, 600x
 bash start.sh --quick            # quick-smoke 兼容别名

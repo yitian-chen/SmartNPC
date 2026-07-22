@@ -77,7 +77,7 @@ fi
 apply_mode() {
     case "$MODE" in
         normal)
-            MOCK_START=6; MOCK_END=22; MOCK_SPEED=300; MOCK_INTERVAL=30; MOCK_SCENARIO="" ;;
+            MOCK_START=6; MOCK_END=22; MOCK_SPEED=150; MOCK_INTERVAL=30; MOCK_SCENARIO="" ;;
         behavior)
             MOCK_START=6; MOCK_END=18; MOCK_SPEED=60; MOCK_INTERVAL=15
             MOCK_SCENARIO="$PROJECT_DIR/assets/scenarios_sample.yaml" ;;
@@ -101,7 +101,7 @@ while [[ $# -gt 0 ]]; do
             echo "Usage: bash start.sh [normal|behavior|quick-smoke] [OPTIONS]"
             echo ""
             echo "Modes:"
-            echo "  normal       06:00-22:00, speed 300x, interval 30"
+            echo "  normal       06:00-22:00, speed 150x, interval 30"
             echo "  behavior     06:00-18:00, speed 60x, interval 15, sample scenario"
             echo "  quick-smoke  06:00-10:00, speed 600x, interval 30"
             echo ""
