@@ -73,6 +73,7 @@ type agentContext struct {
 	llmFailures              int  // 连续 LLM 失败次数（mu 保护），约定 §5.3 安全模式
 	inSafeMode               bool // 是否处于安全模式（mu 保护），约定 §5.3
 	dailyPlan                string        // mu 保护，战略层生成的每日计划（格式化字符串），空=未生成或失败
+	lastPlanSlot             string        // mu 保护，上次注入完整计划时所在的时段（"HH:MM-HH:MM"），用于按需注入
 	strategicHc              *hermes.Client // mu 保护，战略层专用 Hermes client（独立 session，不污染决策链）
 	wake                     chan struct{}
 	cancel                   context.CancelFunc
@@ -88,6 +89,7 @@ type decisionWork struct {
 	localSummary string
 	scanFollowup bool
 	dailyPlan    string
+	timeOfDay    string // 从 perception 提取的 "HH:MM"，用于按需注入计划
 }
 
 func newAgentContext(parent context.Context, epochs ...int64) (*agentContext, context.Context) {
@@ -271,6 +273,7 @@ func (a *agentContext) takeDecision() *decisionWork {
 		extras:       append([]string(nil), a.recentEnvironmentEvents...),
 		scanFollowup: a.pendingScanFollowup,
 		dailyPlan:    a.dailyPlan,
+		timeOfDay:    extractTimeOfDay(a.pendingPerception),
 	}
 	work.localSummary = buildLocalSummary(
 		work.perception, work.physical, work.currentTask,
@@ -538,7 +541,12 @@ func runPerceptionWorker(
 			logger.Warn("perception format returned empty", "agent_id", agentID, "raw", string(work.perception))
 			continue
 		}
-	text = formatDecisionPrompt(text, agentID, agentEpoch, decisionEpoch, work.reasons, work.currentTask, work.dailyPlan)
+		// 按需注入每日计划：时段边界跨越时注入完整计划，否则只注入当前时段。
+		ac.mu.Lock()
+		planInjection, newSlot := selectPlanInjection(work.dailyPlan, work.timeOfDay, ac.lastPlanSlot)
+		ac.lastPlanSlot = newSlot
+		ac.mu.Unlock()
+		text = formatDecisionPrompt(text, agentID, agentEpoch, decisionEpoch, work.reasons, work.currentTask, planInjection)
 	logger.Info("[MCP→Hermes/PERCEPTION]", "agent_id", agentID,
 		"agent_epoch", agentEpoch, "decision_epoch", decisionEpoch, "text", text)
 
@@ -596,13 +604,23 @@ func runPerceptionWorker(
 	}
 }
 
+// extractTimeOfDay 从 perception_update payload 中提取 "HH:MM" 格式的游戏时间。
+// 用于按需注入每日计划（判断时段边界跨越）。失败返回空串。
+func extractTimeOfDay(raw json.RawMessage) string {
+	var p protocol.PerceptionPayload
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return ""
+	}
+	return p.Environment.TimeOfDay
+}
+
 func formatDecisionPrompt(perceptionText, agentID string, agentEpoch, decisionEpoch int64, reasons []string, task *protocol.CurrentTaskProgress, dailyPlan string) string {
 	lines := []string{
 		fmt.Sprintf("[decision_context] agent_id=%s agent_epoch=%d decision_epoch=%d", agentID, agentEpoch, decisionEpoch),
 		"[决策触发原因] " + strings.Join(reasons, "；"),
 	}
 	if dailyPlan != "" {
-		lines = append(lines, "[今日计划]\n"+dailyPlan)
+		lines = append(lines, dailyPlan)
 	}
 	if task == nil {
 		lines = append(lines, "[当前任务] 无")

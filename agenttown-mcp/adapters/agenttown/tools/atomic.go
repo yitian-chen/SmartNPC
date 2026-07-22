@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -203,6 +204,18 @@ func registerAtomic(s *mcp.Server, ex Executor, kb *worldkb.KB, logger *slog.Log
 			"duration_sec": in.DurationSec,
 		})
 		if err != nil {
+			// NPC 正在执行长动作时，Mock UE 会拒绝 Wait（disruptive guard）。
+			// 此时"等待"已经是隐式的——NPC 在忙，时间自然会走。返回成功而非
+			// 错误，避免 LLM 把 rejected 当成需要重试的失败而反复调用 wait，
+			// 每次重试都多耗一轮 LLM 上下文。把拒绝原因原样回传，让 LLM 知道
+			// NPC 当前在忙什么、还剩多久。
+			if msg := err.Error(); strings.Contains(msg, "busy with") {
+				return nil, ackResult{
+					OK:            true,
+					DecisionEpoch: in.DecisionEpoch,
+					Message:       "wait implicit: " + msg,
+				}, nil
+			}
 			return nil, ackResult{}, fmt.Errorf("wait: %w", err)
 		}
 		return nil, buildAckResult(ack, in.DecisionEpoch), nil

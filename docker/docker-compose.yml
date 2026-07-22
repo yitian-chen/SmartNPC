@@ -25,6 +25,11 @@ services:
     environment:
       # Gateway 一期关闭外部门控，接受所有请求
       - GATEWAY_ALLOW_ALL_USERS=true
+      # TERMINAL_CWD 决定 Hermes 在哪个目录查找 context 文件（AGENTS.md /
+      # .cursorrules / CLAUDE.md）和 git 快照。默认 fallback 到镜像 WORKDIR
+      # /opt/hermes，那里有 71KB 的 AGENTS.md 和 .git，会被注入 system prompt
+      # 浪费 ~18k tokens。指向 /opt/data（只有 profiles/，无 context 文件）。
+      - TERMINAL_CWD=/opt/data
     env_file:
       - ../.env
     # 绕过 s6-overlay 交互模式，直接启动 Hermes Gateway

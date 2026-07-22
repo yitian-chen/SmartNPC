@@ -103,3 +103,125 @@ func formatDailyPlan(items []dailyPlanItem) string {
 	}
 	return strings.TrimSuffix(sb.String(), "\n")
 }
+
+// selectPlanInjection 决定本轮决策注入的每日计划文本。
+//
+// 策略：时段边界跨越时注入完整计划（让 LLM 看到全天结构），同一时段
+// 内只注入当前时段的目标（节省每轮 ~150-300 字节）。fullPlan 的每行
+// 格式为 "HH:MM-HH:MM: goal"，timeOfDay 为 "HH:MM"。
+//
+// 返回注入文本（含 [今日计划] 或 [当前时段] 头）和当前时段标识
+//（"HH:MM-HH:MM"）。无法解析时回退到全量注入。
+func selectPlanInjection(fullPlan, timeOfDay, lastSlot string) (string, string) {
+	if fullPlan == "" {
+		return "", ""
+	}
+	items := parseFormattedPlan(fullPlan)
+	if len(items) == 0 {
+		return "[今日计划]\n" + fullPlan, lastSlot
+	}
+	cur := matchPlanSlot(items, timeOfDay)
+	if cur == "" {
+		return "[今日计划]\n" + fullPlan, lastSlot
+	}
+	// 时段未变：只注入当前时段。
+	if cur == lastSlot {
+		for _, item := range items {
+			if item.Time == cur {
+				return "[当前时段] " + item.Time + ": " + item.Goal, cur
+			}
+		}
+	}
+	// 时段跨越：注入完整计划。
+	return "[今日计划]\n" + fullPlan, cur
+}
+
+// parseFormattedPlan 解析 formatDailyPlan 产出的 "HH:MM-HH:MM: goal" 多行字符串。
+// 无法解析的行跳过；返回空切片表示整体不可用。
+func parseFormattedPlan(s string) []dailyPlanItem {
+	var items []dailyPlanItem
+	for _, line := range strings.Split(s, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		colon := strings.Index(line, ": ")
+		if colon < 0 {
+			continue
+		}
+		timePart := line[:colon]
+		goalPart := line[colon+2:]
+		// timePart 必须是 "HH:MM-HH:MM" 格式
+		if _, _, ok := splitPlanRange(timePart); !ok {
+			continue
+		}
+		items = append(items, dailyPlanItem{Time: timePart, Goal: goalPart})
+	}
+	return items
+}
+
+// matchPlanSlot 找到包含 timeOfDay 的计划时段（"HH:MM-HH:MM"）。
+// timeOfDay 格式 "HH:MM"，返回匹配的 item.Time，无匹配返回 ""。
+func matchPlanSlot(items []dailyPlanItem, timeOfDay string) string {
+	if timeOfDay == "" {
+		return ""
+	}
+	cur := parsePlanMinute(timeOfDay)
+	if cur < 0 {
+		return ""
+	}
+	for _, item := range items {
+		start, end, ok := splitPlanRange(item.Time)
+		if !ok {
+			continue
+		}
+		if cur >= start && cur < end {
+			return item.Time
+		}
+	}
+	return ""
+}
+
+// splitPlanRange 把 "HH:MM-HH:MM" 拆成起止分钟数（从午夜起）。
+func splitPlanRange(s string) (start, end int, ok bool) {
+	parts := strings.SplitN(s, "-", 2)
+	if len(parts) != 2 {
+		return 0, 0, false
+	}
+	start = parsePlanMinute(parts[0])
+	end = parsePlanMinute(parts[1])
+	if start < 0 || end < 0 {
+		return 0, 0, false
+	}
+	return start, end, true
+}
+
+// parsePlanMinute 把 "HH:MM" 转成从午夜起的分钟数，失败返回 -1。
+func parsePlanMinute(s string) int {
+	parts := strings.SplitN(strings.TrimSpace(s), ":", 2)
+	if len(parts) != 2 {
+		return -1
+	}
+	h := atoi(parts[0])
+	m := atoi(parts[1])
+	if h < 0 || m < 0 {
+		return -1
+	}
+	return h*60 + m
+}
+
+// atoi 解析非负整数，失败返回 -1。
+func atoi(s string) int {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return -1
+	}
+	n := 0
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return -1
+		}
+		n = n*10 + int(c-'0')
+	}
+	return n
+}

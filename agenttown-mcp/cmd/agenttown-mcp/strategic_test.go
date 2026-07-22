@@ -146,3 +146,73 @@ func TestGenerateDailyPlan_ParseFail(t *testing.T) {
 		t.Errorf("got %q, want empty plan on parse failure", plan)
 	}
 }
+
+// ─── selectPlanInjection ─────────────────────────────────────
+
+func TestSelectPlanInjection_EmptyPlan(t *testing.T) {
+	inj, slot := selectPlanInjection("", "08:00", "")
+	if inj != "" || slot != "" {
+		t.Errorf("got inj=%q slot=%q, want empty", inj, slot)
+	}
+}
+
+func TestSelectPlanInjection_BoundaryCross(t *testing.T) {
+	plan := "07:00-08:00: 晨检\n08:00-12:00: 装配\n12:00-13:00: 午餐"
+	// 08:30 在 08:00-12:00 时段内，上次是 07:00-08:00 → 边界跨越，注入完整计划
+	inj, slot := selectPlanInjection(plan, "08:30", "07:00-08:00")
+	if slot != "08:00-12:00" {
+		t.Errorf("slot=%q, want 08:00-12:00", slot)
+	}
+	if !strings.HasPrefix(inj, "[今日计划]") {
+		t.Errorf("inj should start with [今日计划], got %q", inj)
+	}
+	if !strings.Contains(inj, "装配") {
+		t.Errorf("inj should contain full plan, got %q", inj)
+	}
+}
+
+func TestSelectPlanInjection_SameSlot(t *testing.T) {
+	plan := "07:00-08:00: 晨检\n08:00-12:00: 装配\n12:00-13:00: 午餐"
+	// 09:00 还在 08:00-12:00，上次也是 08:00-12:00 → 只注入当前时段
+	inj, slot := selectPlanInjection(plan, "09:00", "08:00-12:00")
+	if slot != "08:00-12:00" {
+		t.Errorf("slot=%q, want 08:00-12:00", slot)
+	}
+	want := "[当前时段] 08:00-12:00: 装配"
+	if inj != want {
+		t.Errorf("inj=%q, want %q", inj, want)
+	}
+}
+
+func TestSelectPlanInjection_FirstDecision(t *testing.T) {
+	plan := "07:00-08:00: 晨检\n08:00-12:00: 装配"
+	// lastSlot 为空 → 视为边界跨越，注入完整计划
+	inj, slot := selectPlanInjection(plan, "07:30", "")
+	if slot != "07:00-08:00" {
+		t.Errorf("slot=%q, want 07:00-08:00", slot)
+	}
+	if !strings.HasPrefix(inj, "[今日计划]") {
+		t.Errorf("first decision should inject full plan, got %q", inj)
+	}
+}
+
+func TestSelectPlanInjection_UnparseableTime(t *testing.T) {
+	plan := "07:00-08:00: 晨检"
+	// timeOfDay 无法解析 → 回退全量注入
+	inj, _ := selectPlanInjection(plan, "invalid", "07:00-08:00")
+	if !strings.HasPrefix(inj, "[今日计划]") {
+		t.Errorf("unparseable time should fall back to full plan, got %q", inj)
+	}
+}
+
+func TestSelectPlanInjection_TimeBeforeFirstSlot(t *testing.T) {
+	plan := "07:00-08:00: 晨检\n08:00-12:00: 装配"
+	// 06:00 在所有时段之前 → matchPlanSlot 返回空 → 回退全量
+	inj, slot := selectPlanInjection(plan, "06:00", "")
+	if slot != "" {
+		t.Errorf("slot=%q, want empty (no match)", slot)
+	}
+	if !strings.HasPrefix(inj, "[今日计划]") {
+		t.Errorf("no matching slot should fall back to full plan, got %q", inj)
+	}
+}
