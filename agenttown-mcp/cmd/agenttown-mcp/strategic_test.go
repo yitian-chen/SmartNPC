@@ -216,3 +216,37 @@ func TestSelectPlanInjection_TimeBeforeFirstSlot(t *testing.T) {
 		t.Errorf("no matching slot should fall back to full plan, got %q", inj)
 	}
 }
+
+func TestSelectPlanInjection_OvernightSlot(t *testing.T) {
+	// 跨日时段 "17:30-06:00"：傍晚到次日清晨
+	plan := "15:30-17:00: 收尾\n17:00-17:30: 日志\n17:30-06:00: 充电休息"
+	// 19:30 在 17:30-06:00 内 → 应匹配跨日时段
+	inj, slot := selectPlanInjection(plan, "19:30", "17:00-17:30")
+	if slot != "17:30-06:00" {
+		t.Errorf("slot=%q, want 17:30-06:00", slot)
+	}
+	if !strings.HasPrefix(inj, "[今日计划]") {
+		t.Errorf("boundary cross should inject full plan, got %q", inj)
+	}
+	// 同一时段内第二次决策 → 只注入当前时段
+	inj2, slot2 := selectPlanInjection(plan, "20:30", "17:30-06:00")
+	if slot2 != "17:30-06:00" {
+		t.Errorf("slot2=%q, want 17:30-06:00", slot2)
+	}
+	want := "[当前时段] 17:30-06:00: 充电休息"
+	if inj2 != want {
+		t.Errorf("inj2=%q, want %q", inj2, want)
+	}
+}
+
+func TestSelectPlanInjection_OvernightSlotEarlyMorning(t *testing.T) {
+	plan := "17:30-06:00: 充电休息"
+	// 03:00 在 17:30-06:00 的跨日部分（[0,360)）内
+	inj, slot := selectPlanInjection(plan, "03:00", "")
+	if slot != "17:30-06:00" {
+		t.Errorf("slot=%q, want 17:30-06:00", slot)
+	}
+	if !strings.HasPrefix(inj, "[今日计划]") {
+		t.Errorf("first decision should inject full plan, got %q", inj)
+	}
+}

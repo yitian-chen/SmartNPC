@@ -517,6 +517,21 @@ func runPerceptionWorker(
 			continue
 		}
 
+		// UE 断线时跳过本轮 LLM 决策：否则 Hermes 在无 ACK 反馈下会持续
+		// 发起工具调用，每次工具结果都累积进上下文，单轮可飙到 500k+ token
+		//（实测 ep16：UE 断线 1.5 分钟，8 次工具调用，519k token）。
+		// 感知放回 pending，UE 重连后下个 wake 周期重新处理。
+		if !ws.IsConnected() {
+			ac.mu.Lock()
+			ac.pendingPerception = work.perception
+			ac.pendingReasons = work.reasons
+			ac.pendingScanFollowup = work.scanFollowup
+			ac.mu.Unlock()
+			logger.Warn("[UE 断线] 跳过本轮 LLM 决策，感知放回队列等重连",
+				"agent_id", agentID)
+			continue
+		}
+
 		// 安全模式检查（约定 §5.3）：连续 5 次 LLM 失败后进入安全模式，
 		// 不调 LLM，只发 idle wait，持续上报感知，等管理员介入重启 MCP。
 		if ac.IsInSafeMode() {
@@ -919,6 +934,9 @@ func main() {
 			} else {
 				logger.Info("agent_registered (reconnect, session kept)", "agent_id", agentID,
 					"agent_epoch", ac.agentEpoch)
+				// 重连后唤醒 worker：UE 断线期间若有感知放回 pending，
+				// 此处 signal 让 worker 重新处理。无 pending 时 signal 无副作用。
+				ac.signal()
 			}
 
 		case protocol.TypeAgentUnregistered:

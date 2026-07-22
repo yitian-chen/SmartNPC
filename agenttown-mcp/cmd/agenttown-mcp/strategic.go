@@ -175,7 +175,12 @@ func matchPlanSlot(items []dailyPlanItem, timeOfDay string) string {
 		if !ok {
 			continue
 		}
-		if cur >= start && cur < end {
+		if end <= start {
+			// 跨日时段（如 "17:30-06:00"）：cur 在 [start,24:00) 或 [0,end) 内都算匹配。
+			if cur >= start || cur < end {
+				return item.Time
+			}
+		} else if cur >= start && cur < end {
 			return item.Time
 		}
 	}
