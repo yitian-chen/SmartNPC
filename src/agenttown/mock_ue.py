@@ -227,6 +227,21 @@ def load_world_kb(path: str) -> WorldKB:
 # Composite action nominal durations (seconds) when not given explicitly
 COMPOSITE_DEFAULT_SEC = 1800.0  # 30 min
 
+# Physical evolution rates per game-minute, keyed by activity class.
+# `interval` in _evolve_physical is in game-minutes (perception_interval=30),
+# so multiply these by `interval` to get the per-tick delta.
+# charge_at actively restores energy and relieves fatigue (no joint wear —
+# the robot is docked, not moving). rest_idle is light recovery. The default
+# composite rate (work_assemble / patrol_route / repair_target /
+# social_chat_with / archive_research) keeps the pre-fix work-like drain.
+PHYS_RATES = {
+    "charge_at":  {"energy": +0.10, "fatigue": -0.15, "joint_wear": 0.0},
+    "rest_idle":  {"energy": -0.01, "fatigue": -0.07, "joint_wear": 0.0},
+    "_default":   {"energy": -0.05, "fatigue": +0.20, "joint_wear": +0.05},
+}
+# Passive (non-busy) drain — applied when no composite action is running.
+PHYS_RATES_PASSIVE = {"energy": -0.02, "fatigue": +0.05, "joint_wear": 0.0}
+
 # Physical-state delta thresholds (约定5)
 DELTA_THRESHOLD = {"energy": 5.0, "fatigue": 5.0, "health": 5.0, "joint_wear": 1.0}
 
@@ -288,6 +303,11 @@ class NPCState:
     # Busy state for long-running actions
     busy_action_id: Optional[str] = None
     busy_cmd: Optional[str] = None
+    # Composite action name (e.g. "charge_at", "work_assemble") when
+    # busy_cmd == CMD_EXECUTE_COMPOSITE, else None. Used by
+    # _evolve_physical to pick the right physical-evolution rate — without
+    # it, charge_at drained energy instead of restoring it.
+    busy_composite_name: Optional[str] = None
     busy_until_min: Optional[int] = None  # absolute game-minute
     busy_started_ms: Optional[int] = None
 
@@ -657,6 +677,12 @@ class MockUE:
             busy_game_min = max(1, int(est_sec / 60.0))
             self.npc.busy_action_id = action_id
             self.npc.busy_cmd = cmd
+            # Track the composite name so _evolve_physical can distinguish
+            # restorative actions (charge_at/rest_idle) from work-like ones.
+            if cmd == CMD_EXECUTE_COMPOSITE:
+                self.npc.busy_composite_name = params.get("name", "") or None
+            else:
+                self.npc.busy_composite_name = None
             self.npc.busy_until_min = self.time.total_minutes + busy_game_min
             self.npc.busy_started_ms = int(_time.time() * 1000)
             self.npc.current_animation = "work"
@@ -799,6 +825,7 @@ class MockUE:
     def _clear_busy(self):
         self.npc.busy_action_id = None
         self.npc.busy_cmd = None
+        self.npc.busy_composite_name = None
         self.npc.busy_until_min = None
         self.npc.busy_started_ms = None
         self.npc.current_animation = "idle"
@@ -1021,18 +1048,24 @@ class MockUE:
             next_tick += interval_real_sec
 
     def _evolve_physical(self):
-        """Gradually change physical state based on current activity."""
+        """Gradually change physical state based on current activity.
+
+        Rates are per game-minute (``interval`` is in game-minutes). Composite
+        actions pick their rate from PHYS_RATES keyed by the composite name —
+        charge_at restores energy and relieves fatigue, rest_idle is light
+        recovery, other composites keep the work-like drain. Non-busy periods
+        use the passive drain.
+        """
         p = self.npc.physical
         interval = self.perception_interval
         if self.npc.busy_cmd == CMD_EXECUTE_COMPOSITE and self.npc.busy_action_id:
-            # Charging vs working determined loosely; charge_at busy raises energy.
-            # We don't track composite name post-start here; approximate by wear.
-            p.energy = max(0, p.energy - interval * 0.05)
-            p.fatigue = min(100, p.fatigue + interval * 0.2)
-            p.joint_wear = min(100, p.joint_wear + interval * 0.05)
+            name = self.npc.busy_composite_name
+            rate = PHYS_RATES.get(name) or PHYS_RATES["_default"]
         else:
-            p.energy = max(0, p.energy - interval * 0.02)
-            p.fatigue = min(100, p.fatigue + interval * 0.05)
+            rate = PHYS_RATES_PASSIVE
+        p.energy = max(0, min(100, p.energy + interval * rate["energy"]))
+        p.fatigue = max(0, min(100, p.fatigue + interval * rate["fatigue"]))
+        p.joint_wear = max(0, min(100, p.joint_wear + interval * rate["joint_wear"]))
 
     async def _heartbeat_loop(self):
         """Send heartbeats across the whole day, tolerating reconnects."""
