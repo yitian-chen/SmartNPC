@@ -14,21 +14,12 @@ providers:
     discover_models: false
 agent:
   tool_use_enforcement: true
-  # 以下三项关闭 coding guidance 系统提示块（~3.5KB）以节省 token：
-  # - task_completion_guidance: 防 LLM 假完成路径，h01 工具链简单不需要
-  # - parallel_tool_call_guidance: 引导并行工具调用，h01 每轮至多 1 个工具
-  # - environment_probe: 注入宿主 Python/pip 版本行，容器内无意义
   task_completion_guidance: false
   parallel_tool_call_guidance: false
   environment_probe: false
-  # 禁用 skills_tools 工具集（skills_list/skill_view/skill_manage）：
-  # 1. 移除 3 个工具 schema（每个 ~200 token）
-  # 2. system_prompt.py:292 检测到无 skills 工具时，跳过 build_skills_system_prompt，
-  #    整个 73 条 skills 索引（~1,440 token）不注入系统提示
-  # 3. turn_finalizer.py:488 的 skill 背景审查（bg-review 线程）因 skill_manage
-  #    不在 valid_tool_names 而永不触发，省掉每轮额外的 LLM 审查调用
   disabled_toolsets:
     - skills_tools
+    - memory
 compression:
   enabled: true
   threshold: 0.3
