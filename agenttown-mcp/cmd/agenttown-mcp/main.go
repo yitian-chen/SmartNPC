@@ -1030,6 +1030,13 @@ func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
 		a.mu.Unlock()
 		return false // tacticalHc 未初始化，回退 Hermes
 	}
+	// 在途 action 未完成时禁止 refill：UE 此时仍占用（典型为 Hermes-source
+	// 的 composite 如 rest_idle/charge_at），refill 出的队列会被 UE busy
+	// 全部拒绝，整队消耗光。等在途 action_completed 自然唤醒 worker 再 refill。
+	if a.currentActionID != "" {
+		a.mu.Unlock()
+		return false
+	}
 	goal, slot, idx := selectCurrentGoal(a.dailyPlan, a.latestTimeOfDayLocked())
 	if goal == "" {
 		a.mu.Unlock()
@@ -1043,10 +1050,11 @@ func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
 	zone := a.latestZoneLocked()
 	physical := clonePhysical(a.latestPhysical)
 	tacticalHc := a.tacticalHc
+	kbRef := kb
 	a.mu.Unlock()
 
 	// 2. 调战术层 LLM（不持锁）
-	actions, thought, err := generateTacticalPlan(ctx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), physical, logger)
+	actions, thought, err := generateTacticalPlan(ctx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), physical, kbRef, logger)
 	if err != nil {
 		logger.Warn("[战术层] 分解失败，回退 Hermes", "agent_id", agentID, "err", err)
 		return false

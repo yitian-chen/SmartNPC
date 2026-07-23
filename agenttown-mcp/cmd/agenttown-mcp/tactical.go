@@ -54,6 +54,7 @@ const tacticalPromptTemplate = `[战术层/任务分解] 当前时段目标：%s
 
 请把这个目标分解为 3-5 步具体的 action，按顺序执行。
 
+%s
 可用工具（仅限以下 13 个，禁止使用 scan_area / stop）：
 - move_to: 移动到目标位置。params: {"target":"区域或位置id"}
 - turn_to: 转向目标。params: {"target":"实体id"}
@@ -73,17 +74,67 @@ const tacticalPromptTemplate = `[战术层/任务分解] 当前时段目标：%s
 1. 只输出 JSON：{"inner_thought":"一句话内心独白","actions":[{"action":"工具名","params":{...}},...]}
 2. 3-5 步，每步一个 action，按执行顺序排列
 3. 第一步通常是 move_to 到目标区域
-4. 不要输出任何其他文字
+4. move_to 的 target、interact 的 object_id、work_assemble 的 target 必须从上面的可用列表中选取，禁止编造
+5. 不要输出任何其他文字
 
 示例：{"inner_thought":"先去车间再开始装配","actions":[{"action":"move_to","params":{"target":"main_workshop"}},{"action":"work_assemble","params":{"target":"workbench_01","duration_min":240}}]}`
 
-// buildTacticalPrompt 填充战术层 prompt 模板。
-func buildTacticalPrompt(goal, zone, timeOfDay string, physical *protocol.PhysicalState) string {
+// buildTacticalPrompt 填充战术层 prompt 模板。kb 用于注入可用 zone/location/object
+// 列表，避免 LLM 编造不存在的 ID（如 workbench_02、archives）。
+func buildTacticalPrompt(goal, zone, timeOfDay string, physical *protocol.PhysicalState, kb *worldkb.KB) string {
 	e, f, j, h := 0.0, 0.0, 0.0, 0.0
 	if physical != nil {
 		e, f, j, h = physical.Energy, physical.Fatigue, physical.JointWear, physical.Health
 	}
-	return fmt.Sprintf(tacticalPromptTemplate, goal, zone, timeOfDay, e, f, j, h)
+	return fmt.Sprintf(tacticalPromptTemplate, goal, zone, timeOfDay, e, f, j, h, buildKBContext(kb))
+}
+
+// buildKBContext 拼接可用 zone/location/object 列表段落，供战术层 prompt 注入。
+func buildKBContext(kb *worldkb.KB) string {
+	if kb == nil {
+		return ""
+	}
+	var lines []string
+	if zs := kb.ListZones(); len(zs) > 0 {
+		parts := make([]string, 0, len(zs))
+		for _, z := range zs {
+			if z.Name != "" && z.Name != z.ID {
+				parts = append(parts, fmt.Sprintf("%s(%s)", z.Name, z.ID))
+			} else {
+				parts = append(parts, z.ID)
+			}
+		}
+		lines = append(lines, "可前往区域: "+strings.Join(parts, "、")+"。")
+	}
+	if ls := kb.ListLocations(); len(ls) > 0 {
+		parts := make([]string, 0, len(ls))
+		for _, l := range ls {
+			if l.Name != "" && l.Name != l.ID {
+				parts = append(parts, fmt.Sprintf("%s(%s)", l.Name, l.ID))
+			} else {
+				parts = append(parts, l.ID)
+			}
+		}
+		lines = append(lines, "可前往地点: "+strings.Join(parts, "、")+"。")
+	}
+	if os := kb.ListObjects(); len(os) > 0 {
+		parts := make([]string, 0, len(os))
+		for _, o := range os {
+			label := o.ID
+			if o.Name != "" && o.Name != o.ID {
+				label = fmt.Sprintf("%s(%s)", o.Name, o.ID)
+			}
+			if len(o.AvailableActions) > 0 {
+				label += "[" + strings.Join(o.AvailableActions, "/") + "]"
+			}
+			parts = append(parts, label)
+		}
+		lines = append(lines, "可交互物体: "+strings.Join(parts, "、")+"。")
+	}
+	if len(lines) == 0 {
+		return ""
+	}
+	return strings.Join(lines, "\n") + "\n"
 }
 
 // generateTacticalPlan 调战术层 LLM 分解当前时段 goal。
@@ -96,9 +147,10 @@ func generateTacticalPlan(
 	agentID string,
 	goal, zone, timeOfDay string,
 	physical *protocol.PhysicalState,
+	kb *worldkb.KB,
 	logger *slog.Logger,
 ) ([]plannedAction, string, error) {
-	prompt := buildTacticalPrompt(goal, zone, timeOfDay, physical)
+	prompt := buildTacticalPrompt(goal, zone, timeOfDay, physical, kb)
 	logger.Info("[战术层] 开始分解任务", "agent_id", agentID, "goal", goal, "time", timeOfDay)
 
 	resp, err := tc.SendWithSummary(ctx, prompt, "")
