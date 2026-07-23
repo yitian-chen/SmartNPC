@@ -6,7 +6,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from agenttown.mock_ue import MockUE, CMD_EXECUTE_COMPOSITE, PHYS_RATES, PHYS_RATES_PASSIVE
 
-
 class ScenarioInjectionTests(unittest.TestCase):
     def make_ue(self):
         ue = MockUE(log_dir="logs")
@@ -144,6 +143,176 @@ class AgentRoutingTests(unittest.IsolatedAsyncioTestCase):
         import json
         response = json.loads(ue._ws.sent[-1])
         self.assertNotIn("scan_id", response["payload"])
+
+
+class InspectTests(unittest.IsolatedAsyncioTestCase):
+    """Tests for the inspect action returning useful device info.
+
+    Regression guard: before the fix, interact(inspect) returned
+    action_completed with empty details={}, so the NPC got "success" with
+    no inspection content. Now _inspect_object generates a per-object
+    report and folds it into the completion payload.
+    """
+
+    def _make_ue(self):
+        class FakeWS:
+            def __init__(self):
+                self.sent = []
+
+            async def send(self, frame):
+                self.sent.append(frame)
+
+        ue = MockUE(log_dir="logs")
+        ue._ws = FakeWS()
+        ue.npc.current_zone = "main_workshop"
+        ue.npc.physical.energy = 75.0
+        return ue, FakeWS
+
+    async def _send_interact(self, ue, object_id, action):
+        await ue._handle_envelope({
+            "type": "action_command",
+            "agent_id": "H-01",
+            "seq": 1,
+            "payload": {
+                "action_id": "act_inspect",
+                "cmd": "InteractSmartObject",
+                "params": {"object_id": object_id, "action": action},
+            },
+        })
+
+    def _completed_payload(self, ue):
+        import json
+        for frame in ue._ws.sent:
+            msg = json.loads(frame)
+            if msg.get("type") == "action_completed":
+                return msg["payload"]
+        return None
+
+    async def test_inspect_workbench_returns_nonempty_details(self):
+        ue, _ = self._make_ue()
+        await self._send_interact(ue, "workbench_01", "inspect")
+        payload = self._completed_payload(ue)
+        self.assertIsNotNone(payload, "action_completed not sent")
+        self.assertEqual(payload["result"], "success")
+        details = payload.get("details") or {}
+        self.assertIn("inspection", details, f"missing inspection text; got {details}")
+        text = details["inspection"]
+        # Must mention the object and contain some real content.
+        self.assertIn("工作台", text)
+        self.assertGreater(len(text), 20, f"inspection text too short: {text!r}")
+        # Must list the available actions so the NPC knows what it can do next.
+        self.assertIn("assemble", text)
+        self.assertIn("inspect", text)
+
+    async def test_inspect_charging_station_includes_battery_reading(self):
+        ue, _ = self._make_ue()
+        await self._send_interact(ue, "charging_station_01", "inspect")
+        payload = self._completed_payload(ue)
+        details = payload.get("details") or {}
+        self.assertIn("inspection", details)
+        text = details["inspection"]
+        self.assertIn("充电", text)
+        # Charging station inspection must surface the NPC's own battery level
+        # so the NPC can decide whether it needs to charge.
+        self.assertIn("75", text)
+        self.assertIn("charge", text)
+
+    async def test_inspect_rest_bench_returns_content(self):
+        ue, _ = self._make_ue()
+        await self._send_interact(ue, "rest_bench_01", "inspect")
+        payload = self._completed_payload(ue)
+        details = payload.get("details") or {}
+        self.assertIn("inspection", details)
+        self.assertIn("长椅", details["inspection"])
+
+    async def test_inspect_unknown_object_is_rejected_before_completion(self):
+        """An unknown object_id must be rejected at validation time — no
+        action_completed should be sent, only an action_started with
+        accepted=False (the existing _validate_target path)."""
+        ue, _ = self._make_ue()
+        await self._send_interact(ue, "nonexistent_object", "inspect")
+        payload = self._completed_payload(ue)
+        self.assertIsNone(payload,
+                           "action_completed must not be sent for an unknown object")
+
+    async def test_non_inspect_action_does_not_produce_inspection_text(self):
+        """An interact action that isn't 'inspect' (e.g. 'assemble' — though
+        in practice assemble goes through the composite tool) must not
+        synthesize an inspection report. It still completes (mock UE doesn't
+        route assemble through composite), but the details should be empty
+        so the NPC doesn't get a fake inspection for a non-inspect verb."""
+        ue, _ = self._make_ue()
+        await self._send_interact(ue, "workbench_01", "assemble")
+        payload = self._completed_payload(ue)
+        self.assertIsNotNone(payload)
+        details = payload.get("details") or {}
+        self.assertNotIn("inspection", details,
+                         f"non-inspect action must not produce inspection text; got {details}")
+
+    async def test_inspect_carries_object_id_in_details(self):
+        """The details dict must echo object_id so the agent can correlate
+        the inspection with the object it targeted (useful when multiple
+        inspect results are in context)."""
+        ue, _ = self._make_ue()
+        await self._send_interact(ue, "workbench_01", "inspect")
+        payload = self._completed_payload(ue)
+        details = payload.get("details") or {}
+        self.assertEqual(details.get("object_id"), "workbench_01")
+
+    async def test_inspect_while_busy_is_rejected_by_busy_guard(self):
+        """When the NPC is mid-composite-action, interact is a DISRUPTIVE
+        command and must be rejected by the busy guard (not produce an
+        inspection report). This matches 约定: a busy NPC can't start a
+        new disruptive action. The guard fires before _inspect_object."""
+        import json
+
+        ue, _ = self._make_ue()
+        ue.npc.busy_action_id = "act_other"
+        ue.npc.busy_cmd = CMD_EXECUTE_COMPOSITE
+        ue.npc.busy_composite_name = "work_assemble"
+        ue.npc.busy_until_min = ue.time.total_minutes + 30
+        await self._send_interact(ue, "workbench_01", "inspect")
+
+        # The busy guard rejects with action_started accepted=False.
+        started = None
+        for frame in ue._ws.sent:
+            msg = json.loads(frame)
+            if msg.get("type") == "action_started":
+                started = msg["payload"]
+                break
+        self.assertIsNotNone(started, "action_started must be sent")
+        self.assertFalse(started["accepted"],
+                         "inspect while busy must be rejected, not accepted")
+        self.assertIn("busy", started.get("reject_reason", "").lower())
+        # And no action_completed (rejected commands don't complete).
+        self.assertIsNone(self._completed_payload(ue))
+
+    async def test_inspect_unknown_object_falls_back_to_generic_report(self):
+        """A registered object without a dedicated branch (any future object)
+        must still get a generic report rather than empty details — the
+        fallback path covers this. We test via a known object by monkey-
+        patching the kb to drop the id from the dedicated branches, which
+        is awkward; instead verify the fallback directly."""
+        ue, _ = self._make_ue()
+        # Call _inspect_object directly with an id that has no dedicated branch
+        # but IS in the kb (simulating a future object addition).
+        # rest_bench_01 has a dedicated branch, so use a synthetic one: add a
+        # placeholder to the kb so name/actions resolve, then inspect.
+        from agenttown.mock_ue import LocationInfo, ObjectInfo
+        ue.kb.locations["future_obj"] = LocationInfo(
+            id="future_obj", name="未来设备", zone="main_workshop",
+            position=[0, 0, 0], interaction_point=[0, 0, 0],
+            interaction_radius=0, available_actions=["inspect", "operate"],
+        )
+        ue.kb.objects["future_obj"] = ObjectInfo(
+            id="future_obj", available_actions=["inspect", "operate"],
+        )
+        details = ue._inspect_object("future_obj")
+        self.assertIn("inspection", details)
+        text = details["inspection"]
+        self.assertIn("未来设备", text)
+        self.assertIn("operate", text)
+        self.assertIn("正常", text)  # generic phrasing
 
 
 class PhysicalEvolutionTests(unittest.TestCase):

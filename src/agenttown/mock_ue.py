@@ -689,8 +689,11 @@ class MockUE:
             self._apply_command_effects(cmd, params, starting=True)
         else:
             # Short action: apply effects immediately and complete now.
-            self._apply_command_effects(cmd, params, starting=False)
-            await self._send_action_completed(action_id, RESULT_SUCCESS, 0, 1.0)
+            # _apply_command_effects may return a details dict (e.g. the
+            # inspection report for interact+inspect) that we fold into the
+            # action_completed payload so it reaches the agent.
+            details = self._apply_command_effects(cmd, params, starting=False)
+            await self._send_action_completed(action_id, RESULT_SUCCESS, 0, 1.0, details=details)
 
     def _validate_target(self, cmd: str, params: Dict[str, Any]) -> str:
         """Return a non-empty rejection reason when targeting a non‑existent
@@ -756,8 +759,14 @@ class MockUE:
         # TurnTo/Speak/Emote/Stop: near-instant
         return 1.0, False
 
-    def _apply_command_effects(self, cmd: str, params: Dict[str, Any], starting: bool):
-        """Mutate NPC state for a command. Does NOT advance game time."""
+    def _apply_command_effects(self, cmd: str, params: Dict[str, Any], starting: bool) -> Optional[Dict[str, Any]]:
+        """Mutate NPC state for a command. Does NOT advance game time.
+
+        Returns an optional ``details`` dict for short-running actions — the
+        caller passes it to ``_send_action_completed`` so the result reaches
+        the agent. Currently only ``interact`` with ``action=inspect`` returns
+        meaningful content; other commands return None (empty details).
+        """
         if cmd == CMD_MOVE_TO:
             # 方案 A: MCP 已解析坐标，UE 直接用 dest。
             # target+kind 是 metadata，用于精确设置 current_location。
@@ -784,7 +793,66 @@ class MockUE:
                 pass  # energy restored gradually in loop
             elif name in ("work_assemble", "archive_research", "repair_target"):
                 pass  # fatigue accrues in loop
+        elif cmd == CMD_INTERACT:
+            # inspect 是只读查询：根据 object_id 生成设备检查报告，通过
+            # action_completed.details 返回，流经 MCP "动作完成" 行进入下一轮
+            # 决策上下文。其他 interact 动作（assemble/charge 等）由对应
+            # 复合动作处理，这里不产生额外 details。
+            action = params.get("action", "")
+            object_id = params.get("object_id", "")
+            if action == "inspect" and object_id:
+                return self._inspect_object(object_id)
         # Physical drain applied gradually in perception loop.
+        return None
+
+    def _inspect_object(self, object_id: str) -> Dict[str, Any]:
+        """Generate a readable inspection report for a smart object.
+
+        Returns a ``details`` dict with an ``inspection`` text field describing
+        the object's current state, recent activity, and any anomalies. The
+        text is what the NPC sees in the next decision context under
+        "动作完成 ... details={...}". Kept intentionally short (one paragraph)
+        so it stays inside the tool-result injection without bloating context.
+        """
+        loc = self.kb.locations.get(object_id)
+        obj = self.kb.objects.get(object_id)
+        name = (loc.name if loc else "") or object_id
+        actions = (loc.available_actions if loc else None) or (obj.available_actions if obj else [])
+        # NPC's current animation hints at what it was just doing.
+        busy = self.npc.busy_action_id is not None
+        # Build a per-object-type report. The descriptions are deterministic
+        # but varied enough that inspecting different objects yields different
+        # information, so the NPC has a reason to inspect each one.
+        if object_id == "workbench_01":
+            lines = [
+                f"{name}：工作台台面平整，夹具定位准确，无松动。",
+                "工具槽内扳手、扭力起子齐备，最近一次使用留下的切屑已清理。",
+                "传动皮带张力正常，未见打滑痕迹。",
+                f"当前状态：{'作业中' if busy else '待机'}，可执行 {('/'.join(actions))}。",
+            ]
+        elif object_id == "charging_station_01":
+            p = self.npc.physical
+            lines = [
+                f"{name}：充电接口无氧化，线缆绝缘完好，接头锁定顺畅。",
+                "充电模块自检通过，输出电压稳定在标称值。",
+                f"当前状态：{'充电中' if busy else '空闲'}，可执行 {('/'.join(actions))}。",
+                f"本机电池读数 {p.energy:.0f}%，建议电量低于 30% 时及时补能。",
+            ]
+        elif object_id == "rest_bench_01":
+            lines = [
+                f"{name}：长椅结构稳固，靠背无松动，表面无异物。",
+                "周边地面整洁，应急照明指示正常。",
+                f"当前状态：{'有人占用' if busy else '空位'}，可执行 {('/'.join(actions))}。",
+            ]
+        else:
+            # Generic fallback for any future object.
+            lines = [
+                f"{name}：外观正常，未见明显异常。",
+                f"可执行动作：{('/'.join(actions)) if actions else '无'}。",
+            ]
+        text = "".join(lines)
+        logger.info(f"[INSPECT] {object_id} -> {text[:60]}...")
+        return {"inspection": text, "object_id": object_id}
 
     def _move_to(self, dest: List[float], target: Optional[str] = None, kind: Optional[str] = None) -> bool:
         """Move NPC to dest coordinate.
