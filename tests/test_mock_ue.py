@@ -1,4 +1,5 @@
 import sys
+import time as _time
 import unittest
 from pathlib import Path
 
@@ -549,6 +550,53 @@ class PhysicalEvolutionTests(unittest.TestCase):
         # MoveTo is not CMD_EXECUTE_COMPOSITE, so passive rate applies.
         interval = ue.perception_interval
         self.assertAlmostEqual(ue.npc.physical.energy, 80.0 + interval * PHYS_RATES_PASSIVE["energy"])
+
+    def test_completion_tick_uses_composite_rate_not_passive(self):
+        """Regression: on the tick where game time crosses busy_until_min,
+        _evolve_physical must still apply the composite rate (e.g.
+        charge_at restoring energy), not the passive rate.
+
+        The bug was that _clear_busy() ran before _evolve_physical(),
+        so the completion tick saw no busy action and used the passive
+        drain — charge_at's last tick would LOSE energy instead of
+        gaining it.
+        """
+        ue = self.make_ue()
+        interval = ue.perception_interval  # 30 game-min
+
+        # Charge_at: 1 tick duration (30 game-min).
+        ue.time.hour = 12
+        ue.time.minute = 0
+        ue.npc.physical.energy = 50.0
+        ue.npc.physical.fatigue = 60.0
+        ue.npc.busy_action_id = "act_charge"
+        ue.npc.busy_cmd = CMD_EXECUTE_COMPOSITE
+        ue.npc.busy_composite_name = "charge_at"
+        ue.npc.busy_until_min = ue.time.total_minutes + interval  # completes this tick
+        ue.npc.busy_started_ms = int(_time.time() * 1000)
+
+        energy_before = ue.npc.physical.energy
+
+        # Simulate the tick: advance time, then evolve, then clear busy.
+        # (This is the FIXED order in _perception_loop.)
+        ue.time.advance(interval)
+        # At this point game time >= busy_until_min — but we evolve
+        # BEFORE clearing busy, so the composite rate applies.
+        ue._evolve_physical()
+
+        rate = PHYS_RATES["charge_at"]
+        expected_energy = 50.0 + interval * rate["energy"]
+        self.assertAlmostEqual(ue.npc.physical.energy, expected_energy,
+                               msg="completion tick must use charge_at rate, "
+                                   f"not passive; got {ue.npc.physical.energy}, "
+                                   f"expected {expected_energy}")
+        self.assertGreater(ue.npc.physical.energy, energy_before,
+                           "charge_at's completion tick must restore energy, "
+                           "not drain it (the passive rate would drain)")
+
+        # Now clear busy (completion).
+        ue._clear_busy()
+        self.assertIsNone(ue.npc.busy_action_id)
 
 
 if __name__ == "__main__":

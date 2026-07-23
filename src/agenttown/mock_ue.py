@@ -1090,6 +1090,15 @@ class MockUE:
             self.time.advance(self.perception_interval)
             self._queue_crossed_scenario_events(previous_min, self.time.total_minutes)
 
+            # Physical evolution — MUST run before busy completion check.
+            # The completion tick (game time crosses busy_until_min) is still
+            # part of the busy period: the action was running for this entire
+            # interval, so its composite rate (e.g. charge_at restoring
+            # energy) must apply. If we _clear_busy() first, _evolve_physical
+            # would see no busy action and use the passive rate, causing
+            # charge_at's last tick to drain energy instead of restoring it.
+            self._evolve_physical()
+
             # Busy completion check.
             if self.npc.busy_action_id is not None and self.time.total_minutes >= (self.npc.busy_until_min or 0):
                 action_id = self.npc.busy_action_id
@@ -1099,9 +1108,6 @@ class MockUE:
                     action_id, RESULT_SUCCESS,
                     int(_time.time() * 1000) - started, 1.0,
                 )
-
-            # Physical evolution.
-            self._evolve_physical()
 
             # state_report: on threshold change or every 15s fallback.
             now = _time.monotonic()
