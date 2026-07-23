@@ -75,6 +75,12 @@ type agentContext struct {
 	dailyPlan                string        // mu 保护，战略层生成的每日计划（格式化字符串），空=未生成或失败
 	lastPlanSlot             string        // mu 保护，上次注入完整计划时所在的时段（"HH:MM-HH:MM"），用于按需注入
 	strategicHc              *hermes.Client // mu 保护，战略层专用 Hermes client（独立 session，不污染决策链）
+	tacticalHc               *hermes.Client  // mu 保护，战术层专用 Hermes client（独立 session）
+	actionQueue              []plannedAction // mu 保护，战术层分解出的待执行 action（FIFO）
+	currentActionSrc         actionSource    // mu 保护，当前在途 action 的来源（hermes/tactical/空）
+	currentPlanIndex         int             // mu 保护，当前执行到 daily_plan 第几个 item（记账用）
+	currentSlot              string          // mu 保护，当前分解的时段 "HH:MM-HH:MM"（防同时段重复分解）
+	redecomposeCount         int             // mu 保护，当前时段已重复分解次数（防死循环）
 	wake                     chan struct{}
 	cancel                   context.CancelFunc
 	stopped                  bool
@@ -310,6 +316,10 @@ func (a *agentContext) stop() {
 	a.pendingReasons = nil
 	a.recentEnvironmentEvents = nil
 	a.currentActionID = "" // agent 下线时清空（避免残留）
+	a.currentActionSrc = ""
+	a.actionQueue = nil     // 清空战术层队列
+	a.currentSlot = ""      // 重置时段
+	a.redecomposeCount = 0  // 重置重复分解计数
 	// 停止所有 pending action 超时 timer
 	for _, timer := range a.pendingActionTimeouts {
 		timer.Stop()
@@ -407,10 +417,11 @@ func (a *agentContext) retryCurrentSnapshotOnError() bool {
 	return true
 }
 
-func (a *agentContext) recordActionStarted(actionID, cmd string, params map[string]any, decisionEpoch int64) {
+func (a *agentContext) recordActionStarted(actionID, cmd string, params map[string]any, decisionEpoch int64, src actionSource) {
 	encoded, _ := json.Marshal(params)
 	a.mu.Lock()
 	a.currentActionID = actionID // 追踪当前执行中的 action（约定9 stop_action ID 匹配）
+	a.currentActionSrc = src     // 记录来源：completion 时按来源路由（hermes→入队决策，tactical→signal pop 下一个）
 	a.recentActions = appendRolling(a.recentActions, localActionSummary{
 		ActionID: actionID, Cmd: cmd, Params: string(encoded),
 		DecisionEpoch: decisionEpoch, Result: "started",
@@ -678,7 +689,7 @@ func (g *guardedExecutor) SendAction(ctx context.Context, agentID string, decisi
 	}
 	ack, err := g.ws.SendAction(ctx, agentID, cmd, params)
 	if err == nil && ack != nil {
-		ac.recordActionStarted(ack.ActionID, cmd, params, decisionEpoch)
+		ac.recordActionStarted(ack.ActionID, cmd, params, decisionEpoch, sourceHermes)
 		// 注册 action_completed 超时 timer（约定 §5.2：estimated_duration × 1.5）
 		ac.armActionTimeout(ack.ActionID, ack.EstimatedDurationSec, g.ws, agentID, g.lookup)
 	}
@@ -767,6 +778,7 @@ func (a *agentContext) armActionTimeout(
 		if ac != nil {
 			ac.mu.Lock()
 			ac.currentActionID = ""
+			ac.currentActionSrc = "" // 清来源，避免 completion 路由错乱
 			delete(ac.pendingActionTimeouts, actionID)
 			ac.mu.Unlock()
 			// 触发重新决策（下次 perception 会处理）
@@ -784,6 +796,71 @@ func (a *agentContext) armActionTimeout(
 	}
 	a.pendingActionTimeouts[actionID] = timer
 	a.mu.Unlock()
+}
+
+// ─── 战术层队列辅助方法 ────────────────────────────────────────
+
+// hasQueueNext 返回队列是否还有待执行 action（mu 保护）。
+func (a *agentContext) hasQueueNext() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return len(a.actionQueue) > 0
+}
+
+// queueLen 返回队列长度（mu 保护）。
+func (a *agentContext) queueLen() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return len(a.actionQueue)
+}
+
+// latestTimeOfDay 从 latestPerception 提取 "HH:MM" 游戏时间（mu 保护读取 perception）。
+func (a *agentContext) latestTimeOfDay() string {
+	a.mu.Lock()
+	raw := a.latestPerception
+	a.mu.Unlock()
+	return extractTimeOfDay(raw)
+}
+
+// latestZone 从 latestPerception 提取当前区域 id（mu 保护读取 perception）。
+func (a *agentContext) latestZone() string {
+	a.mu.Lock()
+	raw := a.latestPerception
+	a.mu.Unlock()
+	if len(raw) == 0 {
+		return ""
+	}
+	var p protocol.PerceptionPayload
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return ""
+	}
+	if p.Location.CurrentZone != nil {
+		return *p.Location.CurrentZone
+	}
+	return ""
+}
+
+// sendIdleWait 发一个 60 秒的 wait，避免队列空且无 goal 时忙循环。
+func (a *agentContext) sendIdleWait(ctx context.Context, agentID string, ws *wsserver.Server, logger *slog.Logger) {
+	if !ws.IsConnected() {
+		return
+	}
+	if _, err := ws.SendAction(ctx, agentID, protocol.CmdWait, map[string]any{"duration_sec": 60}); err != nil {
+		logger.Debug("[战术层] idle wait 发送失败", "agent_id", agentID, "err", err)
+	}
+}
+
+// isReactiveWork 判断一个 decisionWork 是否由反应事件触发（reasons 含"事件通知"前缀）。
+func isReactiveWork(w *decisionWork) bool {
+	if w == nil {
+		return false
+	}
+	for _, r := range w.reasons {
+		if strings.HasPrefix(r, "事件通知") {
+			return true
+		}
+	}
+	return false
 }
 
 // IncLLMFailures 累加连续 LLM 失败次数并返回累加后的值（约定 §5.3 安全模式）。
