@@ -448,9 +448,14 @@ func containsReason(reasons []string, target string) bool {
 }
 
 func taskLifecycleReasons(previous, current *protocol.CurrentTaskProgress) []string {
+	// Note: nil→non-nil ("任务开始") deliberately does NOT trigger a decision.
+	// The agent already learned its action was accepted from the tool result
+	// (guardedExecutor.SendAction returns the ACK to Hermes). Generating a
+	// second decision round here caused the NPC to self-interrupt: it would
+	// see "[决策触发原因] 任务开始:act_xxx" + "[当前任务] progress=0" and
+	// decide to move/stop/start something else, undoing the action it just
+	// began. The agent should simply wait for the action to complete.
 	switch {
-	case previous == nil && current != nil:
-		return []string{fmt.Sprintf("任务开始:%s", current.ActionID)}
 	case previous != nil && current == nil:
 		return []string{fmt.Sprintf("任务结束:%s", previous.ActionID)}
 	case previous != nil && current != nil && previous.ActionID != current.ActionID:

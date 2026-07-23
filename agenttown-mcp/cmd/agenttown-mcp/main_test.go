@@ -168,14 +168,21 @@ func TestAgentContext_StateAndCompletionTriggers(t *testing.T) {
 	_, _, _ = ac.observePerception(perceptionJSON("06:30", "main_workshop", "", "clear", nil))
 	_ = ac.takeDecision()
 
+	// Task start (nil→non-nil) must NOT trigger a decision — the agent
+	// already knows from the tool result. This prevents self-interruption
+	// where the NPC sees "任务开始" and decides to stop/move instead of
+	// waiting for the action to complete.
 	reasons := ac.updateState(protocol.StateReportPayload{
 		PhysicalState:       protocol.PhysicalState{Energy: 100, Fatigue: 0, Health: 100},
 		CurrentTaskProgress: &protocol.CurrentTaskProgress{ActionID: "act_1", Progress: 0.1},
 	})
-	if len(reasons) != 1 || reasons[0] != "任务开始:act_1" {
-		t.Fatalf("task start reasons=%v", reasons)
+	if len(reasons) != 0 {
+		t.Fatalf("task start should not trigger reasons, got=%v", reasons)
 	}
-	_ = ac.takeDecision()
+	// currentTask is still updated even without a decision trigger.
+	if ac.currentTask == nil || ac.currentTask.ActionID != "act_1" {
+		t.Fatalf("currentTask not updated: %#v", ac.currentTask)
+	}
 
 	// Progress-only update is cache-only.
 	reasons = ac.updateState(protocol.StateReportPayload{
