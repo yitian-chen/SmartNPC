@@ -1020,7 +1020,7 @@ func (a *agentContext) popAndSendQueueAction(ctx context.Context, agentID string
 }
 
 // tacticalRefill 调战术层 LLM 分解当前时段 goal，填充队列，推送独白，下发第一步。
-// 成功返回 true；无 goal / LLM 失败 / 期间被反应事件抢占 返回 false。
+// 成功返回 true；无 goal / LLM 失败 返回 false。
 func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
 	ws *wsserver.Server, kb *worldkb.KB, logger *slog.Logger) bool {
 
@@ -1060,15 +1060,16 @@ func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
 		return false
 	}
 
-	// 3. 原子填充队列：若期间有反应事件入队（pendingPerception != nil）则放弃填充
+	// 3. 填充队列。战术 LLM 调用期间（约 10-20 秒）到达的常规感知
+	// （pendingPerception）是基于更早世界状态的"过期"事件，清空它避免
+	// 反应层打断战术执行。物理状态已由 updateState 更新到 latestPhysical，
+	// 下次 refill 的 prompt 会看到最新值。
+	// 反应事件（event_notification）由 recordEventNotification 独立处理
+	// （清空队列 + 设置 pendingPerception），不在此处考虑。
 	a.mu.Lock()
-	if a.pendingPerception != nil {
-		// 期间到达了反应事件——让 worker 下一轮处理它（清队列→Hermes）
-		a.mu.Unlock()
-		logger.Info("[战术层] 分解期间收到反应事件，放弃填充", "agent_id", agentID)
-		return false
-	}
 	a.actionQueue = actions
+	a.pendingPerception = nil
+	a.pendingReasons = nil
 	isRedecompose := slot == a.currentSlot
 	if isRedecompose {
 		a.redecomposeCount++
