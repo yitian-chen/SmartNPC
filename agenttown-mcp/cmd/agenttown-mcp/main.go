@@ -588,75 +588,93 @@ func runPerceptionWorker(
 			continue
 		}
 
-		agentEpoch, decisionEpoch, ok := ac.beginDecisionWithScan(work.scanFollowup)
-		if !ok {
-			continue
-		}
-		text := perception.Format(work.perception, work.physical, work.extras, kb)
-		if text == "" {
-			ac.endDecision(decisionEpoch)
-			logger.Warn("perception format returned empty", "agent_id", agentID, "raw", string(work.perception))
-			continue
-		}
-		// 按需注入每日计划：时段边界跨越时注入完整计划，否则只注入当前时段。
-		ac.mu.Lock()
-		planInjection, newSlot := selectPlanInjection(work.dailyPlan, work.timeOfDay, ac.lastPlanSlot)
-		ac.lastPlanSlot = newSlot
-		ac.mu.Unlock()
-		text = formatDecisionPrompt(text, agentID, agentEpoch, decisionEpoch, work.reasons, work.currentTask, planInjection)
+		runHermesDecision(ctx, agentID, ac, hc, ws, kb, logger, work)
+	}
+}
+
+// runHermesDecision 执行一轮 Hermes LLM 决策（原 runPerceptionWorker 内联逻辑抽取）。
+// 包含：beginDecisionWithScan → perception.Format → 计划注入 → SendWithSummary →
+// narrative 推送 → 失败计数/安全模式/上游错误重试。行为与原内联代码完全一致。
+// 所有 continue/return 语义映射为函数 return：调用方（worker）自然进入下一轮循环，
+// ctx 取消时由 worker 顶部 select <-ctx.Done() 捕获。
+func runHermesDecision(
+	ctx context.Context,
+	agentID string,
+	ac *agentContext,
+	hc *hermes.Client,
+	ws *wsserver.Server,
+	kb *worldkb.KB,
+	logger *slog.Logger,
+	work *decisionWork,
+) {
+	agentEpoch, decisionEpoch, ok := ac.beginDecisionWithScan(work.scanFollowup)
+	if !ok {
+		return
+	}
+	text := perception.Format(work.perception, work.physical, work.extras, kb)
+	if text == "" {
+		ac.endDecision(decisionEpoch)
+		logger.Warn("perception format returned empty", "agent_id", agentID, "raw", string(work.perception))
+		return
+	}
+	// 按需注入每日计划：时段边界跨越时注入完整计划，否则只注入当前时段。
+	ac.mu.Lock()
+	planInjection, newSlot := selectPlanInjection(work.dailyPlan, work.timeOfDay, ac.lastPlanSlot)
+	ac.lastPlanSlot = newSlot
+	ac.mu.Unlock()
+	text = formatDecisionPrompt(text, agentID, agentEpoch, decisionEpoch, work.reasons, work.currentTask, planInjection)
 	logger.Info("[MCP→Hermes/PERCEPTION]", "agent_id", agentID,
 		"agent_epoch", agentEpoch, "decision_epoch", decisionEpoch, "text", text)
 
-		resp, err := hc.SendWithSummary(ctx, text, work.localSummary)
-		ac.endDecision(decisionEpoch)
-		if err != nil {
-			if ctx.Err() != nil {
-				logger.Info("Hermes request canceled", "agent_id", agentID)
+	resp, err := hc.SendWithSummary(ctx, text, work.localSummary)
+	ac.endDecision(decisionEpoch)
+	if err != nil {
+		if ctx.Err() != nil {
+			logger.Info("Hermes request canceled", "agent_id", agentID)
+			return
+		}
+		// 累加连续 LLM 失败次数（约定 §5.3 安全模式）
+		failures := ac.IncLLMFailures()
+		if errors.Is(err, hermes.ErrUpstreamError) {
+			// The session was already cleared by the client; immediately
+			// retry with the same snapshot so that the NPC gets a clean
+			// decision turn without waiting for the next external event.
+			logger.Warn("[Hermes→MCP] upstream error — retrying with fresh session",
+				"agent_id", agentID, "consecutive_failures", failures)
+			if ac.retryCurrentSnapshotOnError() {
 				return
 			}
-			// 累加连续 LLM 失败次数（约定 §5.3 安全模式）
-			failures := ac.IncLLMFailures()
-			if errors.Is(err, hermes.ErrUpstreamError) {
-				// The session was already cleared by the client; immediately
-				// retry with the same snapshot so that the NPC gets a clean
-				// decision turn without waiting for the next external event.
-				logger.Warn("[Hermes→MCP] upstream error — retrying with fresh session",
-					"agent_id", agentID, "consecutive_failures", failures)
-				if ac.retryCurrentSnapshotOnError() {
-					continue
-				}
-			}
-			// 连续 5 次失败进入安全模式（约定 §5.3）
-			if failures >= 5 {
-				ac.EnterSafeMode()
-				logger.Error("[SafeMode] entering safe mode after 5 consecutive LLM failures",
-					"agent_id", agentID, "failures", failures,
-					"hint", "restart MCP process to exit safe mode")
-				continue
-			}
-			logger.Error("hermes send failed", "agent_id", agentID, "err", err,
-				"consecutive_failures", failures)
-			continue
 		}
-		// LLM 调用成功，清零失败计数并退出安全模式（如果之前在安全模式）
-		ac.ResetLLMFailures()
-		narrative := resp.ExtractText()
-		disp := strings.ReplaceAll(narrative, "\n", "\\n")
-		if len(disp) > 100 {
-			disp = disp[:100] + "..."
+		// 连续 5 次失败进入安全模式（约定 §5.3）
+		if failures >= 5 {
+			ac.EnterSafeMode()
+			logger.Error("[SafeMode] entering safe mode after 5 consecutive LLM failures",
+				"agent_id", agentID, "failures", failures,
+				"hint", "restart MCP process to exit safe mode")
+			return
 		}
-		logger.Info("[Hermes→MCP/RESPONSE]",
-			"agent_id", agentID,
-			"agent_epoch", agentEpoch,
-			"decision_epoch", decisionEpoch,
-			"tokens", resp.Usage.TotalTokens,
-			"narrative_len", len(narrative),
-			"narrative", disp,
-		)
-		if narrative != "" {
-			if err := ws.SendEnvelope(agentID, "narrative", map[string]any{"text": narrative}); err != nil {
-				logger.Debug("narrative push failed", "agent_id", agentID, "err", err)
-			}
+		logger.Error("hermes send failed", "agent_id", agentID, "err", err,
+			"consecutive_failures", failures)
+		return
+	}
+	// LLM 调用成功，清零失败计数并退出安全模式（如果之前在安全模式）
+	ac.ResetLLMFailures()
+	narrative := resp.ExtractText()
+	disp := strings.ReplaceAll(narrative, "\n", "\\n")
+	if len(disp) > 100 {
+		disp = disp[:100] + "..."
+	}
+	logger.Info("[Hermes→MCP/RESPONSE]",
+		"agent_id", agentID,
+		"agent_epoch", agentEpoch,
+		"decision_epoch", decisionEpoch,
+		"tokens", resp.Usage.TotalTokens,
+		"narrative_len", len(narrative),
+		"narrative", disp,
+	)
+	if narrative != "" {
+		if err := ws.SendEnvelope(agentID, "narrative", map[string]any{"text": narrative}); err != nil {
+			logger.Debug("narrative push failed", "agent_id", agentID, "err", err)
 		}
 	}
 }
