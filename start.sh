@@ -291,6 +291,11 @@ start_hermes() {
     case "$HERMES_BUILD_SCRIPT" in
         /mnt/*)
             HERMES_BUILD_SCRIPT_WSL="$HERMES_BUILD_SCRIPT" ;;
+        /?/*)
+            # MSYS/Git-Bash 风格路径 /d/... → /mnt/d/...
+            # wslpath -u 对 MSYS 路径会错误剥离前导 / 产生相对路径，
+            # 导致 WSL 以 /mnt/d/ 为 CWD 拼出 /mnt/d/d/... 找不到文件。
+            HERMES_BUILD_SCRIPT_WSL="/mnt${HERMES_BUILD_SCRIPT}" ;;
         *)
             HERMES_BUILD_SCRIPT_WSL=$(MSYS_NO_PATHCONV=1 $WSL wslpath -u "$HERMES_BUILD_SCRIPT" 2>/dev/null \
                 || echo "/mnt/d/SmartNPC_v3/docker/build-hermes.sh") ;;

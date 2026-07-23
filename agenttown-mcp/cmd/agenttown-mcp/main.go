@@ -152,11 +152,16 @@ func (a *agentContext) observePerception(payload json.RawMessage) ([]string, boo
 		}
 	}
 	replaced := a.pendingPerception != nil
-	queueNonEmpty := len(a.actionQueue) > 0
-	if len(reasons) > 0 && !queueNonEmpty {
+	// 队列非空 OR 有战术层在途 action（已 pop 但未 completed）时，抑制
+	// 感知触发的 Hermes 决策。后者覆盖最后一个 action 被 pop 后、UE 仍在
+	// 执行 composite 的窗口期——否则新感知会立刻触发下一时段的 tacticalRefill，
+	// 导致 refill 出的队列被 UE "busy" 拒绝全部消耗掉。
+	tacticalInFlight := a.currentActionSrc == sourceTactical
+	suppress := len(a.actionQueue) > 0 || tacticalInFlight
+	if len(reasons) > 0 && !suppress {
 		a.pendingReasons = mergeUnique(a.pendingReasons, reasons...)
 	}
-	if queueNonEmpty {
+	if suppress {
 		// 战术执行中：抑制感知触发的 Hermes 决策。latestPerception/observedSnapshot
 		// 已更新（供下次 refill 用），但不入队决策、不 signal。
 		a.mu.Unlock()
@@ -189,9 +194,11 @@ func (a *agentContext) updateState(report protocol.StateReportPayload) []string 
 	physical := report.PhysicalState
 	a.latestPhysical = &physical
 	a.currentTask = cloneTask(report.CurrentTaskProgress)
-	if len(a.actionQueue) > 0 {
+	if len(a.actionQueue) > 0 || a.currentActionSrc == sourceTactical {
 		// 战术执行中：抑制任务生命周期/物理警阈带触发（任务结束由 action_completed
 		// 负责）。物理状态已更新，下次 refill 的 prompt 会看到并自纠正。
+		// 含在途 tactical action（最后一个已 pop 但未完成）——避免 UE 仍在执行
+		// composite 时被新感知触发下一时段 refill。
 		reasons = nil
 	}
 	a.queueDecisionLocked(reasons, nil)
@@ -986,8 +993,22 @@ func (a *agentContext) popAndSendQueueAction(ctx context.Context, agentID string
 	logger.Info("[战术层] 下发 action", "agent_id", agentID, "action", pa.Action, "cmd", cmd, "queue_left", a.queueLen())
 	ack, err := ws.SendAction(ctx, agentID, cmd, params)
 	if err != nil {
-		logger.Warn("[战术层] 下发失败，signal worker 处理", "agent_id", agentID, "err", err)
-		a.signal() // 让 worker 下一轮处理（可能 UE 断线或需 Hermes 重新决策）
+		// 区分两种失败：
+		//   (a) UE 在途 composite 未完成 → 回填队首，等在途 action_completed 唤醒
+		//   (b) UE 断线 / 真错误 → 无在途 action 会触发 completion，signal 让
+		//       worker 走 Hermes 回退（清队列 + runHermesDecision）
+		a.mu.Lock()
+		hasInFlight := a.currentActionSrc == sourceTactical
+		if hasInFlight {
+			a.actionQueue = append([]plannedAction{pa}, a.actionQueue...)
+			a.mu.Unlock()
+			logger.Warn("[战术层] 下发失败（在途 action 占用），回填队首等待 completion",
+				"agent_id", agentID, "action", pa.Action, "err", err)
+			return
+		}
+		a.mu.Unlock()
+		logger.Warn("[战术层] 下发失败，signal worker 回退 Hermes", "agent_id", agentID, "err", err)
+		a.signal()
 		return
 	}
 	if ack != nil {

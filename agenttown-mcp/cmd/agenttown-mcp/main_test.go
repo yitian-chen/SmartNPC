@@ -336,6 +336,29 @@ func TestObservePerception_TriggersWhenQueueEmpty(t *testing.T) {
 	}
 }
 
+func TestObservePerception_SuppressedWhenTacticalActionInFlight(t *testing.T) {
+	ac, _ := newAgentContext(context.Background())
+	_, _, _ = ac.observePerception(perceptionJSON("06:30", "main_workshop", "", "clear", nil))
+	_ = ac.takeDecision()
+
+	// 队列已空，但有战术层在途 action（最后一个 action 已 pop 但 UE 仍在执行 composite）
+	ac.mu.Lock()
+	ac.currentActionSrc = sourceTactical
+	ac.mu.Unlock()
+
+	audible := []protocol.AudibleEvent{{Type: "scenario", Source: "director", Content: "传送带异常"}}
+	reasons, _, err := ac.observePerception(perceptionJSON("07:00", "central_plaza", "plaza", "rain", audible))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reasons != nil {
+		t.Fatalf("perception should be suppressed while tactical action in-flight, got reasons=%v", reasons)
+	}
+	if work := ac.takeDecision(); work != nil {
+		t.Fatalf("decision should not be queued while tactical action in-flight: %#v", work)
+	}
+}
+
 func TestUpdateState_SuppressedDuringTacticalQueue(t *testing.T) {
 	ac, _ := newAgentContext(context.Background())
 	// 建立 currentTask
@@ -506,6 +529,45 @@ func TestClearQueueAndStopInFlight_NoCrashWithDisconnectedWS(t *testing.T) {
 	ac.mu.Unlock()
 	if queueLen != 0 {
 		t.Fatalf("queue should be cleared even with disconnected WS, got %d", queueLen)
+	}
+}
+
+func TestPopAndSendQueueAction_RefillOnBusyRejection(t *testing.T) {
+	// 模拟 UE 拒绝（busy with composite）：SendAction 在未连接 ws 上一定失败。
+	// 当 currentActionSrc == sourceTactical（有在途 composite）时，被拒 action
+	// 应回填到队首，而不是 signal → 整队消耗光。
+	ac, _ := newAgentContext(context.Background())
+	ws := wsserver.New(wsserver.Options{}) // 未连接 → SendAction 失败
+	logger := slog.Default()
+	kb := loadTestKB(t)
+
+	// 队列 3 个 action
+	setQueueForTest(ac, []plannedAction{
+		{Action: "wait", Params: map[string]any{"duration_sec": 30}},
+		{Action: "wait", Params: map[string]any{"duration_sec": 60}},
+		{Action: "wait", Params: map[string]any{"duration_sec": 90}},
+	})
+
+	// 有在途战术 action（最后一个已 pop 但未完成）
+	ac.mu.Lock()
+	ac.currentActionSrc = sourceTactical
+	ac.mu.Unlock()
+
+	ac.popAndSendQueueAction(context.Background(), "H-01", ws, kb, logger)
+
+	// 回填后队列仍为 3，且队首仍是第一个 action
+	ac.mu.Lock()
+	queueLen := len(ac.actionQueue)
+	firstAction := ""
+	if queueLen > 0 {
+		firstAction = ac.actionQueue[0].Action
+	}
+	ac.mu.Unlock()
+	if queueLen != 3 {
+		t.Fatalf("queue should be refilled to 3 after busy rejection, got %d", queueLen)
+	}
+	if firstAction != "wait" {
+		t.Fatalf("first action should be 'wait' after refill, got %q", firstAction)
 	}
 }
 
