@@ -3,10 +3,12 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"strings"
 	"testing"
 
 	"github.com/AgentTown/agenttown-mcp/pkg/protocol"
+	"github.com/AgentTown/agenttown-mcp/pkg/wsserver"
 )
 
 func perceptionJSON(timeOfDay, zone, location, weather string, audible []protocol.AudibleEvent) json.RawMessage {
@@ -272,5 +274,265 @@ func TestAgentContext_StopClearsPendingDecision(t *testing.T) {
 	}
 	if got := ac.takeDecision(); got != nil {
 		t.Fatalf("pending decision survived stop: %#v", got)
+	}
+}
+
+// ─── 战术层队列抑制与 completion 路由 ──────────────────────────
+
+// setQueueForTest 在测试中直接设置队列（绕过 mu 的 tacticalRefill 流程）。
+func setQueueForTest(ac *agentContext, actions []plannedAction) {
+	ac.mu.Lock()
+	ac.actionQueue = actions
+	ac.mu.Unlock()
+}
+
+func TestObservePerception_SuppressedDuringTacticalQueue(t *testing.T) {
+	ac, _ := newAgentContext(context.Background())
+	// 先建立基线感知并消费掉
+	_, _, _ = ac.observePerception(perceptionJSON("06:30", "main_workshop", "", "clear", nil))
+	_ = ac.takeDecision()
+
+	// 设置队列非空（模拟战术执行中）
+	setQueueForTest(ac, []plannedAction{{Action: "wait", Params: map[string]any{"duration_sec": 30}}})
+
+	// 发送一个会触发决策的感知（区域变化 + 可听事件）
+	audible := []protocol.AudibleEvent{{Type: "scenario", Source: "director", Content: "传送带异常"}}
+	reasons, _, err := ac.observePerception(perceptionJSON("07:00", "central_plaza", "plaza", "rain", audible))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reasons != nil {
+		t.Fatalf("perception should be suppressed during tactical queue, got reasons=%v", reasons)
+	}
+	// 不应有 pending 决策
+	if work := ac.takeDecision(); work != nil {
+		t.Fatalf("decision should not be queued during tactical execution: %#v", work)
+	}
+	// 但 latestPerception 应已更新（供 refill 用）
+	ac.mu.Lock()
+	raw := ac.latestPerception
+	ac.mu.Unlock()
+	if len(raw) == 0 {
+		t.Fatal("latestPerception should still update during tactical execution")
+	}
+}
+
+func TestObservePerception_TriggersWhenQueueEmpty(t *testing.T) {
+	ac, _ := newAgentContext(context.Background())
+	_, _, _ = ac.observePerception(perceptionJSON("06:30", "main_workshop", "", "clear", nil))
+	_ = ac.takeDecision()
+
+	// 队列为空，正常触发
+	audible := []protocol.AudibleEvent{{Type: "scenario", Source: "director", Content: "传送带异常"}}
+	reasons, _, err := ac.observePerception(perceptionJSON("07:00", "central_plaza", "plaza", "rain", audible))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reasons) == 0 {
+		t.Fatal("perception should trigger when queue is empty")
+	}
+	if work := ac.takeDecision(); work == nil {
+		t.Fatal("decision should be queued when queue is empty")
+	}
+}
+
+func TestUpdateState_SuppressedDuringTacticalQueue(t *testing.T) {
+	ac, _ := newAgentContext(context.Background())
+	// 建立 currentTask
+	ac.updateState(protocol.StateReportPayload{
+		PhysicalState:       protocol.PhysicalState{Energy: 100, Fatigue: 0, Health: 100},
+		CurrentTaskProgress: &protocol.CurrentTaskProgress{ActionID: "act_1", Progress: 0.5},
+	})
+
+	// 设置队列非空
+	setQueueForTest(ac, []plannedAction{{Action: "wait", Params: map[string]any{"duration_sec": 30}}})
+
+	// 任务结束（non-nil → nil）正常应触发，但队列非空时应抑制
+	reasons := ac.updateState(protocol.StateReportPayload{
+		PhysicalState:       protocol.PhysicalState{Energy: 90, Fatigue: 10, Health: 100},
+		CurrentTaskProgress: nil,
+	})
+	if len(reasons) != 0 {
+		t.Fatalf("task end should be suppressed during tactical queue, got reasons=%v", reasons)
+	}
+	// currentTask 仍应更新
+	ac.mu.Lock()
+	task := ac.currentTask
+	ac.mu.Unlock()
+	if task != nil {
+		t.Fatalf("currentTask should be cleared, got %#v", task)
+	}
+}
+
+func TestRecordActionCompletion_TacticalSourceSignalsOnly(t *testing.T) {
+	ac, _ := newAgentContext(context.Background())
+	_, _, _ = ac.observePerception(perceptionJSON("06:30", "main_workshop", "", "clear", nil))
+	_ = ac.takeDecision() // 消费首次感知决策
+
+	// 设置为战术来源的在途 action
+	ac.mu.Lock()
+	ac.currentActionID = "act_t1"
+	ac.currentActionSrc = sourceTactical
+	ac.mu.Unlock()
+
+	// 排空 wake 通道
+	select {
+	case <-ac.wake:
+	default:
+	}
+
+	queued := ac.recordActionCompletion(protocol.ActionCompletedPayload{
+		ActionID: "act_t1", Result: protocol.ResultSuccess, Progress: 1,
+	})
+	if !queued {
+		t.Fatal("tactical completion should return true (handled)")
+	}
+	// 不应入队 Hermes 决策
+	if work := ac.takeDecision(); work != nil {
+		t.Fatalf("tactical completion should not queue Hermes decision: %#v", work)
+	}
+	// 应 signal worker（wake 通道有值）
+	select {
+	case <-ac.wake:
+		// good
+	default:
+		t.Fatal("tactical completion should signal worker via wake channel")
+	}
+	// currentActionSrc 应已清空
+	ac.mu.Lock()
+	src := ac.currentActionSrc
+	ac.mu.Unlock()
+	if src != "" {
+		t.Fatalf("currentActionSrc should be cleared, got %q", src)
+	}
+}
+
+func TestRecordActionCompletion_HermesSourceQueuesDecision(t *testing.T) {
+	ac, _ := newAgentContext(context.Background())
+	_, _, _ = ac.observePerception(perceptionJSON("06:30", "main_workshop", "", "clear", nil))
+
+	// 设置为 Hermes 来源的在途 action
+	ac.mu.Lock()
+	ac.currentActionID = "act_h1"
+	ac.currentActionSrc = sourceHermes
+	ac.mu.Unlock()
+
+	queued := ac.recordActionCompletion(protocol.ActionCompletedPayload{
+		ActionID: "act_h1", Result: protocol.ResultSuccess, Progress: 1,
+	})
+	if !queued {
+		t.Fatal("hermes completion should queue a decision")
+	}
+	// 应入队 Hermes 决策
+	work := ac.takeDecision()
+	if work == nil {
+		t.Fatal("hermes completion should queue Hermes decision")
+	}
+	if !containsReason(work.reasons, "动作完成:act_h1") {
+		t.Errorf("work reasons missing completion: %v", work.reasons)
+	}
+}
+
+func TestRecordEventNotification_ClearsQueue(t *testing.T) {
+	ac, _ := newAgentContext(context.Background())
+	_, _, _ = ac.observePerception(perceptionJSON("06:30", "main_workshop", "", "clear", nil))
+
+	// 设置队列非空
+	setQueueForTest(ac, []plannedAction{
+		{Action: "move_to", Params: map[string]any{"target": "main_workshop"}},
+		{Action: "wait", Params: map[string]any{"duration_sec": 30}},
+	})
+	ac.mu.Lock()
+	ac.currentSlot = "08:00-12:00"
+	ac.redecomposeCount = 1
+	ac.mu.Unlock()
+
+	queued := ac.recordEventNotification(protocol.EventNotificationPayload{
+		EventID:         "evt_001",
+		PerceptionLevel: "audible",
+		Event:           map[string]any{"type": "alert"},
+	})
+	if !queued {
+		t.Fatal("event notification should queue a decision")
+	}
+	// 队列应被清空
+	ac.mu.Lock()
+	queueLen := len(ac.actionQueue)
+	slot := ac.currentSlot
+	count := ac.redecomposeCount
+	ac.mu.Unlock()
+	if queueLen != 0 {
+		t.Fatalf("queue should be cleared, got %d items", queueLen)
+	}
+	if slot != "" {
+		t.Errorf("currentSlot should be cleared, got %q", slot)
+	}
+	if count != 0 {
+		t.Errorf("redecomposeCount should be reset, got %d", count)
+	}
+}
+
+func TestClearQueueAndStopInFlight_NoInFlightNoStop(t *testing.T) {
+	ac, _ := newAgentContext(context.Background())
+	ws := wsserver.New(wsserver.Options{})
+	setQueueForTest(ac, []plannedAction{{Action: "wait", Params: map[string]any{"duration_sec": 30}}})
+
+	// 无在途 action
+	ac.clearQueueAndStopInFlight("H-01", ws, slog.Default())
+
+	ac.mu.Lock()
+	queueLen := len(ac.actionQueue)
+	ac.mu.Unlock()
+	if queueLen != 0 {
+		t.Fatalf("queue should be cleared, got %d items", queueLen)
+	}
+}
+
+func TestClearQueueAndStopInFlight_NoCrashWithDisconnectedWS(t *testing.T) {
+	ac, _ := newAgentContext(context.Background())
+	ws := wsserver.New(wsserver.Options{}) // 未连接
+	setQueueForTest(ac, []plannedAction{{Action: "wait", Params: map[string]any{"duration_sec": 30}}})
+
+	// 有在途战术 action 但 UE 未连接——不应崩溃，stop_action 被跳过
+	ac.mu.Lock()
+	ac.currentActionID = "act_t1"
+	ac.currentActionSrc = sourceTactical
+	ac.mu.Unlock()
+
+	ac.clearQueueAndStopInFlight("H-01", ws, slog.Default())
+
+	ac.mu.Lock()
+	queueLen := len(ac.actionQueue)
+	ac.mu.Unlock()
+	if queueLen != 0 {
+		t.Fatalf("queue should be cleared even with disconnected WS, got %d", queueLen)
+	}
+}
+
+func TestRecordActionStarted_SetsSource(t *testing.T) {
+	ac, _ := newAgentContext(context.Background())
+
+	ac.recordActionStarted("act_1", "MoveTo", map[string]any{"target": "main_workshop"}, 1, sourceTactical)
+	ac.mu.Lock()
+	src := ac.currentActionSrc
+	id := ac.currentActionID
+	ac.mu.Unlock()
+	if src != sourceTactical {
+		t.Fatalf("currentActionSrc=%q, want tactical", src)
+	}
+	if id != "act_1" {
+		t.Fatalf("currentActionID=%q, want act_1", id)
+	}
+
+	ac.recordActionStarted("act_2", "Wait", map[string]any{"duration_sec": 30}, 2, sourceHermes)
+	ac.mu.Lock()
+	src = ac.currentActionSrc
+	id = ac.currentActionID
+	ac.mu.Unlock()
+	if src != sourceHermes {
+		t.Fatalf("currentActionSrc=%q, want hermes", src)
+	}
+	if id != "act_2" {
+		t.Fatalf("currentActionID=%q, want act_2", id)
 	}
 }

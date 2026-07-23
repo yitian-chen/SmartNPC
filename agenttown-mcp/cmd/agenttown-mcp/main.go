@@ -152,8 +152,15 @@ func (a *agentContext) observePerception(payload json.RawMessage) ([]string, boo
 		}
 	}
 	replaced := a.pendingPerception != nil
-	if len(reasons) > 0 {
+	queueNonEmpty := len(a.actionQueue) > 0
+	if len(reasons) > 0 && !queueNonEmpty {
 		a.pendingReasons = mergeUnique(a.pendingReasons, reasons...)
+	}
+	if queueNonEmpty {
+		// 战术执行中：抑制感知触发的 Hermes 决策。latestPerception/observedSnapshot
+		// 已更新（供下次 refill 用），但不入队决策、不 signal。
+		a.mu.Unlock()
+		return nil, replaced, nil
 	}
 	shouldWake := len(a.pendingReasons) > 0
 	if shouldWake {
@@ -182,6 +189,11 @@ func (a *agentContext) updateState(report protocol.StateReportPayload) []string 
 	physical := report.PhysicalState
 	a.latestPhysical = &physical
 	a.currentTask = cloneTask(report.CurrentTaskProgress)
+	if len(a.actionQueue) > 0 {
+		// 战术执行中：抑制任务生命周期/物理警阈带触发（任务结束由 action_completed
+		// 负责）。物理状态已更新，下次 refill 的 prompt 会看到并自纠正。
+		reasons = nil
+	}
 	a.queueDecisionLocked(reasons, nil)
 	a.mu.Unlock()
 	if len(reasons) > 0 {
@@ -223,7 +235,16 @@ func (a *agentContext) recordActionCompletion(completion protocol.ActionComplete
 		timer.Stop()
 		delete(a.pendingActionTimeouts, completion.ActionID)
 	}
+	src := a.currentActionSrc
+	a.currentActionSrc = ""
 	a.mu.Unlock()
+
+	if src == sourceTactical {
+		// 队列驱动完成：不调 Hermes。signal worker——它 pop 下一个或 refill。
+		a.signal()
+		return true
+	}
+	// Hermes 驱动完成：原逻辑（入队 Hermes 决策）
 	return a.queueExternalEvent(reason, extra)
 }
 
@@ -234,6 +255,11 @@ func (a *agentContext) recordEventNotification(event protocol.EventNotificationP
 	reason := fmt.Sprintf("事件通知:%s", event.EventID)
 	a.mu.Lock()
 	a.summaryEnvironmentEvents = appendRolling(a.summaryEnvironmentEvents, truncateText(extra, 256), 8)
+	// 反应层打断：清空战术队列，让 worker 回退到 Hermes 决策。
+	// 停在途战术 action 由 worker 的 clearQueueAndStopInFlight 处理（拿到 work 后）。
+	a.actionQueue = nil
+	a.currentSlot = ""
+	a.redecomposeCount = 0
 	a.mu.Unlock()
 	return a.queueExternalEvent(reason, extra)
 }
@@ -861,6 +887,23 @@ func isReactiveWork(w *decisionWork) bool {
 		}
 	}
 	return false
+}
+
+// clearQueueAndStopInFlight 清空战术队列并对在途的战术 action 发 stop_action。
+// 由 worker 在拿到反应事件 work 后调用，避免在 recordEventNotification 里直接调 ws。
+func (a *agentContext) clearQueueAndStopInFlight(agentID string, ws *wsserver.Server, logger *slog.Logger) {
+	a.mu.Lock()
+	a.actionQueue = nil
+	a.currentSlot = ""
+	a.redecomposeCount = 0
+	inFlightID := a.currentActionID
+	isTactical := a.currentActionSrc == sourceTactical
+	a.mu.Unlock()
+	if inFlightID != "" && isTactical && ws.IsConnected() {
+		if err := ws.SendStopAction(agentID, inFlightID); err != nil {
+			logger.Debug("[战术层] 反应打断 stop_action 失败", "agent_id", agentID, "err", err)
+		}
+	}
 }
 
 // IncLLMFailures 累加连续 LLM 失败次数并返回累加后的值（约定 §5.3 安全模式）。
