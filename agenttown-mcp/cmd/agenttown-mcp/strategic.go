@@ -42,7 +42,7 @@ const hardcodedYesterdaySummary = "昨天在车间装配8小时，整理了零�
 // 任一步失败均返回 ""，不阻塞仿真。
 func generateDailyPlan(ctx context.Context, sc strategicCaller, agentID string, logger *slog.Logger) string {
 	prompt := fmt.Sprintf(strategicPromptTemplate, hardcodedYesterdaySummary)
-	logger.Info("[战略层] 开始生成每日计划", "agent_id", agentID)
+	logger.Info("[MCP→Hermes/STRATEGIC-PROMPT]", "agent_id", agentID, "text", prompt)
 
 	resp, err := sc.SendWithSummary(ctx, prompt, "")
 	if err != nil {
@@ -52,6 +52,9 @@ func generateDailyPlan(ctx context.Context, sc strategicCaller, agentID string, 
 	sc.ResetSession() // 战略调用一次性使用，立即清链
 
 	raw := resp.ExtractText()
+	logger.Info("[Hermes→MCP/STRATEGIC-RESPONSE]",
+		"agent_id", agentID, "tokens", resp.Usage.TotalTokens, "raw_len", len(raw), "raw", raw)
+
 	items, err := parseDailyPlan(raw)
 	if err != nil {
 		logger.Warn("[战略层] 计划解析失败", "agent_id", agentID, "raw", truncateText(raw, 200), "err", err)

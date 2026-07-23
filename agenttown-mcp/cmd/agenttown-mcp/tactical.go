@@ -151,7 +151,8 @@ func generateTacticalPlan(
 	logger *slog.Logger,
 ) ([]plannedAction, string, error) {
 	prompt := buildTacticalPrompt(goal, zone, timeOfDay, physical, kb)
-	logger.Info("[战术层] 开始分解任务", "agent_id", agentID, "goal", goal, "time", timeOfDay)
+	logger.Info("[MCP→Hermes/TACTICAL-PROMPT]",
+		"agent_id", agentID, "goal", goal, "time", timeOfDay, "text", prompt)
 
 	resp, err := tc.SendWithSummary(ctx, prompt, "")
 	if err != nil {
@@ -160,6 +161,9 @@ func generateTacticalPlan(
 	tc.ResetSession() // 战术调用一次性，立即清链（与战略层一致）
 
 	raw := resp.ExtractText()
+	logger.Info("[Hermes→MCP/TACTICAL-RESPONSE]",
+		"agent_id", agentID, "tokens", resp.Usage.TotalTokens, "raw_len", len(raw), "raw", raw)
+
 	plan, err := parseTacticalPlan(raw)
 	if err != nil {
 		return nil, "", fmt.Errorf("tactical parse: %w (raw=%s)", err, truncateText(raw, 200))
@@ -167,7 +171,10 @@ func generateTacticalPlan(
 	if len(plan.Actions) == 0 {
 		return nil, "", fmt.Errorf("tactical plan has no actions")
 	}
-	logger.Info("[战术层] 分解成功", "agent_id", agentID, "steps", len(plan.Actions), "thought", truncateText(plan.InnerThought, 80))
+	actionsJSON, _ := json.Marshal(plan.Actions)
+	logger.Info("[战术层] 分解成功",
+		"agent_id", agentID, "steps", len(plan.Actions),
+		"thought", plan.InnerThought, "actions", string(actionsJSON))
 	return plan.Actions, plan.InnerThought, nil
 }
 

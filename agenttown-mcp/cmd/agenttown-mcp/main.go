@@ -1069,14 +1069,23 @@ func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
 		return false
 	}
 	a.actionQueue = actions
-	if slot == a.currentSlot {
+	isRedecompose := slot == a.currentSlot
+	if isRedecompose {
 		a.redecomposeCount++
 	} else {
 		a.currentSlot = slot
 		a.currentPlanIndex = idx
 		a.redecomposeCount = 0
 	}
+	queueLen := len(a.actionQueue)
+	redecomposeCount := a.redecomposeCount
 	a.mu.Unlock()
+
+	actionsJSON, _ := json.Marshal(actions)
+	logger.Info("[战术层] 队列已填充",
+		"agent_id", agentID, "slot", slot, "queue_len", queueLen,
+		"redecompose", isRedecompose, "redecompose_count", redecomposeCount,
+		"actions", string(actionsJSON))
 
 	// 4. 推送独白（整个时段一次）
 	if thought != "" {
