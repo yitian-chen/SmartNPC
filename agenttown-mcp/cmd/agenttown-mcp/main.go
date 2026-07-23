@@ -861,21 +861,29 @@ func (a *agentContext) queueLen() int {
 // latestTimeOfDay 从 latestPerception 提取 "HH:MM" 游戏时间（mu 保护读取 perception）。
 func (a *agentContext) latestTimeOfDay() string {
 	a.mu.Lock()
-	raw := a.latestPerception
-	a.mu.Unlock()
-	return extractTimeOfDay(raw)
+	defer a.mu.Unlock()
+	return a.latestTimeOfDayLocked()
+}
+
+// latestTimeOfDayLocked 同 latestTimeOfDay 但假定调用方已持锁。
+func (a *agentContext) latestTimeOfDayLocked() string {
+	return extractTimeOfDay(a.latestPerception)
 }
 
 // latestZone 从 latestPerception 提取当前区域 id（mu 保护读取 perception）。
 func (a *agentContext) latestZone() string {
 	a.mu.Lock()
-	raw := a.latestPerception
-	a.mu.Unlock()
-	if len(raw) == 0 {
+	defer a.mu.Unlock()
+	return a.latestZoneLocked()
+}
+
+// latestZoneLocked 同 latestZone 但假定调用方已持锁。
+func (a *agentContext) latestZoneLocked() string {
+	if len(a.latestPerception) == 0 {
 		return ""
 	}
 	var p protocol.PerceptionPayload
-	if err := json.Unmarshal(raw, &p); err != nil {
+	if err := json.Unmarshal(a.latestPerception, &p); err != nil {
 		return ""
 	}
 	if p.Location.CurrentZone != nil {
@@ -922,6 +930,107 @@ func (a *agentContext) clearQueueAndStopInFlight(agentID string, ws *wsserver.Se
 			logger.Debug("[战术层] 反应打断 stop_action 失败", "agent_id", agentID, "err", err)
 		}
 	}
+}
+
+// popAndSendQueueAction 从队列 pop 一个 action，映射后直发 ws.SendAction。
+// 不经过 Hermes / MCP 工具 / guardedExecutor（无活跃 decision_epoch）。
+// 手动 recordActionStarted + armActionTimeout，source=tactical。
+func (a *agentContext) popAndSendQueueAction(ctx context.Context, agentID string,
+	ws *wsserver.Server, kb *worldkb.KB, logger *slog.Logger) {
+
+	a.mu.Lock()
+	if len(a.actionQueue) == 0 {
+		a.mu.Unlock()
+		return
+	}
+	pa := a.actionQueue[0]
+	a.actionQueue = a.actionQueue[1:]
+	a.mu.Unlock()
+
+	cmd, params, err := mapTacticalAction(pa, kb)
+	if err != nil {
+		logger.Warn("[战术层] action 映射失败，跳过", "agent_id", agentID, "action", pa.Action, "err", err)
+		// 跳过这一个，signal 让 worker 处理下一个（若队列空则触发 refill）
+		a.signal()
+		return
+	}
+
+	logger.Info("[战术层] 下发 action", "agent_id", agentID, "action", pa.Action, "cmd", cmd, "queue_left", a.queueLen())
+	ack, err := ws.SendAction(ctx, agentID, cmd, params)
+	if err != nil {
+		logger.Warn("[战术层] 下发失败，signal worker 处理", "agent_id", agentID, "err", err)
+		a.signal() // 让 worker 下一轮处理（可能 UE 断线或需 Hermes 重新决策）
+		return
+	}
+	if ack != nil {
+		// 复用现有记账 + 超时机制；source=tactical 让 completion 走队列路径
+		a.recordActionStarted(ack.ActionID, cmd, params, 0 /*无 decision_epoch*/, sourceTactical)
+		// lookup 返回 a 自身——超时回滚只需清当前 agent 状态
+		a.armActionTimeout(ack.ActionID, ack.EstimatedDurationSec, ws, agentID, func(string) *agentContext { return a })
+	}
+}
+
+// tacticalRefill 调战术层 LLM 分解当前时段 goal，填充队列，推送独白，下发第一步。
+// 成功返回 true；无 goal / LLM 失败 / 期间被反应事件抢占 返回 false。
+func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
+	ws *wsserver.Server, kb *worldkb.KB, logger *slog.Logger) bool {
+
+	// 1. 取当前时段 goal（持锁迫照）
+	a.mu.Lock()
+	if a.tacticalHc == nil {
+		a.mu.Unlock()
+		return false // tacticalHc 未初始化，回退 Hermes
+	}
+	goal, slot, idx := selectCurrentGoal(a.dailyPlan, a.latestTimeOfDayLocked())
+	if goal == "" {
+		a.mu.Unlock()
+		return false
+	}
+	// 同时段重复分解守卫
+	if slot == a.currentSlot && a.redecomposeCount >= 2 {
+		a.mu.Unlock()
+		return false // 调用方发 idle wait
+	}
+	zone := a.latestZoneLocked()
+	physical := clonePhysical(a.latestPhysical)
+	tacticalHc := a.tacticalHc
+	a.mu.Unlock()
+
+	// 2. 调战术层 LLM（不持锁）
+	actions, thought, err := generateTacticalPlan(ctx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), physical, logger)
+	if err != nil {
+		logger.Warn("[战术层] 分解失败，回退 Hermes", "agent_id", agentID, "err", err)
+		return false
+	}
+
+	// 3. 原子填充队列：若期间有反应事件入队（pendingPerception != nil）则放弃填充
+	a.mu.Lock()
+	if a.pendingPerception != nil {
+		// 期间到达了反应事件——让 worker 下一轮处理它（清队列→Hermes）
+		a.mu.Unlock()
+		logger.Info("[战术层] 分解期间收到反应事件，放弃填充", "agent_id", agentID)
+		return false
+	}
+	a.actionQueue = actions
+	if slot == a.currentSlot {
+		a.redecomposeCount++
+	} else {
+		a.currentSlot = slot
+		a.currentPlanIndex = idx
+		a.redecomposeCount = 0
+	}
+	a.mu.Unlock()
+
+	// 4. 推送独白（整个时段一次）
+	if thought != "" {
+		if err := ws.SendEnvelope(agentID, "narrative", map[string]any{"text": thought}); err != nil {
+			logger.Debug("[战术层] 独白推送失败", "agent_id", agentID, "err", err)
+		}
+	}
+
+	// 5. pop 第一个并下发
+	a.popAndSendQueueAction(ctx, agentID, ws, kb, logger)
+	return true
 }
 
 // IncLLMFailures 累加连续 LLM 失败次数并返回累加后的值（约定 §5.3 安全模式）。
