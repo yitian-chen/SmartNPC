@@ -375,10 +375,19 @@ start_mock_ue() {
 
     # Windows Python does not understand MSYS paths reliably when bash was
     # launched from PowerShell (it may turn /d/... into D:\d\...). Convert
-    # script/scenario paths explicitly before invoking it.
+    # script/scenario/log-dir paths explicitly before invoking it.
+    # --log-dir must be converted too: otherwise os.path.join("/d/SmartNPC_v3/...",
+    # "sim.log") resolves to D:\d\SmartNPC_v3\...\sim.log (note the extra "d\"),
+    # and run_day.py truncates a stale file at the wrong path while the actual
+    # sim.log (written by MCP via WSL) accumulates across runs.
     local script_arg="$MOCK_UE_SCRIPT"
     if command -v cygpath &>/dev/null; then
         script_arg="$(cygpath -w "$MOCK_UE_SCRIPT")"
+        local log_dir_win
+        log_dir_win="$(cygpath -w "$LOG_SUBDIR")"
+        for i in "${!args[@]}"; do
+            [ "${args[$i]}" = "$LOG_SUBDIR" ] && args[$i]="$log_dir_win"
+        done
         if [ -n "$MOCK_SCENARIO" ]; then
             local scenario_win
             scenario_win="$(cygpath -w "$MOCK_SCENARIO")"
