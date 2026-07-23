@@ -530,6 +530,11 @@ func physicalCrossingReasons(previous, current protocol.PhysicalState) []string 
 // runPerceptionWorker serially sends perceptions to Hermes. While one request
 // is in flight, enqueuePerception overwrites the pending slot, so after the
 // request completes the worker processes only the newest world state.
+//
+// 战术层改造后，worker 是一个队列驱动状态机：
+//   - 分支 A（work==nil，wake 来自战术 action 完成）：pop 队列或 tacticalRefill
+//   - 分支 B（work!=nil，有 pending 感知/事件）：反应事件→清队列+Hermes；
+//     队列有→丢弃过期感知+pop；队列空→tacticalRefill 或回退 Hermes
 func runPerceptionWorker(
 	ctx context.Context,
 	agentID string,
@@ -555,40 +560,63 @@ func runPerceptionWorker(
 		}
 
 		work := ac.takeDecision()
-		if work == nil {
-			continue
-		}
 
-		// UE 断线时跳过本轮 LLM 决策：否则 Hermes 在无 ACK 反馈下会持续
-		// 发起工具调用，每次工具结果都累积进上下文，单轮可飙到 500k+ token
+		// UE 断线时跳过本轮：否则 Hermes 在无 ACK 反馈下会持续发起工具调用，
+		// 每次工具结果都累积进上下文，单轮可飙到 500k+ token
 		//（实测 ep16：UE 断线 1.5 分钟，8 次工具调用，519k token）。
-		// 感知放回 pending，UE 重连后下个 wake 周期重新处理。
+		// 有 pending 感知时放回队列，无感知（战术完成 wake）时队列不动，等重连。
 		if !ws.IsConnected() {
-			ac.mu.Lock()
-			ac.pendingPerception = work.perception
-			ac.pendingReasons = work.reasons
-			ac.pendingScanFollowup = work.scanFollowup
-			ac.mu.Unlock()
-			logger.Warn("[UE 断线] 跳过本轮 LLM 决策，感知放回队列等重连",
-				"agent_id", agentID)
+			if work != nil {
+				ac.mu.Lock()
+				ac.pendingPerception = work.perception
+				ac.pendingReasons = work.reasons
+				ac.pendingScanFollowup = work.scanFollowup
+				ac.mu.Unlock()
+			}
+			logger.Warn("[UE 断线] 跳过本轮，等重连", "agent_id", agentID)
 			continue
 		}
 
 		// 安全模式检查（约定 §5.3）：连续 5 次 LLM 失败后进入安全模式，
-		// 不调 LLM，只发 idle wait，持续上报感知，等管理员介入重启 MCP。
+		// 不调 LLM（含战术层），只发 idle wait，等管理员介入重启 MCP。
 		if ac.IsInSafeMode() {
 			logger.Warn("[SafeMode] skipping LLM, sending idle wait", "agent_id", agentID)
-			if ws.IsConnected() {
-				// 发 idle wait 5 分钟（不调 LLM，避免持续失败循环）
-				if _, err := ws.SendAction(ctx, agentID, protocol.CmdWait, map[string]any{"duration_sec": 300}); err != nil {
-					logger.Debug("[SafeMode] idle wait send failed", "agent_id", agentID, "err", err)
-				}
+			if _, err := ws.SendAction(ctx, agentID, protocol.CmdWait, map[string]any{"duration_sec": 300}); err != nil {
+				logger.Debug("[SafeMode] idle wait send failed", "agent_id", agentID, "err", err)
 			}
-			// inSafeMode 保持 true，等管理员介入重启；llmFailures 已在 EnterSafeMode 清零
 			continue
 		}
 
-		runHermesDecision(ctx, agentID, ac, hc, ws, kb, logger, work)
+		switch {
+		// ─── 分支 A：无 pending 感知（wake 来自战术 action 完成）───
+		case work == nil:
+			if ac.hasQueueNext() {
+				// 队列还有下一个：pop 并直发
+				ac.popAndSendQueueAction(ctx, agentID, ws, kb, logger)
+			} else {
+				// 队列空：尝试战术 refill；无 goal 或失败则发短 wait 避免忙循环
+				if !ac.tacticalRefill(ctx, agentID, ws, kb, logger) {
+					ac.sendIdleWait(ctx, agentID, ws, logger)
+				}
+			}
+
+		// ─── 分支 B：有 pending 感知/事件 ───
+		default:
+			if isReactiveWork(work) || ac.dailyPlan == "" {
+				// 反应事件 / 无计划：清队列 + 停在途 + 走 Hermes 决策
+				ac.clearQueueAndStopInFlight(agentID, ws, logger)
+				runHermesDecision(ctx, agentID, ac, hc, ws, kb, logger, work)
+			} else if ac.hasQueueNext() {
+				// 战术执行期间堆积的过期感知（refill 期间到达）：丢弃，继续执行队列
+				logger.Debug("[战术层] 丢弃战术执行期间的过期感知", "agent_id", agentID, "reasons", work.reasons)
+				ac.popAndSendQueueAction(ctx, agentID, ws, kb, logger)
+			} else {
+				// 队列空 + 有计划 + 非反应：战术 refill；失败则回退 Hermes
+				if !ac.tacticalRefill(ctx, agentID, ws, kb, logger) {
+					runHermesDecision(ctx, agentID, ac, hc, ws, kb, logger, work)
+				}
+			}
+		}
 	}
 }
 
