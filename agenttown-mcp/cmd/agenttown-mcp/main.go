@@ -1190,6 +1190,12 @@ func main() {
 			Model:  *hermesModel,
 			Logger: logger,
 		})
+		ac.tacticalHc = hermes.New(hermes.Config{
+			URL:    *hermesURL,
+			APIKey: *hermesAPIKey,
+			Model:  *hermesModel,
+			Logger: logger,
+		})
 		agents[id] = ac
 		go runPerceptionWorker(workerCtx, id, ac, hc, ws, kb, logger)
 		return ac, true
