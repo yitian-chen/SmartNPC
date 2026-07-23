@@ -117,6 +117,52 @@ func TestResolveTarget_Unknown(t *testing.T) {
 	}
 }
 
+func TestListZones(t *testing.T) {
+	kb, _ := Load(sampleYAMLPath(t))
+	zones := kb.ListZones()
+	if len(zones) == 0 {
+		t.Fatal("ListZones returned empty for non-empty KB")
+	}
+	// Should contain main_workshop with its Chinese name.
+	found := false
+	for _, z := range zones {
+		if z.ID == "main_workshop" {
+			if z.Name == "" {
+				t.Errorf("main_workshop has empty Name")
+			}
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("ListZones missing main_workshop; got %v", zones)
+	}
+}
+
+func TestListLocations(t *testing.T) {
+	kb, _ := Load(sampleYAMLPath(t))
+	locs := kb.ListLocations()
+	if len(locs) == 0 {
+		t.Fatal("ListLocations returned empty for non-empty KB")
+	}
+	found := false
+	for _, l := range locs {
+		if l.ID == "workbench_01" {
+			if l.Name == "" {
+				t.Errorf("workbench_01 has empty Name")
+			}
+			if l.Zone == "" {
+				t.Errorf("workbench_01 has empty Zone")
+			}
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("ListLocations missing workbench_01; got %v", locs)
+	}
+}
+
 func TestGetAvailableActions(t *testing.T) {
 	kb, _ := Load(sampleYAMLPath(t))
 	acts := kb.GetAvailableActions("workbench_01")
@@ -165,5 +211,11 @@ func TestNilKB_AllMethodsSafe(t *testing.T) {
 	}
 	if _, _, err := kb.ResolveTarget("x"); err == nil {
 		t.Error("nil ResolveTarget should error")
+	}
+	if zones := kb.ListZones(); zones != nil {
+		t.Errorf("nil ListZones should return nil, got %v", zones)
+	}
+	if locs := kb.ListLocations(); locs != nil {
+		t.Errorf("nil ListLocations should return nil, got %v", locs)
 	}
 }

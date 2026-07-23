@@ -62,6 +62,34 @@ func FormatPayload(p *protocol.PerceptionPayload, physical *protocol.PhysicalSta
 	lines = append(lines, fmt.Sprintf("[感知] %s，时间%s。", period, timeOfDay))
 	lines = append(lines, fmt.Sprintf("你在%s。", zone))
 
+	// Known zones/locations — inject the full list so the LLM knows which
+	// destinations are valid for move_to. Without this the agent only sees
+	// the current zone and invents non-existent targets like "warehouse".
+	if kb != nil {
+		if zs := kb.ListZones(); len(zs) > 0 {
+			parts := make([]string, 0, len(zs))
+			for _, z := range zs {
+				if z.Name != "" && z.Name != z.ID {
+					parts = append(parts, fmt.Sprintf("%s(%s)", z.Name, z.ID))
+				} else {
+					parts = append(parts, z.ID)
+				}
+			}
+			lines = append(lines, "可前往区域: "+strings.Join(parts, "、")+"。")
+		}
+		if ls := kb.ListLocations(); len(ls) > 0 {
+			parts := make([]string, 0, len(ls))
+			for _, l := range ls {
+				if l.Name != "" && l.Name != l.ID {
+					parts = append(parts, fmt.Sprintf("%s(%s)", l.Name, l.ID))
+				} else {
+					parts = append(parts, l.ID)
+				}
+			}
+			lines = append(lines, "可前往地点: "+strings.Join(parts, "、")+"。")
+		}
+	}
+
 	// Physical state (from state_report authoritative channel).
 	if physical != nil {
 		lines = append(lines, fmt.Sprintf("电池%.0f%%，疲劳%.0f，关节磨损%.0f，健康%.0f。",

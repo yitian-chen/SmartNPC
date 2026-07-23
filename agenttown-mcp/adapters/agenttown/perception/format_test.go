@@ -73,6 +73,46 @@ func TestFormatPayload_KBZoneChinese(t *testing.T) {
 	}
 }
 
+func TestFormatPayload_KBZoneListInjection(t *testing.T) {
+	kb := sampleKB(t)
+	p := &protocol.PerceptionPayload{
+		Location:    protocol.Location{CurrentZone: strptr("main_workshop")},
+		Environment: protocol.Environment{TimeOfDay: "08:15"},
+	}
+	got := FormatPayload(p, nil, nil, kb)
+	// Should list all zones with Chinese name + ID.
+	if !strings.Contains(got, "可前往区域:") {
+		t.Errorf("missing 可前往区域 line; got:\n%s", got)
+	}
+	if !strings.Contains(got, "主生产车间(main_workshop)") {
+		t.Errorf("missing main_workshop in zone list; got:\n%s", got)
+	}
+	if !strings.Contains(got, "休息厅(rest_area)") {
+		t.Errorf("missing rest_area in zone list; got:\n%s", got)
+	}
+	// Should list all locations with Chinese name + ID.
+	if !strings.Contains(got, "可前往地点:") {
+		t.Errorf("missing 可前往地点 line; got:\n%s", got)
+	}
+	if !strings.Contains(got, "工作台一号(workbench_01)") {
+		t.Errorf("missing workbench_01 in location list; got:\n%s", got)
+	}
+}
+
+func TestFormatPayload_KBListSuppressedWhenNil(t *testing.T) {
+	p := &protocol.PerceptionPayload{
+		Location:    protocol.Location{CurrentZone: strptr("main_workshop")},
+		Environment: protocol.Environment{TimeOfDay: "08:15"},
+	}
+	got := FormatPayload(p, nil, nil, nil)
+	if strings.Contains(got, "可前往区域:") {
+		t.Errorf("zone list should not appear with nil KB; got:\n%s", got)
+	}
+	if strings.Contains(got, "可前往地点:") {
+		t.Errorf("location list should not appear with nil KB; got:\n%s", got)
+	}
+}
+
 func TestFormatPayload_KBObjectFallback(t *testing.T) {
 	kb := sampleKB(t)
 	// UE pushes only the object ID, no Name. KB should fill in "工作台一号".

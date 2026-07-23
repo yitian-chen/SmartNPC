@@ -130,3 +130,44 @@ func (k *KB) ResolveTarget(desc string) (id string, kind string, err error) {
 	}
 	return "", "", fmt.Errorf("no entity matches %q", desc)
 }
+
+// ZoneInfo is a compact zone summary for prompt injection.
+type ZoneInfo struct {
+	ID   string
+	Name string
+}
+
+// LocationInfo is a compact location summary for prompt injection.
+type LocationInfo struct {
+	ID   string
+	Name string
+	Zone string
+}
+
+// ListZones returns all zones in declaration order. Returns nil if the KB
+// is nil or empty. Used by the perception formatter to inject the full
+// zone list into the LLM prompt so the agent knows which zones exist.
+func (k *KB) ListZones() []ZoneInfo {
+	if k == nil {
+		return nil
+	}
+	out := make([]ZoneInfo, 0, len(k.Zones))
+	for _, z := range k.Zones {
+		out = append(out, ZoneInfo{ID: z.ID, Name: z.Name})
+	}
+	return out
+}
+
+// ListLocations returns all locations in declaration order. Returns nil if
+// the KB is nil or empty. Used by the perception formatter to inject the
+// full location list (with parent zone) into the LLM prompt.
+func (k *KB) ListLocations() []LocationInfo {
+	if k == nil {
+		return nil
+	}
+	out := make([]LocationInfo, 0, len(k.Locations))
+	for _, l := range k.Locations {
+		out = append(out, LocationInfo{ID: l.ID, Name: l.Name, Zone: l.Zone})
+	}
+	return out
+}
