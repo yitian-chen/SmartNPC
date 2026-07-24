@@ -152,7 +152,7 @@ func generateTacticalPlan(
 ) ([]plannedAction, string, error) {
 	prompt := buildTacticalPrompt(goal, zone, timeOfDay, physical, kb)
 	logger.Info("[MCP→Hermes/TACTICAL-PROMPT]",
-		"agent_id", agentID, "goal", goal, "time", timeOfDay, "text", prompt)
+		"agent_id", agentID, "goal", goal, "game_time", timeOfDay, "text", prompt)
 
 	resp, err := tc.SendWithSummary(ctx, prompt, "")
 	if err != nil {
