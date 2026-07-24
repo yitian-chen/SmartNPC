@@ -25,28 +25,14 @@ import (
 // Executor is the interface tools use to send an action_command and await
 // the ACK. The concrete implementation wraps *wsserver.Server; tests can
 // substitute a fake.
+//
+// 反应层移除后，scan_area/stop 工具的 handler 直接返回 error，不再需要
+// RequestScan / LookupCurrentActionID / ClearCurrentActionID / SendStopAction。
+// 接口仅保留 SendAction（13 个原子/组合工具仍用）。
 type Executor interface {
 	// SendAction sends an action_command (cmd + params) for the given agent
 	// and waits for the action_started ACK. Returns the ACK.
 	SendAction(ctx context.Context, agentID string, decisionEpoch int64, cmd string, params map[string]any) (*protocol.ActionStartedPayload, error)
-
-	// RequestScan asks Mock UE to emit an immediate perception_update for
-	// the given agent (backs the scan_area tool). Returns after the request
-	// is sent.
-	RequestScan(ctx context.Context, agentID string, decisionEpoch int64) error
-
-	// LookupCurrentActionID returns the action_id currently executing for
-	// the agent (empty if none). Used by the stop tool for stop_action ID
-	// matching (约定9).
-	LookupCurrentActionID(agentID string) string
-
-	// ClearCurrentActionID clears the local tracking of the current action
-	// (called after sending stop_action).
-	ClearCurrentActionID(agentID string)
-
-	// SendStopAction sends a stop_action control message to UE for the
-	// given action_id (约定9). Fire-and-forget — no ACK expected.
-	SendStopAction(ctx context.Context, agentID, actionID string) error
 }
 
 // RegisterAll installs all AgentTown tools onto the given mcp.Server.
