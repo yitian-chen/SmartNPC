@@ -43,7 +43,7 @@ sequenceDiagram
     participant H as Hermes Gateway
     participant Tools as MCP Tools
 
-    Note over UE: 感知循环 (每30游戏分钟)
+    Note over UE: 感知循环 (每 N 游戏分钟，按模式配置)
     UE->>WS: perception_update {location, physical_delta, nearby_objects...}
     WS->>Fmt: 原始 payload → 第一人称叙事
     Fmt->>HC: 格式化文本
@@ -199,7 +199,7 @@ type Envelope struct {
 
 | type | 方向 | 用途 | 触发时机 |
 |------|------|------|----------|
-| `perception_update` | UE→Agent | 空间+环境感知（物理仅带变化项） | 每 30 游戏分钟 / zone 变化 |
+| `perception_update` | UE→Agent | 空间+环境感知（物理仅带变化项） | 每 N 游戏分钟（normal=60, behavior=15, quick-smoke=30）/ zone 变化 |
 | `action_command` | Agent→UE | 下发动作指令 | 工具调用 / LLM 决策 |
 | `action_started` | UE→Agent | 动作已接收的 ACK（≤2s） | UE 收到 action_command 后 |
 | `action_completed` | UE→Agent | 动作完成回调 | 动作执行完毕 |
