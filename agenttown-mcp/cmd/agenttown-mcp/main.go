@@ -482,6 +482,14 @@ func (a *agentContext) popAndSendQueueAction(ctx context.Context, agentID string
 	}
 }
 
+// tacticalStreamingEnabled controls whether tacticalRefill uses streaming LLM
+// calls (generateTacticalPlanStreaming) or non-streaming (generateTacticalPlan).
+// Set from --tactical-stream flag. Default false: streaming only helps when the
+// upstream LLM emits tokens incrementally; if it buffers the full response
+// (DeepSeek peak-hour queueing behavior), streaming adds SSE overhead with no
+// latency benefit.
+var tacticalStreamingEnabled bool
+
 // tacticalRefill 调战术层 LLM 流式分解当前时段 goal，边接收边入队，
 // 首 action 在流式期间即提前下发以降低体感延迟。成功返回 true。
 func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
@@ -520,36 +528,45 @@ func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
 	physical := clonePhysical(a.latestPhysical)
 	tacticalHc := a.tacticalHc
 	kbRef := kb
-	// worker 仅在 hasQueueNext=false 时调用 tacticalRefill，队列此时为空。
-	// 显式置 nil 以防边界竞态，流式 onAction 回调会逐个 append。
 	a.actionQueue = nil
 	a.mu.Unlock()
 
-	// 2. 流式调战术层 LLM（不持锁）。onAction 回调：逐个入队 + 首 action 提前下发。
-	// 回调在 SendStreaming 的 onDelta 调用栈里同步执行（worker 仍阻塞在 tacticalRefill），
-	// 不跨回调持有 mu。
-	_, thought, err := generateTacticalPlanStreaming(ctx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), physical, kbRef, logger,
-		func(pa plannedAction) {
-			a.mu.Lock()
-			a.actionQueue = append(a.actionQueue, pa)
-			// 首 action 且无在途 action 时立即下发，降低体感延迟。
-			shouldDispatch := a.currentActionID == "" && len(a.actionQueue) == 1
-			a.mu.Unlock()
-			if shouldDispatch {
-				logger.Info("[战术层] 流式下发首 action", "agent_id", agentID, "action", pa.Action)
-				a.popAndSendQueueAction(ctx, agentID, ws, kb, logger)
-			}
-		},
-	)
+	var actions []plannedAction
+	var thought string
+	var err error
 
-	// 3. 流结束后的记账
+	if tacticalStreamingEnabled {
+		// 流式路径：onAction 回调逐个入队 + 首 action 提前下发。
+		// 回调在 SendStreaming 的 onDelta 调用栈里同步执行（worker 仍阻塞在 tacticalRefill），
+		// 不跨回调持有 mu。
+		_, thought, err = generateTacticalPlanStreaming(ctx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), physical, kbRef, logger,
+			func(pa plannedAction) {
+				a.mu.Lock()
+				a.actionQueue = append(a.actionQueue, pa)
+				shouldDispatch := a.currentActionID == "" && len(a.actionQueue) == 1
+				a.mu.Unlock()
+				if shouldDispatch {
+					logger.Info("[战术层] 流式下发首 action", "agent_id", agentID, "action", pa.Action)
+					a.popAndSendQueueAction(ctx, agentID, ws, kb, logger)
+				}
+			},
+		)
+	} else {
+		// 非流式路径（默认）：等完整响应后一次性填充队列。
+		actions, thought, err = generateTacticalPlan(ctx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), physical, kbRef, logger)
+		if err == nil {
+			a.mu.Lock()
+			a.actionQueue = actions
+			a.mu.Unlock()
+		}
+	}
+
+	// 3. LLM 调用结束后的记账（流式/非流式共用）
 	a.mu.Lock()
 	if err != nil {
-		// 流式失败：保留已入队 action（已在途的首 action 正常执行），不更新
-		// slot/redecomposeCount（让下一轮可重试）。
 		queued := len(a.actionQueue)
 		a.mu.Unlock()
-		logger.Warn("[战术层] 流式分解失败，保留已入队 action",
+		logger.Warn("[战术层] 分解失败，保留已入队 action",
 			"agent_id", agentID, "queued", queued, "err", err)
 		return false
 	}
@@ -579,8 +596,8 @@ func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
 		}
 	}
 
-	// 5. 补发：若流期间未成功 dispatch 首 action（如 send 失败被 signal 掉），
-	// 且队列仍有待执行 action 且无在途 action，在此补发。
+	// 5. 补发：非流式路径总有首 action 要 pop；流式路径若首 action 已在回调中
+	// 下发则此处 no-op（队列空或在途 action 占用）。
 	a.mu.Lock()
 	needFallback := a.currentActionID == "" && len(a.actionQueue) > 0
 	a.mu.Unlock()
@@ -605,6 +622,8 @@ func main() {
 		httpAllowAnyOrigin = flag.Bool("http-allow-any-origin", true,
 			"disable origin / localhost restrictions so cross-host clients can connect")
 		worldKBPath = flag.String("world-kb", "assets/world_kb.yaml", "path to world_kb.yaml (required, fail-fast on error)")
+		tacticalStream = flag.Bool("tactical-stream", false,
+			"enable streaming for tactical layer LLM calls (experimental: only helps if upstream LLM emits tokens incrementally)")
 	)
 	flag.Parse()
 	if *showVersion {
@@ -614,11 +633,13 @@ func main() {
 
 	logger := log.New(*logLevel)
 	slog.SetDefault(logger)
+	tacticalStreamingEnabled = *tacticalStream
 	logger.Info("starting agenttown-mcp",
 		"version", version,
 		"http", *httpAddr,
 		"ws", *wsAddr,
 		"hermes_url", *hermesURL,
+		"tactical_stream", tacticalStreamingEnabled,
 	)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
