@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"strings"
 
+	"github.com/AgentTown/agenttown-mcp/pkg/hermes"
 	"github.com/AgentTown/agenttown-mcp/pkg/protocol"
 	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
 )
@@ -17,10 +18,11 @@ type plannedAction struct {
 	Params map[string]any `json:"params"` // 工具参数（LLM 原样输出，duration_min 等未换算）
 }
 
-// tacticalPlan 是战术层 LLM 的完整输出。
-type tacticalPlan struct {
-	InnerThought string          `json:"inner_thought"`
-	Actions      []plannedAction `json:"actions"`
+// ndjsonLine 是战术层 NDJSON 输出的单行判别联合体：要么是 inner_thought，要么是一个 action。
+type ndjsonLine struct {
+	InnerThought string         `json:"inner_thought,omitempty"`
+	Action       string         `json:"action,omitempty"`
+	Params       map[string]any `json:"params,omitempty"`
 }
 
 // actionSource 标识一个在途 action 由哪一层下发，决定 completion 后的路由。
@@ -71,13 +73,16 @@ const tacticalPromptTemplate = `[战术层/任务分解] 当前时段目标：%s
 - archive_research: 档案研究。params: {"duration_min":分钟}
 
 要求：
-1. 只输出 JSON：{"inner_thought":"一句话内心独白","actions":[{"action":"工具名","params":{...}},...]}
-2. 3-5 步，每步一个 action，按执行顺序排列
+1. 第一行输出 {"inner_thought":"一句话内心独白"}
+2. 后续每行输出一个 {"action":"工具名","params":{...}}，3-5 步，按执行顺序排列
 3. 第一步通常是 move_to 到目标区域
 4. move_to 的 target、interact 的 object_id、work_assemble 的 target 必须从上面的可用列表中选取，禁止编造
-5. 不要输出任何其他文字
+5. 每行一个 JSON 对象，不要输出 JSON 数组，不要输出 markdown 围栏，不要输出任何其他文字
 
-示例：{"inner_thought":"先去车间再开始装配","actions":[{"action":"move_to","params":{"target":"main_workshop"}},{"action":"work_assemble","params":{"target":"workbench_01","duration_min":240}}]}`
+示例：
+{"inner_thought":"先去车间再开始装配"}
+{"action":"move_to","params":{"target":"main_workshop"}}
+{"action":"work_assemble","params":{"target":"workbench_01","duration_min":240}}`
 
 // buildTacticalPrompt 填充战术层 prompt 模板。kb 用于注入可用 zone/location/object
 // 列表，避免 LLM 编造不存在的 ID（如 workbench_02、archives）。
@@ -137,7 +142,7 @@ func buildKBContext(kb *worldkb.KB) string {
 	return strings.Join(lines, "\n") + "\n"
 }
 
-// generateTacticalPlan 调战术层 LLM 分解当前时段 goal。
+// generateTacticalPlan 调战术层 LLM 分解当前时段 goal（非流式路径）。
 // 返回分解出的 action 列表 + inner_thought（作为整个时段独白）。
 // 任一步失败返回 err，调用方决定回退到 Hermes。
 // 复用 strategicCaller 接口（hermes.Client 已满足）。
@@ -164,25 +169,80 @@ func generateTacticalPlan(
 	logger.Info("[Hermes→MCP/TACTICAL-RESPONSE]",
 		"agent_id", agentID, "tokens", resp.Usage.TotalTokens, "raw_len", len(raw), "raw", raw)
 
-	plan, err := parseTacticalPlan(raw)
+	actions, thought, err := parseTacticalNDJSON(raw)
 	if err != nil {
 		return nil, "", fmt.Errorf("tactical parse: %w (raw=%s)", err, truncateText(raw, 200))
 	}
-	if len(plan.Actions) == 0 {
-		return nil, "", fmt.Errorf("tactical plan has no actions")
+	if len(actions) == 0 {
+		return nil, "", fmt.Errorf("tactical plan has no actions (raw=%s)", truncateText(raw, 200))
 	}
-	actionsJSON, _ := json.Marshal(plan.Actions)
+	actionsJSON, _ := json.Marshal(actions)
 	logger.Info("[战术层] 分解成功",
-		"agent_id", agentID, "steps", len(plan.Actions),
-		"thought", plan.InnerThought, "actions", string(actionsJSON))
-	return plan.Actions, plan.InnerThought, nil
+		"agent_id", agentID, "steps", len(actions),
+		"thought", thought, "actions", string(actionsJSON))
+	return actions, thought, nil
 }
 
-// parseTacticalPlan 从 LLM 原始输出解析 {inner_thought, actions:[...]}。
-// 容错：剥 ```json 围栏 → 提取首个 {..} 子串 → unmarshal → 过滤非法工具。
-func parseTacticalPlan(raw string) (*tacticalPlan, error) {
+// generateTacticalPlanStreaming 是 generateTacticalPlan 的流式版本：
+// 调 hermes.Client.SendStreaming 边接收边增量解析 NDJSON，每解析出一个
+// action 即调 onAction 回调，使调用方能在首 action 到达时立即下发，
+// 将首动作体感延迟从 ~14s 降至 ~2-3s。
+//
+// 直接用 *hermes.Client（不走 strategicCaller 窄接口），因为需要 SendStreaming。
+func generateTacticalPlanStreaming(
+	ctx context.Context,
+	tc *hermes.Client,
+	agentID, goal, zone, timeOfDay string,
+	physical *protocol.PhysicalState,
+	kb *worldkb.KB,
+	logger *slog.Logger,
+	onAction func(plannedAction),
+) ([]plannedAction, string, error) {
+	prompt := buildTacticalPrompt(goal, zone, timeOfDay, physical, kb)
+	logger.Info("[MCP→Hermes/TACTICAL-PROMPT]",
+		"agent_id", agentID, "goal", goal, "game_time", timeOfDay, "text", prompt, "streaming", true)
+
+	var actions []plannedAction
+	acc := &streamAccumulator{
+		onComplete: func(pa plannedAction) {
+			actions = append(actions, pa)
+			if onAction != nil {
+				onAction(pa)
+			}
+		},
+	}
+
+	resp, err := tc.SendStreaming(ctx, prompt, func(delta string) {
+		acc.feed(delta)
+	})
+	if err != nil {
+		logger.Warn("[Hermes→MCP/TACTICAL-STREAM] stream error, keeping actions already parsed",
+			"agent_id", agentID, "parsed_actions", len(actions), "err", err)
+		return actions, acc.thought, fmt.Errorf("tactical llm stream: %w", err)
+	}
+	acc.flush()
+	tc.ResetSession()
+
+	raw := resp.ExtractText()
+	logger.Info("[Hermes→MCP/TACTICAL-RESPONSE]",
+		"agent_id", agentID, "tokens", resp.Usage.TotalTokens, "raw_len", len(raw), "raw", raw, "streaming", true)
+
+	if len(actions) == 0 {
+		return nil, "", fmt.Errorf("tactical plan has no actions (raw=%s)", truncateText(raw, 200))
+	}
+	actionsJSON, _ := json.Marshal(actions)
+	logger.Info("[战术层] 分解成功",
+		"agent_id", agentID, "steps", len(actions),
+		"thought", acc.thought, "actions", string(actionsJSON))
+	return actions, acc.thought, nil
+}
+
+// parseTacticalNDJSON 从 LLM 的 NDJSON 输出解析 action 列表 + inner_thought。
+// 容错：剥 ```json 围栏 → 按行解析 → 跳过空行/parse 失败行 → 过滤非法工具。
+// 返回的 actions 已经过 filterValidActions。
+func parseTacticalNDJSON(raw string) ([]plannedAction, string, error) {
 	s := strings.TrimSpace(raw)
-	// 剥 markdown 围栏（与 parseDailyPlan 同款逻辑）
+	// 剥 markdown 围栏（LLM 可能仍加，即使 prompt 禁止）
 	if strings.HasPrefix(s, "```json") {
 		s = strings.TrimPrefix(s, "```json")
 		s = strings.TrimSuffix(s, "```")
@@ -192,17 +252,95 @@ func parseTacticalPlan(raw string) (*tacticalPlan, error) {
 		s = strings.TrimSuffix(s, "```")
 		s = strings.TrimSpace(s)
 	}
-	start := strings.Index(s, "{")
-	end := strings.LastIndex(s, "}")
-	if start < 0 || end < 0 || end <= start {
-		return nil, fmt.Errorf("no JSON object found")
+
+	var actions []plannedAction
+	var thought string
+	for _, line := range strings.Split(s, "\n") {
+		pa, th, isAction, ok := parseTacticalNDJSONLine(line)
+		if !ok {
+			continue
+		}
+		if isAction {
+			actions = append(actions, pa)
+		} else {
+			thought = th
+		}
 	}
-	var p tacticalPlan
-	if err := json.Unmarshal([]byte(s[start:end+1]), &p); err != nil {
-		return nil, fmt.Errorf("unmarshal: %w", err)
+	actions = filterValidActions(actions)
+	return actions, thought, nil
+}
+
+// parseTacticalNDJSONLine 解析单行 NDJSON。返回 (action, thought, isAction, ok)。
+// ok=false 表示空行或 parse 失败（调用方跳过）。isAction=true 表示该行是 action；
+// isAction=false 且 ok=true 表示该行是 inner_thought。
+func parseTacticalNDJSONLine(line string) (pa plannedAction, thought string, isAction bool, ok bool) {
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return plannedAction{}, "", false, false
 	}
-	p.Actions = filterValidActions(p.Actions)
-	return &p, nil
+	var nl ndjsonLine
+	if err := json.Unmarshal([]byte(line), &nl); err != nil {
+		return plannedAction{}, "", false, false
+	}
+	if nl.Action != "" {
+		return plannedAction{Action: nl.Action, Params: nl.Params}, "", true, true
+	}
+	if nl.InnerThought != "" {
+		return plannedAction{}, nl.InnerThought, false, true
+	}
+	return plannedAction{}, "", false, false
+}
+
+// streamAccumulator 是流式回调的增量 NDJSON 解析器。
+// feed(delta) 追加 delta 到内部 buffer，按 \n 分割出完整行并即时解析；
+// 最后一行（可能不完整）保留在 buffer 等下次 feed 补全。
+// flush() 在流结束后调用，处理 buffer 中的残余内容。
+type streamAccumulator struct {
+	buf        strings.Builder
+	onComplete func(plannedAction) // 每完整解析出一个合法 action 调一次
+	thought    string
+}
+
+// feed 追加一段 delta 文本并处理所有已完成的行（以 \n 结尾）。
+func (a *streamAccumulator) feed(delta string) {
+	a.buf.WriteString(delta)
+	content := a.buf.String()
+	lines := strings.Split(content, "\n")
+	// 除最后一行外都是完整行（以 \n 结尾）。
+	for _, line := range lines[:len(lines)-1] {
+		a.processLine(line)
+	}
+	// 最后一行可能不完整，留在 buffer 等下次 feed。
+	a.buf.Reset()
+	a.buf.WriteString(lines[len(lines)-1])
+}
+
+// flush 在流结束后调用，处理 buffer 中残余的最后一行。
+func (a *streamAccumulator) flush() {
+	remaining := strings.TrimSpace(a.buf.String())
+	a.buf.Reset()
+	if remaining == "" {
+		return
+	}
+	a.processLine(remaining)
+}
+
+// processLine 解析单行：合法 action 调 onComplete，inner_thought 存入 thought。
+func (a *streamAccumulator) processLine(line string) {
+	pa, thought, isAction, ok := parseTacticalNDJSONLine(line)
+	if !ok {
+		return
+	}
+	if isAction {
+		if !tacticalValidActions[pa.Action] {
+			return // 过滤非法工具（与 parseTacticalNDJSON 一致）
+		}
+		if a.onComplete != nil {
+			a.onComplete(pa)
+		}
+	} else {
+		a.thought = thought
+	}
 }
 
 // filterValidActions 过滤掉 scan_area/stop/未知工具，保留可排队工具。

@@ -482,12 +482,12 @@ func (a *agentContext) popAndSendQueueAction(ctx context.Context, agentID string
 	}
 }
 
-// tacticalRefill 调战术层 LLM 分解当前时段 goal，填充队列，推送独白，下发第一步。
-// 成功返回 true；无 goal / LLM 失败 返回 false。
+// tacticalRefill 调战术层 LLM 流式分解当前时段 goal，边接收边入队，
+// 首 action 在流式期间即提前下发以降低体感延迟。成功返回 true。
 func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
 	ws *wsserver.Server, kb *worldkb.KB, logger *slog.Logger) bool {
 
-	// 1. 取当前时段 goal（持锁迫照）
+	// 1. 取当前时段 goal（持锁）
 	a.mu.Lock()
 	if a.tacticalHc == nil {
 		a.mu.Unlock()
@@ -520,20 +520,39 @@ func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
 	physical := clonePhysical(a.latestPhysical)
 	tacticalHc := a.tacticalHc
 	kbRef := kb
+	// worker 仅在 hasQueueNext=false 时调用 tacticalRefill，队列此时为空。
+	// 显式置 nil 以防边界竞态，流式 onAction 回调会逐个 append。
+	a.actionQueue = nil
 	a.mu.Unlock()
 
-	// 2. 调战术层 LLM（不持锁）
-	actions, thought, err := generateTacticalPlan(ctx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), physical, kbRef, logger)
+	// 2. 流式调战术层 LLM（不持锁）。onAction 回调：逐个入队 + 首 action 提前下发。
+	// 回调在 SendStreaming 的 onDelta 调用栈里同步执行（worker 仍阻塞在 tacticalRefill），
+	// 不跨回调持有 mu。
+	_, thought, err := generateTacticalPlanStreaming(ctx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), physical, kbRef, logger,
+		func(pa plannedAction) {
+			a.mu.Lock()
+			a.actionQueue = append(a.actionQueue, pa)
+			// 首 action 且无在途 action 时立即下发，降低体感延迟。
+			shouldDispatch := a.currentActionID == "" && len(a.actionQueue) == 1
+			a.mu.Unlock()
+			if shouldDispatch {
+				logger.Info("[战术层] 流式下发首 action", "agent_id", agentID, "action", pa.Action)
+				a.popAndSendQueueAction(ctx, agentID, ws, kb, logger)
+			}
+		},
+	)
+
+	// 3. 流结束后的记账
+	a.mu.Lock()
 	if err != nil {
-		logger.Warn("[战术层] 分解失败，调用方发 idle wait", "agent_id", agentID, "err", err)
+		// 流式失败：保留已入队 action（已在途的首 action 正常执行），不更新
+		// slot/redecomposeCount（让下一轮可重试）。
+		queued := len(a.actionQueue)
+		a.mu.Unlock()
+		logger.Warn("[战术层] 流式分解失败，保留已入队 action",
+			"agent_id", agentID, "queued", queued, "err", err)
 		return false
 	}
-
-	// 3. 填充队列。战术 LLM 调用期间（约 10-20 秒）到达的常规感知不再
-	// 触发决策（反应层已移除），物理状态已由 updateState 更新到
-	// latestPhysical，下次 refill 的 prompt 会看到最新值。
-	a.mu.Lock()
-	a.actionQueue = actions
 	isRedecompose := slot == a.currentSlot
 	if isRedecompose {
 		a.redecomposeCount++
@@ -544,9 +563,10 @@ func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
 	}
 	queueLen := len(a.actionQueue)
 	redecomposeCount := a.redecomposeCount
+	queuedActions := append([]plannedAction(nil), a.actionQueue...)
 	a.mu.Unlock()
 
-	actionsJSON, _ := json.Marshal(actions)
+	actionsJSON, _ := json.Marshal(queuedActions)
 	logger.Info("[战术层] 队列已填充",
 		"agent_id", agentID, "slot", slot, "queue_len", queueLen,
 		"redecompose", isRedecompose, "redecompose_count", redecomposeCount,
@@ -559,8 +579,14 @@ func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
 		}
 	}
 
-	// 5. pop 第一个并下发
-	a.popAndSendQueueAction(ctx, agentID, ws, kb, logger)
+	// 5. 补发：若流期间未成功 dispatch 首 action（如 send 失败被 signal 掉），
+	// 且队列仍有待执行 action 且无在途 action，在此补发。
+	a.mu.Lock()
+	needFallback := a.currentActionID == "" && len(a.actionQueue) > 0
+	a.mu.Unlock()
+	if needFallback {
+		a.popAndSendQueueAction(ctx, agentID, ws, kb, logger)
+	}
 	return true
 }
 

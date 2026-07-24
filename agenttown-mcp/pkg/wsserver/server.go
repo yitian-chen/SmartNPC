@@ -83,6 +83,8 @@ type Server struct {
 	lastHeartbeatAt time.Time // 最近收到 UE 心跳的时间（mu 保护），用于 15s 超时检测
 	pending map[string]*pendingCall // keyed by action_id (msg correlation)
 
+	writeMu sync.Mutex // 串行化 conn.Write，防止流式叙事推送与动作分发并发写坏帧
+
 	bufMu   sync.Mutex
 	sendBuf []bufferedMsg // rolling buffer of discrete outbound messages
 
@@ -382,6 +384,8 @@ func (s *Server) SendEnvelope(agentID, msgType string, payload any) error {
 }
 
 // writeFrame writes a pre-marshaled envelope frame to the current connection.
+// writeMu 串行化所有 conn.Write 调用，避免流式叙事推送与动作分发/重放
+// 等并发写造成 WebSocket 帧交错损坏。
 func (s *Server) writeFrame(frame []byte) error {
 	s.mu.RLock()
 	conn := s.conn
@@ -391,6 +395,8 @@ func (s *Server) writeFrame(frame []byte) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), defaultWriteWait)
 	defer cancel()
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	return conn.Write(ctx, websocket.MessageText, frame)
 }
 

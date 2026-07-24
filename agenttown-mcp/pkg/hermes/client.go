@@ -10,6 +10,7 @@
 package hermes
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -124,6 +125,46 @@ func (c *Client) SendWithSummary(ctx context.Context, input, localSummary string
 	return resp, nil
 }
 
+// SendStreaming POSTs input with stream:true and invokes onDelta for each
+// text delta received. It blocks until the stream terminates (response.completed
+// or response.failed) and returns the final Response.
+//
+// sendMu is held for the entire streaming cycle — same serialization as
+// SendWithSummary, so previous_response_id cannot race. Token-threshold reset
+// is applied after response.completed; no localSummary is carried because the
+// streaming path is used by the tactical layer, which resets the session
+// immediately after each call anyway.
+func (c *Client) SendStreaming(ctx context.Context, input string, onDelta func(delta string)) (*Response, error) {
+	c.sendMu.Lock()
+	defer c.sendMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	fullInput := input
+	if summary := c.pendingSummary; summary != "" {
+		c.pendingSummary = ""
+		fullInput = "[本地状态摘要] " + summary + "\n\n" + input
+	}
+	c.turnCount++
+
+	resp, err := c.doSendStreaming(ctx, fullInput, onDelta)
+	if err != nil {
+		return resp, err
+	}
+
+	if resp.Usage.TotalTokens > c.cfg.TokenThreshold {
+		c.prevResponseID = ""
+		c.pendingSummary = ""
+		c.turnCount = 0
+		c.log.Info("token threshold exceeded, session reset (streaming)",
+			"tokens", resp.Usage.TotalTokens,
+			"threshold", c.cfg.TokenThreshold,
+		)
+	}
+	return resp, nil
+}
+
 // doSend performs the HTTP POST and updates prevResponseID.
 // Caller MUST hold sendMu.
 func (c *Client) doSend(ctx context.Context, input string) (*Response, error) {
@@ -199,6 +240,167 @@ func (c *Client) doSend(ctx context.Context, input string) (*Response, error) {
 	return &hr, nil
 }
 
+// doSendStreaming performs the streaming HTTP POST and parses the SSE event
+// stream. Caller MUST hold sendMu.
+//
+// SSE format (Hermes /v1/responses with stream:true):
+//
+//	event: response.output_text.delta
+//	data: {"delta":"文本块"}
+//
+//	event: response.completed
+//	data: {"response":{"id":...,"status":...,"output":[...],"usage":{...}}}
+//
+//	event: response.failed
+//	data: {"error":{"message":"..."}}
+//
+//	: keepalive
+//
+// Events are separated by blank lines. A stream that ends without a terminal
+// event (response.completed/response.failed) returns io.ErrUnexpectedEOF.
+func (c *Client) doSendStreaming(ctx context.Context, input string, onDelta func(delta string)) (*Response, error) {
+	body := request{
+		Model:              c.cfg.Model,
+		Input:              input,
+		PreviousResponseID: c.prevResponseID,
+		Stream:             true,
+	}
+	payload, err := json.Marshal(body)
+	if err != nil {
+		return nil, fmt.Errorf("marshal request: %w", err)
+	}
+
+	postCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
+	defer cancel()
+
+	url := strings.TrimRight(c.cfg.URL, "/") + "/v1/responses"
+	req, err := http.NewRequestWithContext(postCtx, http.MethodPost, url, bytes.NewReader(payload))
+	if err != nil {
+		return nil, fmt.Errorf("new request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+c.cfg.APIKey)
+	req.Header.Set("Accept", "text/event-stream")
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("http do: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		raw, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("hermes status %d: %s", resp.StatusCode, string(raw))
+	}
+
+	sc := bufio.NewScanner(resp.Body)
+	// SSE events can carry a large response.completed payload; allow up to 1MB per line.
+	sc.Buffer(make([]byte, 0, 64*1024), 1<<20)
+
+	var (
+		eventType string
+		dataBuf   strings.Builder
+		finalResp *Response
+	)
+
+	for sc.Scan() {
+		line := sc.Text()
+
+		// Blank line = event boundary → dispatch accumulated event.
+		if line == "" {
+			if eventType != "" && dataBuf.Len() > 0 {
+				fr, terminal, herr := c.handleSSEEvent(eventType, dataBuf.String(), onDelta)
+				if herr != nil {
+					return nil, herr
+				}
+				if terminal {
+					finalResp = fr
+				}
+			}
+			eventType = ""
+			dataBuf.Reset()
+			continue
+		}
+
+		// Comment / keepalive line (starts with ':').
+		if line[0] == ':' {
+			continue
+		}
+
+		switch {
+		case strings.HasPrefix(line, "event:"):
+			eventType = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
+		case strings.HasPrefix(line, "data:"):
+			data := strings.TrimPrefix(line, "data:")
+			data = strings.TrimPrefix(data, " ") // SSE spec: optional single leading space
+			if dataBuf.Len() > 0 {
+				dataBuf.WriteByte('\n')
+			}
+			dataBuf.WriteString(data)
+		}
+	}
+
+	if err := sc.Err(); err != nil {
+		return nil, fmt.Errorf("sse read: %w", err)
+	}
+	if finalResp == nil {
+		return nil, fmt.Errorf("sse stream ended without terminal event: %w", io.ErrUnexpectedEOF)
+	}
+
+	// Upstream error detection — same as doSend.
+	if isUpstreamError(finalResp) {
+		narrative := finalResp.ExtractText()
+		c.log.Warn("[Hermes→MCP] upstream error detected (streaming), resetting session",
+			"narrative", truncate(narrative, 200),
+			"prev_id", c.prevResponseID)
+		c.prevResponseID = ""
+		c.pendingSummary = ""
+		c.turnCount = 0
+		return finalResp, ErrUpstreamError
+	}
+
+	if finalResp.ID != "" {
+		c.prevResponseID = finalResp.ID
+	}
+	return finalResp, nil
+}
+
+// handleSSEEvent dispatches one accumulated SSE event. Returns the parsed
+// Response and terminal=true when the event is response.completed, and a
+// non-nil error for response.failed. For delta events, onDelta is invoked.
+func (c *Client) handleSSEEvent(eventType, data string, onDelta func(delta string)) (*Response, bool, error) {
+	switch eventType {
+	case "response.output_text.delta":
+		if onDelta == nil {
+			return nil, false, nil
+		}
+		var d sseDelta
+		if err := json.Unmarshal([]byte(data), &d); err != nil {
+			c.log.Debug("sse delta parse failed", "err", err, "data", truncate(data, 200))
+			return nil, false, nil
+		}
+		if d.Delta != "" {
+			onDelta(d.Delta)
+		}
+		return nil, false, nil
+	case "response.completed":
+		var comp sseCompleted
+		if err := json.Unmarshal([]byte(data), &comp); err != nil {
+			return nil, false, fmt.Errorf("parse response.completed: %w", err)
+		}
+		return &comp.Response, true, nil
+	case "response.failed":
+		var f sseFailed
+		_ = json.Unmarshal([]byte(data), &f)
+		msg := f.Error.Message
+		if msg == "" {
+			msg = "response.failed (no message)"
+		}
+		return nil, false, fmt.Errorf("hermes stream failed: %s", msg)
+	}
+	return nil, false, nil
+}
+
 // isUpstreamError checks whether the Hermes response wraps an upstream
 // LLM API error rather than a genuine assistant narrative.
 func isUpstreamError(r *Response) bool {
@@ -248,6 +450,20 @@ type request struct {
 	Model              string `json:"model"`
 	Input              string `json:"input"`
 	PreviousResponseID string `json:"previous_response_id,omitempty"`
+	Stream             bool   `json:"stream,omitempty"`
+}
+
+// SSE event payloads emitted by Hermes /v1/responses with stream:true.
+type sseDelta struct {
+	Delta string `json:"delta"`
+}
+type sseCompleted struct {
+	Response Response `json:"response"`
+}
+type sseFailed struct {
+	Error struct {
+		Message string `json:"message"`
+	} `json:"error"`
 }
 
 // Response is the (subset of the) OpenAI Responses shape Hermes returns.

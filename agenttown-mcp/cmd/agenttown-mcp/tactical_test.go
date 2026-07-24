@@ -26,101 +26,188 @@ func loadTestKB(t *testing.T) *worldkb.KB {
 	return kb
 }
 
-// ─── parseTacticalPlan ───────────────────────────────────────
+// ─── parseTacticalNDJSON ─────────────────────────────────────
 
-func TestParseTacticalPlan_ValidJSON(t *testing.T) {
-	raw := `{"inner_thought":"先去车间再装配","actions":[{"action":"move_to","params":{"target":"main_workshop"}},{"action":"work_assemble","params":{"target":"workbench_01","duration_min":240}}]}`
-	plan, err := parseTacticalPlan(raw)
+func TestParseTacticalNDJSON_Valid(t *testing.T) {
+	raw := `{"inner_thought":"先去车间再装配"}` + "\n" +
+		`{"action":"move_to","params":{"target":"main_workshop"}}` + "\n" +
+		`{"action":"work_assemble","params":{"target":"workbench_01","duration_min":240}}`
+	actions, thought, err := parseTacticalNDJSON(raw)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if plan.InnerThought != "先去车间再装配" {
-		t.Errorf("inner_thought=%q", plan.InnerThought)
+	if thought != "先去车间再装配" {
+		t.Errorf("inner_thought=%q", thought)
 	}
-	if len(plan.Actions) != 2 {
-		t.Fatalf("got %d actions, want 2", len(plan.Actions))
+	if len(actions) != 2 {
+		t.Fatalf("got %d actions, want 2", len(actions))
 	}
-	if plan.Actions[0].Action != "move_to" {
-		t.Errorf("action[0]=%q", plan.Actions[0].Action)
+	if actions[0].Action != "move_to" {
+		t.Errorf("action[0]=%q", actions[0].Action)
 	}
 }
 
-func TestParseTacticalPlan_JSONFence(t *testing.T) {
-	raw := "```json\n{\"inner_thought\":\"充电\",\"actions\":[{\"action\":\"charge_at\",\"params\":{\"station_id\":\"charging_station_01\",\"duration_min\":60}}]}\n```"
-	plan, err := parseTacticalPlan(raw)
+func TestParseTacticalNDJSON_WithFence(t *testing.T) {
+	raw := "```json\n" +
+		`{"inner_thought":"充电"}` + "\n" +
+		`{"action":"charge_at","params":{"station_id":"charging_station_01","duration_min":60}}` + "\n" +
+		"```"
+	actions, _, err := parseTacticalNDJSON(raw)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(plan.Actions) != 1 || plan.Actions[0].Action != "charge_at" {
-		t.Errorf("actions=%+v", plan.Actions)
+	if len(actions) != 1 || actions[0].Action != "charge_at" {
+		t.Errorf("actions=%+v", actions)
 	}
 }
 
-func TestParseTacticalPlan_NarrativePrefix(t *testing.T) {
-	raw := `好的，我来分解这个任务：` + "\n" +
-		`{"inner_thought":"开始工作","actions":[{"action":"wait","params":{"duration_sec":30}}]}` + "\n" +
-		`以上就是我的计划。`
-	plan, err := parseTacticalPlan(raw)
+func TestParseTacticalNDJSON_BlankLines(t *testing.T) {
+	raw := `{"inner_thought":"开始"}` + "\n\n" +
+		`{"action":"wait","params":{"duration_sec":30}}` + "\n" +
+		"\n"
+	actions, thought, err := parseTacticalNDJSON(raw)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(plan.Actions) != 1 || plan.Actions[0].Action != "wait" {
-		t.Errorf("actions=%+v", plan.Actions)
+	if thought != "开始" {
+		t.Errorf("thought=%q", thought)
+	}
+	if len(actions) != 1 || actions[0].Action != "wait" {
+		t.Errorf("actions=%+v", actions)
 	}
 }
 
-func TestParseTacticalPlan_Malformed(t *testing.T) {
-	raw := "我今天打算去车间看看，然后再去充电。"
-	if _, err := parseTacticalPlan(raw); err == nil {
-		t.Fatal("expected error for narrative without JSON object")
-	}
-}
-
-func TestParseTacticalPlan_Empty(t *testing.T) {
-	if _, err := parseTacticalPlan(""); err == nil {
-		t.Fatal("expected error for empty input")
-	}
-}
-
-func TestParseTacticalPlan_EmptyActions(t *testing.T) {
-	raw := `{"inner_thought":"不知道做什么","actions":[]}`
-	plan, err := parseTacticalPlan(raw)
+func TestParseTacticalNDJSON_MalformedLine(t *testing.T) {
+	// 单行 parse 失败应跳过，不影响其他行
+	raw := `{"inner_thought":"计划"}` + "\n" +
+		`这不是JSON` + "\n" +
+		`{"action":"wait","params":{"duration_sec":30}}`
+	actions, _, err := parseTacticalNDJSON(raw)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(plan.Actions) != 0 {
-		t.Errorf("got %d actions, want 0 after filter", len(plan.Actions))
+	if len(actions) != 1 || actions[0].Action != "wait" {
+		t.Errorf("actions=%+v, want 1 wait", actions)
 	}
 }
 
-func TestParseTacticalPlan_FiltersScanAreaAndStop(t *testing.T) {
-	raw := `{"inner_thought":"扫描一下","actions":[{"action":"scan_area","params":{}},{"action":"move_to","params":{"target":"main_workshop"}},{"action":"stop","params":{}}]}`
-	plan, err := parseTacticalPlan(raw)
+func TestParseTacticalNDJSON_Empty(t *testing.T) {
+	actions, thought, err := parseTacticalNDJSON("")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(plan.Actions) != 1 {
-		t.Fatalf("got %d actions, want 1 (scan_area/stop filtered)", len(plan.Actions))
+	if len(actions) != 0 {
+		t.Errorf("got %d actions, want 0", len(actions))
 	}
-	if plan.Actions[0].Action != "move_to" {
-		t.Errorf("remaining action=%q, want move_to", plan.Actions[0].Action)
+	if thought != "" {
+		t.Errorf("thought=%q, want empty", thought)
 	}
 }
 
-func TestParseTacticalPlan_DurationMinInt(t *testing.T) {
+func TestParseTacticalNDJSON_ThoughtOnly(t *testing.T) {
+	raw := `{"inner_thought":"不知道做什么"}`
+	actions, thought, err := parseTacticalNDJSON(raw)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(actions) != 0 {
+		t.Errorf("got %d actions, want 0", len(actions))
+	}
+	if thought != "不知道做什么" {
+		t.Errorf("thought=%q", thought)
+	}
+}
+
+func TestParseTacticalNDJSON_FiltersScanAreaAndStop(t *testing.T) {
+	raw := `{"inner_thought":"扫描一下"}` + "\n" +
+		`{"action":"scan_area","params":{}}` + "\n" +
+		`{"action":"move_to","params":{"target":"main_workshop"}}` + "\n" +
+		`{"action":"stop","params":{}}`
+	actions, _, err := parseTacticalNDJSON(raw)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(actions) != 1 {
+		t.Fatalf("got %d actions, want 1 (scan_area/stop filtered)", len(actions))
+	}
+	if actions[0].Action != "move_to" {
+		t.Errorf("remaining action=%q, want move_to", actions[0].Action)
+	}
+}
+
+func TestParseTacticalNDJSON_DurationMinInt(t *testing.T) {
 	// LLM 可能输出 duration_min 为 int 而非 float（JSON 里 240 而非 240.0）
-	raw := `{"inner_thought":"装配","actions":[{"action":"work_assemble","params":{"target":"workbench_01","duration_min":240}}]}`
-	plan, err := parseTacticalPlan(raw)
+	raw := `{"action":"work_assemble","params":{"target":"workbench_01","duration_min":240}}`
+	actions, _, err := parseTacticalNDJSON(raw)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(plan.Actions) != 1 {
-		t.Fatalf("got %d actions, want 1", len(plan.Actions))
+	if len(actions) != 1 {
+		t.Fatalf("got %d actions, want 1", len(actions))
 	}
 	// 验证 toFloat 能处理 int
-	dur := toFloat(plan.Actions[0].Params["duration_min"])
+	dur := toFloat(actions[0].Params["duration_min"])
 	if dur != 240 {
 		t.Errorf("duration_min toFloat=%v, want 240", dur)
+	}
+}
+
+// ─── streamAccumulator ───────────────────────────────────────
+
+func TestStreamAccumulator_Feed(t *testing.T) {
+	var collected []plannedAction
+	acc := &streamAccumulator{
+		onComplete: func(pa plannedAction) { collected = append(collected, pa) },
+	}
+
+	// 模拟流式 delta：第一行 inner_thought 完整到达，第二行 action 分两次到达
+	acc.feed(`{"inner_thought":"开工"}` + "\n")
+	if acc.thought != "开工" {
+		t.Errorf("after first feed: thought=%q, want 开工", acc.thought)
+	}
+	if len(collected) != 0 {
+		t.Errorf("after first feed: collected=%d, want 0", len(collected))
+	}
+
+	// 第二行被拆成两个 delta
+	acc.feed(`{"action":"move_to","params":{"targ`)
+	acc.feed(`et":"main_workshop"}}` + "\n")
+	if len(collected) != 1 {
+		t.Fatalf("after second line: collected=%d, want 1", len(collected))
+	}
+	if collected[0].Action != "move_to" {
+		t.Errorf("collected[0]=%q, want move_to", collected[0].Action)
+	}
+
+	// 第三行不完整（无 \n），不应触发 onComplete
+	acc.feed(`{"action":"wait","params":{"duration_sec":30}}`)
+	if len(collected) != 1 {
+		t.Errorf("incomplete line should not trigger: collected=%d, want 1", len(collected))
+	}
+
+	// flush 处理残余
+	acc.flush()
+	if len(collected) != 2 {
+		t.Fatalf("after flush: collected=%d, want 2", len(collected))
+	}
+	if collected[1].Action != "wait" {
+		t.Errorf("collected[1]=%q, want wait", collected[1].Action)
+	}
+}
+
+func TestStreamAccumulator_FiltersInvalidAction(t *testing.T) {
+	var collected []plannedAction
+	acc := &streamAccumulator{
+		onComplete: func(pa plannedAction) { collected = append(collected, pa) },
+	}
+	acc.feed(`{"action":"scan_area","params":{}}` + "\n")
+	acc.feed(`{"action":"move_to","params":{"target":"main_workshop"}}` + "\n")
+	acc.flush()
+	if len(collected) != 1 {
+		t.Fatalf("collected=%d, want 1 (scan_area filtered)", len(collected))
+	}
+	if collected[0].Action != "move_to" {
+		t.Errorf("collected[0]=%q, want move_to", collected[0].Action)
 	}
 }
 
@@ -311,7 +398,9 @@ func TestGenerateTacticalPlan_HTTPError(t *testing.T) {
 }
 
 func TestGenerateTacticalPlan_ValidResponse(t *testing.T) {
-	raw := `{"inner_thought":"先移动再装配","actions":[{"action":"move_to","params":{"target":"main_workshop"}},{"action":"work_assemble","params":{"target":"workbench_01","duration_min":240}}]}`
+	raw := `{"inner_thought":"先移动再装配"}` + "\n" +
+		`{"action":"move_to","params":{"target":"main_workshop"}}` + "\n" +
+		`{"action":"work_assemble","params":{"target":"workbench_01","duration_min":240}}`
 	tc := &fakeStrategicCaller{resp: makeStrategicResponse(raw)}
 	actions, thought, err := generateTacticalPlan(context.Background(), tc, "H-01", "装配", "main_workshop", "09:00", &protocol.PhysicalState{Energy: 80, Fatigue: 20, JointWear: 10, Health: 100}, nil, slog.Default())
 	if err != nil {
@@ -331,12 +420,12 @@ func TestGenerateTacticalPlan_ValidResponse(t *testing.T) {
 func TestGenerateTacticalPlan_ParseFail(t *testing.T) {
 	tc := &fakeStrategicCaller{resp: makeStrategicResponse("我今天打算去车间转转。")}
 	if _, _, err := generateTacticalPlan(context.Background(), tc, "H-01", "装配", "main_workshop", "09:00", nil, nil, slog.Default()); err == nil {
-		t.Fatal("expected error on parse failure")
+		t.Fatal("expected error on parse failure (no actions)")
 	}
 }
 
 func TestGenerateTacticalPlan_EmptyActions(t *testing.T) {
-	raw := `{"inner_thought":"不知道做什么","actions":[]}`
+	raw := `{"inner_thought":"不知道做什么"}`
 	tc := &fakeStrategicCaller{resp: makeStrategicResponse(raw)}
 	if _, _, err := generateTacticalPlan(context.Background(), tc, "H-01", "装配", "main_workshop", "09:00", nil, nil, slog.Default()); err == nil {
 		t.Fatal("expected error when all actions filtered out")
@@ -344,7 +433,8 @@ func TestGenerateTacticalPlan_EmptyActions(t *testing.T) {
 }
 
 func TestGenerateTacticalPlan_ResetSessionCalled(t *testing.T) {
-	raw := `{"inner_thought":"开始","actions":[{"action":"wait","params":{"duration_sec":30}}]}`
+	raw := `{"inner_thought":"开始"}` + "\n" +
+		`{"action":"wait","params":{"duration_sec":30}}`
 	tc := &fakeStrategicCaller{resp: makeStrategicResponse(raw)}
 	_, _, _ = generateTacticalPlan(context.Background(), tc, "H-01", "等待", "main_workshop", "09:00", nil, nil, slog.Default())
 	if !tc.resetCalled {
