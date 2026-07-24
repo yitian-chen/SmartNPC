@@ -236,6 +236,13 @@ func runPerceptionWorker(
 			continue
 		}
 
+		// 在途 action（composite 执行中）时跳过 pop/refill：UE 正忙，pop 出的
+		// action 会被 busy 拒，refill 出的队列也会被拒。等 action_completed 自然
+		// 唤醒 worker（completion 路径会 signal 并清 currentActionID）。
+		if ac.hasInFlightAction() {
+			continue
+		}
+
 		if ac.hasQueueNext() {
 			// 队列还有下一个：pop 并直发
 			ac.popAndSendQueueAction(ctx, agentID, ws, kb, logger)
@@ -350,6 +357,14 @@ func (a *agentContext) hasQueueNext() bool {
 	return len(a.actionQueue) > 0
 }
 
+// hasInFlightAction 返回是否有在途 action（已下发未 completion）。
+// worker 用它在主循环跳过 pop/refill，避免 UE busy 拒绝循环。
+func (a *agentContext) hasInFlightAction() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.currentActionID != ""
+}
+
 // queueLen 返回队列长度（mu 保护）。
 func (a *agentContext) queueLen() int {
 	a.mu.Lock()
@@ -420,6 +435,12 @@ func (a *agentContext) popAndSendQueueAction(ctx context.Context, agentID string
 		a.mu.Unlock()
 		return
 	}
+	// 在途 action 时不要 pop：UE 正忙，pop 出的 action 会被 busy 拒。
+	// 等 action_completed 唤醒 worker（清 currentActionID）再 pop。
+	if a.currentActionID != "" {
+		a.mu.Unlock()
+		return
+	}
 	pa := a.actionQueue[0]
 	a.actionQueue = a.actionQueue[1:]
 	a.mu.Unlock()
@@ -483,10 +504,17 @@ func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
 		a.mu.Unlock()
 		return false
 	}
-	// 同时段重复分解守卫
-	if slot == a.currentSlot && a.redecomposeCount >= 2 {
-		a.mu.Unlock()
-		return false // 调用方发 idle wait
+	// 同时段重复分解守卫：队列还有 action 时不 redecompose（继续执行剩余 action）；
+	// 队列空且已 redecompose ≥2 次才放弃，调用方发 idle wait 等下一时段。
+	if slot == a.currentSlot {
+		if len(a.actionQueue) > 0 {
+			a.mu.Unlock()
+			return false // 队列有剩余，等它们执行完再考虑 redecompose
+		}
+		if a.redecomposeCount >= 2 {
+			a.mu.Unlock()
+			return false
+		}
 	}
 	zone := a.latestZoneLocked()
 	physical := clonePhysical(a.latestPhysical)
