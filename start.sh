@@ -235,10 +235,12 @@ start_mcp() {
     MSYS_NO_PATHCONV=1 $WSL chmod +x /home/yitianchen/agenttown-mcp
     ok "MCP binary deployed"
 
-    # sim.log 的清空由 run_day.py 在仿真开始时负责，确保每次仿真
-    # 日志从头开始，无论 MCP 是否重启。之前在这里清空依赖 MCP 重启，
-    # 直接跑 run_day.py 时日志会累积。
+    # 清空 sim.log：必须在 MCP 启动前由 WSL 端清空，避免 MCP 已打开
+    # O_APPEND fd 后再截断文件导致 WSL/Windows 文件系统缓存不一致产生
+    # \0 字节（Windows 端 Python truncate 后 WSL 端 fd 偏移仍停留在旧
+    # 位置，下次 write 在旧偏移处写入，前面变 sparse \0）。
     mkdir -p "$LOG_SUBDIR"
+    : > "$LOG_SUBDIR/sim.log"
 
     # 在 WSL 内创建启动脚本（setsid + disown 确保 MCP 进程在 WSL 会话
     # 结束后仍能存活——直接 `wsl bash -c "cmd &"` 会在 wsl 返回时杀掉子进程）
@@ -291,6 +293,11 @@ start_hermes() {
     case "$HERMES_BUILD_SCRIPT" in
         /mnt/*)
             HERMES_BUILD_SCRIPT_WSL="$HERMES_BUILD_SCRIPT" ;;
+        /?/*)
+            # MSYS/Git-Bash 风格路径 /d/... → /mnt/d/...
+            # wslpath -u 对 MSYS 路径会错误剥离前导 / 产生相对路径，
+            # 导致 WSL 以 /mnt/d/ 为 CWD 拼出 /mnt/d/d/... 找不到文件。
+            HERMES_BUILD_SCRIPT_WSL="/mnt${HERMES_BUILD_SCRIPT}" ;;
         *)
             HERMES_BUILD_SCRIPT_WSL=$(MSYS_NO_PATHCONV=1 $WSL wslpath -u "$HERMES_BUILD_SCRIPT" 2>/dev/null \
                 || echo "/mnt/d/SmartNPC_v3/docker/build-hermes.sh") ;;
@@ -370,10 +377,19 @@ start_mock_ue() {
 
     # Windows Python does not understand MSYS paths reliably when bash was
     # launched from PowerShell (it may turn /d/... into D:\d\...). Convert
-    # script/scenario paths explicitly before invoking it.
+    # script/scenario/log-dir paths explicitly before invoking it.
+    # --log-dir must be converted too: otherwise os.path.join("/d/SmartNPC_v3/...",
+    # "sim.log") resolves to D:\d\SmartNPC_v3\...\sim.log (note the extra "d\"),
+    # and run_day.py truncates a stale file at the wrong path while the actual
+    # sim.log (written by MCP via WSL) accumulates across runs.
     local script_arg="$MOCK_UE_SCRIPT"
     if command -v cygpath &>/dev/null; then
         script_arg="$(cygpath -w "$MOCK_UE_SCRIPT")"
+        local log_dir_win
+        log_dir_win="$(cygpath -w "$LOG_SUBDIR")"
+        for i in "${!args[@]}"; do
+            [ "${args[$i]}" = "$LOG_SUBDIR" ] && args[$i]="$log_dir_win"
+        done
         if [ -n "$MOCK_SCENARIO" ]; then
             local scenario_win
             scenario_win="$(cygpath -w "$MOCK_SCENARIO")"

@@ -43,7 +43,7 @@ sequenceDiagram
     participant H as Hermes Gateway
     participant Tools as MCP Tools
 
-    Note over UE: 感知循环 (每30游戏分钟)
+    Note over UE: 感知循环 (每 N 游戏分钟，按模式配置)
     UE->>WS: perception_update {location, physical_delta, nearby_objects...}
     WS->>Fmt: 原始 payload → 第一人称叙事
     Fmt->>HC: 格式化文本
@@ -140,6 +140,11 @@ grep '\[MCP→UE\]' logs/YYYY-MM-DD/sim.log           # MCP → Mock UE（动作
 grep '\[MCP→Hermes/PERCEPTION\]' logs/YYYY-MM-DD/sim.log  # MCP → Hermes（感知文本）
 grep '\[Hermes→MCP/RESPONSE\]' logs/YYYY-MM-DD/sim.log   # Hermes → MCP（LLM 响应 + narrative）
 grep '\[Hermes→MCP/TOOL\]' logs/YYYY-MM-DD/sim.log       # Hermes 调用的工具
+grep '\[MCP→Hermes/STRATEGIC-PROMPT\]' logs/YYYY-MM-DD/sim.log   # 战略层 prompt（每日规划输入）
+grep '\[Hermes→MCP/STRATEGIC-RESPONSE\]' logs/YYYY-MM-DD/sim.log # 战略层 LLM 响应（每日计划 JSON）
+grep '\[MCP→Hermes/TACTICAL-PROMPT\]' logs/YYYY-MM-DD/sim.log    # 战术层 prompt（任务分解输入）
+grep '\[Hermes→MCP/TACTICAL-RESPONSE\]' logs/YYYY-MM-DD/sim.log  # 战术层 LLM 响应（actions JSON）
+grep '队列已填充' logs/YYYY-MM-DD/sim.log           # 战术层任务队列形成（含完整 actions）
 grep 'perception decision triggered' logs/YYYY-MM-DD/sim.log  # LLM 决策触发点
 grep 'state_report' logs/YYYY-MM-DD/sim.log         # 状态报告摘要
 
@@ -147,11 +152,17 @@ grep 'state_report' logs/YYYY-MM-DD/sim.log         # 状态报告摘要
 # 例如查看 decision_epoch=1 的完整链路：
 grep '"decision_epoch":1' logs/YYYY-MM-DD/sim.log   # 同一轮次的 PERCEPTION/TOOL/RESPONSE
 
+# 战术规划链路：TACTICAL-PROMPT → TACTICAL-RESPONSE → 队列已填充 → 下发 action
+# 例如查看某次战术分解的完整链路：
+grep -E 'TACTICAL-PROMPT|TACTICAL-RESPONSE|队列已填充|\[战术层\] 下发 action' logs/YYYY-MM-DD/sim.log
+
 # Hermes 容器日志（独立，不进 sim.log）
 wsl docker logs -f agenttown-h01
 ```
 
 **轮次关联**：`[MCP→Hermes/PERCEPTION]`、`[Hermes→MCP/TOOL]`、`[Hermes→MCP/RESPONSE]` 三种日志都带结构化字段 `agent_id` 和 `decision_epoch`，匹配这两个字段即可关联同一次决策回合的输入 prompt、工具调用、LLM 响应。同一 `decision_epoch` 的 TOOL 可能出现在 RESPONSE 之前（Hermes 在 LLM 流式输出时实时回调工具，而 RESPONSE 日志在 HTTP 响应完成后才写）。
+
+**战术/战略层日志**：战略层和战术层使用独立的 Hermes session（不复用决策链），因此不带 `decision_epoch`。链路按 `agent_id` + 时间顺序关联：`[MCP→Hermes/STRATEGIC-PROMPT]` → `[Hermes→MCP/STRATEGIC-RESPONSE]` → `[战略层] 每日计划生成成功`；`[MCP→Hermes/TACTICAL-PROMPT]` → `[Hermes→MCP/TACTICAL-RESPONSE]` → `[战术层] 队列已填充`（含完整 actions JSON）→ `[战术层] 下发 action`（逐个 pop）。
 
 Mock UE 不再写独立日志文件，但控制台仍输出 `[PERCEPTION]`/`[STATE]`/`[SPEAK]` 等人类可读摘要供实时观察。
 
@@ -188,7 +199,7 @@ type Envelope struct {
 
 | type | 方向 | 用途 | 触发时机 |
 |------|------|------|----------|
-| `perception_update` | UE→Agent | 空间+环境感知（物理仅带变化项） | 每 30 游戏分钟 / zone 变化 |
+| `perception_update` | UE→Agent | 空间+环境感知（物理仅带变化项） | 每 N 游戏分钟（normal=60, behavior=15, quick-smoke=30）/ zone 变化 |
 | `action_command` | Agent→UE | 下发动作指令 | 工具调用 / LLM 决策 |
 | `action_started` | UE→Agent | 动作已接收的 ACK（≤2s） | UE 收到 action_command 后 |
 | `action_completed` | UE→Agent | 动作完成回调 | 动作执行完毕 |

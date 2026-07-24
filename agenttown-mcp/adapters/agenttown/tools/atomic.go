@@ -221,51 +221,22 @@ func registerAtomic(s *mcp.Server, ex Executor, kb *worldkb.KB, logger *slog.Log
 		return nil, buildAckResult(ack, in.DecisionEpoch), nil
 	})
 
-	// scan_area → immediate perception request (not a cmd)
+	// scan_area → 反应层已移除：保留工具定义但 MCP 拒绝调用。
+	// 未来本地小模型反应层重建时再恢复 handler。
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "scan_area",
 		Description: "Request an immediate perception update (look around now).",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in ScanAreaInput) (*mcp.CallToolResult, ackResult, error) {
-		if in.AgentID == "" {
-			return nil, ackResult{}, fmt.Errorf("agent_id is required")
-		}
-		logToolCall("scan_area", in.AgentID, in.DecisionEpoch, in)
-		if err := ex.RequestScan(ctx, in.AgentID, in.DecisionEpoch); err != nil {
-			return nil, ackResult{}, fmt.Errorf("scan_area: %w", err)
-		}
-		return nil, ackResult{OK: true, DecisionEpoch: in.DecisionEpoch, Message: "perception requested"}, nil
+		_ = in
+		return nil, ackResult{}, fmt.Errorf("scan_area disabled: reactive layer removed")
 	})
 
-	// stop → StopAction（约定9：带 action_id 的 stop_action 控制消息）
+	// stop → 反应层已移除：保留工具定义但 MCP 拒绝调用。
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "stop",
 		Description: "Stop the current action. No-op if no action is running.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in StopInput) (*mcp.CallToolResult, ackResult, error) {
-		if in.AgentID == "" {
-			return nil, ackResult{}, fmt.Errorf("agent_id is required")
-		}
-		logToolCall("stop", in.AgentID, in.DecisionEpoch, in)
-
-		// 查询当前执行中的 action_id
-		currentActionID := ex.LookupCurrentActionID(in.AgentID)
-		if currentActionID == "" {
-			// 无执行中动作，直接返回成功（no-op）
-			return &mcp.CallToolResult{
-				Content: []mcp.Content{&mcp.TextContent{Text: "no action running"}},
-			}, ackResult{OK: true, DecisionEpoch: in.DecisionEpoch, Message: "no action running"}, nil
-		}
-
-		// 发送 stop_action 消息（带 action_id，约定9）
-		if err := ex.SendStopAction(ctx, in.AgentID, currentActionID); err != nil {
-			return nil, ackResult{}, fmt.Errorf("stop: %w", err)
-		}
-
-		// 清除本地追踪（UE 侧会回 action_completed 或 STOP_ID_MISMATCH error）
-		ex.ClearCurrentActionID(in.AgentID)
-
-		msg := fmt.Sprintf("stop_action sent for action_id=%s", currentActionID)
-		return &mcp.CallToolResult{
-			Content: []mcp.Content{&mcp.TextContent{Text: msg}},
-		}, ackResult{OK: true, DecisionEpoch: in.DecisionEpoch, ActionID: currentActionID, Message: msg}, nil
+		_ = in
+		return nil, ackResult{}, fmt.Errorf("stop disabled: reactive layer removed")
 	})
 }

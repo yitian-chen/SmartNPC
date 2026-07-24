@@ -71,17 +71,30 @@ _DIRECTION_ALIASES = {
     "PERCEPTION": "MCP→Hermes/PERCEPTION",
     "RESPONSE": "Hermes→MCP/RESPONSE",
     "TOOL": "Hermes→MCP/TOOL",
+    "STRATEGIC-PROMPT": "MCP→Hermes/STRATEGIC-PROMPT",
+    "STRATEGIC-RESPONSE": "Hermes→MCP/STRATEGIC-RESPONSE",
+    "TACTICAL-PROMPT": "MCP→Hermes/TACTICAL-PROMPT",
+    "TACTICAL-RESPONSE": "Hermes→MCP/TACTICAL-RESPONSE",
     "HERMES": "Hermes/internal",
     "HEARTBEAT": "heartbeat",
 }
 
 # 方向 → CSS class（用于着色）
+# 注意：精确方向（含 / ）必须排在中文前缀方向（[战术层]/[战略层]）之前，
+# 否则 _direction_of 的 `marker in msg` 会把 TACTICAL-PROMPT 误归为 [战术层]。
+# 实际上两者不会同时出现在同一条 msg 里，但保持顺序更清晰。
 _DIRECTION_CSS = {
     "UE→MCP": "dir-ue-mcp",
     "MCP→UE": "dir-mcp-ue",
     "MCP→Hermes/PERCEPTION": "dir-perception",
     "Hermes→MCP/RESPONSE": "dir-response",
     "Hermes→MCP/TOOL": "dir-tool",
+    "MCP→Hermes/STRATEGIC-PROMPT": "dir-strategic",
+    "Hermes→MCP/STRATEGIC-RESPONSE": "dir-strategic",
+    "MCP→Hermes/TACTICAL-PROMPT": "dir-tactical",
+    "Hermes→MCP/TACTICAL-RESPONSE": "dir-tactical",
+    "[战略层]": "dir-strategic",
+    "[战术层]": "dir-tactical",
     "Hermes/internal": "dir-hermes",
 }
 
@@ -547,6 +560,8 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
   --response: #b5cea8;
   --tool: #dcdcaa;
   --hermes: #d16969;
+  --strategic: #b267e6;
+  --tactical: #f4a261;
 }}
 * {{ box-sizing: border-box; }}
 body {{
@@ -619,6 +634,8 @@ body {{
 .entry.dir-response .entry-header {{ border-left-color: var(--response); }}
 .entry.dir-tool .entry-header {{ border-left-color: var(--tool); }}
 .entry.dir-hermes .entry-header {{ border-left-color: var(--hermes); }}
+.entry.dir-strategic .entry-header {{ border-left-color: var(--strategic); }}
+.entry.dir-tactical .entry-header {{ border-left-color: var(--tactical); }}
 .entry.level-WARN .entry-header {{ border-left-color: var(--warn); }}
 .entry.level-ERROR .entry-header {{ border-left-color: var(--error); }}
 .entry-time {{ color: var(--time); flex-shrink: 0; }}
@@ -640,6 +657,8 @@ body {{
 .entry.dir-response .entry-msg {{ color: var(--response); }}
 .entry.dir-tool .entry-msg {{ color: var(--tool); }}
 .entry.dir-hermes .entry-msg {{ color: var(--hermes); }}
+.entry.dir-strategic .entry-msg {{ color: var(--strategic); }}
+.entry.dir-tactical .entry-msg {{ color: var(--tactical); }}
 .entry-meta {{ color: var(--fg-dim); font-size: 12px; margin-left: auto; }}
 .entry-body {{
   display: none;
@@ -674,6 +693,8 @@ body {{
   <button class="filter-btn" data-filter="PERCEPTION">PERCEPTION</button>
   <button class="filter-btn" data-filter="RESPONSE">RESPONSE</button>
   <button class="filter-btn" data-filter="TOOL">TOOL</button>
+  <button class="filter-btn" data-filter="STRATEGIC">战略</button>
+  <button class="filter-btn" data-filter="TACTICAL">战术</button>
   <button class="filter-btn" data-filter="HERMES">Hermes</button>
   <select id="game-time-filter" title="按游戏时间过滤">
     <option value="ALL">游戏时间：全部</option>
@@ -720,10 +741,12 @@ function applyFilters() {{
         'PERCEPTION': 'MCP→Hermes/PERCEPTION',
         'RESPONSE': 'Hermes→MCP/RESPONSE',
         'TOOL': 'Hermes→MCP/TOOL',
+        'STRATEGIC': ['MCP→Hermes/STRATEGIC-PROMPT', 'Hermes→MCP/STRATEGIC-RESPONSE', '[战略层]'],
+        'TACTICAL': ['MCP→Hermes/TACTICAL-PROMPT', 'Hermes→MCP/TACTICAL-RESPONSE', '[战术层]'],
         'HERMES': 'Hermes/internal',
       }};
       const full = filterMap[currentFilter] || currentFilter;
-      show = dir.includes(full);
+      show = Array.isArray(full) ? full.some(f => dir.includes(f)) : dir.includes(full);
     }}
     if (show && currentGameTime !== 'ALL') {{
       show = gt === currentGameTime;

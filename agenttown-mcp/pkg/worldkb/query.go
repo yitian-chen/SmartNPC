@@ -171,3 +171,37 @@ func (k *KB) ListLocations() []LocationInfo {
 	}
 	return out
 }
+
+// ObjectInfo is a compact object summary for prompt injection.
+// Name is borrowed from the Location with the same ID (objects mirror
+// locations in the current KB schema and have no Name field of their own).
+type ObjectInfo struct {
+	ID               string
+	Name             string
+	AvailableActions []string
+}
+
+// ListObjects returns all smart objects in declaration order. Returns nil if
+// the KB is nil or empty. Used by the tactical layer prompt to inject the
+// full object list (with available actions) so the LLM cannot invent object
+// IDs like "workbench_02" that don't exist in the KB.
+func (k *KB) ListObjects() []ObjectInfo {
+	if k == nil {
+		return nil
+	}
+	out := make([]ObjectInfo, 0, len(k.Objects))
+	for _, o := range k.Objects {
+		name := o.ID
+		if loc := k.GetLocation(o.ID); loc != nil && loc.Name != "" {
+			name = loc.Name
+		}
+		actions := make([]string, len(o.AvailableActions))
+		copy(actions, o.AvailableActions)
+		out = append(out, ObjectInfo{
+			ID:               o.ID,
+			Name:             name,
+			AvailableActions: actions,
+		})
+	}
+	return out
+}

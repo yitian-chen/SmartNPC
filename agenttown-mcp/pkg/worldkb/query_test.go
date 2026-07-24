@@ -163,6 +163,42 @@ func TestListLocations(t *testing.T) {
 	}
 }
 
+func TestListObjects(t *testing.T) {
+	kb, _ := Load(sampleYAMLPath(t))
+	objs := kb.ListObjects()
+	if len(objs) == 0 {
+		t.Fatal("ListObjects returned empty for non-empty KB")
+	}
+	// Should contain workbench_01 with Name borrowed from Location and
+	// AvailableActions including "assemble".
+	found := false
+	for _, o := range objs {
+		if o.ID == "workbench_01" {
+			if o.Name == "" {
+				t.Errorf("workbench_01 has empty Name (should be borrowed from Location)")
+			}
+			if len(o.AvailableActions) == 0 {
+				t.Errorf("workbench_01 has empty AvailableActions")
+			}
+			hasAssemble := false
+			for _, a := range o.AvailableActions {
+				if a == "assemble" {
+					hasAssemble = true
+					break
+				}
+			}
+			if !hasAssemble {
+				t.Errorf("workbench_01 AvailableActions missing 'assemble', got %v", o.AvailableActions)
+			}
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("ListObjects missing workbench_01; got %v", objs)
+	}
+}
+
 func TestGetAvailableActions(t *testing.T) {
 	kb, _ := Load(sampleYAMLPath(t))
 	acts := kb.GetAvailableActions("workbench_01")
