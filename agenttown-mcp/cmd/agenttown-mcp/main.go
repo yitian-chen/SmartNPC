@@ -90,10 +90,15 @@ func (a *agentContext) observePerception(payload json.RawMessage) error {
 		return fmt.Errorf("parse perception: %w", err)
 	}
 	a.mu.Lock()
-	if !a.stopped {
-		a.latestPerception = cloneRawMessage(payload)
+	if a.stopped {
+		a.mu.Unlock()
+		return nil
 	}
+	a.latestPerception = cloneRawMessage(payload)
 	a.mu.Unlock()
+	// 感知是 worker 的主驱动源：每次感知到达都唤醒它检查战术队列
+	// （pop 下一个 / refill 新时段）。tacticalRefill 内部的守卫避免重复 LLM 调用。
+	a.signal()
 	return nil
 }
 
@@ -389,6 +394,14 @@ func (a *agentContext) latestZoneLocked() string {
 // sendIdleWait 发一个 60 秒的 wait，避免队列空且无 goal 时忙循环。
 func (a *agentContext) sendIdleWait(ctx context.Context, agentID string, ws *wsserver.Server, logger *slog.Logger) {
 	if !ws.IsConnected() {
+		return
+	}
+	// 有在途 action 时跳过：UE 正在执行 composite，wait 会被 busy 拒。
+	// 等 action_completed 自然唤醒 worker（completion 路径会 signal）。
+	a.mu.Lock()
+	inFlight := a.currentActionID != ""
+	a.mu.Unlock()
+	if inFlight {
 		return
 	}
 	if _, err := ws.SendAction(ctx, agentID, protocol.CmdWait, map[string]any{"duration_sec": 60}); err != nil {
