@@ -43,7 +43,10 @@ fail()  { echo -e "${RED}[FAIL]${NC} $*"; exit 1; }
 # 开发实例用 start-dev.sh wrapper 设置偏移端口后调本脚本。
 PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
 MCP_DIR="$PROJECT_DIR/agenttown-mcp"
-MCP_EXE="$MCP_DIR/agenttown-mcp.exe"
+# 二进制名可环境变量覆盖：stable 用 agenttown-mcp.exe，dev 用 agenttown-mcp-dev.exe
+# 避免两实例共用同一 exe 导致 stable 运行时 dev 无法重新编译覆盖
+MCP_EXE_NAME="${MCP_EXE_NAME:-agenttown-mcp.exe}"
+MCP_EXE="$MCP_DIR/$MCP_EXE_NAME"
 DOCKER_COMPOSE="${DOCKER_COMPOSE:-$PROJECT_DIR/docker/docker-compose.yml}"
 ENV_FILE="$PROJECT_DIR/.env"
 ADAPTER_SCRIPT="$PROJECT_DIR/src/agenttown/codebuddy_adapter.py"
@@ -257,7 +260,7 @@ build_mcp() {
 
     info "Building MCP (windows/amd64)..."
     "$GO_BIN" version
-    (cd "$MCP_DIR" && GOOS=windows GOARCH=amd64 CGO_ENABLED=0 "$GO_BIN" build -o agenttown-mcp.exe ./cmd/agenttown-mcp) \
+    (cd "$MCP_DIR" && GOOS=windows GOARCH=amd64 CGO_ENABLED=0 "$GO_BIN" build -o "$MCP_EXE_NAME" ./cmd/agenttown-mcp) \
         || fail "Go build failed"
 
     info "Running MCP unit tests..."

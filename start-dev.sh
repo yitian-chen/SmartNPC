@@ -25,6 +25,9 @@ export HERMES_PORT=8643
 export ADAPTER_PORT=8771
 export CLI_PORT=52002
 
+# 二进制名也偏移：避免与稳定实例共用 agenttown-mcp.exe 导致编译时文件锁冲突
+export MCP_EXE_NAME=agenttown-mcp-dev.exe
+
 # 开发专用 Docker compose 和 Hermes profile
 export DOCKER_COMPOSE="$PWD/docker/docker-compose-dev.yml"
 export HERMES_CONTAINER=agenttown-h01-dev

@@ -39,6 +39,7 @@ models_dev_cache.json
 # ─── 编译产物与临时目录 ───────────────────────────────────────
 agenttown-mcp/agenttown-mcp
 agenttown-mcp/agenttown-mcp.exe
+agenttown-mcp/agenttown-mcp-dev.exe
 agenttown-mcp/tmp/
 tmp/
 scripts/analyze_latency.py
