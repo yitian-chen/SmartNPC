@@ -75,6 +75,11 @@ type Server struct {
 	log         *slog.Logger
 	callTimeout time.Duration
 
+	// startedAt is when New was called; used for heartbeat uptime_sec
+	// (协议 §2.3 heartbeat payload). 与 lastHeartbeatAt 不同：后者是最近
+	// 收到 UE 心跳的时间，前者是进程自身的启动时间戳。
+	startedAt time.Time
+
 	seq             int64 // outbound sequence counter (atomic)
 	lastReceivedSeq int64 // highest inbound seq seen (atomic)
 
@@ -117,6 +122,7 @@ func New(opts Options) *Server {
 		addr:        opts.Addr,
 		log:         opts.Logger,
 		callTimeout: opts.CallTimeout,
+		startedAt:   time.Now(),
 		pending:     make(map[string]*pendingCall),
 	}
 }
@@ -571,8 +577,12 @@ func (s *Server) heartbeatLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			// 发出站心跳（agent_id="system"）
-			if err := s.SendEnvelope(protocol.SystemAgentID, protocol.TypeHeartbeat, protocol.HeartbeatPayload{}); err != nil {
+			// 发出站心跳（agent_id="system"），uptime_sec 填进程实际运行时长
+			// （协议 §2.3 heartbeat payload 示例字段）。
+			uptime := int64(time.Since(s.startedAt).Seconds())
+			if err := s.SendEnvelope(protocol.SystemAgentID, protocol.TypeHeartbeat, protocol.HeartbeatPayload{
+				UptimeSec: uptime,
+			}); err != nil {
 				s.log.Debug("heartbeat send failed", "err", err)
 			}
 			// 检测 UE 心跳响应超时（15s）
