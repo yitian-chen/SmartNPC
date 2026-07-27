@@ -5,7 +5,7 @@ model:
   # IP 172.18.16.1 是 Windows 的 vEthernet (WSL) 适配器地址，可能在 Windows 重启后变化。
   # 查询当前 IP：PowerShell `Get-NetIPAddress -InterfaceAlias "vEthernet (WSL (Hyper-V firewall))" -AddressFamily IPv4`
   # 或在 WSL 里 `ip route show | grep default`（default via <IP> dev eth0，那个 <IP> 就是 Windows 宿主）
-  default: deepseek-v4-flash-ioa
+  default: deepseek-v4-pro-ioa
   base_url: http://172.18.16.1:8761/v1
   api_mode: chat_completions
   context_length: 128000
@@ -14,7 +14,7 @@ providers:
     name: agenttown
     base_url: http://172.18.16.1:8761/v1
     key_env: HERMES_AGENT_API_KEY
-    default_model: deepseek-v4-flash-ioa
+    default_model: deepseek-v4-pro-ioa
     api_mode: chat_completions
     discover_models: false
 agent:
