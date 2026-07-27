@@ -831,14 +831,14 @@ func main() {
 	}()
 
 	if *httpAddr != "" {
-		runHTTP(ctx, logger, server, *httpAddr, *httpAllowAnyOrigin, *mcpAPIKey, ws)
+		runHTTP(ctx, logger, server, *httpAddr, *httpAllowAnyOrigin, *mcpAPIKey, ws, kb)
 	} else {
 		runStdio(ctx, logger, server)
 	}
 }
 
 // runHTTP serves the MCP server over Streamable HTTP + a /status endpoint.
-func runHTTP(ctx context.Context, logger *slog.Logger, server *mcp.Server, addr string, allowAnyOrigin bool, apiKey string, ws *wsserver.Server) {
+func runHTTP(ctx context.Context, logger *slog.Logger, server *mcp.Server, addr string, allowAnyOrigin bool, apiKey string, ws *wsserver.Server, kb *worldkb.KB) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/status", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -846,6 +846,11 @@ func runHTTP(ctx context.Context, logger *slog.Logger, server *mcp.Server, addr 
 			`{"ok":true,"ws_connected":%v}`,
 			ws.IsConnected(),
 		)))
+	})
+	// /debug/action — 联调 debug 端点：终端通过 curl 触发 MCP 向 UE 发
+	// action_command。仅联调用，无认证；生产环境应禁用或加 Bearer 校验。
+	mux.HandleFunc("/debug/action", func(w http.ResponseWriter, r *http.Request) {
+		handleDebugAction(ctx, logger, ws, kb, w, r)
 	})
 
 	err := transport.RunHTTP(ctx, logger, server, transport.HTTPOptions{
@@ -869,6 +874,161 @@ func runStdio(ctx context.Context, logger *slog.Logger, server *mcp.Server) {
 		logger.Error("stdio server exited with error", "err", err)
 		os.Exit(1)
 	}
+}
+
+// ─── /debug/action ──────────────────────────────────────────────
+// 联调 debug 端点：终端通过 curl POST 触发 MCP 向 UE 发 action_command。
+// 仅联调用，无认证。复用 ws.Call（含 action_started ACK 等待）。
+//
+// 请求体：{"agent_id":"H-01","cmd":"move_to","params":{"target":"workbench_01"}}
+// cmd 支持：move_to / speak / interact / wait / charge_at / work_assemble /
+// archive_research / rest_idle。其中 move_to 走 kb.GetPosition 解析坐标，
+// 其他 cmd 直接透传 params 给 ws.Call。
+
+// debugActionRequest 是 /debug/action 的请求体。
+type debugActionRequest struct {
+	AgentID string         `json:"agent_id"`
+	Cmd     string         `json:"cmd"`
+	Params  map[string]any `json:"params"`
+}
+
+// debugActionResponse 是 /debug/action 的响应体。
+type debugActionResponse struct {
+	OK                  bool    `json:"ok"`
+	ActionID            string  `json:"action_id,omitempty"`
+	Accepted            bool    `json:"accepted,omitempty"`
+	EstimatedDurationSec float64 `json:"estimated_duration_sec,omitempty"`
+	Error               string  `json:"error,omitempty"`
+}
+
+// resolveDebugMoveTo 把 move_to 的 target id 解析成 ws.Call 需要的完整参数。
+// 与 tactical.go:433 的 move_to 分支保持一致：dest + target + kind + speed。
+func resolveDebugMoveTo(params map[string]any, kb *worldkb.KB) (map[string]any, error) {
+	target, _ := params["target"].(string)
+	if target == "" {
+		return nil, errors.New("move_to requires params.target")
+	}
+	if kb == nil {
+		return nil, errors.New("world kb not loaded, cannot resolve target")
+	}
+	coord, kind, err := kb.GetPosition(target)
+	if err != nil {
+		return nil, fmt.Errorf("resolve target %q: %w", target, err)
+	}
+	return map[string]any{
+		"dest":   []float64{coord[0], coord[1], coord[2]},
+		"target": target,
+		"kind":   kind,
+		"speed":  "walk",
+	}, nil
+}
+
+// mapDebugCmd 把 debug 端点的 cmd 名映射到 protocol 常量。
+// 复合 action（charge_at / work_assemble / archive_research / rest_idle）统一走
+// CmdExecuteComposite，params 里需要带 name 字段（调用方传的 cmd 名）。
+func mapDebugCmd(cmd string) (protoCmd string, ok bool) {
+	switch cmd {
+	case "move_to":
+		return protocol.CmdMoveTo, true
+	case "speak":
+		return protocol.CmdSpeak, true
+	case "interact":
+		return protocol.CmdInteractSmartObject, true
+	case "wait":
+		return protocol.CmdWait, true
+	case "charge_at", "work_assemble", "archive_research", "rest_idle":
+		return protocol.CmdExecuteComposite, true
+	default:
+		return "", false
+	}
+}
+
+// buildDebugParams 根据 cmd 处理 params：move_to 走 kb 解析，
+// 复合 action 加 name 字段，其他直接透传。
+func buildDebugParams(cmd string, params map[string]any, kb *worldkb.KB) (map[string]any, error) {
+	if cmd == "move_to" {
+		return resolveDebugMoveTo(params, kb)
+	}
+	// 复合 action 需要 name 字段告诉 UE 执行哪个具体动作
+	switch cmd {
+	case "charge_at", "work_assemble", "archive_research", "rest_idle":
+		out := make(map[string]any, len(params)+1)
+		for k, v := range params {
+			out[k] = v
+		}
+		out["name"] = cmd
+		return out, nil
+	default:
+		return params, nil
+	}
+}
+
+func handleDebugAction(ctx context.Context, logger *slog.Logger, ws *wsserver.Server, kb *worldkb.KB, w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		_ = json.NewEncoder(w).Encode(debugActionResponse{Error: "method not allowed, use POST"})
+		return
+	}
+
+	var req debugActionRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(debugActionResponse{Error: "invalid JSON body: " + err.Error()})
+		return
+	}
+	if req.AgentID == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(debugActionResponse{Error: "agent_id is required"})
+		return
+	}
+	if req.Cmd == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(debugActionResponse{Error: "cmd is required"})
+		return
+	}
+
+	protoCmd, ok := mapDebugCmd(req.Cmd)
+	if !ok {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(debugActionResponse{Error: fmt.Sprintf("unknown cmd: %q", req.Cmd)})
+		return
+	}
+
+	if !ws.IsConnected() {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(debugActionResponse{Error: "no mock ue connected"})
+		return
+	}
+
+	params, err := buildDebugParams(req.Cmd, req.Params, kb)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(debugActionResponse{Error: err.Error()})
+		return
+	}
+
+	logger.Info("[debug/action] manual trigger",
+		"agent_id", req.AgentID, "cmd", req.Cmd, "proto_cmd", protoCmd, "params", fmt.Sprint(params))
+
+	ack, err := ws.Call(ctx, req.AgentID, protoCmd, params)
+	if err != nil {
+		w.WriteHeader(http.StatusBadGateway)
+		_ = json.NewEncoder(w).Encode(debugActionResponse{Error: "ws.Call failed: " + err.Error()})
+		return
+	}
+
+	resp := debugActionResponse{
+		OK:       true,
+		ActionID: ack.ActionID,
+		Accepted: ack.Accepted,
+	}
+	if ack.EstimatedDurationSec != nil {
+		resp.EstimatedDurationSec = *ack.EstimatedDurationSec
+	}
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 // Ensure the guarded adapter satisfies the tools.Executor interface.
