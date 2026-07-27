@@ -165,6 +165,30 @@ detect_lan_ip() {
 }
 
 # ─── Step 0: 停止现有进程 ──────────────────────────────────────
+# kill_port_listeners <port> <label>
+# 杀掉指定端口上所有监听进程（IPv4 + IPv6，任意地址）。
+# 关键：不能只抓 0.0.0.0，否则会漏掉 WSL wslrelay 镜像在 [::1] 上的幽灵监听，
+# 导致新启动的 MCP 被 wslrelay 抢占端口（curl 命中 wslrelay 返回 404）。
+kill_port_listeners() {
+    local port="$1" label="$2"
+    local pids
+    # netstat 本地地址列 ($2) 形如 0.0.0.0:8760 / [::1]:8760 / [::]:8760 / 127.0.0.1:8760
+    # 用 awk 匹配 ":<port>$" 结尾，避免误伤 87600 等端口
+    pids=$(netstat.exe -ano 2>/dev/null \
+        | awk -v p=":$port" '$2 ~ p"$" && $4=="LISTENING" {gsub(/\r/,""); print $NF}' \
+        | sort -u)
+    if [ -z "$pids" ]; then
+        warn "  No listener on :$port"
+        return 0
+    fi
+    local pid
+    for pid in $pids; do
+        MSYS_NO_PATHCONV=1 taskkill.exe /F /PID "$pid" >/dev/null 2>&1 \
+            && ok "  $label on :$port stopped (PID $pid)" \
+            || warn "  Failed to kill $label PID $pid on :$port"
+    done
+}
+
 stop_all() {
     info "=== Step 0: Stop existing processes ==="
 
@@ -172,38 +196,21 @@ stop_all() {
     info "Stopping Mock UE..."
     pkill -f "run_day.py" 2>/dev/null && ok "  Mock UE stopped" || warn "  Mock UE not running"
 
-    # MCP（Windows exe）— 用 netstat 找监听端口的 PID
+    # MCP（Windows exe）— 杀掉端口上所有监听者（含 WSL wslrelay 幽灵）
     info "Stopping existing MCP..."
-    local mcp_pid
+    local port
     for port in $WS_PORT $HTTP_PORT; do
-        mcp_pid=$(netstat.exe -ano 2>/dev/null | grep "0.0.0.0:$port" | grep LISTENING | awk '{print $NF}' | tr -d '\r' | head -1)
-        if [ -n "$mcp_pid" ]; then
-            MSYS_NO_PATHCONV=1 taskkill.exe /F /PID "$mcp_pid" >/dev/null 2>&1 \
-                && ok "  MCP on :$port stopped (PID $mcp_pid)" \
-                || warn "  Failed to kill MCP PID $mcp_pid"
-        fi
+        kill_port_listeners "$port" "MCP"
     done
 
     # Adapter
     if $START_ADAPTER; then
         info "Stopping existing Adapter..."
-        local adapter_pid
-        adapter_pid=$(netstat.exe -ano 2>/dev/null | grep "0.0.0.0:$ADAPTER_PORT" | grep LISTENING | awk '{print $NF}' | tr -d '\r' | head -1)
-        if [ -n "$adapter_pid" ]; then
-            MSYS_NO_PATHCONV=1 taskkill.exe /F /PID "$adapter_pid" >/dev/null 2>&1 \
-                && ok "  Adapter stopped (PID $adapter_pid)" \
-                || warn "  Failed to kill adapter PID $adapter_pid"
-        fi
+        kill_port_listeners "$ADAPTER_PORT" "Adapter"
     fi
 
     # CodeBuddy CLI 子进程
-    local cli_pid
-    cli_pid=$(netstat.exe -ano 2>/dev/null | grep "127.0.0.1:$CLI_PORT" | grep LISTENING | awk '{print $NF}' | tr -d '\r' | head -1)
-    if [ -n "$cli_pid" ]; then
-        MSYS_NO_PATHCONV=1 taskkill.exe /F /PID "$cli_pid" >/dev/null 2>&1 \
-            && ok "  CLI subprocess stopped (PID $cli_pid)" \
-            || warn "  Failed to kill CLI subprocess PID $cli_pid"
-    fi
+    kill_port_listeners "$CLI_PORT" "CLI subprocess"
 
     # Hermes（可选停止）
     if $START_HERMES; then
@@ -260,6 +267,10 @@ build_mcp() {
 
     info "Building MCP (windows/amd64)..."
     "$GO_BIN" version
+    # 删除旧二进制，强制 go build 重新链接产物。
+    # Go 的包缓存是内容哈希的（源码改了必定重编包），但若输出文件存在且 mtime 较新，
+    # go build 可能直接跳过链接步骤。删掉旧 exe 保证最终二进制永远反映当前源码。
+    rm -f "$MCP_EXE"
     (cd "$MCP_DIR" && GOOS=windows GOARCH=amd64 CGO_ENABLED=0 "$GO_BIN" build -o "$MCP_EXE_NAME" ./cmd/agenttown-mcp) \
         || fail "Go build failed"
 
