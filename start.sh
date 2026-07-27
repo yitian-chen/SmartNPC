@@ -2,10 +2,12 @@
 # AgentTown_v3 — 一键重启全部组件
 #
 # 先停掉所有现有进程，再按正确顺序启动：
-#   0. 停止 Mock UE + MCP + Hermes
-#   1. agenttown-mcp (WSL, Go binary)  — MCP Server + WebSocket Server
-#   2. Hermes Gateway (Docker)         — LLM Agent，连接 MCP 发现工具
-#   3. Mock UE (Python, host)          — WebSocket 客户端，推送感知
+#   0. 停止 Mock UE + MCP + Hermes + CodeBuddy Adapter
+#   1. agenttown-mcp (WSL, Go binary)         — MCP Server + WebSocket Server
+#   2. CodeBuddy Adapter (Python, Windows)    — OpenAI ↔ CLI Run API 适配层
+#   3. Hermes Gateway (Docker)                — LLM Agent，连接 MCP 发现工具，
+#                                                连接 Adapter 调用公司 GLM-5.2
+#   4. Mock UE (Python, host)                 — WebSocket 客户端，推送感知
 #
 # 用法：
 #   bash start.sh              # 全部重启，跑完整一天 (06:00-22:00)
@@ -15,8 +17,9 @@
 #   - WSL 已安装且 Docker 可用
 #   - Go 编译器可访问（PATH 中有 go，或位于 /d/Go/bin/go）
 #   - Hermes 源码在默认位置或通过 HERMES_SOURCE 环境变量指定
-#   - Python 3.10+，已安装 websockets, pyyaml
+#   - Python 3.10+，已安装 websockets, pyyaml, httpx, fastapi, uvicorn
 #   - d:/SmartNPC_v3/.env 存在且配置了 HERMES_AGENT_API_KEY
+#   - CodeBuddy CLI 已在 Windows 登录（适配层复用其 OAuth 认证）
 #
 # 每次 start.sh 都会强制重建以下组件（不再支持跳过）：
 #   - MCP Go 二进制：交叉编译 linux/amd64 + 跑 cmd/agenttown-mcp 单元测试
@@ -42,6 +45,8 @@ PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
 DOCKER_COMPOSE="$PROJECT_DIR/docker/docker-compose.yml"
 ENV_FILE="$PROJECT_DIR/.env"
 MOCK_UE_SCRIPT="$PROJECT_DIR/src/run_day.py"
+ADAPTER_SCRIPT="$PROJECT_DIR/src/agenttown/codebuddy_adapter.py"
+ADAPTER_PORT=8761
 
 # ─── 日志目录（按测试日期归档到 logs/YYYY-MM-DD/）─────────────
 # 单一日期来源：start.sh 启动时计算一次，传给 MCP 启动器和 Mock UE，
@@ -118,9 +123,22 @@ while [[ $# -gt 0 ]]; do
 done
 
 # ─── 健康检查函数 ──────────────────────────────────────────────
+# 适配层运行在 Windows，其他服务运行在 WSL/Docker。
+# - 从 Git Bash 运行：localhost 即 Windows localhost，可直接访问适配层
+# - 从 WSL 运行：localhost 是 WSL VM 的 localhost，访问 Windows 适配层需要用
+#   Windows 宿主 IP（WSL2 的默认网关，即 vEthernet 网卡 IP）
+ADAPTER_HOST="localhost"
+if [ -z "$WSL" ]; then
+    # 在 WSL 内 — 解析 Windows 宿主 IP（默认网关）
+    ADAPTER_HOST=$(ip route show default 2>/dev/null | awk '{print $3}' | head -1)
+    [ -z "$ADAPTER_HOST" ] && ADAPTER_HOST=$(grep nameserver /etc/resolv.conf 2>/dev/null | head -1 | awk '{print $2}')
+    [ -z "$ADAPTER_HOST" ] && ADAPTER_HOST="172.18.16.1"  # 兜底：常见 vEthernet IP
+fi
+
 check_mcp_http() { $WSL curl -sf http://localhost:8760/healthz >/dev/null 2>&1; }
 check_mcp_ws()   { $WSL curl -sf http://localhost:9090/healthz >/dev/null 2>&1; }
 check_hermes()   { curl -sf http://localhost:8642/health >/dev/null 2>&1; }
+check_adapter()  { curl -sf http://$ADAPTER_HOST:$ADAPTER_PORT/health >/dev/null 2>&1; }
 
 wait_for() {
     local name="$1" check_fn="$2" max_wait="${3:-30}" elapsed=0
@@ -145,6 +163,28 @@ stop_all() {
     # avoiding accidentally killing the wsl bash shell itself.
     info "Stopping MCP..."
     $WSL_BASH 'pkill -x agenttown-mcp 2>/dev/null' && ok "  MCP stopped" || warn "  MCP not running"
+    sleep 1
+
+    # CodeBuddy Adapter (Python, Windows) — 适配层是 Windows 进程，
+    # MSYS pkill -f 看不到 Python 脚本名，所以用 Windows netstat.exe 找到
+    # 监听 :8761 的 PID，再用 Windows taskkill.exe 终止。
+    # 必须显式用 .exe 后缀：Git Bash 和 WSL 都能通过该后缀调到 Windows 工具。
+    # /F /PID 用单斜杠（//F 会被 taskkill 拒绝）；MSYS_NO_PATHCONV=1 防止
+    # Git Bash 把 /F 误转成 Windows 路径（WSL 不受影响，该变量是无害空操作）。
+    # tr -d '\r' 剥离 netstat.exe 输出的 CRLF 行尾，否则 PID 带 \r 会导致
+    # taskkill 报"无效查询"。
+    info "Stopping CodeBuddy Adapter..."
+    local adapter_pid
+    adapter_pid=$(netstat.exe -ano 2>/dev/null | grep "0.0.0.0:$ADAPTER_PORT" | grep LISTENING | awk '{print $NF}' | tr -d '\r' | head -1)
+    if [ -n "$adapter_pid" ]; then
+        if MSYS_NO_PATHCONV=1 taskkill.exe /F /PID "$adapter_pid" >/dev/null 2>&1; then
+            ok "  Adapter stopped (PID $adapter_pid)"
+        else
+            warn "  Failed to kill adapter PID $adapter_pid (taskkill returned non-zero)"
+        fi
+    else
+        warn "  Adapter not running"
+    fi
     sleep 1
 
     # Hermes (Docker)
@@ -264,9 +304,106 @@ chmod +x ~/start_mcp.sh"
     wait_for "MCP WS (:9090)" check_mcp_ws 10
 }
 
-# ─── 步骤 2: 启动 Hermes ──────────────────────────────────────
+# ─── 步骤 2: 启动 CodeBuddy Adapter ───────────────────────────
+# 适配层把 OpenAI /v1/chat/completions 转成 CLI Run API 请求，
+# 复用 CLI 已有的 OAuth 认证调用公司 GLM-5.2 模型。
+#
+# 硬约束：适配层必须在 Windows 运行（CLI 本地服务绑 127.0.0.1，
+# WSL 访问不到）。所以这里用 Windows Python 启动，不能用 WSL Python。
+#
+# start.sh 可从两种环境运行，此函数都需兼容：
+#   - Git Bash (Windows): `python` 是 Windows Python，路径用 cygpath -w 转换
+#     （$PROJECT_DIR 是 /d/SmartNPC_v3 风格，cygpath 理解 /d/ → D:\）
+#   - WSL bash: `python.exe` 通过互操作调用 Windows Python，路径用 wslpath -w
+#     （$PROJECT_DIR 是 /mnt/d/SmartNPC_v3 风格，cygpath 不理解 /mnt/d/，
+#      会错误转成 D:\...\mnt\d\...；wslpath 才能正确转成 D:\SmartNPC_v3\...）
+start_adapter() {
+    info "=== Step 2: Start CodeBuddy CLI Adapter ==="
+
+    if [ ! -f "$ADAPTER_SCRIPT" ]; then
+        fail "Adapter script not found: $ADAPTER_SCRIPT"
+    fi
+
+    # 定位 Windows Python。适配层必须在 Windows 跑（CLI 绑 127.0.0.1）。
+    local py_cmd=""
+    local script_arg="$ADAPTER_SCRIPT"
+
+    if [ -n "$WSL" ]; then
+        # Git Bash (Windows) — `python` 通常就是 Windows Python
+        if ! command -v python &>/dev/null; then
+            fail "Python not found. Install Python 3.10+ on Windows and add to PATH."
+        fi
+        py_cmd="python"
+        # MSYS 路径 /d/... → Windows 路径 D:\...
+        if command -v cygpath &>/dev/null; then
+            script_arg="$(cygpath -w "$ADAPTER_SCRIPT")"
+        fi
+    else
+        # WSL — 需要 Windows Python 互操作
+        if ! $WSL_BASH 'command -v python.exe &>/dev/null' 2>/dev/null; then
+            fail "Adapter must run on Windows Python, but python.exe not found in WSL PATH.
+  Options:
+    1. Run start.sh from Git Bash (recommended): bash start.sh
+    2. Install Python on Windows and ensure it's in Windows PATH (python.exe)"
+        fi
+        py_cmd="python.exe"
+        # WSL 路径 /mnt/d/... → Windows 路径 D:\...
+        # 必须用 wslpath，不能用 cygpath（cygpath 不理解 /mnt/d/ 挂载约定，
+        # 会把 /mnt/d/SmartNPC_v3/... 错误转成 D:\...\mnt\d\SmartNPC_v3\...）
+        if $WSL_BASH 'command -v wslpath &>/dev/null' 2>/dev/null; then
+            script_arg=$($WSL_BASH "wslpath -w '$ADAPTER_SCRIPT'" 2>/dev/null)
+            [ -z "$script_arg" ] && script_arg="$ADAPTER_SCRIPT"
+        fi
+    fi
+    ok "  Python: $py_cmd"
+    ok "  Script: $script_arg"
+
+    local adapter_log="$LOG_SUBDIR/adapter.log"
+
+    # 启动适配层到后台。nohup + disown 确保进程在 start.sh 退出后存活。
+    # 日志写入 logs/$LOG_DATE/adapter.log（与 sim.log 同目录，但独立文件，
+    # 因为适配层是基础设施，不属于仿真协议链路）。
+    info "Starting adapter on :$ADAPTER_PORT (log: logs/$LOG_DATE/adapter.log)..."
+    : > "$adapter_log"  # 清空旧日志，方便本次排查
+    nohup "$py_cmd" "$script_arg" --port "$ADAPTER_PORT" > "$adapter_log" 2>&1 &
+    disown
+
+    # 自定义等待循环：失败时打印 adapter.log 末尾方便排查（wait_for 会直接
+    # exit 1，无法在失败后追加诊断信息）
+    info "Waiting for CodeBuddy Adapter (:$ADAPTER_PORT) (max 20s)..."
+    local elapsed=0
+    while [ $elapsed -lt 20 ]; do
+        if check_adapter; then
+            ok "CodeBuddy Adapter (:$ADAPTER_PORT) is up"
+            break
+        fi
+        sleep 2; elapsed=$((elapsed + 2)); printf "."
+    done
+    echo ""
+    if [ $elapsed -ge 20 ]; then
+        warn "  Adapter did not come up within 20s. Last 25 lines of adapter.log:"
+        tail -25 "$adapter_log" 2>/dev/null | sed 's/^/    /'
+        fail "  Adapter failed to start. See logs/$LOG_DATE/adapter.log for full details."
+    fi
+
+    # 验证适配层能连通 CLI（CLI 必须已登录）
+    local health
+    health=$(curl -sS http://$ADAPTER_HOST:$ADAPTER_PORT/health 2>/dev/null)
+    if echo "$health" | grep -q '"status":"ok"'; then
+        local cli_url
+        cli_url=$(echo "$health" | sed -n 's/.*"cli_url":"\([^"]*\)".*/\1/p')
+        ok "  Adapter connected to CLI ($cli_url)"
+    else
+        warn "  Adapter is up but CLI not reachable (health: $health)"
+        fail "  CodeBuddy CLI not running or not logged in.
+  Start CLI in a separate terminal: codebuddy
+  Log in with your Tencent account, then re-run start.sh"
+    fi
+}
+
+# ─── 步骤 3: 启动 Hermes ──────────────────────────────────────
 start_hermes() {
-    info "=== Step 2: Start Hermes Gateway ==="
+    info "=== Step 3: Start Hermes Gateway ==="
 
     if [ ! -f "$ENV_FILE" ]; then
         fail ".env file not found at $ENV_FILE"
@@ -330,9 +467,9 @@ start_hermes() {
   $WSL tail -20 /mnt/d/SmartNPC_v3/logs/$LOG_DATE/sim.log"
 }
 
-# ─── 步骤 3: 启动 Mock UE ─────────────────────────────────────
+# ─── 步骤 4: 启动 Mock UE ─────────────────────────────────────
 start_mock_ue() {
-    info "=== Step 3: Start Mock UE ==="
+    info "=== Step 4: Start Mock UE ==="
 
     if [ ! -f "$MOCK_UE_SCRIPT" ]; then
         fail "Mock UE script not found: $MOCK_UE_SCRIPT"
@@ -342,6 +479,7 @@ start_mock_ue() {
     info "Pre-flight checks:"
     check_mcp_http && ok "  MCP HTTP reachable" || fail "  MCP HTTP unreachable"
     check_mcp_ws   && ok "  MCP WS reachable"   || fail "  MCP WS unreachable"
+    check_adapter  && ok "  Adapter reachable"  || fail "  Adapter unreachable"
     check_hermes   && ok "  Hermes reachable"   || fail "  Hermes unreachable"
 
     local args=(
@@ -417,6 +555,8 @@ echo ""
 
 stop_all
 start_mcp
+echo ""
+start_adapter
 echo ""
 start_hermes
 echo ""
