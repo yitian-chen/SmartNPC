@@ -446,7 +446,7 @@ start_mcp() {
     cat > "$bat_file" << EOF
 @echo off
 pushd "$cwd_win"
-"$mcp_exe_win" --http ":$HTTP_PORT" --ws ":$WS_PORT" --hermes-url "http://localhost:$HERMES_PORT" --world-kb "$world_kb_win" >> "$mcp_log_win" 2>&1
+"$mcp_exe_win" --http ":$HTTP_PORT" --ws ":$WS_PORT" --hermes-url "http://localhost:$HERMES_PORT" --world-kb "$world_kb_win" --log-level debug >> "$mcp_log_win" 2>&1
 EOF
     if $IN_WSL; then
         local bat_win

@@ -78,6 +78,7 @@ const tacticalPromptTemplate = `[战术层/任务分解] 当前时段目标：%s
 3. 第一步通常是 move_to 到目标区域
 4. move_to 的 target、interact 的 object_id、work_assemble 的 target 必须从上面的可用列表中选取，禁止编造
 5. 每行一个 JSON 对象，不要输出 JSON 数组，不要输出 markdown 围栏，不要输出任何其他文字
+6. 必须以字符 {"inner_thought 开头，不要输出步骤说明、不要解释、不要编号列表、不要 markdown 加粗
 
 示例：
 {"inner_thought":"先去车间再开始装配"}

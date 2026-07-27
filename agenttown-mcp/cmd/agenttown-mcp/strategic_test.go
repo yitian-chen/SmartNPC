@@ -131,8 +131,10 @@ func TestFormatDailyPlan_MultipleItems(t *testing.T) {
 func TestGenerateDailyPlan_HTTPError(t *testing.T) {
 	sc := &fakeStrategicCaller{err: errors.New("network down")}
 	plan := generateDailyPlan(context.Background(), sc, "H-01", slog.Default())
-	if plan != "" {
-		t.Errorf("got %q, want empty plan on error", plan)
+	// HTTP 错误现在回退到 defaultDailyPlan 而不是空字符串，
+	// 保证战术层有目标可分解、仿真不瘫痪。
+	if plan != defaultDailyPlan {
+		t.Errorf("got %q, want defaultDailyPlan on error", plan)
 	}
 	if sc.resetCalled {
 		t.Error("ResetSession should not be called when SendWithSummary fails")
@@ -157,8 +159,10 @@ func TestGenerateDailyPlan_ValidResponse(t *testing.T) {
 func TestGenerateDailyPlan_ParseFail(t *testing.T) {
 	sc := &fakeStrategicCaller{resp: makeStrategicResponse("今天天气不错，我打算去车间转转。")}
 	plan := generateDailyPlan(context.Background(), sc, "H-01", slog.Default())
-	if plan != "" {
-		t.Errorf("got %q, want empty plan on parse failure", plan)
+	// 解析失败现在回退到 defaultDailyPlan 而不是空字符串，
+	// 避免整天 Wait(60s) 瘫痪。
+	if plan != defaultDailyPlan {
+		t.Errorf("got %q, want defaultDailyPlan on parse failure", plan)
 	}
 }
 

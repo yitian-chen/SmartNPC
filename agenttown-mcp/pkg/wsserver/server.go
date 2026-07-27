@@ -83,6 +83,10 @@ type Server struct {
 	seq             int64 // outbound sequence counter (atomic)
 	lastReceivedSeq int64 // highest inbound seq seen (atomic)
 
+	// heartbeatsReceived 累计收到的 UE 心跳数（atomic）。用于超时关闭时
+	// 诊断：若是 0，说明 UE 从未发心跳；若是 N>0 后停发，说明中途断流。
+	heartbeatsReceived int64
+
 	mu      sync.RWMutex
 	conn    *websocket.Conn
 	lastHeartbeatAt time.Time // 最近收到 UE 心跳的时间（mu 保护），用于 15s 超时检测
@@ -246,7 +250,22 @@ func (s *Server) readLoop(ctx context.Context, c *websocket.Conn) {
 		// fully visible in sim.log.
 		switch env.Type {
 		case protocol.TypeHeartbeat:
-			// 更新心跳时间戳（用于 15s 超时检测），保持静默不日志
+			// 解析 uptime_sec 用于日志诊断（协议 §2.3）。解析失败也不影响
+			// 心跳时间戳更新——心跳本质是 liveness 信号，payload 是辅助。
+			var hb protocol.HeartbeatPayload
+			_ = json.Unmarshal(env.Payload, &hb)
+			count := atomic.AddInt64(&s.heartbeatsReceived, 1)
+			// 心跳静默是历史遗留：sim.log 已经被 perception_update 刷屏。
+			// 但同事 UE 联调时心跳是关键诊断信号——超时关闭后若日志里
+			// 看不到任何 heartbeat received，就能直接定位"UE 没发心跳"。
+			// 用 Debug 级别避免污染 INFO 日志，开 -log-level debug 即可见。
+			s.log.Debug("[UE→MCP] heartbeat received",
+				"agent_id", env.AgentID, "seq", env.Seq, "uptime_sec", hb.UptimeSec, "count", count)
+			// 首条心跳打 INFO：标志 UE 心跳链路确实建立。后续靠 Debug。
+			if count == 1 {
+				s.log.Info("[UE→MCP] first heartbeat received", "agent_id", env.AgentID, "seq", env.Seq)
+			}
+			// 更新心跳时间戳（用于 15s 超时检测）
 			s.mu.Lock()
 			s.lastHeartbeatAt = time.Now()
 			s.mu.Unlock()
@@ -590,7 +609,16 @@ func (s *Server) heartbeatLoop(ctx context.Context) {
 			last := s.lastHeartbeatAt
 			s.mu.RUnlock()
 			if time.Since(last) > 15*time.Second {
-				s.log.Warn("UE heartbeat timeout (>15s), closing connection", "last_heartbeat", last)
+				// 详细诊断：连接建立了多久、共收到多少条心跳、最后心跳何时。
+				// 这三个字段能区分"UE 从未发心跳"(count=0)、"发了几条就停"(count>0)
+				// 和"心跳间隔配置错误"(since_last 接近 15s)。
+				count := atomic.LoadInt64(&s.heartbeatsReceived)
+				s.log.Warn("UE heartbeat timeout (>15s), closing connection",
+					"last_heartbeat", last,
+					"since_last_sec", time.Since(last).Seconds(),
+					"heartbeats_received", count,
+					"uptime_sec", uptime,
+				)
 				s.mu.Lock()
 				if s.conn != nil {
 					_ = s.conn.Close(websocket.StatusPolicyViolation, "heartbeat timeout")
