@@ -398,13 +398,35 @@ Mock UE 在 Windows 上通过 `ws://localhost:9090/ws` 连接 MCP（WSL2 localho
 
 ```bash
 cp .env.example .env
-# 编辑 .env，填入 HERMES_AGENT_API_KEY（DeepSeek API key）
+# 编辑 .env，填入 HERMES_AGENT_API_KEY（占位值即可，适配层不校验）
 ```
 
 关键环境变量：
-- `HERMES_AGENT_API_KEY` — DeepSeek API 密钥
+- `HERMES_AGENT_API_KEY` — 占位值即可（适配层复用 CLI OAuth，不校验 API key；Hermes 仅要求该环境变量非空）
 - `AGENTTOWN_MCP_HTTP` — MCP HTTP 监听（默认 `:8760`）
 - `AGENTTOWN_MCP_WS` — MCP WebSocket 监听（默认 `:9090`）
+
+### LLM 模型配置
+
+Hermes 通过 CodeBuddy CLI 适配层（`src/agenttown/codebuddy_adapter.py`）调用公司模型，
+适配层会启动一个独立的 CLI 子进程（`codebuddy --serve --model <name>`），复用 CLI 的
+OAuth 认证。模型配置在 `src/agenttown/adapter_config.yaml`：
+
+```yaml
+cli_port: 52001                          # CLI 子进程监听端口
+model: deepseek-v4-flash-ioa             # 模型 ID（见 `codebuddy --help` 的 --model 参数）
+```
+
+**换模型步骤**：
+1. 改 `src/agenttown/adapter_config.yaml` 的 `model` 字段（适配层启动的 CLI 子进程用）
+2. 改 `hermes/profiles/h01/config.yaml` 的 `default` / `default_model` 字段（保持一致）
+3. 跑 `bash start.sh` 重启
+
+可用模型：`deepseek-v4-flash-ioa` / `deepseek-v4-pro-ioa` / `glm-5.2-internal-ioa` /
+`claude-sonnet-5` / `gpt-5.6-sol` / `gemini-3.1-pro` 等（完整列表见 `codebuddy --help`，
+实际能否使用取决于账号权限）。
+
+前置条件：CodeBuddy CLI 已登录（在终端跑 `codebuddy` 登录腾讯账号）。
 
 ## 文件地图
 
@@ -426,6 +448,8 @@ cp .env.example .env
 | `agenttown-mcp/pkg/transport/http.go` | Streamable HTTP 传输 |
 | `agenttown-mcp/internal/log/logger.go` | slog JSON 日志（写 stderr） |
 | `src/agenttown/mock_ue.py` | Mock UE：协议常量、NPCState、物理状态、感知循环、动作处理、重连+重放 |
+| `src/agenttown/codebuddy_adapter.py` | CodeBuddy CLI OpenAI 适配层：启动 CLI 子进程、协议转换、模型隔离 |
+| `src/agenttown/adapter_config.yaml` | 适配层配置：CLI 子进程端口 + 模型 ID（换模型改这里） |
 | `src/run_day.py` | Mock UE 启动入口 |
 | `hermes/profiles/h01/SKILL.md` | Hermes 工具使用指南（复合+原子行为） |
 | `start.sh` | 一键启动脚本（自动编译+部署+日志合并） |

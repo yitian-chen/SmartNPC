@@ -187,6 +187,23 @@ stop_all() {
     fi
     sleep 1
 
+    # CodeBuddy CLI 子进程（适配层启动的，端口 52001）—— 适配层正常退出时会
+    # 自己 terminate 子进程，但如果适配层异常崩溃，CLI 子进程会残留。
+    # 这里兜底杀掉 52001 端口的残留进程。
+    info "Stopping CodeBuddy CLI subprocess (port 52001)..."
+    local cli_pid
+    cli_pid=$(netstat.exe -ano 2>/dev/null | grep "127.0.0.1:52001" | grep LISTENING | awk '{print $NF}' | tr -d '\r' | head -1)
+    if [ -n "$cli_pid" ]; then
+        if MSYS_NO_PATHCONV=1 taskkill.exe /F /PID "$cli_pid" >/dev/null 2>&1; then
+            ok "  CLI subprocess stopped (PID $cli_pid)"
+        else
+            warn "  Failed to kill CLI subprocess PID $cli_pid"
+        fi
+    else
+        warn "  CLI subprocess not running"
+    fi
+    sleep 1
+
     # Hermes (Docker)
     info "Stopping Hermes..."
     $WSL docker compose -f "$DOCKER_COMPOSE_FILE" stop 2>/dev/null \
