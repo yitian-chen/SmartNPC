@@ -52,9 +52,9 @@ bash start-dev.sh
 - `-H "Content-Type: ..."` → 报 "无法将 System.String 转换为 IDictionary"（`-H` 被绑定到 `-Headers`，需要哈希表）
 - `-d '...'` → 不存在此参数
 
-**解决方法 A — 用真 curl（`curl.exe`，推荐）**：
+**解决方法 A — 用真 curl（`curl.exe` + `\"` 转义，推荐）**：
 
-加 `.exe` 后缀绕过别名。但 PowerShell 把单引号字符串里的双引号会吞掉，导致 JSON 变成 `{agent_id:...}` 解析失败。**必须用 `\"` 转义**：
+加 `.exe` 后缀绕过别名。PowerShell 单引号字符串里的 `"` 传给 native exe 时会被吞掉，导致 JSON 变成 `{agent_id:...}` 解析失败。**必须用 `\"` 转义**（PowerShell 单引号不解析反斜杠，整串原样传给 curl，curl 自己把 `\"` 解析成 `"`）：
 
 ```powershell
 curl.exe -X POST http://localhost:8760/debug/action -H "Content-Type: application/json" -d '{\"agent_id\":\"H-01\",\"cmd\":\"move_to\",\"params\":{\"target\":\"workbench_01\"}}'
@@ -66,7 +66,7 @@ curl.exe -X POST http://localhost:8760/debug/action -H "Content-Type: applicatio
 Invoke-RestMethod -Method Post -Uri http://localhost:8760/debug/action -ContentType "application/json" -Body '{"agent_id":"H-01","cmd":"move_to","params":{"target":"workbench_01"}}'
 ```
 
-> 下方所有 curl 示例按 bash 语法给出（`-d '{"key":"value"}'`）。PowerShell 用户请按上方规则转换。
+> 下方所有 curl 示例按 **bash 语法**给出（`-d '{"key":"value"}'`，无需转义）。PowerShell 用户请按上方规则转换：方法 A 在每个 `"` 前加 `\`，或直接用方法 B。
 
 ---
 
@@ -255,3 +255,18 @@ UE 应收到 `action_command` envelope 并回 `action_started` ACK，执行完�
 4. **复合动作的 name 字段**：`charge_at` / `work_assemble` / `archive_research` / `rest_idle` 这四个 cmd 在协议层统一走 `ExecuteComposite`，MCP 会自动在 params 里注入 `name` 字段告诉 UE 具体执行哪个动作，调用方不需要传 `name`。
 
 5. **ACK 超时**：`ws.Call` 内置 2 秒超时，UE 必须在 2 秒内回 `action_started`，否则 curl 会收到 502 错误。
+
+6. **WSL 端口幽灵排查（curl 返回 `404 page not found` 但 `/status` 正常时）**：
+
+   如果曾经在 WSL 里跑过 MCP，WSL2 的 `wslrelay.exe` 会把 WSL 内监听的端口镜像到 Windows 的 `[::1]:<port>`（IPv6 localhost）。WSL 里 MCP 停了但 `wslrelay` 不会自动退出，继续占着 `[::1]:8760`。Windows 上 `localhost` 解析优先返回 `[::1]`，curl 会命中 `wslrelay` 而非真正的 MCP，`wslrelay` 对任何 HTTP 请求返回 `404 page not found`。
+
+   `start-debug.sh` 的 `--stop` 已修复（`kill_port_listeners` 会杀掉端口上所有监听者，含 `[::1]` 上的 wslrelay），但若手动启动 MCP 后仍遇 404，检查并清理：
+
+   ```powershell
+   # 查看 8760 上所有监听者
+   Get-NetTCPConnection -LocalPort 8760 -State Listen | Select-Object LocalAddress, OwningProcess
+   # 如果 [::1] 上有非 MCP 进程（wslrelay），杀掉
+   Stop-Process -Id <PID> -Force
+   ```
+
+   或者直接 `bash start-debug.sh --stop` 后重启即可。
