@@ -14,9 +14,36 @@
 |---|---|
 | 路径 | `POST /debug/action` |
 | Content-Type | `application/json` |
-| 端口 | MCP HTTP 端口（默认 `8760`，开发实例 `8770`） |
+| 端口 | MCP HTTP 端口（见下方端口对照表） |
 | 认证 | 无（仅联调用，生产环境应禁用或加 Bearer 校验） |
 | 超时 | 复用 `ws.Call` 内置的 2 秒 ACK 等待 |
+
+### 端口对照表
+
+本项目支持双实例并行运行（stable + dev），端口互不冲突。curl 时请按你启动的实例选对应端口。
+
+| 用途 | stable 实例 | dev 实例 | 说明 |
+|---|---|---|---|
+| MCP HTTP（本端点） | `8760` | `8770` | `/debug/action` 走这个端口 |
+| MCP WebSocket | `9090` | `9091` | UE 连这个收 action_command |
+| Hermes | `8642` | `8643` | LLM 推理服务 |
+| CodeBuddy Adapter | `8761` | `8771` | 模型适配层 |
+| CLI | `52001` | `52002` | Hermes CLI 端口 |
+| 二进制名 | `agenttown-mcp.exe` | `agenttown-mcp-dev.exe` | 避免编译时文件锁冲突 |
+
+启动方式：
+
+```bash
+# 开发实例（默认端口 8770，本仓库 d:/SmartNPC_v3）
+cd d:/SmartNPC_v3
+bash start-dev.sh
+
+# 稳定实例（默认端口 8760，worktree d:/SmartNPC_v3-stable）
+cd d:/SmartNPC_v3-stable
+bash start-debug.sh
+```
+
+> **注意**：`/debug/action` 路由当前只在 `feature/manual-action` 分支上，未合入 master。stable 实例跑 master 时无此路由，请用 dev 实例测试。
 
 ---
 
@@ -170,26 +197,16 @@ curl -X POST http://localhost:8770/debug/action \
 
 ## 五、联调流程
 
-### 5.1 启动服务
+> 启动服务见上方"端口对照表"。
 
-```bash
-# 开发实例（端口 8770）
-cd d:/SmartNPC_v3
-bash start-dev.sh
-
-# 或稳定实例（端口 8760）
-cd d:/SmartNPC_v3-stable
-bash start-debug.sh
-```
-
-### 5.2 确认 UE 已连接
+### 5.1 确认 UE 已连接
 
 ```bash
 curl http://localhost:8770/status
 # 预期：{"ok":true,"ws_connected":true}
 ```
 
-### 5.3 触发动作
+### 5.2 触发动作
 
 用上方任意 curl 命令触发。MCP 日志会记录：
 
@@ -198,7 +215,7 @@ curl http://localhost:8770/status
 [MCP→UE/CMD] cmd=MoveTo action_id=act_xxx agent_id=H-01 params=...
 ```
 
-### 5.4 观察 UE 侧
+### 5.3 观察 UE 侧
 
 UE 应收到 `action_command` envelope 并回 `action_started` ACK，执行完毕后回 `action_completed`。
 
