@@ -21,4 +21,4 @@ cli_port: 52001
 #   gemini-3.1-pro           Google Gemini Pro
 #
 # 完整列表见 `codebuddy --help`。注意：实际能否使用取决于你账号的模型权限。
-model: deepseek-v4-flash-ioa
+model: deepseek-v4-pro-ioa

@@ -161,3 +161,131 @@ func TestRecordActionStarted_SetsSource(t *testing.T) {
 		t.Fatalf("currentActionID=%q, want act_2", id)
 	}
 }
+
+// ─── /debug/action ─────────────────────────────────────────────
+
+func TestMapDebugCmd(t *testing.T) {
+	cases := []struct {
+		cmd      string
+		wantCmd  string
+		wantOK   bool
+	}{
+		{"move_to", protocol.CmdMoveTo, true},
+		{"speak", protocol.CmdSpeak, true},
+		{"interact", protocol.CmdInteractSmartObject, true},
+		{"wait", protocol.CmdWait, true},
+		{"charge_at", protocol.CmdExecuteComposite, true},
+		{"work_assemble", protocol.CmdExecuteComposite, true},
+		{"archive_research", protocol.CmdExecuteComposite, true},
+		{"rest_idle", protocol.CmdExecuteComposite, true},
+		{"unknown_cmd", "", false},
+		{"", "", false},
+	}
+	for _, c := range cases {
+		got, ok := mapDebugCmd(c.cmd)
+		if ok != c.wantOK {
+			t.Errorf("mapDebugCmd(%q) ok=%v, want %v", c.cmd, ok, c.wantOK)
+			continue
+		}
+		if ok && got != c.wantCmd {
+			t.Errorf("mapDebugCmd(%q) = %q, want %q", c.cmd, got, c.wantCmd)
+		}
+	}
+}
+
+func TestResolveDebugMoveTo_Valid(t *testing.T) {
+	kb := loadTestKB(t)
+	params := map[string]any{"target": "workbench_01"}
+	out, err := resolveDebugMoveTo(params, kb)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	dest, ok := out["dest"].([]float64)
+	if !ok {
+		t.Fatalf("dest should be []float64, got %T", out["dest"])
+	}
+	if len(dest) != 3 {
+		t.Fatalf("dest should have 3 coords, got %d", len(dest))
+	}
+	if out["target"] != "workbench_01" {
+		t.Errorf("target=%v, want workbench_01", out["target"])
+	}
+	if out["kind"] == "" {
+		t.Error("kind should not be empty for valid target")
+	}
+	if out["speed"] != "walk" {
+		t.Errorf("speed=%v, want walk", out["speed"])
+	}
+}
+
+func TestResolveDebugMoveTo_Zone(t *testing.T) {
+	kb := loadTestKB(t)
+	// main_workshop 是 zone，应返回 kind="zone"
+	out, err := resolveDebugMoveTo(map[string]any{"target": "main_workshop"}, kb)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out["kind"] != "zone" {
+		t.Errorf("kind=%v, want zone", out["kind"])
+	}
+}
+
+func TestResolveDebugMoveTo_UnknownTarget(t *testing.T) {
+	kb := loadTestKB(t)
+	_, err := resolveDebugMoveTo(map[string]any{"target": "nonexistent_place"}, kb)
+	if err == nil {
+		t.Fatal("expected error for unknown target")
+	}
+}
+
+func TestResolveDebugMoveTo_EmptyTarget(t *testing.T) {
+	kb := loadTestKB(t)
+	_, err := resolveDebugMoveTo(map[string]any{"target": ""}, kb)
+	if err == nil {
+		t.Fatal("expected error for empty target")
+	}
+}
+
+func TestResolveDebugMoveTo_NilKB(t *testing.T) {
+	_, err := resolveDebugMoveTo(map[string]any{"target": "workbench_01"}, nil)
+	if err == nil {
+		t.Fatal("expected error when kb is nil")
+	}
+}
+
+func TestBuildDebugParams_CompositeAddsName(t *testing.T) {
+	kb := loadTestKB(t)
+	// charge_at 应在 params 里加 name=charge_at
+	out, err := buildDebugParams("charge_at", map[string]any{
+		"station_id":   "charging_station_01",
+		"duration_min": 30,
+	}, kb)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out["name"] != "charge_at" {
+		t.Errorf("name=%v, want charge_at", out["name"])
+	}
+	if out["station_id"] != "charging_station_01" {
+		t.Errorf("station_id=%v, want charging_station_01", out["station_id"])
+	}
+	if out["duration_min"] != 30 {
+		t.Errorf("duration_min=%v, want 30", out["duration_min"])
+	}
+}
+
+func TestBuildDebugParams_PassthroughForSimple(t *testing.T) {
+	kb := loadTestKB(t)
+	// speak 应直接透传，不加 name
+	in := map[string]any{"content": "hello", "target": ""}
+	out, err := buildDebugParams("speak", in, kb)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out["content"] != "hello" {
+		t.Errorf("content=%v, want hello", out["content"])
+	}
+	if _, hasName := out["name"]; hasName {
+		t.Error("speak should not have name field")
+	}
+}
