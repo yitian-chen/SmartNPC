@@ -34,16 +34,16 @@
 启动方式：
 
 ```bash
+# 稳定实例（默认端口 8760，worktree d:/SmartNPC_v3-stable）— 推荐
+cd d:/SmartNPC_v3-stable
+bash start-debug.sh
+
 # 开发实例（默认端口 8770，本仓库 d:/SmartNPC_v3）
 cd d:/SmartNPC_v3
 bash start-dev.sh
-
-# 稳定实例（默认端口 8760，worktree d:/SmartNPC_v3-stable）
-cd d:/SmartNPC_v3-stable
-bash start-debug.sh
 ```
 
-> **注意**：`/debug/action` 路由当前只在 `feature/manual-action` 分支上，未合入 master。stable 实例跑 master 时无此路由，请用 dev 实例测试。
+> 下方所有 curl 示例使用稳定实例端口 `8760`。若使用开发实例，请将端口改为 `8770`。
 
 ---
 
@@ -72,7 +72,7 @@ bash start-debug.sh
 `params.target` 传 world_kb 中的 zone 或 location id，MCP 会自动解析坐标和 kind。
 
 ```bash
-curl -X POST http://localhost:8770/debug/action -H "Content-Type: application/json" -d '{"agent_id":"H-01","cmd":"move_to","params":{"target":"workbench_01"}}'
+curl.exe -X POST http://localhost:8760/debug/action -H "Content-Type: application/json" -d '{"agent_id":"H-01","cmd":"move_to","params":{"target":"workbench_01"}}'
 ```
 
 MCP 内部处理：调 `kb.GetPosition(target)` 解析坐标 → 构造 `{dest, target, kind, speed:"walk"}` → 发 `MoveTo` 命令。
@@ -92,7 +92,7 @@ MCP 内部处理：调 `kb.GetPosition(target)` 解析坐标 → 构造 `{dest, 
 ### 3.2 `speak` — 说话
 
 ```bash
-curl -X POST http://localhost:8770/debug/action \
+curl -X POST http://localhost:8760/debug/action \
   -H "Content-Type: application/json" \
   -d '{"agent_id":"H-01","cmd":"speak","params":{"content":"测试一句话","target":""}}'
 ```
@@ -105,7 +105,7 @@ curl -X POST http://localhost:8770/debug/action \
 ### 3.3 `interact` — 与智能物体交互
 
 ```bash
-curl -X POST http://localhost:8770/debug/action \
+curl -X POST http://localhost:8760/debug/action \
   -H "Content-Type: application/json" \
   -d '{"agent_id":"H-01","cmd":"interact","params":{"object_id":"workbench_01","action":"inspect"}}'
 ```
@@ -118,7 +118,7 @@ curl -X POST http://localhost:8770/debug/action \
 ### 3.4 `wait` — 原地等待
 
 ```bash
-curl -X POST http://localhost:8770/debug/action \
+curl -X POST http://localhost:8760/debug/action \
   -H "Content-Type: application/json" \
   -d '{"agent_id":"H-01","cmd":"wait","params":{"duration_sec":30}}'
 ```
@@ -133,22 +133,22 @@ curl -X POST http://localhost:8770/debug/action \
 
 ```bash
 # 充电 30 分钟
-curl -X POST http://localhost:8770/debug/action \
+curl -X POST http://localhost:8760/debug/action \
   -H "Content-Type: application/json" \
   -d '{"agent_id":"H-01","cmd":"charge_at","params":{"station_id":"charging_station_01","duration_min":30}}'
 
 # 工作台装配 60 分钟
-curl -X POST http://localhost:8770/debug/action \
+curl -X POST http://localhost:8760/debug/action \
   -H "Content-Type: application/json" \
   -d '{"agent_id":"H-01","cmd":"work_assemble","params":{"target":"workbench_01","duration_min":60}}'
 
 # 档案研究 15 分钟
-curl -X POST http://localhost:8770/debug/action \
+curl -X POST http://localhost:8760/debug/action \
   -H "Content-Type: application/json" \
   -d '{"agent_id":"H-01","cmd":"archive_research","params":{"duration_min":15}}'
 
 # 休息 10 分钟
-curl -X POST http://localhost:8770/debug/action \
+curl -X POST http://localhost:8760/debug/action \
   -H "Content-Type: application/json" \
   -d '{"agent_id":"H-01","cmd":"rest_idle","params":{"duration_min":10}}'
 ```
@@ -202,7 +202,7 @@ curl -X POST http://localhost:8770/debug/action \
 ### 5.1 确认 UE 已连接
 
 ```bash
-curl http://localhost:8770/status
+curl http://localhost:8760/status
 # 预期：{"ok":true,"ws_connected":true}
 ```
 
