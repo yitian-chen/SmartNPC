@@ -541,14 +541,13 @@ func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
 	a.mu.Unlock()
 
 	var actions []plannedAction
-	var thought string
 	var err error
 
 	if tacticalStreamingEnabled {
 		// 流式路径：onAction 回调逐个入队 + 首 action 提前下发。
 		// 回调在 SendStreaming 的 onDelta 调用栈里同步执行（worker 仍阻塞在 tacticalRefill），
 		// 不跨回调持有 mu。
-		_, thought, err = generateTacticalPlanStreaming(ctx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), physical, kbRef, logger,
+		_, _, err = generateTacticalPlanStreaming(ctx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), physical, kbRef, logger,
 			func(pa plannedAction) {
 				a.mu.Lock()
 				a.actionQueue = append(a.actionQueue, pa)
@@ -562,7 +561,7 @@ func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
 		)
 	} else {
 		// 非流式路径（默认）：等完整响应后一次性填充队列。
-		actions, thought, err = generateTacticalPlan(ctx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), physical, kbRef, logger)
+		actions, _, err = generateTacticalPlan(ctx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), physical, kbRef, logger)
 		if err == nil {
 			a.mu.Lock()
 			a.actionQueue = actions
@@ -598,12 +597,8 @@ func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
 		"redecompose", isRedecompose, "redecompose_count", redecomposeCount,
 		"actions", string(actionsJSON))
 
-	// 4. 推送独白（整个时段一次）
-	if thought != "" {
-		if err := ws.SendEnvelope(agentID, "narrative", map[string]any{"text": thought}); err != nil {
-			logger.Debug("[战术层] 独白推送失败", "agent_id", agentID, "err", err)
-		}
-	}
+	// inner_thought 不再推送 UE（协议未定义 narrative 消息类型）。
+	// thought 仍在 tactical.go 的 [战术层] 分解成功 日志中记录，调试可见性保留。
 
 	// 5. 补发：非流式路径总有首 action 要 pop；流式路径若首 action 已在回调中
 	// 下发则此处 no-op（队列空或在途 action 占用）。
