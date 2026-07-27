@@ -1,0 +1,24 @@
+# CodeBuddy 适配层配置
+#
+# 适配层会启动一个独立的 CLI 进程（codebuddy --serve）连接公司模型 API，
+# 复用 CLI 的 OAuth 认证。这样换模型时不影响你日常用的 CodeBuddy CN 桌面版 GUI。
+#
+# 改这里的 model 后，同步改 hermes/profiles/h01/config.yaml 的 default / default_model
+# 字段保持一致，然后跑 `bash start.sh` 重启即可换模型。
+
+# CLI 子进程监听端口（适配层会连这个端口）
+# 52001 是适配层专用端口，避开 GUI 动态分配的端口（如 51986）和适配层自身的 8761
+cli_port: 52001
+
+# 使用的模型 ID（必须与 `codebuddy --help` 的 --model 参数列出的模型名一致）
+#
+# 常用模型：
+#   deepseek-v4-flash-ioa    DeepSeek Flash（快、便宜，推荐用于高并发场景）
+#   deepseek-v4-pro-ioa      DeepSeek Pro（更强推理能力）
+#   glm-5.2-internal-ioa     智谱 GLM-5.2（公司默认模型）
+#   claude-sonnet-5          Anthropic Claude Sonnet 5
+#   gpt-5.6-sol              OpenAI GPT-5.6
+#   gemini-3.1-pro           Google Gemini Pro
+#
+# 完整列表见 `codebuddy --help`。注意：实际能否使用取决于你账号的模型权限。
+model: deepseek-v4-flash-ioa

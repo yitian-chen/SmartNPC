@@ -419,8 +419,17 @@ func (a *agentContext) sendIdleWait(ctx context.Context, agentID string, ws *wss
 	if inFlight {
 		return
 	}
-	if _, err := ws.SendAction(ctx, agentID, protocol.CmdWait, map[string]any{"duration_sec": 60}); err != nil {
+	ack, err := ws.SendAction(ctx, agentID, protocol.CmdWait, map[string]any{"duration_sec": 60})
+	if err != nil {
 		logger.Debug("[战术层] idle wait 发送失败", "agent_id", agentID, "err", err)
+		return
+	}
+	if ack != nil {
+		// 与 popAndSendQueueAction 一致：记录在途 action + 注册超时 timer，
+		// 否则 currentActionID 为空，hasInFlightAction() 永远 false，
+		// completion 的 signal 会立即唤醒 worker 重入 sendIdleWait 形成忙循环。
+		a.recordActionStarted(ack.ActionID, protocol.CmdWait, nil, 0, sourceTactical)
+		a.armActionTimeout(ack.ActionID, ack.EstimatedDurationSec, ws, agentID, func(string) *agentContext { return a })
 	}
 }
 
@@ -482,12 +491,20 @@ func (a *agentContext) popAndSendQueueAction(ctx context.Context, agentID string
 	}
 }
 
-// tacticalRefill 调战术层 LLM 分解当前时段 goal，填充队列，推送独白，下发第一步。
-// 成功返回 true；无 goal / LLM 失败 返回 false。
+// tacticalStreamingEnabled controls whether tacticalRefill uses streaming LLM
+// calls (generateTacticalPlanStreaming) or non-streaming (generateTacticalPlan).
+// Set from --tactical-stream flag. Default false: streaming only helps when the
+// upstream LLM emits tokens incrementally; if it buffers the full response
+// (DeepSeek peak-hour queueing behavior), streaming adds SSE overhead with no
+// latency benefit.
+var tacticalStreamingEnabled bool
+
+// tacticalRefill 调战术层 LLM 流式分解当前时段 goal，边接收边入队，
+// 首 action 在流式期间即提前下发以降低体感延迟。成功返回 true。
 func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
 	ws *wsserver.Server, kb *worldkb.KB, logger *slog.Logger) bool {
 
-	// 1. 取当前时段 goal（持锁迫照）
+	// 1. 取当前时段 goal（持锁）
 	a.mu.Lock()
 	if a.tacticalHc == nil {
 		a.mu.Unlock()
@@ -520,20 +537,47 @@ func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
 	physical := clonePhysical(a.latestPhysical)
 	tacticalHc := a.tacticalHc
 	kbRef := kb
+	a.actionQueue = nil
 	a.mu.Unlock()
 
-	// 2. 调战术层 LLM（不持锁）
-	actions, thought, err := generateTacticalPlan(ctx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), physical, kbRef, logger)
-	if err != nil {
-		logger.Warn("[战术层] 分解失败，调用方发 idle wait", "agent_id", agentID, "err", err)
-		return false
+	var actions []plannedAction
+	var err error
+
+	if tacticalStreamingEnabled {
+		// 流式路径：onAction 回调逐个入队 + 首 action 提前下发。
+		// 回调在 SendStreaming 的 onDelta 调用栈里同步执行（worker 仍阻塞在 tacticalRefill），
+		// 不跨回调持有 mu。
+		_, _, err = generateTacticalPlanStreaming(ctx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, logger,
+			func(pa plannedAction) {
+				a.mu.Lock()
+				a.actionQueue = append(a.actionQueue, pa)
+				shouldDispatch := a.currentActionID == "" && len(a.actionQueue) == 1
+				a.mu.Unlock()
+				if shouldDispatch {
+					logger.Info("[战术层] 流式下发首 action", "agent_id", agentID, "action", pa.Action)
+					a.popAndSendQueueAction(ctx, agentID, ws, kb, logger)
+				}
+			},
+		)
+	} else {
+		// 非流式路径（默认）：等完整响应后一次性填充队列。
+		actions, _, err = generateTacticalPlan(ctx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, logger)
+		if err == nil {
+			a.mu.Lock()
+			a.actionQueue = actions
+			a.mu.Unlock()
+		}
 	}
 
-	// 3. 填充队列。战术 LLM 调用期间（约 10-20 秒）到达的常规感知不再
-	// 触发决策（反应层已移除），物理状态已由 updateState 更新到
-	// latestPhysical，下次 refill 的 prompt 会看到最新值。
+	// 3. LLM 调用结束后的记账（流式/非流式共用）
 	a.mu.Lock()
-	a.actionQueue = actions
+	if err != nil {
+		queued := len(a.actionQueue)
+		a.mu.Unlock()
+		logger.Warn("[战术层] 分解失败，保留已入队 action",
+			"agent_id", agentID, "queued", queued, "err", err)
+		return false
+	}
 	isRedecompose := slot == a.currentSlot
 	if isRedecompose {
 		a.redecomposeCount++
@@ -544,23 +588,26 @@ func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
 	}
 	queueLen := len(a.actionQueue)
 	redecomposeCount := a.redecomposeCount
+	queuedActions := append([]plannedAction(nil), a.actionQueue...)
 	a.mu.Unlock()
 
-	actionsJSON, _ := json.Marshal(actions)
+	actionsJSON, _ := json.Marshal(queuedActions)
 	logger.Info("[战术层] 队列已填充",
 		"agent_id", agentID, "slot", slot, "queue_len", queueLen,
 		"redecompose", isRedecompose, "redecompose_count", redecomposeCount,
 		"actions", string(actionsJSON))
 
-	// 4. 推送独白（整个时段一次）
-	if thought != "" {
-		if err := ws.SendEnvelope(agentID, "narrative", map[string]any{"text": thought}); err != nil {
-			logger.Debug("[战术层] 独白推送失败", "agent_id", agentID, "err", err)
-		}
-	}
+	// inner_thought 不再推送 UE（协议未定义 narrative 消息类型）。
+	// thought 仍在 tactical.go 的 [战术层] 分解成功 日志中记录，调试可见性保留。
 
-	// 5. pop 第一个并下发
-	a.popAndSendQueueAction(ctx, agentID, ws, kb, logger)
+	// 5. 补发：非流式路径总有首 action 要 pop；流式路径若首 action 已在回调中
+	// 下发则此处 no-op（队列空或在途 action 占用）。
+	a.mu.Lock()
+	needFallback := a.currentActionID == "" && len(a.actionQueue) > 0
+	a.mu.Unlock()
+	if needFallback {
+		a.popAndSendQueueAction(ctx, agentID, ws, kb, logger)
+	}
 	return true
 }
 
@@ -579,6 +626,8 @@ func main() {
 		httpAllowAnyOrigin = flag.Bool("http-allow-any-origin", true,
 			"disable origin / localhost restrictions so cross-host clients can connect")
 		worldKBPath = flag.String("world-kb", "assets/world_kb.yaml", "path to world_kb.yaml (required, fail-fast on error)")
+		tacticalStream = flag.Bool("tactical-stream", false,
+			"enable streaming for tactical layer LLM calls (experimental: only helps if upstream LLM emits tokens incrementally)")
 	)
 	flag.Parse()
 	if *showVersion {
@@ -588,11 +637,13 @@ func main() {
 
 	logger := log.New(*logLevel)
 	slog.SetDefault(logger)
+	tacticalStreamingEnabled = *tacticalStream
 	logger.Info("starting agenttown-mcp",
 		"version", version,
 		"http", *httpAddr,
 		"ws", *wsAddr,
 		"hermes_url", *hermesURL,
+		"tactical_stream", tacticalStreamingEnabled,
 	)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -650,16 +701,18 @@ func main() {
 		nextAgentEpoch++
 		ac, workerCtx := newAgentContext(ctx, nextAgentEpoch)
 		ac.strategicHc = hermes.New(hermes.Config{
-			URL:    *hermesURL,
-			APIKey: *hermesAPIKey,
-			Model:  *hermesModel,
-			Logger: logger,
+			URL:              *hermesURL,
+			APIKey:           *hermesAPIKey,
+			Model:            *hermesModel,
+			Logger:           logger,
+			SkipSystemPrompt: true, // 战略层后端调用，不需要 RPG persona/skills/memory 注入
 		})
 		ac.tacticalHc = hermes.New(hermes.Config{
-			URL:    *hermesURL,
-			APIKey: *hermesAPIKey,
-			Model:  *hermesModel,
-			Logger: logger,
+			URL:              *hermesURL,
+			APIKey:           *hermesAPIKey,
+			Model:            *hermesModel,
+			Logger:           logger,
+			SkipSystemPrompt: true, // 战术层后端调用，不需要 RPG persona/skills/memory 注入
 		})
 		agents[id] = ac
 		go runPerceptionWorker(workerCtx, id, ac, ws, kb, logger)

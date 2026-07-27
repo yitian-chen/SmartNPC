@@ -78,6 +78,21 @@ func TestParseDailyPlan_NarrativePrefix(t *testing.T) {
 	}
 }
 
+func TestParseDailyPlan_TruncatedMissingClosingBracket(t *testing.T) {
+	// LLM 输出被上游截断，缺少末尾 ]。parseDailyPlan 应容错补 ] 后解析成功。
+	raw := `[{"time":"06:00-07:00","goal":"起床晨检"},{"time":"07:00-12:00","goal":"车间装配"}`
+	items, err := parseDailyPlan(raw)
+	if err != nil {
+		t.Fatalf("unexpected error for truncated output: %v", err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("got %d items, want 2", len(items))
+	}
+	if items[1].Goal != "车间装配" {
+		t.Errorf("items[1] = %+v", items[1])
+	}
+}
+
 func TestParseDailyPlan_Malformed(t *testing.T) {
 	raw := "今天我打算去车间看看，然后再去充电。"
 	if _, err := parseDailyPlan(raw); err == nil {
@@ -116,8 +131,10 @@ func TestFormatDailyPlan_MultipleItems(t *testing.T) {
 func TestGenerateDailyPlan_HTTPError(t *testing.T) {
 	sc := &fakeStrategicCaller{err: errors.New("network down")}
 	plan := generateDailyPlan(context.Background(), sc, "H-01", slog.Default())
-	if plan != "" {
-		t.Errorf("got %q, want empty plan on error", plan)
+	// HTTP 错误现在回退到 defaultDailyPlan 而不是空字符串，
+	// 保证战术层有目标可分解、仿真不瘫痪。
+	if plan != defaultDailyPlan {
+		t.Errorf("got %q, want defaultDailyPlan on error", plan)
 	}
 	if sc.resetCalled {
 		t.Error("ResetSession should not be called when SendWithSummary fails")
@@ -142,8 +159,10 @@ func TestGenerateDailyPlan_ValidResponse(t *testing.T) {
 func TestGenerateDailyPlan_ParseFail(t *testing.T) {
 	sc := &fakeStrategicCaller{resp: makeStrategicResponse("今天天气不错，我打算去车间转转。")}
 	plan := generateDailyPlan(context.Background(), sc, "H-01", slog.Default())
-	if plan != "" {
-		t.Errorf("got %q, want empty plan on parse failure", plan)
+	// 解析失败现在回退到 defaultDailyPlan 而不是空字符串，
+	// 避免整天 Wait(60s) 瘫痪。
+	if plan != defaultDailyPlan {
+		t.Errorf("got %q, want defaultDailyPlan on parse failure", plan)
 	}
 }
 

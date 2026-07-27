@@ -496,6 +496,10 @@ class MockUE:
 
     async def _send_heartbeat(self):
         uptime = (int(_time.time() * 1000) - self._started_ms) // 1000
+        # 心跳发送打 debug 日志：与 MCP 端 heartbeat received 配对，
+        # 双向都能看到心跳链路状态。INFO 级别会被 perception_update 刷屏，
+        # 所以放 debug；联调时设 LOG_LEVEL=DEBUG 即可见。
+        logger.debug(f"[HEARTBEAT] send uptime_sec={uptime}s")
         await self._send(TYPE_HEARTBEAT, SYSTEM_AGENT_ID, {"uptime_sec": uptime})
 
     # ─── perception_update ────────────────────────────────────
@@ -751,7 +755,9 @@ class MockUE:
             dur = float(params.get("duration_sec", COMPOSITE_DEFAULT_SEC))
             return dur, True
         if cmd == CMD_WAIT:
-            return float(params.get("duration_sec", 5)), False
+            # Wait 是长动作：占用 NPC 直到游戏时间推进过 busy_until_min，
+            # 避免被当作短动作立即完成导致 MCP 侧忙循环（sendIdleWait 路径）。
+            return float(params.get("duration_sec", 5)), True
         if cmd == CMD_MOVE_TO:
             return 120.0, False   # ~2 min walk
         if cmd == CMD_INTERACT:
@@ -1143,15 +1149,20 @@ class MockUE:
 
     async def _heartbeat_loop(self):
         """Send heartbeats across the whole day, tolerating reconnects."""
+        logger.info(f"[HEARTBEAT] loop started, interval={HEARTBEAT_INTERVAL_SEC}s")
         while not self._stop:
             await asyncio.sleep(HEARTBEAT_INTERVAL_SEC)
             if self._ws is None:
                 continue  # disconnected; connection_manager is reconnecting
             try:
                 await self._send_heartbeat()
-            except Exception:
+            except Exception as e:
                 # Link dropped mid-send; connection_manager handles reconnect.
+                # 打 warn 日志：心跳发送失败通常是连接断开，能看到失败次数
+                # 和时间点有助于诊断"UE 端是否真的在发心跳"。
+                logger.warning(f"[HEARTBEAT] send failed: {e}")
                 continue
+        logger.info("[HEARTBEAT] loop stopped")
 
     async def _read_loop(self):
         """Read until the connection drops. Returns so the connection

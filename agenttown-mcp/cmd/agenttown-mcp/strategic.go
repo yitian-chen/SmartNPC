@@ -34,21 +34,33 @@ const strategicPromptTemplate = `[战略层/每日规划] 现在是仿真时间 
 3. 安排要符合你的角色身份和性格特点
 4. 每个时段时长不少于 60 分钟（起止时间差 ≥ 60 分钟）。短活动（如午休 30 分钟、短暂维修）合并到相邻时段，不要单独成段——调度器按整点采样，短于 60 分钟的时段会被跳过
 5. 只输出 JSON 数组，不要任何其他文字
+6. 必须以字符 [ 开头，以字符 ] 结尾，不要输出设计思路、不要解释、不要 markdown 围栏
 
 示例：[{"time":"06:00-07:00","goal":"起床晨检，慢速活动关节"},{"time":"07:00-12:00","goal":"装配作业，盯紧小柯"},{"time":"12:00-13:00","goal":"午间停工会检查公差，饭后短暂补电"}]`
+
+// defaultDailyPlan 是战略层解析失败时的兜底计划。
+// 不返回空字符串是为了避免整天 Wait(60s) 瘫痪——兜底计划虽然无个性，
+// 但能驱动战术层正常工作，让仿真继续运行而非停滞。
+// 时段覆盖 06-22，每段 ≥60min，符合调度器采样约束。
+const defaultDailyPlan = "06:00-12:00: 上午车间装配作业\n" +
+	"12:00-13:00: 午间停工检修与短暂补电\n" +
+	"13:00-18:00: 下午继续装配作业\n" +
+	"18:00-22:00: 充电保养与写工作日志"
 
 const hardcodedYesterdaySummary = "昨天在车间装配8小时，整理了零件分类，晚上在充电站充电休息，关节有点酸。下班时小柯说明天请假一天，让我心里有点空落落的"
 
 // generateDailyPlan 调 LLM 生成当日计划，返回格式化字符串（每行 "时段: 目标"）。
-// 任一步失败均返回 ""，不阻塞仿真。
+// 任一步失败均回退到 defaultDailyPlan，保证战术层有目标可分解、
+// 仿真不瘫痪。返回 "" 仅表示连兜底计划都没用上（理论上不会发生）。
 func generateDailyPlan(ctx context.Context, sc strategicCaller, agentID string, logger *slog.Logger) string {
 	prompt := fmt.Sprintf(strategicPromptTemplate, hardcodedYesterdaySummary)
 	logger.Info("[MCP→Hermes/STRATEGIC-PROMPT]", "agent_id", agentID, "text", prompt)
 
 	resp, err := sc.SendWithSummary(ctx, prompt, "")
 	if err != nil {
-		logger.Warn("[战略层] 计划生成失败，使用空计划继续", "agent_id", agentID, "err", err)
-		return ""
+		logger.Warn("[战略层] 计划生成失败，使用默认计划兜底",
+			"agent_id", agentID, "err", err, "fallback", defaultDailyPlan)
+		return defaultDailyPlan
 	}
 	sc.ResetSession() // 战略调用一次性使用，立即清链
 
@@ -58,8 +70,13 @@ func generateDailyPlan(ctx context.Context, sc strategicCaller, agentID string, 
 
 	items, err := parseDailyPlan(raw)
 	if err != nil {
-		logger.Warn("[战略层] 计划解析失败", "agent_id", agentID, "raw", truncateText(raw, 200), "err", err)
-		return ""
+		logger.Warn("[战略层] 计划解析失败，使用默认计划兜底",
+			"agent_id", agentID, "raw", truncateText(raw, 200), "err", err, "fallback", defaultDailyPlan)
+		return defaultDailyPlan
+	}
+	if len(items) == 0 {
+		logger.Warn("[战略层] 计划解析为空数组，使用默认计划兜底", "agent_id", agentID)
+		return defaultDailyPlan
 	}
 	plan := formatDailyPlan(items)
 	logger.Info("[战略层] 每日计划生成成功", "agent_id", agentID, "items", len(items), "plan", plan)
@@ -80,14 +97,21 @@ func parseDailyPlan(raw string) ([]dailyPlanItem, error) {
 		s = strings.TrimSuffix(s, "```")
 		s = strings.TrimSpace(s)
 	}
-	// 提取首个 [..]
+	// 提取首个 [..]。容错：LLM 输出可能被上游截断（缺少末尾 ]），
+	// 此时尝试补 ] 再 unmarshal；仍失败则报错。
 	start := strings.Index(s, "[")
-	end := strings.LastIndex(s, "]")
-	if start < 0 || end < 0 || end <= start {
+	if start < 0 {
 		return nil, fmt.Errorf("no JSON array found")
 	}
+	end := strings.LastIndex(s, "]")
+	var arrayStr string
+	if end > start {
+		arrayStr = s[start : end+1]
+	} else {
+		arrayStr = s[start:] + "]"
+	}
 	var items []dailyPlanItem
-	if err := json.Unmarshal([]byte(s[start:end+1]), &items); err != nil {
+	if err := json.Unmarshal([]byte(arrayStr), &items); err != nil {
 		return nil, fmt.Errorf("unmarshal: %w", err)
 	}
 	return items, nil
