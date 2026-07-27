@@ -45,6 +45,29 @@ bash start-dev.sh
 
 > 下方所有 curl 示例使用稳定实例端口 `8760`。若使用开发实例，请将端口改为 `8770`。
 
+### PowerShell 用户须知（重要）
+
+**Windows PowerShell 下 `curl` 是 `Invoke-WebRequest` 的别名**，不是真 curl。两者参数风格完全不同，直接复制 bash 风格的 curl 命令会报错：
+
+- `-H "Content-Type: ..."` → 报 "无法将 System.String 转换为 IDictionary"（`-H` 被绑定到 `-Headers`，需要哈希表）
+- `-d '...'` → 不存在此参数
+
+**解决方法 A — 用真 curl（`curl.exe`，推荐）**：
+
+加 `.exe` 后缀绕过别名。但 PowerShell 把单引号字符串里的双引号会吞掉，导致 JSON 变成 `{agent_id:...}` 解析失败。**必须用 `\"` 转义**：
+
+```powershell
+curl.exe -X POST http://localhost:8760/debug/action -H "Content-Type: application/json" -d '{\"agent_id\":\"H-01\",\"cmd\":\"move_to\",\"params\":{\"target\":\"workbench_01\"}}'
+```
+
+**解决方法 B — 用 PowerShell 原生 `Invoke-RestMethod`**：
+
+```powershell
+Invoke-RestMethod -Method Post -Uri http://localhost:8760/debug/action -ContentType "application/json" -Body '{"agent_id":"H-01","cmd":"move_to","params":{"target":"workbench_01"}}'
+```
+
+> 下方所有 curl 示例按 bash 语法给出（`-d '{"key":"value"}'`）。PowerShell 用户请按上方规则转换。
+
 ---
 
 ## 二、请求格式
