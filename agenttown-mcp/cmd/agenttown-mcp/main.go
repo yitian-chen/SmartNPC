@@ -419,8 +419,17 @@ func (a *agentContext) sendIdleWait(ctx context.Context, agentID string, ws *wss
 	if inFlight {
 		return
 	}
-	if _, err := ws.SendAction(ctx, agentID, protocol.CmdWait, map[string]any{"duration_sec": 60}); err != nil {
+	ack, err := ws.SendAction(ctx, agentID, protocol.CmdWait, map[string]any{"duration_sec": 60})
+	if err != nil {
 		logger.Debug("[战术层] idle wait 发送失败", "agent_id", agentID, "err", err)
+		return
+	}
+	if ack != nil {
+		// 与 popAndSendQueueAction 一致：记录在途 action + 注册超时 timer，
+		// 否则 currentActionID 为空，hasInFlightAction() 永远 false，
+		// completion 的 signal 会立即唤醒 worker 重入 sendIdleWait 形成忙循环。
+		a.recordActionStarted(ack.ActionID, protocol.CmdWait, nil, 0, sourceTactical)
+		a.armActionTimeout(ack.ActionID, ack.EstimatedDurationSec, ws, agentID, func(string) *agentContext { return a })
 	}
 }
 
@@ -697,16 +706,18 @@ func main() {
 		nextAgentEpoch++
 		ac, workerCtx := newAgentContext(ctx, nextAgentEpoch)
 		ac.strategicHc = hermes.New(hermes.Config{
-			URL:    *hermesURL,
-			APIKey: *hermesAPIKey,
-			Model:  *hermesModel,
-			Logger: logger,
+			URL:              *hermesURL,
+			APIKey:           *hermesAPIKey,
+			Model:            *hermesModel,
+			Logger:           logger,
+			SkipSystemPrompt: true, // 战略层后端调用，不需要 RPG persona/skills/memory 注入
 		})
 		ac.tacticalHc = hermes.New(hermes.Config{
-			URL:    *hermesURL,
-			APIKey: *hermesAPIKey,
-			Model:  *hermesModel,
-			Logger: logger,
+			URL:              *hermesURL,
+			APIKey:           *hermesAPIKey,
+			Model:            *hermesModel,
+			Logger:           logger,
+			SkipSystemPrompt: true, // 战术层后端调用，不需要 RPG persona/skills/memory 注入
 		})
 		agents[id] = ac
 		go runPerceptionWorker(workerCtx, id, ac, ws, kb, logger)

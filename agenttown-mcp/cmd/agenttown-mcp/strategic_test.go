@@ -78,6 +78,21 @@ func TestParseDailyPlan_NarrativePrefix(t *testing.T) {
 	}
 }
 
+func TestParseDailyPlan_TruncatedMissingClosingBracket(t *testing.T) {
+	// LLM 输出被上游截断，缺少末尾 ]。parseDailyPlan 应容错补 ] 后解析成功。
+	raw := `[{"time":"06:00-07:00","goal":"起床晨检"},{"time":"07:00-12:00","goal":"车间装配"}`
+	items, err := parseDailyPlan(raw)
+	if err != nil {
+		t.Fatalf("unexpected error for truncated output: %v", err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("got %d items, want 2", len(items))
+	}
+	if items[1].Goal != "车间装配" {
+		t.Errorf("items[1] = %+v", items[1])
+	}
+}
+
 func TestParseDailyPlan_Malformed(t *testing.T) {
 	raw := "今天我打算去车间看看，然后再去充电。"
 	if _, err := parseDailyPlan(raw); err == nil {

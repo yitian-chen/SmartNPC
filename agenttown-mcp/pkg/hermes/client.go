@@ -45,6 +45,14 @@ type Config struct {
 	// TokenThreshold: when TotalTokens exceeds this, the client
 	// auto-summarizes and resets. 0 = use DefaultTokenThreshold.
 	TokenThreshold int
+
+	// SkipSystemPrompt: when true, sends skip_system_prompt=true in the
+	// request body so Hermes suppresses its injected system prompt
+	// (SOUL.md identity, skills list, guidance blocks, memory, etc.).
+	// Use for backend LLM calls that supply their own complete prompt
+	// (e.g. tactical/strategic layers); leave false for RPG chat calls
+	// that rely on the Hermes-injected persona.
+	SkipSystemPrompt bool
 }
 
 // Client POSTs perception text to Hermes /v1/responses.
@@ -174,6 +182,7 @@ func (c *Client) doSend(ctx context.Context, input string) (*Response, error) {
 		Model:              c.cfg.Model,
 		Input:              input,
 		PreviousResponseID: prev,
+		SkipSystemPrompt:   c.cfg.SkipSystemPrompt,
 	}
 	payload, err := json.Marshal(body)
 	if err != nil {
@@ -264,6 +273,7 @@ func (c *Client) doSendStreaming(ctx context.Context, input string, onDelta func
 		Input:              input,
 		PreviousResponseID: c.prevResponseID,
 		Stream:             true,
+		SkipSystemPrompt:   c.cfg.SkipSystemPrompt,
 	}
 	payload, err := json.Marshal(body)
 	if err != nil {
@@ -451,6 +461,7 @@ type request struct {
 	Input              string `json:"input"`
 	PreviousResponseID string `json:"previous_response_id,omitempty"`
 	Stream             bool   `json:"stream,omitempty"`
+	SkipSystemPrompt   bool   `json:"skip_system_prompt,omitempty"`
 }
 
 // SSE event payloads emitted by Hermes /v1/responses with stream:true.

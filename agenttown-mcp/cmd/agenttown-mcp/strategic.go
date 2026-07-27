@@ -80,14 +80,21 @@ func parseDailyPlan(raw string) ([]dailyPlanItem, error) {
 		s = strings.TrimSuffix(s, "```")
 		s = strings.TrimSpace(s)
 	}
-	// 提取首个 [..]
+	// 提取首个 [..]。容错：LLM 输出可能被上游截断（缺少末尾 ]），
+	// 此时尝试补 ] 再 unmarshal；仍失败则报错。
 	start := strings.Index(s, "[")
-	end := strings.LastIndex(s, "]")
-	if start < 0 || end < 0 || end <= start {
+	if start < 0 {
 		return nil, fmt.Errorf("no JSON array found")
 	}
+	end := strings.LastIndex(s, "]")
+	var arrayStr string
+	if end > start {
+		arrayStr = s[start : end+1]
+	} else {
+		arrayStr = s[start:] + "]"
+	}
 	var items []dailyPlanItem
-	if err := json.Unmarshal([]byte(s[start:end+1]), &items); err != nil {
+	if err := json.Unmarshal([]byte(arrayStr), &items); err != nil {
 		return nil, fmt.Errorf("unmarshal: %w", err)
 	}
 	return items, nil

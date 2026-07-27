@@ -751,7 +751,9 @@ class MockUE:
             dur = float(params.get("duration_sec", COMPOSITE_DEFAULT_SEC))
             return dur, True
         if cmd == CMD_WAIT:
-            return float(params.get("duration_sec", 5)), False
+            # Wait 是长动作：占用 NPC 直到游戏时间推进过 busy_until_min，
+            # 避免被当作短动作立即完成导致 MCP 侧忙循环（sendIdleWait 路径）。
+            return float(params.get("duration_sec", 5)), True
         if cmd == CMD_MOVE_TO:
             return 120.0, False   # ~2 min walk
         if cmd == CMD_INTERACT:
