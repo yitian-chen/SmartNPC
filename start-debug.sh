@@ -39,19 +39,24 @@ warn()  { echo -e "${YELLOW}[WARN]${NC} $*"; }
 fail()  { echo -e "${RED}[FAIL]${NC} $*"; exit 1; }
 
 # ─── 路径 ──────────────────────────────────────────────────────
+# 所有端口/路径支持环境变量覆盖，使同一脚本可服务稳定实例和开发实例。
+# 开发实例用 start-dev.sh wrapper 设置偏移端口后调本脚本。
 PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
 MCP_DIR="$PROJECT_DIR/agenttown-mcp"
 MCP_EXE="$MCP_DIR/agenttown-mcp.exe"
-DOCKER_COMPOSE="$PROJECT_DIR/docker/docker-compose.yml"
+DOCKER_COMPOSE="${DOCKER_COMPOSE:-$PROJECT_DIR/docker/docker-compose.yml}"
 ENV_FILE="$PROJECT_DIR/.env"
 ADAPTER_SCRIPT="$PROJECT_DIR/src/agenttown/codebuddy_adapter.py"
-ADAPTER_PORT=8761
-WS_PORT=9090
-HTTP_PORT=8760
-HERMES_PORT=8642
+ADAPTER_PORT="${ADAPTER_PORT:-8761}"
+WS_PORT="${WS_PORT:-9090}"
+HTTP_PORT="${HTTP_PORT:-8760}"
+HERMES_PORT="${HERMES_PORT:-8642}"
+CLI_PORT="${CLI_PORT:-52001}"
+HERMES_CONTAINER="${HERMES_CONTAINER:-agenttown-h01}"
 
 LOG_DATE=$(date +%Y-%m-%d)
-LOG_SUBDIR="$PROJECT_DIR/logs/$LOG_DATE"
+LOG_SUBDIR_BASE="$PROJECT_DIR/logs/$LOG_DATE"
+LOG_SUBDIR="${LOG_SUBDIR:-$LOG_SUBDIR_BASE}"
 MCP_LOG="$LOG_SUBDIR/debug-mcp.log"
 ADAPTER_LOG="$LOG_SUBDIR/debug-adapter.log"
 
@@ -188,9 +193,9 @@ stop_all() {
         fi
     fi
 
-    # CodeBuddy CLI 子进程（端口 52001）
+    # CodeBuddy CLI 子进程
     local cli_pid
-    cli_pid=$(netstat.exe -ano 2>/dev/null | grep "127.0.0.1:52001" | grep LISTENING | awk '{print $NF}' | tr -d '\r' | head -1)
+    cli_pid=$(netstat.exe -ano 2>/dev/null | grep "127.0.0.1:$CLI_PORT" | grep LISTENING | awk '{print $NF}' | tr -d '\r' | head -1)
     if [ -n "$cli_pid" ]; then
         MSYS_NO_PATHCONV=1 taskkill.exe /F /PID "$cli_pid" >/dev/null 2>&1 \
             && ok "  CLI subprocess stopped (PID $cli_pid)" \
@@ -325,7 +330,7 @@ start_adapter() {
     info "Starting adapter (log: logs/$LOG_DATE/debug-adapter.log)..."
     info "  Python: $py_cmd"
     info "  Script: $script_arg"
-    nohup "$py_cmd" "$script_arg" --port "$ADAPTER_PORT" > "$ADAPTER_LOG" 2>&1 &
+    nohup "$py_cmd" "$script_arg" --port "$ADAPTER_PORT" --cli-port "$CLI_PORT" > "$ADAPTER_LOG" 2>&1 &
     disown
 
     info "Waiting for Adapter (max 20s)..."
@@ -488,9 +493,10 @@ print_summary() {
     echo -e "    Adapter:    localhost:$ADAPTER_PORT"
     echo ""
     echo -e "  ${BOLD}日志${NC}"
-    echo -e "    MCP:     logs/$LOG_DATE/debug-mcp.log"
-    echo -e "    Adapter: logs/$LOG_DATE/debug-adapter.log"
-    echo -e "    Hermes:  wsl docker logs -f agenttown-h01"
+    local log_rel="${LOG_SUBDIR#$PROJECT_DIR/}"
+    echo -e "    MCP:     $log_rel/debug-mcp.log"
+    echo -e "    Adapter: $log_rel/debug-adapter.log"
+    echo -e "    Hermes:  wsl docker logs -f $HERMES_CONTAINER"
     echo ""
     echo -e "  ${BOLD}协议文档${NC}"
     echo -e "    docs/AgentTown_CommProtocol_Values.md"
