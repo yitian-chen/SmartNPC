@@ -55,7 +55,7 @@ const tacticalPromptTemplate = `[战术层/任务分解] 当前时段目标：%s
 物理状态：能量 %.0f、疲劳 %.0f、关节磨损 %.0f、健康 %.0f。
 
 请把这个目标分解为 3-5 步具体的 action，按顺序执行。
-
+%s
 %s
 可用工具（仅限以下 13 个，禁止使用 scan_area / stop）：
 - move_to: 移动到目标位置。params: {"target":"区域或位置id"}
@@ -79,6 +79,7 @@ const tacticalPromptTemplate = `[战术层/任务分解] 当前时段目标：%s
 4. move_to 的 target、interact 的 object_id、work_assemble 的 target 必须从上面的可用列表中选取，禁止编造
 5. 每行一个 JSON 对象，不要输出 JSON 数组，不要输出 markdown 围栏，不要输出任何其他文字
 6. 必须以字符 {"inner_thought 开头，不要输出步骤说明、不要解释、不要编号列表、不要 markdown 加粗
+7. 步骤总时长应接近当前 slot 时长，避免过短导致队列提前耗尽触发重分解
 
 示例：
 {"inner_thought":"先去车间再开始装配"}
@@ -87,12 +88,41 @@ const tacticalPromptTemplate = `[战术层/任务分解] 当前时段目标：%s
 
 // buildTacticalPrompt 填充战术层 prompt 模板。kb 用于注入可用 zone/location/object
 // 列表，避免 LLM 编造不存在的 ID（如 workbench_02、archives）。
-func buildTacticalPrompt(goal, zone, timeOfDay string, physical *protocol.PhysicalState, kb *worldkb.KB) string {
+// slot 形如 "HH:MM-HH:MM"，用于在 prompt 里提示当前时段时长，引导 LLM
+// 给出总时长接近 slot 时长的步骤，减少队列提前耗尽导致的重分解。
+// slot 为空或解析失败时该提示行降级为空，保持旧行为。
+func buildTacticalPrompt(goal, zone, timeOfDay, slot string, physical *protocol.PhysicalState, kb *worldkb.KB) string {
 	e, f, j, h := 0.0, 0.0, 0.0, 0.0
 	if physical != nil {
 		e, f, j, h = physical.Energy, physical.Fatigue, physical.JointWear, physical.Health
 	}
-	return fmt.Sprintf(tacticalPromptTemplate, goal, zone, timeOfDay, e, f, j, h, buildKBContext(kb))
+	return fmt.Sprintf(tacticalPromptTemplate, goal, zone, timeOfDay, e, f, j, h,
+		buildSlotDurationHint(slot), buildKBContext(kb))
+}
+
+// buildSlotDurationHint 根据slot "HH:MM-HH:MM" 构造一行提示文本。
+// 解析失败或时长 ≤ 0 返回空串（prompt 该行降级为空）。
+func buildSlotDurationHint(slot string) string {
+	min := slotDurationMinute(slot)
+	if min <= 0 {
+		return ""
+	}
+	return fmt.Sprintf("当前时段 %s，约 %d 分钟；请让步骤总时长接近此时长，避免过短导致队列提前耗尽触发重分解。\n", slot, min)
+}
+
+// slotDurationMinute 解析 "HH:MM-HH:MM" 形如的 slot，返回 (end - start) 的分钟数。
+// 解析失败或 end ≤ start 返回 -1。
+func slotDurationMinute(slot string) int {
+	parts := strings.SplitN(slot, "-", 2)
+	if len(parts) != 2 {
+		return -1
+	}
+	start := parsePlanMinute(parts[0])
+	end := parsePlanMinute(parts[1])
+	if start < 0 || end < 0 || end <= start {
+		return -1
+	}
+	return end - start
 }
 
 // buildKBContext 拼接可用 zone/location/object 列表段落，供战术层 prompt 注入。
@@ -151,12 +181,12 @@ func generateTacticalPlan(
 	ctx context.Context,
 	tc strategicCaller,
 	agentID string,
-	goal, zone, timeOfDay string,
+	goal, zone, timeOfDay, slot string,
 	physical *protocol.PhysicalState,
 	kb *worldkb.KB,
 	logger *slog.Logger,
 ) ([]plannedAction, string, error) {
-	prompt := buildTacticalPrompt(goal, zone, timeOfDay, physical, kb)
+	prompt := buildTacticalPrompt(goal, zone, timeOfDay, slot, physical, kb)
 	logger.Info("[MCP→Hermes/TACTICAL-PROMPT]",
 		"agent_id", agentID, "goal", goal, "game_time", timeOfDay, "text", prompt)
 
@@ -193,13 +223,13 @@ func generateTacticalPlan(
 func generateTacticalPlanStreaming(
 	ctx context.Context,
 	tc *hermes.Client,
-	agentID, goal, zone, timeOfDay string,
+	agentID, goal, zone, timeOfDay, slot string,
 	physical *protocol.PhysicalState,
 	kb *worldkb.KB,
 	logger *slog.Logger,
 	onAction func(plannedAction),
 ) ([]plannedAction, string, error) {
-	prompt := buildTacticalPrompt(goal, zone, timeOfDay, physical, kb)
+	prompt := buildTacticalPrompt(goal, zone, timeOfDay, slot, physical, kb)
 	logger.Info("[MCP→Hermes/TACTICAL-PROMPT]",
 		"agent_id", agentID, "goal", goal, "game_time", timeOfDay, "text", prompt, "streaming", true)
 
