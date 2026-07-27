@@ -59,18 +59,21 @@ ADAPTER_LOG="$LOG_SUBDIR/debug-adapter.log"
 REBUILD_HERMES=true
 START_HERMES=true
 START_ADAPTER=true
+STOP_ONLY=false
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --no-rebuild) REBUILD_HERMES=false; shift ;;
         --no-hermes)  START_HERMES=false; shift ;;
         --no-adapter) START_ADAPTER=false; shift ;;
+        --stop)       STOP_ONLY=true; shift ;;
         -h|--help)
             echo "Usage: bash start-debug.sh [OPTIONS]"
             echo ""
             echo "UE 联调启动脚本：MCP 跑在 Windows 原生（监听 0.0.0.0），局域网可达。"
             echo ""
             echo "Options:"
+            echo "  --stop         仅停止所有服务，不重启"
             echo "  --no-rebuild   跳过 Hermes 镜像重建（快速重启）"
             echo "  --no-hermes    跳过 Hermes 启动（已手动启动时用）"
             echo "  --no-adapter   跳过 Adapter 启动（已手动启动时用）"
@@ -503,9 +506,9 @@ print_summary() {
 }
 
 # ─── --stop 选项 ──────────────────────────────────────────────
-if [[ "${1:-}" == "--stop" ]]; then
-    START_HERMES=false
-    START_ADAPTER=false
+# stop_all 内部用 START_HERMES / START_ADAPTER 控制 是否停该组件，
+# 因此 --stop 默认停全部；--stop --no-hermes 则只跳过 Hermes，以此类推。
+if $STOP_ONLY; then
     stop_all
     ok "All services stopped."
     exit 0
