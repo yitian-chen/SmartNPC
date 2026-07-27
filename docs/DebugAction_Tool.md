@@ -45,9 +45,7 @@
 `params.target` 传 world_kb 中的 zone 或 location id，MCP 会自动解析坐标和 kind。
 
 ```bash
-curl -X POST http://localhost:8770/debug/action \
-  -H "Content-Type: application/json" \
-  -d '{"agent_id":"H-01","cmd":"move_to","params":{"target":"workbench_01"}}'
+curl -X POST http://localhost:8770/debug/action -H "Content-Type: application/json" -d '{"agent_id":"H-01","cmd":"move_to","params":{"target":"workbench_01"}}'
 ```
 
 MCP 内部处理：调 `kb.GetPosition(target)` 解析坐标 → 构造 `{dest, target, kind, speed:"walk"}` → 发 `MoveTo` 命令。
