@@ -415,17 +415,46 @@ start_mcp() {
         warn "Hermes not reachable on :$HERMES_PORT — MCP may fail to discover tools"
     fi
 
+    # MCP 是 Windows exe，传给它的路径必须是 Windows 风格（D:\...）。
+    # WSL 里用 wslpath -w 转换；Git Bash 里用 cygpath -w。
+    # cwd 也要是 Windows 路径，否则 Windows 进程看不到 assets/ 等 相对路径。
+    local mcp_exe_win="$MCP_EXE"
+    local world_kb_win="$PROJECT_DIR/assets/world_kb.yaml"
+    local mcp_log_win="$MCP_LOG"
+    local cwd_win="$PROJECT_DIR"
+    if $IN_WSL; then
+        mcp_exe_win=$(wslpath -w "$MCP_EXE" 2>/dev/null) || mcp_exe_win="$MCP_EXE"
+        world_kb_win=$(wslpath -w "$PROJECT_DIR/assets/world_kb.yaml" 2>/dev/null) || world_kb_win="$PROJECT_DIR/assets/world_kb.yaml"
+        mcp_log_win=$(wslpath -w "$MCP_LOG" 2>/dev/null) || mcp_log_win="$MCP_LOG"
+        cwd_win=$(wslpath -w "$PROJECT_DIR" 2>/dev/null) || cwd_win="$PROJECT_DIR"
+    elif command -v cygpath &>/dev/null; then
+        mcp_exe_win="$(cygpath -w "$MCP_EXE")"
+        world_kb_win="$(cygpath -w "$PROJECT_DIR/assets/world_kb.yaml")"
+        mcp_log_win="$(cygpath -w "$MCP_LOG")"
+        cwd_win="$(cygpath -w "$PROJECT_DIR")"
+    fi
+
     info "Starting MCP (log: logs/$LOG_DATE/debug-mcp.log)..."
     # --ws :9090 在 Windows 上监听 0.0.0.0:9090，局域网可达
     # --http :8760 同理
     # --hermes-url http://localhost:8642 连接 Docker 里的 Hermes（WSL2 localhost forwarding）
-    cd "$MCP_DIR"
-    nohup "$MCP_EXE" \
-        --http ":$HTTP_PORT" \
-        --ws ":$WS_PORT" \
-        --hermes-url "http://localhost:$HERMES_PORT" \
-        >> "$MCP_LOG" 2>&1 &
-    disown
+    # --world-kb 用 Windows 绝对路径，避免 cwd 不对找不到 assets/world_kb.yaml
+    # WSL 里执行 Windows exe：写一个 .bat 临时文件用 cmd.exe 启动，
+    # 避免在 bash 里嵌套 cmd.exe /C 时的多层引号转义问题（反斜杠+引号
+    # 在 bash 双引号里会被部分解释，导致路径破损）。
+    local bat_file="$LOG_SUBDIR/start_mcp.bat"
+    cat > "$bat_file" << EOF
+@echo off
+pushd "$cwd_win"
+"$mcp_exe_win" --http ":$HTTP_PORT" --ws ":$WS_PORT" --hermes-url "http://localhost:$HERMES_PORT" --world-kb "$world_kb_win" >> "$mcp_log_win" 2>&1
+EOF
+    if $IN_WSL; then
+        local bat_win
+        bat_win=$(wslpath -w "$bat_file" 2>/dev/null) || bat_win="$bat_file"
+        MSYS_NO_PATHCONV=1 cmd.exe /C "$bat_win" >/dev/null 2>&1 &
+    else
+        MSYS_NO_PATHCONV=1 cmd.exe /C "$(cygpath -w "$bat_file" 2>/dev/null || echo "$bat_file")" >/dev/null 2>&1 &
+    fi
 
     wait_for "MCP HTTP (:$HTTP_PORT)" check_mcp_http 20
     wait_for "MCP WS (:$WS_PORT)" check_mcp_ws 10
