@@ -33,8 +33,12 @@ hermes/profiles/*/plan.md
 
 # ─── Mock UE 运行时输出 ─────────────────────────────────────
 logs/
+logs-dev/
 __pycache__/
 models_dev_cache.json
+
+# ─── Hermes 运行时标记 ───────────────────────────────────────
+hermes/profiles/*/.clean_shutdown
 
 # ─── 编译产物与临时目录 ───────────────────────────────────────
 agenttown-mcp/agenttown-mcp
