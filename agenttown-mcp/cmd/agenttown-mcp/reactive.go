@@ -25,6 +25,7 @@ const (
 	ReactionObserve   ReactionKind = "observe"   // 不打断，记录事件供战术层参考
 	ReactionInterrupt ReactionKind = "interrupt" // 打断当前 action（发 stop_action）
 	ReactionAct       ReactionKind = "act"       // 打断并立即执行新 action
+	ReactionReplan    ReactionKind = "replan"    // 触发战术层重新规划整个时段
 )
 
 // ReactiveDecision 是反应层期望从 Ollama 拿到的 JSON 决策。
@@ -111,15 +112,18 @@ const reactivePromptTemplate = `你是 NPC 老陈的反应决策模块。当前�
 - observe：不打断，记录这个事件供后续参考
 - interrupt：打断当前行动（会发送 stop_action）
 - act：打断当前行动并立即执行一个新动作
+- replan：当前时段的整个战术规划已不合理（如时段目标与实际冲突、物理状态无法支撑剩余 action），请求战术层基于当前状态重新分解本时段 goal
 
 判断要点：
-- 战术层规划的动作通常是合理的，除非有明确理由（物理警戒带、紧急事件），否则 continue
+- 战术层规划的动作通常是合理的，除非有明确理由，否则 continue
 - 仅在物理状态告警、事件突发、或当前动作明显不合理时才 interrupt/act
+- replan 是"重大"决策：当你认为整个 action 队列都应作废、重新规划时使用，而非单个 action 不合适（单个不合适用 interrupt/act）。30 分钟内至多触发 1 次 replan，请慎重
 
 请输出 JSON，格式严格如下，不要输出 JSON 以外的任何内容：
-{"reaction": "continue|observe|interrupt|act", "reason": "简短理由", "action": {"cmd": "...", "params": {...}}}
+{"reaction": "continue|observe|interrupt|act|replan", "reason": "简短理由", "action": {"cmd": "...", "params": {...}}}
 
 action 字段仅在 reaction=act 时填写，cmd 可选：move_to / speak / emote / wait / interact。
+reaction=replan 时不要填 action 字段。
 不要输出 JSON 以外的任何内容。`
 
 // buildReactivePrompt 构造反应层 prompt。纯函数，便于测试。
@@ -176,7 +180,7 @@ func parseReactiveDecision(raw string) ReactiveDecision {
 	}
 	// 枚举校验
 	switch dec.Reaction {
-	case ReactionContinue, ReactionObserve, ReactionInterrupt, ReactionAct:
+	case ReactionContinue, ReactionObserve, ReactionInterrupt, ReactionAct, ReactionReplan:
 		// ok
 	default:
 		return ReactiveDecision{Reaction: ReactionContinue, Reason: "unknown_reaction: " + string(dec.Reaction)}
@@ -329,3 +333,11 @@ const reactiveDedupeWindow = 60 * time.Second
 // 比 60s 短，确保感知频率较低（如 normal 模式 60s 一次）时也能定期触发；
 // 但要有一定去抖，避免感知频率高（如 behavior 模式 15s 一次）时过度调用。
 const reactivePeriodicDedupeWindow = 45 * time.Second
+
+// replanDedupeWindow 限制 reaction=replan 的触发频率：wall-clock 30 分钟内至多 1 次。
+// 不做倍率换算——"至多一次"约束的是反应层决策频率（wall-clock 时间轴上的 Ollama
+// 调用、goroutine 调度），与游戏时间倍率无关。150x 下 30 wall-clock 分钟 ≈ 75 游戏小时，
+// 远超单日仿真（16 游戏小时 ≈ 6.4 wall-clock 分钟），确保 replan 是罕见重大事件。
+// 该去抖在 execute() 的 replan 分支内检查（不在 trigger() 第一层），按 agent 全局，
+// 不按 trigger/detail——replan 是 agent 级决策，不是单个触发的事件。
+const replanDedupeWindow = 30 * time.Minute

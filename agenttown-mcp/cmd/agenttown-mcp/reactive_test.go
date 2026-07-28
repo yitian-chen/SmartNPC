@@ -172,6 +172,46 @@ func TestParseReactiveDecision_UnknownReaction(t *testing.T) {
 	}
 }
 
+func TestParseReactiveDecision_Replan(t *testing.T) {
+	raw := `{"reaction":"replan","reason":"fatigue=75 已突破警戒带，当前装配任务不合理"}`
+	dec := parseReactiveDecision(raw)
+	if dec.Reaction != ReactionReplan {
+		t.Errorf("reaction: got %q, want replan", dec.Reaction)
+	}
+	if dec.Reason != "fatigue=75 已突破警戒带，当前装配任务不合理" {
+		t.Errorf("reason: got %q", dec.Reason)
+	}
+	// replan 不应携带 action 字段
+	if dec.Action != nil {
+		t.Errorf("replan should not carry action, got: %+v", dec.Action)
+	}
+}
+
+func TestBuildReactivePrompt_ReplanOption(t *testing.T) {
+	in := ReactiveInput{
+		AgentID:      "H-01",
+		TimeOfDay:    "14:00",
+		Zone:         "main_workshop",
+		Energy:       80, Fatigue: 75, Health: 90,
+		CurrentAction: "work_assemble(target=workbench_01)",
+		ActionSrc:     "tactical",
+		CurrentSlot:   "13:00-17:00",
+		DailyPlan:     "13:00-17:00 下午装配",
+		Trigger:       TriggerPeriodic,
+		TriggerDetail: "周期性评估",
+	}
+	prompt := buildReactivePrompt(in)
+	if !strings.Contains(prompt, "replan") {
+		t.Errorf("prompt should mention 'replan' option, got: %s", prompt)
+	}
+	if !strings.Contains(prompt, "30 分钟内至多触发 1 次") {
+		t.Errorf("prompt should mention replan frequency limit, got: %s", prompt)
+	}
+	if !strings.Contains(prompt, "continue|observe|interrupt|act|replan") {
+		t.Errorf("prompt JSON schema should include replan, got: %s", prompt)
+	}
+}
+
 // TestParseReactiveDecision_CodeFence verifies that ```json ... ``` wrapped
 // output is correctly extracted.
 func TestParseReactiveDecision_CodeFence(t *testing.T) {
@@ -195,6 +235,7 @@ func TestParseReactiveDecision_AllEnums(t *testing.T) {
 		{`{"reaction":"observe"}`, ReactionObserve},
 		{`{"reaction":"interrupt"}`, ReactionInterrupt},
 		{`{"reaction":"act","action":{"cmd":"wait","params":{"duration_sec":5}}}`, ReactionAct},
+		{`{"reaction":"replan","reason":"fatigue 过高"}`, ReactionReplan},
 	}
 	for _, c := range cases {
 		dec := parseReactiveDecision(c.raw)

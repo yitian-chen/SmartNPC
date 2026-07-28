@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/AgentTown/agenttown-mcp/pkg/hermes"
 	"github.com/AgentTown/agenttown-mcp/pkg/protocol"
 	"github.com/AgentTown/agenttown-mcp/pkg/wsserver"
 )
@@ -591,3 +592,61 @@ func TestAgentContext_DebugOverrideLifecycle(t *testing.T) {
 }
 
 func boolPtr(b bool) *bool { return &b }
+
+// ─── tacticalRefillForReplan 测试 ──────────────────────────────
+
+func TestTacticalRefillForReplan_NoTacticalHc(t *testing.T) {
+	ac, _ := newAgentContext(context.Background())
+	// tacticalHc 默认 nil
+	ok := ac.tacticalRefillForReplan(context.Background(), "H-01", nil, nil, slog.Default(), "test hint")
+	if ok {
+		t.Error("should return false when tacticalHc is nil")
+	}
+}
+
+func TestTacticalRefillForReplan_NoGoal(t *testing.T) {
+	ac, _ := newAgentContext(context.Background())
+	// 设置 tacticalHc 但不设 dailyPlan → selectCurrentGoal 返回 ""
+	ac.mu.Lock()
+	ac.tacticalHc = newFailedHermesClient()
+	ac.dailyPlan = ""
+	ac.mu.Unlock()
+	ok := ac.tacticalRefillForReplan(context.Background(), "H-01", nil, nil, slog.Default(), "test hint")
+	if ok {
+		t.Error("should return false when no current goal")
+	}
+}
+
+func TestTacticalRefillForReplan_LLMFail(t *testing.T) {
+	ac, _ := newAgentContext(context.Background())
+	// 设置 tacticalHc 指向无效端口 → LLM 调用必然失败
+	// 保留旧队列：失败时不应清空
+	oldQueue := []plannedAction{{Action: "wait", Params: map[string]any{"duration_sec": 30}}}
+	setQueueForTest(ac, oldQueue)
+	// 构造一个含 time_of_day 的 perception，使 selectCurrentGoal 能匹配到 slot
+	percJSON, _ := json.Marshal(protocol.PerceptionPayload{
+		Environment: protocol.Environment{TimeOfDay: "09:00"},
+	})
+	ac.mu.Lock()
+	ac.tacticalHc = newFailedHermesClient()
+	ac.dailyPlan = "06:00-12:00: 上午装配\n12:00-13:00: 午休"
+	ac.latestPerception = percJSON
+	ac.mu.Unlock()
+	ok := ac.tacticalRefillForReplan(context.Background(), "H-01", nil, nil, slog.Default(), "test hint")
+	if ok {
+		t.Error("should return false when LLM call fails")
+	}
+	// 验证旧队列保留
+	ac.mu.Lock()
+	queueLen := len(ac.actionQueue)
+	ac.mu.Unlock()
+	if queueLen != 1 {
+		t.Errorf("old queue should be preserved on failure, got len=%d", queueLen)
+	}
+}
+
+// newFailedHermesClient 构造一个指向无效端口的 hermes.Client，
+// 任何 LLM 调用都会因连接失败而返回 error。
+func newFailedHermesClient() *hermes.Client {
+	return hermes.New(hermes.Config{URL: "http://127.0.0.1:1"})
+}

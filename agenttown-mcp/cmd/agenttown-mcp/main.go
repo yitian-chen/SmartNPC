@@ -77,6 +77,10 @@ type agentContext struct {
 	wake           chan struct{}
 	cancel         context.CancelFunc
 	stopped        bool
+	// replan 状态（mu 保护）
+	lastReplanAt     time.Time // wall-clock，30 min 去抖（replanDedupeWindow）
+	replanInProgress bool      // replan 规划进行中，阻止 worker 抢先 pop/refill
+	replanHint       string    // 传入战术层 prompt 的"上次中断原因"（replan reason）
 }
 
 func newAgentContext(parent context.Context, epochs ...int64) (*agentContext, context.Context) {
@@ -296,6 +300,16 @@ func runPerceptionWorker(
 		// UE 断线时跳过本轮，等重连后 agent_registered 路径 signal 唤醒。
 		if !ws.IsConnected() {
 			logger.Warn("[UE 断线] 跳过本轮，等重连", "agent_id", agentID)
+			continue
+		}
+
+		// replan 规划进行中：跳过 pop/refill，等 tacticalRefillForReplan 完成后
+		// signal 唤醒。避免规划期间 worker 抢先 pop 旧队列剩余 action 或 refill
+		// 覆盖正在生成的新队列。
+		ac.mu.Lock()
+		replanBusy := ac.replanInProgress
+		ac.mu.Unlock()
+		if replanBusy {
 			continue
 		}
 
@@ -666,7 +680,7 @@ func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
 		// 流式路径：onAction 回调逐个入队 + 首 action 提前下发。
 		// 回调在 SendStreaming 的 onDelta 调用栈里同步执行（worker 仍阻塞在 tacticalRefill），
 		// 不跨回调持有 mu。
-		_, _, err = generateTacticalPlanStreaming(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, logger,
+		_, _, err = generateTacticalPlanStreaming(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, logger, "",
 			func(pa plannedAction) {
 				a.mu.Lock()
 				a.actionQueue = append(a.actionQueue, pa)
@@ -680,7 +694,7 @@ func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
 		)
 	} else {
 		// 非流式路径（默认）：等完整响应后一次性填充队列。
-		actions, _, err = generateTacticalPlan(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, logger)
+		actions, _, err = generateTacticalPlan(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, logger, "")
 		if err == nil {
 			a.mu.Lock()
 			a.actionQueue = actions
@@ -727,6 +741,93 @@ func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
 	if needFallback {
 		a.popAndSendQueueAction(ctx, agentID, ws, kb, logger)
 	}
+	return true
+}
+
+// tacticalRefillForReplan 供反应层 replan 决策调用：绕过 currentActionID 守卫，
+// 强制重新分解当前时段 goal。规划成功后清空旧队列、写入新队列并 signal worker。
+// 不在此处发 stop_action（由调用方 execute() 在规划成功后发）。
+// 规划失败返回 false，调用方应保持原 action 不打断。
+//
+// 与 tacticalRefill 的区别：
+//  1. 不检查 currentActionID（允许在途 action 期间规划，这是本函数存在的全部意义）
+//  2. 强制重新分解（不受 redecomposeCount ≥2 限制，replan 是反应层显式请求）
+//  3. 重置 redecomposeCount = 0（replan 即"重新开始"）
+//  4. 通过 replanHint 注入"上次中断原因"到战术层 prompt
+func (a *agentContext) tacticalRefillForReplan(
+	ctx context.Context, agentID string, ws *wsserver.Server,
+	kb *worldkb.KB, logger *slog.Logger, replanHint string,
+) bool {
+	// 1. 取当前时段 goal（持锁）——不检查 currentActionID
+	a.mu.Lock()
+	if a.tacticalHc == nil {
+		a.mu.Unlock()
+		return false
+	}
+	goal, slot, idx := selectCurrentGoal(a.dailyPlan, a.latestTimeOfDayLocked())
+	if goal == "" {
+		a.mu.Unlock()
+		logger.Warn("[战术层/replan] 无当前时段 goal，无法 replan",
+			"agent_id", agentID)
+		return false
+	}
+	zone := a.latestZoneLocked()
+	physical := clonePhysical(a.latestPhysical)
+	tacticalHc := a.tacticalHc
+	kbRef := kb
+	hint := replanHint
+	a.mu.Unlock()
+
+	// 2. LLM 调用（30s 硬超时，与 tacticalRefill 一致）
+	tacticalCtx, tacticalCancel := context.WithTimeout(ctx, tacticalCallTimeout)
+	defer tacticalCancel()
+
+	var actions []plannedAction
+	var err error
+
+	if tacticalStreamingEnabled {
+		// 流式路径：回调收集到 local slice（不直接修改 a.actionQueue），
+		// 成功后才覆盖旧队列。失败则旧队列不受影响。
+		var collected []plannedAction
+		_, _, err = generateTacticalPlanStreaming(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, logger, hint,
+			func(pa plannedAction) {
+				collected = append(collected, pa)
+			},
+		)
+		if err == nil {
+			actions = collected
+		}
+	} else {
+		actions, _, err = generateTacticalPlan(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, logger, hint)
+	}
+
+	// 3. 失败处理：保留旧队列（不清空），调用方保持原 action
+	a.mu.Lock()
+	if err != nil {
+		queued := len(a.actionQueue)
+		a.mu.Unlock()
+		logger.Warn("[战术层/replan] 规划失败，保留原队列和原 action",
+			"agent_id", agentID, "queued", queued, "err", err)
+		return false
+	}
+
+	// 4. 成功：原子完成——覆盖旧队列、重置计数、清 hint、signal worker
+	a.actionQueue = actions
+	a.redecomposeCount = 0
+	a.currentSlot = slot
+	a.currentPlanIndex = idx
+	a.replanHint = ""
+	queueLen := len(a.actionQueue)
+	queuedActions := append([]plannedAction(nil), a.actionQueue...)
+	a.mu.Unlock()
+
+	actionsJSON, _ := json.Marshal(queuedActions)
+	logger.Info("[战术层/replan] 重规划成功，新队列已就绪",
+		"agent_id", agentID, "slot", slot, "queue_len", queueLen,
+		"replan_hint", hint, "actions", string(actionsJSON))
+
+	// 唤醒 worker（execute() 也会再 signal 一次，幂等）
+	a.signal()
 	return true
 }
 

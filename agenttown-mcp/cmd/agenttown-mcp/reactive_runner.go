@@ -290,6 +290,74 @@ func (r *reactiveRunner) execute(agentID string, ac *agentContext, dec ReactiveD
 			r.logger.Info("[反应层] act 已下发新 action",
 				"agent_id", agentID, "cmd", cmd, "action_id", ack.ActionID)
 		}
+
+	case ReactionReplan:
+		// replan：先规划后打断，防止角色无 action。
+		// 1. 30 wall-clock 分钟去抖（agent 全局，不按 trigger/detail）
+		ac.mu.Lock()
+		if ac.stopped {
+			ac.mu.Unlock()
+			return
+		}
+		lastReplan := ac.lastReplanAt
+		ac.mu.Unlock()
+		if !lastReplan.IsZero() && time.Since(lastReplan) < replanDedupeWindow {
+			r.logger.Info("[反应层] replan 去抖跳过（30 分钟内已 replan）",
+				"agent_id", agentID, "last_replan_at", lastReplan, "window", replanDedupeWindow)
+			return
+		}
+
+		// 2. 防重入：规划进行中跳过
+		ac.mu.Lock()
+		if ac.replanInProgress {
+			ac.mu.Unlock()
+			r.logger.Debug("[反应层] replan 已在进行，跳过", "agent_id", agentID)
+			return
+		}
+		ac.replanInProgress = true
+		ac.replanHint = dec.Reason
+		ac.mu.Unlock()
+		defer func() {
+			ac.mu.Lock()
+			ac.replanInProgress = false
+			ac.mu.Unlock()
+		}()
+
+		// 3. 调战术层重规划（用 context.Background()，战术层需 30s，
+		//    不复用反应层的 8s ctx）。规划期间 agent 继续原 action，
+		//    worker 被 replanInProgress 守卫挡住不 pop 不 refill。
+		//    规划失败 → 不打断原 action（损失最小）。
+		r.logger.Info("[反应层] replan 开始，规划期间保持原 action",
+			"agent_id", agentID, "replan_reason", dec.Reason)
+		ok := ac.tacticalRefillForReplan(context.Background(), agentID, r.ws, r.kb, r.logger, dec.Reason)
+		if !ok {
+			r.logger.Warn("[反应层] replan 规划失败，保持原 action 不打断",
+				"agent_id", agentID, "replan_reason", dec.Reason)
+			return
+		}
+
+		// 4. 规划成功：更新去抖时间戳
+		ac.mu.Lock()
+		ac.lastReplanAt = time.Now()
+		actionID := ac.currentActionID
+		ac.mu.Unlock()
+
+		// 5. 打断原在途 action（新队列已就绪，worker 待 signal）
+		if actionID != "" {
+			if err := r.ws.SendStopAction(agentID, actionID); err != nil {
+				r.logger.Warn("[反应层] replan stop_action 发送失败（新队列已就绪，等 completion 自然推进）",
+					"agent_id", agentID, "action_id", actionID, "err", err)
+			} else {
+				r.logger.Info("[反应层] replan 已发 stop_action 打断原 action",
+					"agent_id", agentID, "action_id", actionID, "replan_reason", dec.Reason)
+			}
+		} else {
+			r.logger.Info("[反应层] replan 无在途 action，worker 将 pop 新队列",
+				"agent_id", agentID, "replan_reason", dec.Reason)
+		}
+
+		// 6. signal worker（tacticalRefillForReplan 内部已 signal，此处幂等再发一次）
+		ac.signal()
 	}
 }
 
