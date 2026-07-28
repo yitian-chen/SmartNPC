@@ -24,15 +24,19 @@ func TestNew_Defaults(t *testing.T) {
 	if c.httpClient.Timeout != defaultHTTPTimeout {
 		t.Errorf("timeout: got %v, want %v", c.httpClient.Timeout, defaultHTTPTimeout)
 	}
+	if c.numPredict != defaultNumPredict {
+		t.Errorf("numPredict: got %d, want %d", c.numPredict, defaultNumPredict)
+	}
 }
 
 // TestNew_CustomOptions verifies that explicit Options are honored,
 // including trailing-slash trimming on BaseURL.
 func TestNew_CustomOptions(t *testing.T) {
 	c := New(Options{
-		BaseURL: "http://127.0.0.1:11434/",
-		Model:   "qwen2.5:14b",
-		Timeout: 2 * time.Second,
+		BaseURL:    "http://127.0.0.1:11434/",
+		Model:      "qwen2.5:14b",
+		Timeout:    2 * time.Second,
+		NumPredict: 200,
 	})
 	if c.baseURL != "http://127.0.0.1:11434" {
 		t.Errorf("baseURL: got %q, want trimmed %q", c.baseURL, "http://127.0.0.1:11434")
@@ -42,6 +46,9 @@ func TestNew_CustomOptions(t *testing.T) {
 	}
 	if c.httpClient.Timeout != 2*time.Second {
 		t.Errorf("timeout: got %v, want 2s", c.httpClient.Timeout)
+	}
+	if c.numPredict != 200 {
+		t.Errorf("numPredict: got %d, want 200", c.numPredict)
 	}
 }
 
@@ -90,6 +97,9 @@ func TestChat_Success(t *testing.T) {
 	}
 	if gotReq.Stream != false {
 		t.Errorf("stream: got %v, want false", gotReq.Stream)
+	}
+	if gotReq.Options.NumPredict != defaultNumPredict {
+		t.Errorf("options.num_predict: got %d, want %d", gotReq.Options.NumPredict, defaultNumPredict)
 	}
 }
 

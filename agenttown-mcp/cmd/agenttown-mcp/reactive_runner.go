@@ -31,9 +31,11 @@ import (
 )
 
 // reactiveCallTimeout 是单次 Ollama 调用的硬超时。
-// 文档 P0.1 设定反应层延迟预算 ≤3s；HTTP 客户端自身 5s 超时兜底，
-// 这里再用 ctx 3s 提前取消，避免拖到 HTTP 超时才返回。
-const reactiveCallTimeout = 3 * time.Second
+// 文档 P0.1 原设 3s，实测 qwen2.5:7b 热调用 eval 约 0.2-2s，但模型偶尔
+// 输出冗长中文解释会推到 5-9s。提到 8s 覆盖热调用 + 中等长度输出；
+// 配合 ollama client 的 num_predict=80 限制输出 token，常态延迟 <2s。
+// 冷启动（模型未加载）约 8s，刚好在边界，故还需 MCP 启动时预热。
+const reactiveCallTimeout = 8 * time.Second
 
 // reactiveRunner 持有反应层运行所需的全部依赖。
 // 通过 package-level `reactiveRunnerRef` 在 main() 中注入，WS handler 调用。

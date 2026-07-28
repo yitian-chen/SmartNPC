@@ -23,10 +23,17 @@ import (
 // Default timeouts. The reactive layer needs decisions in ≤3s; we give
 // the HTTP call a 5s ceiling so a slow first-token doesn't block the
 // worker loop, but rely on the caller's ctx for the hard deadline.
+//
+// numPredict caps the model's output token count. The reactive layer
+// expects a short JSON decision (≤80 tokens); without this cap the model
+// may emit hundreds of tokens of Chinese explanation before the JSON,
+// blowing the latency budget. 80 is generous for the four-reaction JSON
+// schema while keeping eval time under ~2s on qwen2.5:7b.
 const (
 	defaultHTTPTimeout = 5 * time.Second
 	defaultModel       = "qwen2.5:7b-instruct-q4_K_M"
 	defaultBaseURL     = "http://localhost:11434"
+	defaultNumPredict  = 80
 )
 
 // Client talks to a local Ollama instance. It is safe for concurrent use
@@ -35,16 +42,18 @@ const (
 type Client struct {
 	baseURL    string
 	model      string
+	numPredict int
 	httpClient *http.Client
 	logger     *slog.Logger
 }
 
 // Options configures a Client. Zero values fall back to defaults.
 type Options struct {
-	BaseURL string // e.g. http://localhost:11434
-	Model   string // e.g. qwen2.5:7b-instruct-q4_K_M
-	Timeout time.Duration
-	Logger  *slog.Logger
+	BaseURL    string        // e.g. http://localhost:11434
+	Model      string        // e.g. qwen2.5:7b-instruct-q4_K_M
+	Timeout    time.Duration
+	NumPredict int           // max output tokens; 0 → defaultNumPredict
+	Logger     *slog.Logger
 }
 
 // New creates a Client. If opts is incomplete, defaults are applied.
@@ -62,13 +71,18 @@ func New(opts Options) *Client {
 	if timeout == 0 {
 		timeout = defaultHTTPTimeout
 	}
+	numPredict := opts.NumPredict
+	if numPredict == 0 {
+		numPredict = defaultNumPredict
+	}
 	logger := opts.Logger
 	if logger == nil {
 		logger = slog.Default()
 	}
 	return &Client{
-		baseURL: baseURL,
-		model:   model,
+		baseURL:    baseURL,
+		model:      model,
+		numPredict: numPredict,
 		httpClient: &http.Client{
 			Timeout: timeout,
 		},
@@ -78,9 +92,16 @@ func New(opts Options) *Client {
 
 // chatRequest is the payload sent to /api/chat.
 type chatRequest struct {
-	Model    string        `json:"model"`
-	Messages []chatMessage `json:"messages"`
-	Stream   bool          `json:"stream"`
+	Model    string         `json:"model"`
+	Messages []chatMessage  `json:"messages"`
+	Stream   bool           `json:"stream"`
+	Options  chatOptions    `json:"options,omitempty"`
+}
+
+// chatOptions maps to Ollama's model runner options. num_predict caps the
+// generated token count — critical for the reactive layer's latency budget.
+type chatOptions struct {
+	NumPredict int `json:"num_predict"`
 }
 
 type chatMessage struct {
@@ -110,7 +131,8 @@ func (c *Client) Chat(ctx context.Context, prompt string) (string, error) {
 		Messages: []chatMessage{
 			{Role: "user", Content: prompt},
 		},
-		Stream: false,
+		Stream:  false,
+		Options: chatOptions{NumPredict: c.numPredict},
 	}
 	bodyBytes, err := json.Marshal(reqBody)
 	if err != nil {
