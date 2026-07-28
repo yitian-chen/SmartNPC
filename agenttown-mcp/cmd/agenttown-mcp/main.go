@@ -66,10 +66,11 @@ type agentContext struct {
 	currentSlot           string                 // mu 保护，当前分解的时段 "HH:MM-HH:MM"（防同时段重复分解）
 	redecomposeCount      int                    // mu 保护，当前时段已重复分解次数（防死循环）
 	// 反应层状态（mu 保护）
-	prevZone       string               // 上次感知的 zone id（用于检测 zone 变化触发反应层）
-	prevObjectIDs  []string             // 上次感知的 nearby_objects id 列表（用于检测新物体出现）
-	lastReactiveAt map[string]time.Time // 去抖：trigger dedupe key → 上次触发时间
-	debugOverride  bool                 // mu 保护，debug 手动 action 期间暂停 worker dispatch（避免 stop→idle wait 竞态）
+	prevZone         string               // 上次感知的 zone id（用于检测 zone 变化触发反应层）
+	prevObjectIDs    []string             // 上次感知的 nearby_objects id 列表（用于检测新物体出现）
+	lastReactiveAt   map[string]time.Time // 去抖：trigger dedupe key → 上次触发时间
+	perceptionCount  int                  // 累计感知次数（用于周期性触发反应层）
+	debugOverride    bool                 // mu 保护，debug 手动 action 期间暂停 worker dispatch（避免 stop→idle wait 竞态）
 	wake           chan struct{}
 	cancel         context.CancelFunc
 	stopped        bool
@@ -90,7 +91,7 @@ func newAgentContext(parent context.Context, epochs ...int64) (*agentContext, co
 }
 
 // observePerception 存储最新感知payload，供战术层 refill 时读取当前世界状态。
-// 反应层：检测 zone 变化 / 新物体出现，若显著变化则返回 trigger 信息供
+// 反应层：检测 zone 变化 / 新物体出现 / 周期性触发，若显著变化则返回 trigger 信息供
 // message handler 异步触发 reactiveRunner.trigger。
 func (a *agentContext) observePerception(payload json.RawMessage) (ReactiveTrigger, string, error) {
 	var p protocol.PerceptionPayload
@@ -115,12 +116,18 @@ func (a *agentContext) observePerception(payload json.RawMessage) (ReactiveTrigg
 	a.latestPerception = cloneRawMessage(payload)
 	a.prevZone = curZone
 	a.prevObjectIDs = curObjectIDs
+	a.perceptionCount++
+	pCount := a.perceptionCount
 	a.mu.Unlock()
 
 	// 检测显著变化（zone/新物体）。物理警戒带由 updateState 检测，
 	// 这里 prev/cur physical 都用 latestPhysical（即上次 state_report），
 	// 不重复检测物理触发。
 	trigger, detail := shouldTriggerReactive(prevZone, curZone, prevObjectIDs, curObjectIDs, prevPhysical, prevPhysical)
+	// 事件类触发优先；无事件时检查周期性触发
+	if trigger == "" {
+		trigger, detail = shouldTriggerPeriodic(pCount)
+	}
 
 	// 感知是 worker 的主驱动源：每次感知到达都唤醒它检查战术队列
 	// （pop 下一个 / refill 新时段）。tacticalRefill 内部的守卫避免重复 LLM 调用。
@@ -146,9 +153,11 @@ func (a *agentContext) updateState(report protocol.StateReportPayload) (Reactive
 	return shouldTriggerReactive("", "", nil, nil, prevPhysical, &physical)
 }
 
-// recordActionCompletion 处理 action_completed。反应层移除后：所有来源的
-// completion 都清在途追踪并 signal worker（pop 下一个或 refill）。
-func (a *agentContext) recordActionCompletion(completion protocol.ActionCompletedPayload) bool {
+// recordActionCompletion 处理 action_completed。所有来源的 completion 都清
+// 在途追踪并 signal worker（pop 下一个或 refill）。反应层：action 完成是自然的
+// 评估点（NPC 刚做完一件事，下一步做什么？），返回 trigger 信息供 message
+// handler 异步触发 reactiveRunner。
+func (a *agentContext) recordActionCompletion(completion protocol.ActionCompletedPayload) (bool, ReactiveTrigger, string) {
 	a.mu.Lock()
 	if a.currentTask != nil && a.currentTask.ActionID == completion.ActionID {
 		a.currentTask = nil
@@ -164,7 +173,10 @@ func (a *agentContext) recordActionCompletion(completion protocol.ActionComplete
 	a.currentActionSrc = ""
 	a.mu.Unlock()
 	a.signal()
-	return true
+	// 反应层触发：action 完成是自然评估点。detail 用 result + progress。
+	detail := fmt.Sprintf("action_id=%s result=%s progress=%.2f",
+		completion.ActionID, completion.Result, completion.Progress)
+	return true, TriggerActionDone, detail
 }
 
 // recordEventNotification 处理环境事件通知。反应层：返回 trigger 信息供
@@ -861,10 +873,13 @@ func main() {
 				logger.Warn("action_completed dropped for unregistered agent", "agent_id", agentID)
 				return
 			}
-			queued := ac.recordActionCompletion(completed)
+			queued, trigger, detail := ac.recordActionCompletion(completed)
 			logger.Info("action_completed", "agent_id", agentID,
 				"action_id", completed.ActionID, "result", completed.Result,
 				"progress", completed.Progress, "decision_queued", queued)
+			if trigger != "" {
+				go reactiveRunnerRef.trigger(agentID, ac, trigger, detail)
+			}
 
 		case protocol.TypeEventNotification:
 			var event protocol.EventNotificationPayload

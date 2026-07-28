@@ -48,7 +48,24 @@ const (
 	TriggerNewObject     ReactiveTrigger = "new_object"      // nearby_objects 出现新物体
 	TriggerEventNotify   ReactiveTrigger = "event_notify"    // 收到 event_notification
 	TriggerPhysicalAlert ReactiveTrigger = "physical_alert"  // 物理状态突破警戒带
+	TriggerActionDone    ReactiveTrigger = "action_done"     // action_completed，自然评估点
+	TriggerPeriodic      ReactiveTrigger = "periodic"        // 周期性触发：每 N 次感知强制评估
 )
+
+// 物理警戒带阈值。原 P0 设 energy<20 / health<30 / fatigue>80，但单日仿真
+// energy 最低只到约 80、fatigue 最高约 48，警戒带从未触发。放宽到预警级别，
+// 让 1-2 小时仿真就能自然触发物理类反应。
+const (
+	energyAlertThreshold  = 40.0 // energy 跌破此值触发"低电量预警"
+	healthAlertThreshold  = 50.0 // health 跌破此值触发"健康预警"
+	fatigueAlertThreshold = 60.0 // fatigue 突破此值触发"疲劳预警"
+)
+
+// periodicTriggerInterval 是周期性触发的感知次数间隔。
+// mock_ue 每 15s 推一次 perception（normal 模式 60s，behavior 模式 15s），
+// 设 4 次即每 60s（normal）或 60s（behavior）强制评估一次。
+// 本地 Ollama 调用成本可承受，但太频繁会产出大量 continue 决策浪费算力。
+const periodicTriggerInterval = 4
 
 // ReactiveInput 聚合反应层决策所需的输入状态。由 main.go 从 agentContext
 // 提取后传入，避免 reactive.go 直接依赖 agentContext（便于单元测试）。
@@ -178,6 +195,7 @@ func truncate(s string, maxLen int) string {
 
 // shouldTriggerReactive 判断感知/状态变化是否"显著"到需要调用反应层。
 // 与决策 3 一致：只在显著变化时调用，避免每个 perception_update 都打 Ollama。
+// 本地模型成本可承受，但仍需避免无意义的高频调用（大部分决策会是 continue）。
 //
 // 返回 (trigger, detail) — 若不显著则 trigger 为空字符串。
 func shouldTriggerReactive(
@@ -196,14 +214,14 @@ func shouldTriggerReactive(
 	}
 	// 3. 物理状态突破警戒带（从正常跨入警戒带的那一刻）
 	if prevPhysical != nil && curPhysical != nil {
-		if !belowThreshold(prevPhysical.Energy, 20) && belowThreshold(curPhysical.Energy, 20) {
-			return TriggerPhysicalAlert, fmt.Sprintf("energy %.0f→%.0f 跌破警戒带 20", prevPhysical.Energy, curPhysical.Energy)
+		if !belowThreshold(prevPhysical.Energy, energyAlertThreshold) && belowThreshold(curPhysical.Energy, energyAlertThreshold) {
+			return TriggerPhysicalAlert, fmt.Sprintf("energy %.0f→%.0f 跌破警戒带 %.0f", prevPhysical.Energy, curPhysical.Energy, energyAlertThreshold)
 		}
-		if !belowThreshold(prevPhysical.Health, 30) && belowThreshold(curPhysical.Health, 30) {
-			return TriggerPhysicalAlert, fmt.Sprintf("health %.0f→%.0f 跌破警戒带 30", prevPhysical.Health, curPhysical.Health)
+		if !belowThreshold(prevPhysical.Health, healthAlertThreshold) && belowThreshold(curPhysical.Health, healthAlertThreshold) {
+			return TriggerPhysicalAlert, fmt.Sprintf("health %.0f→%.0f 跌破警戒带 %.0f", prevPhysical.Health, curPhysical.Health, healthAlertThreshold)
 		}
-		if !aboveThreshold(prevPhysical.Fatigue, 80) && aboveThreshold(curPhysical.Fatigue, 80) {
-			return TriggerPhysicalAlert, fmt.Sprintf("fatigue %.0f→%.0f 突破警戒带 80", prevPhysical.Fatigue, curPhysical.Fatigue)
+		if !aboveThreshold(prevPhysical.Fatigue, fatigueAlertThreshold) && aboveThreshold(curPhysical.Fatigue, fatigueAlertThreshold) {
+			return TriggerPhysicalAlert, fmt.Sprintf("fatigue %.0f→%.0f 突破警戒带 %.0f", prevPhysical.Fatigue, curPhysical.Fatigue, fatigueAlertThreshold)
 		}
 	}
 	return "", ""
@@ -214,6 +232,24 @@ func belowThreshold(v, threshold float64) bool { return v < threshold }
 
 // aboveThreshold 返回 v > threshold（严格大于）。
 func aboveThreshold(v, threshold float64) bool { return v > threshold }
+
+// shouldTriggerPeriodic 判断是否到了周期性强制触发的时机。
+//
+// 本地 Ollama 模型调用成本可承受，但大部分 perception 无显著变化时决策会是
+// continue，频繁调用浪费算力。每 periodicTriggerInterval 次感知强制触发一次，
+// 让反应层有机会评估"是否应该换活动"、"已经工作太久该休息了"等长周期决策。
+//
+// perceptionCount 是累计感知次数（从 1 开始），返回 (TriggerPeriodic, detail) 或 ("", "")。
+// 调用方负责传入累计计数；此函数是纯函数，便于测试。
+func shouldTriggerPeriodic(perceptionCount int) (ReactiveTrigger, string) {
+	if perceptionCount <= 0 {
+		return "", ""
+	}
+	if perceptionCount%periodicTriggerInterval == 0 {
+		return TriggerPeriodic, fmt.Sprintf("周期性评估（第 %d 次感知，每 %d 次触发）", perceptionCount, periodicTriggerInterval)
+	}
+	return "", ""
+}
 
 // diffStrings 返回 in 中存在但 notIn 中不存在的字符串（in - notIn）。
 func diffStrings(in, notIn []string) []string {
@@ -250,5 +286,12 @@ func dedupeKey(agentID string, trigger ReactiveTrigger, detail string) string {
 }
 
 // reactiveDedupeWindow 是相同触发原因的去抖窗口。
-// 60 秒——与文档决策 3 一致。
+// 事件类触发（zone/objects/physical/event）用 60s——与文档决策 3 一致。
+// 周期性触发（periodic）用 45s——比事件类短，确保 NPC 在静止场景中也能
+// 定期评估；但不会与事件类触发互相干扰（trigger 类型不同，dedupe key 不同）。
 const reactiveDedupeWindow = 60 * time.Second
+
+// reactivePeriodicDedupeWindow 是周期性触发的去抖窗口。
+// 比 60s 短，确保感知频率较低（如 normal 模式 60s 一次）时也能定期触发；
+// 但要有一定去抖，避免感知频率高（如 behavior 模式 15s 一次）时过度调用。
+const reactivePeriodicDedupeWindow = 45 * time.Second

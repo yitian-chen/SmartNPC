@@ -34,7 +34,7 @@ func TestRecordActionCompletion_SignalsWorkerAndClearsInFlight(t *testing.T) {
 	default:
 	}
 
-	queued := ac.recordActionCompletion(protocol.ActionCompletedPayload{
+	queued, _, _ := ac.recordActionCompletion(protocol.ActionCompletedPayload{
 		ActionID: "act_t1", Result: protocol.ResultSuccess, Progress: 1,
 	})
 	if !queued {
@@ -57,6 +57,24 @@ func TestRecordActionCompletion_SignalsWorkerAndClearsInFlight(t *testing.T) {
 	}
 	if id != "" {
 		t.Fatalf("currentActionID should be cleared, got %q", id)
+	}
+}
+
+// TestRecordActionCompletion_ReturnsTrigger 验证 recordActionCompletion
+// 返回 TriggerActionDone，供 WS handler 异步触发 reactiveRunner。
+func TestRecordActionCompletion_ReturnsTrigger(t *testing.T) {
+	ac, _ := newAgentContext(context.Background())
+	queued, trigger, detail := ac.recordActionCompletion(protocol.ActionCompletedPayload{
+		ActionID: "act_done_1", Result: protocol.ResultSuccess, Progress: 1,
+	})
+	if !queued {
+		t.Fatal("queued should be true")
+	}
+	if trigger != TriggerActionDone {
+		t.Errorf("trigger: got %q, want %q", trigger, TriggerActionDone)
+	}
+	if !strings.Contains(detail, "act_done_1") || !strings.Contains(detail, "success") {
+		t.Errorf("detail should mention action_id + result: %q", detail)
 	}
 }
 

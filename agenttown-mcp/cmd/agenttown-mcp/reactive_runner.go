@@ -80,8 +80,12 @@ func (r *reactiveRunner) trigger(agentID string, ac *agentContext, trigger React
 		return
 	}
 
-	// 1. 去抖检查（与文档决策 3 一致：60s 窗口）
+	// 1. 去抖检查（与文档决策 3 一致：事件类 60s，周期性 45s）
 	key := dedupeKey(agentID, trigger, detail)
+	dedupeWindow := reactiveDedupeWindow
+	if trigger == TriggerPeriodic {
+		dedupeWindow = reactivePeriodicDedupeWindow
+	}
 	now := time.Now()
 	ac.mu.Lock()
 	if ac.stopped {
@@ -89,7 +93,7 @@ func (r *reactiveRunner) trigger(agentID string, ac *agentContext, trigger React
 		return
 	}
 	lastAt, exists := ac.lastReactiveAt[key]
-	if exists && now.Sub(lastAt) < reactiveDedupeWindow {
+	if exists && now.Sub(lastAt) < dedupeWindow {
 		ac.mu.Unlock()
 		r.logger.Debug("[反应层] 去抖跳过",
 			"agent_id", agentID, "trigger", trigger, "detail", detail)

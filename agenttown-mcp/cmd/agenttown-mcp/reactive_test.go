@@ -216,22 +216,22 @@ func TestShouldTriggerReactive_NewObject(t *testing.T) {
 
 // TestShouldTriggerReactive_EnergyAlert verifies energy threshold crossing.
 func TestShouldTriggerReactive_EnergyAlert(t *testing.T) {
-	prev := &protocol.PhysicalState{Energy: 25, Health: 90, Fatigue: 30}
-	cur := &protocol.PhysicalState{Energy: 18, Health: 90, Fatigue: 30}
+	prev := &protocol.PhysicalState{Energy: 45, Health: 90, Fatigue: 30}
+	cur := &protocol.PhysicalState{Energy: 38, Health: 90, Fatigue: 30}
 	trig, detail := shouldTriggerReactive("z", "z", nil, nil, prev, cur)
 	if trig != TriggerPhysicalAlert {
 		t.Errorf("trigger: got %q, want physical_alert", trig)
 	}
-	if !strings.Contains(detail, "energy") || !strings.Contains(detail, "20") {
-		t.Errorf("detail should mention energy + 20: %q", detail)
+	if !strings.Contains(detail, "energy") || !strings.Contains(detail, "40") {
+		t.Errorf("detail should mention energy + 40: %q", detail)
 	}
 }
 
 // TestShouldTriggerReactive_EnergyStaysLow verifies no trigger when energy
 // stays below threshold (already in alert zone, no new crossing).
 func TestShouldTriggerReactive_EnergyStaysLow(t *testing.T) {
-	prev := &protocol.PhysicalState{Energy: 18, Health: 90, Fatigue: 30}
-	cur := &protocol.PhysicalState{Energy: 15, Health: 90, Fatigue: 30}
+	prev := &protocol.PhysicalState{Energy: 38, Health: 90, Fatigue: 30}
+	cur := &protocol.PhysicalState{Energy: 35, Health: 90, Fatigue: 30}
 	trig, _ := shouldTriggerReactive("z", "z", nil, nil, prev, cur)
 	if trig != "" {
 		t.Errorf("trigger: got %q, want empty (already in alert)", trig)
@@ -240,27 +240,27 @@ func TestShouldTriggerReactive_EnergyStaysLow(t *testing.T) {
 
 // TestShouldTriggerReactive_HealthAlert verifies health threshold crossing.
 func TestShouldTriggerReactive_HealthAlert(t *testing.T) {
-	prev := &protocol.PhysicalState{Energy: 50, Health: 35, Fatigue: 30}
-	cur := &protocol.PhysicalState{Energy: 50, Health: 28, Fatigue: 30}
+	prev := &protocol.PhysicalState{Energy: 50, Health: 55, Fatigue: 30}
+	cur := &protocol.PhysicalState{Energy: 50, Health: 48, Fatigue: 30}
 	trig, detail := shouldTriggerReactive("z", "z", nil, nil, prev, cur)
 	if trig != TriggerPhysicalAlert {
 		t.Errorf("trigger: got %q, want physical_alert", trig)
 	}
-	if !strings.Contains(detail, "health") || !strings.Contains(detail, "30") {
-		t.Errorf("detail should mention health + 30: %q", detail)
+	if !strings.Contains(detail, "health") || !strings.Contains(detail, "50") {
+		t.Errorf("detail should mention health + 50: %q", detail)
 	}
 }
 
 // TestShouldTriggerReactive_FatigueAlert verifies fatigue threshold crossing.
 func TestShouldTriggerReactive_FatigueAlert(t *testing.T) {
-	prev := &protocol.PhysicalState{Energy: 50, Health: 90, Fatigue: 75}
-	cur := &protocol.PhysicalState{Energy: 50, Health: 90, Fatigue: 82}
+	prev := &protocol.PhysicalState{Energy: 50, Health: 90, Fatigue: 55}
+	cur := &protocol.PhysicalState{Energy: 50, Health: 90, Fatigue: 62}
 	trig, detail := shouldTriggerReactive("z", "z", nil, nil, prev, cur)
 	if trig != TriggerPhysicalAlert {
 		t.Errorf("trigger: got %q, want physical_alert", trig)
 	}
-	if !strings.Contains(detail, "fatigue") || !strings.Contains(detail, "80") {
-		t.Errorf("detail should mention fatigue + 80: %q", detail)
+	if !strings.Contains(detail, "fatigue") || !strings.Contains(detail, "60") {
+		t.Errorf("detail should mention fatigue + 60: %q", detail)
 	}
 }
 
@@ -270,6 +270,43 @@ func TestShouldTriggerReactive_NoPhysical(t *testing.T) {
 	trig, _ := shouldTriggerReactive("z", "z", nil, nil, nil, nil)
 	if trig != "" {
 		t.Errorf("trigger: got %q, want empty", trig)
+	}
+}
+
+// TestShouldTriggerPeriodic verifies periodic trigger fires every
+// periodicTriggerInterval perceptions.
+func TestShouldTriggerPeriodic(t *testing.T) {
+	// 第 0 次或负数：不触发
+	trig, _ := shouldTriggerPeriodic(0)
+	if trig != "" {
+		t.Errorf("count=0: got %q, want empty", trig)
+	}
+	// 第 1/2/3 次：不触发（间隔为 4）
+	for i := 1; i < periodicTriggerInterval; i++ {
+		trig, _ := shouldTriggerPeriodic(i)
+		if trig != "" {
+			t.Errorf("count=%d: got %q, want empty", i, trig)
+		}
+	}
+	// 第 4 次：触发
+	trig, detail := shouldTriggerPeriodic(periodicTriggerInterval)
+	if trig != TriggerPeriodic {
+		t.Errorf("count=%d: got %q, want %q", periodicTriggerInterval, trig, TriggerPeriodic)
+	}
+	if !strings.Contains(detail, "周期性评估") {
+		t.Errorf("detail should mention 周期性评估: %q", detail)
+	}
+	// 第 8 次：再次触发
+	trig, _ = shouldTriggerPeriodic(periodicTriggerInterval * 2)
+	if trig != TriggerPeriodic {
+		t.Errorf("count=%d: got %q, want %q", periodicTriggerInterval*2, trig, TriggerPeriodic)
+	}
+	// 第 5/6/7 次：不触发
+	for i := periodicTriggerInterval + 1; i < periodicTriggerInterval*2; i++ {
+		trig, _ := shouldTriggerPeriodic(i)
+		if trig != "" {
+			t.Errorf("count=%d: got %q, want empty", i, trig)
+		}
 	}
 }
 
