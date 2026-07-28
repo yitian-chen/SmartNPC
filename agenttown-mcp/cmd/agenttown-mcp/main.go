@@ -575,6 +575,12 @@ func (a *agentContext) popAndSendQueueAction(ctx context.Context, agentID string
 // latency benefit.
 var tacticalStreamingEnabled bool
 
+// tacticalCallTimeout 是单次战术层 LLM 调用（流式或非流式）的硬超时。
+// 之前直接用进程 ctx，导致 Hermes 后端 DeepSeek 排队时单次调用最长卡 120s，
+// 整个游戏时段空转。30s 失败后由调用方发 idle wait，下一个感知周期重新尝试，
+// 比死等 120s 更划算。
+const tacticalCallTimeout = 30 * time.Second
+
 // reactiveRunnerRef 是进程级反应层执行器（package-level 便于 WS handler 调用）。
 // nil 表示反应层未启用（--ollama-url="" 或客户端初始化失败）。
 // trigger() 内部 nil-check，WS handler 无需额外判空。
@@ -624,11 +630,16 @@ func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
 	var actions []plannedAction
 	var err error
 
+	// 战术层 LLM 调用统一 30s 硬超时：避免 Hermes 后端排队时单次调用卡 120s
+	// 拖死整个游戏时段。超时后调用方发 idle wait，下一感知周期重试。
+	tacticalCtx, tacticalCancel := context.WithTimeout(ctx, tacticalCallTimeout)
+	defer tacticalCancel()
+
 	if tacticalStreamingEnabled {
 		// 流式路径：onAction 回调逐个入队 + 首 action 提前下发。
 		// 回调在 SendStreaming 的 onDelta 调用栈里同步执行（worker 仍阻塞在 tacticalRefill），
 		// 不跨回调持有 mu。
-		_, _, err = generateTacticalPlanStreaming(ctx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, logger,
+		_, _, err = generateTacticalPlanStreaming(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, logger,
 			func(pa plannedAction) {
 				a.mu.Lock()
 				a.actionQueue = append(a.actionQueue, pa)
@@ -642,7 +653,7 @@ func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
 		)
 	} else {
 		// 非流式路径（默认）：等完整响应后一次性填充队列。
-		actions, _, err = generateTacticalPlan(ctx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, logger)
+		actions, _, err = generateTacticalPlan(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, logger)
 		if err == nil {
 			a.mu.Lock()
 			a.actionQueue = actions

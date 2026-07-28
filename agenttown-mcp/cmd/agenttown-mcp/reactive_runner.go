@@ -111,7 +111,11 @@ func (r *reactiveRunner) trigger(agentID string, ac *agentContext, trigger React
 	prompt := buildReactivePrompt(input)
 	r.logger.Info("[反应层] 调用 Ollama",
 		"agent_id", agentID, "trigger", trigger, "detail", detail,
-		"model", r.ollama.Model())
+		"model", r.ollama.Model(),
+		"zone", input.Zone, "time_of_day", input.TimeOfDay,
+		"energy", input.Energy, "fatigue", input.Fatigue, "health", input.Health,
+		"current_action", input.CurrentAction, "elapsed_sec", input.ElapsedSec,
+		"action_src", input.ActionSrc, "current_slot", input.CurrentSlot)
 
 	// 4. 调用 Ollama（3s 超时）
 	ctx, cancel := context.WithTimeout(context.Background(), reactiveCallTimeout)
@@ -127,7 +131,12 @@ func (r *reactiveRunner) trigger(agentID string, ac *agentContext, trigger React
 	// 5. 解析决策
 	dec := parseReactiveDecision(raw)
 	r.logger.Info("[反应层] 决策",
-		"agent_id", agentID, "reaction", dec.Reaction, "reason", dec.Reason)
+		"agent_id", agentID, "reaction", dec.Reaction, "reason", dec.Reason,
+		"trigger", trigger,
+		"zone", input.Zone, "time_of_day", input.TimeOfDay,
+		"energy", input.Energy, "fatigue", input.Fatigue, "health", input.Health,
+		"current_action", input.CurrentAction, "elapsed_sec", input.ElapsedSec,
+		"action_src", input.ActionSrc, "current_slot", input.CurrentSlot)
 
 	// 6. 执行
 	r.execute(agentID, ac, dec)
