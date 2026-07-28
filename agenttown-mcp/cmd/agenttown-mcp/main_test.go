@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"log/slog"
+	"strings"
 	"testing"
 
 	"github.com/AgentTown/agenttown-mcp/pkg/protocol"
@@ -58,7 +59,7 @@ func TestRecordActionCompletion_SignalsWorkerAndClearsInFlight(t *testing.T) {
 	}
 }
 
-func TestRecordEventNotification_NoOpPreservesQueue(t *testing.T) {
+func TestRecordEventNotification_ReturnsTrigger(t *testing.T) {
 	ac, _ := newAgentContext(context.Background())
 	setQueueForTest(ac, []plannedAction{
 		{Action: "move_to", Params: map[string]any{"target": "main_workshop"}},
@@ -69,16 +70,27 @@ func TestRecordEventNotification_NoOpPreservesQueue(t *testing.T) {
 	ac.redecomposeCount = 1
 	ac.mu.Unlock()
 
-	// 反应层移除后：事件通知不再打断战术队列，返回 false（未触发决策）
-	queued := ac.recordEventNotification(protocol.EventNotificationPayload{
+	// 反应层 P0：recordEventNotification 返回 (TriggerEventNotify, detail)
+	// 供 WS handler 异步触发 reactiveRunner。本测试验证签名 + 队列不被改动。
+	trigger, detail := ac.recordEventNotification(protocol.EventNotificationPayload{
 		EventID:         "evt_001",
 		PerceptionLevel: "audible",
 		Event:           map[string]any{"type": "alert"},
 	})
-	if queued {
-		t.Fatal("event notification should not queue a decision after reactive layer removal")
+	if trigger != TriggerEventNotify {
+		t.Fatalf("trigger=%q, want %q", trigger, TriggerEventNotify)
 	}
-	// 队列应原样保留
+	if detail == "" {
+		t.Error("detail should not be empty")
+	}
+	if !strings.Contains(detail, "evt_001") {
+		t.Errorf("detail should contain event_id, got %q", detail)
+	}
+	if !strings.Contains(detail, "alert") {
+		t.Errorf("detail should contain event type, got %q", detail)
+	}
+
+	// 队列应原样保留（recordEventNotification 不再触碰战术队列）
 	ac.mu.Lock()
 	queueLen := len(ac.actionQueue)
 	slot := ac.currentSlot

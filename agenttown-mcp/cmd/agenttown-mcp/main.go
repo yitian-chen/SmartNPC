@@ -35,6 +35,7 @@ import (
 	"github.com/AgentTown/agenttown-mcp/adapters/agenttown/tools"
 	"github.com/AgentTown/agenttown-mcp/internal/log"
 	"github.com/AgentTown/agenttown-mcp/pkg/hermes"
+	"github.com/AgentTown/agenttown-mcp/pkg/ollama"
 	"github.com/AgentTown/agenttown-mcp/pkg/protocol"
 	"github.com/AgentTown/agenttown-mcp/pkg/transport"
 	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
@@ -64,6 +65,10 @@ type agentContext struct {
 	currentPlanIndex      int             // mu 保护，当前执行到 daily_plan 第几个 item（记账用）
 	currentSlot           string          // mu 保护，当前分解的时段 "HH:MM-HH:MM"（防同时段重复分解）
 	redecomposeCount      int             // mu 保护，当前时段已重复分解次数（防死循环）
+	// 反应层状态（mu 保护）
+	prevZone        string   // 上次感知的 zone id（用于检测 zone 变化触发反应层）
+	prevObjectIDs   []string // 上次感知的 nearby_objects id 列表（用于检测新物体出现）
+	lastReactiveAt  map[string]time.Time // 去抖：trigger dedupe key → 上次触发时间
 	wake                  chan struct{}
 	cancel                context.CancelFunc
 	stopped               bool
@@ -79,41 +84,65 @@ func newAgentContext(parent context.Context, epochs ...int64) (*agentContext, co
 		online: true, agentEpoch: agentEpoch,
 		wake:                  make(chan struct{}, 1), cancel: cancel,
 		pendingActionTimeouts: make(map[string]*time.Timer),
+		lastReactiveAt:        make(map[string]time.Time),
 	}, ctx
 }
 
 // observePerception 存储最新感知payload，供战术层 refill 时读取当前世界状态。
-// 反应层移除后：感知不再触发 LLM 决策，仅更新 latestPerception。
-func (a *agentContext) observePerception(payload json.RawMessage) error {
+// 反应层：检测 zone 变化 / 新物体出现，若显著变化则返回 trigger 信息供
+// message handler 异步触发 reactiveRunner.trigger。
+func (a *agentContext) observePerception(payload json.RawMessage) (ReactiveTrigger, string, error) {
 	var p protocol.PerceptionPayload
 	if err := json.Unmarshal(payload, &p); err != nil {
-		return fmt.Errorf("parse perception: %w", err)
+		return "", "", fmt.Errorf("parse perception: %w", err)
 	}
 	a.mu.Lock()
 	if a.stopped {
 		a.mu.Unlock()
-		return nil
+		return "", "", nil
 	}
+	// 提取当前 zone + object ids，对比 prev 检测显著变化
+	curZone := ""
+	if p.Location.CurrentZone != nil {
+		curZone = *p.Location.CurrentZone
+	}
+	curObjectIDs := extractObjectIDs(p)
+	prevZone := a.prevZone
+	prevObjectIDs := a.prevObjectIDs
+	prevPhysical := a.latestPhysical
+	// 更新感知状态
 	a.latestPerception = cloneRawMessage(payload)
+	a.prevZone = curZone
+	a.prevObjectIDs = curObjectIDs
 	a.mu.Unlock()
+
+	// 检测显著变化（zone/新物体）。物理警戒带由 updateState 检测，
+	// 这里 prev/cur physical 都用 latestPhysical（即上次 state_report），
+	// 不重复检测物理触发。
+	trigger, detail := shouldTriggerReactive(prevZone, curZone, prevObjectIDs, curObjectIDs, prevPhysical, prevPhysical)
+
 	// 感知是 worker 的主驱动源：每次感知到达都唤醒它检查战术队列
 	// （pop 下一个 / refill 新时段）。tacticalRefill 内部的守卫避免重复 LLM 调用。
 	a.signal()
-	return nil
+	return trigger, detail, nil
 }
 
-// updateState 存储权威的物理/任务状态。反应层移除后：不再触发决策，
-// 物理警阈带由下一时段 tacticalRefill 自纠正。
-func (a *agentContext) updateState(report protocol.StateReportPayload) {
+// updateState 存储权威的物理/任务状态。反应层：检测物理状态突破警戒带，
+// 返回 trigger 信息供 message handler 触发 reactiveRunner。
+func (a *agentContext) updateState(report protocol.StateReportPayload) (ReactiveTrigger, string) {
 	a.mu.Lock()
 	if a.stopped {
 		a.mu.Unlock()
-		return
+		return "", ""
 	}
+	prevPhysical := a.latestPhysical
 	physical := report.PhysicalState
 	a.latestPhysical = &physical
 	a.currentTask = cloneTask(report.CurrentTaskProgress)
 	a.mu.Unlock()
+
+	// 检测物理警戒带突破（zone/objects 不在此检测，由 observePerception 负责）
+	return shouldTriggerReactive("", "", nil, nil, prevPhysical, &physical)
 }
 
 // recordActionCompletion 处理 action_completed。反应层移除后：所有来源的
@@ -137,11 +166,18 @@ func (a *agentContext) recordActionCompletion(completion protocol.ActionComplete
 	return true
 }
 
-// recordEventNotification 处理环境事件通知。反应层移除后：环境事件不打断
-// 战术队列，仅记录日志（WS handler 已记录），等下一时段 tacticalRefill 自纠正。
-func (a *agentContext) recordEventNotification(event protocol.EventNotificationPayload) bool {
-	_ = event
-	return false
+// recordEventNotification 处理环境事件通知。反应层：返回 trigger 信息供
+// message handler 异步触发 reactiveRunner。环境事件不打断战术队列——
+// reactiveRunner 决策若为 interrupt/act 才会发 stop_action。
+func (a *agentContext) recordEventNotification(event protocol.EventNotificationPayload) (ReactiveTrigger, string) {
+	// 提取事件类型用于去抖键（事件 id 每次不同，去抖会失效；type 是合理维度）
+	eventType, _ := event.Event["type"].(string)
+	if eventType == "" {
+		eventType = "unknown"
+	}
+	detail := fmt.Sprintf("event_id=%s level=%s type=%s",
+		event.EventID, event.PerceptionLevel, eventType)
+	return TriggerEventNotify, detail
 }
 
 func (a *agentContext) signal() {
@@ -499,6 +535,11 @@ func (a *agentContext) popAndSendQueueAction(ctx context.Context, agentID string
 // latency benefit.
 var tacticalStreamingEnabled bool
 
+// reactiveRunnerRef 是进程级反应层执行器（package-level 便于 WS handler 调用）。
+// nil 表示反应层未启用（--ollama-url="" 或客户端初始化失败）。
+// trigger() 内部 nil-check，WS handler 无需额外判空。
+var reactiveRunnerRef *reactiveRunner
+
 // tacticalRefill 调战术层 LLM 流式分解当前时段 goal，边接收边入队，
 // 首 action 在流式期间即提前下发以降低体感延迟。成功返回 true。
 func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
@@ -628,6 +669,10 @@ func main() {
 		worldKBPath = flag.String("world-kb", "assets/world_kb.yaml", "path to world_kb.yaml (required, fail-fast on error)")
 		tacticalStream = flag.Bool("tactical-stream", false,
 			"enable streaming for tactical layer LLM calls (experimental: only helps if upstream LLM emits tokens incrementally)")
+		ollamaURL = flag.String("ollama-url", "http://localhost:11434",
+			"Ollama base URL for reactive layer (empty disables reactive layer)")
+		ollamaModel = flag.String("ollama-model", "qwen2.5:7b-instruct-q4_K_M",
+			"Ollama model name for reactive layer decisions")
 	)
 	flag.Parse()
 	if *showVersion {
@@ -644,6 +689,8 @@ func main() {
 		"ws", *wsAddr,
 		"hermes_url", *hermesURL,
 		"tactical_stream", tacticalStreamingEnabled,
+		"ollama_url", *ollamaURL,
+		"ollama_model", *ollamaModel,
 	)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -682,6 +729,24 @@ func main() {
 		"objects", len(kb.Objects),
 		"agents", len(kb.Agents),
 	)
+
+	// ─── 反应层 Ollama 客户端 ────────────────────────────────────
+	// --ollama-url="" 显式禁用反应层；否则初始化客户端（即使 Ollama 进程
+	// 不在跑也不报错——Chat 调用失败时反应层静默降级为 continue）。
+	if *ollamaURL != "" {
+		ollamaClient := ollama.New(ollama.Options{
+			BaseURL: *ollamaURL,
+			Model:   *ollamaModel,
+			Logger:  logger,
+		})
+		reactiveRunnerRef = newReactiveRunner(ollamaClient, ws, kb, logger)
+		logger.Info("reactive layer enabled",
+			"ollama_url", ollamaClient.BaseURL(),
+			"ollama_model", ollamaClient.Model(),
+		)
+	} else {
+		logger.Info("reactive layer disabled (--ollama-url=\"\")")
+	}
 
 	// Per-agent context (Phase 1: single agent, but keyed for multi-NPC).
 	var agentsMu sync.Mutex
@@ -766,10 +831,13 @@ func main() {
 				logger.Warn("state_report dropped for unregistered agent", "agent_id", agentID)
 				return
 			}
-			ac.updateState(sr)
+			trigger, detail := ac.updateState(sr)
 			logger.Info("state_report", "agent_id", agentID,
 				"energy", sr.PhysicalState.Energy, "fatigue", sr.PhysicalState.Fatigue,
 				"joint_wear", sr.PhysicalState.JointWear, "health", sr.PhysicalState.Health)
+			if trigger != "" {
+				go reactiveRunnerRef.trigger(agentID, ac, trigger, detail)
+			}
 
 		case protocol.TypeActionCompleted:
 			var completed protocol.ActionCompletedPayload
@@ -798,10 +866,13 @@ func main() {
 				logger.Warn("event_notification dropped for unregistered agent", "agent_id", agentID)
 				return
 			}
-			queued := ac.recordEventNotification(event)
+			trigger, detail := ac.recordEventNotification(event)
 			logger.Info("event_notification", "agent_id", agentID,
 				"event_id", event.EventID, "perception_level", event.PerceptionLevel,
-				"decision_queued", queued)
+				"trigger", trigger)
+			if trigger != "" {
+				go reactiveRunnerRef.trigger(agentID, ac, trigger, detail)
+			}
 
 		case protocol.TypeError:
 			logger.Warn("error from mock ue", "agent_id", agentID, "payload", string(payload))
@@ -812,9 +883,13 @@ func main() {
 				logger.Warn("perception_update dropped for unregistered agent", "agent_id", agentID)
 				return
 			}
-			if err := ac.observePerception(payload); err != nil {
+			trigger, detail, err := ac.observePerception(payload)
+			if err != nil {
 				logger.Warn("perception_update parse failed", "agent_id", agentID, "err", err)
 				return
+			}
+			if trigger != "" {
+				go reactiveRunnerRef.trigger(agentID, ac, trigger, detail)
 			}
 
 		default:
