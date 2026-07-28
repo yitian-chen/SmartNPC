@@ -8,7 +8,7 @@ Gateway (HTTP) and routes Hermes tool calls back to Mock UE.
 
 Prerequisites:
   1. Hermes Gateway running: docker compose -f docker/docker-compose.yml up -d
-  2. agenttown-mcp running:  agenttown-mcp --http :8760 --ws :9090
+  2. agenttown-mcp running:  agenttown-mcp --http :8770 --ws :9091
 
 Usage:
     python src/run_day.py
@@ -46,7 +46,7 @@ async def _run(args):
 
 def main():
     parser = argparse.ArgumentParser(description="AgentTown Mock UE — Run a game day")
-    parser.add_argument("--mcp-ws", default="ws://localhost:9090/ws",
+    parser.add_argument("--mcp-ws", default="ws://localhost:9091/ws",
                         help="agenttown-mcp WebSocket URL")
     parser.add_argument("--mode", choices=("normal", "behavior", "quick-smoke"), default="normal",
                         help="simulation mode label (parameters are supplied separately)")
@@ -79,7 +79,7 @@ def main():
         print(f"[OK] MCP reachable: {health_url}")
     except Exception as e:
         print(f"[ERROR] MCP not reachable at {health_url}: {e}")
-        print("Start MCP first:  agenttown-mcp --http :8760 --ws :9090")
+        print("Start MCP first:  agenttown-mcp --http :8770 --ws :9091")
         sys.exit(1)
 
     # sim.log 的清空由 start.sh 在启动 MCP 之前负责（WSL 端操作，与 MCP
