@@ -852,6 +852,20 @@ func runHTTP(ctx context.Context, logger *slog.Logger, server *mcp.Server, addr 
 	mux.HandleFunc("/debug/action", func(w http.ResponseWriter, r *http.Request) {
 		handleDebugAction(ctx, logger, ws, kb, w, r)
 	})
+	// /debug/ — 浏览器 debug 控制台 HTML 页面（无外部依赖，嵌入二进制）。
+	mux.HandleFunc("/debug/", func(w http.ResponseWriter, r *http.Request) {
+		// 仅 /debug/ 走 UI；/debug/action 已在上面单独注册。
+		if r.URL.Path == "/debug/" || r.URL.Path == "/debug" {
+			handleDebugUI(w, r)
+			return
+		}
+		// /debug/kb — 返回 world_kb 摘要供前端下拉填充
+		if r.URL.Path == "/debug/kb" {
+			handleDebugKB(w, r, kb, logger)
+			return
+		}
+		http.NotFound(w, r)
+	})
 
 	err := transport.RunHTTP(ctx, logger, server, transport.HTTPOptions{
 		Addr:              addr,
