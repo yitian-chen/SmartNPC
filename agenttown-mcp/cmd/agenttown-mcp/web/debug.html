@@ -386,7 +386,9 @@ function onCmdChange() {
   spec.forEach(field => {
     const div = document.createElement('div');
     div.className = 'field';
-    div.dataset.fieldName = field.name;
+    // 注意：不在 div 上设 data-field-name，否则 querySelector('[data-field-name="..."]')
+    // 会命中 div（父元素先于 input 出现）而非 input/select，导致 .value 为 undefined。
+    // data-field-name 只设在 input/select 上；div 用 data-mode-visibility 控制可见性。
 
     // 模式可见性：move_to 的 target / dest_x/y/z 字段根据模式切换显示
     if (field.modeVisibility) {
