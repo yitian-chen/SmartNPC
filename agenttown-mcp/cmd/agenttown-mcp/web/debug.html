@@ -240,6 +240,14 @@
       <!-- 动态 params 表单由 JS 填充 -->
     </div>
 
+    <div class="field">
+      <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:normal;">
+        <input type="checkbox" id="force" checked style="width:auto;margin:0;" />
+        <span>force — 先 stop 当前动作再发（默认勾选，解决 busy 拒绝）</span>
+      </label>
+      <div class="hint">取消勾选可测试 UE busy 拒绝路径</div>
+    </div>
+
     <div class="button-row">
       <button id="submit-btn" onclick="submitAction()">发送</button>
       <button class="secondary" onclick="resetForm()">重置</button>
@@ -512,6 +520,7 @@ function updateObjectActionOptions() {
 function collectRequest() {
   const agent_id = document.getElementById('agent_id').value.trim();
   const cmd = document.getElementById('cmd').value;
+  const force = document.getElementById('force').checked;
   const params = {};
 
   // move_to 特殊处理：根据当前模式收集不同字段
@@ -529,7 +538,7 @@ function collectRequest() {
       const targetEl = document.querySelector('#params-form [data-field-name="target"]');
       if (targetEl) params.target = targetEl.value;
     }
-    return { agent_id, cmd, params };
+    return { agent_id, cmd, params, force };
   }
 
   // 其他 cmd：通用收集（跳过 mode 控制器字段）
@@ -543,7 +552,7 @@ function collectRequest() {
     }
     params[k] = v;
   });
-  return { agent_id, cmd, params };
+  return { agent_id, cmd, params, force };
 }
 
 // toggleMoveModeVisibility 切换 move_to 的 target / 坐标输入可见性。
@@ -646,6 +655,9 @@ function replayHistory(i) {
   if (!h) return;
   document.getElementById('agent_id').value = h.req.agent_id;
   document.getElementById('cmd').value = h.req.cmd;
+  // force 字段回填（历史可能无此字段，默认勾选）
+  const forceEl = document.getElementById('force');
+  if (forceEl) forceEl.checked = h.req.force !== false;
   onCmdChange();
 
   // move_to 特殊处理：根据历史 params 内容切换模式
@@ -687,6 +699,8 @@ function replayHistory(i) {
 function resetForm() {
   document.getElementById('agent_id').value = 'H-01';
   document.getElementById('cmd').value = 'move_to';
+  const forceEl = document.getElementById('force');
+  if (forceEl) forceEl.checked = true;
   onCmdChange();
 }
 

@@ -64,6 +64,7 @@ type agentContext struct {
 	currentPlanIndex      int             // mu 保护，当前执行到 daily_plan 第几个 item（记账用）
 	currentSlot           string          // mu 保护，当前分解的时段 "HH:MM-HH:MM"（防同时段重复分解）
 	redecomposeCount      int             // mu 保护，当前时段已重复分解次数（防死循环）
+	debugOverride         bool            // mu 保护，debug 手动 action 期间暂停 worker dispatch（避免 stop→idle wait 竞态）
 	wake                  chan struct{}
 	cancel                context.CancelFunc
 	stopped               bool
@@ -240,6 +241,16 @@ func runPerceptionWorker(
 		// action 会被 busy 拒，refill 出的队列也会被拒。等 action_completed 自然
 		// 唤醒 worker（completion 路径会 signal 并清 currentActionID）。
 		if ac.hasInFlightAction() {
+			continue
+		}
+
+		// debug 手动 action 期间暂停 dispatch：debug 端点刚发了 stop_action 清 UE
+		// busy，若此刻 worker 被唤醒会立刻补一个 idle wait 重新占用，导致手动
+		// action 被 busy 拒。debugOverride 由 handleDebugAction 设置/清除。
+		ac.mu.Lock()
+		override := ac.debugOverride
+		ac.mu.Unlock()
+		if override {
 			continue
 		}
 
@@ -831,14 +842,14 @@ func main() {
 	}()
 
 	if *httpAddr != "" {
-		runHTTP(ctx, logger, server, *httpAddr, *httpAllowAnyOrigin, *mcpAPIKey, ws, kb)
+		runHTTP(ctx, logger, server, *httpAddr, *httpAllowAnyOrigin, *mcpAPIKey, ws, kb, lookupAgent)
 	} else {
 		runStdio(ctx, logger, server)
 	}
 }
 
 // runHTTP serves the MCP server over Streamable HTTP + a /status endpoint.
-func runHTTP(ctx context.Context, logger *slog.Logger, server *mcp.Server, addr string, allowAnyOrigin bool, apiKey string, ws *wsserver.Server, kb *worldkb.KB) {
+func runHTTP(ctx context.Context, logger *slog.Logger, server *mcp.Server, addr string, allowAnyOrigin bool, apiKey string, ws *wsserver.Server, kb *worldkb.KB, lookupAgent func(string) *agentContext) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/status", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -850,7 +861,7 @@ func runHTTP(ctx context.Context, logger *slog.Logger, server *mcp.Server, addr 
 	// /debug/action — 联调 debug 端点：终端通过 curl 触发 MCP 向 UE 发
 	// action_command。仅联调用，无认证；生产环境应禁用或加 Bearer 校验。
 	mux.HandleFunc("/debug/action", func(w http.ResponseWriter, r *http.Request) {
-		handleDebugAction(ctx, logger, ws, kb, w, r)
+		handleDebugAction(ctx, logger, ws, kb, lookupAgent, w, r)
 	})
 	// /debug/ — 浏览器 debug 控制台 HTML 页面（无外部依赖，嵌入二进制）。
 	mux.HandleFunc("/debug/", func(w http.ResponseWriter, r *http.Request) {
@@ -898,12 +909,17 @@ func runStdio(ctx context.Context, logger *slog.Logger, server *mcp.Server) {
 // cmd 支持：move_to / speak / interact / wait / charge_at / work_assemble /
 // archive_research / rest_idle。其中 move_to 走 kb.GetPosition 解析坐标，
 // 其他 cmd 直接透传 params 给 ws.Call。
+//
+// force（默认 true）：先发 stop_action 停掉战术层正在执行的 idle wait，
+// 并短暂挂起 worker dispatch，避免手动 action 被 UE busy 拒。设为 false
+// 可测试 busy 拒绝路径。
 
 // debugActionRequest 是 /debug/action 的请求体。
 type debugActionRequest struct {
 	AgentID string         `json:"agent_id"`
 	Cmd     string         `json:"cmd"`
 	Params  map[string]any `json:"params"`
+	Force   *bool          `json:"force,omitempty"` // nil/true → 强制模式（默认）；false → 直发不 stop
 }
 
 // debugActionResponse 是 /debug/action 的响应体。
@@ -1059,7 +1075,7 @@ func buildDebugParams(cmd string, params map[string]any, kb *worldkb.KB) (map[st
 	}
 }
 
-func handleDebugAction(ctx context.Context, logger *slog.Logger, ws *wsserver.Server, kb *worldkb.KB, w http.ResponseWriter, r *http.Request) {
+func handleDebugAction(ctx context.Context, logger *slog.Logger, ws *wsserver.Server, kb *worldkb.KB, lookupAgent func(string) *agentContext, w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
 	if r.Method != http.MethodPost {
@@ -1105,8 +1121,42 @@ func handleDebugAction(ctx context.Context, logger *slog.Logger, ws *wsserver.Se
 		return
 	}
 
+	// force 默认 true（nil 视为 true）；显式传 false 时直发不 stop。
+	force := req.Force == nil || *req.Force
+
+	// 强制模式：暂停 worker dispatch + 发 stop_action 清 UE busy。
+	// debugOverride 阻止 worker 在 stop 后的 completion 信号驱动下补 idle wait，
+	// 否则手动 action 会被新 idle wait 重新 busy 拒。defer 清除并 signal 恢复。
+	var stoppedActionID string
+	if force && lookupAgent != nil {
+		if ac := lookupAgent(req.AgentID); ac != nil {
+			ac.mu.Lock()
+			ac.debugOverride = true
+			curID := ac.currentActionID
+			ac.mu.Unlock()
+			defer func() {
+				ac.mu.Lock()
+				ac.debugOverride = false
+				ac.mu.Unlock()
+				ac.signal() // 唤醒 worker 恢复正常 dispatch
+			}()
+			if curID != "" {
+				if err := ws.SendStopAction(req.AgentID, curID); err != nil {
+					logger.Warn("[debug/action] stop_action failed", "agent_id", req.AgentID, "action_id", curID, "err", err)
+				} else {
+					stoppedActionID = curID
+					// 等 UE 处理 stop（fire-and-forget）并回 action_completed。
+					// 100ms 足以让单线程 UE asyncio 跑完 _handle_stop_action；
+					// debugOverride 保证期间 worker 不会补 idle wait。
+					time.Sleep(100 * time.Millisecond)
+				}
+			}
+		}
+	}
+
 	logger.Info("[debug/action] manual trigger",
-		"agent_id", req.AgentID, "cmd", req.Cmd, "proto_cmd", protoCmd, "params", fmt.Sprint(params))
+		"agent_id", req.AgentID, "cmd", req.Cmd, "proto_cmd", protoCmd, "params", fmt.Sprint(params),
+		"force", force, "stopped", stoppedActionID)
 
 	ack, err := ws.Call(ctx, req.AgentID, protoCmd, params)
 	if err != nil {
