@@ -915,15 +915,40 @@ type debugActionResponse struct {
 	Error               string  `json:"error,omitempty"`
 }
 
-// resolveDebugMoveTo 把 move_to 的 target id 解析成 ws.Call 需要的完整参数。
+// resolveDebugMoveTo 把 move_to 的参数解析成 ws.Call 需要的完整参数。
 // 与 tactical.go:433 的 move_to 分支保持一致：dest + target + kind + speed。
+//
+// 支持两种输入模式：
+//  1. 直接传坐标：params.dest = [x, y, z]（UE5 cm）。跳过 kb 解析，
+//     kind 默认 "coord"，target 字段空。适用于临时调试未知位置。
+//  2. 传 target id：params.target = "workbench_01" / "main_workshop"。
+//     走 kb.GetPosition 解析坐标和 kind。
+//
+// 两种模式都没有 → 报错。同时传时 dest 优先（更明确）。
 func resolveDebugMoveTo(params map[string]any, kb *worldkb.KB) (map[string]any, error) {
+	// 模式 1：直接传 dest 坐标
+	if dest, ok := params["dest"]; ok && dest != nil {
+		coords, err := parseDestCoords(dest)
+		if err != nil {
+			return nil, fmt.Errorf("parse dest: %w", err)
+		}
+		// 调用方可选传 target 作为日志标签（仅标识用途，不参与解析）
+		target, _ := params["target"].(string)
+		return map[string]any{
+			"dest":   coords,
+			"target": target, // 可空
+			"kind":   "coord",
+			"speed":  "walk",
+		}, nil
+	}
+
+	// 模式 2：传 target id 走 kb 解析
 	target, _ := params["target"].(string)
 	if target == "" {
-		return nil, errors.New("move_to requires params.target")
+		return nil, errors.New("move_to requires params.dest ([x,y,z]) or params.target (kb id)")
 	}
 	if kb == nil {
-		return nil, errors.New("world kb not loaded, cannot resolve target")
+		return nil, errors.New("world kb not loaded, cannot resolve target (use params.dest for raw coords)")
 	}
 	coord, kind, err := kb.GetPosition(target)
 	if err != nil {
@@ -935,6 +960,63 @@ func resolveDebugMoveTo(params map[string]any, kb *worldkb.KB) (map[string]any, 
 		"kind":   kind,
 		"speed":  "walk",
 	}, nil
+}
+
+// parseDestCoords 把 params.dest（可能来自 JSON 的 []any / []float64 / []int）
+// 规整成 []float64 三元组。校验长度和数值合法性。
+func parseDestCoords(v any) ([]float64, error) {
+	arr, ok := v.([]any)
+	if !ok {
+		// JSON 解码后 []float64 也会变成 []any，但保险起见也接受原生类型
+		if farr, ok2 := v.([]float64); ok2 {
+			arr = make([]any, len(farr))
+			for i, f := range farr {
+				arr[i] = f
+			}
+		} else {
+			return nil, errors.New("dest must be an array of 3 numbers [x, y, z]")
+		}
+	}
+	if len(arr) != 3 {
+		return nil, fmt.Errorf("dest must have exactly 3 elements [x, y, z], got %d", len(arr))
+	}
+	out := make([]float64, 3)
+	for i, e := range arr {
+		f, err := toFloat64(e)
+		if err != nil {
+			return nil, fmt.Errorf("dest[%d] (%v): %w", i, e, err)
+		}
+		out[i] = f
+	}
+	return out, nil
+}
+
+// toFloat64 把 any 转 float64，支持 JSON 解码后的常见数值类型。
+func toFloat64(v any) (float64, error) {
+	switch n := v.(type) {
+	case float64:
+		return n, nil
+	case float32:
+		return float64(n), nil
+	case int:
+		return float64(n), nil
+	case int64:
+		return float64(n), nil
+	case json.Number:
+		f, err := n.Float64()
+		if err != nil {
+			return 0, fmt.Errorf("not a number: %s", n.String())
+		}
+		return f, nil
+	case string:
+		var f float64
+		if _, err := fmt.Sscanf(n, "%f", &f); err != nil {
+			return 0, fmt.Errorf("not a numeric string: %q", n)
+		}
+		return f, nil
+	default:
+		return 0, fmt.Errorf("unsupported numeric type %T", v)
+	}
 }
 
 // mapDebugCmd 把 debug 端点的 cmd 名映射到 protocol 常量。

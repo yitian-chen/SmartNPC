@@ -18,7 +18,9 @@ http://localhost:8770/debug/      # dev 实例
 网页提供：
 
 - cmd 下拉选择（8 种动作）
-- 按 cmd 动态切换的 params 表单（move_to 的 target 从 world_kb 自动加载下拉）
+- 按 cmd 动态切换的 params 表单：
+  - `move_to` 有"输入模式"下拉，可在 **target id**（从 world_kb 自动加载下拉）和 **直接坐标**（手动填 x/y/z UE5 厘米）之间切换
+  - `interact` 的 object_id 从 world_kb 加载，action 选项随 object_id 变化
 - 一键发送 + 响应展示（HTTP 状态码、耗时、action_id、estimated_duration）
 - 等价 curl 命令预览（可折叠）
 - 历史记录（最近 20 条，点击回填表单）
@@ -112,10 +114,14 @@ Invoke-RestMethod -Method Post -Uri http://localhost:8760/debug/action -ContentT
 
 ### 3.1 `move_to` — 移动到目标位置
 
+支持两种输入模式：
+
+**模式 A：传 target id（走 kb 解析）**
+
 `params.target` 传 world_kb 中的 zone 或 location id，MCP 会自动解析坐标和 kind。
 
 ```bash
-curl.exe -X POST http://localhost:8760/debug/action -H "Content-Type: application/json" -d '{"agent_id":"H-01","cmd":"move_to","params":{"target":"workbench_01"}}'
+curl.exe -X POST http://localhost:8760/debug/action -H "Content-Type: application/json" -d '{\"agent_id\":\"H-01\",\"cmd\":\"move_to\",\"params\":{\"target\":\"workbench_01\"}}'
 ```
 
 MCP 内部处理：调 `kb.GetPosition(target)` 解析坐标 → 构造 `{dest, target, kind, speed:"walk"}` → 发 `MoveTo` 命令。
@@ -131,6 +137,25 @@ MCP 内部处理：调 `kb.GetPosition(target)` 解析坐标 → 构造 `{dest, 
 | location | `workbench_01` | 工作台一号 |
 | location | `charging_station_01` | 充电桩一号 |
 | location | `rest_bench_01` | 休息长椅 |
+
+**模式 B：直接传坐标（跳过 kb 解析）**
+
+`params.dest` 传 `[x, y, z]` 数组（UE5 厘米），MCP 直接构造 `{dest, kind:"coord", speed:"walk"}` 下发，不查 world_kb。适用于临时调试未在 kb 中注册的位置。
+
+```bash
+curl.exe -X POST http://localhost:8760/debug/action -H "Content-Type: application/json" -d '{\"agent_id\":\"H-01\",\"cmd\":\"move_to\",\"params\":{\"dest\":[15000,11000,0]}}'
+```
+
+可选附带 `target` 字段作为日志标签（不影响解析）：`{"dest":[15000,11000,0],"target":"custom_spot"}`。
+
+**两种模式都没有 → 报错**：`move_to requires params.dest ([x,y,z]) or params.target (kb id)`
+
+**dest 校验规则**：
+- 必须是长度为 3 的数组，元素为数字（`float64` / `int` / 数字字符串均可）
+- 长度不对 → `dest must have exactly 3 elements [x, y, z], got N`
+- 元素非数字 → `dest[i] (xxx): not a number`
+
+**浏览器 UI**：网页控制台的 move_to 表单顶部有"输入模式"下拉，切换 `target id` / `直接坐标`，对应字段自动显示/隐藏。
 
 ### 3.2 `speak` — 说话
 

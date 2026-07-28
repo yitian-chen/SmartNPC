@@ -311,8 +311,20 @@ async function loadKB() {
 // ─── 动态 params 表单 ─────────────────────────────────────
 const CMD_PARAM_SPECS = {
   move_to: [
+    // 模式切换：target id（走 kb 解析） / 直接坐标（UE5 cm）
+    { name: '__move_mode', label: '输入模式', type: 'select-move-mode', required: false,
+      hint: 'target id 由 MCP 解析坐标；坐标模式直接传 [x,y,z] UE5 cm' },
+    // target id 模式（默认）
     { name: 'target', label: 'target', type: 'select-kb-target', required: true,
-      hint: 'zone 或 location id，MCP 自动解析坐标' },
+      hint: 'zone 或 location id，MCP 自动解析坐标',
+      modeVisibility: 'target_id' },
+    // 坐标模式
+    { name: 'dest_x', label: 'dest.x', type: 'number', required: true, default: 20000,
+      hint: 'UE5 厘米（X 轴）', modeVisibility: 'coord' },
+    { name: 'dest_y', label: 'dest.y', type: 'number', required: true, default: 10000,
+      hint: 'UE5 厘米（Y 轴）', modeVisibility: 'coord' },
+    { name: 'dest_z', label: 'dest.z', type: 'number', required: true, default: 0,
+      hint: 'UE5 厘米（Z 轴）', modeVisibility: 'coord' },
   ],
   speak: [
     { name: 'content', label: 'content', type: 'text', required: true, hint: '说话内容' },
@@ -368,6 +380,13 @@ function onCmdChange() {
     div.className = 'field';
     div.dataset.fieldName = field.name;
 
+    // 模式可见性：move_to 的 target / dest_x/y/z 字段根据模式切换显示
+    if (field.modeVisibility) {
+      div.dataset.modeVisibility = field.modeVisibility;
+      // 默认 target_id 模式 → coord 字段初始隐藏
+      div.style.display = (field.modeVisibility === 'target_id') ? '' : 'none';
+    }
+
     const label = document.createElement('label');
     label.htmlFor = `param-${field.name}`;
     label.innerHTML = `params.${field.name}${field.required ? ' <span class="req">*</span>' : ''}`;
@@ -375,10 +394,31 @@ function onCmdChange() {
 
     let input;
     switch (field.type) {
+      case 'select-move-mode':
+        input = document.createElement('select');
+        input.id = `param-${field.name}`;
+        input.dataset.fieldName = field.name;
+        input.dataset.modeGroup = 'move_to';
+        [
+          { v: 'target_id', t: 'target id（kb 解析）' },
+          { v: 'coord', t: '直接坐标（UE5 cm）' },
+        ].forEach(o => {
+          const opt = document.createElement('option');
+          opt.value = o.v; opt.textContent = o.t;
+          input.appendChild(opt);
+        });
+        input.value = 'target_id'; // 默认 target id 模式
+        input.onchange = () => { toggleMoveModeVisibility(input.value); updateCurlPreview(); };
+        // 标记为模式控制器，collectRequest 时跳过
+        input.dataset.isModeController = '1';
+        break;
+
       case 'select-kb-target':
         input = document.createElement('select');
         input.id = `param-${field.name}`;
         input.dataset.fieldName = field.name;
+        // 标记该字段所属模式，便于切换显示/隐藏
+        if (field.modeVisibility) input.dataset.modeVisibility = field.modeVisibility;
         // zones
         const zg = document.createElement('optgroup');
         zg.label = 'Zones（区域）';
@@ -473,7 +513,28 @@ function collectRequest() {
   const agent_id = document.getElementById('agent_id').value.trim();
   const cmd = document.getElementById('cmd').value;
   const params = {};
+
+  // move_to 特殊处理：根据当前模式收集不同字段
+  // - target_id 模式 → {target: "..."}
+  // - coord 模式    → {dest: [x, y, z]}
+  if (cmd === 'move_to') {
+    const modeEl = document.querySelector('#params-form [data-field-name="__move_mode"]');
+    const mode = modeEl ? modeEl.value : 'target_id';
+    if (mode === 'coord') {
+      const x = Number(document.querySelector('#params-form [data-field-name="dest_x"]').value || 0);
+      const y = Number(document.querySelector('#params-form [data-field-name="dest_y"]').value || 0);
+      const z = Number(document.querySelector('#params-form [data-field-name="dest_z"]').value || 0);
+      params.dest = [x, y, z];
+    } else {
+      const targetEl = document.querySelector('#params-form [data-field-name="target"]');
+      if (targetEl) params.target = targetEl.value;
+    }
+    return { agent_id, cmd, params };
+  }
+
+  // 其他 cmd：通用收集（跳过 mode 控制器字段）
   document.querySelectorAll('#params-form [data-field-name]').forEach(el => {
+    if (el.dataset.isModeController === '1') return; // 模式控制器不进 params
     const k = el.dataset.fieldName;
     let v = el.value;
     // number 字段转 number
@@ -483,6 +544,14 @@ function collectRequest() {
     params[k] = v;
   });
   return { agent_id, cmd, params };
+}
+
+// toggleMoveModeVisibility 切换 move_to 的 target / 坐标输入可见性。
+// mode = "target_id" 显示 target 下拉；"coord" 显示 dest_x/y/z 三个数字框。
+function toggleMoveModeVisibility(mode) {
+  document.querySelectorAll('#params-form [data-mode-visibility]').forEach(div => {
+    div.style.display = (div.dataset.modeVisibility === mode) ? '' : 'none';
+  });
 }
 
 // ─── curl 预览 ───────────────────────────────────────────
@@ -578,7 +647,31 @@ function replayHistory(i) {
   document.getElementById('agent_id').value = h.req.agent_id;
   document.getElementById('cmd').value = h.req.cmd;
   onCmdChange();
-  // 填回 params
+
+  // move_to 特殊处理：根据历史 params 内容切换模式
+  // - 有 dest 字段 → coord 模式，回填 x/y/z
+  // - 有 target 字段 → target_id 模式，回填 target 下拉
+  if (h.req.cmd === 'move_to' && h.req.params) {
+    const modeEl = document.querySelector('#params-form [data-field-name="__move_mode"]');
+    if (h.req.params.dest) {
+      if (modeEl) { modeEl.value = 'coord'; toggleMoveModeVisibility('coord'); }
+      const [x, y, z] = h.req.params.dest;
+      const xEl = document.querySelector('#params-form [data-field-name="dest_x"]');
+      const yEl = document.querySelector('#params-form [data-field-name="dest_y"]');
+      const zEl = document.querySelector('#params-form [data-field-name="dest_z"]');
+      if (xEl) xEl.value = x;
+      if (yEl) yEl.value = y;
+      if (zEl) zEl.value = z;
+    } else if (h.req.params.target) {
+      if (modeEl) { modeEl.value = 'target_id'; toggleMoveModeVisibility('target_id'); }
+      const tEl = document.querySelector('#params-form [data-field-name="target"]');
+      if (tEl) tEl.value = h.req.params.target;
+    }
+    updateCurlPreview();
+    return;
+  }
+
+  // 其他 cmd：通用回填
   Object.entries(h.req.params || {}).forEach(([k, v]) => {
     const el = document.querySelector(`#params-form [data-field-name="${k}"]`);
     if (el) el.value = v;
