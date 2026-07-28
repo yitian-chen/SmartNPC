@@ -22,6 +22,7 @@ sim.log 每行是一条 JSON，单行可能上千字（perception text 完整不
     python scripts/pretty_log.py --html -o report.html    # 指定输出路径
     python scripts/pretty_log.py --html --no-open         # 生成但不自动打开
     python scripts/pretty_log.py --html --hermes          # 整合 Hermes 容器日志
+    python scripts/pretty_log.py --html --dev             # dev 实例（logs-dev/ + h01-dev）
 
     # 终端渲染
     python scripts/pretty_log.py                          # 查看今天的 sim.log
@@ -246,13 +247,16 @@ def _hide_heartbeat(rec: dict, explicit_heartbeat: bool) -> bool:
     return "heartbeat" in msg
 
 
-def _resolve_log_path(arg: str | None) -> Path:
+def _resolve_log_path(arg: str | None, dev: bool = False) -> Path:
+    # dev 实例：logs-dev/YYYY-MM-DD/debug-mcp.log
+    # stable 实例：logs/YYYY-MM-DD/sim.log
+    log_dir, log_name = ("logs-dev", "debug-mcp.log") if dev else ("logs", "sim.log")
     if arg is None:
         today = _dt.date.today().isoformat()
-        return Path("logs") / today / "sim.log"
+        return Path(log_dir) / today / log_name
     p = Path(arg)
     if not p.exists() and _looks_like_date(arg):
-        return Path("logs") / arg / "sim.log"
+        return Path(log_dir) / arg / log_name
     return p
 
 
@@ -991,9 +995,14 @@ def main() -> int:
         action="store_true",
         help="显示 Hermes 日志全部条目（默认只保留 LLM 决策相关 + WARNING/ERROR）",
     )
+    ap.add_argument(
+        "--dev",
+        action="store_true",
+        help="查看 dev 实例日志（默认 logs-dev/YYYY-MM-DD/debug-mcp.log；--hermes 默认 h01-dev profile）",
+    )
     args = ap.parse_args()
 
-    log_path = _resolve_log_path(args.path)
+    log_path = _resolve_log_path(args.path, dev=args.dev)
     if not log_path.exists():
         print(f"日志文件不存在：{log_path}", file=sys.stderr)
         return 1
@@ -1005,10 +1014,12 @@ def main() -> int:
         if args.hermes_log:
             hermes_path = Path(args.hermes_log)
         else:
-            # 默认位置：项目根 hermes/profiles/h01/logs/agent.log
+            # 默认位置：项目根 hermes/profiles/<profile>/logs/agent.log
+            # dev 实例用 h01-dev profile，stable 用 h01
             # 从 sim.log 路径回推项目根（logs/YYYY-MM-DD/sim.log → ../..）
             project_root = log_path.parent.parent.parent
-            hermes_path = project_root / "hermes" / "profiles" / "h01" / "logs" / "agent.log"
+            profile = "h01-dev" if args.dev else "h01"
+            hermes_path = project_root / "hermes" / "profiles" / profile / "logs" / "agent.log"
         if not hermes_path.exists():
             print(f"警告：Hermes 日志不存在：{hermes_path}", file=sys.stderr)
         else:
