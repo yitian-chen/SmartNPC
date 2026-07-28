@@ -76,6 +76,8 @@ _DIRECTION_ALIASES = {
     "STRATEGIC-RESPONSE": "Hermes→MCP/STRATEGIC-RESPONSE",
     "TACTICAL-PROMPT": "MCP→Hermes/TACTICAL-PROMPT",
     "TACTICAL-RESPONSE": "Hermes→MCP/TACTICAL-RESPONSE",
+    "REACTIVE-PROMPT": "[反应层/PROMPT]",
+    "REACTIVE-RESPONSE": "[反应层/RESPONSE]",
     "HERMES": "Hermes/internal",
     "HEARTBEAT": "heartbeat",
 }
@@ -94,6 +96,12 @@ _DIRECTION_CSS = {
     "Hermes→MCP/STRATEGIC-RESPONSE": "dir-strategic",
     "MCP→Hermes/TACTICAL-PROMPT": "dir-tactical",
     "Hermes→MCP/TACTICAL-RESPONSE": "dir-tactical",
+    "[反应层/PROMPT]": "dir-reactive",
+    "[反应层/RESPONSE]": "dir-reactive",
+    "[反应层/触发]": "dir-reactive",
+    "[反应层/决策]": "dir-reactive",
+    "[反应层/失败]": "dir-reactive",
+    "[反应层]": "dir-reactive",
     "[战略层]": "dir-strategic",
     "[战术层]": "dir-tactical",
     "Hermes/internal": "dir-hermes",
@@ -566,6 +574,7 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
   --hermes: #d16969;
   --strategic: #b267e6;
   --tactical: #f4a261;
+  --reactive: #56c8d8;
 }}
 * {{ box-sizing: border-box; }}
 body {{
@@ -640,6 +649,7 @@ body {{
 .entry.dir-hermes .entry-header {{ border-left-color: var(--hermes); }}
 .entry.dir-strategic .entry-header {{ border-left-color: var(--strategic); }}
 .entry.dir-tactical .entry-header {{ border-left-color: var(--tactical); }}
+.entry.dir-reactive .entry-header {{ border-left-color: var(--reactive); }}
 .entry.level-WARN .entry-header {{ border-left-color: var(--warn); }}
 .entry.level-ERROR .entry-header {{ border-left-color: var(--error); }}
 .entry-time {{ color: var(--time); flex-shrink: 0; }}
@@ -663,6 +673,7 @@ body {{
 .entry.dir-hermes .entry-msg {{ color: var(--hermes); }}
 .entry.dir-strategic .entry-msg {{ color: var(--strategic); }}
 .entry.dir-tactical .entry-msg {{ color: var(--tactical); }}
+.entry.dir-reactive .entry-msg {{ color: var(--reactive); }}
 .entry-meta {{ color: var(--fg-dim); font-size: 12px; margin-left: auto; }}
 .entry-body {{
   display: none;
@@ -699,6 +710,7 @@ body {{
   <button class="filter-btn" data-filter="TOOL">TOOL</button>
   <button class="filter-btn" data-filter="STRATEGIC">战略</button>
   <button class="filter-btn" data-filter="TACTICAL">战术</button>
+  <button class="filter-btn" data-filter="REACTIVE">反应</button>
   <button class="filter-btn" data-filter="HERMES">Hermes</button>
   <select id="game-time-filter" title="按游戏时间过滤">
     <option value="ALL">游戏时间：全部</option>
@@ -747,6 +759,7 @@ function applyFilters() {{
         'TOOL': 'Hermes→MCP/TOOL',
         'STRATEGIC': ['MCP→Hermes/STRATEGIC-PROMPT', 'Hermes→MCP/STRATEGIC-RESPONSE', '[战略层]'],
         'TACTICAL': ['MCP→Hermes/TACTICAL-PROMPT', 'Hermes→MCP/TACTICAL-RESPONSE', '[战术层]'],
+        'REACTIVE': ['[反应层/PROMPT]', '[反应层/RESPONSE]', '[反应层/触发]', '[反应层/决策]', '[反应层/失败]', '[反应层]'],
         'HERMES': 'Hermes/internal',
       }};
       const full = filterMap[currentFilter] || currentFilter;

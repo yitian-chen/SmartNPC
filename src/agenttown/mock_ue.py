@@ -49,6 +49,7 @@ TYPE_SCAN_AREA = "scan_area"
 TYPE_NARRATIVE = "narrative"  # MCP → Mock UE, display only
 TYPE_RESYNC = "resync"        # reconnect: exchange last_received_seq (约定11)
 TYPE_EVENT_LOST = "event_lost"  # reconnect: buffer rollover warning
+TYPE_EVENT_NOTIFICATION = "event_notification"  # director-injected event (P1 实时通道)
 
 # cmd constants
 CMD_MOVE_TO = "MoveTo"
@@ -575,6 +576,23 @@ class MockUE:
         logger.info(f"[STATE] energy={self.npc.physical.energy:.0f} fatigue={self.npc.physical.fatigue:.0f} "
                     f"wear={self.npc.physical.joint_wear:.0f} health={self.npc.physical.health:.0f}")
 
+    async def _send_event_notification(self, event: Dict[str, Any]):
+        """Send an event_notification envelope immediately (P1 实时通道).
+
+        与 _pending_audible_events 互补：事件到达时既走独立通道即时送达反应层，
+        又折入下一个 perception_update 的 audible_events 供战术层参考。
+        EventNotificationPayload 结构与 protocol/messages.go 对齐：
+        {event_id, event: {...}, perception_level}。
+        """
+        import uuid
+        payload = {
+            "event_id": "evt_" + uuid.uuid4().hex[:12],
+            "event": event,
+            "perception_level": "direct",
+        }
+        await self._send(TYPE_EVENT_NOTIFICATION, self.npc.agent_id, payload)
+        logger.info(f"[EVENT_NOTIFY] {payload['event_id']} type={event.get('type','?')} content={str(event.get('content',''))[:80]}")
+
     def _physical_changed_over_threshold(self) -> bool:
         for key, thr in DELTA_THRESHOLD.items():
             if abs(getattr(self.npc.physical, key) - getattr(self._last_reported, key)) >= thr:
@@ -946,12 +964,14 @@ class MockUE:
         self.scenarios = data.get("events", [])
         logger.info(f"Loaded {len(self.scenarios)} scenarios from {filepath}")
 
-    def _queue_crossed_scenario_events(self, previous_min: int, current_min: int):
+    async def _queue_crossed_scenario_events(self, previous_min: int, current_min: int):
         """Queue scenario events crossed by the sole game-time driver.
 
         The interval may skip over an event's exact minute, so events are
-        selected from (previous_min, current_min]. Each event is injected once
-        and consumed by the next perception_update as an audible event.
+        selected from (previous_min, current_min]. Each event is:
+          - sent immediately as an event_notification envelope (P1 实时通道，
+            供反应层即时评估)
+          - also appended to _pending_audible_events (供战术层下一个 perception)
         """
         for index, event in enumerate(self.scenarios):
             if index in self._injected_scenario_events:
@@ -959,11 +979,15 @@ class MockUE:
             event_min = int(event.get("hour", 0)) * 60 + int(event.get("minute", 0))
             if previous_min < event_min <= current_min:
                 description = str(event.get("description", "")).strip()
-                self._pending_audible_events.append({
+                event_dict = {
                     "type": "scenario",
                     "source": "world_director",
                     "content": description,
-                })
+                }
+                # 即时通道：立即发 event_notification 给反应层
+                await self._send_event_notification(event_dict)
+                # 保留折入下一个 perception，供战术层参考
+                self._pending_audible_events.append(event_dict)
                 self._injected_scenario_events.add(index)
                 logger.info(f"[SCENARIO] {event_min // 60:02d}:{event_min % 60:02d} {description}")
 
@@ -1094,7 +1118,7 @@ class MockUE:
             # Advance game time — SOLE time driver.
             previous_min = self.time.total_minutes
             self.time.advance(self.perception_interval)
-            self._queue_crossed_scenario_events(previous_min, self.time.total_minutes)
+            await self._queue_crossed_scenario_events(previous_min, self.time.total_minutes)
 
             # Physical evolution — MUST run before busy completion check.
             # The completion tick (game time crosses busy_until_min) is still

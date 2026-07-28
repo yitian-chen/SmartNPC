@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"strings"
 
+	"github.com/google/uuid"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/AgentTown/agenttown-mcp/pkg/protocol"
@@ -221,22 +222,46 @@ func registerAtomic(s *mcp.Server, ex Executor, kb *worldkb.KB, logger *slog.Log
 		return nil, buildAckResult(ack, in.DecisionEpoch), nil
 	})
 
-	// scan_area → 反应层已移除：保留工具定义但 MCP 拒绝调用。
-	// 未来本地小模型反应层重建时再恢复 handler。
+	// scan_area → 请求 UE 立即回吐一次 perception_update（P1 恢复）。
+	// 异步：handler 只触发扫描，不阻塞等待结果。下一个 perception_update
+	// 会自然到达并触发 observePerception → 反应层评估。scanID 供日志关联。
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "scan_area",
 		Description: "Request an immediate perception update (look around now).",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in ScanAreaInput) (*mcp.CallToolResult, ackResult, error) {
-		_ = in
-		return nil, ackResult{}, fmt.Errorf("scan_area disabled: reactive layer removed")
+		if in.AgentID == "" {
+			return nil, ackResult{}, fmt.Errorf("agent_id is required")
+		}
+		logToolCall("scan_area", in.AgentID, in.DecisionEpoch, in)
+		scanID := "scan_" + uuid.NewString()[:12]
+		if err := ex.RequestScan(ctx, in.AgentID, scanID); err != nil {
+			return nil, ackResult{}, fmt.Errorf("scan_area: %w", err)
+		}
+		return nil, ackResult{
+			OK:            true,
+			DecisionEpoch: in.DecisionEpoch,
+			Message:       "scan requested, perception will arrive next cycle",
+		}, nil
 	})
 
-	// stop → 反应层已移除：保留工具定义但 MCP 拒绝调用。
+	// stop → 发送 stop_action 停止当前在途 action（P1 恢复）。
+	// actionID 为空时由 Executor 查 agentContext.currentActionID。
+	// 无在途 action 时 no-op，返回 OK。
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "stop",
 		Description: "Stop the current action. No-op if no action is running.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in StopInput) (*mcp.CallToolResult, ackResult, error) {
-		_ = in
-		return nil, ackResult{}, fmt.Errorf("stop disabled: reactive layer removed")
+		if in.AgentID == "" {
+			return nil, ackResult{}, fmt.Errorf("agent_id is required")
+		}
+		logToolCall("stop", in.AgentID, in.DecisionEpoch, in)
+		if err := ex.SendStopAction(in.AgentID, ""); err != nil {
+			return nil, ackResult{}, fmt.Errorf("stop: %w", err)
+		}
+		return nil, ackResult{
+			OK:            true,
+			DecisionEpoch: in.DecisionEpoch,
+			Message:       "stop_action sent (or no-op if no in-flight action)",
+		}, nil
 	})
 }

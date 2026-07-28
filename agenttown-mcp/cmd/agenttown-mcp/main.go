@@ -369,6 +369,33 @@ func (g *guardedExecutor) SendAction(ctx context.Context, agentID string, decisi
 	return ack, err
 }
 
+// RequestScan 请求 UE 立即回吐一次 perception_update（fire-and-forget）。
+// 感知到达后走正常 observePerception 路径，触发反应层评估。
+func (g *guardedExecutor) RequestScan(ctx context.Context, agentID, scanID string) error {
+	if _, err := g.validate(agentID); err != nil {
+		return err
+	}
+	return g.ws.RequestScan(ctx, agentID, scanID)
+}
+
+// SendStopAction 发送 stop_action 控制消息停止指定 action。
+// actionID 为空时查 agentContext 当前在途 action；仍为空则返回 nil（无在途 action 是 no-op）。
+func (g *guardedExecutor) SendStopAction(agentID, actionID string) error {
+	ac, err := g.validate(agentID)
+	if err != nil {
+		return err
+	}
+	if actionID == "" {
+		ac.mu.Lock()
+		actionID = ac.currentActionID
+		ac.mu.Unlock()
+		if actionID == "" {
+			return nil // 无在途 action，no-op
+		}
+	}
+	return g.ws.SendStopAction(agentID, actionID)
+}
+
 // armActionTimeout 注册 action_completed 超时 timer（约定 §5.2）。
 // 超时时长 = estimated_duration_sec × 1.5；est 为 nil 或 ≤0 时默认 60s。
 // 超时回调：发 stop_action 停止该动作 + 日志警告 + 触发重新决策。

@@ -109,28 +109,31 @@ func (r *reactiveRunner) trigger(agentID string, ac *agentContext, trigger React
 	// 3. 构造 prompt 输入
 	input := r.buildInput(agentID, ac, trigger, detail)
 	prompt := buildReactivePrompt(input)
-	r.logger.Info("[反应层] 调用 Ollama",
+	r.logger.Info("[反应层/触发]",
 		"agent_id", agentID, "trigger", trigger, "detail", detail,
-		"model", r.ollama.Model(),
 		"zone", input.Zone, "time_of_day", input.TimeOfDay,
 		"energy", input.Energy, "fatigue", input.Fatigue, "health", input.Health,
 		"current_action", input.CurrentAction, "elapsed_sec", input.ElapsedSec,
 		"action_src", input.ActionSrc, "current_slot", input.CurrentSlot)
+	r.logger.Info("[反应层/PROMPT]",
+		"agent_id", agentID, "trigger", trigger, "model", r.ollama.Model(),
+		"text", prompt)
 
-	// 4. 调用 Ollama（3s 超时）
+	// 4. 调用 Ollama（8s 超时）
 	ctx, cancel := context.WithTimeout(context.Background(), reactiveCallTimeout)
 	defer cancel()
 	raw, err := r.ollama.Chat(ctx, prompt)
 	if err != nil {
-		r.logger.Warn("[反应层] Ollama 调用失败，降级 continue",
+		r.logger.Warn("[反应层/失败]",
 			"agent_id", agentID, "trigger", trigger, "err", err)
 		return
 	}
-	r.logger.Debug("[反应层] Ollama 原始输出", "agent_id", agentID, "raw", raw)
+	r.logger.Info("[反应层/RESPONSE]",
+		"agent_id", agentID, "trigger", trigger, "raw", raw)
 
 	// 5. 解析决策
 	dec := parseReactiveDecision(raw)
-	r.logger.Info("[反应层] 决策",
+	r.logger.Info("[反应层/决策]",
 		"agent_id", agentID, "reaction", dec.Reaction, "reason", dec.Reason,
 		"trigger", trigger,
 		"zone", input.Zone, "time_of_day", input.TimeOfDay,
