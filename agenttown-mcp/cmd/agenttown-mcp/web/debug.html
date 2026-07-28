@@ -391,8 +391,8 @@ function onCmdChange() {
     // 模式可见性：move_to 的 target / dest_x/y/z 字段根据模式切换显示
     if (field.modeVisibility) {
       div.dataset.modeVisibility = field.modeVisibility;
-      // 默认 target_id 模式 → coord 字段初始隐藏
-      div.style.display = (field.modeVisibility === 'target_id') ? '' : 'none';
+      // 默认 coord 模式 → target_id 字段初始隐藏
+      div.style.display = (field.modeVisibility === 'coord') ? '' : 'none';
     }
 
     const label = document.createElement('label');
@@ -415,7 +415,7 @@ function onCmdChange() {
           opt.value = o.v; opt.textContent = o.t;
           input.appendChild(opt);
         });
-        input.value = 'target_id'; // 默认 target id 模式
+        input.value = 'coord'; // 默认直接坐标模式
         input.onchange = () => { toggleMoveModeVisibility(input.value); updateCurlPreview(); };
         // 标记为模式控制器，collectRequest 时跳过
         input.dataset.isModeController = '1';
@@ -528,7 +528,7 @@ function collectRequest() {
   // - coord 模式    → {dest: [x, y, z]}
   if (cmd === 'move_to') {
     const modeEl = document.querySelector('#params-form [data-field-name="__move_mode"]');
-    const mode = modeEl ? modeEl.value : 'target_id';
+    const mode = modeEl ? modeEl.value : 'coord';
     if (mode === 'coord') {
       const x = Number(document.querySelector('#params-form [data-field-name="dest_x"]').value || 0);
       const y = Number(document.querySelector('#params-form [data-field-name="dest_y"]').value || 0);
