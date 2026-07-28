@@ -6,6 +6,26 @@
 >
 > 对应代码：`agenttown-mcp/cmd/agenttown-mcp/main.go` 的 `handleDebugAction`。
 
+## 浏览器控制台
+
+除了下方的 curl 用法，还可以直接打开浏览器访问 MCP HTTP 端口的 `/debug/` 路径：
+
+```
+http://localhost:8760/debug/      # stable 实例
+http://localhost:8770/debug/      # dev 实例
+```
+
+网页提供：
+
+- cmd 下拉选择（8 种动作）
+- 按 cmd 动态切换的 params 表单（move_to 的 target 从 world_kb 自动加载下拉）
+- 一键发送 + 响应展示（HTTP 状态码、耗时、action_id、estimated_duration）
+- 等价 curl 命令预览（可折叠）
+- 历史记录（最近 20 条，点击回填表单）
+- 右上角 UE 连接状态徽章（每 5s 自动刷新）
+
+对应代码：`agenttown-mcp/cmd/agenttown-mcp/debug_ui.go` + `web/debug.html`（`//go:embed` 打包进二进制，无外部依赖）。
+
 ---
 
 ## 一、端点信息
