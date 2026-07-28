@@ -21,6 +21,7 @@ http://localhost:8770/debug/      # dev 实例
 - 按 cmd 动态切换的 params 表单：
   - `move_to` 有"输入模式"下拉，可在 **target id**（从 world_kb 自动加载下拉）和 **直接坐标**（手动填 x/y/z UE5 厘米）之间切换
   - `interact` 的 object_id 从 world_kb 加载，action 选项随 object_id 变化
+- **force 复选框**（默认勾选）：先 stop 当前动作再发手动 action，解决战术层 idle wait 占用导致的 busy 拒绝。取消勾选可测试 busy 拒绝路径。
 - 一键发送 + 响应展示（HTTP 状态码、耗时、action_id、estimated_duration）
 - 等价 curl 命令预览（可折叠）
 - 历史记录（最近 20 条，点击回填表单）
@@ -157,6 +158,37 @@ curl.exe -X POST http://localhost:8760/debug/action -H "Content-Type: applicatio
 
 **浏览器 UI**：网页控制台的 move_to 表单顶部有"输入模式"下拉，切换 `target id` / `直接坐标`，对应字段自动显示/隐藏。
 
+### 3.2 `force` 字段 — 解决 busy 拒绝（默认 true）
+
+**问题背景**：战术层在队列空且无 goal 时会发 60 秒 `wait` 避免忙循环（`sendIdleWait`），这会让 UE 一直处于 busy 状态。手动 debug 调用 `move_to` 等破坏性命令时会被 UE 的 busy guard 拒绝：
+
+```
+HTTP 502 {"ok":false,"error":"ws.Call failed: action rejected: busy with Wait (1 game-min remaining)"}
+```
+
+**force 模式**（默认开启）：MCP 在发手动 action 前自动做两件事：
+
+1. 设置 `agentContext.debugOverride=true`，暂停战术层 worker dispatch（防止 stop 后 worker 立刻补一个新 idle wait 重新占用）
+2. 对当前 `currentActionID` 发 `stop_action`，清掉 UE 的 busy 状态
+3. 等 100ms 让 UE 处理 stop（fire-and-forget），然后发手动 action
+4. defer 清除 `debugOverride` 并 signal worker 恢复正常 dispatch
+
+```bash
+# 默认 force=true，无需显式传
+curl.exe -X POST http://localhost:8760/debug/action -H "Content-Type: application/json" -d '{\"agent_id\":\"H-01\",\"cmd\":\"move_to\",\"params\":{\"dest\":[15000,11000,0]}}'
+
+# 显式关闭 force（测试 busy 拒绝路径）
+curl.exe -X POST http://localhost:8760/debug/action -H "Content-Type: application/json" -d '{\"agent_id\":\"H-01\",\"cmd\":\"move_to\",\"params\":{\"dest\":[15000,11000,0]},\"force\":false}'
+```
+
+**日志**：force 模式下会记录 `stopped` 字段（被 stop 的 action_id）：
+
+```
+[debug/action] manual trigger agent_id=H-01 cmd=move_to proto_cmd=MoveTo params=... force=true stopped=act_xxxxx
+```
+
+**注意**：force 模式要求 `lookupAgent` 能找到对应 agent。如果 agent 未注册（UE 从未连接），force 退化为直发模式（无 stop，可能被 busy 拒）。
+
 ### 3.2 `speak` — 说话
 
 ```bash
@@ -291,7 +323,7 @@ UE 应收到 `action_command` envelope 并回 `action_started` ACK，执行完�
 
 ## 六、注意事项
 
-1. **完全旁路**：debug 端点不经过战术层/战略层队列，不影响 NPC 正常决策流程。手动触发的 action 与战术层下发的 action 共享同一个 `currentActionID` 锁——如果战术层正在执行 action，手动触发的 action 会被 UE 拒绝（`accepted:false`），反之亦然。
+1. **完全旁路 + force 默认开启**：debug 端点不经过战术层/战略层队列，不影响 NPC 正常决策流程。默认 `force=true` 会先 stop 战术层正在执行的 idle wait 再发手动 action，避免 busy 拒绝。设 `force:false` 可测试 busy 拒绝路径——此时若战术层正在执行 action，手动触发的 action 会被 UE 拒绝（`accepted:false`）。
 
 2. **无认证**：端点对局域网开放，仅适用于联调环境。生产环境应在 `runHTTP` 里加 Bearer token 校验或直接禁用此路由。
 

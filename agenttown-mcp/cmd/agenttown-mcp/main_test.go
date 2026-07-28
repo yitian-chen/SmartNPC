@@ -461,3 +461,83 @@ func TestBuildDebugParams_PassthroughForSimple(t *testing.T) {
 		t.Error("speak should not have name field")
 	}
 }
+
+// ─── debugOverride / force 逻辑 ────────────────────────────────
+
+// TestDebugActionRequest_ForceDefault 验证 Force 字段 JSON 解码：
+// 缺省 → nil（handleDebugAction 视为 true）；显式 false → false；显式 true → true。
+func TestDebugActionRequest_ForceDefault(t *testing.T) {
+	cases := []struct {
+		json string
+		want *bool
+	}{
+		{`{"agent_id":"H-01","cmd":"wait","params":{}}`, nil},
+		{`{"agent_id":"H-01","cmd":"wait","params":{},"force":false}`, boolPtr(false)},
+		{`{"agent_id":"H-01","cmd":"wait","params":{},"force":true}`, boolPtr(true)},
+	}
+	for i, c := range cases {
+		var req debugActionRequest
+		if err := json.Unmarshal([]byte(c.json), &req); err != nil {
+			t.Fatalf("[%d] unmarshal error: %v", i, err)
+		}
+		if (req.Force == nil) != (c.want == nil) {
+			t.Errorf("[%d] Force=nil mismatch: got %v, want %v", i, req.Force, c.want)
+			continue
+		}
+		if req.Force != nil && *req.Force != *c.want {
+			t.Errorf("[%d] Force value mismatch: got %v, want %v", i, *req.Force, *c.want)
+		}
+	}
+}
+
+// TestAgentContext_DebugOverrideLifecycle 验证 debugOverride 字段的
+// set/clear/signal 生命周期，确保 handleDebugAction 的 defer 模式正确。
+func TestAgentContext_DebugOverrideLifecycle(t *testing.T) {
+	ac, _ := newAgentContext(context.Background())
+
+	// 初始 false
+	ac.mu.Lock()
+	if ac.debugOverride {
+		t.Error("debugOverride should start false")
+	}
+	ac.mu.Unlock()
+
+	// set true
+	ac.mu.Lock()
+	ac.debugOverride = true
+	ac.mu.Unlock()
+
+	ac.mu.Lock()
+	if !ac.debugOverride {
+		t.Error("debugOverride should be true after set")
+	}
+	ac.mu.Unlock()
+
+	// defer 模式：set true → ... → clear + signal
+	func() {
+		ac.mu.Lock()
+		ac.debugOverride = true
+		ac.mu.Unlock()
+		defer func() {
+			ac.mu.Lock()
+			ac.debugOverride = false
+			ac.mu.Unlock()
+			ac.signal()
+		}()
+	}()
+
+	ac.mu.Lock()
+	if ac.debugOverride {
+		t.Error("debugOverride should be false after defer clear")
+	}
+	ac.mu.Unlock()
+
+	// signal 应该投递到 wake
+	select {
+	case <-ac.wake:
+	default:
+		t.Error("signal should have delivered to wake channel")
+	}
+}
+
+func boolPtr(b bool) *bool { return &b }
