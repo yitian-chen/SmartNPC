@@ -19,13 +19,21 @@ func TestBuildReactivePrompt_Defaults(t *testing.T) {
 		Energy:        45,
 		Fatigue:       30,
 		Health:        90,
-		CurrentAction: "work_assemble workbench_01",
+		CurrentAction: "work_assemble(target=workbench_01, duration_min=60)",
 		ElapsedSec:    120,
+		ActionSrc:     "tactical",
+		CurrentSlot:   "14:00-18:00",
+		DailyPlan:     "14:00-18:00 工作组装",
 		Trigger:       TriggerZoneChange,
 		TriggerDetail: "zone rest_area→main_workshop",
 	}
 	prompt := buildReactivePrompt(in)
-	for _, want := range []string{"14:30", "main_workshop", "45", "30", "90", "work_assemble workbench_01", "120", "zone rest_area→main_workshop"} {
+	for _, want := range []string{
+		"14:30", "main_workshop", "45", "30", "90",
+		"work_assemble(target=workbench_01, duration_min=60)",
+		"tactical", "14:00-18:00", "14:00-18:00 工作组装",
+		"zone rest_area→main_workshop",
+	} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("prompt missing %q\nFull prompt:\n%s", want, prompt)
 		}
@@ -46,6 +54,23 @@ func TestBuildReactivePrompt_NoCurrentAction(t *testing.T) {
 	prompt := buildReactivePrompt(in)
 	if !strings.Contains(prompt, "无在途动作") {
 		t.Errorf("empty CurrentAction should render as 无在途动作, got:\n%s", prompt)
+	}
+}
+
+// TestBuildReactivePrompt_EmptyContext verifies that empty tactical context
+// fields render fallback strings without breaking the template.
+func TestBuildReactivePrompt_EmptyContext(t *testing.T) {
+	in := ReactiveInput{
+		AgentID:   "H-01",
+		TimeOfDay: "14:30",
+		Zone:      "main_workshop",
+		Trigger:   TriggerPeriodic,
+	}
+	prompt := buildReactivePrompt(in)
+	for _, want := range []string{"无在途动作", "未分解", "（未生成）", "periodic"} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("empty context should render %q, got:\n%s", want, prompt)
+		}
 	}
 }
 
@@ -310,6 +335,31 @@ func TestShouldTriggerPeriodic(t *testing.T) {
 	}
 }
 
+// TestDescribeAction verifies action description formatting for the prompt.
+func TestDescribeAction(t *testing.T) {
+	tests := []struct {
+		name   string
+		cmd    string
+		params map[string]any
+		want   string
+	}{
+		{"empty cmd", "", nil, ""},
+		{"no params", "wait", nil, "wait"},
+		{"empty params map", "move_to", map[string]any{}, "move_to"},
+		{"target", "move_to", map[string]any{"target": "workbench_01"}, "move_to(target=workbench_01)"},
+		{"multiple keys", "work_assemble", map[string]any{"target": "workbench_01", "duration_min": 60}, "work_assemble(target=workbench_01, duration_min=60)"},
+		{"irrelevant keys ignored", "speak", map[string]any{"foo": "bar", "content": "hello"}, "speak(content=hello)"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := describeAction(tt.cmd, tt.params)
+			if got != tt.want {
+				t.Errorf("describeAction(%q, %v): got %q, want %q", tt.cmd, tt.params, got, tt.want)
+			}
+		})
+	}
+}
+
 // TestDedupeKey verifies the dedupe key format.
 func TestDedupeKey(t *testing.T) {
 	key := dedupeKey("H-01", TriggerZoneChange, "zone A→B")
@@ -479,6 +529,8 @@ func TestReactiveRunner_BuildInput(t *testing.T) {
 	ac.latestPerception = mustMarshalPerception(t, zone, "14:30")
 	ac.latestPhysical = &protocol.PhysicalState{Energy: 18, Fatigue: 85, Health: 75, JointWear: 20}
 	ac.currentActionID = "act_001"
+	ac.currentActionCmd = "work_assemble"
+	ac.currentActionParams = map[string]any{"target": "workbench_01", "duration_min": 60}
 	ac.mu.Unlock()
 
 	in := r.buildInput("H-01", ac, TriggerPhysicalAlert, "energy 22→18")
@@ -500,8 +552,9 @@ func TestReactiveRunner_BuildInput(t *testing.T) {
 	if in.Health != 75 {
 		t.Errorf("Health: got %v, want 75", in.Health)
 	}
-	if in.CurrentAction != "act_001" {
-		t.Errorf("CurrentAction: got %q, want act_001", in.CurrentAction)
+	// CurrentAction 现在是可读描述（cmd + 关键 params），不再是 actionID
+	if in.CurrentAction != "work_assemble(target=workbench_01, duration_min=60)" {
+		t.Errorf("CurrentAction: got %q, want readable description", in.CurrentAction)
 	}
 	if in.Trigger != TriggerPhysicalAlert {
 		t.Errorf("Trigger: got %q", in.Trigger)

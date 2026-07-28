@@ -149,7 +149,23 @@ func (r *reactiveRunner) buildInput(agentID string, ac *agentContext, trigger Re
 		fatigue = ac.latestPhysical.Fatigue
 		health = ac.latestPhysical.Health
 	}
-	currentAction := ac.currentActionID
+	// 构造可读的"在途动作"描述：cmd + 关键 params（target/duration_min）
+	currentAction := ""
+	elapsedSec := 0
+	actionSrc := ""
+	if ac.currentActionID != "" {
+		currentAction = describeAction(ac.currentActionCmd, ac.currentActionParams)
+		if !ac.currentActionStart.IsZero() {
+			elapsedSec = int(time.Since(ac.currentActionStart).Seconds())
+		}
+		actionSrc = string(ac.currentActionSrc)
+	}
+
+	// 战术层上下文：截断 dailyPlan 避免 prompt 过长（反应层只需摘要）
+	plan := ac.dailyPlan
+	if len(plan) > 400 {
+		plan = plan[:400] + "…"
+	}
 
 	return ReactiveInput{
 		AgentID:       agentID,
@@ -159,10 +175,48 @@ func (r *reactiveRunner) buildInput(agentID string, ac *agentContext, trigger Re
 		Fatigue:       fatigue,
 		Health:        health,
 		CurrentAction: currentAction,
-		ElapsedSec:    0, // P0 不追踪 elapsed；P1 增强：记录 action 开始时间计算 elapsed
+		ElapsedSec:    elapsedSec,
+		ActionSrc:     actionSrc,
+		CurrentSlot:   ac.currentSlot,
+		DailyPlan:     plan,
 		Trigger:       trigger,
 		TriggerDetail: detail,
 	}
+}
+
+// describeAction 把 cmd + params 构造为人类可读的描述，供反应层 prompt 使用。
+// 例如：move_to(target=workbench_01) / work_assemble(target=workbench_01, duration_min=60)
+func describeAction(cmd string, params map[string]any) string {
+	if cmd == "" {
+		return ""
+	}
+	if len(params) == 0 {
+		return cmd
+	}
+	// 只提取关键参数：target / duration_min / dest / content
+	keys := []string{"target", "duration_min", "dest", "content", "emotion", "duration_sec"}
+	var parts []string
+	for _, k := range keys {
+		if v, ok := params[k]; ok && v != nil {
+			parts = append(parts, fmt.Sprintf("%s=%v", k, v))
+		}
+	}
+	if len(parts) == 0 {
+		return cmd
+	}
+	return cmd + "(" + joinStrings(parts, ", ") + ")"
+}
+
+// joinStrings 用 sep 连接 strings，避免引入 strings 包（reactive_runner.go 未 import）。
+func joinStrings(ss []string, sep string) string {
+	if len(ss) == 0 {
+		return ""
+	}
+	out := ss[0]
+	for _, s := range ss[1:] {
+		out += sep + s
+	}
+	return out
 }
 
 // execute 执行反应层决策。interrupt/act 会发 stop_action 打断在途 action。

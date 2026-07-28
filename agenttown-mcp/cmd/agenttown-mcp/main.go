@@ -56,6 +56,9 @@ type agentContext struct {
 	latestPerception      json.RawMessage
 	currentTask           *protocol.CurrentTaskProgress
 	currentActionID       string                 // 当前执行中的 action_id（mu 保护），空表示无执行中动作
+	currentActionCmd      string                 // mu 保护，当前在途 action 的 cmd（如 move_to / work_assemble），用于反应层 prompt
+	currentActionParams   map[string]any         // mu 保护，当前在途 action 的 params，用于反应层 prompt
+	currentActionStart    time.Time              // mu 保护，当前在途 action 的开始时间，用于反应层计算 elapsed
 	pendingActionTimeouts map[string]*time.Timer // action_id → 超时 timer（mu 保护），约定 §5.2 action_completed 1.5× 估值超时
 	dailyPlan             string                 // mu 保护，战略层生成的每日计划（格式化字符串），空=未生成或失败
 	strategicHc           *hermes.Client         // mu 保护，战略层专用 Hermes client（独立 session）
@@ -154,9 +157,10 @@ func (a *agentContext) updateState(report protocol.StateReportPayload) (Reactive
 }
 
 // recordActionCompletion 处理 action_completed。所有来源的 completion 都清
-// 在途追踪并 signal worker（pop 下一个或 refill）。反应层：action 完成是自然的
-// 评估点（NPC 刚做完一件事，下一步做什么？），返回 trigger 信息供 message
-// handler 异步触发 reactiveRunner。
+// 在途追踪并 signal worker（pop 下一个或 refill）。反应层：仅在 action 异常
+// 完成（failed/interrupted/error）时触发评估——成功完成是常态，每次都问
+// "要不要打断"意义不大（模型看不到战术层整体规划，只能基于贫乏信息答 continue）。
+// 异常完成才是真正需要反应层介入的时机。
 func (a *agentContext) recordActionCompletion(completion protocol.ActionCompletedPayload) (bool, ReactiveTrigger, string) {
 	a.mu.Lock()
 	if a.currentTask != nil && a.currentTask.ActionID == completion.ActionID {
@@ -164,6 +168,9 @@ func (a *agentContext) recordActionCompletion(completion protocol.ActionComplete
 	}
 	if a.currentActionID == completion.ActionID {
 		a.currentActionID = ""
+		a.currentActionCmd = ""
+		a.currentActionParams = nil
+		a.currentActionStart = time.Time{}
 	}
 	// 取消 action_completed 超时 timer（约定 §5.2）
 	if timer, ok := a.pendingActionTimeouts[completion.ActionID]; ok {
@@ -173,9 +180,12 @@ func (a *agentContext) recordActionCompletion(completion protocol.ActionComplete
 	a.currentActionSrc = ""
 	a.mu.Unlock()
 	a.signal()
-	// 反应层触发：action 完成是自然评估点。detail 用 result + progress。
-	detail := fmt.Sprintf("action_id=%s result=%s progress=%.2f",
-		completion.ActionID, completion.Result, completion.Progress)
+	// 反应层触发：仅异常完成触发。detail 用 result 作为去抖维度（避免每次
+	// action_id 不同导致去抖失效），相同 result 在 60s 内不重复触发。
+	if completion.Result == protocol.ResultSuccess {
+		return true, "", ""
+	}
+	detail := fmt.Sprintf("result=%s progress=%.2f", completion.Result, completion.Progress)
 	return true, TriggerActionDone, detail
 }
 
@@ -211,6 +221,9 @@ func (a *agentContext) stop() {
 	a.latestPerception = nil
 	a.currentActionID = "" // agent 下线时清空（避免残留）
 	a.currentActionSrc = ""
+	a.currentActionCmd = ""
+	a.currentActionParams = nil
+	a.currentActionStart = time.Time{}
 	a.actionQueue = nil    // 清空战术层队列
 	a.currentSlot = ""     // 重置时段
 	a.redecomposeCount = 0 // 重置重复分解计数
@@ -226,11 +239,12 @@ func (a *agentContext) stop() {
 
 func (a *agentContext) recordActionStarted(actionID, cmd string, params map[string]any, decisionEpoch int64, src actionSource) {
 	_ = decisionEpoch // 反应层移除后不再记录到 recentActions，保留参数兼容调用方
-	_ = cmd
-	_ = params
 	a.mu.Lock()
 	a.currentActionID = actionID // 追踪当前执行中的 action（约定9 stop_action ID 匹配）
 	a.currentActionSrc = src     // 记录来源：completion 时按来源路由（tactical→signal pop 下一个）
+	a.currentActionCmd = cmd     // 反应层 prompt 用：描述当前在途动作
+	a.currentActionParams = params
+	a.currentActionStart = time.Now()
 	a.mu.Unlock()
 }
 
@@ -385,11 +399,14 @@ func (a *agentContext) armActionTimeout(
 		// 清除本地追踪并触发重新决策
 		ac := lookup(agentID)
 		if ac != nil {
-			ac.mu.Lock()
-			ac.currentActionID = ""
-			ac.currentActionSrc = "" // 清来源，避免 completion 路由错乱
-			delete(ac.pendingActionTimeouts, actionID)
-			ac.mu.Unlock()
+		ac.mu.Lock()
+		ac.currentActionID = ""
+		ac.currentActionSrc = "" // 清来源，避免 completion 路由错乱
+		ac.currentActionCmd = ""
+		ac.currentActionParams = nil
+		ac.currentActionStart = time.Time{}
+		delete(ac.pendingActionTimeouts, actionID)
+		ac.mu.Unlock()
 			// 触发重新决策（下次 perception 会处理）
 			select {
 			case ac.wake <- struct{}{}:

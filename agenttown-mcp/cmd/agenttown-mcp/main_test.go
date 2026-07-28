@@ -60,12 +60,30 @@ func TestRecordActionCompletion_SignalsWorkerAndClearsInFlight(t *testing.T) {
 	}
 }
 
-// TestRecordActionCompletion_ReturnsTrigger 验证 recordActionCompletion
-// 返回 TriggerActionDone，供 WS handler 异步触发 reactiveRunner。
-func TestRecordActionCompletion_ReturnsTrigger(t *testing.T) {
+// TestRecordActionCompletion_SuccessNoTrigger 验证成功完成的 action 不触发
+// 反应层（成功是常态，无需评估）。
+func TestRecordActionCompletion_SuccessNoTrigger(t *testing.T) {
 	ac, _ := newAgentContext(context.Background())
 	queued, trigger, detail := ac.recordActionCompletion(protocol.ActionCompletedPayload{
-		ActionID: "act_done_1", Result: protocol.ResultSuccess, Progress: 1,
+		ActionID: "act_ok_1", Result: protocol.ResultSuccess, Progress: 1,
+	})
+	if !queued {
+		t.Fatal("queued should be true")
+	}
+	if trigger != "" {
+		t.Errorf("success should not trigger, got trigger=%q", trigger)
+	}
+	if detail != "" {
+		t.Errorf("success should return empty detail, got %q", detail)
+	}
+}
+
+// TestRecordActionCompletion_FailureTriggers 验证异常完成的 action 触发反应层，
+// 且 detail 用 result 作为去抖维度（不含 action_id，避免去抖失效）。
+func TestRecordActionCompletion_FailureTriggers(t *testing.T) {
+	ac, _ := newAgentContext(context.Background())
+	queued, trigger, detail := ac.recordActionCompletion(protocol.ActionCompletedPayload{
+		ActionID: "act_fail_1", Result: protocol.ResultFailed, Progress: 0.3,
 	})
 	if !queued {
 		t.Fatal("queued should be true")
@@ -73,8 +91,11 @@ func TestRecordActionCompletion_ReturnsTrigger(t *testing.T) {
 	if trigger != TriggerActionDone {
 		t.Errorf("trigger: got %q, want %q", trigger, TriggerActionDone)
 	}
-	if !strings.Contains(detail, "act_done_1") || !strings.Contains(detail, "success") {
-		t.Errorf("detail should mention action_id + result: %q", detail)
+	if !strings.Contains(detail, "failed") {
+		t.Errorf("detail should mention result=failed: %q", detail)
+	}
+	if strings.Contains(detail, "act_fail_1") {
+		t.Errorf("detail should NOT contain action_id (breaks dedup): %q", detail)
 	}
 }
 

@@ -70,16 +70,19 @@ const periodicTriggerInterval = 4
 // ReactiveInput 聚合反应层决策所需的输入状态。由 main.go 从 agentContext
 // 提取后传入，避免 reactive.go 直接依赖 agentContext（便于单元测试）。
 type ReactiveInput struct {
-	AgentID      string
-	TimeOfDay    string          // "HH:MM" 游戏时间
-	Zone         string          // 当前区域 id
-	Energy       float64         // 0-100
-	Fatigue      float64         // 0-100
-	Health       float64         // 0-100
-	CurrentAction string         // 当前在途 action 描述（空=无在途）
-	ElapsedSec   int             // 当前 action 已执行秒数
-	Trigger      ReactiveTrigger
-	TriggerDetail string         // 触发原因详情（如 "energy 18→15 跌破警戒带 20"）
+	AgentID       string
+	TimeOfDay     string // "HH:MM" 游戏时间
+	Zone          string // 当前区域 id
+	Energy        float64
+	Fatigue       float64
+	Health        float64
+	CurrentAction string // 当前在途 action 的可读描述（如 "work_assemble(target=workbench_01)"），空=无在途
+	ElapsedSec    int    // 当前 action 已执行秒数
+	ActionSrc     string // 在途 action 来源：tactical / hermes / 空
+	CurrentSlot   string // 当前战术时段 "HH:MM-HH:MM"，空=未分解
+	DailyPlan     string // 战略层每日计划摘要（格式化字符串），空=未生成
+	Trigger       ReactiveTrigger
+	TriggerDetail string // 触发原因详情
 }
 
 // reactivePromptTemplate 是反应层 prompt 模板。用 fmt.Sprintf 填充。
@@ -87,10 +90,18 @@ type ReactiveInput struct {
 const reactivePromptTemplate = `你是 NPC 老陈的反应决策模块。当前情况需要你判断是否打断当前行动。
 
 【当前状态】
-时段：%s
+游戏时间：%s
 位置：%s
 物理：体力=%.0f/100, 疲劳=%.0f/100, 健康=%.0f/100
-在途动作：%s（已执行 %d 秒）
+
+【在途动作】
+%s
+来源：%s（战术层规划的动作为深思熟虑的结果，非必要不打断）
+
+【战术层上下文】
+当前时段：%s
+每日计划摘要：
+%s
 
 【触发原因】
 %s
@@ -100,6 +111,10 @@ const reactivePromptTemplate = `你是 NPC 老陈的反应决策模块。当前�
 - observe：不打断，记录这个事件供后续参考
 - interrupt：打断当前行动（会发送 stop_action）
 - act：打断当前行动并立即执行一个新动作
+
+判断要点：
+- 战术层规划的动作通常是合理的，除非有明确理由（物理警戒带、紧急事件），否则 continue
+- 仅在物理状态告警、事件突发、或当前动作明显不合理时才 interrupt/act
 
 请输出 JSON，格式严格如下，不要输出 JSON 以外的任何内容：
 {"reaction": "continue|observe|interrupt|act", "reason": "简短理由", "action": {"cmd": "...", "params": {...}}}
@@ -113,6 +128,22 @@ func buildReactivePrompt(in ReactiveInput) string {
 	if currentAction == "" {
 		currentAction = "无在途动作"
 	}
+	elapsed := in.ElapsedSec
+	if elapsed < 0 {
+		elapsed = 0
+	}
+	actionSrc := in.ActionSrc
+	if actionSrc == "" {
+		actionSrc = "无"
+	}
+	slot := in.CurrentSlot
+	if slot == "" {
+		slot = "未分解"
+	}
+	plan := in.DailyPlan
+	if plan == "" {
+		plan = "（未生成）"
+	}
 	detail := in.TriggerDetail
 	if detail == "" {
 		detail = string(in.Trigger)
@@ -120,7 +151,10 @@ func buildReactivePrompt(in ReactiveInput) string {
 	return fmt.Sprintf(reactivePromptTemplate,
 		in.TimeOfDay, in.Zone,
 		in.Energy, in.Fatigue, in.Health,
-		currentAction, in.ElapsedSec,
+		currentAction,
+		actionSrc,
+		slot,
+		plan,
 		detail,
 	)
 }
