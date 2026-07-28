@@ -433,7 +433,9 @@ model: deepseek-v4-flash-ioa             # 模型 ID（见 `codebuddy --help` �
 | 路径 | 说明 |
 |------|------|
 | `docs/AgentTown_CommProtocol_Values.md` | 通信协议与数值系统设计文档（唯一权威） |
-| `docs/DebugAction_Tool.md` | 联调 Debug 工具 `/debug/action` 使用文档（curl 手动触发 action） |
+| `docs/DebugAction_Tool.md` | 联调 Debug 工具 `/debug/action` 使用文档（curl + 浏览器 UI） |
+| `agenttown-mcp/cmd/agenttown-mcp/debug_ui.go` | `/debug/` 浏览器控制台 + `/debug/kb` JSON 端点（`//go:embed` 嵌入 HTML） |
+| `agenttown-mcp/cmd/agenttown-mcp/web/debug.html` | 浏览器 debug 控制台单页 HTML（cmd 下拉 + 动态 params 表单 + move_to 坐标直传切换 + force 复选框 + 历史记录） |
 | `agenttown-mcp/pkg/protocol/envelope.go` | Envelope + 11 消息类型 + 9 cmd + error_code 常量 |
 | `agenttown-mcp/pkg/protocol/messages.go` | 各消息 payload 结构体 + resync/event_lost |
 | `agenttown-mcp/pkg/wsserver/server.go` | WS 服务端：收发信封、seq、send buffer、重放、Call/SendAction |

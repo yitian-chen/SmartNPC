@@ -345,7 +345,7 @@ class MockUE:
 
     def __init__(
         self,
-        mcp_ws_url: str = "ws://localhost:9090/ws",
+        mcp_ws_url: str = "ws://localhost:9091/ws",
         mode: str = "normal",
         time_speed: float = 300.0,
         perception_interval: int = 30,   # game-minutes between perception pushes

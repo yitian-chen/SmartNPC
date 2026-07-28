@@ -55,23 +55,24 @@ type agentContext struct {
 	latestPhysical        *protocol.PhysicalState
 	latestPerception      json.RawMessage
 	currentTask           *protocol.CurrentTaskProgress
-	currentActionID       string // 当前执行中的 action_id（mu 保护），空表示无执行中动作
+	currentActionID       string                 // 当前执行中的 action_id（mu 保护），空表示无执行中动作
 	pendingActionTimeouts map[string]*time.Timer // action_id → 超时 timer（mu 保护），约定 §5.2 action_completed 1.5× 估值超时
-	dailyPlan             string         // mu 保护，战略层生成的每日计划（格式化字符串），空=未生成或失败
-	strategicHc           *hermes.Client // mu 保护，战略层专用 Hermes client（独立 session）
-	tacticalHc            *hermes.Client // mu 保护，战术层专用 Hermes client（独立 session）
-	actionQueue           []plannedAction // mu 保护，战术层分解出的待执行 action（FIFO）
-	currentActionSrc      actionSource    // mu 保护，当前在途 action 的来源（hermes/tactical/空）
-	currentPlanIndex      int             // mu 保护，当前执行到 daily_plan 第几个 item（记账用）
-	currentSlot           string          // mu 保护，当前分解的时段 "HH:MM-HH:MM"（防同时段重复分解）
-	redecomposeCount      int             // mu 保护，当前时段已重复分解次数（防死循环）
+	dailyPlan             string                 // mu 保护，战略层生成的每日计划（格式化字符串），空=未生成或失败
+	strategicHc           *hermes.Client         // mu 保护，战略层专用 Hermes client（独立 session）
+	tacticalHc            *hermes.Client         // mu 保护，战术层专用 Hermes client（独立 session）
+	actionQueue           []plannedAction        // mu 保护，战术层分解出的待执行 action（FIFO）
+	currentActionSrc      actionSource           // mu 保护，当前在途 action 的来源（hermes/tactical/空）
+	currentPlanIndex      int                    // mu 保护，当前执行到 daily_plan 第几个 item（记账用）
+	currentSlot           string                 // mu 保护，当前分解的时段 "HH:MM-HH:MM"（防同时段重复分解）
+	redecomposeCount      int                    // mu 保护，当前时段已重复分解次数（防死循环）
 	// 反应层状态（mu 保护）
-	prevZone        string   // 上次感知的 zone id（用于检测 zone 变化触发反应层）
-	prevObjectIDs   []string // 上次感知的 nearby_objects id 列表（用于检测新物体出现）
-	lastReactiveAt  map[string]time.Time // 去抖：trigger dedupe key → 上次触发时间
-	wake                  chan struct{}
-	cancel                context.CancelFunc
-	stopped               bool
+	prevZone       string               // 上次感知的 zone id（用于检测 zone 变化触发反应层）
+	prevObjectIDs  []string             // 上次感知的 nearby_objects id 列表（用于检测新物体出现）
+	lastReactiveAt map[string]time.Time // 去抖：trigger dedupe key → 上次触发时间
+	debugOverride  bool                 // mu 保护，debug 手动 action 期间暂停 worker dispatch（避免 stop→idle wait 竞态）
+	wake           chan struct{}
+	cancel         context.CancelFunc
+	stopped        bool
 }
 
 func newAgentContext(parent context.Context, epochs ...int64) (*agentContext, context.Context) {
@@ -82,7 +83,7 @@ func newAgentContext(parent context.Context, epochs ...int64) (*agentContext, co
 	}
 	return &agentContext{
 		online: true, agentEpoch: agentEpoch,
-		wake:                  make(chan struct{}, 1), cancel: cancel,
+		wake: make(chan struct{}, 1), cancel: cancel,
 		pendingActionTimeouts: make(map[string]*time.Timer),
 		lastReactiveAt:        make(map[string]time.Time),
 	}, ctx
@@ -276,6 +277,16 @@ func runPerceptionWorker(
 		// action 会被 busy 拒，refill 出的队列也会被拒。等 action_completed 自然
 		// 唤醒 worker（completion 路径会 signal 并清 currentActionID）。
 		if ac.hasInFlightAction() {
+			continue
+		}
+
+		// debug 手动 action 期间暂停 dispatch：debug 端点刚发了 stop_action 清 UE
+		// busy，若此刻 worker 被唤醒会立刻补一个 idle wait 重新占用，导致手动
+		// action 被 busy 拒。debugOverride 由 handleDebugAction 设置/清除。
+		ac.mu.Lock()
+		override := ac.debugOverride
+		ac.mu.Unlock()
+		if override {
 			continue
 		}
 
@@ -666,7 +677,7 @@ func main() {
 		mcpAPIKey          = flag.String("mcp-api-key", "", "if set, require this Bearer token on /mcp")
 		httpAllowAnyOrigin = flag.Bool("http-allow-any-origin", true,
 			"disable origin / localhost restrictions so cross-host clients can connect")
-		worldKBPath = flag.String("world-kb", "assets/world_kb.yaml", "path to world_kb.yaml (required, fail-fast on error)")
+		worldKBPath    = flag.String("world-kb", "assets/world_kb.yaml", "path to world_kb.yaml (required, fail-fast on error)")
 		tacticalStream = flag.Bool("tactical-stream", false,
 			"enable streaming for tactical layer LLM calls (experimental: only helps if upstream LLM emits tokens incrementally)")
 		ollamaURL = flag.String("ollama-url", "http://localhost:11434",
@@ -906,14 +917,14 @@ func main() {
 	}()
 
 	if *httpAddr != "" {
-		runHTTP(ctx, logger, server, *httpAddr, *httpAllowAnyOrigin, *mcpAPIKey, ws, kb)
+		runHTTP(ctx, logger, server, *httpAddr, *httpAllowAnyOrigin, *mcpAPIKey, ws, kb, lookupAgent)
 	} else {
 		runStdio(ctx, logger, server)
 	}
 }
 
 // runHTTP serves the MCP server over Streamable HTTP + a /status endpoint.
-func runHTTP(ctx context.Context, logger *slog.Logger, server *mcp.Server, addr string, allowAnyOrigin bool, apiKey string, ws *wsserver.Server, kb *worldkb.KB) {
+func runHTTP(ctx context.Context, logger *slog.Logger, server *mcp.Server, addr string, allowAnyOrigin bool, apiKey string, ws *wsserver.Server, kb *worldkb.KB, lookupAgent func(string) *agentContext) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/status", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -925,7 +936,21 @@ func runHTTP(ctx context.Context, logger *slog.Logger, server *mcp.Server, addr 
 	// /debug/action — 联调 debug 端点：终端通过 curl 触发 MCP 向 UE 发
 	// action_command。仅联调用，无认证；生产环境应禁用或加 Bearer 校验。
 	mux.HandleFunc("/debug/action", func(w http.ResponseWriter, r *http.Request) {
-		handleDebugAction(ctx, logger, ws, kb, w, r)
+		handleDebugAction(ctx, logger, ws, kb, lookupAgent, w, r)
+	})
+	// /debug/ — 浏览器 debug 控制台 HTML 页面（无外部依赖，嵌入二进制）。
+	mux.HandleFunc("/debug/", func(w http.ResponseWriter, r *http.Request) {
+		// 仅 /debug/ 走 UI；/debug/action 已在上面单独注册。
+		if r.URL.Path == "/debug/" || r.URL.Path == "/debug" {
+			handleDebugUI(w, r)
+			return
+		}
+		// /debug/kb — 返回 world_kb 摘要供前端下拉填充
+		if r.URL.Path == "/debug/kb" {
+			handleDebugKB(w, r, kb, logger)
+			return
+		}
+		http.NotFound(w, r)
 	})
 
 	err := transport.RunHTTP(ctx, logger, server, transport.HTTPOptions{
@@ -959,32 +984,62 @@ func runStdio(ctx context.Context, logger *slog.Logger, server *mcp.Server) {
 // cmd 支持：move_to / speak / interact / wait / charge_at / work_assemble /
 // archive_research / rest_idle。其中 move_to 走 kb.GetPosition 解析坐标，
 // 其他 cmd 直接透传 params 给 ws.Call。
+//
+// force（默认 true）：先发 stop_action 停掉战术层正在执行的 idle wait，
+// 并短暂挂起 worker dispatch，避免手动 action 被 UE busy 拒。设为 false
+// 可测试 busy 拒绝路径。
 
 // debugActionRequest 是 /debug/action 的请求体。
 type debugActionRequest struct {
 	AgentID string         `json:"agent_id"`
 	Cmd     string         `json:"cmd"`
 	Params  map[string]any `json:"params"`
+	Force   *bool          `json:"force,omitempty"` // nil/true → 强制模式（默认）；false → 直发不 stop
 }
 
 // debugActionResponse 是 /debug/action 的响应体。
 type debugActionResponse struct {
-	OK                  bool    `json:"ok"`
-	ActionID            string  `json:"action_id,omitempty"`
-	Accepted            bool    `json:"accepted,omitempty"`
+	OK                   bool    `json:"ok"`
+	ActionID             string  `json:"action_id,omitempty"`
+	Accepted             bool    `json:"accepted,omitempty"`
 	EstimatedDurationSec float64 `json:"estimated_duration_sec,omitempty"`
-	Error               string  `json:"error,omitempty"`
+	Error                string  `json:"error,omitempty"`
 }
 
-// resolveDebugMoveTo 把 move_to 的 target id 解析成 ws.Call 需要的完整参数。
+// resolveDebugMoveTo 把 move_to 的参数解析成 ws.Call 需要的完整参数。
 // 与 tactical.go:433 的 move_to 分支保持一致：dest + target + kind + speed。
+//
+// 支持两种输入模式：
+//  1. 直接传坐标：params.dest = [x, y, z]（UE5 cm）。跳过 kb 解析，
+//     kind 默认 "coord"，target 字段空。适用于临时调试未知位置。
+//  2. 传 target id：params.target = "workbench_01" / "main_workshop"。
+//     走 kb.GetPosition 解析坐标和 kind。
+//
+// 两种模式都没有 → 报错。同时传时 dest 优先（更明确）。
 func resolveDebugMoveTo(params map[string]any, kb *worldkb.KB) (map[string]any, error) {
+	// 模式 1：直接传 dest 坐标
+	if dest, ok := params["dest"]; ok && dest != nil {
+		coords, err := parseDestCoords(dest)
+		if err != nil {
+			return nil, fmt.Errorf("parse dest: %w", err)
+		}
+		// 调用方可选传 target 作为日志标签（仅标识用途，不参与解析）
+		target, _ := params["target"].(string)
+		return map[string]any{
+			"dest":   coords,
+			"target": target, // 可空
+			"kind":   "coord",
+			"speed":  "walk",
+		}, nil
+	}
+
+	// 模式 2：传 target id 走 kb 解析
 	target, _ := params["target"].(string)
 	if target == "" {
-		return nil, errors.New("move_to requires params.target")
+		return nil, errors.New("move_to requires params.dest ([x,y,z]) or params.target (kb id)")
 	}
 	if kb == nil {
-		return nil, errors.New("world kb not loaded, cannot resolve target")
+		return nil, errors.New("world kb not loaded, cannot resolve target (use params.dest for raw coords)")
 	}
 	coord, kind, err := kb.GetPosition(target)
 	if err != nil {
@@ -996,6 +1051,63 @@ func resolveDebugMoveTo(params map[string]any, kb *worldkb.KB) (map[string]any, 
 		"kind":   kind,
 		"speed":  "walk",
 	}, nil
+}
+
+// parseDestCoords 把 params.dest（可能来自 JSON 的 []any / []float64 / []int）
+// 规整成 []float64 三元组。校验长度和数值合法性。
+func parseDestCoords(v any) ([]float64, error) {
+	arr, ok := v.([]any)
+	if !ok {
+		// JSON 解码后 []float64 也会变成 []any，但保险起见也接受原生类型
+		if farr, ok2 := v.([]float64); ok2 {
+			arr = make([]any, len(farr))
+			for i, f := range farr {
+				arr[i] = f
+			}
+		} else {
+			return nil, errors.New("dest must be an array of 3 numbers [x, y, z]")
+		}
+	}
+	if len(arr) != 3 {
+		return nil, fmt.Errorf("dest must have exactly 3 elements [x, y, z], got %d", len(arr))
+	}
+	out := make([]float64, 3)
+	for i, e := range arr {
+		f, err := toFloat64(e)
+		if err != nil {
+			return nil, fmt.Errorf("dest[%d] (%v): %w", i, e, err)
+		}
+		out[i] = f
+	}
+	return out, nil
+}
+
+// toFloat64 把 any 转 float64，支持 JSON 解码后的常见数值类型。
+func toFloat64(v any) (float64, error) {
+	switch n := v.(type) {
+	case float64:
+		return n, nil
+	case float32:
+		return float64(n), nil
+	case int:
+		return float64(n), nil
+	case int64:
+		return float64(n), nil
+	case json.Number:
+		f, err := n.Float64()
+		if err != nil {
+			return 0, fmt.Errorf("not a number: %s", n.String())
+		}
+		return f, nil
+	case string:
+		var f float64
+		if _, err := fmt.Sscanf(n, "%f", &f); err != nil {
+			return 0, fmt.Errorf("not a numeric string: %q", n)
+		}
+		return f, nil
+	default:
+		return 0, fmt.Errorf("unsupported numeric type %T", v)
+	}
 }
 
 // mapDebugCmd 把 debug 端点的 cmd 名映射到 protocol 常量。
@@ -1038,7 +1150,7 @@ func buildDebugParams(cmd string, params map[string]any, kb *worldkb.KB) (map[st
 	}
 }
 
-func handleDebugAction(ctx context.Context, logger *slog.Logger, ws *wsserver.Server, kb *worldkb.KB, w http.ResponseWriter, r *http.Request) {
+func handleDebugAction(ctx context.Context, logger *slog.Logger, ws *wsserver.Server, kb *worldkb.KB, lookupAgent func(string) *agentContext, w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
 	if r.Method != http.MethodPost {
@@ -1084,8 +1196,42 @@ func handleDebugAction(ctx context.Context, logger *slog.Logger, ws *wsserver.Se
 		return
 	}
 
+	// force 默认 true（nil 视为 true）；显式传 false 时直发不 stop。
+	force := req.Force == nil || *req.Force
+
+	// 强制模式：暂停 worker dispatch + 发 stop_action 清 UE busy。
+	// debugOverride 阻止 worker 在 stop 后的 completion 信号驱动下补 idle wait，
+	// 否则手动 action 会被新 idle wait 重新 busy 拒。defer 清除并 signal 恢复。
+	var stoppedActionID string
+	if force && lookupAgent != nil {
+		if ac := lookupAgent(req.AgentID); ac != nil {
+			ac.mu.Lock()
+			ac.debugOverride = true
+			curID := ac.currentActionID
+			ac.mu.Unlock()
+			defer func() {
+				ac.mu.Lock()
+				ac.debugOverride = false
+				ac.mu.Unlock()
+				ac.signal() // 唤醒 worker 恢复正常 dispatch
+			}()
+			if curID != "" {
+				if err := ws.SendStopAction(req.AgentID, curID); err != nil {
+					logger.Warn("[debug/action] stop_action failed", "agent_id", req.AgentID, "action_id", curID, "err", err)
+				} else {
+					stoppedActionID = curID
+					// 等 UE 处理 stop（fire-and-forget）并回 action_completed。
+					// 100ms 足以让单线程 UE asyncio 跑完 _handle_stop_action；
+					// debugOverride 保证期间 worker 不会补 idle wait。
+					time.Sleep(100 * time.Millisecond)
+				}
+			}
+		}
+	}
+
 	logger.Info("[debug/action] manual trigger",
-		"agent_id", req.AgentID, "cmd", req.Cmd, "proto_cmd", protoCmd, "params", fmt.Sprint(params))
+		"agent_id", req.AgentID, "cmd", req.Cmd, "proto_cmd", protoCmd, "params", fmt.Sprint(params),
+		"force", force, "stopped", stoppedActionID)
 
 	ack, err := ws.Call(ctx, req.AgentID, protoCmd, params)
 	if err != nil {

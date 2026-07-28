@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"strings"
 	"testing"
@@ -265,6 +266,176 @@ func TestResolveDebugMoveTo_NilKB(t *testing.T) {
 	}
 }
 
+// ─── move_to 坐标直传（v2 新功能） ──────────────────────────
+
+func TestResolveDebugMoveTo_DestCoords(t *testing.T) {
+	kb := loadTestKB(t)
+	// 直接传 dest 坐标，不走 kb 解析
+	params := map[string]any{"dest": []any{10000.0, 20000.0, 0.0}}
+	out, err := resolveDebugMoveTo(params, kb)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	dest, ok := out["dest"].([]float64)
+	if !ok {
+		t.Fatalf("dest should be []float64, got %T", out["dest"])
+	}
+	if len(dest) != 3 || dest[0] != 10000 || dest[1] != 20000 || dest[2] != 0 {
+		t.Fatalf("dest=%v, want [10000 20000 0]", dest)
+	}
+	if out["kind"] != "coord" {
+		t.Errorf("kind=%v, want coord", out["kind"])
+	}
+	if out["target"] != "" {
+		t.Errorf("target should be empty for coord mode, got %v", out["target"])
+	}
+	if out["speed"] != "walk" {
+		t.Errorf("speed=%v, want walk", out["speed"])
+	}
+}
+
+func TestResolveDebugMoveTo_DestWithIntCoords(t *testing.T) {
+	// JSON 解码整数常会变 float64，但也支持 int / int64
+	kb := loadTestKB(t)
+	params := map[string]any{"dest": []any{10000, 20000, 0}}
+	out, err := resolveDebugMoveTo(params, kb)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	dest, _ := out["dest"].([]float64)
+	if len(dest) != 3 || dest[0] != 10000 || dest[1] != 20000 {
+		t.Fatalf("dest=%v, want [10000 20000 0]", dest)
+	}
+}
+
+func TestResolveDebugMoveTo_DestWithTargetLabel(t *testing.T) {
+	// dest + target 同时传：dest 优先，target 仅作日志标签
+	kb := loadTestKB(t)
+	params := map[string]any{
+		"dest":   []any{15000.0, 11000.0, 0.0},
+		"target": "custom_spot",
+	}
+	out, err := resolveDebugMoveTo(params, kb)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out["kind"] != "coord" {
+		t.Errorf("kind=%v, want coord (dest 优先)", out["kind"])
+	}
+	if out["target"] != "custom_spot" {
+		t.Errorf("target=%v, want custom_spot (保留标签)", out["target"])
+	}
+}
+
+func TestResolveDebugMoveTo_DestWrongLength(t *testing.T) {
+	kb := loadTestKB(t)
+	cases := [][]any{
+		{1.0, 2.0},           // 太少
+		{1.0, 2.0, 3.0, 4.0}, // 太多
+	}
+	for i, arr := range cases {
+		_, err := resolveDebugMoveTo(map[string]any{"dest": arr}, kb)
+		if err == nil {
+			t.Errorf("[%d] expected error for wrong-length dest, got nil", i)
+		}
+	}
+}
+
+func TestResolveDebugMoveTo_DestNonNumeric(t *testing.T) {
+	kb := loadTestKB(t)
+	params := map[string]any{"dest": []any{"foo", 2.0, 3.0}}
+	_, err := resolveDebugMoveTo(params, kb)
+	if err == nil {
+		t.Fatal("expected error for non-numeric dest element")
+	}
+}
+
+func TestResolveDebugMoveTo_DestNotArray(t *testing.T) {
+	kb := loadTestKB(t)
+	params := map[string]any{"dest": "not an array"}
+	_, err := resolveDebugMoveTo(params, kb)
+	if err == nil {
+		t.Fatal("expected error when dest is not an array")
+	}
+}
+
+func TestResolveDebugMoveTo_NoDestNoTarget(t *testing.T) {
+	kb := loadTestKB(t)
+	// 既没 dest 也没 target，应报错提示两种模式
+	_, err := resolveDebugMoveTo(map[string]any{}, kb)
+	if err == nil {
+		t.Fatal("expected error when neither dest nor target is provided")
+	}
+	if !strings.Contains(err.Error(), "dest") || !strings.Contains(err.Error(), "target") {
+		t.Errorf("error should mention both dest and target options, got: %v", err)
+	}
+}
+
+func TestResolveDebugMoveTo_DestNilKB(t *testing.T) {
+	// dest 模式不应依赖 kb，nil kb 也能正常工作
+	out, err := resolveDebugMoveTo(map[string]any{"dest": []any{1.0, 2.0, 3.0}}, nil)
+	if err != nil {
+		t.Fatalf("dest mode should work without kb: %v", err)
+	}
+	if out["kind"] != "coord" {
+		t.Errorf("kind=%v, want coord", out["kind"])
+	}
+}
+
+func TestParseDestCoords_FloatSlice(t *testing.T) {
+	out, err := parseDestCoords([]float64{1.5, 2.5, 3.5})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(out) != 3 || out[0] != 1.5 || out[2] != 3.5 {
+		t.Fatalf("got %v", out)
+	}
+}
+
+func TestParseDestCoords_StringNumbers(t *testing.T) {
+	// 字符串数字也应支持（容错）
+	out, err := parseDestCoords([]any{"100", "200", "0"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out[0] != 100 || out[1] != 200 || out[2] != 0 {
+		t.Fatalf("got %v", out)
+	}
+}
+
+func TestToFloat64_Types(t *testing.T) {
+	cases := []struct {
+		in   any
+		want float64
+		err  bool
+	}{
+		{float64(1.5), 1.5, false},
+		{int(10), 10, false},
+		{int64(20), 20, false},
+		{float32(0.5), 0.5, false},
+		{json.Number("3.14"), 3.14, false},
+		{"42", 42, false},
+		{"not a number", 0, true},
+		{nil, 0, true},
+		{[]int{1}, 0, true},
+	}
+	for i, c := range cases {
+		got, err := toFloat64(c.in)
+		if c.err {
+			if err == nil {
+				t.Errorf("[%d] expected error for %v", i, c.in)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("[%d] unexpected error: %v", i, err)
+		}
+		if got != c.want {
+			t.Errorf("[%d] got %v, want %v", i, got, c.want)
+		}
+	}
+}
+
 func TestBuildDebugParams_CompositeAddsName(t *testing.T) {
 	kb := loadTestKB(t)
 	// charge_at 应在 params 里加 name=charge_at
@@ -301,3 +472,83 @@ func TestBuildDebugParams_PassthroughForSimple(t *testing.T) {
 		t.Error("speak should not have name field")
 	}
 }
+
+// ─── debugOverride / force 逻辑 ────────────────────────────────
+
+// TestDebugActionRequest_ForceDefault 验证 Force 字段 JSON 解码：
+// 缺省 → nil（handleDebugAction 视为 true）；显式 false → false；显式 true → true。
+func TestDebugActionRequest_ForceDefault(t *testing.T) {
+	cases := []struct {
+		json string
+		want *bool
+	}{
+		{`{"agent_id":"H-01","cmd":"wait","params":{}}`, nil},
+		{`{"agent_id":"H-01","cmd":"wait","params":{},"force":false}`, boolPtr(false)},
+		{`{"agent_id":"H-01","cmd":"wait","params":{},"force":true}`, boolPtr(true)},
+	}
+	for i, c := range cases {
+		var req debugActionRequest
+		if err := json.Unmarshal([]byte(c.json), &req); err != nil {
+			t.Fatalf("[%d] unmarshal error: %v", i, err)
+		}
+		if (req.Force == nil) != (c.want == nil) {
+			t.Errorf("[%d] Force=nil mismatch: got %v, want %v", i, req.Force, c.want)
+			continue
+		}
+		if req.Force != nil && *req.Force != *c.want {
+			t.Errorf("[%d] Force value mismatch: got %v, want %v", i, *req.Force, *c.want)
+		}
+	}
+}
+
+// TestAgentContext_DebugOverrideLifecycle 验证 debugOverride 字段的
+// set/clear/signal 生命周期，确保 handleDebugAction 的 defer 模式正确。
+func TestAgentContext_DebugOverrideLifecycle(t *testing.T) {
+	ac, _ := newAgentContext(context.Background())
+
+	// 初始 false
+	ac.mu.Lock()
+	if ac.debugOverride {
+		t.Error("debugOverride should start false")
+	}
+	ac.mu.Unlock()
+
+	// set true
+	ac.mu.Lock()
+	ac.debugOverride = true
+	ac.mu.Unlock()
+
+	ac.mu.Lock()
+	if !ac.debugOverride {
+		t.Error("debugOverride should be true after set")
+	}
+	ac.mu.Unlock()
+
+	// defer 模式：set true → ... → clear + signal
+	func() {
+		ac.mu.Lock()
+		ac.debugOverride = true
+		ac.mu.Unlock()
+		defer func() {
+			ac.mu.Lock()
+			ac.debugOverride = false
+			ac.mu.Unlock()
+			ac.signal()
+		}()
+	}()
+
+	ac.mu.Lock()
+	if ac.debugOverride {
+		t.Error("debugOverride should be false after defer clear")
+	}
+	ac.mu.Unlock()
+
+	// signal 应该投递到 wake
+	select {
+	case <-ac.wake:
+	default:
+		t.Error("signal should have delivered to wake channel")
+	}
+}
+
+func boolPtr(b bool) *bool { return &b }

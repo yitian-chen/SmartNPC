@@ -1,0 +1,718 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AgentTown Debug Console</title>
+<style>
+  :root {
+    --bg: #1a1d23;
+    --panel: #252932;
+    --panel-2: #2d323d;
+    --border: #3a4050;
+    --text: #e4e7eb;
+    --text-muted: #8b95a7;
+    --accent: #4a9eff;
+    --accent-hover: #6bb0ff;
+    --ok: #4caf50;
+    --err: #f44336;
+    --warn: #ff9800;
+    --code-bg: #1a1d23;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.5;
+  }
+  header {
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+    padding: 14px 24px;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+  }
+  header h1 {
+    margin: 0;
+    font-size: 18px;
+    font-weight: 600;
+  }
+  header .subtitle {
+    color: var(--text-muted);
+    font-size: 13px;
+  }
+  .status-badge {
+    margin-left: auto;
+    padding: 4px 10px;
+    border-radius: 4px;
+    font-size: 12px;
+    font-weight: 500;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .status-badge::before {
+    content: "";
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: currentColor;
+  }
+  .status-badge.connected { background: rgba(76,175,80,0.15); color: var(--ok); }
+  .status-badge.disconnected { background: rgba(244,67,54,0.15); color: var(--err); }
+  .status-badge.loading { background: rgba(255,152,0,0.15); color: var(--warn); }
+  main {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+    padding: 16px 24px;
+    max-width: 1400px;
+    margin: 0 auto;
+  }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 16px 20px;
+  }
+  .panel h2 {
+    margin: 0 0 14px 0;
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  .field { margin-bottom: 14px; }
+  .field label {
+    display: block;
+    font-size: 13px;
+    color: var(--text-muted);
+    margin-bottom: 4px;
+  }
+  .field label .req { color: var(--err); margin-left: 2px; }
+  .field input, .field select, .field textarea {
+    width: 100%;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--text);
+    padding: 8px 10px;
+    font-size: 14px;
+    font-family: inherit;
+  }
+  .field textarea {
+    font-family: "Consolas", "Monaco", monospace;
+    min-height: 80px;
+    resize: vertical;
+  }
+  .field input:focus, .field select:focus, .field textarea:focus {
+    outline: none;
+    border-color: var(--accent);
+  }
+  .field .hint { font-size: 12px; color: var(--text-muted); margin-top: 4px; }
+  .field-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+  }
+  button {
+    background: var(--accent);
+    color: white;
+    border: none;
+    border-radius: 4px;
+    padding: 9px 18px;
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+    font-family: inherit;
+  }
+  button:hover:not(:disabled) { background: var(--accent-hover); }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  button.secondary {
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    color: var(--text);
+  }
+  button.secondary:hover:not(:disabled) { background: var(--border); }
+  .button-row { display: flex; gap: 10px; margin-top: 4px; }
+  .response-meta {
+    display: flex;
+    gap: 12px;
+    font-size: 12px;
+    color: var(--text-muted);
+    margin-bottom: 8px;
+    flex-wrap: wrap;
+  }
+  .response-meta span {
+    background: var(--panel-2);
+    padding: 2px 8px;
+    border-radius: 3px;
+  }
+  .response-meta .status-2xx { color: var(--ok); }
+  .response-meta .status-4xx, .response-meta .status-5xx { color: var(--err); }
+  pre {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 12px;
+    margin: 0;
+    font-family: "Consolas", "Monaco", monospace;
+    font-size: 13px;
+    overflow-x: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+    max-height: 500px;
+    overflow-y: auto;
+  }
+  .empty-state {
+    color: var(--text-muted);
+    font-size: 13px;
+    font-style: italic;
+    padding: 20px;
+    text-align: center;
+  }
+  .curl-preview {
+    margin-top: 12px;
+    padding-top: 12px;
+    border-top: 1px dashed var(--border);
+  }
+  .curl-preview details summary {
+    cursor: pointer;
+    color: var(--text-muted);
+    font-size: 12px;
+    user-select: none;
+  }
+  .history-item {
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--border);
+    font-size: 12px;
+    cursor: pointer;
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+  }
+  .history-item:hover { background: var(--panel-2); }
+  .history-item:last-child { border-bottom: none; }
+  .history-item .cmd { font-family: monospace; color: var(--accent); }
+  .history-item .time { color: var(--text-muted); font-size: 11px; }
+  .history-item .ok { color: var(--ok); }
+  .history-item .fail { color: var(--err); }
+  #history-list { max-height: 300px; overflow-y: auto; }
+</style>
+</head>
+<body>
+<header>
+  <h1>AgentTown Debug Console</h1>
+  <span class="subtitle">手动触发 action_command 联调</span>
+  <span id="status-badge" class="status-badge loading">检查中…</span>
+</header>
+
+<main>
+  <!-- 左侧：表单 -->
+  <section class="panel">
+    <h2>请求</h2>
+
+    <div class="field">
+      <label for="agent_id">agent_id <span class="req">*</span></label>
+      <input type="text" id="agent_id" value="H-01" />
+      <div class="hint">UE 注册的 agent id（当前固定 H-01）</div>
+    </div>
+
+    <div class="field">
+      <label for="cmd">cmd <span class="req">*</span></label>
+      <select id="cmd" onchange="onCmdChange()">
+        <option value="move_to">move_to — 移动到目标位置</option>
+        <option value="speak">speak — 说话</option>
+        <option value="interact">interact — 与智能物体交互</option>
+        <option value="wait">wait — 原地等待</option>
+        <option value="charge_at">charge_at — 充电（复合）</option>
+        <option value="work_assemble">work_assemble — 工作台装配（复合）</option>
+        <option value="archive_research">archive_research — 档案研究（复合）</option>
+        <option value="rest_idle">rest_idle — 休息（复合）</option>
+      </select>
+    </div>
+
+    <div id="params-form">
+      <!-- 动态 params 表单由 JS 填充 -->
+    </div>
+
+    <div class="field">
+      <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:normal;">
+        <input type="checkbox" id="force" checked style="width:auto;margin:0;" />
+        <span>force — 先 stop 当前动作再发（默认勾选，解决 busy 拒绝）</span>
+      </label>
+      <div class="hint">取消勾选可测试 UE busy 拒绝路径</div>
+    </div>
+
+    <div class="button-row">
+      <button id="submit-btn" onclick="submitAction()">发送</button>
+      <button class="secondary" onclick="resetForm()">重置</button>
+    </div>
+
+    <div class="curl-preview">
+      <details>
+        <summary>查看等价 curl 命令</summary>
+        <pre id="curl-preview" style="margin-top:8px;"></pre>
+      </details>
+    </div>
+  </section>
+
+  <!-- 右侧：响应 + 历史 -->
+  <section class="panel">
+    <h2>响应</h2>
+    <div id="response-area">
+      <div class="empty-state">尚未发送请求</div>
+    </div>
+
+    <h2 style="margin-top:24px;">历史</h2>
+    <div id="history-list">
+      <div class="empty-state">无历史记录</div>
+    </div>
+  </section>
+</main>
+
+<script>
+// ─── 全局状态 ────────────────────────────────────────────
+let kbData = { zones: [], locations: [], objects: [] };
+let history = []; // 最近 20 条
+
+// ─── 初始化 ──────────────────────────────────────────────
+async function init() {
+  await Promise.all([loadStatus(), loadKB()]);
+  onCmdChange();
+  // 定时刷新状态徽章（每 5s）
+  setInterval(loadStatus, 5000);
+}
+
+async function loadStatus() {
+  const badge = document.getElementById('status-badge');
+  try {
+    const r = await fetch('/status');
+    const j = await r.json();
+    if (j.ok && j.ws_connected) {
+      badge.textContent = 'UE 已连接';
+      badge.className = 'status-badge connected';
+    } else {
+      badge.textContent = 'UE 未连接';
+      badge.className = 'status-badge disconnected';
+    }
+  } catch (e) {
+    badge.textContent = 'MCP 不可达';
+    badge.className = 'status-badge disconnected';
+  }
+}
+
+async function loadKB() {
+  try {
+    const r = await fetch('/debug/kb');
+    if (!r.ok) return;
+    kbData = await r.json();
+  } catch (e) {
+    console.warn('loadKB failed:', e);
+  }
+}
+
+// ─── 动态 params 表单 ─────────────────────────────────────
+const CMD_PARAM_SPECS = {
+  move_to: [
+    // 模式切换：target id（走 kb 解析） / 直接坐标（UE5 cm）
+    { name: '__move_mode', label: '输入模式', type: 'select-move-mode', required: false,
+      hint: 'target id 由 MCP 解析坐标；坐标模式直接传 [x,y,z] UE5 cm' },
+    // target id 模式（默认）
+    { name: 'target', label: 'target', type: 'select-kb-target', required: true,
+      hint: 'zone 或 location id，MCP 自动解析坐标',
+      modeVisibility: 'target_id' },
+    // 坐标模式
+    { name: 'dest_x', label: 'dest.x', type: 'number', required: true, default: 20000,
+      hint: 'UE5 厘米（X 轴）', modeVisibility: 'coord' },
+    { name: 'dest_y', label: 'dest.y', type: 'number', required: true, default: 10000,
+      hint: 'UE5 厘米（Y 轴）', modeVisibility: 'coord' },
+    { name: 'dest_z', label: 'dest.z', type: 'number', required: true, default: 0,
+      hint: 'UE5 厘米（Z 轴）', modeVisibility: 'coord' },
+  ],
+  speak: [
+    { name: 'content', label: 'content', type: 'text', required: true, hint: '说话内容' },
+    { name: 'target', label: 'target', type: 'text', required: false, default: '',
+      hint: '目标 agent_id，空串=自言自语' },
+  ],
+  interact: [
+    { name: 'object_id', label: 'object_id', type: 'select-kb-object', required: true,
+      hint: '智能物体 id' },
+    { name: 'action', label: 'action', type: 'select-object-action', required: true,
+      hint: '动作词（选项随 object_id 变化）' },
+  ],
+  wait: [
+    { name: 'duration_sec', label: 'duration_sec', type: 'number', required: true, default: 30,
+      hint: '等待秒数' },
+  ],
+  charge_at: [
+    { name: 'station_id', label: 'station_id', type: 'select-kb-object', required: true,
+      hint: '充电桩 id', filterActions: ['charge'] },
+    { name: 'duration_min', label: 'duration_min', type: 'number', required: true, default: 30,
+      hint: '充电分钟数' },
+  ],
+  work_assemble: [
+    { name: 'target', label: 'target', type: 'select-kb-object', required: true,
+      hint: '工作台 id', filterActions: ['assemble'] },
+    { name: 'duration_min', label: 'duration_min', type: 'number', required: true, default: 60,
+      hint: '装配分钟数' },
+  ],
+  archive_research: [
+    { name: 'duration_min', label: 'duration_min', type: 'number', required: true, default: 15,
+      hint: '档案研究分钟数' },
+  ],
+  rest_idle: [
+    { name: 'duration_min', label: 'duration_min', type: 'number', required: true, default: 10,
+      hint: '休息分钟数' },
+  ],
+};
+
+function onCmdChange() {
+  const cmd = document.getElementById('cmd').value;
+  const spec = CMD_PARAM_SPECS[cmd] || [];
+  const container = document.getElementById('params-form');
+  container.innerHTML = '';
+
+  if (spec.length === 0) {
+    container.innerHTML = '<div class="empty-state">该 cmd 无参数</div>';
+    updateCurlPreview();
+    return;
+  }
+
+  spec.forEach(field => {
+    const div = document.createElement('div');
+    div.className = 'field';
+    // 注意：不在 div 上设 data-field-name，否则 querySelector('[data-field-name="..."]')
+    // 会命中 div（父元素先于 input 出现）而非 input/select，导致 .value 为 undefined。
+    // data-field-name 只设在 input/select 上；div 用 data-mode-visibility 控制可见性。
+
+    // 模式可见性：move_to 的 target / dest_x/y/z 字段根据模式切换显示
+    if (field.modeVisibility) {
+      div.dataset.modeVisibility = field.modeVisibility;
+      // 默认 coord 模式 → target_id 字段初始隐藏
+      div.style.display = (field.modeVisibility === 'coord') ? '' : 'none';
+    }
+
+    const label = document.createElement('label');
+    label.htmlFor = `param-${field.name}`;
+    label.innerHTML = `params.${field.name}${field.required ? ' <span class="req">*</span>' : ''}`;
+    div.appendChild(label);
+
+    let input;
+    switch (field.type) {
+      case 'select-move-mode':
+        input = document.createElement('select');
+        input.id = `param-${field.name}`;
+        input.dataset.fieldName = field.name;
+        input.dataset.modeGroup = 'move_to';
+        [
+          { v: 'target_id', t: 'target id（kb 解析）' },
+          { v: 'coord', t: '直接坐标（UE5 cm）' },
+        ].forEach(o => {
+          const opt = document.createElement('option');
+          opt.value = o.v; opt.textContent = o.t;
+          input.appendChild(opt);
+        });
+        input.value = 'coord'; // 默认直接坐标模式
+        input.onchange = () => { toggleMoveModeVisibility(input.value); updateCurlPreview(); };
+        // 标记为模式控制器，collectRequest 时跳过
+        input.dataset.isModeController = '1';
+        break;
+
+      case 'select-kb-target':
+        input = document.createElement('select');
+        input.id = `param-${field.name}`;
+        input.dataset.fieldName = field.name;
+        // 标记该字段所属模式，便于切换显示/隐藏
+        if (field.modeVisibility) input.dataset.modeVisibility = field.modeVisibility;
+        // zones
+        const zg = document.createElement('optgroup');
+        zg.label = 'Zones（区域）';
+        (kbData.zones || []).forEach(z => {
+          const o = document.createElement('option');
+          o.value = z.id; o.textContent = `${z.id} — ${z.name}`;
+          zg.appendChild(o);
+        });
+        input.appendChild(zg);
+        // locations
+        const lg = document.createElement('optgroup');
+        lg.label = 'Locations（地点）';
+        (kbData.locations || []).forEach(l => {
+          const o = document.createElement('option');
+          o.value = l.id; o.textContent = `${l.id} — ${l.name} (in ${l.zone})`;
+          lg.appendChild(o);
+        });
+        input.appendChild(lg);
+        if (kbData.locations && kbData.locations.length > 0) {
+          input.value = kbData.locations[0].id;
+        }
+        break;
+
+      case 'select-kb-object':
+        input = document.createElement('select');
+        input.id = `param-${field.name}`;
+        input.dataset.fieldName = field.name;
+        input.onchange = () => { updateObjectActionOptions(); updateCurlPreview(); };
+        (kbData.objects || []).forEach(o => {
+          if (field.filterActions && !field.filterActions.some(a => (o.available_actions || []).includes(a))) return;
+          const opt = document.createElement('option');
+          opt.value = o.id; opt.textContent = `${o.id} — ${o.name}`;
+          input.appendChild(opt);
+        });
+        break;
+
+      case 'select-object-action':
+        input = document.createElement('select');
+        input.id = `param-${field.name}`;
+        input.dataset.fieldName = field.name;
+        // 选项由 updateObjectActionOptions 动态填
+        break;
+
+      case 'number':
+        input = document.createElement('input');
+        input.type = 'number';
+        input.id = `param-${field.name}`;
+        input.value = field.default != null ? field.default : 0;
+        input.dataset.fieldName = field.name;
+        input.oninput = updateCurlPreview;
+        break;
+
+      default: // text
+        input = document.createElement('input');
+        input.type = 'text';
+        input.id = `param-${field.name}`;
+        input.value = field.default != null ? field.default : '';
+        input.dataset.fieldName = field.name;
+        input.oninput = updateCurlPreview;
+    }
+    div.appendChild(input);
+
+    if (field.hint) {
+      const h = document.createElement('div');
+      h.className = 'hint'; h.textContent = field.hint;
+      div.appendChild(h);
+    }
+    container.appendChild(div);
+  });
+
+  updateObjectActionOptions();
+  updateCurlPreview();
+}
+
+function updateObjectActionOptions() {
+  // 找到 object_id select，根据其值更新 action select 的选项
+  const objSel = document.querySelector('[data-field-name="object_id"]');
+  const actSel = document.querySelector('[data-field-name="action"]');
+  if (!objSel || !actSel) return;
+  const obj = (kbData.objects || []).find(o => o.id === objSel.value);
+  actSel.innerHTML = '';
+  (obj && obj.available_actions || []).forEach(a => {
+    const o = document.createElement('option');
+    o.value = a; o.textContent = a;
+    actSel.appendChild(o);
+  });
+  updateCurlPreview();
+}
+
+// ─── 收集表单 → 请求体 ───────────────────────────────────
+function collectRequest() {
+  const agent_id = document.getElementById('agent_id').value.trim();
+  const cmd = document.getElementById('cmd').value;
+  const force = document.getElementById('force').checked;
+  const params = {};
+
+  // move_to 特殊处理：根据当前模式收集不同字段
+  // - target_id 模式 → {target: "..."}
+  // - coord 模式    → {dest: [x, y, z]}
+  if (cmd === 'move_to') {
+    const modeEl = document.querySelector('#params-form [data-field-name="__move_mode"]');
+    const mode = modeEl ? modeEl.value : 'coord';
+    if (mode === 'coord') {
+      const x = Number(document.querySelector('#params-form [data-field-name="dest_x"]').value || 0);
+      const y = Number(document.querySelector('#params-form [data-field-name="dest_y"]').value || 0);
+      const z = Number(document.querySelector('#params-form [data-field-name="dest_z"]').value || 0);
+      params.dest = [x, y, z];
+    } else {
+      const targetEl = document.querySelector('#params-form [data-field-name="target"]');
+      if (targetEl) params.target = targetEl.value;
+    }
+    return { agent_id, cmd, params, force };
+  }
+
+  // 其他 cmd：通用收集（跳过 mode 控制器字段）
+  document.querySelectorAll('#params-form [data-field-name]').forEach(el => {
+    if (el.dataset.isModeController === '1') return; // 模式控制器不进 params
+    const k = el.dataset.fieldName;
+    let v = el.value;
+    // number 字段转 number
+    if (el.type === 'number') {
+      v = v === '' ? 0 : Number(v);
+    }
+    params[k] = v;
+  });
+  return { agent_id, cmd, params, force };
+}
+
+// toggleMoveModeVisibility 切换 move_to 的 target / 坐标输入可见性。
+// mode = "target_id" 显示 target 下拉；"coord" 显示 dest_x/y/z 三个数字框。
+function toggleMoveModeVisibility(mode) {
+  document.querySelectorAll('#params-form [data-mode-visibility]').forEach(div => {
+    div.style.display = (div.dataset.modeVisibility === mode) ? '' : 'none';
+  });
+}
+
+// ─── curl 预览 ───────────────────────────────────────────
+function updateCurlPreview() {
+  const req = collectRequest();
+  const json = JSON.stringify(req);
+  // 端口用当前页面的端口（同源）
+  const base = `${location.protocol}//${location.host}`;
+  const curl = `curl -X POST ${base}/debug/action \\\n  -H "Content-Type: application/json" \\\n  -d '${json}'`;
+  document.getElementById('curl-preview').textContent = curl;
+}
+
+// ─── 提交 ────────────────────────────────────────────────
+async function submitAction() {
+  const btn = document.getElementById('submit-btn');
+  const req = collectRequest();
+  btn.disabled = true; btn.textContent = '发送中…';
+
+  const t0 = performance.now();
+  let resp, json, err;
+  try {
+    resp = await fetch('/debug/action', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(req),
+    });
+    json = await resp.json();
+  } catch (e) {
+    err = e.toString();
+  }
+  const elapsed = Math.round(performance.now() - t0);
+
+  renderResponse(resp, json, err, elapsed);
+  addHistory(req, resp, json, err, elapsed);
+
+  btn.disabled = false; btn.textContent = '发送';
+}
+
+function renderResponse(resp, json, err, elapsed) {
+  const area = document.getElementById('response-area');
+  if (err) {
+    area.innerHTML = `
+      <div class="response-meta"><span class="status-5xx">网络错误</span><span>${elapsed}ms</span></div>
+      <pre>${escapeHtml(err)}</pre>
+    `;
+    return;
+  }
+  const statusClass = resp.status < 300 ? 'status-2xx' : (resp.status < 500 ? 'status-4xx' : 'status-5xx');
+  const meta = `
+    <div class="response-meta">
+      <span class="${statusClass}">HTTP ${resp.status}</span>
+      <span>${elapsed}ms</span>
+      ${json && json.action_id ? `<span>action_id: ${escapeHtml(json.action_id)}</span>` : ''}
+      ${json && json.accepted ? `<span>accepted: ${json.accepted}</span>` : ''}
+      ${json && json.estimated_duration_sec ? `<span>est: ${json.estimated_duration_sec}s</span>` : ''}
+    </div>
+  `;
+  area.innerHTML = `${meta}<pre>${escapeHtml(JSON.stringify(json, null, 2))}</pre>`;
+}
+
+function addHistory(req, resp, json, err, elapsed) {
+  const item = {
+    req, resp_status: resp ? resp.status : 0, json, err, elapsed,
+    time: new Date().toLocaleTimeString('zh-CN', { hour12: false }),
+  };
+  history.unshift(item);
+  if (history.length > 20) history.pop();
+  renderHistory();
+}
+
+function renderHistory() {
+  const list = document.getElementById('history-list');
+  if (history.length === 0) {
+    list.innerHTML = '<div class="empty-state">无历史记录</div>';
+    return;
+  }
+  list.innerHTML = history.map((h, i) => {
+    const ok = h.resp_status && h.resp_status < 300;
+    const statusCls = ok ? 'ok' : 'fail';
+    const statusText = h.err ? 'NET ERR' : `HTTP ${h.resp_status}`;
+    return `
+      <div class="history-item" onclick="replayHistory(${i})">
+        <span><span class="${statusCls}">●</span> <span class="cmd">${escapeHtml(h.req.cmd)}</span> ${escapeHtml(JSON.stringify(h.req.params))}</span>
+        <span class="time">${h.time} · ${statusText} · ${h.elapsed}ms</span>
+      </div>
+    `;
+  }).join('');
+}
+
+function replayHistory(i) {
+  const h = history[i];
+  if (!h) return;
+  document.getElementById('agent_id').value = h.req.agent_id;
+  document.getElementById('cmd').value = h.req.cmd;
+  // force 字段回填（历史可能无此字段，默认勾选）
+  const forceEl = document.getElementById('force');
+  if (forceEl) forceEl.checked = h.req.force !== false;
+  onCmdChange();
+
+  // move_to 特殊处理：根据历史 params 内容切换模式
+  // - 有 dest 字段 → coord 模式，回填 x/y/z
+  // - 有 target 字段 → target_id 模式，回填 target 下拉
+  if (h.req.cmd === 'move_to' && h.req.params) {
+    const modeEl = document.querySelector('#params-form [data-field-name="__move_mode"]');
+    if (h.req.params.dest) {
+      if (modeEl) { modeEl.value = 'coord'; toggleMoveModeVisibility('coord'); }
+      const [x, y, z] = h.req.params.dest;
+      const xEl = document.querySelector('#params-form [data-field-name="dest_x"]');
+      const yEl = document.querySelector('#params-form [data-field-name="dest_y"]');
+      const zEl = document.querySelector('#params-form [data-field-name="dest_z"]');
+      if (xEl) xEl.value = x;
+      if (yEl) yEl.value = y;
+      if (zEl) zEl.value = z;
+    } else if (h.req.params.target) {
+      if (modeEl) { modeEl.value = 'target_id'; toggleMoveModeVisibility('target_id'); }
+      const tEl = document.querySelector('#params-form [data-field-name="target"]');
+      if (tEl) tEl.value = h.req.params.target;
+    }
+    updateCurlPreview();
+    return;
+  }
+
+  // 其他 cmd：通用回填
+  Object.entries(h.req.params || {}).forEach(([k, v]) => {
+    const el = document.querySelector(`#params-form [data-field-name="${k}"]`);
+    if (el) el.value = v;
+  });
+  updateObjectActionOptions();
+  Object.entries(h.req.params || {}).forEach(([k, v]) => {
+    const el = document.querySelector(`#params-form [data-field-name="${k}"]`);
+    if (el) el.value = v;
+  });
+  updateCurlPreview();
+}
+
+function resetForm() {
+  document.getElementById('agent_id').value = 'H-01';
+  document.getElementById('cmd').value = 'move_to';
+  const forceEl = document.getElementById('force');
+  if (forceEl) forceEl.checked = true;
+  onCmdChange();
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({
+    '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+  }[c]));
+}
+
+init();
+</script>
+</body>
+</html>
