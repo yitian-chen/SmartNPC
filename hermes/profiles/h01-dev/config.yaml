@@ -12,7 +12,16 @@ model:
   default: qwen3.6-35b-a3b
   base_url: http://v2.open.venus.oa.com/llmproxy/v1
   api_mode: chat_completions
-  context_length: 128000
+  # Venus qwen3.6-35b-a3b 实际上下文上限 65536 tokens（不是 128000）。
+  # 此值用于 Hermes 压缩预算计算（effective_window = context_length - max_tokens）。
+  # 经 Venus 400 错误信息确认："model's maximum context length of 65536 tokens"
+  context_length: 65536
+  # 输出 token 上限。Hermes 把此值作为 max_tokens 发给上游 LLM。
+  # 若不设置，custom provider profile 默认 65536，导致
+  #   input(12k) + max_output(65536) > 65536 → Venus HTTP 400
+  #   → Hermes 压缩失败 → 战术/战略层收到"Context length exceeded"错误字符串
+  # 设为 8192 留出输入空间：input + output ≤ 65536
+  max_tokens: 8192
 providers:
   venus:
     name: venus
