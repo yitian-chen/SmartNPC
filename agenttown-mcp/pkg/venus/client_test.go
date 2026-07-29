@@ -34,8 +34,17 @@ func TestSendWithSummary_NonStreaming(t *testing.T) {
 		if r.URL.Path != "/v1/messages" {
 			t.Errorf("path = %q, want /v1/messages", r.URL.Path)
 		}
+		// Venus 用 Bearer 认证（非 Anthropic 原生 x-api-key）
+		if got := r.Header.Get("Authorization"); got != "Bearer test-key" {
+			t.Errorf("Authorization = %q, want 'Bearer test-key'", got)
+		}
+		// 同时保留 x-api-key 以兼容真实 Anthropic API
 		if got := r.Header.Get("x-api-key"); got != "test-key" {
 			t.Errorf("x-api-key = %q, want test-key", got)
+		}
+		// Venus 自定义头
+		if got := r.Header.Get("Venus-Sticky-Routing"); got != "token" {
+			t.Errorf("Venus-Sticky-Routing = %q, want token", got)
 		}
 		if got := r.Header.Get("anthropic-version"); got != anthropicVersion {
 			t.Errorf("anthropic-version = %q, want %q", got, anthropicVersion)
@@ -160,6 +169,13 @@ func TestSendStreaming_SSE(t *testing.T) {
 		}
 		if got := r.Header.Get("Accept"); got != "text/event-stream" {
 			t.Errorf("Accept = %q, want text/event-stream", got)
+		}
+		// 流式路径也应带 Bearer 认证和 Venus 自定义头
+		if got := r.Header.Get("Authorization"); got != "Bearer test-key" {
+			t.Errorf("Authorization = %q, want 'Bearer test-key'", got)
+		}
+		if got := r.Header.Get("Venus-Sticky-Routing"); got != "token" {
+			t.Errorf("Venus-Sticky-Routing = %q, want token", got)
 		}
 
 		w.Header().Set("Content-Type", "text/event-stream")

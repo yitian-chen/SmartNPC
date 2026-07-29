@@ -142,8 +142,14 @@ func (c *Client) doSend(ctx context.Context, input string, stream bool, onDelta 
 		return nil, fmt.Errorf("new request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("x-api-key", c.cfg.APIKey)
 	req.Header.Set("anthropic-version", anthropicVersion)
+	// Venus 网关用 Bearer 认证（对应 Claude Code 的 ANTHROPIC_AUTH_TOKEN 方式），
+	// 而非 Anthropic 原生的 x-api-key。同时保留 x-api-key 以兼容真实 Anthropic API。
+	req.Header.Set("Authorization", "Bearer "+c.cfg.APIKey)
+	req.Header.Set("x-api-key", c.cfg.APIKey)
+	// Venus 自定义头：会话粘性路由（sticky routing），值固定为 "token"。
+	// 来自 Venus 平台示例配置的 ANTHROPIC_CUSTOM_HEADERS。
+	req.Header.Set("Venus-Sticky-Routing", "token")
 	if stream {
 		req.Header.Set("Accept", "text/event-stream")
 	}
