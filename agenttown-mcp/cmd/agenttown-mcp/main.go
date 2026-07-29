@@ -625,8 +625,8 @@ var tacticalStreamingEnabled bool
 var tacticalCallTimeout = 60 * time.Second
 
 // llmClient 是战略层/战术层 LLM 客户端的统一接口。
-// *hermes.Client（Hermes Gateway，OpenAI Responses 协议）和 *venus.Client
-// （Venus 代理，Anthropic Messages 协议）均实现此接口，通过 --llm-backend 切换。
+// *hermes.Client（Hermes Gateway，OpenAI Responses 协议，默认）和 *venus.Client
+// （Venus 代理，OpenAI Chat Completions 协议）均实现此接口，通过 --llm-backend 切换。
 type llmClient interface {
 	SendWithSummary(ctx context.Context, input, summary string) (*hermes.Response, error)
 	SendStreaming(ctx context.Context, input string, onDelta func(string)) (*hermes.Response, error)
@@ -870,8 +870,10 @@ func main() {
 	ollamaModel = flag.String("ollama-model", "qwen2.5:7b-instruct-q4_K_M",
 		"Ollama model name for reactive layer decisions")
 	// ─── 战略层/战术层 LLM backend 切换 ───────────────────────────
-	llmBackend = flag.String("llm-backend", "venus",
-		"LLM backend for strategic/tactical layers: venus|hermes")
+	// 默认走 hermes：MCP → Hermes Gateway → 后端模型（由 Hermes config.yaml
+	// 决定，当前为 Venus qwen3.6-35b-a3b）。需要直连 Venus 绕过 Hermes 时切 venus。
+	llmBackend = flag.String("llm-backend", "hermes",
+		"LLM backend for strategic/tactical layers: hermes|venus")
 	venusURL = flag.String("venus-url", "http://v2.open.venus.oa.com/llmproxy",
 		"Venus LLM proxy base URL (OpenAI Chat Completions API compatible)")
 	venusAPIKey = flag.String("venus-api-key", "",
@@ -980,8 +982,8 @@ func main() {
 		nextAgentEpoch++
 		ac, workerCtx := newAgentContext(ctx, nextAgentEpoch)
 		// 战略层/战术层各用一个独立 LLM client 实例（独立 session 链）。
-		// backend 由 --llm-backend 选择：venus（默认，Anthropic Messages API）
-		// 或 hermes（Hermes Gateway，OpenAI Responses API）。
+		// backend 由 --llm-backend 选择：hermes（默认，MCP → Hermes → 后端模型）
+		// 或 venus（直连 Venus OpenAI Chat Completions API，绕过 Hermes）。
 		switch *llmBackend {
 		case "venus":
 			venusAPIKeyValue := *venusAPIKey

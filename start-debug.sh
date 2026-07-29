@@ -67,7 +67,9 @@ ADAPTER_LOG="$LOG_SUBDIR/debug-adapter.log"
 # MCP 是 Windows exe，通过 .bat 启动；bash export 不会自动传给 cmd.exe，
 # 因此需要在生成 .bat 时显式 set 环境变量。这里先把 .env 的变量 source
 # 到当前 shell，后续 generate .bat 时再注入。
-# 只加载 VENUS_ 前缀的变量（避免覆盖 Hermes/Adapter 专用变量）。
+# 默认架构是 MCP → Hermes → Venus：MCP 走 hermes backend，Venus 凭据由
+# Hermes 容器通过 docker-compose env_file 直接读取，不经过 MCP。
+# 这里仍加载 VENUS_ 前缀变量，便于临时切回 --llm-backend venus 直连调试。
 if [ -f "$ENV_FILE" ]; then
     while IFS='=' read -r key value || [ -n "$key" ]; do
         # 跳过空行和注释
@@ -82,7 +84,7 @@ if [ -f "$ENV_FILE" ]; then
 fi
 
 # Venus URL/model 默认值（与 Go flag 默认值一致）。
-# 若 .env 未定义，用此默认值；若 .env 覆盖，则用 .env 的值。
+# 仅在临时切回 --llm-backend venus 直连调试时使用；默认走 Hermes 时不读取。
 VENUS_URL="${VENUS_URL:-http://v2.open.venus.oa.com/llmproxy}"
 VENUS_MODEL="${VENUS_MODEL:-qwen3.6-35b-a3b}"
 
@@ -482,21 +484,22 @@ start_mcp() {
     info "Starting MCP (log: logs/$LOG_DATE/debug-mcp.log)..."
     # --ws :9090 在 Windows 上监听 0.0.0.0:9090，局域网可达
     # --http :8760 同理
-    # --llm-backend venus 使用 Venus 代理（Anthropic Messages API）作为战略/战术层后端；
-    #   --hermes-url 仍保留（切回 --llm-backend hermes 时用）
-    # --venus-url / --venus-model 显式传入，便于日志排查
+    # --llm-backend hermes 走 MCP → Hermes → Venus 架构：MCP 把战略/战术层
+    #   LLM 调用发给 Hermes Gateway，由 Hermes 配置 (hermes/profiles/h01-dev/
+    #   config.yaml) 决定后端模型（当前为 Venus qwen3.6-35b-a3b）。
+    #   Venus client 仍保留在代码中，需要时切回 --llm-backend venus 直连即可。
     # --world-kb 用 Windows 绝对路径，避免 cwd 不对找不到 assets/world_kb.yaml
     # WSL 里执行 Windows exe：写一个 .bat 临时文件用 cmd.exe 启动，
     # 避免在 bash 里嵌套 cmd.exe /C 时的多层引号转义问题（反斜杠+引号
     # 在 bash 双引号里会被部分解释，导致路径破损）。
     #
-    # VENUS_API_KEY 通过 .bat 的 set 命令注入（bash export 不会传给 cmd.exe）。
+    # 注意：MCP 走 Hermes 时不需要 VENUS_API_KEY，Venus 凭据由 Hermes 容器
+    # 通过 docker-compose 的 env_file: ../.env 读取，不透传到 MCP 进程。
     local bat_file="$LOG_SUBDIR/start_mcp.bat"
     cat > "$bat_file" << EOF
 @echo off
 pushd "$cwd_win"
-set VENUS_API_KEY=$VENUS_API_KEY
-"$mcp_exe_win" --http ":$HTTP_PORT" --ws ":$WS_PORT" --llm-backend venus --venus-url "$VENUS_URL" --venus-model "$VENUS_MODEL" --hermes-url "http://localhost:$HERMES_PORT" --world-kb "$world_kb_win" --log-level debug >> "$mcp_log_win" 2>&1
+"$mcp_exe_win" --http ":$HTTP_PORT" --ws ":$WS_PORT" --llm-backend hermes --hermes-url "http://localhost:$HERMES_PORT" --world-kb "$world_kb_win" --log-level debug >> "$mcp_log_win" 2>&1
 EOF
     if $IN_WSL; then
         local bat_win

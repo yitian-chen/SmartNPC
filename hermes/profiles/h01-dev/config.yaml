@@ -1,23 +1,24 @@
 model:
-  provider: custom:agenttown
-  # CodeBuddy CLI 适配层（复用 CLI OAuth 认证，详见 src/agenttown/codebuddy_adapter.py）
-  # 适配层运行在 Windows 宿主，Docker 容器通过 WSL vEthernet 网卡 IP 访问。
-  # IP 172.18.16.1 是 Windows 的 vEthernet (WSL) 适配器地址，可能在 Windows 重启后变化。
-  # 查询当前 IP：PowerShell `Get-NetIPAddress -InterfaceAlias "vEthernet (WSL (Hyper-V firewall))" -AddressFamily IPv4`
-  # 或在 WSL 里 `ip route show | grep default`（default via <IP> dev eth0，那个 <IP> 就是 Windows 宿主）
+  provider: custom:venus
+  # Venus 内部 LLM 代理平台（OpenAI Chat Completions API 兼容）。
+  # 替代原 CodeBuddy Adapter + DeepSeek 方案：MCP 仍走 Hermes Gateway，
+  # Hermes 后端改为直连 Venus，由 Venus 提供 qwen3.6-35b-a3b 模型。
+  # 认证用 Bearer Token，key_env 指向 .env 中的 VENUS_API_KEY；
+  # 该 .env 通过 docker-compose 的 env_file 透传到 Hermes 容器内。
+  # 经测试 Venus 不需要 Venus-Sticky-Routing 头即可正常路由。
   #
   # === 开发实例配置 ===
-  # 端口与稳定实例 (h01) 错开：Adapter 8771 / MCP HTTP 8770 / Hermes 8643
-  default: deepseek-v4-pro-ioa
-  base_url: http://172.18.16.1:8771/v1
+  # 端口与稳定实例 (h01) 错开：MCP HTTP 8770 / Hermes 8643
+  default: qwen3.6-35b-a3b
+  base_url: http://v2.open.venus.oa.com/llmproxy/v1
   api_mode: chat_completions
   context_length: 128000
 providers:
-  agenttown:
-    name: agenttown
-    base_url: http://172.18.16.1:8771/v1
-    key_env: HERMES_AGENT_API_KEY
-    default_model: deepseek-v4-pro-ioa
+  venus:
+    name: venus
+    base_url: http://v2.open.venus.oa.com/llmproxy/v1
+    key_env: VENUS_API_KEY
+    default_model: qwen3.6-35b-a3b
     api_mode: chat_completions
     discover_models: false
 agent:
@@ -34,7 +35,7 @@ compression:
   target_ratio: 0.25
   protect_last_n: 12
   hygiene_hard_message_limit: 80
-_config_version: 33
+_config_version: 34
 API_SERVER_ENABLED: true
 API_SERVER_KEY: agenttown-test-key
 API_SERVER_HOST: 0.0.0.0
