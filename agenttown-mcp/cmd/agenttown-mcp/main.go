@@ -1585,6 +1585,12 @@ func handleDebugSchedule(ctx context.Context, logger *slog.Logger, ws *wsserver.
 		return
 	}
 
+	// 入口日志：请求到达（字段已校验非空）。分解可能耗时 3-15s，
+	// 若 LLM 超时（60s）后续无 decompose ok 日志，可凭此条追踪请求来源。
+	force := req.Force == nil || *req.Force
+	logger.Info("[debug/schedule] request received",
+		"agent_id", req.AgentID, "schedule", req.Schedule, "force", force)
+
 	// schedule 支持两种形态：
 	//   (a) 带时间段："HH:MM-HH:MM: 目标描述"（与 dailyPlan 单行格式一致）
 	//   (b) 纯 goal："目标描述"（不含时间段，slot 留空）
@@ -1624,8 +1630,6 @@ func handleDebugSchedule(ctx context.Context, logger *slog.Logger, ws *wsserver.
 		_ = json.NewEncoder(w).Encode(debugScheduleResponse{Error: "unknown agent_id: " + req.AgentID})
 		return
 	}
-
-	force := req.Force == nil || *req.Force
 
 	// 互斥：检查 replanInProgress（防 worker 并发 refill 撞 tacticalHc session）；
 	// 检查 tacticalHc 是否就绪。设 replanInProgress=true + debugOverride=true。
