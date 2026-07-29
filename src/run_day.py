@@ -44,6 +44,24 @@ async def _run(args):
         mock.print_report()
 
 
+def _clear_mcp_logs(log_dir: str) -> None:
+    """Truncate MCP 日志文件，确保每次仿真从干净日志开始。
+
+    覆盖 log_dir 下的 debug-mcp.log（dev）和 sim.log（stable）。
+    用 'w' 模式打开即 truncate（文件存在则清空内容，不存在则忽略）。
+
+    安全性：dev 实例 MCP 是 Windows exe + >> 追加，truncate 后 O_APPEND
+    会自动 seek to end(=0)，下次 write 从头开始，无 sparse 风险。
+    """
+    for name in ("debug-mcp.log", "sim.log"):
+        path = os.path.join(log_dir, name)
+        if os.path.exists(path) and os.path.getsize(path) > 0:
+            prev_size = os.path.getsize(path)
+            with open(path, "w"):
+                pass  # truncate to 0
+            print(f"[OK] 已清空 MCP 日志: {path} (was {prev_size} bytes)")
+
+
 def main():
     parser = argparse.ArgumentParser(description="AgentTown Mock UE — Run a game day")
     parser.add_argument("--mcp-ws", default="ws://localhost:9091/ws",
@@ -63,6 +81,9 @@ def main():
     parser.add_argument("--log-dir", default="logs",
                         help="Directory for Mock UE day logs "
                              "(start.sh passes logs/YYYY-MM-DD)")
+    parser.add_argument("--no-clear-log", action="store_true",
+                        help="不清空 MCP 日志文件（WSL stable 场景用："
+                             "WSL MCP 的 O_APPEND fd 跨 drvfs truncate 会产生 sparse nul）")
     parser.add_argument("--world-kb", default="assets/world_kb.yaml",
                         help="Path to world_kb.yaml (single source of truth for "
                              "zone/location/object data, shared with agenttown-mcp)")
@@ -82,15 +103,17 @@ def main():
         print("Start MCP first:  agenttown-mcp --http :8770 --ws :9091")
         sys.exit(1)
 
-    # sim.log 的清空由 start.sh 在启动 MCP 之前负责（WSL 端操作，与 MCP
-    # 同侧）。这里不再清空：Windows 端 Python truncate 与 WSL 端 MCP 的
-    # O_APPEND fd 竞争会导致 WSL fd 偏移停留在旧位置，下次 write 在旧
-    # 偏移处写入，前面变成 sparse \0 字节（巨量 nul 问题根因）。
-    # 若直接跑 run_day.py（不经 start.sh），需手动清空或重启 MCP。
-    sim_log_path = os.path.join(args.log_dir, "sim.log")
-    if os.path.exists(sim_log_path) and os.path.getsize(sim_log_path) > 0:
-        print(f"[WARN] {sim_log_path} 已存在且非空（size={os.path.getsize(sim_log_path)}），"
-              f"将追加写入。如需清空请通过 start.sh 启动或手动删除。")
+    # 清空 MCP 日志文件，确保每次仿真从干净日志开始。
+    #
+    # dev 实例：MCP 是 Windows exe，用 >> 追加重定向。Windows 的 O_APPEND
+    # 每次 write 前 seek to end，truncate 后 end=0，下次 write 从头开始 → 安全。
+    #
+    # stable 实例：MCP 在 WSL 跑，通过 drvfs 访问 Windows 文件。truncate 后
+    # WSL 侧 fd 偏移不重置，下次 write 在旧偏移处写入，前面变成 sparse \0
+    # （巨量 nul 问题根因）。stable 用 --no-clear-log 规避，清空交给 start.sh
+    # 在启动 MCP 之前同侧完成。
+    if not args.no_clear_log:
+        _clear_mcp_logs(args.log_dir)
 
     asyncio.run(_run(args))
 

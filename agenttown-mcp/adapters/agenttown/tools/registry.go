@@ -26,13 +26,23 @@ import (
 // the ACK. The concrete implementation wraps *wsserver.Server; tests can
 // substitute a fake.
 //
-// 反应层移除后，scan_area/stop 工具的 handler 直接返回 error，不再需要
-// RequestScan / LookupCurrentActionID / ClearCurrentActionID / SendStopAction。
-// 接口仅保留 SendAction（13 个原子/组合工具仍用）。
+// P1 恢复 scan_area/stop 工具后，Executor 增加 RequestScan 和 SendStopAction
+// 两个方法，对应 reaction 层的两个工具调用。
 type Executor interface {
 	// SendAction sends an action_command (cmd + params) for the given agent
 	// and waits for the action_started ACK. Returns the ACK.
 	SendAction(ctx context.Context, agentID string, decisionEpoch int64, cmd string, params map[string]any) (*protocol.ActionStartedPayload, error)
+
+	// RequestScan asks UE to emit an immediate perception_update for the
+	// agent (fire-and-forget). The perception arrives asynchronously via
+	// the normal perception_update channel, triggering observePerception.
+	// scanID is echoed by the response for correlation.
+	RequestScan(ctx context.Context, agentID, scanID string) error
+
+	// SendStopAction sends a stop_action control message to stop the given
+	// action. If actionID is empty, the implementation looks up the agent's
+	// current in-flight action. Fire-and-forget (no ACK expected).
+	SendStopAction(agentID, actionID string) error
 }
 
 // RegisterAll installs all AgentTown tools onto the given mcp.Server.

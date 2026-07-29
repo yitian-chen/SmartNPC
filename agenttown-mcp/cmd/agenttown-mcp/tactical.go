@@ -57,6 +57,7 @@ const tacticalPromptTemplate = `[战术层/任务分解] 当前时段目标：%s
 请把这个目标分解为 3-5 步具体的 action，按顺序执行。
 %s
 %s
+%s
 可用工具（仅限以下 13 个，禁止使用 scan_area / stop）：
 - move_to: 移动到目标位置。params: {"target":"区域或位置id"}
 - turn_to: 转向目标。params: {"target":"实体id"}
@@ -91,13 +92,17 @@ const tacticalPromptTemplate = `[战术层/任务分解] 当前时段目标：%s
 // slot 形如 "HH:MM-HH:MM"，用于在 prompt 里提示当前时段时长，引导 LLM
 // 给出总时长接近 slot 时长的步骤，减少队列提前耗尽导致的重分解。
 // slot 为空或解析失败时该提示行降级为空，保持旧行为。
-func buildTacticalPrompt(goal, zone, timeOfDay, slot string, physical *protocol.PhysicalState, kb *worldkb.KB) string {
+func buildTacticalPrompt(goal, zone, timeOfDay, slot string, physical *protocol.PhysicalState, kb *worldkb.KB, hint string) string {
 	e, f, j, h := 0.0, 0.0, 0.0, 0.0
 	if physical != nil {
 		e, f, j, h = physical.Energy, physical.Fatigue, physical.JointWear, physical.Health
 	}
+	hintLine := ""
+	if hint != "" {
+		hintLine = "【上次中断原因】" + hint + "（请据此调整本轮规划）"
+	}
 	return fmt.Sprintf(tacticalPromptTemplate, goal, zone, timeOfDay, e, f, j, h,
-		buildSlotDurationHint(slot), buildKBContext(kb))
+		hintLine, buildSlotDurationHint(slot), buildKBContext(kb))
 }
 
 // buildSlotDurationHint 根据slot "HH:MM-HH:MM" 构造一行提示文本。
@@ -185,10 +190,12 @@ func generateTacticalPlan(
 	physical *protocol.PhysicalState,
 	kb *worldkb.KB,
 	logger *slog.Logger,
+	hint string,
 ) ([]plannedAction, string, error) {
-	prompt := buildTacticalPrompt(goal, zone, timeOfDay, slot, physical, kb)
+	prompt := buildTacticalPrompt(goal, zone, timeOfDay, slot, physical, kb, hint)
 	logger.Info("[MCP→Hermes/TACTICAL-PROMPT]",
-		"agent_id", agentID, "goal", goal, "game_time", timeOfDay, "text", prompt)
+		"agent_id", agentID, "goal", goal, "game_time", timeOfDay, "text", prompt,
+		"replan_hint", hint)
 
 	resp, err := tc.SendWithSummary(ctx, prompt, "")
 	if err != nil {
@@ -227,11 +234,13 @@ func generateTacticalPlanStreaming(
 	physical *protocol.PhysicalState,
 	kb *worldkb.KB,
 	logger *slog.Logger,
+	hint string,
 	onAction func(plannedAction),
 ) ([]plannedAction, string, error) {
-	prompt := buildTacticalPrompt(goal, zone, timeOfDay, slot, physical, kb)
+	prompt := buildTacticalPrompt(goal, zone, timeOfDay, slot, physical, kb, hint)
 	logger.Info("[MCP→Hermes/TACTICAL-PROMPT]",
-		"agent_id", agentID, "goal", goal, "game_time", timeOfDay, "text", prompt, "streaming", true)
+		"agent_id", agentID, "goal", goal, "game_time", timeOfDay, "text", prompt,
+		"streaming", true, "replan_hint", hint)
 
 	var actions []plannedAction
 	acc := &streamAccumulator{

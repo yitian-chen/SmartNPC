@@ -22,6 +22,7 @@ sim.log 每行是一条 JSON，单行可能上千字（perception text 完整不
     python scripts/pretty_log.py --html -o report.html    # 指定输出路径
     python scripts/pretty_log.py --html --no-open         # 生成但不自动打开
     python scripts/pretty_log.py --html --hermes          # 整合 Hermes 容器日志
+    python scripts/pretty_log.py --html --dev             # dev 实例（logs-dev/ + h01-dev）
 
     # 终端渲染
     python scripts/pretty_log.py                          # 查看今天的 sim.log
@@ -75,6 +76,8 @@ _DIRECTION_ALIASES = {
     "STRATEGIC-RESPONSE": "Hermes→MCP/STRATEGIC-RESPONSE",
     "TACTICAL-PROMPT": "MCP→Hermes/TACTICAL-PROMPT",
     "TACTICAL-RESPONSE": "Hermes→MCP/TACTICAL-RESPONSE",
+    "REACTIVE-PROMPT": "[反应层/PROMPT]",
+    "REACTIVE-RESPONSE": "[反应层/RESPONSE]",
     "HERMES": "Hermes/internal",
     "HEARTBEAT": "heartbeat",
 }
@@ -93,6 +96,12 @@ _DIRECTION_CSS = {
     "Hermes→MCP/STRATEGIC-RESPONSE": "dir-strategic",
     "MCP→Hermes/TACTICAL-PROMPT": "dir-tactical",
     "Hermes→MCP/TACTICAL-RESPONSE": "dir-tactical",
+    "[反应层/PROMPT]": "dir-reactive",
+    "[反应层/RESPONSE]": "dir-reactive",
+    "[反应层/触发]": "dir-reactive",
+    "[反应层/决策]": "dir-reactive",
+    "[反应层/失败]": "dir-reactive",
+    "[反应层]": "dir-reactive",
     "[战略层]": "dir-strategic",
     "[战术层]": "dir-tactical",
     "Hermes/internal": "dir-hermes",
@@ -246,13 +255,16 @@ def _hide_heartbeat(rec: dict, explicit_heartbeat: bool) -> bool:
     return "heartbeat" in msg
 
 
-def _resolve_log_path(arg: str | None) -> Path:
+def _resolve_log_path(arg: str | None, dev: bool = False) -> Path:
+    # dev 实例：logs-dev/YYYY-MM-DD/debug-mcp.log
+    # stable 实例：logs/YYYY-MM-DD/sim.log
+    log_dir, log_name = ("logs-dev", "debug-mcp.log") if dev else ("logs", "sim.log")
     if arg is None:
         today = _dt.date.today().isoformat()
-        return Path("logs") / today / "sim.log"
+        return Path(log_dir) / today / log_name
     p = Path(arg)
     if not p.exists() and _looks_like_date(arg):
-        return Path("logs") / arg / "sim.log"
+        return Path(log_dir) / arg / log_name
     return p
 
 
@@ -562,6 +574,7 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
   --hermes: #d16969;
   --strategic: #b267e6;
   --tactical: #f4a261;
+  --reactive: #56c8d8;
 }}
 * {{ box-sizing: border-box; }}
 body {{
@@ -636,6 +649,7 @@ body {{
 .entry.dir-hermes .entry-header {{ border-left-color: var(--hermes); }}
 .entry.dir-strategic .entry-header {{ border-left-color: var(--strategic); }}
 .entry.dir-tactical .entry-header {{ border-left-color: var(--tactical); }}
+.entry.dir-reactive .entry-header {{ border-left-color: var(--reactive); }}
 .entry.level-WARN .entry-header {{ border-left-color: var(--warn); }}
 .entry.level-ERROR .entry-header {{ border-left-color: var(--error); }}
 .entry-time {{ color: var(--time); flex-shrink: 0; }}
@@ -659,6 +673,7 @@ body {{
 .entry.dir-hermes .entry-msg {{ color: var(--hermes); }}
 .entry.dir-strategic .entry-msg {{ color: var(--strategic); }}
 .entry.dir-tactical .entry-msg {{ color: var(--tactical); }}
+.entry.dir-reactive .entry-msg {{ color: var(--reactive); }}
 .entry-meta {{ color: var(--fg-dim); font-size: 12px; margin-left: auto; }}
 .entry-body {{
   display: none;
@@ -695,6 +710,7 @@ body {{
   <button class="filter-btn" data-filter="TOOL">TOOL</button>
   <button class="filter-btn" data-filter="STRATEGIC">战略</button>
   <button class="filter-btn" data-filter="TACTICAL">战术</button>
+  <button class="filter-btn" data-filter="REACTIVE">反应</button>
   <button class="filter-btn" data-filter="HERMES">Hermes</button>
   <select id="game-time-filter" title="按游戏时间过滤">
     <option value="ALL">游戏时间：全部</option>
@@ -743,6 +759,7 @@ function applyFilters() {{
         'TOOL': 'Hermes→MCP/TOOL',
         'STRATEGIC': ['MCP→Hermes/STRATEGIC-PROMPT', 'Hermes→MCP/STRATEGIC-RESPONSE', '[战略层]'],
         'TACTICAL': ['MCP→Hermes/TACTICAL-PROMPT', 'Hermes→MCP/TACTICAL-RESPONSE', '[战术层]'],
+        'REACTIVE': ['[反应层/PROMPT]', '[反应层/RESPONSE]', '[反应层/触发]', '[反应层/决策]', '[反应层/失败]', '[反应层]'],
         'HERMES': 'Hermes/internal',
       }};
       const full = filterMap[currentFilter] || currentFilter;
@@ -991,9 +1008,14 @@ def main() -> int:
         action="store_true",
         help="显示 Hermes 日志全部条目（默认只保留 LLM 决策相关 + WARNING/ERROR）",
     )
+    ap.add_argument(
+        "--dev",
+        action="store_true",
+        help="查看 dev 实例日志（默认 logs-dev/YYYY-MM-DD/debug-mcp.log；--hermes 默认 h01-dev profile）",
+    )
     args = ap.parse_args()
 
-    log_path = _resolve_log_path(args.path)
+    log_path = _resolve_log_path(args.path, dev=args.dev)
     if not log_path.exists():
         print(f"日志文件不存在：{log_path}", file=sys.stderr)
         return 1
@@ -1005,10 +1027,12 @@ def main() -> int:
         if args.hermes_log:
             hermes_path = Path(args.hermes_log)
         else:
-            # 默认位置：项目根 hermes/profiles/h01/logs/agent.log
+            # 默认位置：项目根 hermes/profiles/<profile>/logs/agent.log
+            # dev 实例用 h01-dev profile，stable 用 h01
             # 从 sim.log 路径回推项目根（logs/YYYY-MM-DD/sim.log → ../..）
             project_root = log_path.parent.parent.parent
-            hermes_path = project_root / "hermes" / "profiles" / "h01" / "logs" / "agent.log"
+            profile = "h01-dev" if args.dev else "h01"
+            hermes_path = project_root / "hermes" / "profiles" / profile / "logs" / "agent.log"
         if not hermes_path.exists():
             print(f"警告：Hermes 日志不存在：{hermes_path}", file=sys.stderr)
         else:

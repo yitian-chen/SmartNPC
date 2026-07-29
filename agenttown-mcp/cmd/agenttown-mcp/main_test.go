@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/AgentTown/agenttown-mcp/pkg/hermes"
 	"github.com/AgentTown/agenttown-mcp/pkg/protocol"
 	"github.com/AgentTown/agenttown-mcp/pkg/wsserver"
 )
@@ -34,7 +35,7 @@ func TestRecordActionCompletion_SignalsWorkerAndClearsInFlight(t *testing.T) {
 	default:
 	}
 
-	queued := ac.recordActionCompletion(protocol.ActionCompletedPayload{
+	queued, _, _ := ac.recordActionCompletion(protocol.ActionCompletedPayload{
 		ActionID: "act_t1", Result: protocol.ResultSuccess, Progress: 1,
 	})
 	if !queued {
@@ -60,7 +61,46 @@ func TestRecordActionCompletion_SignalsWorkerAndClearsInFlight(t *testing.T) {
 	}
 }
 
-func TestRecordEventNotification_NoOpPreservesQueue(t *testing.T) {
+// TestRecordActionCompletion_SuccessNoTrigger 验证成功完成的 action 不触发
+// 反应层（成功是常态，无需评估）。
+func TestRecordActionCompletion_SuccessNoTrigger(t *testing.T) {
+	ac, _ := newAgentContext(context.Background())
+	queued, trigger, detail := ac.recordActionCompletion(protocol.ActionCompletedPayload{
+		ActionID: "act_ok_1", Result: protocol.ResultSuccess, Progress: 1,
+	})
+	if !queued {
+		t.Fatal("queued should be true")
+	}
+	if trigger != "" {
+		t.Errorf("success should not trigger, got trigger=%q", trigger)
+	}
+	if detail != "" {
+		t.Errorf("success should return empty detail, got %q", detail)
+	}
+}
+
+// TestRecordActionCompletion_FailureTriggers 验证异常完成的 action 触发反应层，
+// 且 detail 用 result 作为去抖维度（不含 action_id，避免去抖失效）。
+func TestRecordActionCompletion_FailureTriggers(t *testing.T) {
+	ac, _ := newAgentContext(context.Background())
+	queued, trigger, detail := ac.recordActionCompletion(protocol.ActionCompletedPayload{
+		ActionID: "act_fail_1", Result: protocol.ResultFailed, Progress: 0.3,
+	})
+	if !queued {
+		t.Fatal("queued should be true")
+	}
+	if trigger != TriggerActionDone {
+		t.Errorf("trigger: got %q, want %q", trigger, TriggerActionDone)
+	}
+	if !strings.Contains(detail, "failed") {
+		t.Errorf("detail should mention result=failed: %q", detail)
+	}
+	if strings.Contains(detail, "act_fail_1") {
+		t.Errorf("detail should NOT contain action_id (breaks dedup): %q", detail)
+	}
+}
+
+func TestRecordEventNotification_ReturnsTrigger(t *testing.T) {
 	ac, _ := newAgentContext(context.Background())
 	setQueueForTest(ac, []plannedAction{
 		{Action: "move_to", Params: map[string]any{"target": "main_workshop"}},
@@ -71,16 +111,27 @@ func TestRecordEventNotification_NoOpPreservesQueue(t *testing.T) {
 	ac.redecomposeCount = 1
 	ac.mu.Unlock()
 
-	// 反应层移除后：事件通知不再打断战术队列，返回 false（未触发决策）
-	queued := ac.recordEventNotification(protocol.EventNotificationPayload{
+	// 反应层 P0：recordEventNotification 返回 (TriggerEventNotify, detail)
+	// 供 WS handler 异步触发 reactiveRunner。本测试验证签名 + 队列不被改动。
+	trigger, detail := ac.recordEventNotification(protocol.EventNotificationPayload{
 		EventID:         "evt_001",
 		PerceptionLevel: "audible",
 		Event:           map[string]any{"type": "alert"},
 	})
-	if queued {
-		t.Fatal("event notification should not queue a decision after reactive layer removal")
+	if trigger != TriggerEventNotify {
+		t.Fatalf("trigger=%q, want %q", trigger, TriggerEventNotify)
 	}
-	// 队列应原样保留
+	if detail == "" {
+		t.Error("detail should not be empty")
+	}
+	if !strings.Contains(detail, "evt_001") {
+		t.Errorf("detail should contain event_id, got %q", detail)
+	}
+	if !strings.Contains(detail, "alert") {
+		t.Errorf("detail should contain event type, got %q", detail)
+	}
+
+	// 队列应原样保留（recordEventNotification 不再触碰战术队列）
 	ac.mu.Lock()
 	queueLen := len(ac.actionQueue)
 	slot := ac.currentSlot
@@ -541,3 +592,61 @@ func TestAgentContext_DebugOverrideLifecycle(t *testing.T) {
 }
 
 func boolPtr(b bool) *bool { return &b }
+
+// ─── tacticalRefillForReplan 测试 ──────────────────────────────
+
+func TestTacticalRefillForReplan_NoTacticalHc(t *testing.T) {
+	ac, _ := newAgentContext(context.Background())
+	// tacticalHc 默认 nil
+	ok := ac.tacticalRefillForReplan(context.Background(), "H-01", nil, nil, slog.Default(), "test hint")
+	if ok {
+		t.Error("should return false when tacticalHc is nil")
+	}
+}
+
+func TestTacticalRefillForReplan_NoGoal(t *testing.T) {
+	ac, _ := newAgentContext(context.Background())
+	// 设置 tacticalHc 但不设 dailyPlan → selectCurrentGoal 返回 ""
+	ac.mu.Lock()
+	ac.tacticalHc = newFailedHermesClient()
+	ac.dailyPlan = ""
+	ac.mu.Unlock()
+	ok := ac.tacticalRefillForReplan(context.Background(), "H-01", nil, nil, slog.Default(), "test hint")
+	if ok {
+		t.Error("should return false when no current goal")
+	}
+}
+
+func TestTacticalRefillForReplan_LLMFail(t *testing.T) {
+	ac, _ := newAgentContext(context.Background())
+	// 设置 tacticalHc 指向无效端口 → LLM 调用必然失败
+	// 保留旧队列：失败时不应清空
+	oldQueue := []plannedAction{{Action: "wait", Params: map[string]any{"duration_sec": 30}}}
+	setQueueForTest(ac, oldQueue)
+	// 构造一个含 time_of_day 的 perception，使 selectCurrentGoal 能匹配到 slot
+	percJSON, _ := json.Marshal(protocol.PerceptionPayload{
+		Environment: protocol.Environment{TimeOfDay: "09:00"},
+	})
+	ac.mu.Lock()
+	ac.tacticalHc = newFailedHermesClient()
+	ac.dailyPlan = "06:00-12:00: 上午装配\n12:00-13:00: 午休"
+	ac.latestPerception = percJSON
+	ac.mu.Unlock()
+	ok := ac.tacticalRefillForReplan(context.Background(), "H-01", nil, nil, slog.Default(), "test hint")
+	if ok {
+		t.Error("should return false when LLM call fails")
+	}
+	// 验证旧队列保留
+	ac.mu.Lock()
+	queueLen := len(ac.actionQueue)
+	ac.mu.Unlock()
+	if queueLen != 1 {
+		t.Errorf("old queue should be preserved on failure, got len=%d", queueLen)
+	}
+}
+
+// newFailedHermesClient 构造一个指向无效端口的 hermes.Client，
+// 任何 LLM 调用都会因连接失败而返回 error。
+func newFailedHermesClient() *hermes.Client {
+	return hermes.New(hermes.Config{URL: "http://127.0.0.1:1"})
+}

@@ -35,6 +35,7 @@ import (
 	"github.com/AgentTown/agenttown-mcp/adapters/agenttown/tools"
 	"github.com/AgentTown/agenttown-mcp/internal/log"
 	"github.com/AgentTown/agenttown-mcp/pkg/hermes"
+	"github.com/AgentTown/agenttown-mcp/pkg/ollama"
 	"github.com/AgentTown/agenttown-mcp/pkg/protocol"
 	"github.com/AgentTown/agenttown-mcp/pkg/transport"
 	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
@@ -54,20 +55,32 @@ type agentContext struct {
 	latestPhysical        *protocol.PhysicalState
 	latestPerception      json.RawMessage
 	currentTask           *protocol.CurrentTaskProgress
-	currentActionID       string // 当前执行中的 action_id（mu 保护），空表示无执行中动作
+	currentActionID       string                 // 当前执行中的 action_id（mu 保护），空表示无执行中动作
+	currentActionCmd      string                 // mu 保护，当前在途 action 的 cmd（如 move_to / work_assemble），用于反应层 prompt
+	currentActionParams   map[string]any         // mu 保护，当前在途 action 的 params，用于反应层 prompt
+	currentActionStart    time.Time              // mu 保护，当前在途 action 的开始时间，用于反应层计算 elapsed
 	pendingActionTimeouts map[string]*time.Timer // action_id → 超时 timer（mu 保护），约定 §5.2 action_completed 1.5× 估值超时
-	dailyPlan             string         // mu 保护，战略层生成的每日计划（格式化字符串），空=未生成或失败
-	strategicHc           *hermes.Client // mu 保护，战略层专用 Hermes client（独立 session）
-	tacticalHc            *hermes.Client // mu 保护，战术层专用 Hermes client（独立 session）
-	actionQueue           []plannedAction // mu 保护，战术层分解出的待执行 action（FIFO）
-	currentActionSrc      actionSource    // mu 保护，当前在途 action 的来源（hermes/tactical/空）
-	currentPlanIndex      int             // mu 保护，当前执行到 daily_plan 第几个 item（记账用）
-	currentSlot           string          // mu 保护，当前分解的时段 "HH:MM-HH:MM"（防同时段重复分解）
-	redecomposeCount      int             // mu 保护，当前时段已重复分解次数（防死循环）
-	debugOverride         bool            // mu 保护，debug 手动 action 期间暂停 worker dispatch（避免 stop→idle wait 竞态）
-	wake                  chan struct{}
-	cancel                context.CancelFunc
-	stopped               bool
+	dailyPlan             string                 // mu 保护，战略层生成的每日计划（格式化字符串），空=未生成或失败
+	strategicHc           *hermes.Client         // mu 保护，战略层专用 Hermes client（独立 session）
+	tacticalHc            *hermes.Client         // mu 保护，战术层专用 Hermes client（独立 session）
+	actionQueue           []plannedAction        // mu 保护，战术层分解出的待执行 action（FIFO）
+	currentActionSrc      actionSource           // mu 保护，当前在途 action 的来源（hermes/tactical/空）
+	currentPlanIndex      int                    // mu 保护，当前执行到 daily_plan 第几个 item（记账用）
+	currentSlot           string                 // mu 保护，当前分解的时段 "HH:MM-HH:MM"（防同时段重复分解）
+	redecomposeCount      int                    // mu 保护，当前时段已重复分解次数（防死循环）
+	// 反应层状态（mu 保护）
+	prevZone         string               // 上次感知的 zone id（用于检测 zone 变化触发反应层）
+	prevObjectIDs    []string             // 上次感知的 nearby_objects id 列表（用于检测新物体出现）
+	lastReactiveAt   map[string]time.Time // 去抖：trigger dedupe key → 上次触发时间
+	perceptionCount  int                  // 累计感知次数（用于周期性触发反应层）
+	debugOverride    bool                 // mu 保护，debug 手动 action 期间暂停 worker dispatch（避免 stop→idle wait 竞态）
+	wake           chan struct{}
+	cancel         context.CancelFunc
+	stopped        bool
+	// replan 状态（mu 保护）
+	lastReplanAt     time.Time // wall-clock，30 min 去抖（replanDedupeWindow）
+	replanInProgress bool      // replan 规划进行中，阻止 worker 抢先 pop/refill
+	replanHint       string    // 传入战术层 prompt 的"上次中断原因"（replan reason）
 }
 
 func newAgentContext(parent context.Context, epochs ...int64) (*agentContext, context.Context) {
@@ -78,54 +91,90 @@ func newAgentContext(parent context.Context, epochs ...int64) (*agentContext, co
 	}
 	return &agentContext{
 		online: true, agentEpoch: agentEpoch,
-		wake:                  make(chan struct{}, 1), cancel: cancel,
+		wake: make(chan struct{}, 1), cancel: cancel,
 		pendingActionTimeouts: make(map[string]*time.Timer),
+		lastReactiveAt:        make(map[string]time.Time),
 	}, ctx
 }
 
 // observePerception 存储最新感知payload，供战术层 refill 时读取当前世界状态。
-// 反应层移除后：感知不再触发 LLM 决策，仅更新 latestPerception。
-func (a *agentContext) observePerception(payload json.RawMessage) error {
+// 反应层：检测 zone 变化 / 新物体出现 / 周期性触发，若显著变化则返回 trigger 信息供
+// message handler 异步触发 reactiveRunner.trigger。
+func (a *agentContext) observePerception(payload json.RawMessage) (ReactiveTrigger, string, error) {
 	var p protocol.PerceptionPayload
 	if err := json.Unmarshal(payload, &p); err != nil {
-		return fmt.Errorf("parse perception: %w", err)
+		return "", "", fmt.Errorf("parse perception: %w", err)
 	}
 	a.mu.Lock()
 	if a.stopped {
 		a.mu.Unlock()
-		return nil
+		return "", "", nil
 	}
+	// 提取当前 zone + object ids，对比 prev 检测显著变化
+	curZone := ""
+	if p.Location.CurrentZone != nil {
+		curZone = *p.Location.CurrentZone
+	}
+	curObjectIDs := extractObjectIDs(p)
+	prevZone := a.prevZone
+	prevObjectIDs := a.prevObjectIDs
+	prevPhysical := a.latestPhysical
+	// 更新感知状态
 	a.latestPerception = cloneRawMessage(payload)
+	a.prevZone = curZone
+	a.prevObjectIDs = curObjectIDs
+	a.perceptionCount++
+	pCount := a.perceptionCount
 	a.mu.Unlock()
+
+	// 检测显著变化（zone/新物体）。物理警戒带由 updateState 检测，
+	// 这里 prev/cur physical 都用 latestPhysical（即上次 state_report），
+	// 不重复检测物理触发。
+	trigger, detail := shouldTriggerReactive(prevZone, curZone, prevObjectIDs, curObjectIDs, prevPhysical, prevPhysical)
+	// 事件类触发优先；无事件时检查周期性触发
+	if trigger == "" {
+		trigger, detail = shouldTriggerPeriodic(pCount)
+	}
+
 	// 感知是 worker 的主驱动源：每次感知到达都唤醒它检查战术队列
 	// （pop 下一个 / refill 新时段）。tacticalRefill 内部的守卫避免重复 LLM 调用。
 	a.signal()
-	return nil
+	return trigger, detail, nil
 }
 
-// updateState 存储权威的物理/任务状态。反应层移除后：不再触发决策，
-// 物理警阈带由下一时段 tacticalRefill 自纠正。
-func (a *agentContext) updateState(report protocol.StateReportPayload) {
+// updateState 存储权威的物理/任务状态。反应层：检测物理状态突破警戒带，
+// 返回 trigger 信息供 message handler 触发 reactiveRunner。
+func (a *agentContext) updateState(report protocol.StateReportPayload) (ReactiveTrigger, string) {
 	a.mu.Lock()
 	if a.stopped {
 		a.mu.Unlock()
-		return
+		return "", ""
 	}
+	prevPhysical := a.latestPhysical
 	physical := report.PhysicalState
 	a.latestPhysical = &physical
 	a.currentTask = cloneTask(report.CurrentTaskProgress)
 	a.mu.Unlock()
+
+	// 检测物理警戒带突破（zone/objects 不在此检测，由 observePerception 负责）
+	return shouldTriggerReactive("", "", nil, nil, prevPhysical, &physical)
 }
 
-// recordActionCompletion 处理 action_completed。反应层移除后：所有来源的
-// completion 都清在途追踪并 signal worker（pop 下一个或 refill）。
-func (a *agentContext) recordActionCompletion(completion protocol.ActionCompletedPayload) bool {
+// recordActionCompletion 处理 action_completed。所有来源的 completion 都清
+// 在途追踪并 signal worker（pop 下一个或 refill）。反应层：仅在 action 异常
+// 完成（failed/interrupted/error）时触发评估——成功完成是常态，每次都问
+// "要不要打断"意义不大（模型看不到战术层整体规划，只能基于贫乏信息答 continue）。
+// 异常完成才是真正需要反应层介入的时机。
+func (a *agentContext) recordActionCompletion(completion protocol.ActionCompletedPayload) (bool, ReactiveTrigger, string) {
 	a.mu.Lock()
 	if a.currentTask != nil && a.currentTask.ActionID == completion.ActionID {
 		a.currentTask = nil
 	}
 	if a.currentActionID == completion.ActionID {
 		a.currentActionID = ""
+		a.currentActionCmd = ""
+		a.currentActionParams = nil
+		a.currentActionStart = time.Time{}
 	}
 	// 取消 action_completed 超时 timer（约定 §5.2）
 	if timer, ok := a.pendingActionTimeouts[completion.ActionID]; ok {
@@ -135,14 +184,27 @@ func (a *agentContext) recordActionCompletion(completion protocol.ActionComplete
 	a.currentActionSrc = ""
 	a.mu.Unlock()
 	a.signal()
-	return true
+	// 反应层触发：仅异常完成触发。detail 用 result 作为去抖维度（避免每次
+	// action_id 不同导致去抖失效），相同 result 在 60s 内不重复触发。
+	if completion.Result == protocol.ResultSuccess {
+		return true, "", ""
+	}
+	detail := fmt.Sprintf("result=%s progress=%.2f", completion.Result, completion.Progress)
+	return true, TriggerActionDone, detail
 }
 
-// recordEventNotification 处理环境事件通知。反应层移除后：环境事件不打断
-// 战术队列，仅记录日志（WS handler 已记录），等下一时段 tacticalRefill 自纠正。
-func (a *agentContext) recordEventNotification(event protocol.EventNotificationPayload) bool {
-	_ = event
-	return false
+// recordEventNotification 处理环境事件通知。反应层：返回 trigger 信息供
+// message handler 异步触发 reactiveRunner。环境事件不打断战术队列——
+// reactiveRunner 决策若为 interrupt/act 才会发 stop_action。
+func (a *agentContext) recordEventNotification(event protocol.EventNotificationPayload) (ReactiveTrigger, string) {
+	// 提取事件类型用于去抖键（事件 id 每次不同，去抖会失效；type 是合理维度）
+	eventType, _ := event.Event["type"].(string)
+	if eventType == "" {
+		eventType = "unknown"
+	}
+	detail := fmt.Sprintf("event_id=%s level=%s type=%s",
+		event.EventID, event.PerceptionLevel, eventType)
+	return TriggerEventNotify, detail
 }
 
 func (a *agentContext) signal() {
@@ -163,6 +225,9 @@ func (a *agentContext) stop() {
 	a.latestPerception = nil
 	a.currentActionID = "" // agent 下线时清空（避免残留）
 	a.currentActionSrc = ""
+	a.currentActionCmd = ""
+	a.currentActionParams = nil
+	a.currentActionStart = time.Time{}
 	a.actionQueue = nil    // 清空战术层队列
 	a.currentSlot = ""     // 重置时段
 	a.redecomposeCount = 0 // 重置重复分解计数
@@ -178,11 +243,12 @@ func (a *agentContext) stop() {
 
 func (a *agentContext) recordActionStarted(actionID, cmd string, params map[string]any, decisionEpoch int64, src actionSource) {
 	_ = decisionEpoch // 反应层移除后不再记录到 recentActions，保留参数兼容调用方
-	_ = cmd
-	_ = params
 	a.mu.Lock()
 	a.currentActionID = actionID // 追踪当前执行中的 action（约定9 stop_action ID 匹配）
 	a.currentActionSrc = src     // 记录来源：completion 时按来源路由（tactical→signal pop 下一个）
+	a.currentActionCmd = cmd     // 反应层 prompt 用：描述当前在途动作
+	a.currentActionParams = params
+	a.currentActionStart = time.Now()
 	a.mu.Unlock()
 }
 
@@ -234,6 +300,16 @@ func runPerceptionWorker(
 		// UE 断线时跳过本轮，等重连后 agent_registered 路径 signal 唤醒。
 		if !ws.IsConnected() {
 			logger.Warn("[UE 断线] 跳过本轮，等重连", "agent_id", agentID)
+			continue
+		}
+
+		// replan 规划进行中：跳过 pop/refill，等 tacticalRefillForReplan 完成后
+		// signal 唤醒。避免规划期间 worker 抢先 pop 旧队列剩余 action 或 refill
+		// 覆盖正在生成的新队列。
+		ac.mu.Lock()
+		replanBusy := ac.replanInProgress
+		ac.mu.Unlock()
+		if replanBusy {
 			continue
 		}
 
@@ -307,6 +383,33 @@ func (g *guardedExecutor) SendAction(ctx context.Context, agentID string, decisi
 	return ack, err
 }
 
+// RequestScan 请求 UE 立即回吐一次 perception_update（fire-and-forget）。
+// 感知到达后走正常 observePerception 路径，触发反应层评估。
+func (g *guardedExecutor) RequestScan(ctx context.Context, agentID, scanID string) error {
+	if _, err := g.validate(agentID); err != nil {
+		return err
+	}
+	return g.ws.RequestScan(ctx, agentID, scanID)
+}
+
+// SendStopAction 发送 stop_action 控制消息停止指定 action。
+// actionID 为空时查 agentContext 当前在途 action；仍为空则返回 nil（无在途 action 是 no-op）。
+func (g *guardedExecutor) SendStopAction(agentID, actionID string) error {
+	ac, err := g.validate(agentID)
+	if err != nil {
+		return err
+	}
+	if actionID == "" {
+		ac.mu.Lock()
+		actionID = ac.currentActionID
+		ac.mu.Unlock()
+		if actionID == "" {
+			return nil // 无在途 action，no-op
+		}
+	}
+	return g.ws.SendStopAction(agentID, actionID)
+}
+
 // armActionTimeout 注册 action_completed 超时 timer（约定 §5.2）。
 // 超时时长 = estimated_duration_sec × 1.5；est 为 nil 或 ≤0 时默认 60s。
 // 超时回调：发 stop_action 停止该动作 + 日志警告 + 触发重新决策。
@@ -337,11 +440,14 @@ func (a *agentContext) armActionTimeout(
 		// 清除本地追踪并触发重新决策
 		ac := lookup(agentID)
 		if ac != nil {
-			ac.mu.Lock()
-			ac.currentActionID = ""
-			ac.currentActionSrc = "" // 清来源，避免 completion 路由错乱
-			delete(ac.pendingActionTimeouts, actionID)
-			ac.mu.Unlock()
+		ac.mu.Lock()
+		ac.currentActionID = ""
+		ac.currentActionSrc = "" // 清来源，避免 completion 路由错乱
+		ac.currentActionCmd = ""
+		ac.currentActionParams = nil
+		ac.currentActionStart = time.Time{}
+		delete(ac.pendingActionTimeouts, actionID)
+		ac.mu.Unlock()
 			// 触发重新决策（下次 perception 会处理）
 			select {
 			case ac.wake <- struct{}{}:
@@ -510,6 +616,17 @@ func (a *agentContext) popAndSendQueueAction(ctx context.Context, agentID string
 // latency benefit.
 var tacticalStreamingEnabled bool
 
+// tacticalCallTimeout 是单次战术层 LLM 调用（流式或非流式）的硬超时。
+// 之前直接用进程 ctx，导致 Hermes 后端 DeepSeek 排队时单次调用最长卡 120s，
+// 整个游戏时段空转。30s 失败后由调用方发 idle wait，下一个感知周期重新尝试，
+// 比死等 120s 更划算。
+const tacticalCallTimeout = 30 * time.Second
+
+// reactiveRunnerRef 是进程级反应层执行器（package-level 便于 WS handler 调用）。
+// nil 表示反应层未启用（--ollama-url="" 或客户端初始化失败）。
+// trigger() 内部 nil-check，WS handler 无需额外判空。
+var reactiveRunnerRef *reactiveRunner
+
 // tacticalRefill 调战术层 LLM 流式分解当前时段 goal，边接收边入队，
 // 首 action 在流式期间即提前下发以降低体感延迟。成功返回 true。
 func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
@@ -554,11 +671,16 @@ func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
 	var actions []plannedAction
 	var err error
 
+	// 战术层 LLM 调用统一 30s 硬超时：避免 Hermes 后端排队时单次调用卡 120s
+	// 拖死整个游戏时段。超时后调用方发 idle wait，下一感知周期重试。
+	tacticalCtx, tacticalCancel := context.WithTimeout(ctx, tacticalCallTimeout)
+	defer tacticalCancel()
+
 	if tacticalStreamingEnabled {
 		// 流式路径：onAction 回调逐个入队 + 首 action 提前下发。
 		// 回调在 SendStreaming 的 onDelta 调用栈里同步执行（worker 仍阻塞在 tacticalRefill），
 		// 不跨回调持有 mu。
-		_, _, err = generateTacticalPlanStreaming(ctx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, logger,
+		_, _, err = generateTacticalPlanStreaming(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, logger, "",
 			func(pa plannedAction) {
 				a.mu.Lock()
 				a.actionQueue = append(a.actionQueue, pa)
@@ -572,7 +694,7 @@ func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
 		)
 	} else {
 		// 非流式路径（默认）：等完整响应后一次性填充队列。
-		actions, _, err = generateTacticalPlan(ctx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, logger)
+		actions, _, err = generateTacticalPlan(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, logger, "")
 		if err == nil {
 			a.mu.Lock()
 			a.actionQueue = actions
@@ -622,6 +744,93 @@ func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
 	return true
 }
 
+// tacticalRefillForReplan 供反应层 replan 决策调用：绕过 currentActionID 守卫，
+// 强制重新分解当前时段 goal。规划成功后清空旧队列、写入新队列并 signal worker。
+// 不在此处发 stop_action（由调用方 execute() 在规划成功后发）。
+// 规划失败返回 false，调用方应保持原 action 不打断。
+//
+// 与 tacticalRefill 的区别：
+//  1. 不检查 currentActionID（允许在途 action 期间规划，这是本函数存在的全部意义）
+//  2. 强制重新分解（不受 redecomposeCount ≥2 限制，replan 是反应层显式请求）
+//  3. 重置 redecomposeCount = 0（replan 即"重新开始"）
+//  4. 通过 replanHint 注入"上次中断原因"到战术层 prompt
+func (a *agentContext) tacticalRefillForReplan(
+	ctx context.Context, agentID string, ws *wsserver.Server,
+	kb *worldkb.KB, logger *slog.Logger, replanHint string,
+) bool {
+	// 1. 取当前时段 goal（持锁）——不检查 currentActionID
+	a.mu.Lock()
+	if a.tacticalHc == nil {
+		a.mu.Unlock()
+		return false
+	}
+	goal, slot, idx := selectCurrentGoal(a.dailyPlan, a.latestTimeOfDayLocked())
+	if goal == "" {
+		a.mu.Unlock()
+		logger.Warn("[战术层/replan] 无当前时段 goal，无法 replan",
+			"agent_id", agentID)
+		return false
+	}
+	zone := a.latestZoneLocked()
+	physical := clonePhysical(a.latestPhysical)
+	tacticalHc := a.tacticalHc
+	kbRef := kb
+	hint := replanHint
+	a.mu.Unlock()
+
+	// 2. LLM 调用（30s 硬超时，与 tacticalRefill 一致）
+	tacticalCtx, tacticalCancel := context.WithTimeout(ctx, tacticalCallTimeout)
+	defer tacticalCancel()
+
+	var actions []plannedAction
+	var err error
+
+	if tacticalStreamingEnabled {
+		// 流式路径：回调收集到 local slice（不直接修改 a.actionQueue），
+		// 成功后才覆盖旧队列。失败则旧队列不受影响。
+		var collected []plannedAction
+		_, _, err = generateTacticalPlanStreaming(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, logger, hint,
+			func(pa plannedAction) {
+				collected = append(collected, pa)
+			},
+		)
+		if err == nil {
+			actions = collected
+		}
+	} else {
+		actions, _, err = generateTacticalPlan(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, logger, hint)
+	}
+
+	// 3. 失败处理：保留旧队列（不清空），调用方保持原 action
+	a.mu.Lock()
+	if err != nil {
+		queued := len(a.actionQueue)
+		a.mu.Unlock()
+		logger.Warn("[战术层/replan] 规划失败，保留原队列和原 action",
+			"agent_id", agentID, "queued", queued, "err", err)
+		return false
+	}
+
+	// 4. 成功：原子完成——覆盖旧队列、重置计数、清 hint、signal worker
+	a.actionQueue = actions
+	a.redecomposeCount = 0
+	a.currentSlot = slot
+	a.currentPlanIndex = idx
+	a.replanHint = ""
+	queueLen := len(a.actionQueue)
+	queuedActions := append([]plannedAction(nil), a.actionQueue...)
+	a.mu.Unlock()
+
+	actionsJSON, _ := json.Marshal(queuedActions)
+	logger.Info("[战术层/replan] 重规划成功，新队列已就绪",
+		"agent_id", agentID, "slot", slot, "queue_len", queueLen,
+		"replan_hint", hint, "actions", string(actionsJSON))
+
+	// 唤醒 worker（execute() 也会再 signal 一次，幂等）
+	a.signal()
+	return true
+}
+
 func main() {
 	log.EnableUTF8Console()
 
@@ -636,9 +845,13 @@ func main() {
 		mcpAPIKey          = flag.String("mcp-api-key", "", "if set, require this Bearer token on /mcp")
 		httpAllowAnyOrigin = flag.Bool("http-allow-any-origin", true,
 			"disable origin / localhost restrictions so cross-host clients can connect")
-		worldKBPath = flag.String("world-kb", "assets/world_kb.yaml", "path to world_kb.yaml (required, fail-fast on error)")
+		worldKBPath    = flag.String("world-kb", "assets/world_kb.yaml", "path to world_kb.yaml (required, fail-fast on error)")
 		tacticalStream = flag.Bool("tactical-stream", false,
 			"enable streaming for tactical layer LLM calls (experimental: only helps if upstream LLM emits tokens incrementally)")
+		ollamaURL = flag.String("ollama-url", "http://localhost:11434",
+			"Ollama base URL for reactive layer (empty disables reactive layer)")
+		ollamaModel = flag.String("ollama-model", "qwen2.5:7b-instruct-q4_K_M",
+			"Ollama model name for reactive layer decisions")
 	)
 	flag.Parse()
 	if *showVersion {
@@ -655,6 +868,8 @@ func main() {
 		"ws", *wsAddr,
 		"hermes_url", *hermesURL,
 		"tactical_stream", tacticalStreamingEnabled,
+		"ollama_url", *ollamaURL,
+		"ollama_model", *ollamaModel,
 	)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -693,6 +908,24 @@ func main() {
 		"objects", len(kb.Objects),
 		"agents", len(kb.Agents),
 	)
+
+	// ─── 反应层 Ollama 客户端 ────────────────────────────────────
+	// --ollama-url="" 显式禁用反应层；否则初始化客户端（即使 Ollama 进程
+	// 不在跑也不报错——Chat 调用失败时反应层静默降级为 continue）。
+	if *ollamaURL != "" {
+		ollamaClient := ollama.New(ollama.Options{
+			BaseURL: *ollamaURL,
+			Model:   *ollamaModel,
+			Logger:  logger,
+		})
+		reactiveRunnerRef = newReactiveRunner(ollamaClient, ws, kb, logger)
+		logger.Info("reactive layer enabled",
+			"ollama_url", ollamaClient.BaseURL(),
+			"ollama_model", ollamaClient.Model(),
+		)
+	} else {
+		logger.Info("reactive layer disabled (--ollama-url=\"\")")
+	}
 
 	// Per-agent context (Phase 1: single agent, but keyed for multi-NPC).
 	var agentsMu sync.Mutex
@@ -777,10 +1010,13 @@ func main() {
 				logger.Warn("state_report dropped for unregistered agent", "agent_id", agentID)
 				return
 			}
-			ac.updateState(sr)
+			trigger, detail := ac.updateState(sr)
 			logger.Info("state_report", "agent_id", agentID,
 				"energy", sr.PhysicalState.Energy, "fatigue", sr.PhysicalState.Fatigue,
 				"joint_wear", sr.PhysicalState.JointWear, "health", sr.PhysicalState.Health)
+			if trigger != "" {
+				go reactiveRunnerRef.trigger(agentID, ac, trigger, detail)
+			}
 
 		case protocol.TypeActionCompleted:
 			var completed protocol.ActionCompletedPayload
@@ -793,10 +1029,13 @@ func main() {
 				logger.Warn("action_completed dropped for unregistered agent", "agent_id", agentID)
 				return
 			}
-			queued := ac.recordActionCompletion(completed)
+			queued, trigger, detail := ac.recordActionCompletion(completed)
 			logger.Info("action_completed", "agent_id", agentID,
 				"action_id", completed.ActionID, "result", completed.Result,
 				"progress", completed.Progress, "decision_queued", queued)
+			if trigger != "" {
+				go reactiveRunnerRef.trigger(agentID, ac, trigger, detail)
+			}
 
 		case protocol.TypeEventNotification:
 			var event protocol.EventNotificationPayload
@@ -809,10 +1048,13 @@ func main() {
 				logger.Warn("event_notification dropped for unregistered agent", "agent_id", agentID)
 				return
 			}
-			queued := ac.recordEventNotification(event)
+			trigger, detail := ac.recordEventNotification(event)
 			logger.Info("event_notification", "agent_id", agentID,
 				"event_id", event.EventID, "perception_level", event.PerceptionLevel,
-				"decision_queued", queued)
+				"trigger", trigger)
+			if trigger != "" {
+				go reactiveRunnerRef.trigger(agentID, ac, trigger, detail)
+			}
 
 		case protocol.TypeError:
 			logger.Warn("error from mock ue", "agent_id", agentID, "payload", string(payload))
@@ -823,9 +1065,13 @@ func main() {
 				logger.Warn("perception_update dropped for unregistered agent", "agent_id", agentID)
 				return
 			}
-			if err := ac.observePerception(payload); err != nil {
+			trigger, detail, err := ac.observePerception(payload)
+			if err != nil {
 				logger.Warn("perception_update parse failed", "agent_id", agentID, "err", err)
 				return
+			}
+			if trigger != "" {
+				go reactiveRunnerRef.trigger(agentID, ac, trigger, detail)
 			}
 
 		default:
@@ -924,11 +1170,11 @@ type debugActionRequest struct {
 
 // debugActionResponse 是 /debug/action 的响应体。
 type debugActionResponse struct {
-	OK                  bool    `json:"ok"`
-	ActionID            string  `json:"action_id,omitempty"`
-	Accepted            bool    `json:"accepted,omitempty"`
+	OK                   bool    `json:"ok"`
+	ActionID             string  `json:"action_id,omitempty"`
+	Accepted             bool    `json:"accepted,omitempty"`
 	EstimatedDurationSec float64 `json:"estimated_duration_sec,omitempty"`
-	Error               string  `json:"error,omitempty"`
+	Error                string  `json:"error,omitempty"`
 }
 
 // resolveDebugMoveTo 把 move_to 的参数解析成 ws.Call 需要的完整参数。

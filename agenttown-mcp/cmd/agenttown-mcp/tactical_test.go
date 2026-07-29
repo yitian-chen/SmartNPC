@@ -385,7 +385,7 @@ func TestSelectCurrentGoal_OvernightSlotEarlyMorning(t *testing.T) {
 
 func TestGenerateTacticalPlan_HTTPError(t *testing.T) {
 	tc := &fakeStrategicCaller{err: errors.New("network down")}
-	actions, thought, err := generateTacticalPlan(context.Background(), tc, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", &protocol.PhysicalState{Energy: 80, Fatigue: 20, JointWear: 10, Health: 100}, nil, slog.Default())
+	actions, thought, err := generateTacticalPlan(context.Background(), tc, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", &protocol.PhysicalState{Energy: 80, Fatigue: 20, JointWear: 10, Health: 100}, nil, slog.Default(), "")
 	if err == nil {
 		t.Fatal("expected error on HTTP failure")
 	}
@@ -402,7 +402,7 @@ func TestGenerateTacticalPlan_ValidResponse(t *testing.T) {
 		`{"action":"move_to","params":{"target":"main_workshop"}}` + "\n" +
 		`{"action":"work_assemble","params":{"target":"workbench_01","duration_min":240}}`
 	tc := &fakeStrategicCaller{resp: makeStrategicResponse(raw)}
-	actions, thought, err := generateTacticalPlan(context.Background(), tc, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", &protocol.PhysicalState{Energy: 80, Fatigue: 20, JointWear: 10, Health: 100}, nil, slog.Default())
+	actions, thought, err := generateTacticalPlan(context.Background(), tc, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", &protocol.PhysicalState{Energy: 80, Fatigue: 20, JointWear: 10, Health: 100}, nil, slog.Default(), "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -419,7 +419,7 @@ func TestGenerateTacticalPlan_ValidResponse(t *testing.T) {
 
 func TestGenerateTacticalPlan_ParseFail(t *testing.T) {
 	tc := &fakeStrategicCaller{resp: makeStrategicResponse("我今天打算去车间转转。")}
-	if _, _, err := generateTacticalPlan(context.Background(), tc, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", nil, nil, slog.Default()); err == nil {
+	if _, _, err := generateTacticalPlan(context.Background(), tc, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", nil, nil, slog.Default(), ""); err == nil {
 		t.Fatal("expected error on parse failure (no actions)")
 	}
 }
@@ -427,7 +427,7 @@ func TestGenerateTacticalPlan_ParseFail(t *testing.T) {
 func TestGenerateTacticalPlan_EmptyActions(t *testing.T) {
 	raw := `{"inner_thought":"不知道做什么"}`
 	tc := &fakeStrategicCaller{resp: makeStrategicResponse(raw)}
-	if _, _, err := generateTacticalPlan(context.Background(), tc, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", nil, nil, slog.Default()); err == nil {
+	if _, _, err := generateTacticalPlan(context.Background(), tc, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", nil, nil, slog.Default(), ""); err == nil {
 		t.Fatal("expected error when all actions filtered out")
 	}
 }
@@ -436,7 +436,7 @@ func TestGenerateTacticalPlan_ResetSessionCalled(t *testing.T) {
 	raw := `{"inner_thought":"开始"}` + "\n" +
 		`{"action":"wait","params":{"duration_sec":30}}`
 	tc := &fakeStrategicCaller{resp: makeStrategicResponse(raw)}
-	_, _, _ = generateTacticalPlan(context.Background(), tc, "H-01", "等待", "main_workshop", "09:00", "09:00-12:00", nil, nil, slog.Default())
+	_, _, _ = generateTacticalPlan(context.Background(), tc, "H-01", "等待", "main_workshop", "09:00", "09:00-12:00", nil, nil, slog.Default(), "")
 	if !tc.resetCalled {
 		t.Error("ResetSession should be called after successful tactical generation")
 	}
@@ -445,7 +445,7 @@ func TestGenerateTacticalPlan_ResetSessionCalled(t *testing.T) {
 // ─── buildTacticalPrompt ─────────────────────────────────────
 
 func TestBuildTacticalPrompt_NilPhysical(t *testing.T) {
-	prompt := buildTacticalPrompt("装配", "main_workshop", "09:00", "", nil, nil)
+	prompt := buildTacticalPrompt("装配", "main_workshop", "09:00", "", nil, nil, "")
 	if prompt == "" {
 		t.Fatal("prompt should not be empty")
 	}
@@ -460,7 +460,7 @@ func TestBuildTacticalPrompt_NilPhysical(t *testing.T) {
 }
 
 func TestBuildTacticalPrompt_WithPhysical(t *testing.T) {
-	prompt := buildTacticalPrompt("装配", "main_workshop", "09:00", "09:00-12:00", &protocol.PhysicalState{Energy: 75, Fatigue: 30, JointWear: 5, Health: 90}, nil)
+	prompt := buildTacticalPrompt("装配", "main_workshop", "09:00", "09:00-12:00", &protocol.PhysicalState{Energy: 75, Fatigue: 30, JointWear: 5, Health: 90}, nil, "")
 	if !strings.Contains(prompt, "能量 75") {
 		t.Errorf("prompt should contain '能量 75', got: %s", prompt)
 	}
@@ -476,7 +476,7 @@ func TestBuildTacticalPrompt_WithPhysical(t *testing.T) {
 func TestBuildTacticalPrompt_InjectsKBContext(t *testing.T) {
 	kb := loadTestKB(t)
 	prompt := buildTacticalPrompt("装配", "main_workshop", "09:00", "09:00-12:00",
-		&protocol.PhysicalState{Energy: 75, Fatigue: 30, JointWear: 5, Health: 90}, kb)
+		&protocol.PhysicalState{Energy: 75, Fatigue: 30, JointWear: 5, Health: 90}, kb, "")
 	// 应包含所有区域
 	if !strings.Contains(prompt, "main_workshop") || !strings.Contains(prompt, "central_plaza") ||
 		!strings.Contains(prompt, "charging_station") || !strings.Contains(prompt, "rest_area") {
@@ -498,12 +498,35 @@ func TestBuildTacticalPrompt_InjectsKBContext(t *testing.T) {
 
 func TestBuildTacticalPrompt_NilKB(t *testing.T) {
 	// nil KB 时不应崩溃，也不应包含 KB 上下文段落
-	prompt := buildTacticalPrompt("装配", "main_workshop", "09:00", "", nil, nil)
+	prompt := buildTacticalPrompt("装配", "main_workshop", "09:00", "", nil, nil, "")
 	if strings.Contains(prompt, "可前往区域") {
 		t.Errorf("prompt should not contain '可前往区域' when KB is nil, got: %s", prompt)
 	}
 	if strings.Contains(prompt, "可交互物体") {
 		t.Errorf("prompt should not contain '可交互物体' when KB is nil, got: %s", prompt)
+	}
+}
+
+func TestBuildTacticalPrompt_WithHint(t *testing.T) {
+	prompt := buildTacticalPrompt("装配", "main_workshop", "09:00", "09:00-12:00",
+		&protocol.PhysicalState{Energy: 75, Fatigue: 30, JointWear: 5, Health: 90}, nil,
+		"fatigue=72 已突破警戒带，当前装配任务不合理")
+	if !strings.Contains(prompt, "【上次中断原因】") {
+		t.Errorf("prompt should contain '【上次中断原因】' when hint is non-empty, got: %s", prompt)
+	}
+	if !strings.Contains(prompt, "fatigue=72 已突破警戒带") {
+		t.Errorf("prompt should contain the hint text, got: %s", prompt)
+	}
+	if !strings.Contains(prompt, "请据此调整本轮规划") {
+		t.Errorf("prompt should contain adjustment guidance, got: %s", prompt)
+	}
+}
+
+func TestBuildTacticalPrompt_NoHint(t *testing.T) {
+	prompt := buildTacticalPrompt("装配", "main_workshop", "09:00", "09:00-12:00",
+		&protocol.PhysicalState{Energy: 75, Fatigue: 30, JointWear: 5, Health: 90}, nil, "")
+	if strings.Contains(prompt, "【上次中断原因】") {
+		t.Errorf("prompt should not contain '【上次中断原因】' when hint is empty, got: %s", prompt)
 	}
 }
 
