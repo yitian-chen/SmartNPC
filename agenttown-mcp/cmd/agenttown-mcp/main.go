@@ -38,6 +38,7 @@ import (
 	"github.com/AgentTown/agenttown-mcp/pkg/ollama"
 	"github.com/AgentTown/agenttown-mcp/pkg/protocol"
 	"github.com/AgentTown/agenttown-mcp/pkg/transport"
+	"github.com/AgentTown/agenttown-mcp/pkg/venus"
 	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
 	"github.com/AgentTown/agenttown-mcp/pkg/wsserver"
 )
@@ -61,8 +62,8 @@ type agentContext struct {
 	currentActionStart    time.Time              // mu 保护，当前在途 action 的开始时间，用于反应层计算 elapsed
 	pendingActionTimeouts map[string]*time.Timer // action_id → 超时 timer（mu 保护），约定 §5.2 action_completed 1.5× 估值超时
 	dailyPlan             string                 // mu 保护，战略层生成的每日计划（格式化字符串），空=未生成或失败
-	strategicHc           *hermes.Client         // mu 保护，战略层专用 Hermes client（独立 session）
-	tacticalHc            *hermes.Client         // mu 保护，战术层专用 Hermes client（独立 session）
+	strategicHc           llmClient              // mu 保护，战略层专用 LLM client（hermes 或 venus，独立 session）
+	tacticalHc            llmClient              // mu 保护，战术层专用 LLM client（hermes 或 venus，独立 session）
 	actionQueue           []plannedAction        // mu 保护，战术层分解出的待执行 action（FIFO）
 	currentActionSrc      actionSource           // mu 保护，当前在途 action 的来源（hermes/tactical/空）
 	currentPlanIndex      int                    // mu 保护，当前执行到 daily_plan 第几个 item（记账用）
@@ -617,10 +618,26 @@ func (a *agentContext) popAndSendQueueAction(ctx context.Context, agentID string
 var tacticalStreamingEnabled bool
 
 // tacticalCallTimeout 是单次战术层 LLM 调用（流式或非流式）的硬超时。
+// 由 --tactical-timeout flag 配置，默认 60s。
 // 之前直接用进程 ctx，导致 Hermes 后端 DeepSeek 排队时单次调用最长卡 120s，
-// 整个游戏时段空转。30s 失败后由调用方发 idle wait，下一个感知周期重新尝试，
-// 比死等 120s 更划算。
-const tacticalCallTimeout = 30 * time.Second
+// 整个游戏时段空转。超时后由调用方发 idle wait，下一个感知周期重新尝试，
+// 比死等更划算。
+var tacticalCallTimeout = 60 * time.Second
+
+// llmClient 是战略层/战术层 LLM 客户端的统一接口。
+// *hermes.Client（Hermes Gateway，OpenAI Responses 协议，默认）和 *venus.Client
+// （Venus 代理，OpenAI Chat Completions 协议）均实现此接口，通过 --llm-backend 切换。
+type llmClient interface {
+	SendWithSummary(ctx context.Context, input, summary string) (*hermes.Response, error)
+	SendStreaming(ctx context.Context, input string, onDelta func(string)) (*hermes.Response, error)
+	ResetSession()
+}
+
+// 编译期断言：两个 backend 都满足 llmClient 接口。
+var (
+	_ llmClient = (*hermes.Client)(nil)
+	_ llmClient = (*venus.Client)(nil)
+)
 
 // reactiveRunnerRef 是进程级反应层执行器（package-level 便于 WS handler 调用）。
 // nil 表示反应层未启用（--ollama-url="" 或客户端初始化失败）。
@@ -848,10 +865,25 @@ func main() {
 		worldKBPath    = flag.String("world-kb", "assets/world_kb.yaml", "path to world_kb.yaml (required, fail-fast on error)")
 		tacticalStream = flag.Bool("tactical-stream", false,
 			"enable streaming for tactical layer LLM calls (experimental: only helps if upstream LLM emits tokens incrementally)")
-		ollamaURL = flag.String("ollama-url", "http://localhost:11434",
-			"Ollama base URL for reactive layer (empty disables reactive layer)")
-		ollamaModel = flag.String("ollama-model", "qwen2.5:7b-instruct-q4_K_M",
-			"Ollama model name for reactive layer decisions")
+	ollamaURL = flag.String("ollama-url", "http://localhost:11434",
+		"Ollama base URL for reactive layer (empty disables reactive layer)")
+	ollamaModel = flag.String("ollama-model", "qwen2.5:7b-instruct-q4_K_M",
+		"Ollama model name for reactive layer decisions")
+	// ─── 战略层/战术层 LLM backend 切换 ───────────────────────────
+	// 默认走 hermes：MCP → Hermes Gateway → 后端模型（由 Hermes config.yaml
+	// 决定，当前为 Venus qwen3.6-35b-a3b）。需要直连 Venus 绕过 Hermes 时切 venus。
+	llmBackend = flag.String("llm-backend", "hermes",
+		"LLM backend for strategic/tactical layers: hermes|venus")
+	venusURL = flag.String("venus-url", "http://v2.open.venus.oa.com/llmproxy",
+		"Venus LLM proxy base URL (OpenAI Chat Completions API compatible)")
+	venusAPIKey = flag.String("venus-api-key", "",
+		"Venus API key (overrides VENUS_API_KEY env var)")
+	venusModel = flag.String("venus-model", "qwen3.6-35b-a3b",
+		"Venus model name")
+	venusTimeout = flag.Duration("venus-timeout", 60*time.Second,
+		"Venus HTTP timeout per call")
+	tacticalTimeout = flag.Duration("tactical-timeout", 60*time.Second,
+		"hard timeout for a single tactical-layer LLM call (streaming or not)")
 	)
 	flag.Parse()
 	if *showVersion {
@@ -862,12 +894,17 @@ func main() {
 	logger := log.New(*logLevel)
 	slog.SetDefault(logger)
 	tacticalStreamingEnabled = *tacticalStream
+	tacticalCallTimeout = *tacticalTimeout
 	logger.Info("starting agenttown-mcp",
 		"version", version,
 		"http", *httpAddr,
 		"ws", *wsAddr,
+		"llm_backend", *llmBackend,
 		"hermes_url", *hermesURL,
+		"venus_url", *venusURL,
+		"venus_model", *venusModel,
 		"tactical_stream", tacticalStreamingEnabled,
+		"tactical_timeout", tacticalCallTimeout,
 		"ollama_url", *ollamaURL,
 		"ollama_model", *ollamaModel,
 	)
@@ -944,20 +981,53 @@ func main() {
 		}
 		nextAgentEpoch++
 		ac, workerCtx := newAgentContext(ctx, nextAgentEpoch)
-		ac.strategicHc = hermes.New(hermes.Config{
-			URL:              *hermesURL,
-			APIKey:           *hermesAPIKey,
-			Model:            *hermesModel,
-			Logger:           logger,
-			SkipSystemPrompt: true, // 战略层后端调用，不需要 RPG persona/skills/memory 注入
-		})
-		ac.tacticalHc = hermes.New(hermes.Config{
-			URL:              *hermesURL,
-			APIKey:           *hermesAPIKey,
-			Model:            *hermesModel,
-			Logger:           logger,
-			SkipSystemPrompt: true, // 战术层后端调用，不需要 RPG persona/skills/memory 注入
-		})
+		// 战略层/战术层各用一个独立 LLM client 实例（独立 session 链）。
+		// backend 由 --llm-backend 选择：hermes（默认，MCP → Hermes → 后端模型）
+		// 或 venus（直连 Venus OpenAI Chat Completions API，绕过 Hermes）。
+		switch *llmBackend {
+		case "venus":
+			venusAPIKeyValue := *venusAPIKey
+			if venusAPIKeyValue == "" {
+				venusAPIKeyValue = os.Getenv("VENUS_API_KEY")
+			}
+			ac.strategicHc = venus.New(venus.Config{
+				BaseURL: *venusURL,
+				APIKey:  venusAPIKeyValue,
+				Model:   *venusModel,
+				Logger:  logger,
+				Timeout: *venusTimeout,
+			})
+			ac.tacticalHc = venus.New(venus.Config{
+				BaseURL: *venusURL,
+				APIKey:  venusAPIKeyValue,
+				Model:   *venusModel,
+				Logger:  logger,
+				Timeout: *venusTimeout,
+			})
+		case "hermes":
+			ac.strategicHc = hermes.New(hermes.Config{
+				URL:              *hermesURL,
+				APIKey:           *hermesAPIKey,
+				Model:            *hermesModel,
+				Logger:           logger,
+				SkipSystemPrompt: true, // 战略层后端调用，不需要 RPG persona/skills/memory 注入
+			})
+			ac.tacticalHc = hermes.New(hermes.Config{
+				URL:              *hermesURL,
+				APIKey:           *hermesAPIKey,
+				Model:            *hermesModel,
+				Logger:           logger,
+				SkipSystemPrompt: true, // 战术层后端调用，不需要 RPG persona/skills/memory 注入
+			})
+		default:
+			// flag 校验已在 parse 后完成，此处不应到达；防御性日志。
+			logger.Error("unknown llm-backend, falling back to venus", "backend", *llmBackend)
+			ac.strategicHc = venus.New(venus.Config{
+				BaseURL: *venusURL, APIKey: os.Getenv("VENUS_API_KEY"),
+				Model: *venusModel, Logger: logger, Timeout: *venusTimeout,
+			})
+			ac.tacticalHc = ac.strategicHc
+		}
 		agents[id] = ac
 		go runPerceptionWorker(workerCtx, id, ac, ws, kb, logger)
 		return ac, true

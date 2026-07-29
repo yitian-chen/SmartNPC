@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"strings"
 
-	"github.com/AgentTown/agenttown-mcp/pkg/hermes"
 	"github.com/AgentTown/agenttown-mcp/pkg/protocol"
 	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
 )
@@ -222,14 +221,15 @@ func generateTacticalPlan(
 }
 
 // generateTacticalPlanStreaming 是 generateTacticalPlan 的流式版本：
-// 调 hermes.Client.SendStreaming 边接收边增量解析 NDJSON，每解析出一个
+// 调 LLM 客户端 SendStreaming 边接收边增量解析 NDJSON，每解析出一个
 // action 即调 onAction 回调，使调用方能在首 action 到达时立即下发，
 // 将首动作体感延迟从 ~14s 降至 ~2-3s。
 //
-// 直接用 *hermes.Client（不走 strategicCaller 窄接口），因为需要 SendStreaming。
+// 走 llmClient 接口（hermes.Client 和 venus.Client 均实现），由 main.go
+// 的 --llm-backend 决定具体后端。
 func generateTacticalPlanStreaming(
 	ctx context.Context,
-	tc *hermes.Client,
+	tc llmClient,
 	agentID, goal, zone, timeOfDay, slot string,
 	physical *protocol.PhysicalState,
 	kb *worldkb.KB,
