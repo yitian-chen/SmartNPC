@@ -26,6 +26,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -1179,6 +1180,12 @@ func runHTTP(ctx context.Context, logger *slog.Logger, server *mcp.Server, addr 
 	mux.HandleFunc("/debug/action", func(w http.ResponseWriter, r *http.Request) {
 		handleDebugAction(ctx, logger, ws, kb, lookupAgent, w, r)
 	})
+	// /debug/schedule — 联调 debug 端点：给战术层注入一条单行 schedule
+	// （如 "07:00-11:00: 车间装配作业"），战术层立即分解成 action 入队下发。
+	// 仅联调用，无认证。
+	mux.HandleFunc("/debug/schedule", func(w http.ResponseWriter, r *http.Request) {
+		handleDebugSchedule(ctx, logger, ws, kb, lookupAgent, w, r)
+	})
 	// /debug/ — 浏览器 debug 控制台 HTML 页面（无外部依赖，嵌入二进制）。
 	mux.HandleFunc("/debug/", func(w http.ResponseWriter, r *http.Request) {
 		// 仅 /debug/ 走 UI；/debug/action 已在上面单独注册。
@@ -1245,6 +1252,30 @@ type debugActionResponse struct {
 	Accepted             bool    `json:"accepted,omitempty"`
 	EstimatedDurationSec float64 `json:"estimated_duration_sec,omitempty"`
 	Error                string  `json:"error,omitempty"`
+}
+
+// debugScheduleRequest 是 /debug/schedule 的请求体。
+// schedule 支持两种形态：纯 goal（"车间装配作业"）或带时间段的
+// "HH:MM-HH:MM: goal"。时间段可选，用于 prompt 提示步骤总时长。
+type debugScheduleRequest struct {
+	AgentID  string `json:"agent_id"`
+	Schedule string `json:"schedule"`       // 单行，纯 goal 或 "HH:MM-HH:MM: goal"
+	Force    *bool  `json:"force,omitempty"` // nil/true → 强制中断当前 action（默认）
+}
+
+// debugScheduleResponse 是 /debug/schedule 的响应体。
+// dispatched=false 表示 actions 已入 actionQueue，实际下发由 worker 异步完成
+// （handler 不自己 pop，避免 UE stop 未处理完时下发被 busy 拒）。
+type debugScheduleResponse struct {
+	OK           bool            `json:"ok"`
+	Slot         string          `json:"slot,omitempty"`
+	Goal         string          `json:"goal,omitempty"`
+	Actions      []plannedAction `json:"actions,omitempty"`
+	QueueLen     int             `json:"queue_len,omitempty"`
+	InnerThought string          `json:"inner_thought,omitempty"`
+	Dispatched   bool            `json:"dispatched"` // false=已入队异步下发
+	Warning      string          `json:"warning,omitempty"` // agent 无感知时非空
+	Error        string          `json:"error,omitempty"`
 }
 
 // resolveDebugMoveTo 把 move_to 的参数解析成 ws.Call 需要的完整参数。
@@ -1488,6 +1519,224 @@ func handleDebugAction(ctx context.Context, logger *slog.Logger, ws *wsserver.Se
 	}
 	if ack.EstimatedDurationSec != nil {
 		resp.EstimatedDurationSec = *ack.EstimatedDurationSec
+	}
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// parseScheduleText 解析 /debug/schedule 的 schedule 字段，支持两种形态：
+//   - 带时间段："HH:MM-HH:MM: 目标描述"（与 dailyPlan 单行格式一致）→ 返回 (slot, goal)
+//   - 纯 goal："目标描述"（不含时间段）→ 返回 ("", goal)
+//
+// 时间段用于战术层 prompt 提示步骤总时长（buildSlotDurationHint），可选。
+// 判定逻辑：先尝试用 parseFormattedPlan 解析（它内置 splitPlanRange 校验），
+// 解析出恰好 1 条且 slot 非空 → 用其 slot/goal；否则当作纯 goal，slot 留空。
+// 调用方需保证输入是单行（多行已在 handler 层拒绝）。
+func parseScheduleText(s string) (slot, goal string) {
+	items := parseFormattedPlan(s)
+	if len(items) == 1 && items[0].Time != "" {
+		return items[0].Time, items[0].Goal
+	}
+	// 纯 goal 形态：整串当作 goal，trim 首尾空白
+	return "", strings.TrimSpace(s)
+}
+
+// ─── /debug/schedule ─────────────────────────────────────────────
+// 联调 debug 端点：给战术层注入一条单行 schedule，战术层立即分解成 3-5 个 action
+// 入队，由 worker 异步下发到 UE。仅联调用，无认证。
+//
+// schedule 支持两种形态：
+//   - 带时间段："07:00-11:00: 车间装配作业"（时间段用于 prompt 提示步骤总时长）
+//   - 纯 goal："车间装配作业"（时间段可选，不填则 prompt 不提示时长）
+//
+// 与 /debug/action 的区别：
+//   - /debug/action 直接发单个 action_command 到 UE，绕过战术层
+//   - /debug/schedule 走战术层 LLM 分解流程，用于调试分解 + 下发全链路
+//
+// 不覆盖 ac.dailyPlan：goal/slot 直接传给 generateTacticalPlan，仅在 currentSlot
+// 加 "__debug__" 前缀避免与 dailyPlan 同时段撞 redecomposeCount 限制。
+//
+// 互斥：复用 replanInProgress（worker main.go:311 检查后 continue），防止
+// handler 调 LLM 期间 worker 并发 tacticalRefill 撞 tacticalHc session。
+// debugOverride 叠加设置防止 worker 在 stop→completion 信号驱动下补 idle wait。
+func handleDebugSchedule(ctx context.Context, logger *slog.Logger, ws *wsserver.Server, kb *worldkb.KB, lookupAgent func(string) *agentContext, w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		_ = json.NewEncoder(w).Encode(debugScheduleResponse{Error: "method not allowed, use POST"})
+		return
+	}
+
+	var req debugScheduleRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(debugScheduleResponse{Error: "invalid JSON body: " + err.Error()})
+		return
+	}
+	if req.AgentID == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(debugScheduleResponse{Error: "agent_id is required"})
+		return
+	}
+	if req.Schedule == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(debugScheduleResponse{Error: "schedule is required"})
+		return
+	}
+
+	// 入口日志：请求到达（字段已校验非空）。分解可能耗时 3-15s，
+	// 若 LLM 超时（60s）后续无 decompose ok 日志，可凭此条追踪请求来源。
+	force := req.Force == nil || *req.Force
+	logger.Info("[debug/schedule] request received",
+		"agent_id", req.AgentID, "schedule", req.Schedule, "force", force)
+
+	// schedule 支持两种形态：
+	//   (a) 带时间段："HH:MM-HH:MM: 目标描述"（与 dailyPlan 单行格式一致）
+	//   (b) 纯 goal："目标描述"（不含时间段，slot 留空）
+	// 时间段用于 prompt 提示步骤总时长（引导 LLM 给出总时长接近的步骤），
+	// 调试时可选——不填则 prompt 不提示时长，LLM 自行决定步骤数和时长。
+	// 多行语义不明（分解哪行？），强制单行。
+	if strings.ContainsRune(req.Schedule, '\n') {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(debugScheduleResponse{
+			Error: "schedule must be a single line",
+		})
+		return
+	}
+	slot, goal := parseScheduleText(req.Schedule)
+	if goal == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(debugScheduleResponse{
+			Error: "schedule goal is empty after parsing",
+		})
+		return
+	}
+
+	if !ws.IsConnected() {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(debugScheduleResponse{Error: "no mock ue connected"})
+		return
+	}
+
+	if lookupAgent == nil {
+		w.WriteHeader(http.StatusNotFound)
+		_ = json.NewEncoder(w).Encode(debugScheduleResponse{Error: "agent lookup not available"})
+		return
+	}
+	ac := lookupAgent(req.AgentID)
+	if ac == nil {
+		w.WriteHeader(http.StatusNotFound)
+		_ = json.NewEncoder(w).Encode(debugScheduleResponse{Error: "unknown agent_id: " + req.AgentID})
+		return
+	}
+
+	// 互斥：检查 replanInProgress（防 worker 并发 refill 撞 tacticalHc session）；
+	// 检查 tacticalHc 是否就绪。设 replanInProgress=true + debugOverride=true。
+	ac.mu.Lock()
+	if ac.replanInProgress {
+		ac.mu.Unlock()
+		w.WriteHeader(http.StatusConflict)
+		_ = json.NewEncoder(w).Encode(debugScheduleResponse{
+			Error: "another replan/debug in progress, retry later",
+		})
+		return
+	}
+	if ac.tacticalHc == nil {
+		ac.mu.Unlock()
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(debugScheduleResponse{Error: "tactical layer not ready"})
+		return
+	}
+	ac.replanInProgress = true
+	ac.debugOverride = true
+	curID := ac.currentActionID
+	ac.mu.Unlock()
+
+	// defer：清互斥 + signal 唤醒 worker（处理入队后的 pop）。
+	defer func() {
+		ac.mu.Lock()
+		ac.replanInProgress = false
+		ac.debugOverride = false
+		ac.mu.Unlock()
+		ac.signal()
+	}()
+
+	// 强制中断当前 action：发 stop_action 清 UE busy，等 100ms 让单线程 UE
+	// asyncio 跑完 _handle_stop_action。debugOverride 保证期间 worker 不补 idle wait。
+	var stoppedActionID string
+	if force && curID != "" {
+		if err := ws.SendStopAction(req.AgentID, curID); err != nil {
+			logger.Warn("[debug/schedule] stop_action failed",
+				"agent_id", req.AgentID, "action_id", curID, "err", err)
+		} else {
+			stoppedActionID = curID
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
+
+	// 取感知上下文 + 清队列 + 清在途记账（让战术层以为空闲，worker pop 不会被守卫拒）。
+	ac.mu.Lock()
+	zone := ac.latestZoneLocked()
+	timeOfDay := ac.latestTimeOfDayLocked()
+	physical := clonePhysical(ac.latestPhysical)
+	tacticalHc := ac.tacticalHc
+	hasPerception := len(ac.latestPerception) > 0
+	ac.actionQueue = nil
+	ac.currentActionID = ""
+	ac.currentActionSrc = ""
+	ac.currentActionCmd = ""
+	ac.currentActionParams = nil
+	ac.currentActionStart = time.Time{}
+	ac.mu.Unlock()
+
+	// 调战术层 LLM 分解（非流式，tacticalCallTimeout 60s 硬超时）。
+	// 复用 generateTacticalPlan：它不读 dailyPlan，goal/slot 由调用方传入。
+	tacticalCtx, tacticalCancel := context.WithTimeout(ctx, tacticalCallTimeout)
+	defer tacticalCancel()
+
+	actions, thought, err := generateTacticalPlan(
+		tacticalCtx, tacticalHc, req.AgentID,
+		goal, zone, timeOfDay, slot, physical, kb, logger, "",
+	)
+	if err != nil {
+		logger.Warn("[debug/schedule] decompose failed",
+			"agent_id", req.AgentID, "slot", slot, "goal", goal, "err", err)
+		w.WriteHeader(http.StatusBadGateway)
+		_ = json.NewEncoder(w).Encode(debugScheduleResponse{
+			Error: "decompose failed: " + err.Error(),
+		})
+		return
+	}
+
+	// 入队 + 记账。currentSlot 加 "__debug__" 前缀避免与 dailyPlan 同时段撞
+	// redecomposeCount >= 2 限制（main.go:676），保证 worker 下次 refill 必走
+	// "新时段"重置路径，注入队列执行完后回到 dailyPlan 正轨。
+	ac.mu.Lock()
+	ac.actionQueue = actions
+	ac.currentSlot = "__debug__" + slot
+	ac.redecomposeCount = 0
+	queueLen := len(actions)
+	ac.mu.Unlock()
+
+	logger.Info("[debug/schedule] decompose ok",
+		"agent_id", req.AgentID, "slot", slot, "goal", goal,
+		"queue_len", queueLen, "thought", thought,
+		"stopped", stoppedActionID)
+	// 不调 popAndSendQueueAction：依赖 defer signal() 唤醒 worker 走正常 pop 路径
+	// （含 currentActionID 守卫 + busy 重试），避免 UE stop 未处理完时下发被拒。
+
+	resp := debugScheduleResponse{
+		OK:           true,
+		Slot:         slot,
+		Goal:         goal,
+		Actions:      actions,
+		QueueLen:     queueLen,
+		InnerThought: thought,
+		Dispatched:   false, // worker 异步下发
+	}
+	if !hasPerception {
+		resp.Warning = "agent 未上报感知，zone/timeOfDay/physical 为空，分解质量可能下降"
 	}
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(resp)

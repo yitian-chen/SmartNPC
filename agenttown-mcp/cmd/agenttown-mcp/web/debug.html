@@ -139,6 +139,31 @@
   }
   button.secondary:hover:not(:disabled) { background: var(--border); }
   .button-row { display: flex; gap: 10px; margin-top: 4px; }
+  .tabs {
+    display: flex;
+    gap: 6px;
+    margin-bottom: 14px;
+    border-bottom: 1px solid var(--border);
+  }
+  .tab {
+    background: transparent;
+    color: var(--text-muted);
+    border: none;
+    border-bottom: 2px solid transparent;
+    border-radius: 0;
+    padding: 8px 14px;
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    font-family: inherit;
+    margin-bottom: -1px;
+  }
+  .tab:hover:not(.active) { color: var(--text); background: var(--panel-2); }
+  .tab.active {
+    color: var(--accent);
+    border-bottom-color: var(--accent);
+    background: transparent;
+  }
   .response-meta {
     display: flex;
     gap: 12px;
@@ -207,7 +232,7 @@
 <body>
 <header>
   <h1>AgentTown Debug Console</h1>
-  <span class="subtitle">手动触发 action_command 联调</span>
+  <span class="subtitle">手动触发 action_command / 注入 schedule 联调</span>
   <span id="status-badge" class="status-badge loading">检查中…</span>
 </header>
 
@@ -216,6 +241,12 @@
   <section class="panel">
     <h2>请求</h2>
 
+    <div class="tabs">
+      <button class="tab active" id="tab-btn-action" onclick="switchTab('action')">单 Action</button>
+      <button class="tab" id="tab-btn-schedule" onclick="switchTab('schedule')">Schedule 注入</button>
+    </div>
+
+    <div id="tab-action">
     <div class="field">
       <label for="agent_id">agent_id <span class="req">*</span></label>
       <input type="text" id="agent_id" value="H-01" />
@@ -259,6 +290,41 @@
         <pre id="curl-preview" style="margin-top:8px;"></pre>
       </details>
     </div>
+    </div><!-- /tab-action -->
+
+    <div id="tab-schedule" style="display:none">
+      <div class="field">
+        <label for="sched-agent">agent_id <span class="req">*</span></label>
+        <input type="text" id="sched-agent" value="H-01" />
+        <div class="hint">UE 注册的 agent id（当前固定 H-01）</div>
+      </div>
+
+      <div class="field">
+        <label for="sched-text">schedule <span class="req">*</span></label>
+        <textarea id="sched-text" rows="2" placeholder="车间装配作业&#10;或 07:00-11:00: 车间装配作业"></textarea>
+        <div class="hint">目标描述（如"车间装配作业"）；可选加时间段"HH:MM-HH:MM: 目标"提示步骤时长</div>
+      </div>
+
+      <div class="field">
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:normal;">
+          <input type="checkbox" id="sched-force" checked style="width:auto;margin:0;" />
+          <span>force — 先 stop 当前动作再分解（默认勾选）</span>
+        </label>
+        <div class="hint">中断当前 action 并清空队列，避免新分解的 action 被 UE busy 拒</div>
+      </div>
+
+      <div class="button-row">
+        <button id="sched-submit-btn" onclick="submitSchedule()">分解并下发</button>
+        <button class="secondary" onclick="resetScheduleForm()">重置</button>
+      </div>
+
+      <div class="curl-preview">
+        <details>
+          <summary>查看等价 curl 命令</summary>
+          <pre id="sched-curl-preview" style="margin-top:8px;"></pre>
+        </details>
+      </div>
+    </div><!-- /tab-schedule -->
   </section>
 
   <!-- 右侧：响应 + 历史 -->
@@ -284,6 +350,7 @@ let history = []; // 最近 20 条
 async function init() {
   await Promise.all([loadStatus(), loadKB()]);
   onCmdChange();
+  updateSchedCurlPreview();
   // 定时刷新状态徽章（每 5s）
   setInterval(loadStatus, 5000);
 }
@@ -596,10 +663,82 @@ async function submitAction() {
   const elapsed = Math.round(performance.now() - t0);
 
   renderResponse(resp, json, err, elapsed);
-  addHistory(req, resp, json, err, elapsed);
+  addHistory('action', req, resp, json, err, elapsed);
 
   btn.disabled = false; btn.textContent = '发送';
 }
+
+// ─── tab 切换 ────────────────────────────────────────────
+function switchTab(which) {
+  document.getElementById('tab-action').style.display = (which === 'action') ? '' : 'none';
+  document.getElementById('tab-schedule').style.display = (which === 'schedule') ? '' : 'none';
+  document.getElementById('tab-btn-action').classList.toggle('active', which === 'action');
+  document.getElementById('tab-btn-schedule').classList.toggle('active', which === 'schedule');
+}
+
+// ─── schedule 提交 ───────────────────────────────────────
+function collectScheduleRequest() {
+  return {
+    agent_id: document.getElementById('sched-agent').value.trim(),
+    schedule: document.getElementById('sched-text').value.trim(),
+    force: document.getElementById('sched-force').checked,
+  };
+}
+
+function updateSchedCurlPreview() {
+  const req = collectScheduleRequest();
+  const json = JSON.stringify(req);
+  const base = `${location.protocol}//${location.host}`;
+  const curl = `curl -X POST ${base}/debug/schedule \\\n  -H "Content-Type: application/json" \\\n  -d '${json}'`;
+  const el = document.getElementById('sched-curl-preview');
+  if (el) el.textContent = curl;
+}
+
+async function submitSchedule() {
+  const btn = document.getElementById('sched-submit-btn');
+  const req = collectScheduleRequest();
+  if (!req.agent_id || !req.schedule) {
+    alert('agent_id 和 schedule 不能为空');
+    return;
+  }
+  btn.disabled = true; btn.textContent = '分解中…';
+
+  const t0 = performance.now();
+  let resp, json, err;
+  try {
+    resp = await fetch('/debug/schedule', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(req),
+    });
+    json = await resp.json();
+  } catch (e) {
+    err = e.toString();
+  }
+  const elapsed = Math.round(performance.now() - t0);
+
+  renderResponse(resp, json, err, elapsed);
+  addHistory('schedule', req, resp, json, err, elapsed);
+
+  btn.disabled = false; btn.textContent = '分解并下发';
+}
+
+function resetScheduleForm() {
+  document.getElementById('sched-agent').value = 'H-01';
+  document.getElementById('sched-text').value = '';
+  document.getElementById('sched-force').checked = true;
+  updateSchedCurlPreview();
+}
+
+// schedule 输入实时更新 curl 预览
+document.addEventListener('DOMContentLoaded', () => {
+  ['sched-agent', 'sched-text', 'sched-force'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) {
+      el.addEventListener(el.type === 'checkbox' ? 'change' : 'input', updateSchedCurlPreview);
+    }
+  });
+});
 
 function renderResponse(resp, json, err, elapsed) {
   const area = document.getElementById('response-area');
@@ -611,6 +750,7 @@ function renderResponse(resp, json, err, elapsed) {
     return;
   }
   const statusClass = resp.status < 300 ? 'status-2xx' : (resp.status < 500 ? 'status-4xx' : 'status-5xx');
+  // schedule 响应字段：slot/goal/queue_len；action 响应字段：action_id/accepted/est
   const meta = `
     <div class="response-meta">
       <span class="${statusClass}">HTTP ${resp.status}</span>
@@ -618,14 +758,18 @@ function renderResponse(resp, json, err, elapsed) {
       ${json && json.action_id ? `<span>action_id: ${escapeHtml(json.action_id)}</span>` : ''}
       ${json && json.accepted ? `<span>accepted: ${json.accepted}</span>` : ''}
       ${json && json.estimated_duration_sec ? `<span>est: ${json.estimated_duration_sec}s</span>` : ''}
+      ${json && json.slot ? `<span>slot: ${escapeHtml(json.slot)}</span>` : ''}
+      ${json && json.queue_len != null ? `<span>queue: ${json.queue_len}</span>` : ''}
+      ${json && json.dispatched === false ? `<span>异步下发</span>` : ''}
+      ${json && json.warning ? `<span style="color:var(--warn);">⚠ ${escapeHtml(json.warning)}</span>` : ''}
     </div>
   `;
   area.innerHTML = `${meta}<pre>${escapeHtml(JSON.stringify(json, null, 2))}</pre>`;
 }
 
-function addHistory(req, resp, json, err, elapsed) {
+function addHistory(type, req, resp, json, err, elapsed) {
   const item = {
-    req, resp_status: resp ? resp.status : 0, json, err, elapsed,
+    type, req, resp_status: resp ? resp.status : 0, json, err, elapsed,
     time: new Date().toLocaleTimeString('zh-CN', { hour12: false }),
   };
   history.unshift(item);
@@ -643,9 +787,13 @@ function renderHistory() {
     const ok = h.resp_status && h.resp_status < 300;
     const statusCls = ok ? 'ok' : 'fail';
     const statusText = h.err ? 'NET ERR' : `HTTP ${h.resp_status}`;
+    // schedule 类型显示 schedule 文本；action 类型显示 cmd + params
+    const label = h.type === 'schedule'
+      ? `<span class="cmd">schedule</span> ${escapeHtml(h.req.schedule || '')}`
+      : `<span class="cmd">${escapeHtml(h.req.cmd)}</span> ${escapeHtml(JSON.stringify(h.req.params))}`;
     return `
       <div class="history-item" onclick="replayHistory(${i})">
-        <span><span class="${statusCls}">●</span> <span class="cmd">${escapeHtml(h.req.cmd)}</span> ${escapeHtml(JSON.stringify(h.req.params))}</span>
+        <span><span class="${statusCls}">●</span> ${label}</span>
         <span class="time">${h.time} · ${statusText} · ${h.elapsed}ms</span>
       </div>
     `;
@@ -655,6 +803,18 @@ function renderHistory() {
 function replayHistory(i) {
   const h = history[i];
   if (!h) return;
+  // schedule 类型：切到 schedule tab，回填 agent_id/schedule/force
+  if (h.type === 'schedule') {
+    switchTab('schedule');
+    document.getElementById('sched-agent').value = h.req.agent_id || 'H-01';
+    document.getElementById('sched-text').value = h.req.schedule || '';
+    const sForce = document.getElementById('sched-force');
+    if (sForce) sForce.checked = h.req.force !== false;
+    updateSchedCurlPreview();
+    return;
+  }
+  // action 类型：切到 action tab，回填原有表单
+  switchTab('action');
   document.getElementById('agent_id').value = h.req.agent_id;
   document.getElementById('cmd').value = h.req.cmd;
   // force 字段回填（历史可能无此字段，默认勾选）

@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -649,4 +651,265 @@ func TestTacticalRefillForReplan_LLMFail(t *testing.T) {
 // 任何 LLM 调用都会因连接失败而返回 error。
 func newFailedHermesClient() *hermes.Client {
 	return hermes.New(hermes.Config{URL: "http://127.0.0.1:1"})
+}
+
+// ─── /debug/schedule 端点测试 ──────────────────────────────────
+//
+// 这些测试覆盖 handleDebugSchedule 的早期校验路径（method/JSON/字段/schedule
+// 格式），这些校验在 ws.IsConnected() 检查之前触发，因此不需要真实 UE 连接。
+// 需要 ws + LLM 的路径（happy path / 409 / 502 / force stop）依赖 ws 测试
+// 夹具，与现有 handleDebugAction 一致地留作集成测试。
+
+// newDebugScheduleRecorder 构造一个 POST /debug/schedule 的 httptest 请求 +
+// recorder，body 为给定 JSON 字符串。复用 wsserver.New 创建的未连接 server
+// （IsConnected 返回 false，但早期校验在此之前返回）。
+func newDebugScheduleRecorder(t *testing.T, body string) (*http.Request, *httptest.ResponseRecorder) {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/debug/schedule", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	return req, rec
+}
+
+func TestHandleDebugSchedule_MethodNotAllowed(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/debug/schedule", nil)
+	rec := httptest.NewRecorder()
+	ws := wsserver.New(wsserver.Options{})
+	handleDebugSchedule(context.Background(), slog.Default(), ws, nil, nil, rec, req)
+
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status: got %d, want 405", rec.Code)
+	}
+	var resp debugScheduleResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if resp.Error == "" {
+		t.Error("error message should be non-empty")
+	}
+}
+
+func TestHandleDebugSchedule_InvalidJSON(t *testing.T) {
+	req, rec := newDebugScheduleRecorder(t, "{not json")
+	ws := wsserver.New(wsserver.Options{})
+	handleDebugSchedule(context.Background(), slog.Default(), ws, nil, nil, rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status: got %d, want 400", rec.Code)
+	}
+	var resp debugScheduleResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !strings.Contains(resp.Error, "invalid JSON") {
+		t.Errorf("error=%q, want contain 'invalid JSON'", resp.Error)
+	}
+}
+
+func TestHandleDebugSchedule_MissingAgentID(t *testing.T) {
+	req, rec := newDebugScheduleRecorder(t, `{"schedule":"07:00-11:00: 装配"}`)
+	ws := wsserver.New(wsserver.Options{})
+	handleDebugSchedule(context.Background(), slog.Default(), ws, nil, nil, rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status: got %d, want 400", rec.Code)
+	}
+	var resp debugScheduleResponse
+	json.Unmarshal(rec.Body.Bytes(), &resp)
+	if !strings.Contains(resp.Error, "agent_id") {
+		t.Errorf("error=%q, want contain 'agent_id'", resp.Error)
+	}
+}
+
+func TestHandleDebugSchedule_MissingSchedule(t *testing.T) {
+	req, rec := newDebugScheduleRecorder(t, `{"agent_id":"H-01"}`)
+	ws := wsserver.New(wsserver.Options{})
+	handleDebugSchedule(context.Background(), slog.Default(), ws, nil, nil, rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status: got %d, want 400", rec.Code)
+	}
+	var resp debugScheduleResponse
+	json.Unmarshal(rec.Body.Bytes(), &resp)
+	if !strings.Contains(resp.Error, "schedule") {
+		t.Errorf("error=%q, want contain 'schedule'", resp.Error)
+	}
+}
+
+// TestHandleDebugSchedule_MultiLineRejected 验证多行 schedule 被拒。
+// 多行语义不明（分解哪行？），强制单行。
+func TestHandleDebugSchedule_MultiLineRejected(t *testing.T) {
+	body := `{"agent_id":"H-01","schedule":"07:00-11:00: 装配\n13:00-17:00: 巡检"}`
+	req, rec := newDebugScheduleRecorder(t, body)
+	ws := wsserver.New(wsserver.Options{})
+	handleDebugSchedule(context.Background(), slog.Default(), ws, nil, nil, rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status: got %d, want 400", rec.Code)
+	}
+	var resp debugScheduleResponse
+	json.Unmarshal(rec.Body.Bytes(), &resp)
+	if !strings.Contains(resp.Error, "single line") {
+		t.Errorf("error=%q, want contain 'single line'", resp.Error)
+	}
+}
+
+// TestHandleDebugSchedule_PureGoalAccepted 验证纯 goal 形态（无时间段）被接受。
+// "车间装配作业" 不含时间段，parseScheduleText 返回 ("", "车间装配作业")，
+// 校验通过到达 ws 检查返回 503（而非 400）。
+func TestHandleDebugSchedule_PureGoalAccepted(t *testing.T) {
+	body := `{"agent_id":"H-01","schedule":"车间装配作业"}`
+	req, rec := newDebugScheduleRecorder(t, body)
+	ws := wsserver.New(wsserver.Options{})
+	handleDebugSchedule(context.Background(), slog.Default(), ws, nil, nil, rec, req)
+
+	// 纯 goal 合法，应到达 ws 检查返回 503（而非 400）
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status: got %d, want 503 (pure goal valid, ws not connected)", rec.Code)
+	}
+}
+
+// TestHandleDebugSchedule_BadSlotFallsBackToPureGoal 验证 slot 格式非法时
+// 降级为纯 goal。"07-11: 装配作业" 缺少分钟，parseFormattedPlan 解析失败
+// 返回 0 条 → parseScheduleText 当作纯 goal 返回 ("", "07-11: 装配作业")，
+// 校验通过到达 ws 检查返回 503（而非 400）。
+func TestHandleDebugSchedule_BadSlotFallsBackToPureGoal(t *testing.T) {
+	body := `{"agent_id":"H-01","schedule":"07-11: 装配作业"}`
+	req, rec := newDebugScheduleRecorder(t, body)
+	ws := wsserver.New(wsserver.Options{})
+	handleDebugSchedule(context.Background(), slog.Default(), ws, nil, nil, rec, req)
+
+	// 格式非法的 slot → 降级为纯 goal → 合法 → 503
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status: got %d, want 503 (bad slot → fallback to pure goal)", rec.Code)
+	}
+}
+
+// TestHandleDebugSchedule_UENotConnected 验证 schedule 校验通过后，
+// UE 未连接时返回 503（确认校验顺序：parse → ws check）。
+func TestHandleDebugSchedule_UENotConnected(t *testing.T) {
+	body := `{"agent_id":"H-01","schedule":"07:00-11:00: 车间装配作业"}`
+	req, rec := newDebugScheduleRecorder(t, body)
+	ws := wsserver.New(wsserver.Options{}) // 未连接
+	handleDebugSchedule(context.Background(), slog.Default(), ws, nil, nil, rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status: got %d, want 503", rec.Code)
+	}
+	var resp debugScheduleResponse
+	json.Unmarshal(rec.Body.Bytes(), &resp)
+	if !strings.Contains(resp.Error, "no mock ue") {
+		t.Errorf("error=%q, want contain 'no mock ue'", resp.Error)
+	}
+}
+
+// TestHandleDebugSchedule_AgentNotFound 验证 lookupAgent 返回 nil 时 404。
+// 需要 ws.IsConnected 返回 true 才能到达此分支，故此用例验证 lookupAgent==nil
+// 路径（nil lookupAgent 函数）—— 但 ws 检查在前，所以此用例实际验证的是
+// ws 未连接时返回 503 而非 404（agent 检查在 ws 之后）。
+// 保留此用例确认顺序：ws check → lookupAgent check。
+func TestHandleDebugSchedule_OrderWSBeforeLookup(t *testing.T) {
+	body := `{"agent_id":"H-01","schedule":"07:00-11:00: 车间装配作业"}`
+	req, rec := newDebugScheduleRecorder(t, body)
+	ws := wsserver.New(wsserver.Options{}) // 未连接
+	// lookupAgent 返回 nil，但 ws 检查在前，应返回 503 而非 404
+	lookup := func(string) *agentContext { return nil }
+	handleDebugSchedule(context.Background(), slog.Default(), ws, nil, lookup, rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status: got %d, want 503 (ws check before lookup)", rec.Code)
+	}
+}
+
+// TestDebugScheduleRequest_ForceDefault 验证 Force 字段 JSON 解码：
+// 缺省 → nil（handler 视为 true）；显式 false → false；显式 true → true。
+func TestDebugScheduleRequest_ForceDefault(t *testing.T) {
+	cases := []struct {
+		json string
+		want *bool
+	}{
+		{`{"agent_id":"H-01","schedule":"07:00-11:00: 装配"}`, nil},
+		{`{"agent_id":"H-01","schedule":"07:00-11:00: 装配","force":false}`, boolPtr(false)},
+		{`{"agent_id":"H-01","schedule":"07:00-11:00: 装配","force":true}`, boolPtr(true)},
+	}
+	for i, c := range cases {
+		var req debugScheduleRequest
+		if err := json.Unmarshal([]byte(c.json), &req); err != nil {
+			t.Fatalf("[%d] unmarshal error: %v", i, err)
+		}
+		if (req.Force == nil) != (c.want == nil) {
+			t.Errorf("[%d] Force=nil mismatch: got %v, want %v", i, req.Force, c.want)
+			continue
+		}
+		if req.Force != nil && *req.Force != *c.want {
+			t.Errorf("[%d] Force value mismatch: got %v, want %v", i, *req.Force, *c.want)
+		}
+	}
+}
+
+// TestHandleDebugSchedule_SingleLineParseValid 验证合法单行 schedule 能通过
+// parseFormattedPlan + splitPlanRange 校验（即不会在 400 阶段被拒），
+// 到达 ws.IsConnected() 检查返回 503。覆盖 "07:00-11:00: 车间装配作业" 示例。
+func TestHandleDebugSchedule_SingleLineParseValid(t *testing.T) {
+	body := `{"agent_id":"H-01","schedule":"07:00-11:00: 车间装配作业"}`
+	req, rec := newDebugScheduleRecorder(t, body)
+	ws := wsserver.New(wsserver.Options{})
+	handleDebugSchedule(context.Background(), slog.Default(), ws, nil, nil, rec, req)
+
+	// 应通过 schedule 校验，到达 ws 检查返回 503（而非 400）
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status: got %d, want 503 (schedule valid, ws not connected)", rec.Code)
+	}
+}
+
+// TestParseScheduleText 验证 parseScheduleText 的两种形态解析。
+func TestParseScheduleText(t *testing.T) {
+	cases := []struct {
+		name     string
+		input    string
+		wantSlot string
+		wantGoal string
+	}{
+		{
+			name:     "带时间段",
+			input:    "07:00-11:00: 车间装配作业",
+			wantSlot: "07:00-11:00",
+			wantGoal: "车间装配作业",
+		},
+		{
+			name:     "纯 goal 无时间段",
+			input:    "车间装配作业",
+			wantSlot: "",
+			wantGoal: "车间装配作业",
+		},
+		{
+			name:     "纯 goal 带冒号但非时段格式",
+			input:    "去车间: 装配作业",
+			wantSlot: "",
+			wantGoal: "去车间: 装配作业",
+		},
+		{
+			name:     "slot 格式非法降级为纯 goal",
+			input:    "07-11: 装配作业",
+			wantSlot: "",
+			wantGoal: "07-11: 装配作业",
+		},
+		{
+			name:     "带前后空白的纯 goal 被 trim",
+			input:    "  车间装配作业  ",
+			wantSlot: "",
+			wantGoal: "车间装配作业",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			slot, goal := parseScheduleText(c.input)
+			if slot != c.wantSlot {
+				t.Errorf("slot: got %q, want %q", slot, c.wantSlot)
+			}
+			if goal != c.wantGoal {
+				t.Errorf("goal: got %q, want %q", goal, c.wantGoal)
+			}
+		})
+	}
 }

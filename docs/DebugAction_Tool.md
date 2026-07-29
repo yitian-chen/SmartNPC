@@ -347,3 +347,180 @@ UE 应收到 `action_command` envelope 并回 `action_started` ACK，执行完�
    ```
 
    或者直接 `bash start-debug.sh --stop` 后重启即可。
+
+---
+
+# 联调 Debug 工具：/debug/schedule 注入 schedule 端点
+
+> 本文档说明联调用 debug HTTP 端点 `/debug/schedule` 的用法。
+> 该端点让终端通过 curl 给战术层注入一条单行 schedule（如
+> `07:00-11:00: 车间装配作业`），战术层立即分解成 3-5 个 action 入队下发，
+> 用于调试战术层的分解 + 下发全链路。
+>
+> 对应代码：`agenttown-mcp/cmd/agenttown-mcp/main.go` 的 `handleDebugSchedule`。
+
+## 与 /debug/action 的区别
+
+| 端点 | 用途 | 是否走战术层 |
+|---|---|---|
+| `POST /debug/action` | 直接发单个 action_command 到 UE | 否，绕过战术层 |
+| `POST /debug/schedule` | 注入 schedule，战术层 LLM 分解成 action 序列入队 | 是，走完整战术层分解流程 |
+
+`/debug/schedule` 适合调试战术层 prompt、LLM 分解质量、action 映射、队列下发全链路；`/debug/action` 适合单独验证某个 action 在 UE 侧的执行。
+
+## 浏览器控制台
+
+打开 `/debug/` 页面后，左上角表单顶部有两个 tab：
+
+- **单 Action**：原有的 `/debug/action` 表单
+- **Schedule 注入**：新增的 schedule 表单
+
+Schedule tab 提供：
+
+- `agent_id` 输入框（默认 H-01）
+- `schedule` 文本框（placeholder `07:00-11:00: 车间装配作业`）
+- **force 复选框**（默认勾选）：先 stop 当前动作再分解
+- "分解并下发"按钮 + 等价 curl 预览
+
+提交后响应展示在右侧（与单 Action tab 共用响应区 + 历史区）。历史记录区分类型显示：schedule 类型显示 `schedule <文本>`，action 类型显示 `<cmd> <params>`。点击历史项自动切到对应 tab 并回填表单。
+
+## 一、端点信息
+
+| 项 | 值 |
+|---|---|
+| 路径 | `POST /debug/schedule` |
+| Content-Type | `application/json` |
+| 端口 | 与 `/debug/action` 相同（stable 8760 / dev 8770） |
+| 认证 | 无（仅联调用） |
+| 超时 | 战术层 LLM 调用硬超时 60s（`tacticalCallTimeout`） |
+
+## 二、请求格式
+
+```json
+{
+  "agent_id": "H-01",
+  "schedule": "车间装配作业",
+  "force": true
+}
+```
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `agent_id` | string | 是 | UE 注册的 agent id（当前固定 H-01） |
+| `schedule` | string | 是 | 目标描述，单行；可选加时间段前缀 |
+| `force` | bool | 否 | 默认 true：先 stop 当前 action 再分解；false 时不中断 |
+
+**schedule 支持两种形态**：
+
+1. **纯 goal**（推荐，调试常用）：`车间装配作业` — 只给目标描述，战术层 LLM 自行决定步骤数和时长
+2. **带时间段**：`07:00-11:00: 车间装配作业` — 时间段用于 prompt 提示步骤总时长（引导 LLM 给出总时长接近 240 分钟的步骤），与 dailyPlan 单行格式一致
+
+**时间段是可选的**，仅在想让 LLM 对齐特定时长时填写。格式要求：
+- 必须单行（多行返回 400 `schedule must be a single line`）
+- 带时间段时格式为 `HH:MM-HH:MM: 目标描述`（起止用 `-`，时段后跟 `: `）
+- 纯 goal 形态直接写目标描述即可
+
+## 三、curl 示例
+
+```bash
+# 纯 goal 形态（推荐，调试常用）
+curl -X POST http://localhost:8760/debug/schedule \
+  -H "Content-Type: application/json" \
+  -d '{"agent_id":"H-01","schedule":"车间装配作业","force":true}'
+
+# 带时间段形态（可选，提示步骤时长）
+curl -X POST http://localhost:8760/debug/schedule \
+  -H "Content-Type: application/json" \
+  -d '{"agent_id":"H-01","schedule":"07:00-11:00: 车间装配作业","force":true}'
+```
+
+PowerShell 用户用 `curl.exe` 并转义 `"`（规则同 `/debug/action`）：
+
+```powershell
+curl.exe -X POST http://localhost:8760/debug/schedule -H "Content-Type: application/json" -d '{\"agent_id\":\"H-01\",\"schedule\":\"车间装配作业\",\"force\":true}'
+```
+
+## 四、响应格式
+
+### 成功（HTTP 200）
+
+```json
+{
+  "ok": true,
+  "slot": "07:00-11:00",
+  "goal": "车间装配作业",
+  "actions": [
+    {"action":"move_to","params":{"target":"main_workshop"}},
+    {"action":"work_assemble","params":{"target":"workbench_01","duration_min":240}}
+  ],
+  "queue_len": 2,
+  "inner_thought": "先去车间再开始装配",
+  "dispatched": false,
+  "warning": ""
+}
+```
+
+| 字段 | 说明 |
+|---|---|
+| `ok` | 是否分解成功 |
+| `slot` | 解析出的时段（如 `07:00-11:00`）；纯 goal 形态为空串 |
+| `goal` | 解析出的目标描述 |
+| `actions` | 战术层分解出的 action 列表（3-5 个） |
+| `queue_len` | 入队 action 数量 |
+| `inner_thought` | 战术层 LLM 的内心独白（第一行 NDJSON） |
+| `dispatched` | 固定 `false`：actions 已入 `actionQueue`，实际下发由 worker 异步完成 |
+| `warning` | agent 未上报感知时非空，提示 zone/timeOfDay/physical 为空 |
+
+**关于 `dispatched: false`**：handler 只负责"分解 + 入队 + signal 唤醒 worker"，实际下发由 worker 的 `popAndSendQueueAction` 异步完成（含 `currentActionID` 守卫 + UE busy 重试）。这样避免 handler 在 UE stop 未处理完时下发被拒。下发进度看日志 `[战术层] 下发 action`。
+
+### 错误响应
+
+| HTTP 状态码 | 场景 | 响应体 |
+|---|---|---|
+| 400 | 请求体非法 / 缺字段 / schedule 多行 / goal 解析为空 | `{"ok":false,"error":"..."}` |
+| 404 | agent_id 未注册 | `{"ok":false,"error":"unknown agent_id: ..."}` |
+| 405 | 非 POST 方法 | `{"ok":false,"error":"method not allowed, use POST"}` |
+| 409 | 另一个 replan/debug 正在进行 | `{"ok":false,"error":"another replan/debug in progress, retry later"}` |
+| 502 | 战术层 LLM 调用失败或超时 | `{"ok":false,"error":"decompose failed: ..."}` |
+| 503 | UE 未连接 / 战术层未就绪 | `{"ok":false,"error":"no mock ue connected"}` |
+
+## 五、联调流程
+
+### 5.1 确认 UE 已连接
+
+```bash
+curl http://localhost:8760/status
+# 预期：{"ok":true,"ws_connected":true}
+```
+
+### 5.2 注入 schedule
+
+用上方 curl 命令注入。MCP 日志会记录：
+
+```
+[MCP→Hermes/TACTICAL-PROMPT] agent_id=H-01 goal=车间装配作业 ...
+[Hermes→MCP/TACTICAL-RESPONSE] agent_id=H-01 tokens=... raw=...
+[战术层] 分解成功 agent_id=H-01 steps=3 thought=... actions=[...]
+[debug/schedule] decompose ok agent_id=H-01 slot=07:00-11:00 goal=车间装配作业 queue_len=3
+[战术层] 队列已填充 agent_id=H-01 slot=__debug__07:00-11:00 queue_len=3 ...
+[战术层] 下发 action agent_id=H-01 action=move_to ...
+[MCP→UE/CMD] cmd=MoveTo action_id=act_xxx agent_id=H-01 ...
+```
+
+### 5.3 观察下发
+
+actions 入队后由 worker 异步逐个下发。每个 action 走 `action_command` → UE `action_started` ACK → 执行 → `action_completed` 流程。completion 唤醒 worker pop 下一个，直到队列空。
+
+## 六、注意事项
+
+1. **不覆盖 dailyPlan**：注入的 schedule 仅用于本次分解，不修改 `agentContext.dailyPlan`。注入队列执行完后，worker 下次 refill 会回到战略层生成的原 dailyPlan 正轨。`currentSlot` 加 `__debug__` 前缀（纯 goal 形态则为 `__debug__`）避免与 dailyPlan 同时段撞 `redecomposeCount` 限制。
+
+2. **force 默认开启**：默认 `force=true` 会先 stop 当前 action + 清空 `actionQueue` 再分解，避免新分解的 action 被 UE busy 拒。设 `force:false` 可保留当前 action（但新队列会在当前 action 完成后才下发）。
+
+3. **互斥**：handler 复用 `replanInProgress` 互斥，防止与 worker 的 `tacticalRefill` 或反应层 `tacticalRefillForReplan` 并发调用 `tacticalHc`（撞 session）。若冲突返回 409，稍后重试即可。
+
+4. **时间段可选**：schedule 可带时间段（`07:00-11:00: goal`）或纯 goal（`goal`）。时间段仅在想让 LLM 对齐特定时长时填写——它会进 prompt 提示"步骤总时长应接近 slot 时长"。纯 goal 形态不提示时长，LLM 自行决定步骤数。两种形态都不要求当前游戏时间在 slot 时段内（调试时忽略游戏时间）。
+
+5. **agent 无感知时仍可分解**：若 agent 尚未上报感知（`latestPerception` 为空），zone/timeOfDay/physical 为空，prompt 仍能构造（buildTacticalPrompt 对 nil 用 0.0），响应 `warning` 字段提示分解质量可能下降。
+
+6. **同步等待分解**：handler 同步等战术层 LLM 分解完成（最长 60s）再返回 actions 列表。LLM 超时返回 502。下发是异步的（`dispatched: false`）。
