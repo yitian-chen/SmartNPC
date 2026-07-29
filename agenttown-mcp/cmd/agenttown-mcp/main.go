@@ -26,6 +26,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -1254,11 +1255,11 @@ type debugActionResponse struct {
 }
 
 // debugScheduleRequest 是 /debug/schedule 的请求体。
-// schedule 为单行 "HH:MM-HH:MM: goal" 格式，战术层会立即分解这条 goal
-// 并下发（不覆盖整天的 dailyPlan，忽略当前游戏时间是否在该时段内）。
+// schedule 支持两种形态：纯 goal（"车间装配作业"）或带时间段的
+// "HH:MM-HH:MM: goal"。时间段可选，用于 prompt 提示步骤总时长。
 type debugScheduleRequest struct {
 	AgentID  string `json:"agent_id"`
-	Schedule string `json:"schedule"`       // 单行 "HH:MM-HH:MM: goal"
+	Schedule string `json:"schedule"`       // 单行，纯 goal 或 "HH:MM-HH:MM: goal"
 	Force    *bool  `json:"force,omitempty"` // nil/true → 强制中断当前 action（默认）
 }
 
@@ -1523,9 +1524,30 @@ func handleDebugAction(ctx context.Context, logger *slog.Logger, ws *wsserver.Se
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
+// parseScheduleText 解析 /debug/schedule 的 schedule 字段，支持两种形态：
+//   - 带时间段："HH:MM-HH:MM: 目标描述"（与 dailyPlan 单行格式一致）→ 返回 (slot, goal)
+//   - 纯 goal："目标描述"（不含时间段）→ 返回 ("", goal)
+//
+// 时间段用于战术层 prompt 提示步骤总时长（buildSlotDurationHint），可选。
+// 判定逻辑：先尝试用 parseFormattedPlan 解析（它内置 splitPlanRange 校验），
+// 解析出恰好 1 条且 slot 非空 → 用其 slot/goal；否则当作纯 goal，slot 留空。
+// 调用方需保证输入是单行（多行已在 handler 层拒绝）。
+func parseScheduleText(s string) (slot, goal string) {
+	items := parseFormattedPlan(s)
+	if len(items) == 1 && items[0].Time != "" {
+		return items[0].Time, items[0].Goal
+	}
+	// 纯 goal 形态：整串当作 goal，trim 首尾空白
+	return "", strings.TrimSpace(s)
+}
+
 // ─── /debug/schedule ─────────────────────────────────────────────
-// 联调 debug 端点：给战术层注入一条单行 schedule（如 "07:00-11:00: 车间装配作业"），
-// 战术层立即分解成 3-5 个 action 入队，由 worker 异步下发到 UE。仅联调用，无认证。
+// 联调 debug 端点：给战术层注入一条单行 schedule，战术层立即分解成 3-5 个 action
+// 入队，由 worker 异步下发到 UE。仅联调用，无认证。
+//
+// schedule 支持两种形态：
+//   - 带时间段："07:00-11:00: 车间装配作业"（时间段用于 prompt 提示步骤总时长）
+//   - 纯 goal："车间装配作业"（时间段可选，不填则 prompt 不提示时长）
 //
 // 与 /debug/action 的区别：
 //   - /debug/action 直接发单个 action_command 到 UE，绕过战术层
@@ -1563,21 +1585,27 @@ func handleDebugSchedule(ctx context.Context, logger *slog.Logger, ws *wsserver.
 		return
 	}
 
-	// schedule 必须是单行 "HH:MM-HH:MM: goal"。多行语义不明（分解哪行？），强制单行。
-	items := parseFormattedPlan(req.Schedule)
-	if len(items) != 1 {
+	// schedule 支持两种形态：
+	//   (a) 带时间段："HH:MM-HH:MM: 目标描述"（与 dailyPlan 单行格式一致）
+	//   (b) 纯 goal："目标描述"（不含时间段，slot 留空）
+	// 时间段用于 prompt 提示步骤总时长（引导 LLM 给出总时长接近的步骤），
+	// 调试时可选——不填则 prompt 不提示时长，LLM 自行决定步骤数和时长。
+	// 多行语义不明（分解哪行？），强制单行。
+	if strings.ContainsRune(req.Schedule, '\n') {
 		w.WriteHeader(http.StatusBadRequest)
 		_ = json.NewEncoder(w).Encode(debugScheduleResponse{
-			Error: "schedule must be a single line 'HH:MM-HH:MM: goal'",
+			Error: "schedule must be a single line",
 		})
 		return
 	}
-	if _, _, ok := splitPlanRange(items[0].Time); !ok {
+	slot, goal := parseScheduleText(req.Schedule)
+	if goal == "" {
 		w.WriteHeader(http.StatusBadRequest)
-		_ = json.NewEncoder(w).Encode(debugScheduleResponse{Error: "bad slot format, expected HH:MM-HH:MM"})
+		_ = json.NewEncoder(w).Encode(debugScheduleResponse{
+			Error: "schedule goal is empty after parsing",
+		})
 		return
 	}
-	slot, goal := items[0].Time, items[0].Goal
 
 	if !ws.IsConnected() {
 		w.WriteHeader(http.StatusServiceUnavailable)

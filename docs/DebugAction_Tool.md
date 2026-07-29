@@ -399,7 +399,7 @@ Schedule tab 提供：
 ```json
 {
   "agent_id": "H-01",
-  "schedule": "07:00-11:00: 车间装配作业",
+  "schedule": "车间装配作业",
   "force": true
 }
 ```
@@ -407,19 +407,28 @@ Schedule tab 提供：
 | 字段 | 类型 | 必填 | 说明 |
 |---|---|---|---|
 | `agent_id` | string | 是 | UE 注册的 agent id（当前固定 H-01） |
-| `schedule` | string | 是 | 单行 `HH:MM-HH:MM: 目标描述`，多行会被拒 |
+| `schedule` | string | 是 | 目标描述，单行；可选加时间段前缀 |
 | `force` | bool | 否 | 默认 true：先 stop 当前 action 再分解；false 时不中断 |
 
-**schedule 格式要求**：
-- 必须是单行（多行返回 400 `schedule must be a single line`）
-- 时段格式 `HH:MM-HH:MM`（如 `07:00-11:00`），起止时间用 `-` 分隔
-- 时段后跟 `: `（冒号空格），再跟目标描述
-- 完整示例：`07:00-11:00: 车间装配作业`
+**schedule 支持两种形态**：
+
+1. **纯 goal**（推荐，调试常用）：`车间装配作业` — 只给目标描述，战术层 LLM 自行决定步骤数和时长
+2. **带时间段**：`07:00-11:00: 车间装配作业` — 时间段用于 prompt 提示步骤总时长（引导 LLM 给出总时长接近 240 分钟的步骤），与 dailyPlan 单行格式一致
+
+**时间段是可选的**，仅在想让 LLM 对齐特定时长时填写。格式要求：
+- 必须单行（多行返回 400 `schedule must be a single line`）
+- 带时间段时格式为 `HH:MM-HH:MM: 目标描述`（起止用 `-`，时段后跟 `: `）
+- 纯 goal 形态直接写目标描述即可
 
 ## 三、curl 示例
 
 ```bash
-# 注入一条 schedule，战术层立即分解并下发
+# 纯 goal 形态（推荐，调试常用）
+curl -X POST http://localhost:8760/debug/schedule \
+  -H "Content-Type: application/json" \
+  -d '{"agent_id":"H-01","schedule":"车间装配作业","force":true}'
+
+# 带时间段形态（可选，提示步骤时长）
 curl -X POST http://localhost:8760/debug/schedule \
   -H "Content-Type: application/json" \
   -d '{"agent_id":"H-01","schedule":"07:00-11:00: 车间装配作业","force":true}'
@@ -428,7 +437,7 @@ curl -X POST http://localhost:8760/debug/schedule \
 PowerShell 用户用 `curl.exe` 并转义 `"`（规则同 `/debug/action`）：
 
 ```powershell
-curl.exe -X POST http://localhost:8760/debug/schedule -H "Content-Type: application/json" -d '{\"agent_id\":\"H-01\",\"schedule\":\"07:00-11:00: 车间装配作业\",\"force\":true}'
+curl.exe -X POST http://localhost:8760/debug/schedule -H "Content-Type: application/json" -d '{\"agent_id\":\"H-01\",\"schedule\":\"车间装配作业\",\"force\":true}'
 ```
 
 ## 四、响应格式
@@ -454,7 +463,7 @@ curl.exe -X POST http://localhost:8760/debug/schedule -H "Content-Type: applicat
 | 字段 | 说明 |
 |---|---|
 | `ok` | 是否分解成功 |
-| `slot` | 解析出的时段（如 `07:00-11:00`） |
+| `slot` | 解析出的时段（如 `07:00-11:00`）；纯 goal 形态为空串 |
 | `goal` | 解析出的目标描述 |
 | `actions` | 战术层分解出的 action 列表（3-5 个） |
 | `queue_len` | 入队 action 数量 |
@@ -468,7 +477,7 @@ curl.exe -X POST http://localhost:8760/debug/schedule -H "Content-Type: applicat
 
 | HTTP 状态码 | 场景 | 响应体 |
 |---|---|---|
-| 400 | 请求体非法 / 缺字段 / schedule 多行 / slot 格式非法 | `{"ok":false,"error":"..."}` |
+| 400 | 请求体非法 / 缺字段 / schedule 多行 / goal 解析为空 | `{"ok":false,"error":"..."}` |
 | 404 | agent_id 未注册 | `{"ok":false,"error":"unknown agent_id: ..."}` |
 | 405 | 非 POST 方法 | `{"ok":false,"error":"method not allowed, use POST"}` |
 | 409 | 另一个 replan/debug 正在进行 | `{"ok":false,"error":"another replan/debug in progress, retry later"}` |
@@ -504,13 +513,13 @@ actions 入队后由 worker 异步逐个下发。每个 action 走 `action_comma
 
 ## 六、注意事项
 
-1. **不覆盖 dailyPlan**：注入的 schedule 仅用于本次分解，不修改 `agentContext.dailyPlan`。注入队列执行完后，worker 下次 refill 会回到战略层生成的原 dailyPlan 正轨。`currentSlot` 加 `__debug__` 前缀避免与 dailyPlan 同时段撞 `redecomposeCount` 限制。
+1. **不覆盖 dailyPlan**：注入的 schedule 仅用于本次分解，不修改 `agentContext.dailyPlan`。注入队列执行完后，worker 下次 refill 会回到战略层生成的原 dailyPlan 正轨。`currentSlot` 加 `__debug__` 前缀（纯 goal 形态则为 `__debug__`）避免与 dailyPlan 同时段撞 `redecomposeCount` 限制。
 
 2. **force 默认开启**：默认 `force=true` 会先 stop 当前 action + 清空 `actionQueue` 再分解，避免新分解的 action 被 UE busy 拒。设 `force:false` 可保留当前 action（但新队列会在当前 action 完成后才下发）。
 
 3. **互斥**：handler 复用 `replanInProgress` 互斥，防止与 worker 的 `tacticalRefill` 或反应层 `tacticalRefillForReplan` 并发调用 `tacticalHc`（撞 session）。若冲突返回 409，稍后重试即可。
 
-4. **忽略当前游戏时间**：注入的 schedule 立即分解，不要求当前游戏时间在 slot 时段内。slot 仅用于 prompt 提示时段时长（引导 LLM 给出总时长接近的步骤）。
+4. **时间段可选**：schedule 可带时间段（`07:00-11:00: goal`）或纯 goal（`goal`）。时间段仅在想让 LLM 对齐特定时长时填写——它会进 prompt 提示"步骤总时长应接近 slot 时长"。纯 goal 形态不提示时长，LLM 自行决定步骤数。两种形态都不要求当前游戏时间在 slot 时段内（调试时忽略游戏时间）。
 
 5. **agent 无感知时仍可分解**：若 agent 尚未上报感知（`latestPerception` 为空），zone/timeOfDay/physical 为空，prompt 仍能构造（buildTacticalPrompt 对 nil 用 0.0），响应 `warning` 字段提示分解质量可能下降。
 

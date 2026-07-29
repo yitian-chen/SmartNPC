@@ -737,7 +737,7 @@ func TestHandleDebugSchedule_MissingSchedule(t *testing.T) {
 }
 
 // TestHandleDebugSchedule_MultiLineRejected 验证多行 schedule 被拒。
-// 用户需求明确"单条+立即分解"，多行语义不明。
+// 多行语义不明（分解哪行？），强制单行。
 func TestHandleDebugSchedule_MultiLineRejected(t *testing.T) {
 	body := `{"agent_id":"H-01","schedule":"07:00-11:00: 装配\n13:00-17:00: 巡检"}`
 	req, rec := newDebugScheduleRecorder(t, body)
@@ -754,24 +754,34 @@ func TestHandleDebugSchedule_MultiLineRejected(t *testing.T) {
 	}
 }
 
-// TestHandleDebugSchedule_BadSlotFormat 验证 slot 格式非法时被拒。
-// "07-11: 装配" 缺少分钟，parseFormattedPlan 内部 splitPlanRange 解析失败
-// → 该行被跳过 → items 为空 → 触发 "single line" 错误（len != 1）。
-// 这说明 parseFormattedPlan 已内置 slot 格式校验，格式非法的行不会进 items。
-func TestHandleDebugSchedule_BadSlotFormat(t *testing.T) {
+// TestHandleDebugSchedule_PureGoalAccepted 验证纯 goal 形态（无时间段）被接受。
+// "车间装配作业" 不含时间段，parseScheduleText 返回 ("", "车间装配作业")，
+// 校验通过到达 ws 检查返回 503（而非 400）。
+func TestHandleDebugSchedule_PureGoalAccepted(t *testing.T) {
+	body := `{"agent_id":"H-01","schedule":"车间装配作业"}`
+	req, rec := newDebugScheduleRecorder(t, body)
+	ws := wsserver.New(wsserver.Options{})
+	handleDebugSchedule(context.Background(), slog.Default(), ws, nil, nil, rec, req)
+
+	// 纯 goal 合法，应到达 ws 检查返回 503（而非 400）
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status: got %d, want 503 (pure goal valid, ws not connected)", rec.Code)
+	}
+}
+
+// TestHandleDebugSchedule_BadSlotFallsBackToPureGoal 验证 slot 格式非法时
+// 降级为纯 goal。"07-11: 装配作业" 缺少分钟，parseFormattedPlan 解析失败
+// 返回 0 条 → parseScheduleText 当作纯 goal 返回 ("", "07-11: 装配作业")，
+// 校验通过到达 ws 检查返回 503（而非 400）。
+func TestHandleDebugSchedule_BadSlotFallsBackToPureGoal(t *testing.T) {
 	body := `{"agent_id":"H-01","schedule":"07-11: 装配作业"}`
 	req, rec := newDebugScheduleRecorder(t, body)
 	ws := wsserver.New(wsserver.Options{})
 	handleDebugSchedule(context.Background(), slog.Default(), ws, nil, nil, rec, req)
 
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status: got %d, want 400", rec.Code)
-	}
-	var resp debugScheduleResponse
-	json.Unmarshal(rec.Body.Bytes(), &resp)
-	// 格式非法 → parseFormattedPlan 返回 0 条 → "single line" 错误
-	if !strings.Contains(resp.Error, "single line") {
-		t.Errorf("error=%q, want contain 'single line' (bad slot → 0 items parsed)", resp.Error)
+	// 格式非法的 slot → 降级为纯 goal → 合法 → 503
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status: got %d, want 503 (bad slot → fallback to pure goal)", rec.Code)
 	}
 }
 
@@ -849,5 +859,57 @@ func TestHandleDebugSchedule_SingleLineParseValid(t *testing.T) {
 	// 应通过 schedule 校验，到达 ws 检查返回 503（而非 400）
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status: got %d, want 503 (schedule valid, ws not connected)", rec.Code)
+	}
+}
+
+// TestParseScheduleText 验证 parseScheduleText 的两种形态解析。
+func TestParseScheduleText(t *testing.T) {
+	cases := []struct {
+		name     string
+		input    string
+		wantSlot string
+		wantGoal string
+	}{
+		{
+			name:     "带时间段",
+			input:    "07:00-11:00: 车间装配作业",
+			wantSlot: "07:00-11:00",
+			wantGoal: "车间装配作业",
+		},
+		{
+			name:     "纯 goal 无时间段",
+			input:    "车间装配作业",
+			wantSlot: "",
+			wantGoal: "车间装配作业",
+		},
+		{
+			name:     "纯 goal 带冒号但非时段格式",
+			input:    "去车间: 装配作业",
+			wantSlot: "",
+			wantGoal: "去车间: 装配作业",
+		},
+		{
+			name:     "slot 格式非法降级为纯 goal",
+			input:    "07-11: 装配作业",
+			wantSlot: "",
+			wantGoal: "07-11: 装配作业",
+		},
+		{
+			name:     "带前后空白的纯 goal 被 trim",
+			input:    "  车间装配作业  ",
+			wantSlot: "",
+			wantGoal: "车间装配作业",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			slot, goal := parseScheduleText(c.input)
+			if slot != c.wantSlot {
+				t.Errorf("slot: got %q, want %q", slot, c.wantSlot)
+			}
+			if goal != c.wantGoal {
+				t.Errorf("goal: got %q, want %q", goal, c.wantGoal)
+			}
+		})
 	}
 }
