@@ -872,8 +872,8 @@ func main() {
 	// ─── 战略层/战术层 LLM backend 切换 ───────────────────────────
 	llmBackend = flag.String("llm-backend", "venus",
 		"LLM backend for strategic/tactical layers: venus|hermes")
-	venusURL = flag.String("venus-url", "http://v2.open.venus.oa.com/llmproxy/anthropic",
-		"Venus LLM proxy base URL (Anthropic Messages API compatible)")
+	venusURL = flag.String("venus-url", "http://v2.open.venus.oa.com/llmproxy",
+		"Venus LLM proxy base URL (OpenAI Chat Completions API compatible)")
 	venusAPIKey = flag.String("venus-api-key", "",
 		"Venus API key (overrides VENUS_API_KEY env var)")
 	venusModel = flag.String("venus-model", "qwen3.6-35b-a3b",

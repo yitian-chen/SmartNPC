@@ -83,7 +83,7 @@ fi
 
 # Venus URL/model 默认值（与 Go flag 默认值一致）。
 # 若 .env 未定义，用此默认值；若 .env 覆盖，则用 .env 的值。
-VENUS_URL="${VENUS_URL:-http://v2.open.venus.oa.com/llmproxy/anthropic}"
+VENUS_URL="${VENUS_URL:-http://v2.open.venus.oa.com/llmproxy}"
 VENUS_MODEL="${VENUS_MODEL:-qwen3.6-35b-a3b}"
 
 # ─── 参数 ──────────────────────────────────────────────────────

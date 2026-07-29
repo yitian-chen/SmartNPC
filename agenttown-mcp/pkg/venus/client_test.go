@@ -27,27 +27,24 @@ func newTestClient(t *testing.T, url string) *Client {
 	})
 }
 
-// TestSendWithSummary_NonStreaming verifies a non-streaming Messages API call
-// is parsed and converted to *hermes.Response correctly.
+// TestSendWithSummary_NonStreaming verifies a non-streaming OpenAI Chat
+// Completions call is parsed and converted to *hermes.Response correctly.
 func TestSendWithSummary_NonStreaming(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/messages" {
-			t.Errorf("path = %q, want /v1/messages", r.URL.Path)
+		if r.URL.Path != "/v1/chat/completions" {
+			t.Errorf("path = %q, want /v1/chat/completions", r.URL.Path)
 		}
-		// Venus 用 Bearer 认证（非 Anthropic 原生 x-api-key）
+		// Venus 用 Bearer 认证
 		if got := r.Header.Get("Authorization"); got != "Bearer test-key" {
 			t.Errorf("Authorization = %q, want 'Bearer test-key'", got)
-		}
-		// 同时保留 x-api-key 以兼容真实 Anthropic API
-		if got := r.Header.Get("x-api-key"); got != "test-key" {
-			t.Errorf("x-api-key = %q, want test-key", got)
 		}
 		// Venus 自定义头
 		if got := r.Header.Get("Venus-Sticky-Routing"); got != "token" {
 			t.Errorf("Venus-Sticky-Routing = %q, want token", got)
 		}
-		if got := r.Header.Get("anthropic-version"); got != anthropicVersion {
-			t.Errorf("anthropic-version = %q, want %q", got, anthropicVersion)
+		// OpenAI 协议不需要 anthropic-version 头
+		if got := r.Header.Get("anthropic-version"); got != "" {
+			t.Errorf("anthropic-version should be absent, got %q", got)
 		}
 		var req request
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -68,11 +65,10 @@ func TestSendWithSummary_NonStreaming(t *testing.T) {
 
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{
-			"id": "msg_123",
-			"model": "qwen3.6-35b-a3b",
-			"content": [{"type": "text", "text": "Hello, world!"}],
-			"stop_reason": "end_turn",
-			"usage": {"input_tokens": 10, "output_tokens": 5}
+			"id": "chatcmpl-123",
+			"model": "default",
+			"choices": [{"message": {"role": "assistant", "content": "Hello, world!"}, "finish_reason": "stop"}],
+			"usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
 		}`))
 	}))
 	defer server.Close()
@@ -82,11 +78,15 @@ func TestSendWithSummary_NonStreaming(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SendWithSummary: %v", err)
 	}
-	if resp.ID != "msg_123" {
+	if resp.ID != "chatcmpl-123" {
 		t.Errorf("ID = %q", resp.ID)
 	}
 	if resp.Status != "completed" {
 		t.Errorf("Status = %q", resp.Status)
+	}
+	// Model "default" should fall back to cfg.Model
+	if resp.Model != "qwen3.6-35b-a3b" {
+		t.Errorf("Model = %q, want qwen3.6-35b-a3b (fallback from default)", resp.Model)
 	}
 	if got := resp.ExtractText(); got != "Hello, world!" {
 		t.Errorf("ExtractText = %q, want %q", got, "Hello, world!")
@@ -106,7 +106,7 @@ func TestSendWithSummary_SummaryUnused(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewDecoder(r.Body).Decode(&capturedRequest)
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"id":"x","model":"m","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`))
+		_, _ = w.Write([]byte(`{"id":"x","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
 	}))
 	defer server.Close()
 
@@ -143,7 +143,7 @@ func TestSendWithSummary_ContextCanceled(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(500 * time.Millisecond)
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"id":"x","content":[{"type":"text","text":"ok"}],"usage":{}}`))
+		_, _ = w.Write([]byte(`{"id":"x","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{}}`))
 	}))
 	defer server.Close()
 
@@ -156,8 +156,8 @@ func TestSendWithSummary_ContextCanceled(t *testing.T) {
 	}
 }
 
-// TestSendStreaming_SSE verifies streaming SSE parsing assembles the full
-// response and invokes onDelta for each text chunk.
+// TestSendStreaming_SSE verifies streaming OpenAI SSE parsing assembles
+// the full response and invokes onDelta for each text chunk.
 func TestSendStreaming_SSE(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req request
@@ -180,19 +180,17 @@ func TestSendStreaming_SSE(t *testing.T) {
 
 		w.Header().Set("Content-Type", "text/event-stream")
 		flusher, _ := w.(http.Flusher)
-		// message_start
-		_, _ = w.Write([]byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_abc\",\"model\":\"qwen3.6-35b-a3b\",\"usage\":{\"input_tokens\":8}}}\n\n"))
+		// first chunk with role + first content
+		_, _ = w.Write([]byte("data: {\"id\":\"chatcmpl-abc\",\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"Hello\"}}]}\n\n"))
 		flusher.Flush()
-		// content_block_delta × 2
-		_, _ = w.Write([]byte("event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello\"}}\n\n"))
+		// second content chunk
+		_, _ = w.Write([]byte("data: {\"id\":\"chatcmpl-abc\",\"choices\":[{\"delta\":{\"content\":\", world!\"}}]}\n\n"))
 		flusher.Flush()
-		_, _ = w.Write([]byte("event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\", world!\"}}\n\n"))
+		// terminal chunk with finish_reason
+		_, _ = w.Write([]byte("data: {\"id\":\"chatcmpl-abc\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"))
 		flusher.Flush()
-		// message_delta with output token count
-		_, _ = w.Write([]byte("event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":3}}\n\n"))
-		flusher.Flush()
-		// message_stop
-		_, _ = w.Write([]byte("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"))
+		// DONE marker
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
 		flusher.Flush()
 	}))
 	defer server.Close()
@@ -209,17 +207,40 @@ func TestSendStreaming_SSE(t *testing.T) {
 	if got := resp.ExtractText(); got != "Hello, world!" {
 		t.Errorf("ExtractText = %q", got)
 	}
-	if resp.ID != "msg_abc" {
+	if resp.ID != "chatcmpl-abc" {
 		t.Errorf("ID = %q", resp.ID)
 	}
+	// Model falls back to cfg.Model (OpenAI streaming chunks don't carry model)
 	if resp.Model != "qwen3.6-35b-a3b" {
 		t.Errorf("Model = %q", resp.Model)
 	}
-	if resp.Usage.InputTokens != 8 || resp.Usage.OutputTokens != 3 {
-		t.Errorf("Usage = %+v", resp.Usage)
+}
+
+// TestSendStreaming_WithUsage verifies usage info from a chunk is captured
+// when present (e.g. via stream_options.include_usage).
+func TestSendStreaming_WithUsage(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, _ := w.(http.Flusher)
+		_, _ = w.Write([]byte("data: {\"id\":\"m1\",\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n"))
+		flusher.Flush()
+		_, _ = w.Write([]byte("data: {\"id\":\"m1\",\"choices\":[],\"usage\":{\"prompt_tokens\":8,\"completion_tokens\":3,\"total_tokens\":11}}\n\n"))
+		flusher.Flush()
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+		flusher.Flush()
+	}))
+	defer server.Close()
+
+	c := newTestClient(t, server.URL)
+	resp, err := c.SendStreaming(context.Background(), "hi", nil)
+	if err != nil {
+		t.Fatalf("SendStreaming: %v", err)
 	}
 	if resp.Usage.TotalTokens != 11 {
 		t.Errorf("TotalTokens = %d, want 11", resp.Usage.TotalTokens)
+	}
+	if resp.Usage.InputTokens != 8 || resp.Usage.OutputTokens != 3 {
+		t.Errorf("Usage = %+v", resp.Usage)
 	}
 }
 
@@ -230,11 +251,9 @@ func TestSendStreaming_KeepaliveComment(t *testing.T) {
 		flusher, _ := w.(http.Flusher)
 		_, _ = w.Write([]byte(": keepalive\n\n"))
 		flusher.Flush()
-		_, _ = w.Write([]byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m1\",\"model\":\"x\",\"usage\":{\"input_tokens\":1}}}\n\n"))
+		_, _ = w.Write([]byte("data: {\"id\":\"m1\",\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n"))
 		flusher.Flush()
-		_, _ = w.Write([]byte("event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}\n\n"))
-		flusher.Flush()
-		_, _ = w.Write([]byte("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
 		flusher.Flush()
 	}))
 	defer server.Close()
@@ -249,23 +268,44 @@ func TestSendStreaming_KeepaliveComment(t *testing.T) {
 	}
 }
 
-// TestSendStreaming_StreamError verifies the error SSE event is surfaced.
-func TestSendStreaming_StreamError(t *testing.T) {
+// TestSendStreaming_MissingDoneMarker verifies a stream that ends without
+// [DONE] but with accumulated content still returns a response
+// (graceful degradation).
+func TestSendStreaming_MissingDoneMarker(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		flusher, _ := w.(http.Flusher)
-		_, _ = w.Write([]byte("event: error\ndata: {\"error\":{\"type\":\"overloaded_error\",\"message\":\"Venus is overloaded\"}}\n\n"))
+		_, _ = w.Write([]byte("data: {\"id\":\"m1\",\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n"))
 		flusher.Flush()
+		// connection drops here — no [DONE]
+	}))
+	defer server.Close()
+
+	c := newTestClient(t, server.URL)
+	resp, err := c.SendStreaming(context.Background(), "hi", nil)
+	if err != nil {
+		t.Fatalf("expected graceful partial response, got error: %v", err)
+	}
+	if got := resp.ExtractText(); got != "partial" {
+		t.Errorf("ExtractText = %q, want partial", got)
+	}
+}
+
+// TestSendStreaming_EmptyStream verifies an empty stream with no content
+// returns an error rather than a silent empty response.
+func TestSendStreaming_EmptyStream(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
 	}))
 	defer server.Close()
 
 	c := newTestClient(t, server.URL)
 	_, err := c.SendStreaming(context.Background(), "hi", nil)
 	if err == nil {
-		t.Fatal("expected error")
+		t.Fatal("expected error for empty stream")
 	}
-	if !strings.Contains(err.Error(), "Venus is overloaded") {
-		t.Errorf("error should contain message: %v", err)
+	if !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Errorf("expected io.ErrUnexpectedEOF, got: %v", err)
 	}
 }
 
@@ -294,22 +334,24 @@ func TestNew_Defaults(t *testing.T) {
 	}
 }
 
-// TestAnthropicResponse_ToHermes verifies the response conversion handles
-// multiple text content blocks and empty usage.
-func TestAnthropicResponse_ToHermes(t *testing.T) {
-	ar := &anthropicResponse{
-		ID:    "msg_x",
-		Model: "model_y",
-		Content: []anthropicContentBlock{
-			{Type: "text", Text: "part1"},
-			{Type: "text", Text: "part2"},
-			{Type: "tool_use", Text: "ignored"}, // non-text blocks skipped
+// TestOpenaiResponse_ToHermes verifies the response conversion handles
+// multiple choices, empty model (fallback), and usage fields.
+func TestOpenaiResponse_ToHermes(t *testing.T) {
+	or := &openaiResponse{
+		ID:    "chat_x",
+		Model: "default",
+		Choices: []openaiChoice{
+			{Message: openaiMessage{Role: "assistant", Content: "part1"}},
+			{Message: openaiMessage{Role: "assistant", Content: "part2"}},
 		},
-		Usage: anthropicUsage{InputTokens: 3, OutputTokens: 4},
+		Usage: openaiUsage{PromptTokens: 3, CompletionTokens: 4, TotalTokens: 7},
 	}
-	hr := ar.toHermes()
-	if hr.ID != "msg_x" || hr.Model != "model_y" {
-		t.Errorf("ID/Model = %q/%q", hr.ID, hr.Model)
+	hr := or.toHermes("fallback-model")
+	if hr.ID != "chat_x" {
+		t.Errorf("ID = %q", hr.ID)
+	}
+	if hr.Model != "fallback-model" {
+		t.Errorf("Model = %q, want fallback-model", hr.Model)
 	}
 	if got := hr.ExtractText(); got != "part1part2" {
 		t.Errorf("ExtractText = %q, want part1part2", got)
@@ -317,59 +359,17 @@ func TestAnthropicResponse_ToHermes(t *testing.T) {
 	if hr.Usage.TotalTokens != 7 {
 		t.Errorf("TotalTokens = %d, want 7", hr.Usage.TotalTokens)
 	}
+	if hr.Usage.InputTokens != 3 || hr.Usage.OutputTokens != 4 {
+		t.Errorf("Usage = %+v", hr.Usage)
+	}
 }
 
-// TestHermesClient_SatisfiesLLMInterface is a compile-time check that
+// TestVenusClient_MatchesHermesSignatures is a compile-time check that
 // *venus.Client satisfies the llmClient interface expected by main.go.
-// The interface is defined in package main; here we assert the method
-// signatures match hermes.Client (the reference implementation).
 func TestVenusClient_MatchesHermesSignatures(t *testing.T) {
 	var _ interface {
 		SendWithSummary(ctx context.Context, input, summary string) (*hermes.Response, error)
 		SendStreaming(ctx context.Context, input string, onDelta func(string)) (*hermes.Response, error)
 		ResetSession()
 	} = (*Client)(nil)
-}
-
-// TestParseStream_MissingTerminalEvent verifies a stream that ends without
-// message_stop but with accumulated content still returns a response
-// (graceful degradation).
-func TestParseStream_MissingTerminalEvent(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/event-stream")
-		flusher, _ := w.(http.Flusher)
-		_, _ = w.Write([]byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m1\",\"model\":\"x\",\"usage\":{\"input_tokens\":1}}}\n\n"))
-		flusher.Flush()
-		_, _ = w.Write([]byte("event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"partial\"}}\n\n"))
-		flusher.Flush()
-		// connection drops here — no message_stop
-	}))
-	defer server.Close()
-
-	c := newTestClient(t, server.URL)
-	resp, err := c.SendStreaming(context.Background(), "hi", nil)
-	if err != nil {
-		t.Fatalf("expected graceful partial response, got error: %v", err)
-	}
-	if got := resp.ExtractText(); got != "partial" {
-		t.Errorf("ExtractText = %q, want partial", got)
-	}
-}
-
-// TestParseStream_EmptyStream verifies an empty stream with no content
-// returns an error rather than a silent empty response.
-func TestParseStream_EmptyStream(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/event-stream")
-	}))
-	defer server.Close()
-
-	c := newTestClient(t, server.URL)
-	_, err := c.SendStreaming(context.Background(), "hi", nil)
-	if err == nil {
-		t.Fatal("expected error for empty stream")
-	}
-	if !errors.Is(err, io.ErrUnexpectedEOF) {
-		t.Errorf("expected io.ErrUnexpectedEOF, got: %v", err)
-	}
 }
