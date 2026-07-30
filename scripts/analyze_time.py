@@ -2,13 +2,21 @@
 
 Extracts `time_of_day` from perception_update events' payload and compares
 against real timestamps to detect uneven time flow.
+
+Usage:
+    python scripts/analyze_time.py [path/to/sim.log] [start_line]
+    # 默认: <项目根>/logs/<今天>/sim.log
 """
 import json
 import re
 import sys
 from datetime import datetime
+from pathlib import Path
 
-log_path = sys.argv[1] if len(sys.argv) > 1 else "d:/SmartNPC_v3/logs/2026-07-22/sim.log"
+# 默认指向项目根目录下今天的 sim.log
+_project_root = Path(__file__).resolve().parent.parent
+_default_log = _project_root / "logs" / datetime.now().strftime("%Y-%m-%d") / "sim.log"
+log_path = sys.argv[1] if len(sys.argv) > 1 else str(_default_log)
 start_line = int(sys.argv[2]) if len(sys.argv) > 2 else 1
 
 with open(log_path, encoding="utf-8") as f:

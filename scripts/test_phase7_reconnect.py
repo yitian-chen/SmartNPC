@@ -1,7 +1,7 @@
 """Phase 7 end-to-end reconnect + seq-replay integration test.
 
-Connects to a running MCP (ws://localhost:9090/ws) as a minimal UE client,
-verifies:
+Connects to a running MCP (default ws://localhost:9090/ws) as a minimal UE
+client, verifies:
   1. On first connect, MCP sends a resync{last_received_seq=0}.
   2. After registering + sending some inbound messages, we drop the link,
      reconnect, and MCP re-sends resync AND replays any discrete messages we
@@ -9,6 +9,9 @@ verifies:
 
 This exercises the MCP-side send buffer + replay. The MCP has no Hermes, so
 perception POSTs fail silently — irrelevant to the protocol layer here.
+
+Usage:
+    python scripts/test_phase7_reconnect.py [ws://host:port/ws]
 """
 import asyncio
 import json
@@ -18,7 +21,7 @@ import sys
 
 import websockets
 
-URL = "ws://localhost:9090/ws"
+URL = sys.argv[1] if len(sys.argv) > 1 else "ws://localhost:9090/ws"
 AGENT = "H-01"
 
 
