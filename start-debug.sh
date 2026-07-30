@@ -118,17 +118,20 @@ while [[ $# -gt 0 ]]; do
 done
 
 # ─── 环境检测 ──────────────────────────────────────────────────
-# 脚本可能在 Git Bash (Windows) 或 WSL bash 里运行：
-#   - Git Bash: localhost = Windows localhost，可直接访问 Windows 服务
-#   - WSL bash: localhost = WSL VM localhost，访问 Windows 服务需用宿主 IP
-#              （WSL2 默认网关 = vEthernet 网卡 IP）
-# 检测方法：WSL 里 /proc/version 含 "microsoft"，Git Bash 里不存在。
+# 脚本可能在三种环境运行：
+#   - Git Bash (Windows): localhost = Windows localhost，用 wsl 调 WSL 命令、cygpath 转路径
+#   - WSL bash: localhost = WSL VM localhost，访问 Windows 服务需用宿主 IP（wslpath 转路径）
+#   - 纯 Linux (AnyDev/远程): 无 Windows 工具，无需路径转换，docker compose 直接可用
+# 检测方法：WSL 里 /proc/version 含 "microsoft"；纯 Linux 无 cmd.exe；其余视为 Git Bash。
 IN_WSL=false
+IN_LINUX=false
 if grep -qi microsoft /proc/version 2>/dev/null; then
     IN_WSL=true
+elif ! command -v cmd.exe >/dev/null 2>&1; then
+    IN_LINUX=true
 fi
 
-# Windows 宿主 IP（WSL 访问 Windows 服务用）；Git Bash 里不用
+# Windows 宿主 IP（WSL 访问 Windows 服务用）；Git Bash 和纯 Linux 里不用
 WIN_HOST="localhost"
 if $IN_WSL; then
     WIN_HOST=$(ip route show default 2>/dev/null | awk '{print $3}' | head -1)
@@ -136,13 +139,18 @@ if $IN_WSL; then
     [ -z "$WIN_HOST" ] && WIN_HOST="172.18.16.1"  # 兜底：常见 vEthernet IP
 fi
 
-# WSL 调用前缀：Git Bash 里用 "wsl" 调用 WSL 命令，WSL 里为空（直接执行）。
-# 路径转换：Git Bash 用 cygpath，WSL 用 wslpath。
+# WSL 调用前缀与路径转换工具：
+#   - WSL: WSL_CMD=""（直接执行），PATH_CONV=wslpath
+#   - 纯 Linux: WSL_CMD=""，PATH_CONV=""（无需转换）
+#   - Git Bash: WSL_CMD=wsl，PATH_CONV=cygpath
 WSL_CMD=""
 PATH_CONV=""
 if $IN_WSL; then
     WSL_CMD=""
     PATH_CONV="wslpath"
+elif $IN_LINUX; then
+    WSL_CMD=""
+    PATH_CONV=""
 else
     WSL_CMD="wsl"
     PATH_CONV="cygpath"
@@ -172,6 +180,18 @@ wait_for() {
 # 排除 WSL vEthernet (172.18.x.x) 和 VPN 虚拟网卡 (192.168.255.x)，
 # 优先返回公司内网 IP。
 detect_lan_ip() {
+    if $IN_LINUX; then
+        # 纯 Linux：hostname -I 输出空格分隔的 IP 列表，取第一个
+        local ip
+        ip=$(hostname -I 2>/dev/null | awk '{print $1}')
+        if [ -z "$ip" ]; then
+            # 兜底：从 ip addr 提取第一个非 loopback 的 IPv4
+            ip=$(ip -4 addr show 2>/dev/null | grep -oE "inet [0-9.]+" | grep -v "127.0.0.1" | head -1 | awk '{print $2}')
+        fi
+        echo "$ip"
+        return
+    fi
+    # Windows/WSL：用 ipconfig.exe
     local ip
     # ipconfig 输出可能因语言不同而字段名不同，用 grep 抓所有 IPv4 行
     ip=$(ipconfig.exe 2>/dev/null | grep -E "IPv4|IPv4 Address" \
@@ -196,6 +216,23 @@ detect_lan_ip() {
 # 导致新启动的 MCP 被 wslrelay 抢占端口（curl 命中 wslrelay 返回 404）。
 kill_port_listeners() {
     local port="$1" label="$2"
+    if $IN_LINUX; then
+        # 纯 Linux：用 ss 找监听 PID + kill。awk 提取 "pid=1234" 中的数字。
+        local pids
+        pids=$(ss -ltnp 2>/dev/null | awk -v p=":$port" '$4 ~ p"$" {match($0, /pid=([0-9]+)/, m); print m[1]}' | sort -u)
+        if [ -z "$pids" ]; then
+            warn "  No listener on :$port"
+            return 0
+        fi
+        local pid
+        for pid in $pids; do
+            kill -9 "$pid" >/dev/null 2>&1 \
+                && ok "  $label on :$port stopped (PID $pid)" \
+                || warn "  Failed to kill $label PID $pid on :$port"
+        done
+        return
+    fi
+    # Windows/WSL：netstat.exe + taskkill.exe
     local pids
     # netstat 本地地址列 ($2) 形如 0.0.0.0:8760 / [::1]:8760 / [::]:8760 / 127.0.0.1:8760
     # 用 awk 匹配 ":<port>$" 结尾，避免误伤 87600 等端口
@@ -240,15 +277,21 @@ stop_all() {
     # Hermes（可选停止）
     if $START_HERMES; then
         info "Stopping Hermes..."
-        local compose_path
-        if $IN_WSL; then
-            compose_path="$DOCKER_COMPOSE"
+        if $IN_LINUX; then
+            # 裸金属：pkill hermes gateway 进程 + 兜底杀端口
+            pkill -f "hermes.*gateway run" 2>/dev/null && ok "  Hermes process stopped" || warn "  Hermes process not running"
+            kill_port_listeners "$HERMES_PORT" "Hermes"
         else
-            compose_path=$(MSYS_NO_PATHCONV=1 $WSL_CMD wslpath -u "$DOCKER_COMPOSE" 2>/dev/null || echo "/mnt/d/SmartNPC_v3/docker/docker-compose.yml")
+            local compose_path
+            if $IN_WSL; then
+                compose_path="$DOCKER_COMPOSE"
+            else
+                compose_path=$(MSYS_NO_PATHCONV=1 $WSL_CMD wslpath -u "$DOCKER_COMPOSE" 2>/dev/null || echo "/mnt/d/SmartNPC_v3/docker/docker-compose.yml")
+            fi
+            $WSL_CMD docker compose -f "$compose_path" stop 2>/dev/null \
+                && ok "  Hermes stopped" \
+                || warn "  Hermes not running"
         fi
-        $WSL_CMD docker compose -f "$compose_path" stop 2>/dev/null \
-            && ok "  Hermes stopped" \
-            || warn "  Hermes not running"
     fi
 
     sleep 2
@@ -290,20 +333,26 @@ build_mcp() {
   GO_BIN=/d/Go/bin/go bash start-debug.sh"
     fi
 
-    info "Building MCP (windows/amd64)..."
-    "$GO_BIN" version
     # 删除旧二进制，强制 go build 重新链接产物。
     # Go 的包缓存是内容哈希的（源码改了必定重编包），但若输出文件存在且 mtime 较新，
     # go build 可能直接跳过链接步骤。删掉旧 exe 保证最终二进制永远反映当前源码。
     rm -f "$MCP_EXE"
-    (cd "$MCP_DIR" && GOOS=windows GOARCH=amd64 CGO_ENABLED=0 "$GO_BIN" build -o "$MCP_EXE_NAME" ./cmd/agenttown-mcp) \
-        || fail "Go build failed"
+    if $IN_LINUX; then
+        info "Building MCP (linux/amd64)..."
+        (cd "$MCP_DIR" && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 "$GO_BIN" build -o "$MCP_EXE_NAME" ./cmd/agenttown-mcp) \
+            || fail "Go build failed"
+    else
+        info "Building MCP (windows/amd64)..."
+        (cd "$MCP_DIR" && GOOS=windows GOARCH=amd64 CGO_ENABLED=0 "$GO_BIN" build -o "$MCP_EXE_NAME" ./cmd/agenttown-mcp) \
+            || fail "Go build failed"
+    fi
+    "$GO_BIN" version
 
     info "Running MCP unit tests..."
     (cd "$MCP_DIR" && "$GO_BIN" test ./cmd/agenttown-mcp/ -count=1) \
         || fail "MCP unit tests failed; refusing to deploy broken binary"
 
-    ok "MCP exe built: $MCP_EXE"
+    ok "MCP binary built: $MCP_EXE"
     echo ""
 }
 
@@ -397,12 +446,56 @@ start_adapter() {
 
 # ─── Step 3: 启动 Hermes ──────────────────────────────────────
 start_hermes() {
-    info "=== Step 3: Start Hermes Gateway (Docker, localhost:$HERMES_PORT) ==="
+    info "=== Step 3: Start Hermes Gateway (localhost:$HERMES_PORT) ==="
 
     if [ ! -f "$ENV_FILE" ]; then
         fail ".env file not found at $ENV_FILE"
     fi
 
+    # 加载 .env 中的 VENUS_API_KEY（h01-dev 直连 Venus 必需）
+    local venus_key=""
+    if grep -q "^VENUS_API_KEY=" "$ENV_FILE" 2>/dev/null; then
+        venus_key=$(grep "^VENUS_API_KEY=" "$ENV_FILE" | cut -d= -f2-)
+    fi
+
+    if $IN_LINUX; then
+        # 裸金属：直接在本机跑 hermes 命令，不走 Docker
+        # 依赖：pip install -e /data/workspace/hermes-agent + pip install aiohttp
+        # profile 路径通过 HERMES_HOME 指向 $PROJECT_DIR/hermes，
+        # Hermes 自动解析到 $HERMES_HOME/profiles/h01-dev
+        if ! command -v hermes >/dev/null 2>&1; then
+            fail "hermes command not found. Install dependencies:
+  cd /data/workspace/hermes-agent && pip3 install -e . && pip3 install aiohttp"
+        fi
+
+        # 裸金属下 host.docker.internal 不存在（那是 Docker 容器内才能解析的宿主别名）。
+        # h01-dev config.yaml 里 MCP URL 写的是 http://host.docker.internal:8770/mcp，
+        # 这里在 /etc/hosts 加一行让该域名解析到 127.0.0.1，MCP 和 Hermes 同机运行。
+        if ! getent hosts host.docker.internal >/dev/null 2>&1; then
+            echo "127.0.0.1 host.docker.internal" | sudo tee -a /etc/hosts >/dev/null 2>&1 \
+                && ok "  Added host.docker.internal → 127.0.0.1 to /etc/hosts" \
+                || warn "  Failed to add host.docker.internal to /etc/hosts (MCP connection may fail)"
+        fi
+
+        local hermes_log="$LOG_SUBDIR/debug-hermes.log"
+        mkdir -p "$LOG_SUBDIR"
+        : > "$hermes_log"
+
+        info "Starting Hermes (bare-metal, log: $LOG_SUBDIR/debug-hermes.log)..."
+        HERMES_HOME="$PROJECT_DIR/hermes" \
+        TERMINAL_CWD="$PROJECT_DIR/hermes" \
+        VENUS_API_KEY="$venus_key" \
+        GATEWAY_ALLOW_ALL_USERS=true \
+        nohup hermes -p h01-dev gateway run --accept-hooks >> "$hermes_log" 2>&1 &
+        disown
+
+        wait_for "Hermes Gateway (:$HERMES_PORT)" check_hermes 40
+        ok "Hermes is up (bare-metal)"
+        echo ""
+        return
+    fi
+
+    # Windows/WSL：走 Docker compose
     if $REBUILD_HERMES; then
         info "Rebuilding Hermes Docker image..."
         HERMES_BUILD_SCRIPT="$PROJECT_DIR/docker/build-hermes.sh"
@@ -410,6 +503,7 @@ start_hermes() {
             fail "Hermes build script not found: $HERMES_BUILD_SCRIPT"
         fi
         # 转成 WSL 路径（/mnt/d/... 风格），build-hermes.sh 在 WSL/Docker 里跑
+        # WSL 直接用原路径；仅 Git Bash 需要 wslpath 转换
         local script_wsl
         if $IN_WSL; then
             script_wsl="$HERMES_BUILD_SCRIPT"
@@ -446,12 +540,12 @@ start_hermes() {
     echo ""
 }
 
-# ─── Step 4: 启动 MCP（Windows 原生，监听 0.0.0.0）────────────
+# ─── Step 4: 启动 MCP（监听 0.0.0.0，局域网可达）────────────
 start_mcp() {
-    info "=== Step 4: Start agenttown-mcp.exe (0.0.0.0:$WS_PORT + :$HTTP_PORT) ==="
+    info "=== Step 4: Start agenttown-mcp (0.0.0.0:$WS_PORT + :$HTTP_PORT) ==="
 
     if [ ! -f "$MCP_EXE" ]; then
-        fail "MCP exe not found: $MCP_EXE. Run build step first."
+        fail "MCP binary not found: $MCP_EXE. Run build step first."
     fi
 
     mkdir -p "$LOG_SUBDIR"
@@ -464,12 +558,15 @@ start_mcp() {
 
     # MCP 是 Windows exe，传给它的路径必须是 Windows 风格（D:\...）。
     # WSL 里用 wslpath -w 转换；Git Bash 里用 cygpath -w。
+    # 纯 Linux 无需转换，直接用原路径。
     # cwd 也要是 Windows 路径，否则 Windows 进程看不到 assets/ 等 相对路径。
     local mcp_exe_win="$MCP_EXE"
     local world_kb_win="$PROJECT_DIR/assets/world_kb.yaml"
     local mcp_log_win="$MCP_LOG"
     local cwd_win="$PROJECT_DIR"
-    if $IN_WSL; then
+    if $IN_LINUX; then
+        : # 纯 Linux 直接用原路径，无需转换
+    elif $IN_WSL; then
         mcp_exe_win=$(wslpath -w "$MCP_EXE" 2>/dev/null) || mcp_exe_win="$MCP_EXE"
         world_kb_win=$(wslpath -w "$PROJECT_DIR/assets/world_kb.yaml" 2>/dev/null) || world_kb_win="$PROJECT_DIR/assets/world_kb.yaml"
         mcp_log_win=$(wslpath -w "$MCP_LOG" 2>/dev/null) || mcp_log_win="$MCP_LOG"
@@ -488,25 +585,34 @@ start_mcp() {
     #   LLM 调用发给 Hermes Gateway，由 Hermes 配置 (hermes/profiles/h01-dev/
     #   config.yaml) 决定后端模型（当前为 Venus qwen3.6-35b-a3b）。
     #   Venus client 仍保留在代码中，需要时切回 --llm-backend venus 直连即可。
-    # --world-kb 用 Windows 绝对路径，避免 cwd 不对找不到 assets/world_kb.yaml
-    # WSL 里执行 Windows exe：写一个 .bat 临时文件用 cmd.exe 启动，
-    # 避免在 bash 里嵌套 cmd.exe /C 时的多层引号转义问题（反斜杠+引号
-    # 在 bash 双引号里会被部分解释，导致路径破损）。
+    # --world-kb 用绝对路径，避免 cwd 不对找不到 assets/world_kb.yaml
     #
     # 注意：MCP 走 Hermes 时不需要 VENUS_API_KEY，Venus 凭据由 Hermes 容器
     # 通过 docker-compose 的 env_file: ../.env 读取，不透传到 MCP 进程。
-    local bat_file="$LOG_SUBDIR/start_mcp.bat"
-    cat > "$bat_file" << EOF
+    if $IN_LINUX; then
+        # 纯 Linux：直接 nohup 启动 Linux 二进制，无需 .bat/cmd.exe
+        nohup "$MCP_EXE" --http ":$HTTP_PORT" --ws ":$WS_PORT" \
+            --llm-backend hermes --hermes-url "http://localhost:$HERMES_PORT" \
+            --world-kb "$PROJECT_DIR/assets/world_kb.yaml" \
+            --log-level debug >> "$MCP_LOG" 2>&1 &
+        disown
+    else
+        # Windows/WSL：写一个 .bat 临时文件用 cmd.exe 启动，
+        # 避免在 bash 里嵌套 cmd.exe /C 时的多层引号转义问题（反斜杠+引号
+        # 在 bash 双引号里会被部分解释，导致路径破损）。
+        local bat_file="$LOG_SUBDIR/start_mcp.bat"
+        cat > "$bat_file" << EOF
 @echo off
 pushd "$cwd_win"
 "$mcp_exe_win" --http ":$HTTP_PORT" --ws ":$WS_PORT" --llm-backend hermes --hermes-url "http://localhost:$HERMES_PORT" --world-kb "$world_kb_win" --log-level debug >> "$mcp_log_win" 2>&1
 EOF
-    if $IN_WSL; then
-        local bat_win
-        bat_win=$(wslpath -w "$bat_file" 2>/dev/null) || bat_win="$bat_file"
-        MSYS_NO_PATHCONV=1 cmd.exe /C "$bat_win" >/dev/null 2>&1 &
-    else
-        MSYS_NO_PATHCONV=1 cmd.exe /C "$(cygpath -w "$bat_file" 2>/dev/null || echo "$bat_file")" >/dev/null 2>&1 &
+        if $IN_WSL; then
+            local bat_win
+            bat_win=$(wslpath -w "$bat_file" 2>/dev/null) || bat_win="$bat_file"
+            MSYS_NO_PATHCONV=1 cmd.exe /C "$bat_win" >/dev/null 2>&1 &
+        else
+            MSYS_NO_PATHCONV=1 cmd.exe /C "$(cygpath -w "$bat_file" 2>/dev/null || echo "$bat_file")" >/dev/null 2>&1 &
+        fi
     fi
 
     wait_for "MCP HTTP (:$HTTP_PORT)" check_mcp_http 20
@@ -540,18 +646,31 @@ print_summary() {
     echo -e "  ${BOLD}日志${NC}"
     local log_rel="${LOG_SUBDIR#$PROJECT_DIR/}"
     echo -e "    MCP:     $log_rel/debug-mcp.log"
-    echo -e "    Adapter: $log_rel/debug-adapter.log"
-    echo -e "    Hermes:  wsl docker logs -f $HERMES_CONTAINER"
+    if $START_ADAPTER; then
+        echo -e "    Adapter: $log_rel/debug-adapter.log"
+    fi
+    if $IN_LINUX; then
+        echo -e "    Hermes:  $log_rel/debug-hermes.log"
+    else
+        echo -e "    Hermes:  wsl docker logs -f $HERMES_CONTAINER"
+    fi
     echo ""
     echo -e "  ${BOLD}协议文档${NC}"
     echo -e "    docs/AgentTown_CommProtocol_Values.md"
     echo -e "    docs/AgentTown_Core_DeepDive.md"
     echo ""
     echo -e "  ${YELLOW}注意${NC}"
-    echo -e "    1. 确保 Windows 防火墙放行 :$WS_PORT 端口（管理员 PowerShell）："
-    echo -e "       New-NetFirewallRule -DisplayName \"AgentTown WS\" -Direction Inbound -LocalPort $WS_PORT -Protocol TCP -Action Allow"
-    echo -e "    2. 本脚本未启动 Mock UE，UE 同事自己连 WS 发感知即可"
-    echo -e "    3. 停止服务：bash start-debug.sh --stop 或手动 taskkill"
+    if $IN_LINUX; then
+        echo -e "    1. 确保防火墙放行 :$WS_PORT 端口："
+        echo -e "       sudo ufw allow $WS_PORT/tcp  (或 firewalld: sudo firewall-cmd --add-port=$WS_PORT/tcp --permanent)"
+        echo -e "    2. 本脚本未启动 Mock UE，UE 同事自己连 WS 发感知即可"
+        echo -e "    3. 停止服务：bash start-dev.sh --stop 或 kill 占用端口的进程"
+    else
+        echo -e "    1. 确保 Windows 防火墙放行 :$WS_PORT 端口（管理员 PowerShell）："
+        echo -e "       New-NetFirewallRule -DisplayName \"AgentTown WS\" -Direction Inbound -LocalPort $WS_PORT -Protocol TCP -Action Allow"
+        echo -e "    2. 本脚本未启动 Mock UE，UE 同事自己连 WS 发感知即可"
+        echo -e "    3. 停止服务：bash start-debug.sh --stop 或手动 taskkill"
+    fi
     echo -e ""
     echo -e "${BOLD}${GREEN}═══════════════════════════════════════════════════════════════${NC}"
 }

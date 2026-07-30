@@ -26,7 +26,12 @@ export ADAPTER_PORT=8771
 export CLI_PORT=52002
 
 # 二进制名也偏移：避免与稳定实例共用 agenttown-mcp.exe 导致编译时文件锁冲突
-export MCP_EXE_NAME=agenttown-mcp-dev.exe
+# Linux 下不带 .exe 后缀，Windows 下保留
+if grep -qi microsoft /proc/version 2>/dev/null || command -v cmd.exe >/dev/null 2>&1; then
+    export MCP_EXE_NAME=agenttown-mcp-dev.exe
+else
+    export MCP_EXE_NAME=agenttown-mcp-dev
+fi
 
 # 开发专用 Docker compose 和 Hermes profile
 export DOCKER_COMPOSE="$PWD/docker/docker-compose-dev.yml"
@@ -36,4 +41,6 @@ export HERMES_CONTAINER=agenttown-h01-dev
 LOG_DATE=$(date +%Y-%m-%d)
 export LOG_SUBDIR="$PWD/logs-dev/$LOG_DATE"
 
-exec bash start-debug.sh "$@"
+# h01-dev profile 直连 Venus（provider: custom:venus），不依赖 CodeBuddy Adapter。
+# 默认带 --no-adapter 跳过适配层；用户额外传参追加在后（重复 --no-adapter 无害）。
+exec bash start-debug.sh --no-adapter "$@"

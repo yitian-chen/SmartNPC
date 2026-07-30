@@ -43,7 +43,24 @@ hermes/profiles/*/.clean_shutdown
 # ─── 编译产物与临时目录 ───────────────────────────────────────
 agenttown-mcp/agenttown-mcp
 agenttown-mcp/agenttown-mcp.exe
+agenttown-mcp/agenttown-mcp-dev
 agenttown-mcp/agenttown-mcp-dev.exe
 agenttown-mcp/tmp/
 tmp/
+mcp
 scripts/analyze_latency.py
+
+# ─── Hermes 裸金属运行时产物（根目录层级） ─────────────────
+# 裸金属跑 Hermes（不走 Docker）时，工作目录在 hermes/ 下，
+# 会产生 kanban.db / SOUL.md 副本等运行时文件。
+hermes/SOUL.md
+hermes/kanban.db
+hermes/kanban.db.*
+hermes/kanban/
+
+# ─── Hermes Profile 运行时补充 ─────────────────────────────
+# 上述 profiles/* 规则遗漏的裸金属运行时产物
+hermes/profiles/*/.gateway_state*.tmp
+hermes/profiles/*/cache/
+hermes/profiles/*/gateway-starts.log
+hermes/profiles/*/state/

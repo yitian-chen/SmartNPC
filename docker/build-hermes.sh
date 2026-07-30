@@ -12,7 +12,12 @@
 
 set -euo pipefail
 
-HERMES_SOURCE="${HERMES_SOURCE:-/mnt/c/Users/yitianchen/AppData/Local/hermes/hermes-agent}"
+# Hermes source repo path (read-only dependency for `docker build`).
+# Default points to /data/workspace/hermes-agent — the convention used in
+# AnyDev/remote Linux setups where the source is cloned alongside the
+# project repos (dev/stable). Override with HERMES_SOURCE if your layout
+# differs (e.g. WSL+Windows: /mnt/c/Users/.../hermes-agent).
+HERMES_SOURCE="${HERMES_SOURCE:-/data/workspace/hermes-agent}"
 
 if [ ! -f "$HERMES_SOURCE/Dockerfile" ]; then
     echo "ERROR: Hermes source not found at $HERMES_SOURCE"
