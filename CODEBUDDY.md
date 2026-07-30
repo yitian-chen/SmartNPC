@@ -576,6 +576,60 @@ ollama pull qwen2.5:7b-instruct-q4_K_M
 - 内网工蜂 `git.woa.com` 一般可达，可用 HTTPS clone
 - Venus `v2.open.venus.oa.com` 需确认云端网络可达
 
+### stable / dev 目录分离（云开发环境）
+
+云开发环境（AnyDev / 远程 Linux）下，项目 clone 到 `/data/workspace/` 下两个独立目录，用端口隔离同时运行：
+
+| 目录 | 分支 | 用途 | MCP HTTP | MCP WS | Mock UE 连接 | debug 控制台 |
+|------|------|------|----------|--------|--------------|--------------|
+| `/data/workspace/stable` | `master` | 稳定运行、验证 | `:8760` | `:9090` | `--mcp-ws ws://localhost:9090/ws` | `http://localhost:8760/debug/` |
+| `/data/workspace/dev` | `dev-working` | 日常开发、调试 | `:8770` | `:9091` | 默认（`ws://localhost:9091/ws`） | `http://localhost:8770/debug/` |
+
+**初始化**（每个目录独立 clone + 编译）：
+```bash
+cd /data/workspace
+git clone https://git.woa.com/yitianchen/smartnpc.git stable
+cd stable && git checkout master && cd ..
+git clone https://git.woa.com/yitianchen/smartnpc.git dev
+cd dev && git checkout dev-working && cd ..
+
+# 各自编译 MCP（需要 Go 1.25+）
+cd /data/workspace/stable/agenttown-mcp && go build -o ../mcp ./cmd/agenttown-mcp && cd ~
+cd /data/workspace/dev/agenttown-mcp && go build -o ../mcp ./cmd/agenttown-mcp && cd ~
+
+# 各自配 .env（至少 VENUS_API_KEY）
+cp .env.example /data/workspace/stable/.env  # 填入 VENUS_API_KEY
+cp .env.example /data/workspace/dev/.env
+```
+
+**启动 stable**（终端 1 — MCP，终端 2 — Mock UE）：
+```bash
+# 终端 1
+cd /data/workspace/stable
+./mcp --llm-backend=venus --http :8760 --ws :9090 \
+  --venus-api-key "$VENUS_API_KEY" --log-level debug
+
+# 终端 2
+cd /data/workspace/stable
+python3 src/run_day.py --mcp-ws ws://localhost:9090/ws
+```
+
+**启动 dev**（终端 3 — MCP，终端 4 — Mock UE）：
+```bash
+# 终端 3
+cd /data/workspace/dev
+./mcp --llm-backend=venus --http :8770 --ws :9091 \
+  --venus-api-key "$VENUS_API_KEY" --log-level debug
+
+# 终端 4
+cd /data/workspace/dev
+python3 src/run_day.py   # 默认连 :9091
+```
+
+**端口隔离原则**：stable 用 `8760/9090`，dev 用 `8770/9091`，互不干扰，可同时运行各自独立的仿真。日志分别写入 `/data/workspace/{stable,dev}/logs/YYYY-MM-DD/sim.log`。
+
+**本地 Windows 对比**：本地用 `D:\SmartNPC_v3`（dev worktree，`dev-working` 分支）和 `D:\SmartNPC_v3-stable`（stable worktree，`master` 分支）两个 worktree 实现同样的分离，端口约定一致。
+
 ### LLM 模型配置（Hermes 后端专用）
 
 Hermes 通过 CodeBuddy CLI 适配层（`src/agenttown/codebuddy_adapter.py`）调用公司模型，
