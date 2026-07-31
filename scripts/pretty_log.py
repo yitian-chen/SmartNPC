@@ -952,13 +952,39 @@ def generate_html(records: list[dict], title: str, output: Path) -> Path:
     return output
 
 
-def _open_in_browser(path: Path) -> None:
-    """跨平台打开浏览器。"""
+def _is_headless() -> bool:
+    """检测无头/远程环境（无 GUI、SSH 会话、容器内）。
+
+    这些环境下 webbrowser.open() 会 fallback 到调用 goland/x-www-browser
+    等不存在的 handler，报 XDG_RUNTIME_DIR 错误。
+    """
+    # SSH 会话（SSH_CONNECTION / SSH_TTY 由 sshd 注入）
+    if os.environ.get("SSH_CONNECTION") or os.environ.get("SSH_TTY"):
+        return True
+    # 无 DISPLAY（Linux 无 X server）
+    if not os.environ.get("DISPLAY"):
+        return True
+    # 容器环境（常见标识）
+    if Path("/.dockerenv").exists():
+        return True
+    return False
+
+
+def _open_in_browser(path: Path) -> bool:
+    """跨平台打开浏览器。返回是否成功打开。
+
+    无头/SSH/容器环境下跳过，避免 fallback 到 goland/x-www-browser
+    等不存在的 handler 报 XDG_RUNTIME_DIR 错误。
+    """
+    if _is_headless():
+        print("[INFO] 检测到无头/远程环境，跳过自动打开浏览器。"
+              "用 --no-open 可显式禁用此提示。")
+        return False
     url = path.resolve().as_uri()
     try:
-        webbrowser.open(url, new=2)
+        return webbrowser.open(url, new=2)
     except Exception:
-        pass
+        return False
 
 
 # ── 主入口 ────────────────────────────────────────────────────────────
