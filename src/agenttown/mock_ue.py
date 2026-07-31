@@ -51,6 +51,7 @@ TYPE_RESYNC = "resync"        # reconnect: exchange last_received_seq (约定11)
 TYPE_EVENT_LOST = "event_lost"  # reconnect: buffer rollover warning
 TYPE_EVENT_NOTIFICATION = "event_notification"  # director-injected event (P1 实时通道)
 TYPE_CAPABILITY_REGISTRY = "capability_registry"  # UE → MCP: declare NPC cmds
+TYPE_WORLD_KB = "world_kb"  # UE → MCP: push full world KB (generated + authored) on connect
 
 # cmd constants
 CMD_MOVE_TO = "MoveTo"
@@ -110,10 +111,9 @@ class ObjectInfo:
     interaction_point: List[float] = field(default_factory=lambda: [0, 0, 0])
     interaction_facing: List[float] = field(default_factory=lambda: [0, 0, 0])
     interaction_radius: float = 0.0
-    available_actions: List[str] = field(default_factory=list)
+    available_interactions: List[str] = field(default_factory=list)
     default_state: str = ""
-    required_roles: List[str] = field(default_factory=list)
-    capacity: int = 0
+    tags: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -226,10 +226,9 @@ def load_world_kb(path: str) -> WorldKB:
             interaction_point=list(raw_obj.get("interaction_point", [0, 0, 0])),
             interaction_facing=list(raw_obj.get("interaction_facing", [0, 0, 0])),
             interaction_radius=radius,
-            available_actions=list(raw_obj.get("available_actions", []) or []),
+            available_interactions=list(raw_obj.get("available_interactions", []) or []),
             default_state=raw_obj.get("default_state", ""),
-            required_roles=list(raw_obj.get("required_roles", []) or []),
-            capacity=int(raw_obj.get("capacity", 0)),
+            tags=list(raw_obj.get("tags", []) or []),
         )
 
     return kb
@@ -618,6 +617,227 @@ class MockUE:
             ],
         })
 
+    async def _send_world_kb(self):
+        """Push the full world KB (generated + authored) to MCP on connect.
+
+        Sent FIRST in the connection sequence (before agent_registered)
+        so MCP can merge + persist + swap its in-memory KB before any
+        agent starts running. MCP only accepts this before the first
+        agent_registered (startup window); later pushes are rejected.
+
+        The payload mirrors the on-disk world.generated.json +
+        world.authored.json (NEW schema: bounds.rotation,
+        available_interactions, narrative, connections, aliases, tags,
+        profession, personality{traits,speech_style}). MCP merges the
+        two halves via its worldkb pipeline — UE does NOT pre-merge.
+
+        Hardcoded here per design decision: Mock UE is a self-contained
+        test fixture and should not depend on loading the on-disk JSON
+        files at runtime. Update this payload when the world changes.
+        """
+        await self._send(TYPE_WORLD_KB, SYSTEM_AGENT_ID, {
+            "pushed_at": _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime()),
+            "generated": {
+                "$schema": "agenttown-world-generated/v1",
+                "schema_version": "1.0",
+                "generated_at": "2026-07-31T03:00:00Z",
+                "generator": {"name": "MockUE", "version": "0.1.0"},
+                "source": {
+                    "map_package": "/Game/AgentTown/Maps/L_IndustrialTown",
+                    "map_name": "L_IndustrialTown",
+                },
+                "coordinate_system": {
+                    "space": "UE5_world", "distance_unit": "centimeter",
+                    "rotation_unit": "degree", "rotation_order": "pitch_yaw_roll",
+                },
+                "zones": [
+                    {
+                        "id": "central_plaza", "editor_label": "Zone_CentralPlaza",
+                        "actor_path": "/Game/AgentTown/Maps/L_IndustrialTown.Zone_CentralPlaza",
+                        "bounds": {"center": [10000, 11000, 0], "extent": [4000, 4000, 500], "rotation": [0, 0, 0]},
+                        "entry_point": [10000, 13000, 100], "entry_facing": [0, -1, 0],
+                    },
+                    {
+                        "id": "main_workshop", "editor_label": "Zone_MainWorkshop",
+                        "actor_path": "/Game/AgentTown/Maps/L_IndustrialTown.Zone_MainWorkshop",
+                        "bounds": {"center": [20000, 10000, 0], "extent": [5000, 5000, 500], "rotation": [0, 0, 0]},
+                        "entry_point": [16000, 10000, 100], "entry_facing": [1, 0, 0],
+                    },
+                    {
+                        "id": "logistics_hub", "editor_label": "Zone_LogisticsHub",
+                        "actor_path": "/Game/AgentTown/Maps/L_IndustrialTown.Zone_LogisticsHub",
+                        "bounds": {"center": [30000, 10000, 0], "extent": [6000, 4000, 500], "rotation": [0, 0, 0]},
+                        "entry_point": [26000, 10000, 100], "entry_facing": [1, 0, 0],
+                    },
+                    {
+                        "id": "repair_bay", "editor_label": "Zone_RepairBay",
+                        "actor_path": "/Game/AgentTown/Maps/L_IndustrialTown.Zone_RepairBay",
+                        "bounds": {"center": [20000, 3000, 0], "extent": [4000, 3000, 500], "rotation": [0, 0, 0]},
+                        "entry_point": [20000, 6000, 100], "entry_facing": [0, 1, 0],
+                    },
+                    {
+                        "id": "residential_quarters", "editor_label": "Zone_ResidentialQuarters",
+                        "actor_path": "/Game/AgentTown/Maps/L_IndustrialTown.Zone_ResidentialQuarters",
+                        "bounds": {"center": [10000, 3000, 0], "extent": [4000, 3000, 500], "rotation": [0, 0, 0]},
+                        "entry_point": [10000, 6000, 100], "entry_facing": [0, 1, 0],
+                    },
+                    {
+                        "id": "archive_station", "editor_label": "Zone_ArchiveStation",
+                        "actor_path": "/Game/AgentTown/Maps/L_IndustrialTown.Zone_ArchiveStation",
+                        "bounds": {"center": [5000, 11000, 0], "extent": [3000, 3000, 500], "rotation": [0, 0, 0]},
+                        "entry_point": [8000, 11000, 100], "entry_facing": [-1, 0, 0],
+                    },
+                    {
+                        "id": "recycling_yard", "editor_label": "Zone_RecyclingYard",
+                        "actor_path": "/Game/AgentTown/Maps/L_IndustrialTown.Zone_RecyclingYard",
+                        "bounds": {"center": [30000, 3000, 0], "extent": [5000, 3000, 500], "rotation": [0, 0, 0]},
+                        "entry_point": [30000, 6000, 100], "entry_facing": [0, 1, 0],
+                    },
+                ],
+                "objects": [
+                    {
+                        "id": "workbench_01", "category": "workbench", "zone_id": "main_workshop",
+                        "editor_label": "BP_Workbench_01",
+                        "actor_class": "/Game/AgentTown/Objects/BP_Workbench.BP_Workbench_C",
+                        "actor_position": [20000, 10000, 100],
+                        "interaction_point": [19500, 10500, 100], "interaction_facing": [1, 0, 0],
+                        "available_interactions": ["assemble", "inspect"], "default_state": "idle",
+                    },
+                    {
+                        "id": "charging_station_01", "category": "charging_station", "zone_id": "central_plaza",
+                        "editor_label": "BP_ChargingStation_01",
+                        "actor_class": "/Game/AgentTown/Objects/BP_ChargingStation.BP_ChargingStation_C",
+                        "actor_position": [10500, 11000, 100],
+                        "interaction_point": [10000, 11500, 100], "interaction_facing": [0, 1, 0],
+                        "available_interactions": ["charge"], "default_state": "idle",
+                    },
+                    {
+                        "id": "rest_bench_01", "category": "rest_bench", "zone_id": "residential_quarters",
+                        "editor_label": "BP_RestBench_01",
+                        "actor_class": "/Game/AgentTown/Objects/BP_RestBench.BP_RestBench_C",
+                        "actor_position": [9500, 3000, 100],
+                        "interaction_point": [9500, 3300, 100], "interaction_facing": [0, -1, 0],
+                        "available_interactions": ["rest"], "default_state": "idle",
+                    },
+                ],
+                "agents": [
+                    {
+                        "id": "H-01", "type": "humanoid", "initial_zone": "central_plaza",
+                        "editor_label": "BP_LaoChen",
+                        "actor_class": "/Game/AgentTown/Agents/BP_LaoChen.BP_LaoChen_C",
+                        "initial_position": [10000, 11000, 100],
+                        "action_table": "/Game/AgentTown/AI/DT_ActionBTMap.DT_ActionBTMap",
+                        "main_behavior_tree": "/Game/AgentTown/AI/BT_AgentTownMain.BT_AgentTownMain",
+                    },
+                ],
+                "validation_summary": {"errors": 0, "warnings": 0},
+            },
+            "authored": {
+                "version": "1.0",
+                "narrative": {
+                    "setting": "工业机器人小镇",
+                    "theme": "一座由机器人居民维持生产和日常生活的封闭工业园区。",
+                },
+                "zones": {
+                    "central_plaza": {
+                        "display_name": "中央广场与综合充能站",
+                        "description": "公共交通、社交和充能中心。",
+                        "aliases": ["广场", "充能站"],
+                        "connections": [
+                            {"to": "main_workshop", "type": "road", "bidirectional": True},
+                            {"to": "residential_quarters", "type": "road", "bidirectional": True},
+                            {"to": "archive_station", "type": "road", "bidirectional": True},
+                        ],
+                    },
+                    "main_workshop": {
+                        "display_name": "主生产车间",
+                        "description": "装配、质检和设备调试的生产核心。",
+                        "aliases": ["车间"],
+                        "connections": [
+                            {"to": "central_plaza", "type": "road", "bidirectional": True},
+                            {"to": "logistics_hub", "type": "road", "bidirectional": True},
+                            {"to": "repair_bay", "type": "road", "bidirectional": True},
+                        ],
+                    },
+                    "logistics_hub": {
+                        "display_name": "物料仓储与转运站",
+                        "description": "原料、半成品和成品的仓储与分拣中心。",
+                        "aliases": ["仓储区"],
+                        "connections": [
+                            {"to": "main_workshop", "type": "road", "bidirectional": True},
+                            {"to": "recycling_yard", "type": "road", "bidirectional": True},
+                        ],
+                    },
+                    "repair_bay": {
+                        "display_name": "机械维修厂与零件诊所",
+                        "description": "居民检修、换件和紧急救援中心。",
+                        "aliases": ["维修厂"],
+                        "connections": [
+                            {"to": "main_workshop", "type": "road", "bidirectional": True},
+                            {"to": "recycling_yard", "type": "road", "bidirectional": True},
+                        ],
+                    },
+                    "residential_quarters": {
+                        "display_name": "休眠舱居住区",
+                        "description": "机器人居民休眠、独处与存放私人物品的生活区。",
+                        "aliases": ["居住区", "宿舍"],
+                        "connections": [
+                            {"to": "central_plaza", "type": "road", "bidirectional": True},
+                            {"to": "archive_station", "type": "road", "bidirectional": True},
+                        ],
+                    },
+                    "archive_station": {
+                        "display_name": "档案馆与广播站",
+                        "description": "保存园区历史、技术资料和个人记忆的文化中心。",
+                        "aliases": ["档案馆"],
+                        "connections": [
+                            {"to": "central_plaza", "type": "road", "bidirectional": True},
+                            {"to": "residential_quarters", "type": "road", "bidirectional": True},
+                        ],
+                    },
+                    "recycling_yard": {
+                        "display_name": "废料回收与再制造场",
+                        "description": "废料分类、零件再生和永久报废处理区域。",
+                        "aliases": ["回收场"],
+                        "connections": [
+                            {"to": "logistics_hub", "type": "road", "bidirectional": True},
+                            {"to": "repair_bay", "type": "road", "bidirectional": True},
+                        ],
+                    },
+                },
+                "objects": {
+                    "workbench_01": {
+                        "display_name": "一号装配工作台",
+                        "description": "老陈经常使用的装配工作台。",
+                        "tags": ["crafting", "assembly"],
+                    },
+                    "charging_station_01": {
+                        "display_name": "综合充能站一号",
+                        "description": "中央广场上的主充能桩，支持所有型号机器人。",
+                        "tags": ["charging"],
+                    },
+                    "rest_bench_01": {
+                        "display_name": "休息长椅",
+                        "description": "居住区供居民歇息的长椅。",
+                        "tags": ["rest"],
+                    },
+                },
+                "agents": {
+                    "H-01": {
+                        "display_name": "老陈",
+                        "description": "车间主管机器人，沉稳念旧，重视工艺。",
+                        "profession": "车间主管",
+                        "personality": {
+                            "traits": ["沉稳", "念旧", "重视工艺"],
+                            "speech_style": "简洁，偶尔念叨老物件",
+                        },
+                        "initial_zone": "central_plaza",
+                        "relationships": [],
+                    },
+                },
+            },
+        })
+
     async def _send_agent_unregistered(self, reason: str):
         await self._send(TYPE_AGENT_UNREGISTERED, self.npc.agent_id, {"reason": reason})
 
@@ -682,7 +902,7 @@ class MockUE:
                 "name": name,
                 "distance": 8.0,
                 "state": obj.default_state or "idle",
-                "available_actions": list(obj.available_actions),
+                "available_actions": list(obj.available_interactions),
             })
         return objs
 
@@ -969,7 +1189,7 @@ class MockUE:
         """
         obj = self.kb.objects.get(object_id)
         name = (obj.display_name if obj else "") or object_id
-        actions = (obj.available_actions if obj else [])
+        actions = (obj.available_interactions if obj else [])
         # NPC's current animation hints at what it was just doing.
         busy = self.npc.busy_action_id is not None
         # Build a per-object-type report. The descriptions are deterministic
@@ -1184,6 +1404,11 @@ class MockUE:
                 else:
                     logger.info(f"[RECONNECT] reconnected to MCP at {self.mcp_ws_url}")
 
+                # Push the full world KB FIRST so MCP can merge + persist
+                # + swap its in-memory KB before any agent_registered
+                # starts workers. MCP only accepts this during the startup
+                # window (before first agent_registered).
+                await self._send_world_kb()
                 # Re-register all agents (§4.2). agent_registered triggers the
                 # MCP Hermes session reset on the initial connect; on reconnect
                 # the MCP matches by agent_id.

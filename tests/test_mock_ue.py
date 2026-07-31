@@ -302,7 +302,7 @@ class InspectTests(unittest.IsolatedAsyncioTestCase):
         from agenttown.mock_ue import ObjectInfo
         ue.kb.objects["future_obj"] = ObjectInfo(
             id="future_obj", display_name="未来设备",
-            available_actions=["inspect", "operate"],
+            available_interactions=["inspect", "operate"],
         )
         details = ue._inspect_object("future_obj")
         self.assertIn("inspection", details)
