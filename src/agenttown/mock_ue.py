@@ -50,6 +50,7 @@ TYPE_NARRATIVE = "narrative"  # MCP → Mock UE, display only
 TYPE_RESYNC = "resync"        # reconnect: exchange last_received_seq (约定11)
 TYPE_EVENT_LOST = "event_lost"  # reconnect: buffer rollover warning
 TYPE_EVENT_NOTIFICATION = "event_notification"  # director-injected event (P1 实时通道)
+TYPE_CAPABILITY_REGISTRY = "capability_registry"  # UE → MCP: declare NPC cmds
 
 # cmd constants
 CMD_MOVE_TO = "MoveTo"
@@ -498,6 +499,123 @@ class MockUE:
             "ue5_ref": self.npc.ue5_ref,
             "initial_position": list(self.npc.position),
             "initial_zone": self.npc.current_zone,
+        })
+
+    async def _send_capability_registry(self):
+        """Declare the cmds Mock UE actually implements.
+
+        Sent on connect (and reconnect) right after agent_registered,
+        with agent_id="system" so it overwrites MCP's built-in default
+        and becomes the authoritative global capability set. MCP uses
+        this to drive tactical-layer prompt generation and dynamic
+        MCP tool registration (AddTool/RemoveTools).
+
+        The list mirrors the 9 cmds the protocol defines and that
+        _handle_action_command actually accepts. If a future mock_ue
+        drops support for a cmd (e.g. stops honoring PlayAnimation),
+        removing it here makes MCP stop advertising tools that depend
+        on it.
+        """
+        await self._send(TYPE_CAPABILITY_REGISTRY, SYSTEM_AGENT_ID, {
+            "actions": [
+                {
+                    "cmd": CMD_MOVE_TO,
+                    "kind": "atomic",
+                    "description": "移动到目标位置",
+                    "estimated_duration_sec": 30,
+                    "params": [
+                        {"name": "target", "type": "string",
+                         "description": "目标位置或语义目标 ID", "required": True},
+                    ],
+                },
+                {
+                    "cmd": CMD_TURN_TO,
+                    "kind": "atomic",
+                    "description": "转身面向目标",
+                    "estimated_duration_sec": 5,
+                    "params": [
+                        {"name": "target", "type": "string",
+                         "description": "目标朝向 ID", "required": True},
+                    ],
+                },
+                {
+                    "cmd": CMD_PLAY_ANIMATION,
+                    "kind": "atomic",
+                    "description": "播放动画",
+                    "estimated_duration_sec": 10,
+                    "params": [
+                        {"name": "animation", "type": "string",
+                         "description": "动画名称", "required": True},
+                    ],
+                },
+                {
+                    "cmd": CMD_SPEAK,
+                    "kind": "atomic",
+                    "description": "对目标说话",
+                    "estimated_duration_sec": 10,
+                    "params": [
+                        {"name": "content", "type": "string",
+                         "description": "说话内容", "required": True},
+                        {"name": "target", "type": "string",
+                         "description": "对话目标 ID（可空）", "required": False},
+                    ],
+                },
+                {
+                    "cmd": CMD_EMOTE,
+                    "kind": "atomic",
+                    "description": "表现情绪表情",
+                    "estimated_duration_sec": 5,
+                    "params": [
+                        {"name": "emotion", "type": "string",
+                         "description": "情绪类型", "required": True},
+                        {"name": "mode", "type": "string",
+                         "description": "oneshot 或 sustained", "required": False},
+                    ],
+                },
+                {
+                    "cmd": CMD_WAIT,
+                    "kind": "atomic",
+                    "description": "原地等待",
+                    "estimated_duration_sec": 60,
+                    "params": [
+                        {"name": "duration_sec", "type": "integer",
+                         "description": "等待秒数", "required": True},
+                    ],
+                },
+                {
+                    "cmd": CMD_INTERACT,
+                    "kind": "atomic",
+                    "description": "与智能对象交互",
+                    "estimated_duration_sec": 15,
+                    "params": [
+                        {"name": "object_id", "type": "string",
+                         "description": "智能对象 ID", "required": True},
+                        {"name": "action", "type": "string",
+                         "description": "交互动作", "required": True},
+                    ],
+                },
+                {
+                    "cmd": CMD_EXECUTE_COMPOSITE,
+                    "kind": "composite",
+                    "description": "执行复合行为（封装一段时长内的多步骤活动）",
+                    "estimated_duration_sec": 600,
+                    "params": [
+                        {"name": "action", "type": "string",
+                         "description": "复合行为类型", "required": True},
+                        {"name": "target", "type": "string",
+                         "description": "目标 ID", "required": False},
+                        {"name": "duration_min", "type": "integer",
+                         "description": "持续分钟数", "required": False},
+                    ],
+                },
+                {
+                    "cmd": CMD_STOP,
+                    "kind": "atomic",
+                    "description": "停止当前在途动作",
+                    "estimated_duration_sec": 1,
+                    "params": [],
+                },
+            ],
         })
 
     async def _send_agent_unregistered(self, reason: str):
@@ -1070,6 +1188,11 @@ class MockUE:
                 # MCP Hermes session reset on the initial connect; on reconnect
                 # the MCP matches by agent_id.
                 await self._send_agent_registered()
+                # Declare NPC capabilities (cmds Mock UE implements) so MCP
+                # can drive tactical-layer prompt generation and dynamic
+                # tool registration. Sent every connect to refresh MCP's
+                # registry (idempotent on MCP side — Register replaces).
+                await self._send_capability_registry()
                 # Announce our last received seq so MCP replays what we missed.
                 await self._send(TYPE_RESYNC, SYSTEM_AGENT_ID,
                                  {"last_received_seq": self._last_received_seq})
