@@ -12,8 +12,8 @@
 #   Adapter   8761
 #   CLI       52001
 #
-# 云环境（AnyDev/纯 Linux）下 Hermes 裸金属运行，profile 用 h01-dev
-# （直连 Venus，不依赖 CodeBuddy Adapter），因此默认带 --no-adapter。
+# 云环境（AnyDev/纯 Linux）下 Hermes 裸金属运行，profile 用 h01
+# （直连 Venus，不依赖已弃用的 CodeBuddy Adapter）。
 # 本地 Windows+WSL 环境下若需用 h01 profile + Adapter，请改用 start.sh。
 #
 # 用法：
@@ -21,7 +21,7 @@
 #   bash start-dev.sh --stop         # 停稳定实例
 #   bash start-dev.sh --no-rebuild   # 跳过 Hermes 镜像重建
 #   bash start-dev.sh --no-hermes    # 跳过 Hermes（已手动启动时用）
-#   bash start-dev.sh --no-adapter   # 跳过 Adapter（已手动启动时用，默认已带）
+#   bash start-dev.sh --with-adapter # 临时启动已弃用的 Adapter
 
 # 端口：stable 默认端口（与 dev 偏移端口 8770/9091/8643 隔离）
 export WS_PORT=9090
@@ -49,6 +49,6 @@ export HERMES_PROFILE=h01
 LOG_DATE=$(date +%Y-%m-%d)
 export LOG_SUBDIR="$PWD/logs/$LOG_DATE"
 
-# h01-dev profile 直连 Venus（provider: custom:venus），不依赖 CodeBuddy Adapter。
-# 默认带 --no-adapter 跳过适配层；用户额外传参追加在后（重复 --no-adapter 无害）。
-exec bash start-debug.sh --no-adapter "$@"
+# Adapter 已弃用（h01 直连 Venus），start-debug.sh 默认不启动 adapter。
+# 这里仍传 --no-adapter 保持向后兼容；如需临时调试 adapter，改用 --with-adapter。
+exec bash start-debug.sh "$@"

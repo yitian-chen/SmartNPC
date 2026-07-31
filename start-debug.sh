@@ -93,25 +93,28 @@ VENUS_MODEL="${VENUS_MODEL:-qwen3.6-35b-a3b}"
 # ─── 参数 ──────────────────────────────────────────────────────
 REBUILD_HERMES=true
 START_HERMES=true
-START_ADAPTER=true
+# Adapter 已弃用（h01/h01-dev profile 直连 Venus，不再需要 CodeBuddy Adapter）。
+# 默认 false；如需临时调试 adapter，显式传 --with-adapter 启用。
+START_ADAPTER=false
 STOP_ONLY=false
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --no-rebuild) REBUILD_HERMES=false; shift ;;
-        --no-hermes)  START_HERMES=false; shift ;;
-        --no-adapter) START_ADAPTER=false; shift ;;
-        --stop)       STOP_ONLY=true; shift ;;
+        --no-rebuild)  REBUILD_HERMES=false; shift ;;
+        --no-hermes)   START_HERMES=false; shift ;;
+        --no-adapter)  START_ADAPTER=false; shift ;;   # 向后兼容（已是默认值）
+        --with-adapter) START_ADAPTER=true; shift ;;    # 临时调试 adapter
+        --stop)        STOP_ONLY=true; shift ;;
         -h|--help)
             echo "Usage: bash start-debug.sh [OPTIONS]"
             echo ""
             echo "UE 联调启动脚本：MCP 跑在 Windows 原生（监听 0.0.0.0），局域网可达。"
             echo ""
             echo "Options:"
-            echo "  --stop         仅停止所有服务，不重启"
-            echo "  --no-rebuild   跳过 Hermes 镜像重建（快速重启）"
-            echo "  --no-hermes    跳过 Hermes 启动（已手动启动时用）"
-            echo "  --no-adapter   跳过 Adapter 启动（已手动启动时用）"
+            echo "  --stop          仅停止所有服务，不重启"
+            echo "  --no-rebuild    跳过 Hermes 镜像重建（快速重启）"
+            echo "  --no-hermes     跳过 Hermes 启动（已手动启动时用）"
+            echo "  --with-adapter  启动已弃用的 CodeBuddy Adapter（默认不启动，h01 直连 Venus）"
             echo ""
             echo "UE 端连接地址：ws://<本机局域网IP>:$WS_PORT/ws"
             exit 0 ;;
