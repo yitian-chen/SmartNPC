@@ -1188,14 +1188,14 @@ func main() {
 	}()
 
 	if *httpAddr != "" {
-		runHTTP(ctx, logger, server, *httpAddr, *httpAllowAnyOrigin, *mcpAPIKey, ws, kb, lookupAgent)
+		runHTTP(ctx, logger, server, *httpAddr, *httpAllowAnyOrigin, *mcpAPIKey, ws, kb, lookupAgent, registerAgent)
 	} else {
 		runStdio(ctx, logger, server)
 	}
 }
 
 // runHTTP serves the MCP server over Streamable HTTP + a /status endpoint.
-func runHTTP(ctx context.Context, logger *slog.Logger, server *mcp.Server, addr string, allowAnyOrigin bool, apiKey string, ws *wsserver.Server, kb *worldkb.KB, lookupAgent func(string) *agentContext) {
+func runHTTP(ctx context.Context, logger *slog.Logger, server *mcp.Server, addr string, allowAnyOrigin bool, apiKey string, ws *wsserver.Server, kb *worldkb.KB, lookupAgent func(string) *agentContext, registerAgent func(string) (*agentContext, bool)) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/status", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -1213,7 +1213,7 @@ func runHTTP(ctx context.Context, logger *slog.Logger, server *mcp.Server, addr 
 	// （如 "07:00-11:00: 车间装配作业"），战术层立即分解成 action 入队下发。
 	// 仅联调用，无认证。
 	mux.HandleFunc("/debug/schedule", func(w http.ResponseWriter, r *http.Request) {
-		handleDebugSchedule(ctx, logger, ws, kb, lookupAgent, w, r)
+		handleDebugSchedule(ctx, logger, ws, kb, lookupAgent, registerAgent, w, r)
 	})
 	// /debug/ — 浏览器 debug 控制台 HTML 页面（无外部依赖，嵌入二进制）。
 	mux.HandleFunc("/debug/", func(w http.ResponseWriter, r *http.Request) {
@@ -1588,7 +1588,7 @@ func parseScheduleText(s string) (slot, goal string) {
 // 互斥：复用 replanInProgress（worker main.go:311 检查后 continue），防止
 // handler 调 LLM 期间 worker 并发 tacticalRefill 撞 tacticalHc session。
 // debugOverride 叠加设置防止 worker 在 stop→completion 信号驱动下补 idle wait。
-func handleDebugSchedule(ctx context.Context, logger *slog.Logger, ws *wsserver.Server, kb *worldkb.KB, lookupAgent func(string) *agentContext, w http.ResponseWriter, r *http.Request) {
+func handleDebugSchedule(ctx context.Context, logger *slog.Logger, ws *wsserver.Server, kb *worldkb.KB, lookupAgent func(string) *agentContext, registerAgent func(string) (*agentContext, bool), w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
 	if r.Method != http.MethodPost {
@@ -1648,16 +1648,24 @@ func handleDebugSchedule(ctx context.Context, logger *slog.Logger, ws *wsserver.
 		return
 	}
 
-	if lookupAgent == nil {
-		w.WriteHeader(http.StatusNotFound)
-		_ = json.NewEncoder(w).Encode(debugScheduleResponse{Error: "agent lookup not available"})
-		return
-	}
 	ac := lookupAgent(req.AgentID)
 	if ac == nil {
-		w.WriteHeader(http.StatusNotFound)
-		_ = json.NewEncoder(w).Encode(debugScheduleResponse{Error: "unknown agent_id: " + req.AgentID})
-		return
+		// 联调 debug 场景：wscat 手动测试时不会发 agent_registered，
+		// 此处自动注册 agent，让 /debug/schedule 能独立工作。
+		// 正常仿真流程仍由 UE 的 agent_registered 消息触发注册。
+		if registerAgent == nil {
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(debugScheduleResponse{Error: "agent lookup not available"})
+			return
+		}
+		var isNew bool
+		ac, isNew = registerAgent(req.AgentID)
+		if ac == nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(debugScheduleResponse{Error: "failed to register agent: " + req.AgentID})
+			return
+		}
+		logger.Info("[debug/schedule] auto-registered agent", "agent_id", req.AgentID, "new", isNew)
 	}
 
 	// 互斥：检查 replanInProgress（防 worker 并发 refill 撞 tacticalHc session）；

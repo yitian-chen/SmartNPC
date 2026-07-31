@@ -675,7 +675,7 @@ func TestHandleDebugSchedule_MethodNotAllowed(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/debug/schedule", nil)
 	rec := httptest.NewRecorder()
 	ws := wsserver.New(wsserver.Options{})
-	handleDebugSchedule(context.Background(), slog.Default(), ws, nil, nil, rec, req)
+	handleDebugSchedule(context.Background(), slog.Default(), ws, nil, nil, nil, rec, req)
 
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("status: got %d, want 405", rec.Code)
@@ -692,7 +692,7 @@ func TestHandleDebugSchedule_MethodNotAllowed(t *testing.T) {
 func TestHandleDebugSchedule_InvalidJSON(t *testing.T) {
 	req, rec := newDebugScheduleRecorder(t, "{not json")
 	ws := wsserver.New(wsserver.Options{})
-	handleDebugSchedule(context.Background(), slog.Default(), ws, nil, nil, rec, req)
+	handleDebugSchedule(context.Background(), slog.Default(), ws, nil, nil, nil, rec, req)
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status: got %d, want 400", rec.Code)
@@ -709,7 +709,7 @@ func TestHandleDebugSchedule_InvalidJSON(t *testing.T) {
 func TestHandleDebugSchedule_MissingAgentID(t *testing.T) {
 	req, rec := newDebugScheduleRecorder(t, `{"schedule":"07:00-11:00: 装配"}`)
 	ws := wsserver.New(wsserver.Options{})
-	handleDebugSchedule(context.Background(), slog.Default(), ws, nil, nil, rec, req)
+	handleDebugSchedule(context.Background(), slog.Default(), ws, nil, nil, nil, rec, req)
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status: got %d, want 400", rec.Code)
@@ -724,7 +724,7 @@ func TestHandleDebugSchedule_MissingAgentID(t *testing.T) {
 func TestHandleDebugSchedule_MissingSchedule(t *testing.T) {
 	req, rec := newDebugScheduleRecorder(t, `{"agent_id":"H-01"}`)
 	ws := wsserver.New(wsserver.Options{})
-	handleDebugSchedule(context.Background(), slog.Default(), ws, nil, nil, rec, req)
+	handleDebugSchedule(context.Background(), slog.Default(), ws, nil, nil, nil, rec, req)
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status: got %d, want 400", rec.Code)
@@ -742,7 +742,7 @@ func TestHandleDebugSchedule_MultiLineRejected(t *testing.T) {
 	body := `{"agent_id":"H-01","schedule":"07:00-11:00: 装配\n13:00-17:00: 巡检"}`
 	req, rec := newDebugScheduleRecorder(t, body)
 	ws := wsserver.New(wsserver.Options{})
-	handleDebugSchedule(context.Background(), slog.Default(), ws, nil, nil, rec, req)
+	handleDebugSchedule(context.Background(), slog.Default(), ws, nil, nil, nil, rec, req)
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status: got %d, want 400", rec.Code)
@@ -761,7 +761,7 @@ func TestHandleDebugSchedule_PureGoalAccepted(t *testing.T) {
 	body := `{"agent_id":"H-01","schedule":"车间装配作业"}`
 	req, rec := newDebugScheduleRecorder(t, body)
 	ws := wsserver.New(wsserver.Options{})
-	handleDebugSchedule(context.Background(), slog.Default(), ws, nil, nil, rec, req)
+	handleDebugSchedule(context.Background(), slog.Default(), ws, nil, nil, nil, rec, req)
 
 	// 纯 goal 合法，应到达 ws 检查返回 503（而非 400）
 	if rec.Code != http.StatusServiceUnavailable {
@@ -777,7 +777,7 @@ func TestHandleDebugSchedule_BadSlotFallsBackToPureGoal(t *testing.T) {
 	body := `{"agent_id":"H-01","schedule":"07-11: 装配作业"}`
 	req, rec := newDebugScheduleRecorder(t, body)
 	ws := wsserver.New(wsserver.Options{})
-	handleDebugSchedule(context.Background(), slog.Default(), ws, nil, nil, rec, req)
+	handleDebugSchedule(context.Background(), slog.Default(), ws, nil, nil, nil, rec, req)
 
 	// 格式非法的 slot → 降级为纯 goal → 合法 → 503
 	if rec.Code != http.StatusServiceUnavailable {
@@ -791,7 +791,7 @@ func TestHandleDebugSchedule_UENotConnected(t *testing.T) {
 	body := `{"agent_id":"H-01","schedule":"07:00-11:00: 车间装配作业"}`
 	req, rec := newDebugScheduleRecorder(t, body)
 	ws := wsserver.New(wsserver.Options{}) // 未连接
-	handleDebugSchedule(context.Background(), slog.Default(), ws, nil, nil, rec, req)
+	handleDebugSchedule(context.Background(), slog.Default(), ws, nil, nil, nil, rec, req)
 
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status: got %d, want 503", rec.Code)
@@ -814,7 +814,7 @@ func TestHandleDebugSchedule_OrderWSBeforeLookup(t *testing.T) {
 	ws := wsserver.New(wsserver.Options{}) // 未连接
 	// lookupAgent 返回 nil，但 ws 检查在前，应返回 503 而非 404
 	lookup := func(string) *agentContext { return nil }
-	handleDebugSchedule(context.Background(), slog.Default(), ws, nil, lookup, rec, req)
+	handleDebugSchedule(context.Background(), slog.Default(), ws, nil, lookup, nil, rec, req)
 
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status: got %d, want 503 (ws check before lookup)", rec.Code)
@@ -854,7 +854,7 @@ func TestHandleDebugSchedule_SingleLineParseValid(t *testing.T) {
 	body := `{"agent_id":"H-01","schedule":"07:00-11:00: 车间装配作业"}`
 	req, rec := newDebugScheduleRecorder(t, body)
 	ws := wsserver.New(wsserver.Options{})
-	handleDebugSchedule(context.Background(), slog.Default(), ws, nil, nil, rec, req)
+	handleDebugSchedule(context.Background(), slog.Default(), ws, nil, nil, nil, rec, req)
 
 	// 应通过 schedule 校验，到达 ws 检查返回 503（而非 400）
 	if rec.Code != http.StatusServiceUnavailable {
