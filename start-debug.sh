@@ -56,6 +56,8 @@ HTTP_PORT="${HTTP_PORT:-8760}"
 HERMES_PORT="${HERMES_PORT:-8642}"
 CLI_PORT="${CLI_PORT:-52001}"
 HERMES_CONTAINER="${HERMES_CONTAINER:-agenttown-h01}"
+# Hermes profile 名：stable 用 h01，dev 用 h01-dev（由各自 start-dev.sh 设置）
+HERMES_PROFILE="${HERMES_PROFILE:-h01}"
 
 LOG_DATE=$(date +%Y-%m-%d)
 LOG_SUBDIR_BASE="$PROJECT_DIR/logs/$LOG_DATE"
@@ -452,7 +454,7 @@ start_hermes() {
         fail ".env file not found at $ENV_FILE"
     fi
 
-    # 加载 .env 中的 VENUS_API_KEY（h01-dev 直连 Venus 必需）
+    # 加载 .env 中的 VENUS_API_KEY（h01/h01-dev 直连 Venus 必需）
     local venus_key=""
     if grep -q "^VENUS_API_KEY=" "$ENV_FILE" 2>/dev/null; then
         venus_key=$(grep "^VENUS_API_KEY=" "$ENV_FILE" | cut -d= -f2-)
@@ -462,14 +464,14 @@ start_hermes() {
         # 裸金属：直接在本机跑 hermes 命令，不走 Docker
         # 依赖：pip install -e /data/workspace/hermes-agent + pip install aiohttp
         # profile 路径通过 HERMES_HOME 指向 $PROJECT_DIR/hermes，
-        # Hermes 自动解析到 $HERMES_HOME/profiles/h01-dev
+        # Hermes 自动解析到 $HERMES_HOME/profiles/$HERMES_PROFILE
         if ! command -v hermes >/dev/null 2>&1; then
             fail "hermes command not found. Install dependencies:
   cd /data/workspace/hermes-agent && pip3 install -e . && pip3 install aiohttp"
         fi
 
         # 裸金属下 host.docker.internal 不存在（那是 Docker 容器内才能解析的宿主别名）。
-        # h01-dev config.yaml 里 MCP URL 写的是 http://host.docker.internal:8770/mcp，
+        # h01/h01-dev config.yaml 里 MCP URL 写的是 http://host.docker.internal:<port>/mcp，
         # 这里在 /etc/hosts 加一行让该域名解析到 127.0.0.1，MCP 和 Hermes 同机运行。
         if ! getent hosts host.docker.internal >/dev/null 2>&1; then
             echo "127.0.0.1 host.docker.internal" | sudo tee -a /etc/hosts >/dev/null 2>&1 \
@@ -481,12 +483,12 @@ start_hermes() {
         mkdir -p "$LOG_SUBDIR"
         : > "$hermes_log"
 
-        info "Starting Hermes (bare-metal, log: $LOG_SUBDIR/debug-hermes.log)..."
+        info "Starting Hermes (bare-metal, profile=$HERMES_PROFILE, log: $LOG_SUBDIR/debug-hermes.log)..."
         HERMES_HOME="$PROJECT_DIR/hermes" \
         TERMINAL_CWD="$PROJECT_DIR/hermes" \
         VENUS_API_KEY="$venus_key" \
         GATEWAY_ALLOW_ALL_USERS=true \
-        nohup hermes -p h01-dev gateway run --accept-hooks >> "$hermes_log" 2>&1 &
+        nohup hermes -p "$HERMES_PROFILE" gateway run --accept-hooks >> "$hermes_log" 2>&1 &
         disown
 
         wait_for "Hermes Gateway (:$HERMES_PORT)" check_hermes 40
@@ -582,7 +584,7 @@ start_mcp() {
     # --ws :9090 在 Windows 上监听 0.0.0.0:9090，局域网可达
     # --http :8760 同理
     # --llm-backend hermes 走 MCP → Hermes → Venus 架构：MCP 把战略/战术层
-    #   LLM 调用发给 Hermes Gateway，由 Hermes 配置 (hermes/profiles/h01-dev/
+    #   LLM 调用发给 Hermes Gateway，由 Hermes 配置 (hermes/profiles/$HERMES_PROFILE/
     #   config.yaml) 决定后端模型（当前为 Venus qwen3.6-35b-a3b）。
     #   Venus client 仍保留在代码中，需要时切回 --llm-backend venus 直连即可。
     # --world-kb 用绝对路径，避免 cwd 不对找不到 assets/world_kb.yaml
