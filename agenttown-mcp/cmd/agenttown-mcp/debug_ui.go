@@ -52,10 +52,10 @@ type debugKBZone struct {
 }
 
 type debugKBObject struct {
-	ID               string   `json:"id"`
-	DisplayName      string   `json:"display_name"`
-	ZoneID           string   `json:"zone_id"`
-	AvailableActions []string `json:"available_actions"`
+	ID                    string   `json:"id"`
+	DisplayName           string   `json:"display_name"`
+	ZoneID                string   `json:"zone_id"`
+	AvailableInteractions []string `json:"available_interactions"`
 }
 
 // handleDebugUI 返回 debug 控制台 HTML 页面。
@@ -92,10 +92,10 @@ func handleDebugKB(w http.ResponseWriter, r *http.Request, kb *worldkb.KB, logge
 	}
 	for _, o := range kb.ListObjects() {
 		resp.Objects = append(resp.Objects, debugKBObject{
-			ID:               o.ID,
-			DisplayName:      o.DisplayName,
-			ZoneID:           o.ZoneID,
-			AvailableActions: o.AvailableActions,
+			ID:                    o.ID,
+			DisplayName:           o.DisplayName,
+			ZoneID:                o.ZoneID,
+			AvailableInteractions: o.AvailableInteractions,
 		})
 	}
 	if err := json.NewEncoder(w).Encode(resp); err != nil {

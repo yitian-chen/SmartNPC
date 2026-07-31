@@ -85,14 +85,14 @@ func (k *KB) WhichObject(pos [3]float64) string {
 	return ""
 }
 
-// GetAvailableActions returns the actions allowed at an object ID.
-// Returns nil if the object is unknown or has no actions defined.
-func (k *KB) GetAvailableActions(objectID string) []string {
+// GetAvailableInteractions returns the interactions allowed at an object ID.
+// Returns nil if the object is unknown or has no interactions defined.
+func (k *KB) GetAvailableInteractions(objectID string) []string {
 	if k == nil {
 		return nil
 	}
 	if o := k.objectByID[objectID]; o != nil {
-		return o.AvailableActions
+		return o.AvailableInteractions
 	}
 	return nil
 }
@@ -130,10 +130,10 @@ type ZoneInfo struct {
 // ObjectInfo is a compact object summary for prompt injection. Includes
 // ZoneID so consumers can express zone-object relationships in prompts.
 type ObjectInfo struct {
-	ID               string
-	DisplayName      string
-	ZoneID           string
-	AvailableActions []string
+	ID                    string
+	DisplayName           string
+	ZoneID                string
+	AvailableInteractions []string
 }
 
 // ListZones returns all zones in declaration order. Returns nil if the KB
@@ -152,21 +152,21 @@ func (k *KB) ListZones() []ZoneInfo {
 
 // ListObjects returns all smart objects in declaration order. Returns nil if
 // the KB is nil or empty. Used by the tactical layer prompt to inject the
-// full object list (with zone_id and available actions) so the LLM cannot
-// invent object IDs like "workbench_02" that don't exist in the KB.
+// full object list (with zone_id and available interactions) so the LLM
+// cannot invent object IDs like "workbench_02" that don't exist in the KB.
 func (k *KB) ListObjects() []ObjectInfo {
 	if k == nil {
 		return nil
 	}
 	out := make([]ObjectInfo, 0, len(k.Objects))
 	for _, o := range k.Objects {
-		actions := make([]string, len(o.AvailableActions))
-		copy(actions, o.AvailableActions)
+		interactions := make([]string, len(o.AvailableInteractions))
+		copy(interactions, o.AvailableInteractions)
 		out = append(out, ObjectInfo{
-			ID:               o.ID,
-			DisplayName:      o.DisplayName,
-			ZoneID:           o.ZoneID,
-			AvailableActions: actions,
+			ID:                    o.ID,
+			DisplayName:           o.DisplayName,
+			ZoneID:                o.ZoneID,
+			AvailableInteractions: interactions,
 		})
 	}
 	return out

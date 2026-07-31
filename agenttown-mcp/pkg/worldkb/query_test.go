@@ -146,7 +146,7 @@ func TestListObjects(t *testing.T) {
 		t.Fatal("ListObjects returned empty for non-empty KB")
 	}
 	// Should contain workbench_01 with native DisplayName and
-	// AvailableActions including "assemble".
+	// AvailableInteractions including "assemble".
 	found := false
 	for _, o := range objs {
 		if o.ID == "workbench_01" {
@@ -156,18 +156,18 @@ func TestListObjects(t *testing.T) {
 			if o.ZoneID != "main_workshop" {
 				t.Errorf("workbench_01 ZoneID = %q, want main_workshop", o.ZoneID)
 			}
-			if len(o.AvailableActions) == 0 {
-				t.Errorf("workbench_01 has empty AvailableActions")
+			if len(o.AvailableInteractions) == 0 {
+				t.Errorf("workbench_01 has empty AvailableInteractions")
 			}
 			hasAssemble := false
-			for _, a := range o.AvailableActions {
+			for _, a := range o.AvailableInteractions {
 				if a == "assemble" {
 					hasAssemble = true
 					break
 				}
 			}
 			if !hasAssemble {
-				t.Errorf("workbench_01 AvailableActions missing 'assemble', got %v", o.AvailableActions)
+				t.Errorf("workbench_01 AvailableInteractions missing 'assemble', got %v", o.AvailableInteractions)
 			}
 			found = true
 			break
@@ -178,11 +178,11 @@ func TestListObjects(t *testing.T) {
 	}
 }
 
-func TestGetAvailableActions(t *testing.T) {
+func TestGetAvailableInteractions(t *testing.T) {
 	kb, _ := Load(sampleYAMLPath(t))
-	acts := kb.GetAvailableActions("workbench_01")
+	acts := kb.GetAvailableInteractions("workbench_01")
 	if len(acts) != 2 {
-		t.Fatalf("len(actions) = %d, want 2", len(acts))
+		t.Fatalf("len(interactions) = %d, want 2", len(acts))
 	}
 	// Should contain assemble and inspect
 	want := map[string]bool{"assemble": false, "inspect": false}
@@ -193,7 +193,7 @@ func TestGetAvailableActions(t *testing.T) {
 	}
 	for a, found := range want {
 		if !found {
-			t.Errorf("missing action %q in %v", a, acts)
+			t.Errorf("missing interaction %q in %v", a, acts)
 		}
 	}
 }
@@ -218,8 +218,8 @@ func TestNilKB_AllMethodsSafe(t *testing.T) {
 	if kb.WhichObject([3]float64{}) != "" {
 		t.Error("nil WhichObject should return empty")
 	}
-	if kb.GetAvailableActions("x") != nil {
-		t.Error("nil GetAvailableActions should return nil")
+	if kb.GetAvailableInteractions("x") != nil {
+		t.Error("nil GetAvailableInteractions should return nil")
 	}
 	if _, _, err := kb.ResolveTarget("x"); err == nil {
 		t.Error("nil ResolveTarget should error")

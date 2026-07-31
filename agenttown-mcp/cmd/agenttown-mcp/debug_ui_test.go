@@ -88,14 +88,14 @@ func TestHandleDebugKB_ReturnsZonesAndObjects(t *testing.T) {
 				t.Errorf("workbench_01 zone_id: got %q, want main_workshop", o.ZoneID)
 			}
 			foundAssemble := false
-			for _, a := range o.AvailableActions {
+			for _, a := range o.AvailableInteractions {
 				if a == "assemble" {
 					foundAssemble = true
 					break
 				}
 			}
 			if !foundAssemble {
-				t.Errorf("workbench_01 available_actions should contain assemble, got %v", o.AvailableActions)
+				t.Errorf("workbench_01 available_interactions should contain assemble, got %v", o.AvailableInteractions)
 			}
 			break
 		}

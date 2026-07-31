@@ -32,7 +32,7 @@ func TestWriteYAML_RoundTrip(t *testing.T) {
 	// Should contain expected keys.
 	s := string(data)
 	for _, want := range []string{
-		"version:", "site:", "zones:", "objects:", "agents:",
+		"version:", "narrative:", "zones:", "objects:", "agents:",
 		"display_name:", "bounds:", "extent:", "entry_point:",
 		"interaction_point:", "zone_id:", "initial_zone:",
 	} {

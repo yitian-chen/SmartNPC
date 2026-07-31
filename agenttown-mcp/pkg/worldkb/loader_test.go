@@ -31,8 +31,8 @@ func TestLoad_Sample(t *testing.T) {
 	if kb.Version != "1.0" {
 		t.Errorf("Version = %q, want 1.0", kb.Version)
 	}
-	if kb.Site.ID != "industrial_town" {
-		t.Errorf("Site.ID = %q", kb.Site.ID)
+	if kb.Narrative.Setting == "" {
+		t.Errorf("Narrative.Setting is empty")
 	}
 	if len(kb.Zones) != 7 {
 		t.Errorf("len(Zones) = %d, want 7", len(kb.Zones))
@@ -119,7 +119,7 @@ func TestLoad_DuplicateZoneID(t *testing.T) {
 	p := filepath.Join(dir, "dup.yaml")
 	content := `
 version: "1.0"
-site: {id: x, display_name: X}
+narrative: {setting: x, theme: y}
 zones:
   - id: dup_zone
     entry_point: [0, 0, 0]
@@ -147,7 +147,7 @@ func TestLoad_BadVectorArity(t *testing.T) {
 	p := filepath.Join(dir, "bad_vec.yaml")
 	content := `
 version: "1.0"
-site: {id: x, display_name: X}
+narrative: {setting: x, theme: y}
 zones:
   - id: z
     entry_point: [0, 0]          # only 2 elements — should fail

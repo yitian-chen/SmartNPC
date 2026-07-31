@@ -92,10 +92,10 @@ func Validate(kb *KB) *IssueSet {
 				Message: "object has empty category",
 			})
 		}
-		if len(o.AvailableActions) == 0 {
+		if len(o.AvailableInteractions) == 0 {
 			set.Warnings = append(set.Warnings, Issue{
 				Code: "EMPTY_OBJECT_ACTIONS", Entity: o.ID,
-				Message: "object has no available_actions",
+				Message: "object has no available_interactions",
 			})
 		}
 	}
@@ -116,21 +116,16 @@ func Validate(kb *KB) *IssueSet {
 				Message: "agent references non-existent initial_zone " + a.InitialZone,
 			})
 		}
-		if a.HomeZone != "" && !zoneIDs[a.HomeZone] {
-			set.Warnings = append(set.Warnings, Issue{
-				Code: "AGENT_HOME_ZONE_REF_INVALID", Entity: a.ID,
-				Message: "agent references non-existent home_zone " + a.HomeZone,
-			})
-		}
 	}
 
-	// Zone connected_to checks.
+	// Zone connections checks (NEW schema: structured Connection replaces
+	// ConnectedTo []string). Validates that each Connection.To exists.
 	for _, z := range kb.Zones {
-		for _, conn := range z.ConnectedTo {
-			if !zoneIDs[conn] {
+		for _, conn := range z.Connections {
+			if !zoneIDs[conn.To] {
 				set.Errors = append(set.Errors, Issue{
 					Code: "ZONE_CONNECTION_REF_INVALID", Entity: z.ID,
-					Message: "zone connected_to references non-existent zone " + conn,
+					Message: "zone connections references non-existent zone " + conn.To,
 				})
 			}
 		}

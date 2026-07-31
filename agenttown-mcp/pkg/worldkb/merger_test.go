@@ -30,7 +30,7 @@ func minimalGenerated() *GeneratedDoc {
 		Zones: []GeneratedZone{
 			{
 				ID: "main_workshop", EditorLabel: "Z1", ActorPath: "/p/z1",
-				Bounds:      GeneratedBounds{Center: []float64{1, 2, 3}, Extent: []float64{4, 5, 6}},
+				Bounds:      GeneratedBounds{Center: []float64{1, 2, 3}, Extent: []float64{4, 5, 6}, Rotation: []float64{0, 0, 0}},
 				EntryPoint:  []float64{7, 8, 9},
 				EntryFacing: []float64{1, 0, 0},
 			},
@@ -38,12 +38,12 @@ func minimalGenerated() *GeneratedDoc {
 		Objects: []GeneratedObject{
 			{
 				ID: "workbench_01", Category: "workbench", ZoneID: "main_workshop",
-				EditorLabel:       "W1", ActorClass: "/p/w1",
-				ActorPosition:     []float64{1, 2, 3},
-				InteractionPoint:  []float64{4, 5, 6},
-				InteractionFacing: []float64{1, 0, 0},
-				AvailableActions:  []string{"assemble"},
-				DefaultState:      "idle",
+				EditorLabel:           "W1", ActorClass: "/p/w1",
+				ActorPosition:         []float64{1, 2, 3},
+				InteractionPoint:      []float64{4, 5, 6},
+				InteractionFacing:     []float64{1, 0, 0},
+				AvailableInteractions: []string{"assemble"},
+				DefaultState:          "idle",
 			},
 		},
 		Agents: []GeneratedAgent{
@@ -57,23 +57,29 @@ func minimalGenerated() *GeneratedDoc {
 	}
 }
 
-// helper: build a minimal authored doc matching the generated above.
+// helper: build a minimal authored doc matching the generated above (NEW schema).
 func minimalAuthored() *AuthoredDoc {
 	return &AuthoredDoc{
-		Schema:        "agenttown-world-authored/v1",
-		SchemaVersion: "1.0",
-		Site:          AuthoredSite{ID: "town", DisplayName: "小镇", Description: "d"},
+		Version:   "1.0",
+		Narrative: AuthoredNarrative{Setting: "小镇", Theme: "测试"},
 		Zones: map[string]AuthoredZone{
 			"main_workshop": {
 				DisplayName: "主车间", Description: "d",
-				ConnectedTo: []string{"main_workshop"}, // self-loop for dedup test
+				Aliases: []string{"工坊", "工坊"}, // duplicate for dedup test
+				Connections: []AuthoredConnection{
+					{To: "main_workshop", Type: "road", Bidirectional: true}, // self-loop
+				},
 			},
 		},
 		Objects: map[string]AuthoredObject{
-			"workbench_01": {DisplayName: "工作台", RequiredRoles: []string{"worker"}, Capacity: 1},
+			"workbench_01": {DisplayName: "工作台", Tags: []string{"crafting"}},
 		},
 		Agents: map[string]AuthoredAgent{
-			"H-01": {DisplayName: "老陈", Role: []string{"worker"}, HomeZone: "main_workshop"},
+			"H-01": {
+				DisplayName: "老陈", Description: "测试 agent",
+				Profession:  "worker",
+				Personality: AuthoredPersonality{Traits: []string{"calm"}, SpeechStyle: "concise"},
+			},
 		},
 	}
 }
@@ -92,11 +98,14 @@ func TestMerge_HappyPath(t *testing.T) {
 	if kb.Zones[0].DisplayName != "主车间" {
 		t.Errorf("DisplayName not overlayed: %q", kb.Zones[0].DisplayName)
 	}
-	if len(kb.Zones[0].ConnectedTo) != 1 {
-		t.Errorf("ConnectedTo dedup failed: %v", kb.Zones[0].ConnectedTo)
+	if len(kb.Zones[0].Connections) != 1 {
+		t.Errorf("Connections not set: %v", kb.Zones[0].Connections)
 	}
-	if kb.Site.ID != "town" {
-		t.Errorf("site not from authored: %q", kb.Site.ID)
+	if len(kb.Zones[0].Aliases) != 1 {
+		t.Errorf("Aliases dedup failed: %v", kb.Zones[0].Aliases)
+	}
+	if kb.Narrative.Setting != "小镇" {
+		t.Errorf("narrative not from authored: %q", kb.Narrative.Setting)
 	}
 	if len(kb.Objects) != 1 || kb.Objects[0].DisplayName != "工作台" {
 		t.Errorf("object overlay failed: %+v", kb.Objects)
@@ -104,15 +113,24 @@ func TestMerge_HappyPath(t *testing.T) {
 	if kb.Objects[0].InteractionRadius != defaultInteractionRadius {
 		t.Errorf("default radius not applied: %v", kb.Objects[0].InteractionRadius)
 	}
+	if len(kb.Objects[0].Tags) != 1 || kb.Objects[0].Tags[0] != "crafting" {
+		t.Errorf("object tags not overlayed: %v", kb.Objects[0].Tags)
+	}
 	if len(kb.Agents) != 1 || kb.Agents[0].DisplayName != "老陈" {
 		t.Errorf("agent overlay failed: %+v", kb.Agents)
+	}
+	if kb.Agents[0].Profession != "worker" {
+		t.Errorf("agent profession not overlayed: %q", kb.Agents[0].Profession)
+	}
+	if len(kb.Agents[0].Personality.Traits) != 1 || kb.Agents[0].Personality.Traits[0] != "calm" {
+		t.Errorf("agent personality not overlayed: %v", kb.Agents[0].Personality)
 	}
 }
 
 func TestMerge_SchemaVersionMismatch(t *testing.T) {
 	gen := minimalGenerated()
 	auth := minimalAuthored()
-	auth.SchemaVersion = "2.0"
+	auth.Version = "2.0"
 	_, _, err := Merge(gen, auth)
 	if err == nil || !strings.Contains(err.Error(), "schema version mismatch") {
 		t.Fatalf("expected version mismatch error, got: %v", err)
@@ -179,8 +197,7 @@ func TestMerge_WrongVectorArity(t *testing.T) {
 func TestMerge_WarningWhenAuthoredMissing(t *testing.T) {
 	gen := minimalGenerated()
 	auth := &AuthoredDoc{
-		Schema: "x", SchemaVersion: "1.0",
-		Site: AuthoredSite{ID: "town", DisplayName: "t"},
+		Version: "1.0", Narrative: AuthoredNarrative{Setting: "t"},
 		Zones:   map[string]AuthoredZone{},
 		Objects: map[string]AuthoredObject{},
 		Agents:  map[string]AuthoredAgent{},
@@ -194,41 +211,50 @@ func TestMerge_WarningWhenAuthoredMissing(t *testing.T) {
 	}
 }
 
-func TestMerge_AuthoredInteractionRadiusOverrides(t *testing.T) {
+func TestMerge_PerAgentRelationshipsFlattened(t *testing.T) {
 	gen := minimalGenerated()
-	auth := minimalAuthored()
-	auth.Objects["workbench_01"] = AuthoredObject{
-		DisplayName: "工作台",
-		InteractionRadius: 999.0,
-	}
-	kb, _, err := Merge(gen, auth)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if kb.Objects[0].InteractionRadius != 999.0 {
-		t.Errorf("authored radius not applied: %v", kb.Objects[0].InteractionRadius)
-	}
-}
-
-func TestMerge_Relationships(t *testing.T) {
-	gen := minimalGenerated()
-	auth := minimalAuthored()
-	auth.Agents["H-01"] = AuthoredAgent{DisplayName: "老陈", HomeZone: "main_workshop"}
 	// Add a second agent so relationship has a valid target.
 	gen.Agents = append(gen.Agents, GeneratedAgent{
 		ID: "H-02", Type: "humanoid", InitialZone: "main_workshop",
 		InitialPosition: []float64{1, 2, 3},
 	})
+	auth := minimalAuthored()
 	auth.Agents["H-02"] = AuthoredAgent{DisplayName: "小李"}
-	auth.Relationships = []AuthoredRelationship{
-		{From: "H-01", To: "H-02", Familiarity: 80, Type: "colleague"},
+	auth.Agents["H-01"] = AuthoredAgent{
+		DisplayName: "老陈",
+		Relationships: []AuthoredRelationship{
+			{From: "H-01", To: "H-02", Familiarity: 80, Type: "colleague"},
+		},
 	}
 	kb, _, err := Merge(gen, auth)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if len(kb.Relationships) != 1 || kb.Relationships[0].From != "H-01" {
-		t.Errorf("relationship not merged: %+v", kb.Relationships)
+		t.Errorf("per-agent relationship not flattened: %+v", kb.Relationships)
+	}
+}
+
+func TestMerge_AuthoredInitialZoneOverrides(t *testing.T) {
+	gen := minimalGenerated()
+	auth := minimalAuthored()
+	// generated has initial_zone="main_workshop"; authored overrides to a
+	// different zone that must exist in generated. Add it first.
+	gen.Zones = append(gen.Zones, GeneratedZone{
+		ID: "zone_b", EditorLabel: "ZB", ActorPath: "/p/zb",
+		Bounds:      GeneratedBounds{Center: []float64{0, 0, 0}, Extent: []float64{1, 1, 1}},
+		EntryPoint:  []float64{0, 0, 0},
+		EntryFacing: []float64{1, 0, 0},
+	})
+	auth.Zones["zone_b"] = AuthoredZone{DisplayName: "B"}
+	auth.Agents["H-01"] = AuthoredAgent{DisplayName: "老陈", InitialZone: "zone_b"}
+	kb, _, err := Merge(gen, auth)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	got := kb.GetAgent("H-01")
+	if got.InitialZone != "zone_b" {
+		t.Errorf("authored initial_zone not applied: %q", got.InitialZone)
 	}
 }
 
@@ -242,7 +268,7 @@ func TestMerge_DeterministicSort(t *testing.T) {
 			EntryPoint: []float64{0, 0, 0}, EntryFacing: []float64{1, 0, 0}},
 	}
 	auth := &AuthoredDoc{
-		SchemaVersion: "1.0", Site: AuthoredSite{ID: "t"},
+		Version: "1.0", Narrative: AuthoredNarrative{Setting: "t"},
 		Zones: map[string]AuthoredZone{"z_a": {}, "z_b": {}},
 	}
 	kb, _, err := Merge(gen, auth)
@@ -291,8 +317,8 @@ func TestMergeAndWrite_HappyPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reload merged yaml: %v", err)
 	}
-	if reloaded.Site.ID != "town" {
-		t.Errorf("reloaded site id = %q, want town", reloaded.Site.ID)
+	if reloaded.Narrative.Setting != "小镇" {
+		t.Errorf("reloaded narrative.setting = %q, want 小镇", reloaded.Narrative.Setting)
 	}
 	if reloaded.GetZone("main_workshop") == nil {
 		t.Error("reloaded missing main_workshop zone")
@@ -379,7 +405,7 @@ func TestMergeAndWrite_ValidationErrorPropagates(t *testing.T) {
 	// Authored must match — also use 1bad so no dangling-id error.
 	auth := minimalAuthored()
 	delete(auth.Agents, "H-01")
-	auth.Agents["1bad"] = AuthoredAgent{DisplayName: "x", HomeZone: "main_workshop"}
+	auth.Agents["1bad"] = AuthoredAgent{DisplayName: "x"}
 	writeJSONFile(t, authPath, auth)
 
 	_, err := MergeAndWrite(genPath, authPath, outPath, "")
