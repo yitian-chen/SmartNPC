@@ -32,7 +32,7 @@ func TestParseTacticalNDJSON_Valid(t *testing.T) {
 	raw := `{"inner_thought":"先去车间再装配"}` + "\n" +
 		`{"action":"move_to","params":{"target":"main_workshop"}}` + "\n" +
 		`{"action":"work_assemble","params":{"target":"workbench_01","duration_min":240}}`
-	actions, thought, err := parseTacticalNDJSON(raw)
+	actions, thought, err := parseTacticalNDJSON(raw, nil, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -52,7 +52,7 @@ func TestParseTacticalNDJSON_WithFence(t *testing.T) {
 		`{"inner_thought":"充电"}` + "\n" +
 		`{"action":"charge_at","params":{"station_id":"charging_station_01","duration_min":60}}` + "\n" +
 		"```"
-	actions, _, err := parseTacticalNDJSON(raw)
+	actions, _, err := parseTacticalNDJSON(raw, nil, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -65,7 +65,7 @@ func TestParseTacticalNDJSON_BlankLines(t *testing.T) {
 	raw := `{"inner_thought":"开始"}` + "\n\n" +
 		`{"action":"wait","params":{"duration_sec":30}}` + "\n" +
 		"\n"
-	actions, thought, err := parseTacticalNDJSON(raw)
+	actions, thought, err := parseTacticalNDJSON(raw, nil, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -82,7 +82,7 @@ func TestParseTacticalNDJSON_MalformedLine(t *testing.T) {
 	raw := `{"inner_thought":"计划"}` + "\n" +
 		`这不是JSON` + "\n" +
 		`{"action":"wait","params":{"duration_sec":30}}`
-	actions, _, err := parseTacticalNDJSON(raw)
+	actions, _, err := parseTacticalNDJSON(raw, nil, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -92,7 +92,7 @@ func TestParseTacticalNDJSON_MalformedLine(t *testing.T) {
 }
 
 func TestParseTacticalNDJSON_Empty(t *testing.T) {
-	actions, thought, err := parseTacticalNDJSON("")
+	actions, thought, err := parseTacticalNDJSON("", nil, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -106,7 +106,7 @@ func TestParseTacticalNDJSON_Empty(t *testing.T) {
 
 func TestParseTacticalNDJSON_ThoughtOnly(t *testing.T) {
 	raw := `{"inner_thought":"不知道做什么"}`
-	actions, thought, err := parseTacticalNDJSON(raw)
+	actions, thought, err := parseTacticalNDJSON(raw, nil, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -123,7 +123,7 @@ func TestParseTacticalNDJSON_FiltersScanAreaAndStop(t *testing.T) {
 		`{"action":"scan_area","params":{}}` + "\n" +
 		`{"action":"move_to","params":{"target":"main_workshop"}}` + "\n" +
 		`{"action":"stop","params":{}}`
-	actions, _, err := parseTacticalNDJSON(raw)
+	actions, _, err := parseTacticalNDJSON(raw, nil, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -138,7 +138,7 @@ func TestParseTacticalNDJSON_FiltersScanAreaAndStop(t *testing.T) {
 func TestParseTacticalNDJSON_DurationMinInt(t *testing.T) {
 	// LLM 可能输出 duration_min 为 int 而非 float（JSON 里 240 而非 240.0）
 	raw := `{"action":"work_assemble","params":{"target":"workbench_01","duration_min":240}}`
-	actions, _, err := parseTacticalNDJSON(raw)
+	actions, _, err := parseTacticalNDJSON(raw, nil, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -385,7 +385,7 @@ func TestSelectCurrentGoal_OvernightSlotEarlyMorning(t *testing.T) {
 
 func TestGenerateTacticalPlan_HTTPError(t *testing.T) {
 	tc := &fakeStrategicCaller{err: errors.New("network down")}
-	actions, thought, err := generateTacticalPlan(context.Background(), tc, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", &protocol.PhysicalState{Energy: 80, Fatigue: 20, JointWear: 10, Health: 100}, nil, slog.Default(), "")
+	actions, thought, err := generateTacticalPlan(context.Background(), tc, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", &protocol.PhysicalState{Energy: 80, Fatigue: 20, JointWear: 10, Health: 100}, nil, slog.Default(), "", nil)
 	if err == nil {
 		t.Fatal("expected error on HTTP failure")
 	}
@@ -402,7 +402,7 @@ func TestGenerateTacticalPlan_ValidResponse(t *testing.T) {
 		`{"action":"move_to","params":{"target":"main_workshop"}}` + "\n" +
 		`{"action":"work_assemble","params":{"target":"workbench_01","duration_min":240}}`
 	tc := &fakeStrategicCaller{resp: makeStrategicResponse(raw)}
-	actions, thought, err := generateTacticalPlan(context.Background(), tc, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", &protocol.PhysicalState{Energy: 80, Fatigue: 20, JointWear: 10, Health: 100}, nil, slog.Default(), "")
+	actions, thought, err := generateTacticalPlan(context.Background(), tc, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", &protocol.PhysicalState{Energy: 80, Fatigue: 20, JointWear: 10, Health: 100}, nil, slog.Default(), "", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -419,7 +419,7 @@ func TestGenerateTacticalPlan_ValidResponse(t *testing.T) {
 
 func TestGenerateTacticalPlan_ParseFail(t *testing.T) {
 	tc := &fakeStrategicCaller{resp: makeStrategicResponse("我今天打算去车间转转。")}
-	if _, _, err := generateTacticalPlan(context.Background(), tc, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", nil, nil, slog.Default(), ""); err == nil {
+	if _, _, err := generateTacticalPlan(context.Background(), tc, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", nil, nil, slog.Default(), "", nil); err == nil {
 		t.Fatal("expected error on parse failure (no actions)")
 	}
 }
@@ -427,7 +427,7 @@ func TestGenerateTacticalPlan_ParseFail(t *testing.T) {
 func TestGenerateTacticalPlan_EmptyActions(t *testing.T) {
 	raw := `{"inner_thought":"不知道做什么"}`
 	tc := &fakeStrategicCaller{resp: makeStrategicResponse(raw)}
-	if _, _, err := generateTacticalPlan(context.Background(), tc, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", nil, nil, slog.Default(), ""); err == nil {
+	if _, _, err := generateTacticalPlan(context.Background(), tc, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", nil, nil, slog.Default(), "", nil); err == nil {
 		t.Fatal("expected error when all actions filtered out")
 	}
 }
@@ -436,7 +436,7 @@ func TestGenerateTacticalPlan_ResetSessionCalled(t *testing.T) {
 	raw := `{"inner_thought":"开始"}` + "\n" +
 		`{"action":"wait","params":{"duration_sec":30}}`
 	tc := &fakeStrategicCaller{resp: makeStrategicResponse(raw)}
-	_, _, _ = generateTacticalPlan(context.Background(), tc, "H-01", "等待", "main_workshop", "09:00", "09:00-12:00", nil, nil, slog.Default(), "")
+	_, _, _ = generateTacticalPlan(context.Background(), tc, "H-01", "等待", "main_workshop", "09:00", "09:00-12:00", nil, nil, slog.Default(), "", nil)
 	if !tc.resetCalled {
 		t.Error("ResetSession should be called after successful tactical generation")
 	}
@@ -445,7 +445,7 @@ func TestGenerateTacticalPlan_ResetSessionCalled(t *testing.T) {
 // ─── buildTacticalPrompt ─────────────────────────────────────
 
 func TestBuildTacticalPrompt_NilPhysical(t *testing.T) {
-	prompt := buildTacticalPrompt("装配", "main_workshop", "09:00", "", nil, nil, "")
+	prompt := buildTacticalPrompt("装配", "main_workshop", "09:00", "", nil, nil, "", nil, "")
 	if prompt == "" {
 		t.Fatal("prompt should not be empty")
 	}
@@ -460,7 +460,7 @@ func TestBuildTacticalPrompt_NilPhysical(t *testing.T) {
 }
 
 func TestBuildTacticalPrompt_WithPhysical(t *testing.T) {
-	prompt := buildTacticalPrompt("装配", "main_workshop", "09:00", "09:00-12:00", &protocol.PhysicalState{Energy: 75, Fatigue: 30, JointWear: 5, Health: 90}, nil, "")
+	prompt := buildTacticalPrompt("装配", "main_workshop", "09:00", "09:00-12:00", &protocol.PhysicalState{Energy: 75, Fatigue: 30, JointWear: 5, Health: 90}, nil, "", nil, "")
 	if !strings.Contains(prompt, "能量 75") {
 		t.Errorf("prompt should contain '能量 75', got: %s", prompt)
 	}
@@ -476,7 +476,7 @@ func TestBuildTacticalPrompt_WithPhysical(t *testing.T) {
 func TestBuildTacticalPrompt_InjectsKBContext(t *testing.T) {
 	kb := loadTestKB(t)
 	prompt := buildTacticalPrompt("装配", "main_workshop", "09:00", "09:00-12:00",
-		&protocol.PhysicalState{Energy: 75, Fatigue: 30, JointWear: 5, Health: 90}, kb, "")
+		&protocol.PhysicalState{Energy: 75, Fatigue: 30, JointWear: 5, Health: 90}, kb, "", nil, "")
 	// 应包含所有区域（新 schema 7 zones）
 	if !strings.Contains(prompt, "main_workshop") || !strings.Contains(prompt, "central_plaza") ||
 		!strings.Contains(prompt, "logistics_hub") || !strings.Contains(prompt, "repair_bay") ||
@@ -500,7 +500,7 @@ func TestBuildTacticalPrompt_InjectsKBContext(t *testing.T) {
 
 func TestBuildTacticalPrompt_NilKB(t *testing.T) {
 	// nil KB 时不应崩溃，也不应包含 KB 上下文段落
-	prompt := buildTacticalPrompt("装配", "main_workshop", "09:00", "", nil, nil, "")
+	prompt := buildTacticalPrompt("装配", "main_workshop", "09:00", "", nil, nil, "", nil, "")
 	if strings.Contains(prompt, "可前往区域") {
 		t.Errorf("prompt should not contain '可前往区域' when KB is nil, got: %s", prompt)
 	}
@@ -512,7 +512,7 @@ func TestBuildTacticalPrompt_NilKB(t *testing.T) {
 func TestBuildTacticalPrompt_WithHint(t *testing.T) {
 	prompt := buildTacticalPrompt("装配", "main_workshop", "09:00", "09:00-12:00",
 		&protocol.PhysicalState{Energy: 75, Fatigue: 30, JointWear: 5, Health: 90}, nil,
-		"fatigue=72 已突破警戒带，当前装配任务不合理")
+		"fatigue=72 已突破警戒带，当前装配任务不合理", nil, "")
 	if !strings.Contains(prompt, "【上次中断原因】") {
 		t.Errorf("prompt should contain '【上次中断原因】' when hint is non-empty, got: %s", prompt)
 	}
@@ -526,9 +526,81 @@ func TestBuildTacticalPrompt_WithHint(t *testing.T) {
 
 func TestBuildTacticalPrompt_NoHint(t *testing.T) {
 	prompt := buildTacticalPrompt("装配", "main_workshop", "09:00", "09:00-12:00",
-		&protocol.PhysicalState{Energy: 75, Fatigue: 30, JointWear: 5, Health: 90}, nil, "")
+		&protocol.PhysicalState{Energy: 75, Fatigue: 30, JointWear: 5, Health: 90}, nil, "", nil, "")
 	if strings.Contains(prompt, "【上次中断原因】") {
 		t.Errorf("prompt should not contain '【上次中断原因】' when hint is empty, got: %s", prompt)
+	}
+}
+
+// ─── registry-aware tactical prompt / filtering ─────────────
+
+func TestBuildTacticalPrompt_RegistryFiltersTools(t *testing.T) {
+	// Registry with only CmdMoveTo + CmdWait available — composite tools
+	// (which depend on CmdExecuteComposite) should be filtered out.
+	reg := NewCapabilityRegistry()
+	reg.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
+		{Cmd: protocol.CmdMoveTo, Kind: "atomic"},
+		{Cmd: protocol.CmdWait, Kind: "atomic"},
+	})
+	prompt := buildTacticalPrompt("装配", "main_workshop", "09:00", "09:00-12:00",
+		&protocol.PhysicalState{Energy: 75, Fatigue: 30, JointWear: 5, Health: 90}, nil, "", reg, "H-01")
+	// Tool bullet list should contain move_to and wait.
+	if !strings.Contains(prompt, "- move_to:") || !strings.Contains(prompt, "- wait:") {
+		t.Errorf("prompt should list move_to and wait as bullets, got: %s", prompt)
+	}
+	// Tool bullet list should NOT contain composite tools (CmdExecuteComposite unavailable).
+	// Check the bullet prefix specifically — the hardcoded example section
+	// mentions work_assemble regardless, which is a separate prompt-quality concern.
+	if strings.Contains(prompt, "- work_assemble:") || strings.Contains(prompt, "- rest_idle:") {
+		t.Errorf("prompt should NOT list composite tools as bullets (CmdExecuteComposite unavailable), got: %s", prompt)
+	}
+	// Count in header should match available tools (2).
+	if !strings.Contains(prompt, "仅限以下 2 个") {
+		t.Errorf("prompt header should say '仅限以下 2 个', got: %s", prompt)
+	}
+}
+
+func TestBuildTacticalPrompt_PerAgentOverride(t *testing.T) {
+	// Global has CmdMoveTo + CmdExecuteComposite; per-agent H-02 only
+	// has CmdMoveTo. H-02's prompt should NOT list composite tools.
+	reg := NewCapabilityRegistry()
+	reg.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
+		{Cmd: protocol.CmdMoveTo, Kind: "atomic"},
+		{Cmd: protocol.CmdExecuteComposite, Kind: "composite"},
+	})
+	reg.Register("H-02", []protocol.CapabilityAction{
+		{Cmd: protocol.CmdMoveTo, Kind: "atomic"},
+	})
+	promptH01 := buildTacticalPrompt("装配", "main_workshop", "09:00", "09:00-12:00",
+		&protocol.PhysicalState{Energy: 75}, nil, "", reg, "H-01")
+	promptH02 := buildTacticalPrompt("装配", "main_workshop", "09:00", "09:00-12:00",
+		&protocol.PhysicalState{Energy: 75}, nil, "", reg, "H-02")
+	// Check bullet prefix — example section is hardcoded and not registry-aware.
+	if !strings.Contains(promptH01, "- work_assemble:") {
+		t.Errorf("H-01 prompt should list composite tools as bullets (global default), got: %s", promptH01)
+	}
+	if strings.Contains(promptH02, "- work_assemble:") {
+		t.Errorf("H-02 prompt should NOT list composite tools as bullets (per-agent override), got: %s", promptH02)
+	}
+}
+
+func TestFilterValidActions_RegistryFiltersCmd(t *testing.T) {
+	reg := NewCapabilityRegistry()
+	reg.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
+		{Cmd: protocol.CmdMoveTo, Kind: "atomic"},
+		// CmdExecuteComposite absent → composite tools filtered.
+	})
+	actions := []plannedAction{
+		{Action: "move_to", Params: map[string]any{"target": "main_workshop"}},
+		{Action: "work_assemble", Params: map[string]any{"target": "workbench_01"}},
+		{Action: "rest_idle", Params: map[string]any{"duration_min": 30}},
+	}
+	got := filterValidActions(actions, reg, "H-01")
+	if len(got) != 1 {
+		t.Fatalf("got %d actions, want 1 (only move_to)", len(got))
+	}
+	if got[0].Action != "move_to" {
+		t.Errorf("got action %q, want move_to", got[0].Action)
 	}
 }
 

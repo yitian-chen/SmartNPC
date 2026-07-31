@@ -36,17 +36,13 @@ func TestCapabilityRegistry_PerAgentOverrideWins(t *testing.T) {
 		{Cmd: protocol.CmdMoveTo, Kind: "atomic", Description: "h01-move"},
 	})
 	got := r.EffectiveActions("H-01")
-	if len(got) != 2 {
-		t.Fatalf("EffectiveActions(H-01) len = %d; want 2 (override augments)", len(got))
+	// Per-agent override REPLACES global (not augments): H-01 only has
+	// what its override declares.
+	if len(got) != 1 {
+		t.Fatalf("EffectiveActions(H-01) len = %d; want 1 (override replaces global)", len(got))
 	}
-	want := map[string]string{
-		protocol.CmdMoveTo: "h01-move", // per-agent wins
-		protocol.CmdWait:   "global-wait",
-	}
-	for _, a := range got {
-		if a.Description != want[a.Cmd] {
-			t.Errorf("EffectiveActions[%s].Description = %q; want %q", a.Cmd, a.Description, want[a.Cmd])
-		}
+	if got[0].Cmd != protocol.CmdMoveTo || got[0].Description != "h01-move" {
+		t.Errorf("EffectiveActions[0] = %+v; want {Cmd:MoveTo, Description:h01-move}", got[0])
 	}
 }
 
@@ -60,7 +56,7 @@ func TestCapabilityRegistry_PerAgentRejectsCmdAbsentEverywhere(t *testing.T) {
 	}
 }
 
-func TestCapabilityRegistry_PerAgentOverrideAddsCmd(t *testing.T) {
+func TestCapabilityRegistry_PerAgentOverrideReplacesGlobal(t *testing.T) {
 	r := NewCapabilityRegistry()
 	r.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
 		{Cmd: protocol.CmdMoveTo, Kind: "atomic"},
@@ -68,16 +64,16 @@ func TestCapabilityRegistry_PerAgentOverrideAddsCmd(t *testing.T) {
 	r.Register("H-01", []protocol.CapabilityAction{
 		{Cmd: protocol.CmdStop, Kind: "atomic"},
 	})
-	// Override adds CmdStop on top of global CmdMoveTo (augments, not replaces).
-	if !r.HasCmd("H-01", protocol.CmdMoveTo) {
-		t.Errorf("HasCmd(H-01, MoveTo) = false; want true (override augments global)")
+	// Override REPLACES global: H-01 only has CmdStop, not CmdMoveTo.
+	if r.HasCmd("H-01", protocol.CmdMoveTo) {
+		t.Errorf("HasCmd(H-01, MoveTo) = true; want false (override replaces global)")
 	}
 	if !r.HasCmd("H-01", protocol.CmdStop) {
 		t.Errorf("HasCmd(H-01, Stop) = false; want true (per-agent override)")
 	}
 	got := r.EffectiveActions("H-01")
-	if len(got) != 2 {
-		t.Fatalf("EffectiveActions(H-01) len = %d; want 2 (merge)", len(got))
+	if len(got) != 1 {
+		t.Fatalf("EffectiveActions(H-01) len = %d; want 1 (override only)", len(got))
 	}
 }
 
