@@ -326,6 +326,7 @@ type Envelope struct {
 | `agent_unregistered` | UE→Agent | 机器人下线 | RobotActor EndPlay |
 | `heartbeat` | 双向 | 心跳保活 | 每 5 秒 |
 | `error` | 双向 | 错误上报 | 异常情况 |
+| `capability_registry` | UE→Agent | NPC 能力声明（哪些 cmd 可执行） | UE 连接后 / 能力变更时 |
 
 ### 动作生命周期
 
@@ -377,6 +378,8 @@ energy / fatigue / joint_wear / health，通过 `state_report` 权威通道上�
 ## MCP 工具
 
 所有工具在 `agenttown-mcp/adapters/agenttown/tools/`。15 个工具均以 `agent_id` 为第一参数、`decision_epoch` 为第二个必填参数。Hermes 侧工具名为 `mcp__agenttown__<tool_name>`（双下划线）。
+
+**工具列表由 `capability_registry` 动态驱动**：UE 连接 MCP 后发送 `capability_registry` 声明可执行 cmd，MCP 据此调 `tools.ReconcileTools` 增删工具（`AddTool`/`RemoveTools`）。启动时 seed 内置 9 cmd 默认值（`BuiltinCmdCapabilities`），保证 UE 不发 `capability_registry` 也能跑。per-agent 差异化在 `guardedExecutor.SendAction` 这一咽喉点拦截——查 `CapabilityRegistry.HasCmd(agentID, cmd)`，不通过则拒绝下发。战术层 prompt 中的可用工具列表也按 registry 对 agentID 的有效能力集动态生成（`tacticalToolMeta` 是工具元数据单一来源）。
 
 ### 复合行为工具（→ `ExecuteComposite` cmd）
 
@@ -669,10 +672,11 @@ model: deepseek-v4-flash-ioa             # 模型 ID（见 `codebuddy --help` �
 | `agenttown-mcp/cmd/agenttown-mcp/tactical.go` | 战术层：goal → action 分解 |
 | `agenttown-mcp/cmd/agenttown-mcp/reactive.go` | 反应层纯函数：prompt 构建 + 决策解析 |
 | `agenttown-mcp/cmd/agenttown-mcp/reactive_runner.go` | 反应层运行时：Ollama 调用 + WS 副作用 |
+| `agenttown-mcp/cmd/agenttown-mcp/capability.go` | NPC 能力注册表：per-agent cmd 能力声明（system 全局默认 + 具体 agent 覆盖） |
 | `agenttown-mcp/cmd/agenttown-mcp/debug_ui.go` | `/debug/` 浏览器控制台 + `/debug/kb` JSON 端点 |
 | `agenttown-mcp/cmd/agenttown-mcp/web/debug.html` | debug 控制台单页 HTML（单 Action + Schedule 注入双 tab） |
-| `agenttown-mcp/pkg/protocol/envelope.go` | Envelope + 11 消息类型 + 9 cmd + error_code 常量 |
-| `agenttown-mcp/pkg/protocol/messages.go` | 各消息 payload 结构体 + resync/event_lost |
+| `agenttown-mcp/pkg/protocol/envelope.go` | Envelope + 12 消息类型 + 9 cmd + error_code 常量 |
+| `agenttown-mcp/pkg/protocol/messages.go` | 各消息 payload 结构体 + resync/event_lost/capability_registry |
 | `agenttown-mcp/pkg/wsserver/server.go` | WS 服务端：收发信封、seq、send buffer、重放、Call/SendAction |
 | `agenttown-mcp/pkg/hermes/client.go` | Hermes HTTP 客户端：会话链、token 阈值自动摘要重置、上游错误检测 |
 | `agenttown-mcp/pkg/venus/client.go` | Venus 客户端：OpenAI Chat Completions 协议直连 |
