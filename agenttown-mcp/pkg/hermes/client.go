@@ -439,13 +439,15 @@ func truncate(s string, maxLen int) string {
 }
 
 // ResetSession clears the session state. Safe to call from any goroutine.
+// 调用方负责在自身上下文打日志标识来源（战略层 "每日计划生成成功" /
+// 战术层 "分解成功"），此处仅记录中性 reset 事件。
 func (c *Client) ResetSession() {
 	c.sendMu.Lock()
 	defer c.sendMu.Unlock()
 	c.prevResponseID = ""
 	c.pendingSummary = ""
 	c.turnCount = 0
-	c.log.Info("hermes session reset (new game day)")
+	c.log.Info("hermes session reset")
 }
 
 // SessionID returns the current previous_response_id (for /status).
