@@ -343,7 +343,7 @@
 
 <script>
 // ─── 全局状态 ────────────────────────────────────────────
-let kbData = { zones: [], locations: [], objects: [] };
+let kbData = { zones: [], objects: [] };
 let history = []; // 最近 20 条
 
 // ─── 初始化 ──────────────────────────────────────────────
@@ -501,21 +501,21 @@ function onCmdChange() {
         zg.label = 'Zones（区域）';
         (kbData.zones || []).forEach(z => {
           const o = document.createElement('option');
-          o.value = z.id; o.textContent = `${z.id} — ${z.name}`;
+          o.value = z.id; o.textContent = `${z.id} — ${z.display_name}`;
           zg.appendChild(o);
         });
         input.appendChild(zg);
-        // locations
-        const lg = document.createElement('optgroup');
-        lg.label = 'Locations（地点）';
-        (kbData.locations || []).forEach(l => {
-          const o = document.createElement('option');
-          o.value = l.id; o.textContent = `${l.id} — ${l.name} (in ${l.zone})`;
-          lg.appendChild(o);
+        // objects（合并了原 locations）
+        const og = document.createElement('optgroup');
+        og.label = 'Objects（物体）';
+        (kbData.objects || []).forEach(o => {
+          const opt = document.createElement('option');
+          opt.value = o.id; opt.textContent = `${o.id} — ${o.display_name} (in ${o.zone_id})`;
+          og.appendChild(opt);
         });
-        input.appendChild(lg);
-        if (kbData.locations && kbData.locations.length > 0) {
-          input.value = kbData.locations[0].id;
+        input.appendChild(og);
+        if (kbData.objects && kbData.objects.length > 0) {
+          input.value = kbData.objects[0].id;
         }
         break;
 
@@ -527,7 +527,7 @@ function onCmdChange() {
         (kbData.objects || []).forEach(o => {
           if (field.filterActions && !field.filterActions.some(a => (o.available_actions || []).includes(a))) return;
           const opt = document.createElement('option');
-          opt.value = o.id; opt.textContent = `${o.id} — ${o.name}`;
+          opt.value = o.id; opt.textContent = `${o.id} — ${o.display_name}`;
           input.appendChild(opt);
         });
         break;

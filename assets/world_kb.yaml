@@ -1,125 +1,262 @@
-# World Knowledge Base — AgentTown 园区世界字典
-#
-# 这是 UE5 场景的导出物（目前由手写维护，未来由 UE 端 WorldKBExporter 自动生成）。
-# MCP 层启动时加载此文件，把语义 ID 解析为坐标，供 move_to 等工具下发。
-# Mock UE (src/agenttown/mock_ue.py) 也读同一份文件作为唯一真相源。
-#
-# 坐标单位：UE5 centimeter（如 [16000, 10000, 0] 表示 X=160m, Y=100m, Z=0）。
-# 与 src/agenttown/mock_ue.py 中原有硬编码 dict 数据对齐。
-#
-# 字段参考 docs/AgentTown_Design.md §子系统1 的 YAML schema。
-
 version: "1.0"
-
 site:
-  id: industrial_park
-  name: "工业机器人园区"
-
-# ─── Zones（区域，由 UE5 BoxTrigger 导出） ─────────────────────────
+    id: industrial_town
+    display_name: 工业机器人小镇
+    description: 一座由机器人居民维持生产和日常生活的封闭工业园区。
 zones:
-  - id: main_workshop
-    name: "主生产车间"
-    description: "机器人们的主要工作场所"
-    ue5_bounds:
-      center: [20000, 10000, 0]        # BoxTrigger 位置
-      half_size: [5000, 5000, 5000]    # BoxComponent 半尺寸
-    entry_point: [16000, 10000, 0]     # 自动计算的入口
-    connected_to: [central_plaza]
-    locations: [workbench_01, charging_station_01]
-
-  - id: central_plaza
-    name: "中央广场"
-    description: "园区中央的开放广场，机器人休息社交的场所"
-    ue5_bounds:
-      center: [11500, 11500, 0]
-      half_size: [3500, 3500, 5000]
-    entry_point: [10000, 10000, 0]
-    connected_to: [main_workshop, charging_station]
-    locations: []
-
-  - id: charging_station
-    name: "充电站"
-    description: "园区充电设施所在区域"
-    ue5_bounds:
-      center: [22500, 7500, 0]
-      half_size: [2500, 2500, 5000]
-    entry_point: [21500, 8500, 0]
-    connected_to: [central_plaza]
-    locations: [charging_station_01]
-
-  - id: rest_area
-    name: "休息厅"
-    description: "废弃货运升降井旁的公共休息区，充电、聊天、留言、聚会的场所"
-    ue5_bounds:
-      center: [15000, 11500, 0]          # 主车间与中央广场之间
-      half_size: [3000, 2500, 5000]
-    entry_point: [14000, 11000, 0]
-    connected_to: [main_workshop, central_plaza]
-    locations: [rest_bench_01]
-
-# ─── Locations（地点，由 Smart Object Actor 导出） ────────────────
-locations:
-  - id: workbench_01
-    name: "工作台一号"
-    zone: main_workshop
-    type: workstation
-    position: [20000, 10000, 0]          # Actor->GetActorLocation()
-    interaction_point: [19500, 10500, 0] # InteractionSocket 世界坐标
-    interaction_radius: 1500             # cm，用于 mock_ue 坐标反推 current_location
-    facing: [1, 0, 0]
-    available_actions: [assemble, inspect]
-    ue5_ref: "BP_Workbench_01"
-
-  - id: charging_station_01
-    name: "充电桩一号"
-    zone: main_workshop
-    type: charging
-    position: [21500, 8500, 0]
-    interaction_point: [21500, 8500, 0]
-    interaction_radius: 1500
-    facing: [1, 0, 0]
-    available_actions: [charge, inspect]
-    ue5_ref: "BP_ChargingStation_01"
-
-  - id: rest_bench_01
-    name: "休息长椅"
-    zone: rest_area
-    type: furniture
-    position: [15000, 11500, 0]
-    interaction_point: [14800, 11300, 0]
-    interaction_radius: 1500
-    facing: [0, 1, 0]
-    available_actions: [rest, inspect]
-    ue5_ref: "BP_RestBench_01"
-
-# ─── Objects（智能对象，与 Location 一一对应） ─────────────────────
+    - id: archive_station
+      display_name: 档案馆与广播站
+      description: 保存园区历史、技术资料和个人记忆的文化中心。
+      bounds:
+        center:
+            - 5000
+            - 11000
+            - 0
+        extent:
+            - 3000
+            - 3000
+            - 500
+      entry_point:
+        - 8000
+        - 11000
+        - 100
+      entry_facing:
+        - -1
+        - 0
+        - 0
+      connected_to:
+        - central_plaza
+        - residential_quarters
+    - id: central_plaza
+      display_name: 中央广场与综合充能站
+      description: 公共交通、社交和充能中心。
+      bounds:
+        center:
+            - 10000
+            - 11000
+            - 0
+        extent:
+            - 4000
+            - 4000
+            - 500
+      entry_point:
+        - 10000
+        - 13000
+        - 100
+      entry_facing:
+        - 0
+        - -1
+        - 0
+      connected_to:
+        - main_workshop
+        - residential_quarters
+        - archive_station
+    - id: logistics_hub
+      display_name: 物料仓储与转运站
+      description: 原料、半成品和成品的仓储与分拣中心。
+      bounds:
+        center:
+            - 30000
+            - 10000
+            - 0
+        extent:
+            - 6000
+            - 4000
+            - 500
+      entry_point:
+        - 26000
+        - 10000
+        - 100
+      entry_facing:
+        - 1
+        - 0
+        - 0
+      connected_to:
+        - main_workshop
+        - recycling_yard
+    - id: main_workshop
+      display_name: 主生产车间
+      description: 装配、质检和设备调试的生产核心。
+      bounds:
+        center:
+            - 20000
+            - 10000
+            - 0
+        extent:
+            - 5000
+            - 5000
+            - 500
+      entry_point:
+        - 16000
+        - 10000
+        - 100
+      entry_facing:
+        - 1
+        - 0
+        - 0
+      connected_to:
+        - central_plaza
+        - logistics_hub
+        - repair_bay
+    - id: recycling_yard
+      display_name: 废料回收与再制造场
+      description: 废料分类、零件再生和永久报废处理区域。
+      bounds:
+        center:
+            - 30000
+            - 3000
+            - 0
+        extent:
+            - 5000
+            - 3000
+            - 500
+      entry_point:
+        - 30000
+        - 6000
+        - 100
+      entry_facing:
+        - 0
+        - 1
+        - 0
+      connected_to:
+        - logistics_hub
+        - repair_bay
+    - id: repair_bay
+      display_name: 机械维修厂与零件诊所
+      description: 居民检修、换件和紧急救援中心。
+      bounds:
+        center:
+            - 20000
+            - 3000
+            - 0
+        extent:
+            - 4000
+            - 3000
+            - 500
+      entry_point:
+        - 20000
+        - 6000
+        - 100
+      entry_facing:
+        - 0
+        - 1
+        - 0
+      connected_to:
+        - main_workshop
+        - recycling_yard
+    - id: residential_quarters
+      display_name: 休眠舱居住区
+      description: 机器人居民休眠、独处与存放私人物品的生活区。
+      bounds:
+        center:
+            - 10000
+            - 3000
+            - 0
+        extent:
+            - 4000
+            - 3000
+            - 500
+      entry_point:
+        - 10000
+        - 6000
+        - 100
+      entry_facing:
+        - 0
+        - 1
+        - 0
+      connected_to:
+        - central_plaza
+        - archive_station
 objects:
-  - id: workbench_01
-    available_actions: [assemble, inspect]
-    required_role: [worker]
-    capacity: 1
-    ue5_ref: "BP_Workbench_01"
-
-  - id: charging_station_01
-    available_actions: [charge, inspect]
-    required_role: []
-    capacity: 1
-    ue5_ref: "BP_ChargingStation_01"
-
-  - id: rest_bench_01
-    available_actions: [rest, inspect]
-    required_role: []
-    capacity: 2
-    ue5_ref: "BP_RestBench_01"
-
-# ─── Agents（园区内的 NPC 定义） ───────────────────────────────────
+    - id: charging_station_01
+      display_name: 综合充能站一号
+      description: 中央广场上的主充能桩，支持所有型号机器人。
+      category: charging_station
+      zone_id: central_plaza
+      actor_class: /Game/AgentTown/Objects/BP_ChargingStation.BP_ChargingStation_C
+      actor_position:
+        - 10500
+        - 11000
+        - 100
+      interaction_point:
+        - 10000
+        - 11500
+        - 100
+      interaction_facing:
+        - 0
+        - 1
+        - 0
+      interaction_radius: 1500
+      available_actions:
+        - charge
+      default_state: idle
+      capacity: 1
+    - id: rest_bench_01
+      display_name: 休息长椅
+      description: 居住区供居民歇息的长椅。
+      category: rest_bench
+      zone_id: residential_quarters
+      actor_class: /Game/AgentTown/Objects/BP_RestBench.BP_RestBench_C
+      actor_position:
+        - 9500
+        - 3000
+        - 100
+      interaction_point:
+        - 9500
+        - 3300
+        - 100
+      interaction_facing:
+        - 0
+        - -1
+        - 0
+      interaction_radius: 1500
+      available_actions:
+        - rest
+      default_state: idle
+      capacity: 2
+    - id: workbench_01
+      display_name: 一号装配工作台
+      description: 老陈经常使用的装配工作台。
+      category: workbench
+      zone_id: main_workshop
+      actor_class: /Game/AgentTown/Objects/BP_Workbench.BP_Workbench_C
+      actor_position:
+        - 20000
+        - 10000
+        - 100
+      interaction_point:
+        - 19500
+        - 10500
+        - 100
+      interaction_facing:
+        - 1
+        - 0
+        - 0
+      interaction_radius: 1500
+      available_actions:
+        - assemble
+        - inspect
+      default_state: idle
+      required_roles:
+        - worker
+      capacity: 1
 agents:
-  - id: H-01
-    name: "老陈"
-    type: humanoid
-    role: [supervisor, worker]
-    capabilities: [move_to, speak, emote, work_assemble]
-    default_zone: main_workshop
-    default_position: [20000, 10000, 0]
-    ue5_class: "BP_HumanoidRobot"
-    ue5_variant: "H01_LaoChen"
+    - id: H-01
+      display_name: 老陈
+      type: humanoid
+      role:
+        - supervisor
+        - worker
+      personality:
+        - 沉稳
+        - 念旧
+        - 重视工艺
+      initial_zone: central_plaza
+      initial_position:
+        - 10000
+        - 11000
+        - 100
+      home_zone: residential_quarters
+      actor_class: /Game/AgentTown/Agents/BP_LaoChen.BP_LaoChen_C
+      action_table: /Game/AgentTown/AI/DT_ActionBTMap.DT_ActionBTMap
+      main_behavior_tree: /Game/AgentTown/AI/BT_AgentTownMain.BT_AgentTownMain

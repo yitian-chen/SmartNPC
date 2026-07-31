@@ -83,29 +83,36 @@ SCALE = 100.0  # convert legacy small coords to cm
 class ZoneInfo:
     """One zone entry from world_kb.yaml."""
     id: str
-    name: str
+    display_name: str
     entry_point: List[float]
     bounds: Tuple[float, float, float, float]  # (x_min, x_max, y_min, y_max)
-    locations: List[str] = field(default_factory=list)
-
-
-@dataclass
-class LocationInfo:
-    """One location entry from world_kb.yaml."""
-    id: str
-    name: str
-    zone: str
-    position: List[float]
-    interaction_point: List[float]
-    interaction_radius: float
-    available_actions: List[str] = field(default_factory=list)
 
 
 @dataclass
 class ObjectInfo:
-    """One object entry from world_kb.yaml (mirrors a location for now)."""
+    """One object entry from world_kb.yaml.
+
+    New schema (2026-07) merges the former `locations[]` segment into
+    `objects[]` — each object now carries both narrative (display_name,
+    description) and spatial fields (actor_position, interaction_point,
+    interaction_radius) together. The interaction_radius is used by
+    which_object() to reverse-lookup the NPC's current object by
+    position; it defaults to 1500cm when not authored.
+    """
     id: str
+    display_name: str
+    description: str = ""
+    category: str = ""
+    zone_id: str = ""
+    actor_class: str = ""
+    actor_position: List[float] = field(default_factory=lambda: [0, 0, 0])
+    interaction_point: List[float] = field(default_factory=lambda: [0, 0, 0])
+    interaction_facing: List[float] = field(default_factory=lambda: [0, 0, 0])
+    interaction_radius: float = 0.0
     available_actions: List[str] = field(default_factory=list)
+    default_state: str = ""
+    required_roles: List[str] = field(default_factory=list)
+    capacity: int = 0
 
 
 @dataclass
@@ -119,24 +126,23 @@ class WorldKB:
     drift.
     """
     zones: Dict[str, ZoneInfo] = field(default_factory=dict)
-    locations: Dict[str, LocationInfo] = field(default_factory=dict)
     objects: Dict[str, ObjectInfo] = field(default_factory=dict)
 
     def zone_entry(self, zone_id: str) -> Optional[List[float]]:
         z = self.zones.get(zone_id)
         return list(z.entry_point) if z else None
 
-    def location_point(self, loc_id: str) -> Optional[List[float]]:
-        loc = self.locations.get(loc_id)
-        return list(loc.interaction_point) if loc else None
+    def object_point(self, object_id: str) -> Optional[List[float]]:
+        o = self.objects.get(object_id)
+        return list(o.interaction_point) if o else None
 
     def resolve_position(self, target: str) -> Optional[List[float]]:
         """Resolve a semantic ID to a coordinate. Zones use entry_point,
-        locations use interaction_point. Returns None if unknown."""
-        return self.zone_entry(target) or self.location_point(target)
+        objects use interaction_point. Returns None if unknown."""
+        return self.zone_entry(target) or self.object_point(target)
 
     def is_target(self, target: str) -> bool:
-        return target in self.zones or target in self.locations
+        return target in self.zones or target in self.objects
 
     def which_zone(self, pos: List[float]) -> str:
         """Reverse-lookup zone by position via AABB (X/Y only)."""
@@ -147,20 +153,24 @@ class WorldKB:
                 return zid
         return ""
 
-    def which_location(self, pos: List[float]) -> Optional[str]:
-        """Reverse-lookup location by position via interaction_radius (X/Y only)."""
+    def which_object(self, pos: List[float]) -> Optional[str]:
+        """Reverse-lookup object by position via interaction_radius (X/Y only).
+
+        Uses the actor_position + interaction_radius pair — NPC is
+        considered "at" an object when within its interaction radius.
+        """
         x, y = pos[0], pos[1]
-        for lid, loc in self.locations.items():
-            if loc.interaction_radius <= 0:
+        for oid, obj in self.objects.items():
+            if obj.interaction_radius <= 0:
                 continue
-            dx, dy = x - loc.position[0], y - loc.position[1]
-            if (dx * dx + dy * dy) <= loc.interaction_radius * loc.interaction_radius:
-                return lid
+            dx, dy = x - obj.actor_position[0], y - obj.actor_position[1]
+            if (dx * dx + dy * dy) <= obj.interaction_radius * obj.interaction_radius:
+                return oid
         return None
 
     def objects_in_zone(self, zone_id: str) -> List[str]:
-        """Return location/object IDs registered under a zone."""
-        return list(self.zones.get(zone_id, ZoneInfo(id="", name="", entry_point=[], bounds=(0, 0, 0, 0))).locations)
+        """Return object IDs registered under a zone (by zone_id field)."""
+        return [oid for oid, obj in self.objects.items() if obj.zone_id == zone_id]
 
 
 def load_world_kb(path: str) -> WorldKB:
@@ -180,36 +190,19 @@ def load_world_kb(path: str) -> WorldKB:
             raise ValueError(f"zone missing id in {path}: {raw_zone}")
         if zid in kb.zones:
             raise ValueError(f"duplicate zone id {zid!r} in {path}")
-        bounds_raw = raw_zone.get("ue5_bounds", {}) or {}
+        bounds_raw = raw_zone.get("bounds", {}) or {}
         center = bounds_raw.get("center", [0, 0, 0])
-        half = bounds_raw.get("half_size", [0, 0, 0])
+        extent = bounds_raw.get("extent", [0, 0, 0])
         # AABB: (x_min, x_max, y_min, y_max) — Z ignored for flat worlds.
         bounds = (
-            center[0] - half[0], center[0] + half[0],
-            center[1] - half[1], center[1] + half[1],
+            center[0] - extent[0], center[0] + extent[0],
+            center[1] - extent[1], center[1] + extent[1],
         )
         kb.zones[zid] = ZoneInfo(
             id=zid,
-            name=raw_zone.get("name", zid),
+            display_name=raw_zone.get("display_name", zid),
             entry_point=list(raw_zone.get("entry_point", [0, 0, 0])),
             bounds=bounds,
-            locations=list(raw_zone.get("locations", []) or []),
-        )
-
-    for raw_loc in data.get("locations", []) or []:
-        lid = raw_loc.get("id", "")
-        if not lid:
-            raise ValueError(f"location missing id in {path}: {raw_loc}")
-        if lid in kb.locations:
-            raise ValueError(f"duplicate location id {lid!r} in {path}")
-        kb.locations[lid] = LocationInfo(
-            id=lid,
-            name=raw_loc.get("name", lid),
-            zone=raw_loc.get("zone", ""),
-            position=list(raw_loc.get("position", [0, 0, 0])),
-            interaction_point=list(raw_loc.get("interaction_point", [0, 0, 0])),
-            interaction_radius=float(raw_loc.get("interaction_radius", 0)),
-            available_actions=list(raw_loc.get("available_actions", []) or []),
         )
 
     for raw_obj in data.get("objects", []) or []:
@@ -218,9 +211,24 @@ def load_world_kb(path: str) -> WorldKB:
             raise ValueError(f"object missing id in {path}: {raw_obj}")
         if oid in kb.objects:
             raise ValueError(f"duplicate object id {oid!r} in {path}")
+        radius = float(raw_obj.get("interaction_radius", 0))
+        if radius == 0:
+            radius = 1500.0  # default 1500cm, matches Go side defaultInteractionRadius
         kb.objects[oid] = ObjectInfo(
             id=oid,
+            display_name=raw_obj.get("display_name", oid),
+            description=raw_obj.get("description", ""),
+            category=raw_obj.get("category", ""),
+            zone_id=raw_obj.get("zone_id", ""),
+            actor_class=raw_obj.get("actor_class", ""),
+            actor_position=list(raw_obj.get("actor_position", [0, 0, 0])),
+            interaction_point=list(raw_obj.get("interaction_point", [0, 0, 0])),
+            interaction_facing=list(raw_obj.get("interaction_facing", [0, 0, 0])),
+            interaction_radius=radius,
             available_actions=list(raw_obj.get("available_actions", []) or []),
+            default_state=raw_obj.get("default_state", ""),
+            required_roles=list(raw_obj.get("required_roles", []) or []),
+            capacity=int(raw_obj.get("capacity", 0)),
         )
 
     return kb
@@ -365,7 +373,7 @@ class MockUE:
             self.kb = load_world_kb(world_kb_path)
         except Exception as e:
             raise SystemExit(f"[FATAL] failed to load world_kb from {world_kb_path!r}: {e}")
-        logger.info(f"[KB] loaded {len(self.kb.zones)} zones, {len(self.kb.locations)} locations, "
+        logger.info(f"[KB] loaded {len(self.kb.zones)} zones, "
                     f"{len(self.kb.objects)} objects from {world_kb_path}")
 
         # Seed NPC defaults. KB does not yet expose agent defaults, so we
@@ -547,17 +555,16 @@ class MockUE:
     def _nearby_objects(self) -> List[Dict[str, Any]]:
         objs = []
         for oid in self.kb.objects_in_zone(self.npc.current_zone):
-            loc = self.kb.locations.get(oid)
             obj = self.kb.objects.get(oid)
-            # Prefer location name (中文), fall back to ID.
-            name = (loc.name if loc else "") or oid
-            actions = (loc.available_actions if loc else None) or (obj.available_actions if obj else [])
+            if obj is None:
+                continue
+            name = obj.display_name or oid
             objs.append({
                 "id": oid,
                 "name": name,
                 "distance": 8.0,
-                "state": "idle",
-                "available_actions": list(actions),
+                "state": obj.default_state or "idle",
+                "available_actions": list(obj.available_actions),
             })
         return objs
 
@@ -838,10 +845,9 @@ class MockUE:
         "动作完成 ... details={...}". Kept intentionally short (one paragraph)
         so it stays inside the tool-result injection without bloating context.
         """
-        loc = self.kb.locations.get(object_id)
         obj = self.kb.objects.get(object_id)
-        name = (loc.name if loc else "") or object_id
-        actions = (loc.available_actions if loc else None) or (obj.available_actions if obj else [])
+        name = (obj.display_name if obj else "") or object_id
+        actions = (obj.available_actions if obj else [])
         # NPC's current animation hints at what it was just doing.
         busy = self.npc.busy_action_id is not None
         # Build a per-object-type report. The descriptions are deterministic
@@ -883,8 +889,8 @@ class MockUE:
 
         方案 A: dest 是权威坐标（MCP 层解析自 world_kb.yaml）。
         target+kind 是 metadata：
-          - kind=="location" 且 target 非空 → 直接设置 current_location = target
-          - 否则用 _resolve_location(pos) 基于坐标距离反推
+          - kind=="object" 且 target 非空 → 直接设置 current_location = target
+          - 否则用 which_object(pos) 基于坐标距离反推
         """
         if not dest or len(dest) != 3:
             logger.warning(f"[MOVE] invalid dest {dest!r}")
@@ -898,10 +904,10 @@ class MockUE:
         self.npc.position = list(dest)
 
         # Resolve current_location: prefer explicit metadata, else reverse-lookup.
-        if kind == "location" and target:
+        if kind == "object" and target:
             self.npc.current_location = target
         else:
-            self.npc.current_location = self.kb.which_location(self.npc.position)
+            self.npc.current_location = self.kb.which_object(self.npc.position)
 
         # Resolve current_zone via AABB reverse-lookup.
         new_zone = self.kb.which_zone(self.npc.position)

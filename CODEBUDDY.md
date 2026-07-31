@@ -253,7 +253,7 @@ MCP 启动后暴露 HTTP debug 端点（dev 端口 `:8770`，stable `:8760`，�
 | `GET /debug/` | GET | 浏览器控制台 UI（单页 HTML，`//go:embed` 嵌入） |
 | `POST /debug/action` | POST | 直接下发单个 action_command 到 UE（单步调试） |
 | `POST /debug/schedule` | POST | 注入一条 schedule 到战术层，立即分解为 action 序列入队 |
-| `GET /debug/kb` | GET | 返回 world_kb JSON（ zones/locations/objects） |
+| `GET /debug/kb` | GET | 返回 world_kb JSON（zones/objects） |
 
 ### `/debug/schedule`（2026-07 新增）
 
@@ -543,6 +543,10 @@ cp .env.example .env
 | `--ollama-model` | `qwen2.5:7b-instruct-q4_K_M` | 反应层模型 |
 | `--ollama-num-thread` | `16` | Ollama CPU 推理线程数（0=默认 16，-1=让 Ollama 自决）。高核数 CPU 上默认用满所有核反而劣化，实测 96 vCPU EPYC 限制到 16 线程可获得 3x 加速 |
 | `--world-kb` | `assets/world_kb.yaml` | 世界 KB 路径（fail-fast） |
+| `--auto-merge-world-kb` | `false` | 启动时先跑 merge pipeline 重生成 world_kb.yaml（UE 端更新 generated.json 后下次启动即生效，fail-fast on merge/validation error） |
+| `--world-generated-json` | `assets/world.generated.json` | merge pipeline 输入（仅 `--auto-merge-world-kb` 时用） |
+| `--world-authored-json` | `assets/world.authored.json` | merge pipeline 输入（仅 `--auto-merge-world-kb` 时用） |
+| `--world-kb-manifest` | `assets/world_kb.manifest.json` | manifest.json 输出路径（空串=跳过 manifest；仅 `--auto-merge-world-kb` 时用） |
 | `--log-level` | `info` | `debug`/`info`/`warn`/`error` |
 
 ### 云开发环境（AnyDev / 远程 Linux）
@@ -674,12 +678,22 @@ model: deepseek-v4-flash-ioa             # 模型 ID（见 `codebuddy --help` �
 | `agenttown-mcp/pkg/venus/client.go` | Venus 客户端：OpenAI Chat Completions 协议直连 |
 | `agenttown-mcp/pkg/ollama/client.go` | Ollama 客户端：反应层专用，非流式 |
 | `agenttown-mcp/pkg/worldkb/loader.go` | world_kb.yaml 加载 + 内存索引 |
+| `agenttown-mcp/pkg/worldkb/types.go` | KB/Zone/Object/Agent 权威类型（新 schema） |
+| `agenttown-mcp/pkg/worldkb/query.go` | KB 查询：GetPosition/WhichZone/WhichObject/ResolveTarget |
+| `agenttown-mcp/pkg/worldkb/schema.go` | merge pipeline 输入 JSON schema（GeneratedDoc/AuthoredDoc）+ 受保护字段白名单 |
+| `agenttown-mcp/pkg/worldkb/merger.go` | `Merge(gen, auth)` deep merge + `MergeAndWrite`（Step 3 用） |
+| `agenttown-mcp/pkg/worldkb/validator.go` | `Validate(kb)` — ID 格式、cross-reference 合法性 |
+| `agenttown-mcp/pkg/worldkb/serializer.go` | `WriteYAML`（按 ID 排序，原子替换）+ `WriteManifest`（SHA256 + RFC3339） |
+| `agenttown-mcp/cmd/worldkb-merge/main.go` | CLI：`--generated/--authored/--out/--manifest` 合成 world_kb.yaml |
 | `agenttown-mcp/adapters/agenttown/tools/registry.go` | 工具注册 + Executor 接口 |
 | `agenttown-mcp/adapters/agenttown/tools/composite.go` | 7 个复合行为工具 |
 | `agenttown-mcp/adapters/agenttown/tools/atomic.go` | 8 个原子行为工具 |
 | `agenttown-mcp/adapters/agenttown/perception/format.go` | 感知 → 自然语言叙事 |
 | `agenttown-mcp/internal/log/logger.go` | slog JSON 日志（写 stderr） |
-| `assets/world_kb.yaml` | 世界 KB：4 zones / 3 locations / 3 objects / 1 agent |
+| `assets/world_kb.yaml` | 世界 KB：7 zones / 3 objects / 1 agent（新 schema，locations 已合并进 objects） |
+| `assets/world.generated.json` | UE 自动导出的世界事实（merge pipeline 输入） |
+| `assets/world.authored.json` | 人工维护的叙事层（merge pipeline 输入） |
+| `assets/world_kb.manifest.json` | merge 产物：源文件 SHA256 + 时间戳（CLI 生成） |
 | `src/agenttown/mock_ue.py` | Mock UE：协议常量、NPCState、物理状态、感知循环、动作处理、重连+重放 |
 | `src/agenttown/codebuddy_adapter.py` | CodeBuddy CLI OpenAI 适配层（仅 Hermes 后端用） |
 | `src/agenttown/adapter_config.yaml` | 适配层配置：CLI 子进程端口 + 模型 ID |

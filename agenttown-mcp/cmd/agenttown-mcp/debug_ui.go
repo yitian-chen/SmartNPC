@@ -5,7 +5,7 @@
 //
 // 路由（注册在 main.go runHTTP 的 mux 上）：
 //   - GET  /debug/    → 返回嵌入的 debug.html
-//   - GET  /debug/kb  → 返回 world_kb 的 zones/locations/objects 摘要（JSON）
+//   - GET  /debug/kb  → 返回 world_kb 的 zones/objects 摘要（JSON）
 //   - POST /debug/action → 已有端点，本文件不修改
 //
 // HTML 是单文件、无外部依赖、纯静态（fetch /debug/kb 拿下拉数据），
@@ -39,27 +39,22 @@ func init() {
 }
 
 // debugKBResponse 是 /debug/kb 的响应体。结构故意保持紧凑——只暴露
-// 前端下拉需要的字段（id/name/zone/available_actions），不泄露坐标等内部数据。
+// 前端下拉需要的字段（id/display_name/zone_id/available_actions），
+// 不泄露坐标等内部数据。
 type debugKBResponse struct {
-	Zones     []debugKBZone     `json:"zones"`
-	Locations []debugKBLocation `json:"locations"`
-	Objects   []debugKBObject   `json:"objects"`
+	Zones   []debugKBZone   `json:"zones"`
+	Objects []debugKBObject `json:"objects"`
 }
 
 type debugKBZone struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
-}
-
-type debugKBLocation struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
-	Zone string `json:"zone"`
+	ID          string `json:"id"`
+	DisplayName string `json:"display_name"`
 }
 
 type debugKBObject struct {
 	ID               string   `json:"id"`
-	Name             string   `json:"name"`
+	DisplayName      string   `json:"display_name"`
+	ZoneID           string   `json:"zone_id"`
 	AvailableActions []string `json:"available_actions"`
 }
 
@@ -89,20 +84,17 @@ func handleDebugKB(w http.ResponseWriter, r *http.Request, kb *worldkb.KB, logge
 	}
 
 	resp := debugKBResponse{
-		Zones:     make([]debugKBZone, 0, len(kb.Zones)),
-		Locations: make([]debugKBLocation, 0, len(kb.Locations)),
-		Objects:   make([]debugKBObject, 0, len(kb.Objects)),
+		Zones:   make([]debugKBZone, 0, len(kb.Zones)),
+		Objects: make([]debugKBObject, 0, len(kb.Objects)),
 	}
 	for _, z := range kb.ListZones() {
-		resp.Zones = append(resp.Zones, debugKBZone{ID: z.ID, Name: z.Name})
-	}
-	for _, l := range kb.ListLocations() {
-		resp.Locations = append(resp.Locations, debugKBLocation{ID: l.ID, Name: l.Name, Zone: l.Zone})
+		resp.Zones = append(resp.Zones, debugKBZone{ID: z.ID, DisplayName: z.DisplayName})
 	}
 	for _, o := range kb.ListObjects() {
 		resp.Objects = append(resp.Objects, debugKBObject{
 			ID:               o.ID,
-			Name:             o.Name,
+			DisplayName:      o.DisplayName,
+			ZoneID:           o.ZoneID,
 			AvailableActions: o.AvailableActions,
 		})
 	}

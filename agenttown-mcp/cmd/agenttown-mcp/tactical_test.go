@@ -477,15 +477,17 @@ func TestBuildTacticalPrompt_InjectsKBContext(t *testing.T) {
 	kb := loadTestKB(t)
 	prompt := buildTacticalPrompt("装配", "main_workshop", "09:00", "09:00-12:00",
 		&protocol.PhysicalState{Energy: 75, Fatigue: 30, JointWear: 5, Health: 90}, kb, "")
-	// 应包含所有区域
+	// 应包含所有区域（新 schema 7 zones）
 	if !strings.Contains(prompt, "main_workshop") || !strings.Contains(prompt, "central_plaza") ||
-		!strings.Contains(prompt, "charging_station") || !strings.Contains(prompt, "rest_area") {
-		t.Errorf("prompt should list all 4 zones, got: %s", prompt)
+		!strings.Contains(prompt, "logistics_hub") || !strings.Contains(prompt, "repair_bay") ||
+		!strings.Contains(prompt, "residential_quarters") || !strings.Contains(prompt, "archive_station") ||
+		!strings.Contains(prompt, "recycling_yard") {
+		t.Errorf("prompt should list all 7 zones, got: %s", prompt)
 	}
-	// 应包含所有地点
+	// 应包含所有物体（原 locations 已合并进 objects）
 	if !strings.Contains(prompt, "workbench_01") || !strings.Contains(prompt, "charging_station_01") ||
 		!strings.Contains(prompt, "rest_bench_01") {
-		t.Errorf("prompt should list all 3 locations, got: %s", prompt)
+		t.Errorf("prompt should list all 3 objects, got: %s", prompt)
 	}
 	// 应包含可交互物体及其动作
 	if !strings.Contains(prompt, "可交互物体") {

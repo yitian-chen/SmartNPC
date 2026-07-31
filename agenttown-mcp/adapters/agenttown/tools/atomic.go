@@ -87,7 +87,7 @@ func registerAtomic(s *mcp.Server, ex Executor, kb *worldkb.KB, logger *slog.Log
 	// without maintaining its own semantic→coordinate map.
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "move_to",
-		Description: "Move to a semantic destination (zone or location id). The MCP layer resolves it to a coordinate via the World KB.",
+		Description: "Move to a semantic destination (zone or object id). The MCP layer resolves it to a coordinate via the World KB.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in MoveToInput) (*mcp.CallToolResult, ackResult, error) {
 		if in.AgentID == "" || in.Target == "" {
 			return nil, ackResult{}, fmt.Errorf("agent_id and target are required")
