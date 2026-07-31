@@ -19,7 +19,9 @@ package worldkb
 //   - Generated entities without authored narrative are warnings (not fatal).
 
 import (
+	"encoding/json"
 	"fmt"
+	"os"
 	"sort"
 )
 
@@ -259,4 +261,99 @@ func dedupStrings(s []string) []string {
 		}
 	}
 	return out
+}
+
+// MergeAndWrite is the one-shot pipeline used by the MCP --auto-merge-world-kb
+// startup flag and by the worldkb-merge CLI. It loads the two source JSONs,
+// merges them, validates the result, and atomically writes world_kb.yaml +
+// manifest.json. Returns the merged KB so callers can use it directly
+// without re-loading the file they just wrote.
+//
+// Path semantics:
+//   - genPath / authPath: input JSON files (must exist).
+//   - outPath: world_kb.yaml is written here (atomic temp-file + rename).
+//   - manifestPath: if non-empty, manifest.json is written here.
+//   - If manifestPath is empty, no manifest is written.
+//
+// Failures:
+//   - I/O errors (missing files, permission denied) wrap the underlying error.
+//   - Schema mismatch / dangling authored IDs / protected-field violations
+//     return the merge error directly.
+//   - Validation errors (after a successful merge) return the first Issue
+//     with SeverityError wrapped in an error.
+func MergeAndWrite(genPath, authPath, outPath, manifestPath string) (*KB, error) {
+	gen, err := loadGeneratedDoc(genPath)
+	if err != nil {
+		return nil, fmt.Errorf("load generated: %w", err)
+	}
+	auth, err := loadAuthoredDoc(authPath)
+	if err != nil {
+		return nil, fmt.Errorf("load authored: %w", err)
+	}
+
+	kb, _, err := Merge(gen, auth)
+	if err != nil {
+		return nil, fmt.Errorf("merge: %w", err)
+	}
+
+	if issues := Validate(kb); issues.HasErrors() {
+		// Surface the first error; subsequent errors are in issues.Errors
+		// but a single wrapped error is enough for fail-fast startup.
+		first := issues.Errors[0]
+		return nil, fmt.Errorf("validate: [%s] %s: %s", first.Entity, first.Code, first.Message)
+	}
+
+	if _, err := WriteYAML(kb, outPath); err != nil {
+		return nil, fmt.Errorf("write yaml: %w", err)
+	}
+
+	if manifestPath != "" {
+		genBytes, err := os.ReadFile(genPath)
+		if err != nil {
+			return nil, fmt.Errorf("read generated for manifest: %w", err)
+		}
+		authBytes, err := os.ReadFile(authPath)
+		if err != nil {
+			return nil, fmt.Errorf("read authored for manifest: %w", err)
+		}
+		mergedBytes, err := os.ReadFile(outPath)
+		if err != nil {
+			return nil, fmt.Errorf("read merged for manifest: %w", err)
+		}
+		sourceMap := ""
+		if gen.Source.MapPackage != "" {
+			sourceMap = gen.Source.MapPackage
+		}
+		if err := WriteManifest(genBytes, authBytes, mergedBytes, manifestPath, sourceMap); err != nil {
+			return nil, fmt.Errorf("write manifest: %w", err)
+		}
+	}
+
+	return kb, nil
+}
+
+// loadGeneratedDoc parses a world.generated.json file.
+func loadGeneratedDoc(path string) (*GeneratedDoc, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var doc GeneratedDoc
+	if err := json.Unmarshal(data, &doc); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", path, err)
+	}
+	return &doc, nil
+}
+
+// loadAuthoredDoc parses a world.authored.json file.
+func loadAuthoredDoc(path string) (*AuthoredDoc, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var doc AuthoredDoc
+	if err := json.Unmarshal(data, &doc); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", path, err)
+	}
+	return &doc, nil
 }

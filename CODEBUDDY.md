@@ -543,6 +543,10 @@ cp .env.example .env
 | `--ollama-model` | `qwen2.5:7b-instruct-q4_K_M` | 反应层模型 |
 | `--ollama-num-thread` | `16` | Ollama CPU 推理线程数（0=默认 16，-1=让 Ollama 自决）。高核数 CPU 上默认用满所有核反而劣化，实测 96 vCPU EPYC 限制到 16 线程可获得 3x 加速 |
 | `--world-kb` | `assets/world_kb.yaml` | 世界 KB 路径（fail-fast） |
+| `--auto-merge-world-kb` | `false` | 启动时先跑 merge pipeline 重生成 world_kb.yaml（UE 端更新 generated.json 后下次启动即生效，fail-fast on merge/validation error） |
+| `--world-generated-json` | `assets/world.generated.json` | merge pipeline 输入（仅 `--auto-merge-world-kb` 时用） |
+| `--world-authored-json` | `assets/world.authored.json` | merge pipeline 输入（仅 `--auto-merge-world-kb` 时用） |
+| `--world-kb-manifest` | `assets/world_kb.manifest.json` | manifest.json 输出路径（空串=跳过 manifest；仅 `--auto-merge-world-kb` 时用） |
 | `--log-level` | `info` | `debug`/`info`/`warn`/`error` |
 
 ### 云开发环境（AnyDev / 远程 Linux）

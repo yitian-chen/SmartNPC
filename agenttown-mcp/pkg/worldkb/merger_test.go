@@ -1,9 +1,19 @@
 package worldkb
 
 import (
+	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 )
+
+// ─── test helpers for MergeAndWrite ─────────────────────────────
+// (named with mw prefix to avoid collision with serializer_test.go's contains)
+func mwMarshal(v any) ([]byte, error)                { return json.MarshalIndent(v, "", "  ") }
+func mwWrite(p string, b []byte, m os.FileMode) error { return os.WriteFile(p, b, m) }
+func mwRead(p string) ([]byte, error)                { return os.ReadFile(p) }
+func mwStat(p string) (os.FileInfo, error)           { return os.Stat(p) }
+func mwContains(s, substr string) bool               { return strings.Contains(s, substr) }
 
 // helper: build a minimal valid generated doc with one zone/object/agent.
 func minimalGenerated() *GeneratedDoc {
@@ -241,5 +251,142 @@ func TestMerge_DeterministicSort(t *testing.T) {
 	}
 	if kb.Zones[0].ID != "z_a" || kb.Zones[1].ID != "z_b" {
 		t.Errorf("zones not sorted: %v %v", kb.Zones[0].ID, kb.Zones[1].ID)
+	}
+}
+
+// ─── MergeAndWrite (one-shot pipeline) ──────────────────────────
+
+// writeJSONFile helper for MergeAndWrite tests: marshals v to JSON and
+// writes to path.
+func writeJSONFile(t *testing.T, path string, v any) {
+	t.Helper()
+	data, err := mwMarshal(v)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if err := mwWrite(path, data, 0644); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+}
+
+func TestMergeAndWrite_HappyPath(t *testing.T) {
+	dir := t.TempDir()
+	genPath := dir + "/world.generated.json"
+	authPath := dir + "/world.authored.json"
+	outPath := dir + "/world_kb.yaml"
+	manifestPath := dir + "/world_kb.manifest.json"
+
+	writeJSONFile(t, genPath, minimalGenerated())
+	writeJSONFile(t, authPath, minimalAuthored())
+
+	kb, err := MergeAndWrite(genPath, authPath, outPath, manifestPath)
+	if err != nil {
+		t.Fatalf("MergeAndWrite: %v", err)
+	}
+	if kb == nil || len(kb.Zones) != 1 || len(kb.Objects) != 1 || len(kb.Agents) != 1 {
+		t.Fatalf("unexpected kb: %+v", kb)
+	}
+	// YAML file should exist and be re-loadable.
+	reloaded, err := Load(outPath)
+	if err != nil {
+		t.Fatalf("reload merged yaml: %v", err)
+	}
+	if reloaded.Site.ID != "town" {
+		t.Errorf("reloaded site id = %q, want town", reloaded.Site.ID)
+	}
+	if reloaded.GetZone("main_workshop") == nil {
+		t.Error("reloaded missing main_workshop zone")
+	}
+	// Manifest should exist and be non-empty.
+	manifestBytes, err := mwRead(manifestPath)
+	if err != nil {
+		t.Fatalf("read manifest: %v", err)
+	}
+	if len(manifestBytes) == 0 || !mwContains(string(manifestBytes), "sha256") {
+		t.Errorf("manifest missing sha256 field: %s", manifestBytes)
+	}
+}
+
+func TestMergeAndWrite_EmptyManifestSkipped(t *testing.T) {
+	dir := t.TempDir()
+	genPath := dir + "/world.generated.json"
+	authPath := dir + "/world.authored.json"
+	outPath := dir + "/world_kb.yaml"
+
+	writeJSONFile(t, genPath, minimalGenerated())
+	writeJSONFile(t, authPath, minimalAuthored())
+
+	_, err := MergeAndWrite(genPath, authPath, outPath, "")
+	if err != nil {
+		t.Fatalf("MergeAndWrite: %v", err)
+	}
+	// YAML should still be written.
+	if _, err := Load(outPath); err != nil {
+		t.Errorf("reload: %v", err)
+	}
+}
+
+func TestMergeAndWrite_MissingGeneratedFile(t *testing.T) {
+	dir := t.TempDir()
+	authPath := dir + "/world.authored.json"
+	writeJSONFile(t, authPath, minimalAuthored())
+
+	_, err := MergeAndWrite(dir+"/nonexistent.json", authPath, dir+"/out.yaml", "")
+	if err == nil {
+		t.Fatal("expected error for missing generated file")
+	}
+	if !mwContains(err.Error(), "load generated") {
+		t.Errorf("error should mention load generated: %v", err)
+	}
+}
+
+func TestMergeAndWrite_MergeErrorPropagates(t *testing.T) {
+	dir := t.TempDir()
+	genPath := dir + "/world.generated.json"
+	authPath := dir + "/world.authored.json"
+	outPath := dir + "/world_kb.yaml"
+
+	// Schema version mismatch → merge error.
+	gen := minimalGenerated()
+	gen.SchemaVersion = "9.9"
+	writeJSONFile(t, genPath, gen)
+	writeJSONFile(t, authPath, minimalAuthored())
+
+	_, err := MergeAndWrite(genPath, authPath, outPath, "")
+	if err == nil {
+		t.Fatal("expected merge error for schema mismatch")
+	}
+	if !mwContains(err.Error(), "merge:") {
+		t.Errorf("error should mention merge: %v", err)
+	}
+	// Output file should NOT exist (merge failed before write).
+	if _, err := mwStat(outPath); err == nil {
+		t.Error("out file should not exist after merge failure")
+	}
+}
+
+func TestMergeAndWrite_ValidationErrorPropagates(t *testing.T) {
+	dir := t.TempDir()
+	genPath := dir + "/world.generated.json"
+	authPath := dir + "/world.authored.json"
+	outPath := dir + "/world_kb.yaml"
+
+	// Build a generated doc with an invalid agent ID (starts with digit,
+	// violates ^[A-Za-z]...) to trigger validator error.
+	gen := minimalGenerated()
+	gen.Agents[0].ID = "1bad"
+	writeJSONFile(t, genPath, gen)
+	// Authored must match — also use 1bad so no dangling-id error.
+	auth := minimalAuthored()
+	delete(auth.Agents, "H-01")
+	auth.Agents["1bad"] = AuthoredAgent{DisplayName: "x", HomeZone: "main_workshop"}
+	writeJSONFile(t, authPath, auth)
+
+	_, err := MergeAndWrite(genPath, authPath, outPath, "")
+	if err == nil {
+		t.Fatal("expected validation error for invalid agent ID")
+	}
+	if !mwContains(err.Error(), "validate:") {
+		t.Errorf("error should mention validate: %v", err)
 	}
 }
