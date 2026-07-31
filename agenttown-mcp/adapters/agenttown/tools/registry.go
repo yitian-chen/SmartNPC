@@ -60,6 +60,78 @@ func RegisterAll(s *mcp.Server, ex Executor, kb *worldkb.KB, logger *slog.Logger
 	registerAtomic(s, ex, kb, logger)
 }
 
+// ToolSpec describes one built-in tool's name and the UE cmd it depends
+// on. RequiredCmd == "" means the tool has no UE cmd dependency (e.g.
+// scan_area, which only triggers an immediate perception_update) and is
+// therefore always available.
+type ToolSpec struct {
+	Name        string
+	RequiredCmd string
+}
+
+// BuiltinToolSpecs is the static metadata table for all 15 built-in
+// tools, mapping each tool name to the UE cmd it translates to. Used by
+// ReconcileTools to decide which tools to keep/remove based on the
+// capability registry.
+//
+// Order is irrelevant — ReconcileTools reads it as a set.
+func BuiltinToolSpecs() []ToolSpec {
+	return []ToolSpec{
+		// Atomic tools.
+		{Name: "move_to", RequiredCmd: protocol.CmdMoveTo},
+		{Name: "turn_to", RequiredCmd: protocol.CmdTurnTo},
+		{Name: "speak", RequiredCmd: protocol.CmdSpeak},
+		{Name: "emote", RequiredCmd: protocol.CmdEmote},
+		{Name: "interact", RequiredCmd: protocol.CmdInteractSmartObject},
+		{Name: "wait", RequiredCmd: protocol.CmdWait},
+		{Name: "stop", RequiredCmd: protocol.CmdStop},
+		// scan_area has no UE cmd — it triggers an immediate
+		// perception_update via RequestScan, not an action_command.
+		{Name: "scan_area", RequiredCmd: ""},
+		// Composite tools — all translate to ExecuteComposite.
+		{Name: "work_assemble", RequiredCmd: protocol.CmdExecuteComposite},
+		{Name: "patrol_route", RequiredCmd: protocol.CmdExecuteComposite},
+		{Name: "charge_at", RequiredCmd: protocol.CmdExecuteComposite},
+		{Name: "repair_target", RequiredCmd: protocol.CmdExecuteComposite},
+		{Name: "social_chat_with", RequiredCmd: protocol.CmdExecuteComposite},
+		{Name: "rest_idle", RequiredCmd: protocol.CmdExecuteComposite},
+		{Name: "archive_research", RequiredCmd: protocol.CmdExecuteComposite},
+	}
+}
+
+// ReconcileTools ensures the tools registered on s match the capability
+// set implied by hasCmd. Tools whose RequiredCmd is unavailable (and
+// isn't "") are removed via s.RemoveTools; the rest are (re-)registered
+// via RegisterAll (mcp.AddTool is idempotent — it replaces existing
+// tools with the same name).
+//
+// hasCmd returns whether a given cmd is currently available to the
+// global/system scope. Per-agent capability enforcement happens
+// separately in the guardedExecutor (SendAction gates on
+// registry.HasCmd(agentID, cmd)).
+//
+// This is invoked on every capability_registry message and is safe to
+// call multiple times.
+func ReconcileTools(s *mcp.Server, ex Executor, kb *worldkb.KB, logger *slog.Logger, hasCmd func(string) bool) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	RegisterAll(s, ex, kb, logger)
+	var drop []string
+	for _, spec := range BuiltinToolSpecs() {
+		if spec.RequiredCmd == "" {
+			continue
+		}
+		if !hasCmd(spec.RequiredCmd) {
+			drop = append(drop, spec.Name)
+		}
+	}
+	if len(drop) > 0 {
+		s.RemoveTools(drop...)
+		logger.Info("capability reconcile: removed tools for unavailable cmds", "tools", drop)
+	}
+}
+
 // ackResult is the common output shape all tools return: it echoes the
 // action_id and estimated duration from the ACK so the LLM knows the
 // action was accepted and roughly how long it will take. The actual

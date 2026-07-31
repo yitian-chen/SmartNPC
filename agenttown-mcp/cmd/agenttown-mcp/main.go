@@ -365,6 +365,7 @@ func extractTimeOfDay(raw json.RawMessage) string {
 type guardedExecutor struct {
 	ws     *wsserver.Server
 	lookup func(string) *agentContext
+	caps   *CapabilityRegistry // per-agent cmd capability gate; nil = no check
 }
 
 func (g *guardedExecutor) validate(agentID string) (*agentContext, error) {
@@ -382,6 +383,14 @@ func (g *guardedExecutor) SendAction(ctx context.Context, agentID string, decisi
 	ac, err := g.validate(agentID)
 	if err != nil {
 		return nil, err
+	}
+	// Per-agent capability gate: reject if the agent doesn't have the
+	// required cmd in its effective capability set (per-agent override
+	// over global default). Defense-in-depth on top of tactical-layer
+	// prompt filtering — protects against LLM hallucinating an action
+	// the agent can't execute.
+	if g.caps != nil && !g.caps.HasCmd(agentID, cmd) {
+		return nil, fmt.Errorf("agent %s lacks capability for cmd %s", agentID, cmd)
 	}
 	ack, err := g.ws.SendAction(ctx, agentID, cmd, params)
 	if err == nil && ack != nil {
@@ -1104,15 +1113,16 @@ func main() {
 		return ac, true
 	}
 
-	// All tools pass through the online/decision-epoch guard before WS send.
-	executor := &guardedExecutor{ws: ws, lookup: lookupAgent}
-
 	// Capability registry seeded with built-in defaults so the system
 	// works even if UE never sends a capability_registry message. UE
 	// (e.g. mock_ue) is expected to send one on connect to declare its
 	// actually-implemented cmds, overwriting this seed.
 	capabilityRegistry := NewCapabilityRegistry()
 	capabilityRegistry.Register(protocol.SystemAgentID, BuiltinCmdCapabilities)
+
+	// All tools pass through the online/decision-epoch guard before WS send.
+	// The executor also gates on per-agent cmd capability (HasCmd).
+	executor := &guardedExecutor{ws: ws, lookup: lookupAgent, caps: capabilityRegistry}
 	tools.RegisterAll(server, executor, kb, logger)
 
 	// ─── Wire inbound message handler ──────────────────────────
@@ -1127,10 +1137,13 @@ func main() {
 			capabilityRegistry.Register(agentID, cr.Actions)
 			logger.Info("capability_registry registered",
 				"agent_id", agentID, "actions", len(cr.Actions))
-			// TODO(step5): tools.ReconcileTools(server, capabilityRegistry)
-			// —— 工具列表的动态增删在 Step 5 接入。当前仍使用启动时
-			// RegisterAll 注册的全量 15 工具，registry 仅作为战术层
-			// prompt 生成的数据源。
+			// Reconcile MCP tool list so AddTool/RemoveTools reflects
+			// the new global capability set. Per-agent overrides
+			// don't change the global tool list — the guardedExecutor
+			// enforces per-agent capability at SendAction time.
+			tools.ReconcileTools(server, executor, kb, logger, func(cmd string) bool {
+				return capabilityRegistry.HasCmd(protocol.SystemAgentID, cmd)
+			})
 		case protocol.TypeAgentRegistered:
 			// First registration = new day. Re-registration after reconnect =
 			// restore, keep the per-agent strategic/tactical sessions
