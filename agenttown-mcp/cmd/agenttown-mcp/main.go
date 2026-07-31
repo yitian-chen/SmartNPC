@@ -961,7 +961,6 @@ func main() {
 	logger.Info("world kb loaded",
 		"path", *worldKBPath,
 		"zones", len(kb.Zones),
-		"locations", len(kb.Locations),
 		"objects", len(kb.Objects),
 		"agents", len(kb.Agents),
 	)

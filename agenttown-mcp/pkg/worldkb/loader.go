@@ -13,58 +13,57 @@ type rawKB struct {
 	Version       string        `yaml:"version"`
 	Site          rawSite       `yaml:"site"`
 	Zones         []rawZone     `yaml:"zones"`
-	Locations     []rawLocation `yaml:"locations"`
 	Objects       []rawObject   `yaml:"objects"`
 	Agents        []rawAgent    `yaml:"agents"`
 	Relationships []rawRel      `yaml:"relationships"`
 }
 
 type rawSite struct {
-	ID   string `yaml:"id"`
-	Name string `yaml:"name"`
+	ID          string `yaml:"id"`
+	DisplayName string `yaml:"display_name"`
+	Description string `yaml:"description"`
 }
 
 type rawZone struct {
 	ID          string    `yaml:"id"`
-	Name        string    `yaml:"name"`
+	DisplayName string    `yaml:"display_name"`
 	Description string    `yaml:"description"`
-	UE5Bounds   rawBounds `yaml:"ue5_bounds"`
+	Bounds      rawBounds `yaml:"bounds"`
 	EntryPoint  []float64 `yaml:"entry_point"`
+	EntryFacing []float64 `yaml:"entry_facing"`
 	ConnectedTo []string  `yaml:"connected_to"`
-	Locations   []string  `yaml:"locations"`
-}
-
-type rawLocation struct {
-	ID                string    `yaml:"id"`
-	Name              string    `yaml:"name"`
-	Zone              string    `yaml:"zone"`
-	Type              string    `yaml:"type"`
-	Position          []float64 `yaml:"position"`
-	InteractionPoint  []float64 `yaml:"interaction_point"`
-	InteractionRadius float64   `yaml:"interaction_radius"`
-	Facing            []float64 `yaml:"facing"`
-	AvailableActions  []string  `yaml:"available_actions"`
-	UE5Ref            string    `yaml:"ue5_ref"`
 }
 
 type rawObject struct {
-	ID               string   `yaml:"id"`
-	AvailableActions []string `yaml:"available_actions"`
-	RequiredRole     []string `yaml:"required_role"`
-	Capacity         int      `yaml:"capacity"`
-	UE5Ref           string   `yaml:"ue5_ref"`
+	ID                string    `yaml:"id"`
+	DisplayName       string    `yaml:"display_name"`
+	Description       string    `yaml:"description"`
+	Category          string    `yaml:"category"`
+	ZoneID            string    `yaml:"zone_id"`
+	ActorClass        string    `yaml:"actor_class"`
+	ActorPosition     []float64 `yaml:"actor_position"`
+	InteractionPoint  []float64 `yaml:"interaction_point"`
+	InteractionFacing []float64 `yaml:"interaction_facing"`
+	InteractionRadius float64   `yaml:"interaction_radius"`
+	AvailableActions  []string  `yaml:"available_actions"`
+	DefaultState      string    `yaml:"default_state"`
+	RequiredRoles     []string  `yaml:"required_roles"`
+	Capacity          int       `yaml:"capacity"`
 }
 
 type rawAgent struct {
-	ID              string    `yaml:"id"`
-	Name            string    `yaml:"name"`
-	Type            string    `yaml:"type"`
-	Role            []string  `yaml:"role"`
-	Capabilities    []string  `yaml:"capabilities"`
-	DefaultZone     string    `yaml:"default_zone"`
-	DefaultPosition []float64 `yaml:"default_position"`
-	UE5Class        string    `yaml:"ue5_class"`
-	UE5Variant      string    `yaml:"ue5_variant"`
+	ID               string    `yaml:"id"`
+	DisplayName      string    `yaml:"display_name"`
+	Type             string    `yaml:"type"`
+	Role             []string  `yaml:"role"`
+	Personality      []string  `yaml:"personality"`
+	InitialZone      string    `yaml:"initial_zone"`
+	InitialPosition  []float64 `yaml:"initial_position"`
+	HomeZone         string    `yaml:"home_zone"`
+	CoreMemories     []string  `yaml:"core_memories"`
+	ActorClass       string    `yaml:"actor_class"`
+	ActionTable      string    `yaml:"action_table"`
+	MainBehaviorTree string    `yaml:"main_behavior_tree"`
 }
 
 type rawRel struct {
@@ -76,8 +75,8 @@ type rawRel struct {
 }
 
 type rawBounds struct {
-	Center   []float64 `yaml:"center"`
-	HalfSize []float64 `yaml:"half_size"`
+	Center []float64 `yaml:"center"`
+	Extent []float64 `yaml:"extent"`
 }
 
 // Load reads and parses the world_kb.yaml file at path, validates required
@@ -101,13 +100,13 @@ func Load(path string) (*KB, error) {
 	kb := &KB{
 		Version: raw.Version,
 		Site: Site{
-			ID:   raw.Site.ID,
-			Name: raw.Site.Name,
+			ID:          raw.Site.ID,
+			DisplayName: raw.Site.DisplayName,
+			Description: raw.Site.Description,
 		},
-		zoneByID:     make(map[string]*Zone),
-		locationByID: make(map[string]*Location),
-		objectByID:   make(map[string]*Object),
-		agentByID:    make(map[string]*Agent),
+		zoneByID:   make(map[string]*Zone),
+		objectByID: make(map[string]*Object),
+		agentByID:  make(map[string]*Agent),
 	}
 
 	// Zones
@@ -123,65 +122,32 @@ func Load(path string) (*KB, error) {
 		if err != nil {
 			return nil, fmt.Errorf("zone %q: %w", rz.ID, err)
 		}
-		center, err := toVec3(rz.UE5Bounds.Center, "ue5_bounds.center", rz.ID)
+		facing, err := toVec3(rz.EntryFacing, "entry_facing", rz.ID)
 		if err != nil {
 			return nil, fmt.Errorf("zone %q: %w", rz.ID, err)
 		}
-		half, err := toVec3(rz.UE5Bounds.HalfSize, "ue5_bounds.half_size", rz.ID)
+		center, err := toVec3(rz.Bounds.Center, "bounds.center", rz.ID)
+		if err != nil {
+			return nil, fmt.Errorf("zone %q: %w", rz.ID, err)
+		}
+		extent, err := toVec3(rz.Bounds.Extent, "bounds.extent", rz.ID)
 		if err != nil {
 			return nil, fmt.Errorf("zone %q: %w", rz.ID, err)
 		}
 		z := Zone{
 			ID:          rz.ID,
-			Name:        rz.Name,
+			DisplayName: rz.DisplayName,
 			Description: rz.Description,
 			EntryPoint:  entry,
-			UE5Bounds: Bounds{
-				Center:   center,
-				HalfSize: half,
+			EntryFacing: facing,
+			Bounds: Bounds{
+				Center: center,
+				Extent: extent,
 			},
 			ConnectedTo: rz.ConnectedTo,
-			Locations:   rz.Locations,
 		}
 		kb.Zones = append(kb.Zones, z)
 		kb.zoneByID[z.ID] = &kb.Zones[len(kb.Zones)-1]
-	}
-
-	// Locations
-	kb.Locations = make([]Location, 0, len(raw.Locations))
-	for i, rl := range raw.Locations {
-		if rl.ID == "" {
-			return nil, fmt.Errorf("location[%d]: missing id", i)
-		}
-		if _, dup := kb.locationByID[rl.ID]; dup {
-			return nil, fmt.Errorf("location[%d]: duplicate id %q", i, rl.ID)
-		}
-		pos, err := toVec3(rl.Position, "position", rl.ID)
-		if err != nil {
-			return nil, fmt.Errorf("location %q: %w", rl.ID, err)
-		}
-		ip, err := toVec3(rl.InteractionPoint, "interaction_point", rl.ID)
-		if err != nil {
-			return nil, fmt.Errorf("location %q: %w", rl.ID, err)
-		}
-		facing, err := toVec3(rl.Facing, "facing", rl.ID)
-		if err != nil {
-			return nil, fmt.Errorf("location %q: %w", rl.ID, err)
-		}
-		l := Location{
-			ID:                rl.ID,
-			Name:              rl.Name,
-			Zone:              rl.Zone,
-			Type:              rl.Type,
-			Position:          pos,
-			InteractionPoint:  ip,
-			InteractionRadius: rl.InteractionRadius,
-			Facing:            facing,
-			AvailableActions:  rl.AvailableActions,
-			UE5Ref:            rl.UE5Ref,
-		}
-		kb.Locations = append(kb.Locations, l)
-		kb.locationByID[l.ID] = &kb.Locations[len(kb.Locations)-1]
 	}
 
 	// Objects
@@ -193,12 +159,37 @@ func Load(path string) (*KB, error) {
 		if _, dup := kb.objectByID[ro.ID]; dup {
 			return nil, fmt.Errorf("object[%d]: duplicate id %q", i, ro.ID)
 		}
+		actorPos, err := toVec3(ro.ActorPosition, "actor_position", ro.ID)
+		if err != nil {
+			return nil, fmt.Errorf("object %q: %w", ro.ID, err)
+		}
+		ip, err := toVec3(ro.InteractionPoint, "interaction_point", ro.ID)
+		if err != nil {
+			return nil, fmt.Errorf("object %q: %w", ro.ID, err)
+		}
+		ifacing, err := toVec3(ro.InteractionFacing, "interaction_facing", ro.ID)
+		if err != nil {
+			return nil, fmt.Errorf("object %q: %w", ro.ID, err)
+		}
+		radius := ro.InteractionRadius
+		if radius == 0 {
+			radius = defaultInteractionRadius
+		}
 		kb.Objects = append(kb.Objects, Object{
-			ID:               ro.ID,
-			AvailableActions: ro.AvailableActions,
-			RequiredRole:     ro.RequiredRole,
-			Capacity:         ro.Capacity,
-			UE5Ref:           ro.UE5Ref,
+			ID:                ro.ID,
+			DisplayName:       ro.DisplayName,
+			Description:       ro.Description,
+			Category:          ro.Category,
+			ZoneID:            ro.ZoneID,
+			ActorClass:        ro.ActorClass,
+			ActorPosition:     actorPos,
+			InteractionPoint:  ip,
+			InteractionFacing: ifacing,
+			InteractionRadius: radius,
+			AvailableActions:  ro.AvailableActions,
+			DefaultState:      ro.DefaultState,
+			RequiredRoles:     ro.RequiredRoles,
+			Capacity:          ro.Capacity,
 		})
 		kb.objectByID[ro.ID] = &kb.Objects[len(kb.Objects)-1]
 	}
@@ -212,20 +203,23 @@ func Load(path string) (*KB, error) {
 		if _, dup := kb.agentByID[ra.ID]; dup {
 			return nil, fmt.Errorf("agent[%d]: duplicate id %q", i, ra.ID)
 		}
-		dp, err := toVec3(ra.DefaultPosition, "default_position", ra.ID)
+		ip, err := toVec3(ra.InitialPosition, "initial_position", ra.ID)
 		if err != nil {
 			return nil, fmt.Errorf("agent %q: %w", ra.ID, err)
 		}
 		kb.Agents = append(kb.Agents, Agent{
-			ID:              ra.ID,
-			Name:            ra.Name,
-			Type:            ra.Type,
-			Role:            ra.Role,
-			Capabilities:    ra.Capabilities,
-			DefaultZone:     ra.DefaultZone,
-			DefaultPosition: dp,
-			UE5Class:        ra.UE5Class,
-			UE5Variant:      ra.UE5Variant,
+			ID:               ra.ID,
+			DisplayName:      ra.DisplayName,
+			Type:             ra.Type,
+			Role:             ra.Role,
+			Personality:      ra.Personality,
+			InitialZone:      ra.InitialZone,
+			InitialPosition:  ip,
+			HomeZone:         ra.HomeZone,
+			CoreMemories:     ra.CoreMemories,
+			ActorClass:       ra.ActorClass,
+			ActionTable:      ra.ActionTable,
+			MainBehaviorTree: ra.MainBehaviorTree,
 		})
 		kb.agentByID[ra.ID] = &kb.Agents[len(kb.Agents)-1]
 	}

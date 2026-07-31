@@ -299,14 +299,10 @@ class InspectTests(unittest.IsolatedAsyncioTestCase):
         # but IS in the kb (simulating a future object addition).
         # rest_bench_01 has a dedicated branch, so use a synthetic one: add a
         # placeholder to the kb so name/actions resolve, then inspect.
-        from agenttown.mock_ue import LocationInfo, ObjectInfo
-        ue.kb.locations["future_obj"] = LocationInfo(
-            id="future_obj", name="未来设备", zone="main_workshop",
-            position=[0, 0, 0], interaction_point=[0, 0, 0],
-            interaction_radius=0, available_actions=["inspect", "operate"],
-        )
+        from agenttown.mock_ue import ObjectInfo
         ue.kb.objects["future_obj"] = ObjectInfo(
-            id="future_obj", available_actions=["inspect", "operate"],
+            id="future_obj", display_name="未来设备",
+            available_actions=["inspect", "operate"],
         )
         details = ue._inspect_object("future_obj")
         self.assertIn("inspection", details)

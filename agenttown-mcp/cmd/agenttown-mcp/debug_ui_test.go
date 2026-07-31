@@ -41,9 +41,9 @@ func TestHandleDebugUI_RejectsNonGet(t *testing.T) {
 	}
 }
 
-// TestHandleDebugKB_ReturnsZonesAndLocations verifies /debug/kb returns
-// zones/locations/objects from the loaded KB.
-func TestHandleDebugKB_ReturnsZonesAndLocations(t *testing.T) {
+// TestHandleDebugKB_ReturnsZonesAndObjects verifies /debug/kb returns
+// zones/objects from the loaded KB.
+func TestHandleDebugKB_ReturnsZonesAndObjects(t *testing.T) {
 	kb := loadTestKB(t)
 	logger := slog.Default()
 
@@ -66,9 +66,6 @@ func TestHandleDebugKB_ReturnsZonesAndLocations(t *testing.T) {
 	if len(resp.Zones) == 0 {
 		t.Error("Zones should not be empty")
 	}
-	if len(resp.Locations) == 0 {
-		t.Error("Locations should not be empty")
-	}
 	if len(resp.Objects) == 0 {
 		t.Error("Objects should not be empty")
 	}
@@ -84,21 +81,12 @@ func TestHandleDebugKB_ReturnsZonesAndLocations(t *testing.T) {
 		t.Error("Zones should contain main_workshop")
 	}
 	foundWorkbench := false
-	for _, l := range resp.Locations {
-		if l.ID == "workbench_01" {
-			foundWorkbench = true
-			if l.Zone != "main_workshop" {
-				t.Errorf("workbench_01 zone: got %q, want main_workshop", l.Zone)
-			}
-			break
-		}
-	}
-	if !foundWorkbench {
-		t.Error("Locations should contain workbench_01")
-	}
-	// 验证 objects 含 available_actions
 	for _, o := range resp.Objects {
 		if o.ID == "workbench_01" {
+			foundWorkbench = true
+			if o.ZoneID != "main_workshop" {
+				t.Errorf("workbench_01 zone_id: got %q, want main_workshop", o.ZoneID)
+			}
 			foundAssemble := false
 			for _, a := range o.AvailableActions {
 				if a == "assemble" {
@@ -109,7 +97,11 @@ func TestHandleDebugKB_ReturnsZonesAndLocations(t *testing.T) {
 			if !foundAssemble {
 				t.Errorf("workbench_01 available_actions should contain assemble, got %v", o.AvailableActions)
 			}
+			break
 		}
+	}
+	if !foundWorkbench {
+		t.Error("Objects should contain workbench_01")
 	}
 }
 
@@ -127,8 +119,8 @@ func TestHandleDebugKB_NilKBReturnsEmpty(t *testing.T) {
 	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if len(resp.Zones) != 0 || len(resp.Locations) != 0 || len(resp.Objects) != 0 {
-		t.Errorf("nil KB should return empty arrays, got zones=%d locs=%d objs=%d",
-			len(resp.Zones), len(resp.Locations), len(resp.Objects))
+	if len(resp.Zones) != 0 || len(resp.Objects) != 0 {
+		t.Errorf("nil KB should return empty arrays, got zones=%d objs=%d",
+			len(resp.Zones), len(resp.Objects))
 	}
 }

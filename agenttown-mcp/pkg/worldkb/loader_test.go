@@ -31,14 +31,11 @@ func TestLoad_Sample(t *testing.T) {
 	if kb.Version != "1.0" {
 		t.Errorf("Version = %q, want 1.0", kb.Version)
 	}
-	if kb.Site.ID != "industrial_park" {
+	if kb.Site.ID != "industrial_town" {
 		t.Errorf("Site.ID = %q", kb.Site.ID)
 	}
-	if len(kb.Zones) != 4 {
-		t.Errorf("len(Zones) = %d, want 4", len(kb.Zones))
-	}
-	if len(kb.Locations) != 3 {
-		t.Errorf("len(Locations) = %d, want 3", len(kb.Locations))
+	if len(kb.Zones) != 7 {
+		t.Errorf("len(Zones) = %d, want 7", len(kb.Zones))
 	}
 	if len(kb.Objects) != 3 {
 		t.Errorf("len(Objects) = %d, want 3", len(kb.Objects))
@@ -51,38 +48,44 @@ func TestLoad_Sample(t *testing.T) {
 	if kb.GetZone("main_workshop") == nil {
 		t.Error("zoneByID missing main_workshop")
 	}
-	if kb.GetZone("rest_area") == nil {
-		t.Error("zoneByID missing rest_area")
+	if kb.GetZone("central_plaza") == nil {
+		t.Error("zoneByID missing central_plaza")
 	}
-	if kb.GetLocation("workbench_01") == nil {
-		t.Error("locationByID missing workbench_01")
-	}
-	if kb.GetLocation("rest_bench_01") == nil {
-		t.Error("locationByID missing rest_bench_01")
-	}
-	if kb.GetObject("charging_station_01") == nil {
-		t.Error("objectByID missing charging_station_01")
+	if kb.GetObject("workbench_01") == nil {
+		t.Error("objectByID missing workbench_01")
 	}
 	if kb.GetObject("rest_bench_01") == nil {
 		t.Error("objectByID missing rest_bench_01")
+	}
+	if kb.GetObject("charging_station_01") == nil {
+		t.Error("objectByID missing charging_station_01")
 	}
 	if kb.GetAgent("H-01") == nil {
 		t.Error("agentByID missing H-01")
 	}
 
-	// Coordinates: workbench_01 interaction_point = [19500, 10500, 0]
-	l := kb.GetLocation("workbench_01")
-	if l.InteractionPoint != [3]float64{19500, 10500, 0} {
-		t.Errorf("workbench_01 interaction_point = %v, want [19500 10500 0]", l.InteractionPoint)
+	// Coordinates: workbench_01 interaction_point = [19500, 10500, 100]
+	o := kb.GetObject("workbench_01")
+	if o.InteractionPoint != [3]float64{19500, 10500, 100} {
+		t.Errorf("workbench_01 interaction_point = %v, want [19500 10500 100]", o.InteractionPoint)
 	}
-	if l.InteractionRadius != 1500 {
-		t.Errorf("workbench_01 interaction_radius = %v, want 1500", l.InteractionRadius)
+	if o.InteractionRadius != 1500 {
+		t.Errorf("workbench_01 interaction_radius = %v, want 1500", o.InteractionRadius)
+	}
+	if o.ZoneID != "main_workshop" {
+		t.Errorf("workbench_01 zone_id = %q, want main_workshop", o.ZoneID)
+	}
+	if o.DisplayName != "一号装配工作台" {
+		t.Errorf("workbench_01 display_name = %q", o.DisplayName)
 	}
 
-	// rest_area zone entry_point resolves to a coordinate.
-	z := kb.GetZone("rest_area")
-	if z == nil || z.EntryPoint != [3]float64{14000, 11000, 0} {
-		t.Errorf("rest_area entry_point = %v, want [14000 11000 0]", z)
+	// main_workshop zone entry_point resolves to a coordinate.
+	z := kb.GetZone("main_workshop")
+	if z == nil || z.EntryPoint != [3]float64{16000, 10000, 100} {
+		t.Errorf("main_workshop entry_point = %v, want [16000 10000 100]", z)
+	}
+	if z.Bounds.Extent != [3]float64{5000, 5000, 500} {
+		t.Errorf("main_workshop bounds.extent = %v, want [5000 5000 500]", z.Bounds.Extent)
 	}
 }
 
@@ -116,14 +119,16 @@ func TestLoad_DuplicateZoneID(t *testing.T) {
 	p := filepath.Join(dir, "dup.yaml")
 	content := `
 version: "1.0"
-site: {id: x, name: X}
+site: {id: x, display_name: X}
 zones:
   - id: dup_zone
     entry_point: [0, 0, 0]
-    ue5_bounds: {center: [0,0,0], half_size: [1,1,1]}
+    entry_facing: [0, 0, 0]
+    bounds: {center: [0,0,0], extent: [1,1,1]}
   - id: dup_zone
     entry_point: [1, 1, 1]
-    ue5_bounds: {center: [0,0,0], half_size: [1,1,1]}
+    entry_facing: [0, 0, 0]
+    bounds: {center: [0,0,0], extent: [1,1,1]}
 `
 	if err := os.WriteFile(p, []byte(content), 0644); err != nil {
 		t.Fatal(err)
@@ -142,11 +147,12 @@ func TestLoad_BadVectorArity(t *testing.T) {
 	p := filepath.Join(dir, "bad_vec.yaml")
 	content := `
 version: "1.0"
-site: {id: x, name: X}
+site: {id: x, display_name: X}
 zones:
   - id: z
     entry_point: [0, 0]          # only 2 elements — should fail
-    ue5_bounds: {center: [0,0,0], half_size: [1,1,1]}
+    entry_facing: [0, 0, 0]
+    bounds: {center: [0,0,0], extent: [1,1,1]}
 `
 	if err := os.WriteFile(p, []byte(content), 0644); err != nil {
 		t.Fatal(err)

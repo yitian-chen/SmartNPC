@@ -129,7 +129,7 @@ func slotDurationMinute(slot string) int {
 	return end - start
 }
 
-// buildKBContext 拼接可用 zone/location/object 列表段落，供战术层 prompt 注入。
+// buildKBContext 拼接可用 zone/object 列表段落，供战术层 prompt 注入。
 func buildKBContext(kb *worldkb.KB) string {
 	if kb == nil {
 		return ""
@@ -138,31 +138,24 @@ func buildKBContext(kb *worldkb.KB) string {
 	if zs := kb.ListZones(); len(zs) > 0 {
 		parts := make([]string, 0, len(zs))
 		for _, z := range zs {
-			if z.Name != "" && z.Name != z.ID {
-				parts = append(parts, fmt.Sprintf("%s(%s)", z.Name, z.ID))
+			if z.DisplayName != "" && z.DisplayName != z.ID {
+				parts = append(parts, fmt.Sprintf("%s(%s)", z.DisplayName, z.ID))
 			} else {
 				parts = append(parts, z.ID)
 			}
 		}
 		lines = append(lines, "可前往区域: "+strings.Join(parts, "、")+"。")
 	}
-	if ls := kb.ListLocations(); len(ls) > 0 {
-		parts := make([]string, 0, len(ls))
-		for _, l := range ls {
-			if l.Name != "" && l.Name != l.ID {
-				parts = append(parts, fmt.Sprintf("%s(%s)", l.Name, l.ID))
-			} else {
-				parts = append(parts, l.ID)
-			}
-		}
-		lines = append(lines, "可前往地点: "+strings.Join(parts, "、")+"。")
-	}
 	if os := kb.ListObjects(); len(os) > 0 {
 		parts := make([]string, 0, len(os))
 		for _, o := range os {
 			label := o.ID
-			if o.Name != "" && o.Name != o.ID {
-				label = fmt.Sprintf("%s(%s)", o.Name, o.ID)
+			if o.DisplayName != "" && o.DisplayName != o.ID {
+				label = fmt.Sprintf("%s(%s)", o.DisplayName, o.ID)
+			}
+			// 追加 zone_id 以保留 zone-object 归属（原 locations[] 行已移除）。
+			if o.ZoneID != "" {
+				label += "|" + o.ZoneID
 			}
 			if len(o.AvailableActions) > 0 {
 				label += "[" + strings.Join(o.AvailableActions, "/") + "]"
