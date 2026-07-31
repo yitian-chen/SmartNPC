@@ -32,24 +32,69 @@ const (
 	sourceTactical actionSource = "tactical"
 )
 
-// tacticalValidActions 列出战术层允许使用的工具（不含 scan_area/stop）。
-var tacticalValidActions = map[string]bool{
-	"move_to":          true,
-	"turn_to":          true,
-	"speak":            true,
-	"emote":            true,
-	"interact":         true,
-	"wait":             true,
-	"work_assemble":    true,
-	"patrol_route":     true,
-	"charge_at":        true,
-	"repair_target":    true,
-	"social_chat_with": true,
-	"rest_idle":        true,
-	"archive_research": true,
+// tacticalToolMeta 是战术层可选用工具的元数据表，同时是 prompt 工具列表段、
+// action 合法性校验、cmd 依赖关系的单一来源（替代原 tacticalValidActions
+// 全局 map + tacticalPromptTemplate 硬编码 bullet 列表）。
+//
+// 顺序即 prompt 中展示的顺序；scan_area/stop 不在此表（战术层不可排队）。
+var tacticalToolMeta = []struct {
+	Name        string
+	RequiredCmd string // 该工具依赖的 UE cmd；"" 表示不依赖 UE（理论上不会出现在此表）
+	Desc        string // prompt 中的工具描述
+	Params      string // prompt 中的 params 示例
+}{
+	{"move_to", protocol.CmdMoveTo, "移动到目标位置", `{"target":"区域或位置id"}`},
+	{"turn_to", protocol.CmdTurnTo, "转向目标", `{"target":"实体id"}`},
+	{"speak", protocol.CmdSpeak, "说话", `{"content":"...","target":"目标agent_id（可空）"}`},
+	{"emote", protocol.CmdEmote, "表达情绪", `{"emotion":"happy|sad|...","mode":"oneshot|sustained"}`},
+	{"interact", protocol.CmdInteractSmartObject, "与智能物体交互", `{"object_id":"...","action":"动词"}`},
+	{"wait", protocol.CmdWait, "原地等待", `{"duration_sec":秒数}`},
+	{"work_assemble", protocol.CmdExecuteComposite, "在工作台装配", `{"target":"工作台id","duration_min":分钟}`},
+	{"patrol_route", protocol.CmdExecuteComposite, "巡逻路线", `{"route_id":"路线id"}`},
+	{"charge_at", protocol.CmdExecuteComposite, "充电", `{"station_id":"充电站id","duration_min":分钟}`},
+	{"repair_target", protocol.CmdExecuteComposite, "修理其他agent", `{"target_agent_id":"..."}`},
+	{"social_chat_with", protocol.CmdExecuteComposite, "与其他agent聊天", `{"target_agent_id":"..."}`},
+	{"rest_idle", protocol.CmdExecuteComposite, "休息", `{"duration_min":分钟}`},
+	{"archive_research", protocol.CmdExecuteComposite, "档案研究", `{"duration_min":分钟}`},
 }
 
-const tacticalPromptTemplate = `[战术层/任务分解] 当前时段目标：%s
+// tacticalActionAvailable 判断 action 是否为战术层可用工具，且其依赖的
+// cmd 在 registry 中对 agentID 有效。registry == nil 时降级为仅检查是否
+// 内置战术工具（向后兼容测试与未启用 capability 的场景）。
+func tacticalActionAvailable(action, agentID string, registry *CapabilityRegistry) bool {
+	for _, tm := range tacticalToolMeta {
+		if tm.Name != action {
+			continue
+		}
+		if registry == nil {
+			return true
+		}
+		return tm.RequiredCmd == "" || registry.HasCmd(agentID, tm.RequiredCmd)
+	}
+	return false
+}
+
+// buildTacticalToolList 按 registry 对 agentID 的有效能力集过滤
+// tacticalToolMeta，构造 prompt 中的工具 bullet 列表。registry == nil
+// 时返回全量列表（向后兼容）。
+// 返回 (拼接好的 bullet 段, 可用工具数)。
+func buildTacticalToolList(agentID string, registry *CapabilityRegistry) (string, int) {
+	lines := make([]string, 0, len(tacticalToolMeta))
+	count := 0
+	for _, tm := range tacticalToolMeta {
+		if registry != nil && !registry.HasCmd(agentID, tm.RequiredCmd) {
+			continue
+		}
+		lines = append(lines, fmt.Sprintf("- %s: %s。params: %s", tm.Name, tm.Desc, tm.Params))
+		count++
+	}
+	return strings.Join(lines, "\n"), count
+}
+
+// tacticalPromptBody 是 prompt 的固定骨架，%s 占位符依次为：
+// goal / zone / timeOfDay / energy / fatigue / joint_wear / health /
+// hintLine / slotDurationHint / kbContext / toolCount / toolList。
+const tacticalPromptBody = `[战术层/任务分解] 当前时段目标：%s
 你目前在：%s，游戏时间 %s。
 物理状态：能量 %.0f、疲劳 %.0f、关节磨损 %.0f、健康 %.0f。
 
@@ -57,20 +102,8 @@ const tacticalPromptTemplate = `[战术层/任务分解] 当前时段目标：%s
 %s
 %s
 %s
-可用工具（仅限以下 13 个，禁止使用 scan_area / stop）：
-- move_to: 移动到目标位置。params: {"target":"区域或位置id"}
-- turn_to: 转向目标。params: {"target":"实体id"}
-- speak: 说话。params: {"content":"...","target":"目标agent_id（可空）"}
-- emote: 表达情绪。params: {"emotion":"happy|sad|...","mode":"oneshot|sustained"}
-- interact: 与智能物体交互。params: {"object_id":"...","action":"动词"}
-- wait: 原地等待。params: {"duration_sec":秒数}
-- work_assemble: 在工作台装配。params: {"target":"工作台id","duration_min":分钟}
-- patrol_route: 巡逻路线。params: {"route_id":"路线id"}
-- charge_at: 充电。params: {"station_id":"充电站id","duration_min":分钟}
-- repair_target: 修理其他agent。params: {"target_agent_id":"..."}
-- social_chat_with: 与其他agent聊天。params: {"target_agent_id":"..."}
-- rest_idle: 休息。params: {"duration_min":分钟}
-- archive_research: 档案研究。params: {"duration_min":分钟}
+可用工具（仅限以下 %d 个，禁止使用 scan_area / stop）：
+%s
 
 要求：
 1. 第一行输出 {"inner_thought":"一句话内心独白"}
@@ -91,7 +124,10 @@ const tacticalPromptTemplate = `[战术层/任务分解] 当前时段目标：%s
 // slot 形如 "HH:MM-HH:MM"，用于在 prompt 里提示当前时段时长，引导 LLM
 // 给出总时长接近 slot 时长的步骤，减少队列提前耗尽导致的重分解。
 // slot 为空或解析失败时该提示行降级为空，保持旧行为。
-func buildTacticalPrompt(goal, zone, timeOfDay, slot string, physical *protocol.PhysicalState, kb *worldkb.KB, hint string) string {
+//
+// registry 非 nil 时，工具列表段按 registry 对 agentID 的有效能力集动态
+// 生成（per-agent 覆盖全局默认）；nil 时降级为全量内置工具（向后兼容）。
+func buildTacticalPrompt(goal, zone, timeOfDay, slot string, physical *protocol.PhysicalState, kb *worldkb.KB, hint string, registry *CapabilityRegistry, agentID string) string {
 	e, f, j, h := 0.0, 0.0, 0.0, 0.0
 	if physical != nil {
 		e, f, j, h = physical.Energy, physical.Fatigue, physical.JointWear, physical.Health
@@ -100,8 +136,9 @@ func buildTacticalPrompt(goal, zone, timeOfDay, slot string, physical *protocol.
 	if hint != "" {
 		hintLine = "【上次中断原因】" + hint + "（请据此调整本轮规划）"
 	}
-	return fmt.Sprintf(tacticalPromptTemplate, goal, zone, timeOfDay, e, f, j, h,
-		hintLine, buildSlotDurationHint(slot), buildKBContext(kb))
+	toolList, toolCount := buildTacticalToolList(agentID, registry)
+	return fmt.Sprintf(tacticalPromptBody, goal, zone, timeOfDay, e, f, j, h,
+		hintLine, buildSlotDurationHint(slot), buildKBContext(kb), toolCount, toolList)
 }
 
 // buildSlotDurationHint 根据slot "HH:MM-HH:MM" 构造一行提示文本。
@@ -183,8 +220,9 @@ func generateTacticalPlan(
 	kb *worldkb.KB,
 	logger *slog.Logger,
 	hint string,
+	registry *CapabilityRegistry,
 ) ([]plannedAction, string, error) {
-	prompt := buildTacticalPrompt(goal, zone, timeOfDay, slot, physical, kb, hint)
+	prompt := buildTacticalPrompt(goal, zone, timeOfDay, slot, physical, kb, hint, registry, agentID)
 	logger.Info("[MCP→Hermes/TACTICAL-PROMPT]",
 		"agent_id", agentID, "goal", goal, "game_time", timeOfDay, "text", prompt,
 		"replan_hint", hint)
@@ -199,7 +237,7 @@ func generateTacticalPlan(
 	logger.Info("[Hermes→MCP/TACTICAL-RESPONSE]",
 		"agent_id", agentID, "tokens", resp.Usage.TotalTokens, "raw_len", len(raw), "raw", raw)
 
-	actions, thought, err := parseTacticalNDJSON(raw)
+	actions, thought, err := parseTacticalNDJSON(raw, registry, agentID)
 	if err != nil {
 		return nil, "", fmt.Errorf("tactical parse: %w (raw=%s)", err, truncateText(raw, 200))
 	}
@@ -228,15 +266,18 @@ func generateTacticalPlanStreaming(
 	kb *worldkb.KB,
 	logger *slog.Logger,
 	hint string,
+	registry *CapabilityRegistry,
 	onAction func(plannedAction),
 ) ([]plannedAction, string, error) {
-	prompt := buildTacticalPrompt(goal, zone, timeOfDay, slot, physical, kb, hint)
+	prompt := buildTacticalPrompt(goal, zone, timeOfDay, slot, physical, kb, hint, registry, agentID)
 	logger.Info("[MCP→Hermes/TACTICAL-PROMPT]",
 		"agent_id", agentID, "goal", goal, "game_time", timeOfDay, "text", prompt,
 		"streaming", true, "replan_hint", hint)
 
 	var actions []plannedAction
 	acc := &streamAccumulator{
+		registry: registry,
+		agentID:  agentID,
 		onComplete: func(pa plannedAction) {
 			actions = append(actions, pa)
 			if onAction != nil {
@@ -273,7 +314,10 @@ func generateTacticalPlanStreaming(
 // parseTacticalNDJSON 从 LLM 的 NDJSON 输出解析 action 列表 + inner_thought。
 // 容错：剥 ```json 围栏 → 按行解析 → 跳过空行/parse 失败行 → 过滤非法工具。
 // 返回的 actions 已经过 filterValidActions。
-func parseTacticalNDJSON(raw string) ([]plannedAction, string, error) {
+//
+// registry 非 nil 时，过滤还会剔除依赖的 cmd 在 registry 中对 agentID 不可用
+// 的工具（与 prompt 工具列表保持一致）。
+func parseTacticalNDJSON(raw string, registry *CapabilityRegistry, agentID string) ([]plannedAction, string, error) {
 	s := strings.TrimSpace(raw)
 	// 剥 markdown 围栏（LLM 可能仍加，即使 prompt 禁止）
 	if strings.HasPrefix(s, "```json") {
@@ -299,7 +343,7 @@ func parseTacticalNDJSON(raw string) ([]plannedAction, string, error) {
 			thought = th
 		}
 	}
-	actions = filterValidActions(actions)
+	actions = filterValidActions(actions, registry, agentID)
 	return actions, thought, nil
 }
 
@@ -332,6 +376,8 @@ type streamAccumulator struct {
 	buf        strings.Builder
 	onComplete func(plannedAction) // 每完整解析出一个合法 action 调一次
 	thought    string
+	registry   *CapabilityRegistry // 用于过滤依赖 cmd 不可用的工具；nil = 不过滤
+	agentID    string              // 配合 registry 做 per-agent 过滤
 }
 
 // feed 追加一段 delta 文本并处理所有已完成的行（以 \n 结尾）。
@@ -365,8 +411,8 @@ func (a *streamAccumulator) processLine(line string) {
 		return
 	}
 	if isAction {
-		if !tacticalValidActions[pa.Action] {
-			return // 过滤非法工具（与 parseTacticalNDJSON 一致）
+		if !tacticalActionAvailable(pa.Action, a.agentID, a.registry) {
+			return // 过滤非法工具或依赖 cmd 不可用的工具（与 parseTacticalNDJSON 一致）
 		}
 		if a.onComplete != nil {
 			a.onComplete(pa)
@@ -377,10 +423,11 @@ func (a *streamAccumulator) processLine(line string) {
 }
 
 // filterValidActions 过滤掉 scan_area/stop/未知工具，保留可排队工具。
-func filterValidActions(actions []plannedAction) []plannedAction {
+// registry 非 nil 时同时过滤依赖 cmd 对 agentID 不可用的工具。
+func filterValidActions(actions []plannedAction, registry *CapabilityRegistry, agentID string) []plannedAction {
 	out := make([]plannedAction, 0, len(actions))
 	for _, a := range actions {
-		if tacticalValidActions[a.Action] {
+		if tacticalActionAvailable(a.Action, agentID, registry) {
 			out = append(out, a)
 		}
 	}

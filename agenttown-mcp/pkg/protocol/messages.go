@@ -189,3 +189,36 @@ type EventLostPayload struct {
 	Count   int64  `json:"count"`    // number of lost discrete messages
 	Reason  string `json:"reason"`
 }
+
+// ─── capability_registry (UE → MCP, capability declaration) ────
+
+// CapabilityRegistryPayload is sent by UE on connection (and any time
+// the NPC's capability set changes) to declare which cmds it can
+// execute. agent_id="system" sets the global default; a specific
+// agent_id overrides the default for that agent only.
+//
+// MCP uses this payload to drive:
+//   - tactical-layer prompt generation (which actions are available)
+//   - dynamic MCP tool registration (AddTool/RemoveTools)
+type CapabilityRegistryPayload struct {
+	Actions []CapabilityAction `json:"actions"`
+}
+
+// CapabilityAction describes one cmd the UE can execute.
+type CapabilityAction struct {
+	Cmd                  string            `json:"cmd"`           // one of Cmd* constants
+	Kind                 string            `json:"kind"`          // "atomic" | "composite"
+	Description          string            `json:"description"`   // human/LLM-readable
+	UsageHint            string            `json:"usage_hint,omitempty"`
+	EstimatedDurationSec int               `json:"estimated_duration_sec,omitempty"`
+	Params               []CapabilityParam `json:"params,omitempty"`
+}
+
+// CapabilityParam describes one parameter of a cmd.
+type CapabilityParam struct {
+	Name        string   `json:"name"`
+	Type        string   `json:"type"` // "string" | "number" | "integer" | "boolean" | "object" | "array"
+	Description string   `json:"description,omitempty"`
+	Required    bool     `json:"required"`
+	Enum        []string `json:"enum,omitempty"`
+}

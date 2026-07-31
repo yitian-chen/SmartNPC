@@ -365,6 +365,7 @@ func extractTimeOfDay(raw json.RawMessage) string {
 type guardedExecutor struct {
 	ws     *wsserver.Server
 	lookup func(string) *agentContext
+	caps   *CapabilityRegistry // per-agent cmd capability gate; nil = no check
 }
 
 func (g *guardedExecutor) validate(agentID string) (*agentContext, error) {
@@ -382,6 +383,14 @@ func (g *guardedExecutor) SendAction(ctx context.Context, agentID string, decisi
 	ac, err := g.validate(agentID)
 	if err != nil {
 		return nil, err
+	}
+	// Per-agent capability gate: reject if the agent doesn't have the
+	// required cmd in its effective capability set (per-agent override
+	// over global default). Defense-in-depth on top of tactical-layer
+	// prompt filtering — protects against LLM hallucinating an action
+	// the agent can't execute.
+	if g.caps != nil && !g.caps.HasCmd(agentID, cmd) {
+		return nil, fmt.Errorf("agent %s lacks capability for cmd %s", agentID, cmd)
 	}
 	ack, err := g.ws.SendAction(ctx, agentID, cmd, params)
 	if err == nil && ack != nil {
@@ -664,6 +673,11 @@ var (
 // trigger() 内部 nil-check，WS handler 无需额外判空。
 var reactiveRunnerRef *reactiveRunner
 
+// capabilityRegistryRef 是进程级能力注册表（package-level 便于战术层 worker 与
+// debug handler 引用，避免长串参数传递）。nil 表示未启用能力过滤（降级为全量
+// 内置工具）。main() 启动时赋值。
+var capabilityRegistryRef *CapabilityRegistry
+
 // tacticalRefill 调战术层 LLM 流式分解当前时段 goal，边接收边入队，
 // 首 action 在流式期间即提前下发以降低体感延迟。成功返回 true。
 func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
@@ -719,7 +733,7 @@ func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
 		// 流式路径：onAction 回调逐个入队 + 首 action 提前下发。
 		// 回调在 SendStreaming 的 onDelta 调用栈里同步执行（worker 仍阻塞在 tacticalRefill），
 		// 不跨回调持有 mu。
-		_, _, err = generateTacticalPlanStreaming(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, logger, "",
+		_, _, err = generateTacticalPlanStreaming(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, logger, "", capabilityRegistryRef,
 			func(pa plannedAction) {
 				a.mu.Lock()
 				a.actionQueue = append(a.actionQueue, pa)
@@ -733,7 +747,7 @@ func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
 		)
 	} else {
 		// 非流式路径（默认）：等完整响应后一次性填充队列。
-		actions, _, err = generateTacticalPlan(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, logger, "")
+		actions, _, err = generateTacticalPlan(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, logger, "", capabilityRegistryRef)
 		if err == nil {
 			a.mu.Lock()
 			a.actionQueue = actions
@@ -828,7 +842,7 @@ func (a *agentContext) tacticalRefillForReplan(
 		// 流式路径：回调收集到 local slice（不直接修改 a.actionQueue），
 		// 成功后才覆盖旧队列。失败则旧队列不受影响。
 		var collected []plannedAction
-		_, _, err = generateTacticalPlanStreaming(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, logger, hint,
+		_, _, err = generateTacticalPlanStreaming(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, logger, hint, capabilityRegistryRef,
 			func(pa plannedAction) {
 				collected = append(collected, pa)
 			},
@@ -837,7 +851,7 @@ func (a *agentContext) tacticalRefillForReplan(
 			actions = collected
 		}
 	} else {
-		actions, _, err = generateTacticalPlan(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, logger, hint)
+		actions, _, err = generateTacticalPlan(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, logger, hint, capabilityRegistryRef)
 	}
 
 	// 3. 失败处理：保留旧队列（不清空），调用方保持原 action
@@ -1104,13 +1118,38 @@ func main() {
 		return ac, true
 	}
 
+	// Capability registry seeded with built-in defaults so the system
+	// works even if UE never sends a capability_registry message. UE
+	// (e.g. mock_ue) is expected to send one on connect to declare its
+	// actually-implemented cmds, overwriting this seed.
+	capabilityRegistry := NewCapabilityRegistry()
+	capabilityRegistry.Register(protocol.SystemAgentID, BuiltinCmdCapabilities)
+	capabilityRegistryRef = capabilityRegistry // expose to tactical worker + debug handler
+
 	// All tools pass through the online/decision-epoch guard before WS send.
-	executor := &guardedExecutor{ws: ws, lookup: lookupAgent}
+	// The executor also gates on per-agent cmd capability (HasCmd).
+	executor := &guardedExecutor{ws: ws, lookup: lookupAgent, caps: capabilityRegistry}
 	tools.RegisterAll(server, executor, kb, logger)
 
 	// ─── Wire inbound message handler ──────────────────────────
 	ws.SetMessageHandler(func(_ context.Context, msgType, agentID string, payload json.RawMessage) {
 		switch msgType {
+		case protocol.TypeCapabilityRegistry:
+			var cr protocol.CapabilityRegistryPayload
+			if err := json.Unmarshal(payload, &cr); err != nil {
+				logger.Warn("capability_registry parse failed", "err", err, "agent_id", agentID)
+				return
+			}
+			capabilityRegistry.Register(agentID, cr.Actions)
+			logger.Info("capability_registry registered",
+				"agent_id", agentID, "actions", len(cr.Actions))
+			// Reconcile MCP tool list so AddTool/RemoveTools reflects
+			// the new global capability set. Per-agent overrides
+			// don't change the global tool list — the guardedExecutor
+			// enforces per-agent capability at SendAction time.
+			tools.ReconcileTools(server, executor, kb, logger, func(cmd string) bool {
+				return capabilityRegistry.HasCmd(protocol.SystemAgentID, cmd)
+			})
 		case protocol.TypeAgentRegistered:
 			// First registration = new day. Re-registration after reconnect =
 			// restore, keep the per-agent strategic/tactical sessions
@@ -1775,7 +1814,7 @@ func handleDebugSchedule(ctx context.Context, logger *slog.Logger, ws *wsserver.
 
 	actions, thought, err := generateTacticalPlan(
 		tacticalCtx, tacticalHc, req.AgentID,
-		goal, zone, timeOfDay, slot, physical, kb, logger, "",
+		goal, zone, timeOfDay, slot, physical, kb, logger, "", capabilityRegistryRef,
 	)
 	if err != nil {
 		logger.Warn("[debug/schedule] decompose failed",
