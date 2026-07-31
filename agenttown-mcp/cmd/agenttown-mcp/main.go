@@ -1106,11 +1106,31 @@ func main() {
 
 	// All tools pass through the online/decision-epoch guard before WS send.
 	executor := &guardedExecutor{ws: ws, lookup: lookupAgent}
+
+	// Capability registry seeded with built-in defaults so the system
+	// works even if UE never sends a capability_registry message. UE
+	// (e.g. mock_ue) is expected to send one on connect to declare its
+	// actually-implemented cmds, overwriting this seed.
+	capabilityRegistry := NewCapabilityRegistry()
+	capabilityRegistry.Register(protocol.SystemAgentID, BuiltinCmdCapabilities)
 	tools.RegisterAll(server, executor, kb, logger)
 
 	// ─── Wire inbound message handler ──────────────────────────
 	ws.SetMessageHandler(func(_ context.Context, msgType, agentID string, payload json.RawMessage) {
 		switch msgType {
+		case protocol.TypeCapabilityRegistry:
+			var cr protocol.CapabilityRegistryPayload
+			if err := json.Unmarshal(payload, &cr); err != nil {
+				logger.Warn("capability_registry parse failed", "err", err, "agent_id", agentID)
+				return
+			}
+			capabilityRegistry.Register(agentID, cr.Actions)
+			logger.Info("capability_registry registered",
+				"agent_id", agentID, "actions", len(cr.Actions))
+			// TODO(step5): tools.ReconcileTools(server, capabilityRegistry)
+			// —— 工具列表的动态增删在 Step 5 接入。当前仍使用启动时
+			// RegisterAll 注册的全量 15 工具，registry 仅作为战术层
+			// prompt 生成的数据源。
 		case protocol.TypeAgentRegistered:
 			// First registration = new day. Re-registration after reconnect =
 			// restore, keep the per-agent strategic/tactical sessions

@@ -105,3 +105,99 @@ func (r *CapabilityRegistry) Clear(agentID string) {
 	}
 	delete(r.perAgent, agentID)
 }
+
+// BuiltinCmdCapabilities is the default capability set seeded at startup
+// so the system works even if UE never sends a capability_registry
+// message. It lists all 9 cmds the protocol defines with the same
+// descriptions the tactical layer previously hardcoded.
+//
+// UE that implements every cmd (e.g. mock_ue) is expected to send a
+// capability_registry message on connect that mirrors this list; doing
+// so overwrites the seed and becomes the authoritative declaration.
+var BuiltinCmdCapabilities = []protocol.CapabilityAction{
+	{
+		Cmd:                  protocol.CmdMoveTo,
+		Kind:                 "atomic",
+		Description:          "移动到指定目标位置或语义目标",
+		UsageHint:            "target 可填 zones/objects 中的 ID 或语义名称",
+		EstimatedDurationSec: 30,
+		Params: []protocol.CapabilityParam{
+			{Name: "target", Type: "string", Description: "目标位置或语义目标 ID", Required: true},
+		},
+	},
+	{
+		Cmd:                  protocol.CmdTurnTo,
+		Kind:                 "atomic",
+		Description:          "转身面向指定目标",
+		EstimatedDurationSec: 5,
+		Params: []protocol.CapabilityParam{
+			{Name: "target", Type: "string", Description: "目标朝向 ID", Required: true},
+		},
+	},
+	{
+		Cmd:                  protocol.CmdPlayAnimation,
+		Kind:                 "atomic",
+		Description:          "播放一段动画",
+		EstimatedDurationSec: 10,
+		Params: []protocol.CapabilityParam{
+			{Name: "animation", Type: "string", Description: "动画名称", Required: true},
+		},
+	},
+	{
+		Cmd:                  protocol.CmdSpeak,
+		Kind:                 "atomic",
+		Description:          "对目标说话",
+		EstimatedDurationSec: 10,
+		Params: []protocol.CapabilityParam{
+			{Name: "content", Type: "string", Description: "说话内容", Required: true},
+			{Name: "target", Type: "string", Description: "对话目标 ID"},
+		},
+	},
+	{
+		Cmd:                  protocol.CmdEmote,
+		Kind:                 "atomic",
+		Description:          "表现情绪表情",
+		EstimatedDurationSec: 5,
+		Params: []protocol.CapabilityParam{
+			{Name: "emotion", Type: "string", Description: "情绪类型", Required: true},
+			{Name: "mode", Type: "string", Description: "表现模式"},
+		},
+	},
+	{
+		Cmd:                  protocol.CmdWait,
+		Kind:                 "atomic",
+		Description:          "原地等待一段时间",
+		EstimatedDurationSec: 60,
+		Params: []protocol.CapabilityParam{
+			{Name: "duration_sec", Type: "integer", Description: "等待秒数", Required: true},
+		},
+	},
+	{
+		Cmd:                  protocol.CmdInteractSmartObject,
+		Kind:                 "atomic",
+		Description:          "与智能对象交互",
+		EstimatedDurationSec: 15,
+		Params: []protocol.CapabilityParam{
+			{Name: "object_id", Type: "string", Description: "智能对象 ID", Required: true},
+			{Name: "action", Type: "string", Description: "交互动作", Required: true},
+		},
+	},
+	{
+		Cmd:                  protocol.CmdExecuteComposite,
+		Kind:                 "composite",
+		Description:          "执行复合行为（封装一段时长内的多步骤活动）",
+		UsageHint:            "duration_min 内部 ×60 转 duration_sec",
+		EstimatedDurationSec: 600,
+		Params: []protocol.CapabilityParam{
+			{Name: "action", Type: "string", Description: "复合行为类型", Required: true},
+			{Name: "target", Type: "string", Description: "目标 ID"},
+			{Name: "duration_min", Type: "integer", Description: "持续分钟数"},
+		},
+	},
+	{
+		Cmd:                  protocol.CmdStop,
+		Kind:                 "atomic",
+		Description:          "停止当前在途动作",
+		EstimatedDurationSec: 1,
+	},
+}
