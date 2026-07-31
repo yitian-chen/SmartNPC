@@ -63,6 +63,13 @@ const (
 	// drive tactical-layer prompt generation and dynamic MCP tool
 	// registration (AddTool/RemoveTools).
 	TypeCapabilityRegistry = "capability_registry"
+
+	// TypeWorldKB is sent by UE on connection (agent_id="system") to push
+	// the full world knowledge base (generated + authored JSON). MCP merges
+	// the two halves via the worldkb pipeline, persists to --world-kb path,
+	// and swaps the in-memory KB. Only accepted before the first
+	// agent_registered; later pushes are rejected with a warning.
+	TypeWorldKB = "world_kb"
 )
 
 // action_command cmd constants (§2.3).

@@ -131,3 +131,39 @@ func TestStateReportPayload(t *testing.T) {
 		t.Fatalf("task progress lost: %+v", got.CurrentTaskProgress)
 	}
 }
+
+func TestWorldKBPayloadRoundTrip(t *testing.T) {
+	genBlob := json.RawMessage(`{"$schema":"agenttown-world-generated/v1","schema_version":"1.0","zones":[{"id":"z1","bounds":{"center":[0,0,0],"extent":[1,1,1]}}]}`)
+	authBlob := json.RawMessage(`{"version":"1.0","narrative":{"setting":"小镇","theme":"测试"},"zones":{"z1":{"display_name":"Z1"}}}`)
+	p := WorldKBPayload{
+		PushedAt:  "2026-07-31T03:00:00Z",
+		Generated: genBlob,
+		Authored:  authBlob,
+	}
+	raw, err := json.Marshal(p)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var got WorldKBPayload
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.PushedAt != p.PushedAt {
+		t.Errorf("PushedAt lost: %q", got.PushedAt)
+	}
+	if string(got.Generated) != string(genBlob) {
+		t.Errorf("Generated blob corrupted: %s", got.Generated)
+	}
+	if string(got.Authored) != string(authBlob) {
+		t.Errorf("Authored blob corrupted: %s", got.Authored)
+	}
+
+	// Verify the blob is still valid JSON that can be unmarshaled later
+	// by the worldkb package (deferred deserialization pattern).
+	var probe struct {
+		Version string `json:"schema_version"`
+	}
+	if json.Unmarshal(got.Generated, &probe) != nil || probe.Version != "1.0" {
+		t.Errorf("generated blob not independently parseable: %+v", probe)
+	}
+}
