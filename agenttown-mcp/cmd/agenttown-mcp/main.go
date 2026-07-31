@@ -472,6 +472,10 @@ func (a *agentContext) armActionTimeout(
 	if _, alreadyDone := a.completedBeforeArm[actionID]; alreadyDone {
 		delete(a.completedBeforeArm, actionID)
 		a.mu.Unlock()
+		// 竞态保护：time.AfterFunc 创建即启动，此时 timer 已在倒计时但永不会被
+		// recordActionCompletion 取消（completion 已处理过），必须显式 stop，
+		// 否则 5s/180s 后盲触发 stop_action（STOP_ID_MISMATCH）。
+		timer.Stop()
 		return
 	}
 	// 如果已有同 action_id 的 timer，先 stop 旧的
