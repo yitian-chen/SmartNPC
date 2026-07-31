@@ -62,6 +62,7 @@ type agentContext struct {
 	currentActionParams   map[string]any         // mu 保护，当前在途 action 的 params，用于反应层 prompt
 	currentActionStart    time.Time              // mu 保护，当前在途 action 的开始时间，用于反应层计算 elapsed
 	pendingActionTimeouts map[string]*time.Timer // action_id → 超时 timer（mu 保护），约定 §5.2 action_completed 1.5× 估值超时
+	completedBeforeArm    map[string]struct{}   // action_id → 已完成但 timer 尚未 arm（mu 保护），防止 ACK/completion 竞态导致 timer 泄漏
 	dailyPlan             string                 // mu 保护，战略层生成的每日计划（格式化字符串），空=未生成或失败
 	strategicHc           llmClient              // mu 保护，战略层专用 LLM client（hermes 或 venus，独立 session）
 	tacticalHc            llmClient              // mu 保护，战术层专用 LLM client（hermes 或 venus，独立 session）
@@ -95,6 +96,7 @@ func newAgentContext(parent context.Context, epochs ...int64) (*agentContext, co
 		online: true, agentEpoch: agentEpoch,
 		wake: make(chan struct{}, 1), cancel: cancel,
 		pendingActionTimeouts: make(map[string]*time.Timer),
+		completedBeforeArm:    make(map[string]struct{}),
 		lastReactiveAt:        make(map[string]time.Time),
 	}, ctx
 }
@@ -178,10 +180,15 @@ func (a *agentContext) recordActionCompletion(completion protocol.ActionComplete
 		a.currentActionParams = nil
 		a.currentActionStart = time.Time{}
 	}
-	// 取消 action_completed 超时 timer（约定 §5.2）
+	// 取消 action_completed 超时 timer（约定 §5.2）。
+	// 竞态处理：ACK 和 action_completed 可能同一批到达（read loop 顺序处理），
+	// completion handler 可能在 SendAction 调用方 armActionTimeout 之前执行。
+	// 此时 timer 尚未注册，记录到 completedBeforeArm，让 armActionTimeout 跳过 arm。
 	if timer, ok := a.pendingActionTimeouts[completion.ActionID]; ok {
 		timer.Stop()
 		delete(a.pendingActionTimeouts, completion.ActionID)
+	} else {
+		a.completedBeforeArm[completion.ActionID] = struct{}{}
 	}
 	a.currentActionSrc = ""
 	a.mu.Unlock()
@@ -459,6 +466,14 @@ func (a *agentContext) armActionTimeout(
 	})
 
 	a.mu.Lock()
+	// 竞态处理：如果 action_completed 已先于 ACK 到达（read loop 同批处理），
+	// recordActionCompletion 会把它记到 completedBeforeArm。此时不应 arm timer，
+	// 否则永不会被取消，180s 后盲触发 stop_action（STOP_ID_MISMATCH）。
+	if _, alreadyDone := a.completedBeforeArm[actionID]; alreadyDone {
+		delete(a.completedBeforeArm, actionID)
+		a.mu.Unlock()
+		return
+	}
 	// 如果已有同 action_id 的 timer，先 stop 旧的
 	if old, ok := a.pendingActionTimeouts[actionID]; ok {
 		old.Stop()
