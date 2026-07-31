@@ -687,13 +687,15 @@ func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
 		return false
 	}
 	// 同时段重复分解守卫：队列还有 action 时不 redecompose（继续执行剩余 action）；
-	// 队列空且已 redecompose ≥2 次才放弃，调用方发 idle wait 等下一时段。
+	// 队列空且已 redecompose ≥1 次才放弃，调用方发 idle wait 等下一时段。
+	// 阈值从 2 收紧到 1：避免队列提前耗尽时 50s 内连续重调 LLM 浪费 token
+	// （LLM 若 1 次重分解仍给不够时长的 plan，第 2 次大概率也不够，不如 idle wait）。
 	if slot == a.currentSlot {
 		if len(a.actionQueue) > 0 {
 			a.mu.Unlock()
 			return false // 队列有剩余，等它们执行完再考虑 redecompose
 		}
-		if a.redecomposeCount >= 2 {
+		if a.redecomposeCount >= 1 {
 			a.mu.Unlock()
 			return false
 		}
@@ -1786,7 +1788,7 @@ func handleDebugSchedule(ctx context.Context, logger *slog.Logger, ws *wsserver.
 	}
 
 	// 入队 + 记账。currentSlot 加 "__debug__" 前缀避免与 dailyPlan 同时段撞
-	// redecomposeCount >= 2 限制（main.go:676），保证 worker 下次 refill 必走
+	// redecomposeCount >= 1 限制（main.go:696），保证 worker 下次 refill 必走
 	// "新时段"重置路径，注入队列执行完后回到 dailyPlan 正轨。
 	ac.mu.Lock()
 	ac.actionQueue = actions
