@@ -284,7 +284,10 @@ stop_all() {
         info "Stopping Hermes..."
         if $IN_LINUX; then
             # 裸金属：pkill hermes gateway 进程 + 兜底杀端口
-            pkill -f "hermes.*gateway run" 2>/dev/null && ok "  Hermes process stopped" || warn "  Hermes process not running"
+            # 关键：pkill 必须带 -p $HERMES_PROFILE 限定，否则会误杀另一实例
+            # （stable 和 dev 共用同机裸金属环境，pkill "hermes.*gateway run"
+            #   会匹配两实例全部进程，导致后启动的脚本杀死先启动的 Hermes）
+            pkill -f "hermes -p $HERMES_PROFILE gateway run" 2>/dev/null && ok "  Hermes process stopped (profile=$HERMES_PROFILE)" || warn "  Hermes process not running"
             kill_port_listeners "$HERMES_PORT" "Hermes"
         else
             local compose_path
