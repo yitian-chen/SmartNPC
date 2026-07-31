@@ -870,6 +870,10 @@ func main() {
 		"Ollama base URL for reactive layer (empty disables reactive layer)")
 	ollamaModel = flag.String("ollama-model", "qwen2.5:7b-instruct-q4_K_M",
 		"Ollama model name for reactive layer decisions")
+	ollamaNumThread = flag.Int("ollama-num-thread", 16,
+		"CPU threads for Ollama inference (0=use default 16, -1=let Ollama decide). "+
+			"CPU inference on high-core-count machines often regresses past ~16 threads; "+
+			"benchmark to find the optimum for your host.")
 	// ─── 战略层/战术层 LLM backend 切换 ───────────────────────────
 	// 默认走 hermes：MCP → Hermes Gateway → 后端模型（由 Hermes config.yaml
 	// 决定，当前为 Venus qwen3.6-35b-a3b）。需要直连 Venus 绕过 Hermes 时切 venus。
@@ -954,12 +958,22 @@ func main() {
 		ollamaClient := ollama.New(ollama.Options{
 			BaseURL: *ollamaURL,
 			Model:   *ollamaModel,
-			Logger:  logger,
+			// HTTP client timeout 作为 backstop，必须 > reactiveCallTimeout，
+			// 让 context deadline 成为真正的硬截止。否则 HTTP 超时会先于
+			// ctx 触发，导致 "Client.Timeout exceeded while awaiting headers"
+			// 错误，违背反应层 "ctx 是硬截止" 的设计意图。
+			Timeout: reactiveCallTimeout + 5*time.Second,
+			// CPU 推理线程数。云开发环境（EPYC 96 vCPU）实测默认 96 线程
+			// 反而劣化到 ~8 tok/s，限制到 16 线程可恢复到 ~24 tok/s。
+			// -1 表示不传 num_thread，让 Ollama 自决（本地 GPU 场景用）。
+			NumThread: *ollamaNumThread,
+			Logger:    logger,
 		})
 		reactiveRunnerRef = newReactiveRunner(ollamaClient, ws, kb, logger)
 		logger.Info("reactive layer enabled",
 			"ollama_url", ollamaClient.BaseURL(),
 			"ollama_model", ollamaClient.Model(),
+			"ollama_num_thread", ollamaClient.NumThread(),
 		)
 	} else {
 		logger.Info("reactive layer disabled (--ollama-url=\"\")")

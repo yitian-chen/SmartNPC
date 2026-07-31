@@ -30,12 +30,16 @@ import (
 	"github.com/AgentTown/agenttown-mcp/pkg/wsserver"
 )
 
-// reactiveCallTimeout 是单次 Ollama 调用的硬超时。
-// 文档 P0.1 原设 3s，实测 qwen2.5:7b 热调用 eval 约 0.2-2s，但模型偶尔
-// 输出冗长中文解释会推到 5-9s。提到 8s 覆盖热调用 + 中等长度输出；
-// 配合 ollama client 的 num_predict=80 限制输出 token，常态延迟 <2s。
-// 冷启动（模型未加载）约 8s，刚好在边界，故还需 MCP 启动时预热。
-const reactiveCallTimeout = 8 * time.Second
+// reactiveCallTimeout 是单次 Ollama 调用的硬超时（context deadline）。
+//
+// 实测 qwen2.5:7b-instruct-q4_K_M 在当前宿主上 eval ~7.5 tok/s，
+// num_predict=80 最坏 ~10.5s eval + 冷启动 load ~3-5s ≈ 15s。
+// 取 20s 覆盖冷启动 + 满额输出，常态热调用 2-5s 远低于此。
+//
+// 注：ollama.Client 的 HTTP Timeout 必须大于此值（main.go 中显式传入
+// reactiveCallTimeout + 5s），否则 HTTP 超时会先于 ctx 触发，违背
+// "ctx 是硬截止、HTTP Timeout 仅作 backstop" 的设计意图。
+const reactiveCallTimeout = 20 * time.Second
 
 // reactiveRunner 持有反应层运行所需的全部依赖。
 // 通过 package-level `reactiveRunnerRef` 在 main() 中注入，WS handler 调用。

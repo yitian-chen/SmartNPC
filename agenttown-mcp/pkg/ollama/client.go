@@ -29,11 +29,20 @@ import (
 // may emit hundreds of tokens of Chinese explanation before the JSON,
 // blowing the latency budget. 80 is generous for the four-reaction JSON
 // schema while keeping eval time under ~2s on qwen2.5:7b.
+//
+// numThread caps the number of CPU threads used by llama-server for
+// inference. CPU inference on memory-bandwidth-bound models (7B Q4_K_M)
+// scales sublinearly past ~16 threads and can regress sharply on
+// high-core-count CPUs (e.g. 96 vCPU EPYC) where the default (all cores)
+// causes cache thrashing and NUMA overhead. 0 means "let Ollama decide"
+// (current default = physical core count). Benchmark on the target host
+// to find the optimum; 16 is a safe choice for most modern x86 CPUs.
 const (
 	defaultHTTPTimeout = 5 * time.Second
 	defaultModel       = "qwen2.5:7b-instruct-q4_K_M"
 	defaultBaseURL     = "http://localhost:11434"
 	defaultNumPredict  = 80
+	defaultNumThread   = 16
 )
 
 // Client talks to a local Ollama instance. It is safe for concurrent use
@@ -43,6 +52,7 @@ type Client struct {
 	baseURL    string
 	model      string
 	numPredict int
+	numThread  int
 	httpClient *http.Client
 	logger     *slog.Logger
 }
@@ -53,6 +63,7 @@ type Options struct {
 	Model      string        // e.g. qwen2.5:7b-instruct-q4_K_M
 	Timeout    time.Duration
 	NumPredict int           // max output tokens; 0 → defaultNumPredict
+	NumThread  int           // CPU threads for inference; 0 → defaultNumThread, -1 → omit (let Ollama decide)
 	Logger     *slog.Logger
 }
 
@@ -75,6 +86,11 @@ func New(opts Options) *Client {
 	if numPredict == 0 {
 		numPredict = defaultNumPredict
 	}
+	// NumThread: 0 → default, -1 → omit (let Ollama decide), >0 → explicit
+	numThread := opts.NumThread
+	if numThread == 0 {
+		numThread = defaultNumThread
+	}
 	logger := opts.Logger
 	if logger == nil {
 		logger = slog.Default()
@@ -83,6 +99,7 @@ func New(opts Options) *Client {
 		baseURL:    baseURL,
 		model:      model,
 		numPredict: numPredict,
+		numThread:  numThread,
 		httpClient: &http.Client{
 			Timeout: timeout,
 		},
@@ -100,8 +117,10 @@ type chatRequest struct {
 
 // chatOptions maps to Ollama's model runner options. num_predict caps the
 // generated token count — critical for the reactive layer's latency budget.
+// num_thread caps CPU threads; omit when numThread < 0 to let Ollama decide.
 type chatOptions struct {
 	NumPredict int `json:"num_predict"`
+	NumThread  int `json:"num_thread,omitempty"`
 }
 
 type chatMessage struct {
@@ -126,13 +145,18 @@ type chatResponse struct {
 // On any error (network, non-200, malformed JSON), Chat returns an error
 // and the caller should treat it as "decision unavailable, fall back to continue".
 func (c *Client) Chat(ctx context.Context, prompt string) (string, error) {
+	// numThread: -1 → omit (let Ollama decide), >=0 → explicit
+	opts := chatOptions{NumPredict: c.numPredict}
+	if c.numThread >= 0 {
+		opts.NumThread = c.numThread
+	}
 	reqBody := chatRequest{
 		Model: c.model,
 		Messages: []chatMessage{
 			{Role: "user", Content: prompt},
 		},
 		Stream:  false,
-		Options: chatOptions{NumPredict: c.numPredict},
+		Options: opts,
 	}
 	bodyBytes, err := json.Marshal(reqBody)
 	if err != nil {
@@ -171,3 +195,6 @@ func (c *Client) Model() string { return c.model }
 
 // BaseURL returns the configured base URL (for logging / status endpoints).
 func (c *Client) BaseURL() string { return c.baseURL }
+
+// NumThread returns the configured CPU thread count (-1 means "let Ollama decide").
+func (c *Client) NumThread() int { return c.numThread }
