@@ -56,6 +56,13 @@ const (
 	// already rolled over the peer's requested resume point, so some
 	// discrete messages cannot be replayed (约定11).
 	TypeEventLost = "event_lost"
+
+	// TypeCapabilityRegistry is sent by UE on connection to declare which
+	// cmds the NPC can execute. agent_id="system" sets the global default;
+	// a specific agent_id overrides it for that agent. MCP uses this to
+	// drive tactical-layer prompt generation and dynamic MCP tool
+	// registration (AddTool/RemoveTools).
+	TypeCapabilityRegistry = "capability_registry"
 )
 
 // action_command cmd constants (§2.3).
