@@ -1,12 +1,13 @@
 version: "1.0"
-site:
-    id: industrial_town
-    display_name: 工业机器人小镇
-    description: 一座由机器人居民维持生产和日常生活的封闭工业园区。
+narrative:
+    setting: 工业机器人小镇
+    theme: 一座由机器人居民维持生产和日常生活的封闭工业园区。
 zones:
     - id: archive_station
       display_name: 档案馆与广播站
       description: 保存园区历史、技术资料和个人记忆的文化中心。
+      aliases:
+        - 档案馆
       bounds:
         center:
             - 5000
@@ -24,12 +25,19 @@ zones:
         - -1
         - 0
         - 0
-      connected_to:
-        - central_plaza
-        - residential_quarters
+      connections:
+        - to: central_plaza
+          type: road
+          bidirectional: true
+        - to: residential_quarters
+          type: road
+          bidirectional: true
     - id: central_plaza
       display_name: 中央广场与综合充能站
       description: 公共交通、社交和充能中心。
+      aliases:
+        - 广场
+        - 充能站
       bounds:
         center:
             - 10000
@@ -47,13 +55,21 @@ zones:
         - 0
         - -1
         - 0
-      connected_to:
-        - main_workshop
-        - residential_quarters
-        - archive_station
+      connections:
+        - to: main_workshop
+          type: road
+          bidirectional: true
+        - to: residential_quarters
+          type: road
+          bidirectional: true
+        - to: archive_station
+          type: road
+          bidirectional: true
     - id: logistics_hub
       display_name: 物料仓储与转运站
       description: 原料、半成品和成品的仓储与分拣中心。
+      aliases:
+        - 仓储区
       bounds:
         center:
             - 30000
@@ -71,12 +87,18 @@ zones:
         - 1
         - 0
         - 0
-      connected_to:
-        - main_workshop
-        - recycling_yard
+      connections:
+        - to: main_workshop
+          type: road
+          bidirectional: true
+        - to: recycling_yard
+          type: road
+          bidirectional: true
     - id: main_workshop
       display_name: 主生产车间
       description: 装配、质检和设备调试的生产核心。
+      aliases:
+        - 车间
       bounds:
         center:
             - 20000
@@ -94,13 +116,21 @@ zones:
         - 1
         - 0
         - 0
-      connected_to:
-        - central_plaza
-        - logistics_hub
-        - repair_bay
+      connections:
+        - to: central_plaza
+          type: road
+          bidirectional: true
+        - to: logistics_hub
+          type: road
+          bidirectional: true
+        - to: repair_bay
+          type: road
+          bidirectional: true
     - id: recycling_yard
       display_name: 废料回收与再制造场
       description: 废料分类、零件再生和永久报废处理区域。
+      aliases:
+        - 回收场
       bounds:
         center:
             - 30000
@@ -118,12 +148,18 @@ zones:
         - 0
         - 1
         - 0
-      connected_to:
-        - logistics_hub
-        - repair_bay
+      connections:
+        - to: logistics_hub
+          type: road
+          bidirectional: true
+        - to: repair_bay
+          type: road
+          bidirectional: true
     - id: repair_bay
       display_name: 机械维修厂与零件诊所
       description: 居民检修、换件和紧急救援中心。
+      aliases:
+        - 维修厂
       bounds:
         center:
             - 20000
@@ -141,12 +177,19 @@ zones:
         - 0
         - 1
         - 0
-      connected_to:
-        - main_workshop
-        - recycling_yard
+      connections:
+        - to: main_workshop
+          type: road
+          bidirectional: true
+        - to: recycling_yard
+          type: road
+          bidirectional: true
     - id: residential_quarters
       display_name: 休眠舱居住区
       description: 机器人居民休眠、独处与存放私人物品的生活区。
+      aliases:
+        - 居住区
+        - 宿舍
       bounds:
         center:
             - 10000
@@ -164,9 +207,13 @@ zones:
         - 0
         - 1
         - 0
-      connected_to:
-        - central_plaza
-        - archive_station
+      connections:
+        - to: central_plaza
+          type: road
+          bidirectional: true
+        - to: archive_station
+          type: road
+          bidirectional: true
 objects:
     - id: charging_station_01
       display_name: 综合充能站一号
@@ -187,10 +234,11 @@ objects:
         - 1
         - 0
       interaction_radius: 1500
-      available_actions:
+      available_interactions:
         - charge
       default_state: idle
-      capacity: 1
+      tags:
+        - charging
     - id: rest_bench_01
       display_name: 休息长椅
       description: 居住区供居民歇息的长椅。
@@ -210,10 +258,11 @@ objects:
         - -1
         - 0
       interaction_radius: 1500
-      available_actions:
+      available_interactions:
         - rest
       default_state: idle
-      capacity: 2
+      tags:
+        - rest
     - id: workbench_01
       display_name: 一号装配工作台
       description: 老陈经常使用的装配工作台。
@@ -233,30 +282,30 @@ objects:
         - 0
         - 0
       interaction_radius: 1500
-      available_actions:
+      available_interactions:
         - assemble
         - inspect
       default_state: idle
-      required_roles:
-        - worker
-      capacity: 1
+      tags:
+        - crafting
+        - assembly
 agents:
     - id: H-01
       display_name: 老陈
+      description: 车间主管机器人，沉稳念旧，重视工艺。
       type: humanoid
-      role:
-        - supervisor
-        - worker
+      profession: 车间主管
       personality:
-        - 沉稳
-        - 念旧
-        - 重视工艺
+        traits:
+            - 沉稳
+            - 念旧
+            - 重视工艺
+        speech_style: 简洁，偶尔念叨老物件
       initial_zone: central_plaza
       initial_position:
         - 10000
         - 11000
         - 100
-      home_zone: residential_quarters
       actor_class: /Game/AgentTown/Agents/BP_LaoChen.BP_LaoChen_C
       action_table: /Game/AgentTown/AI/DT_ActionBTMap.DT_ActionBTMap
       main_behavior_tree: /Game/AgentTown/AI/BT_AgentTownMain.BT_AgentTownMain
