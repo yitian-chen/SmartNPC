@@ -717,11 +717,15 @@ class MockUE:
             self.npc.current_animation = "work"
             self._apply_command_effects(cmd, params, starting=True)
         else:
-            # Short action: apply effects immediately and complete now.
-            # _apply_command_effects may return a details dict (e.g. the
-            # inspection report for interact+inspect) that we fold into the
-            # action_completed payload so it reaches the agent.
+            # Short action: apply effects and complete after a small delay.
+            # Real UE has frame-level execution latency even for instant actions;
+            # completing in the same tick as the ACK exposed a race in MCP's
+            # armActionTimeout (completion arrived before the timer was armed,
+            # but the already-started timer was not stopped, leading to
+            # spurious stop_action after 5s). A 100ms delay mirrors real UE
+            # timing and lets the armActionTimeout race path settle.
             details = self._apply_command_effects(cmd, params, starting=False)
+            await asyncio.sleep(0.1)
             await self._send_action_completed(action_id, RESULT_SUCCESS, 0, 1.0, details=details)
 
     def _validate_target(self, cmd: str, params: Dict[str, Any]) -> str:
