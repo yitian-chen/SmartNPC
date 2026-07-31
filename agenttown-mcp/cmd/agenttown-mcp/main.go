@@ -1052,6 +1052,11 @@ func main() {
 	// Per-agent context (Phase 1: single agent, but keyed for multi-NPC).
 	var agentsMu sync.Mutex
 	var nextAgentEpoch int64
+	// firstAgentRegistered gates the world_kb startup window: once any agent
+	// has been registered, subsequent world_kb pushes are rejected (the KB
+	// is now in active use by worker goroutines / tools / reactive runner).
+	// Guarded by agentsMu.
+	var firstAgentRegistered bool
 	agents := make(map[string]*agentContext)
 	lookupAgent := func(id string) *agentContext {
 		agentsMu.Lock()
@@ -1064,6 +1069,7 @@ func main() {
 		if ac, ok := agents[id]; ok {
 			return ac, false // reconnect: preserve current lifecycle and session
 		}
+		firstAgentRegistered = true
 		nextAgentEpoch++
 		ac, workerCtx := newAgentContext(ctx, nextAgentEpoch)
 		// 战略层/战术层各用一个独立 LLM client 实例（独立 session 链）。
@@ -1150,6 +1156,41 @@ func main() {
 			tools.ReconcileTools(server, executor, kb, logger, func(cmd string) bool {
 				return capabilityRegistry.HasCmd(protocol.SystemAgentID, cmd)
 			})
+		case protocol.TypeWorldKB:
+			// UE pushes the full world KB (generated + authored JSON blobs)
+			// on connection. MCP merges, persists, and swaps the in-memory
+			// KB. Only accepted before the first agent_registered — after
+			// that, worker goroutines hold kb pointers and hot-swap would
+			// race. Handler holds agentsMu for the full duration so a
+			// concurrent agent_registered cannot start workers mid-swap.
+			agentsMu.Lock()
+			newKB, err := worldKBSwap(firstAgentRegistered, payload, *worldKBPath, *worldKBManifest)
+			if err != nil {
+				agentsMu.Unlock()
+				if errors.Is(err, errAgentWindowClosed) {
+					logger.Warn("world_kb rejected: agents already registered, startup window closed",
+						"agent_id", agentID)
+				} else {
+					logger.Error("world_kb merge failed, keeping existing KB",
+						"err", err, "path", *worldKBPath)
+				}
+				return
+			}
+			kb = newKB
+			// Re-register tools so their closures capture the new kb.
+			// AddTool is idempotent (replaces same-named tools).
+			tools.RegisterAll(server, executor, kb, logger)
+			if reactiveRunnerRef != nil {
+				reactiveRunnerRef.kb = kb
+			}
+			agentsMu.Unlock()
+			logger.Info("world_kb merged and persisted",
+				"path", *worldKBPath,
+				"manifest", *worldKBManifest,
+				"zones", len(kb.Zones),
+				"objects", len(kb.Objects),
+				"agents", len(kb.Agents),
+			)
 		case protocol.TypeAgentRegistered:
 			// First registration = new day. Re-registration after reconnect =
 			// restore, keep the per-agent strategic/tactical sessions
@@ -1861,3 +1902,35 @@ func handleDebugSchedule(ctx context.Context, logger *slog.Logger, ws *wsserver.
 
 // Ensure the guarded adapter satisfies the tools.Executor interface.
 var _ tools.Executor = (*guardedExecutor)(nil)
+
+// errAgentWindowClosed is returned by worldKBSwap when the startup window
+// has already closed (at least one agent_registered processed). Callers
+// distinguish this from merge/parse errors to log appropriately.
+var errAgentWindowClosed = errors.New("world_kb rejected: startup window closed (agents already registered)")
+
+// worldKBSwap processes a world_kb WS payload: validates the startup window,
+// unmarshals the generated+authored blobs, merges them via the worldkb
+// pipeline, and persists the result to kbPath (+ manifest if non-empty).
+// Returns the new KB for the caller to swap in.
+//
+// If firstAgentRegistered is true, returns errAgentWindowClosed without
+// touching the payload or disk. If the payload is malformed or the merge
+// fails, returns the underlying error without writing to disk.
+//
+// The caller is responsible for the kb pointer swap, tools.RegisterAll
+// re-registration, and reactiveRunnerRef.kb assignment — these side
+// effects require main()-local state that this pure function does not see.
+func worldKBSwap(firstAgentRegistered bool, payload json.RawMessage, kbPath, manifestPath string) (*worldkb.KB, error) {
+	if firstAgentRegistered {
+		return nil, errAgentWindowClosed
+	}
+	var wkb protocol.WorldKBPayload
+	if err := json.Unmarshal(payload, &wkb); err != nil {
+		return nil, fmt.Errorf("parse world_kb payload: %w", err)
+	}
+	newKB, err := worldkb.MergeAndWriteBytes(wkb.Generated, wkb.Authored, kbPath, manifestPath)
+	if err != nil {
+		return nil, fmt.Errorf("merge world_kb: %w", err)
+	}
+	return newKB, nil
+}
