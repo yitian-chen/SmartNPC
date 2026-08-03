@@ -16,7 +16,7 @@ func TestEnvelopeRoundTrip(t *testing.T) {
 		VisibleAgents: []VisibleAgent{},
 		NearbyObjects: []NearbyObject{
 			{ID: "workbench_01", Name: "工作台一号", Distance: 8.0, State: "idle",
-				AvailableActions: []string{"assemble", "inspect"}},
+				AvailableInteractions: []string{"assemble", "inspect"}},
 		},
 		AudibleEvents:    []AudibleEvent{},
 		CurrentAnimation: "idle",

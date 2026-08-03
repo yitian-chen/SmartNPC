@@ -41,11 +41,11 @@ type VisibleAgent struct {
 
 // NearbyObject is a nearby interactable smart object.
 type NearbyObject struct {
-	ID               string   `json:"id"`
-	Name             string   `json:"name"`
-	Distance         float64  `json:"distance"`
-	State            string   `json:"state"`
-	AvailableActions []string `json:"available_actions"`
+	ID                   string   `json:"id"`
+	Name                 string   `json:"name"`
+	Distance             float64  `json:"distance"`
+	State                string   `json:"state"`
+	AvailableInteractions []string `json:"available_interactions"`
 }
 
 // AudibleEvent is a heard sound/broadcast.
@@ -208,21 +208,24 @@ type CapabilityRegistryPayload struct {
 
 // CapabilityAction describes one cmd the UE can execute.
 type CapabilityAction struct {
-	Cmd                  string            `json:"cmd"`           // one of Cmd* constants
-	Kind                 string            `json:"kind"`          // "atomic" | "composite"
-	Description          string            `json:"description"`   // human/LLM-readable
+	Cmd                  string            `json:"cmd"`                       // one of Cmd* constants
+	Kind                 string            `json:"kind"`                      // "atomic" | "composite"
+	Description          string            `json:"description"`               // human/LLM-readable
 	UsageHint            string            `json:"usage_hint,omitempty"`
-	EstimatedDurationSec int               `json:"estimated_duration_sec,omitempty"`
+	EstimatedDurationSec float64           `json:"estimated_duration_sec,omitempty"`
 	Params               []CapabilityParam `json:"params,omitempty"`
 }
 
 // CapabilityParam describes one parameter of a cmd.
+// Type is one of "string" | "number" | "bool" | "vector" | "enum"
+// (per docs/AgentTown_CommProtocol_Values.md §2.4).
 type CapabilityParam struct {
-	Name        string   `json:"name"`
-	Type        string   `json:"type"` // "string" | "number" | "integer" | "boolean" | "object" | "array"
-	Description string   `json:"description,omitempty"`
-	Required    bool     `json:"required"`
-	Enum        []string `json:"enum,omitempty"`
+	Name         string   `json:"name"`
+	Type         string   `json:"type"`
+	Description  string   `json:"description,omitempty"`
+	Required     bool     `json:"required"`
+	DefaultValue string   `json:"default_value,omitempty"`
+	EnumValues   []string `json:"enum_values,omitempty"`
 }
 
 // ─── world_kb (UE → MCP, world knowledge base push) ─────────────

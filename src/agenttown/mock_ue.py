@@ -936,7 +936,7 @@ class MockUE:
                 "name": name,
                 "distance": round(distance, 1),
                 "state": obj.default_state or "idle",
-                "available_actions": list(obj.available_interactions),
+                "available_interactions": list(obj.available_interactions),
             })
         return objs
 
@@ -1439,15 +1439,18 @@ class MockUE:
                 # starts workers. MCP only accepts this during the startup
                 # window (before first agent_registered).
                 await self._send_world_kb()
-                # Re-register all agents (§4.2). agent_registered triggers the
-                # MCP Hermes session reset on the initial connect; on reconnect
-                # the MCP matches by agent_id.
-                await self._send_agent_registered()
                 # Declare NPC capabilities (cmds Mock UE implements) so MCP
                 # can drive tactical-layer prompt generation and dynamic
                 # tool registration. Sent every connect to refresh MCP's
                 # registry (idempotent on MCP side — Register replaces).
+                # Per §4.1 both system messages (world_kb + capability_registry)
+                # must arrive before the first agent_registered so MCP has
+                # the capability set and world model in place when workers start.
                 await self._send_capability_registry()
+                # Re-register all agents (§4.2). agent_registered triggers the
+                # MCP Hermes session reset on the initial connect; on reconnect
+                # the MCP matches by agent_id.
+                await self._send_agent_registered()
                 # Announce our last received seq so MCP replays what we missed.
                 await self._send(TYPE_RESYNC, SYSTEM_AGENT_ID,
                                  {"last_received_seq": self._last_received_seq})
