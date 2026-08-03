@@ -440,6 +440,18 @@ energy / fatigue / joint_wear / health，通过 `state_report` 权威通道上�
 
 `world_kb` 仅在启动窗口内（首个 `agent_registered` 之前）接受；之后到达的 `world_kb` 被拒绝并告警（worker goroutine 已持 kb 指针，热替换会竞态）。合并失败保留旧 KB + 不写盘。
 
+### world_kb 自动适配
+
+UE 推送新 `world_kb` 后，MCP 重启即自动适配全链路，无需改任何代码：
+
+- **战略层 prompt 注入 KB**：`generateDailyPlan` 接收 `kb`，`buildStrategicContext(kb, agentID)` 构造【你的角色】+【世界知识】两段——角色段从 `kb.GetAgent(agentID)` 取 `DisplayName`/`Profession`/`Description`/`Personality`；世界知识段复用 `buildKBContext(kb)`（与战术层同源）列出全部 zone/object id。LLM 据此规划当日计划，不会编造 KB 外概念。
+- **战术层工具列表动态派生**：`capability_registry` 驱动 `ReconcileTools` 增删工具；`buildTacticalToolEntries` 按 registry 对 agent 的有效能力集生成 prompt 工具列表；`buildTacticalExample(kb)` 从 KB 取首个 zone/object 作示例。新 cmd 由 `registerGenericActionTool` 自动注册通用工具。
+- **反应层 cmd 列表动态派生**：`isValidReactionCmd` / `buildReactiveCmdList` 从 registry 派生原子 cmd 集合（排除 `TurnTo`/`PlayMontage`）。
+- **工具 jsonschema 描述去硬编码 id**：`MoveToLocationInput.Target` / `InteractInput.TargetObjectID` / `WorkAtWorkbenchInput.AgentID` 等不再写死 `e.g. main_workshop`/`workbench_01`/`"H-01"`，改为引用 `world_kb`，LLM 从 prompt 注入的【世界知识】段获取合法 id。
+- **兜底每日计划从 KB 派生**：`buildDefaultDailyPlan(kb)` 用首个 zone 显示名 + 首个 object 显示名组装工作时段；`kb == nil` 时降级为中性表述（不引用"车间"/"装配"/"充电"等当前 KB 专属词）。
+
+**仅启动时适配**：不支持运行时热替换 KB。worker 按值捕获 kb，swap 仅在 worker 启动前发生，当前架构安全。换 KB 流程：UE 推送新 `world_kb` → MCP 重启 → worker 启动时拿新 kb。
+
 ### Mock UE Busy 状态
 
 长耗时动作（`ExecuteComposite`）不跳跃时间，设置 `npc.busy_until_min`。感知循环自然推进时间，NPC 留在原位直到时间到达。
@@ -743,7 +755,7 @@ model: deepseek-v4-flash-ioa             # 模型 ID（见 `codebuddy --help` �
 按严重度排序：
 
 1. **Hermes token 黑箱**：MCP 发出的战术层 prompt 仅 ~870 token，但 Hermes 实投 ~13k token，差值 ~12k 是 Hermes 服务端隐式拼接的 SOUL/SKILL/示例，MCP 不可见不可控。这是"取缔 Hermes、MCP 直连 Venus"重构的核心动机
-2. **战术层输出 schema 漂移**：模型偶尔把 `target` 放顶层而非 `params` 内，或发明不存在的动作（如 `patrol_route`）和路线。"巡检"类目标强诱导漂移
+2. **战术层输出 schema 漂移**：模型偶尔把 `target` 放顶层而非 `params` 内，或发明不存在的动作（如 `patrol_route`）和路线。"巡检"类目标强诱导漂移。**部分缓解**：战略层 prompt 现注入【你的角色】+【世界知识】段（`buildStrategicContext`），LLM 可见 KB 内合法 zone/object/agent 名，减少编造 KB 外概念；工具 jsonschema 描述已去硬编码 id 示例
 3. **战术层队列提前耗尽**：模型给的 action 总时长不够 slot 时长，触发频繁重分解（50 秒内重调 LLM），浪费 token
 4. **反应层冷启动超时**：Ollama 模型卸载后首 call >8s 超时，预热后稳定 1.3s
 5. **反应层 0% 打断率**：当前 prompt 强偏向 continue/observe，从未触发 act/interrupt/replan（成本中心问题）

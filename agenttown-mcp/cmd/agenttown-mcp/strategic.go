@@ -42,14 +42,49 @@ const strategicPromptTemplate = `[战略层/每日规划] 现在是仿真时间 
 
 示例：[{"time":"06:00-07:00","goal":"起床晨检，慢速活动关节"},{"time":"07:00-12:00","goal":"上午车间装配作业，盯紧关键工序"},{"time":"12:00-13:00","goal":"午间停工，检查公差记录并短暂补电休息"}]`
 
-// defaultDailyPlan 是战略层解析失败时的兜底计划。
+// defaultDailyPlan 是 kb == nil 时的兜底计划（无 KB 上下文降级路径）。
+// buildDefaultDailyPlan(nil) 返回此常量。
+//
 // 不返回空字符串是为了避免整天 Wait(60s) 瘫痪——兜底计划虽然无个性，
 // 但能驱动战术层正常工作，让仿真继续运行而非停滞。
 // 时段覆盖 06-22，每段 ≥60min，符合调度器采样约束。
-const defaultDailyPlan = "06:00-12:00: 上午车间装配作业\n" +
-	"12:00-13:00: 午间停工检修与短暂补电\n" +
-	"13:00-18:00: 下午继续装配作业\n" +
-	"18:00-22:00: 充电保养与写工作日志"
+// 表述中性：不引用任何 KB 专属词（"车间"/"装配"/"充电"等），避免换 KB 后
+// 兜底计划仍诱导战术层编造 KB 外概念。
+const defaultDailyPlan = "06:00-12:00: 上午主要工作\n" +
+	"12:00-13:00: 午间停工与短暂休息\n" +
+	"13:00-18:00: 下午继续工作\n" +
+	"18:00-22:00: 保养与写工作日志"
+
+// buildDefaultDailyPlan 根据 KB 派生兜底每日计划。
+// kb == nil 时返回 defaultDailyPlan（中性表述，不引用任何 KB id）。
+// 有 KB 时：用第一个 zone 显示名作工作地点、第一个 object 显示名作工作内容
+// 组装上午/下午时段，午间和晚间保持中性。避免硬编码"车间"/"装配"等当前
+// KB 专属词——换 KB 后兜底计划自动适配新 KB 的地点/设施名。
+func buildDefaultDailyPlan(kb *worldkb.KB) string {
+	if kb == nil {
+		return defaultDailyPlan
+	}
+	zoneName := "主要区域"
+	if zs := kb.ListZones(); len(zs) > 0 {
+		if zs[0].DisplayName != "" {
+			zoneName = zs[0].DisplayName
+		} else {
+			zoneName = zs[0].ID
+		}
+	}
+	workName := "工作"
+	if os := kb.ListObjects(); len(os) > 0 {
+		if os[0].DisplayName != "" {
+			workName = os[0].DisplayName
+		} else {
+			workName = os[0].ID
+		}
+	}
+	return fmt.Sprintf("06:00-12:00: 上午在%s进行%s作业\n", zoneName, workName) +
+		"12:00-13:00: 午间停工与短暂休息\n" +
+		fmt.Sprintf("13:00-18:00: 下午继续%s作业\n", workName) +
+		"18:00-22:00: 保养与写工作日志"
+}
 
 // yesterdaySummaryForFirstDay 是首日启动时注入的"昨日总结"。
 //
@@ -60,7 +95,7 @@ const defaultDailyPlan = "06:00-12:00: 上午车间装配作业\n" +
 const yesterdaySummaryForFirstDay = "昨天按计划完成了车间装配和设备巡检，下午体力下降明显，晚上进入低功耗休息状态，关节略有磨损"
 
 // generateDailyPlan 调 LLM 生成当日计划，返回格式化字符串（每行 "时段: 目标"）。
-// 任一步失败均回退到 defaultDailyPlan，保证战术层有目标可分解、
+// 任一步失败均回退到 buildDefaultDailyPlan(kb)，保证战术层有目标可分解、
 // 仿真不瘫痪。返回 "" 仅表示连兜底计划都没用上（理论上不会发生）。
 // kb 用于注入【你的角色】+【世界知识】段，让 LLM 看到 KB 内合法的
 // zone/object/agent 名，避免编造 KB 外概念（如换 KB 后仍写"车间"）。
@@ -73,9 +108,10 @@ func generateDailyPlan(ctx context.Context, sc strategicCaller, agentID string, 
 
 	resp, err := sc.SendWithSummary(ctx, prompt, "")
 	if err != nil {
+		fallback := buildDefaultDailyPlan(kb)
 		logger.Warn("[战略层] 计划生成失败，使用默认计划兜底",
-			"agent_id", agentID, "err", err, "fallback", defaultDailyPlan)
-		return defaultDailyPlan
+			"agent_id", agentID, "err", err, "fallback", fallback)
+		return fallback
 	}
 	sc.ResetSession() // 战略调用一次性使用，立即清链
 
@@ -85,13 +121,14 @@ func generateDailyPlan(ctx context.Context, sc strategicCaller, agentID string, 
 
 	items, err := parseDailyPlan(raw)
 	if err != nil {
+		fallback := buildDefaultDailyPlan(kb)
 		logger.Warn("[战略层] 计划解析失败，使用默认计划兜底",
-			"agent_id", agentID, "raw", truncateText(raw, 200), "err", err, "fallback", defaultDailyPlan)
-		return defaultDailyPlan
+			"agent_id", agentID, "raw", truncateText(raw, 200), "err", err, "fallback", fallback)
+		return fallback
 	}
 	if len(items) == 0 {
 		logger.Warn("[战略层] 计划解析为空数组，使用默认计划兜底", "agent_id", agentID)
-		return defaultDailyPlan
+		return buildDefaultDailyPlan(kb)
 	}
 	plan := formatDailyPlan(items)
 	logger.Info("[战略层] 每日计划生成成功", "agent_id", agentID, "items", len(items), "plan", plan)

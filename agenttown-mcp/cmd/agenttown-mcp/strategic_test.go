@@ -242,6 +242,41 @@ func TestGenerateDailyPlan_KBInjectedIntoPrompt(t *testing.T) {
 	}
 }
 
+// ─── buildDefaultDailyPlan ───────────────────────────────────
+
+func TestBuildDefaultDailyPlan_NilKB(t *testing.T) {
+	// kb == nil 返回 defaultDailyPlan 常量（中性表述，无 KB 专属词）。
+	got := buildDefaultDailyPlan(nil)
+	if got != defaultDailyPlan {
+		t.Errorf("got %q, want defaultDailyPlan %q", got, defaultDailyPlan)
+	}
+	// 中性表述不应包含旧 KB 专属词
+	for _, w := range []string{"车间", "装配", "充电"} {
+		if strings.Contains(got, w) {
+			t.Errorf("nil-KB fallback should not contain KB-specific word %q: %q", w, got)
+		}
+	}
+}
+
+func TestBuildDefaultDailyPlan_WithKB(t *testing.T) {
+	// 有 KB 时：兜底计划应包含第一个 zone 显示名 + 第一个 object 显示名。
+	kb := loadTestKB(t)
+	got := buildDefaultDailyPlan(kb)
+	// 第一个 zone 是 archive_station（显示名"档案馆与广播站"）
+	if !strings.Contains(got, "档案馆与广播站") {
+		t.Errorf("KB-derived plan should contain first zone display name: %q", got)
+	}
+	// 第一个 object 是 charging_station_01（显示名"综合充能站一号"）
+	if !strings.Contains(got, "综合充能站一号") {
+		t.Errorf("KB-derived plan should contain first object display name: %q", got)
+	}
+	// 时段格式可被 parseFormattedPlan 解析
+	items := parseFormattedPlan(got)
+	if len(items) != 4 {
+		t.Errorf("got %d plan items, want 4", len(items))
+	}
+}
+
 // ─── selectPlanInjection ─────────────────────────────────────
 
 func TestSelectPlanInjection_EmptyPlan(t *testing.T) {
