@@ -898,15 +898,9 @@ func main() {
 		mcpAPIKey          = flag.String("mcp-api-key", "", "if set, require this Bearer token on /mcp")
 		httpAllowAnyOrigin = flag.Bool("http-allow-any-origin", true,
 			"disable origin / localhost restrictions so cross-host clients can connect")
-	worldKBPath    = flag.String("world-kb", "assets/world_kb.yaml", "path to world_kb.yaml (required, fail-fast on error)")
-	autoMergeKB    = flag.Bool("auto-merge-world-kb", false,
-		"before loading, run worldkb merge pipeline to regenerate world_kb.yaml from world.generated.json + world.authored.json (fail-fast on merge/validation error)")
-	worldGeneratedJSON = flag.String("world-generated-json", "assets/world.generated.json",
-		"path to world.generated.json (used only when --auto-merge-world-kb is set)")
-	worldAuthoredJSON  = flag.String("world-authored-json", "assets/world.authored.json",
-		"path to world.authored.json (used only when --auto-merge-world-kb is set)")
+	worldKBPath = flag.String("world-kb", "assets/world_kb.yaml", "path to world_kb.yaml (required, fail-fast on error)")
 	worldKBManifest    = flag.String("world-kb-manifest", "assets/world_kb.manifest.json",
-		"path to write world_kb.manifest.json (used only when --auto-merge-world-kb is set; empty skips manifest)")
+		"path to write world_kb.manifest.json (empty skips manifest; written when UE pushes world_kb)")
 	tacticalStream = flag.Bool("tactical-stream", false,
 		"enable streaming for tactical layer LLM calls (experimental: only helps if upstream LLM emits tokens incrementally)")
 	ollamaURL = flag.String("ollama-url", "http://localhost:11434",
@@ -982,44 +976,20 @@ func main() {
 	// so a load failure is fatal. Loaded before registering agents so the
 	// perception worker can safely close over it.
 	//
-	// --auto-merge-world-kb: 在 Load 之前先调 merge pipeline 重生成 YAML。
-	// UE 端导出新的 world.generated.json 后，下次启动 MCP 即可自动合并，
-	// 无需手动跑 worldkb-merge CLI。失败按 fail-fast 退出。
-	var kb *worldkb.KB
-	if *autoMergeKB {
-		logger.Info("auto-merging world kb",
-			"generated", *worldGeneratedJSON,
-			"authored", *worldAuthoredJSON,
-			"out", *worldKBPath,
-			"manifest", *worldKBManifest,
-		)
-		mergedKB, err := worldkb.MergeAndWrite(*worldGeneratedJSON, *worldAuthoredJSON, *worldKBPath, *worldKBManifest)
-		if err != nil {
-			logger.Error("auto-merge world kb failed", "err", err)
-			os.Exit(1)
-		}
-		// 直接复用 mergedKB，省一次 Load；与磁盘文件应一致。
-		kb = mergedKB
-		logger.Info("world kb auto-merged",
-			"path", *worldKBPath,
-			"zones", len(kb.Zones),
-			"objects", len(kb.Objects),
-			"agents", len(kb.Agents),
-		)
-	} else {
-		var err error
-		kb, err = worldkb.Load(*worldKBPath)
-		if err != nil {
-			logger.Error("failed to load world_kb", "path", *worldKBPath, "err", err)
-			os.Exit(1)
-		}
-		logger.Info("world kb loaded",
-			"path", *worldKBPath,
-			"zones", len(kb.Zones),
-			"objects", len(kb.Objects),
-			"agents", len(kb.Agents),
-		)
+	// UE pushes an updated KB via the world_kb WebSocket message on connect
+	// (handled by worldKBSwap → MergeAndWriteBytes); this Load is the
+	// startup seed before UE connects.
+	kb, err := worldkb.Load(*worldKBPath)
+	if err != nil {
+		logger.Error("failed to load world_kb", "path", *worldKBPath, "err", err)
+		os.Exit(1)
 	}
+	logger.Info("world kb loaded",
+		"path", *worldKBPath,
+		"zones", len(kb.Zones),
+		"objects", len(kb.Objects),
+		"agents", len(kb.Agents),
+	)
 
 	// ─── 反应层 Ollama 客户端 ────────────────────────────────────
 	// --ollama-url="" 显式禁用反应层；否则初始化客户端（即使 Ollama 进程
