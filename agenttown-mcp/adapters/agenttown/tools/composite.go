@@ -17,9 +17,9 @@ import (
 
 // WorkAtWorkbenchInput — composite: work at a specific workbench.
 type WorkAtWorkbenchInput struct {
-	AgentID        string  `json:"agent_id" jsonschema:"the NPC's id, e.g. \"H-01\""`
+	AgentID        string  `json:"agent_id" jsonschema:"the NPC's id"`
 	DecisionEpoch  int64   `json:"decision_epoch" jsonschema:"required epoch from the current decision_context"`
-	TargetObjectID string  `json:"target_object_id" jsonschema:"workbench id, e.g. workbench_01"`
+	TargetObjectID string  `json:"target_object_id" jsonschema:"workbench object id from the world_kb"`
 	DurationSec    float64 `json:"duration_sec,omitempty" jsonschema:"work duration in seconds (optional)"`
 }
 

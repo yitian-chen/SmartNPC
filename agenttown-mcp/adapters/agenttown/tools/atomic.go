@@ -24,7 +24,7 @@ import (
 type MoveToLocationInput struct {
 	AgentID       string  `json:"agent_id" jsonschema:"the NPC's id"`
 	DecisionEpoch int64   `json:"decision_epoch" jsonschema:"required epoch from the current decision_context"`
-	Target        string  `json:"target" jsonschema:"semantic destination: zone id or object id, e.g. main_workshop, workbench_01"`
+	Target        string  `json:"target" jsonschema:"semantic destination: zone id or object id from the world_kb"`
 	Speed         string  `json:"speed,omitempty" jsonschema:"walk or run (default walk)"`
 }
 
@@ -68,7 +68,7 @@ type EmoteInput struct {
 type InteractInput struct {
 	AgentID         string `json:"agent_id" jsonschema:"the NPC's id"`
 	DecisionEpoch   int64  `json:"decision_epoch" jsonschema:"required epoch from the current decision_context"`
-	TargetObjectID  string `json:"target_object_id" jsonschema:"smart object id, e.g. workbench_01"`
+	TargetObjectID  string `json:"target_object_id" jsonschema:"smart object id from the world_kb"`
 	Interaction     string `json:"interaction"    jsonschema:"verb from the object's available_interactions"`
 }
 
