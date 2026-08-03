@@ -286,33 +286,57 @@ func buildTacticalPrompt(goal, zone, timeOfDay, slot string, physical *protocol.
 	}
 	toolList, toolCount := buildTacticalToolList(agentID, registry)
 	return fmt.Sprintf(tacticalPromptBody, goal, zone, timeOfDay, e, f, j, h,
-		hintLine, buildSlotDurationHint(slot), buildKBContext(kb), toolCount, toolList,
+		hintLine, buildSlotDurationHint(slot, timeOfDay), buildKBContext(kb), toolCount, toolList,
 		buildTacticalExample(kb))
 }
 
-// buildSlotDurationHint 根据slot "HH:MM-HH:MM" 构造一行提示文本。
-// 解析失败或时长 ≤ 0 返回空串（prompt 该行降级为空）。
-func buildSlotDurationHint(slot string) string {
-	min := slotDurationMinute(slot)
-	if min <= 0 {
+// buildSlotDurationHint 根据 slot "HH:MM-HH:MM" 和当前 game_time 构造一行提示文本。
+// 提示 LLM 按剩余时长（slot_end - timeOfDay）规划，避免长动作 overshoot 跨越到下个 slot。
+// timeOfDay 为空或解析失败时降级为完整 slot 时长（旧行为）。
+func buildSlotDurationHint(slot, timeOfDay string) string {
+	start, end := slotRangeMinute(slot)
+	if start < 0 {
 		return ""
 	}
-	return fmt.Sprintf("当前时段 %s，约 %d 分钟；请让步骤总时长接近此时长，避免过短导致队列提前耗尽触发重分解。\n", slot, min)
+	total := end - start
+	curMin := parsePlanMinute(timeOfDay)
+	if curMin < 0 {
+		return fmt.Sprintf("当前时段 %s，约 %d 分钟；请让步骤总时长接近此时长，避免过短导致队列提前耗尽触发重分解。\n", slot, total)
+	}
+	remaining := end - curMin
+	if remaining <= 0 {
+		return fmt.Sprintf("当前时段 %s 已过期（game_time=%s 已超出时段末尾），请仅规划 1-2 个短动作（≤10 分钟），避免 overshoot。\n", slot, timeOfDay)
+	}
+	if remaining < total {
+		elapsed := curMin - start
+		return fmt.Sprintf("当前时段 %s，剩余约 %d 分钟（已过去 %d 分钟）；请让步骤总时长接近剩余时长，避免过短导致队列提前耗尽触发重分解。\n", slot, remaining, elapsed)
+	}
+	return fmt.Sprintf("当前时段 %s，约 %d 分钟；请让步骤总时长接近此时长，避免过短导致队列提前耗尽触发重分解。\n", slot, total)
+}
+
+// slotRangeMinute 解析 "HH:MM-HH:MM" 返回 (start, end) 分钟数。
+// 解析失败或 end ≤ start 返回 (-1, -1)。
+func slotRangeMinute(slot string) (int, int) {
+	parts := strings.SplitN(slot, "-", 2)
+	if len(parts) != 2 {
+		return -1, -1
+	}
+	start := parsePlanMinute(parts[0])
+	end := parsePlanMinute(parts[1])
+	if start < 0 || end < 0 || end <= start {
+		return -1, -1
+	}
+	return start, end
 }
 
 // slotDurationMinute 解析 "HH:MM-HH:MM" 形如的 slot，返回 (end - start) 的分钟数。
 // 解析失败或 end ≤ start 返回 -1。
 func slotDurationMinute(slot string) int {
-	parts := strings.SplitN(slot, "-", 2)
-	if len(parts) != 2 {
+	s, e := slotRangeMinute(slot)
+	if s < 0 {
 		return -1
 	}
-	start := parsePlanMinute(parts[0])
-	end := parsePlanMinute(parts[1])
-	if start < 0 || end < 0 || end <= start {
-		return -1
-	}
-	return end - start
+	return e - s
 }
 
 // buildKBContext 拼接可用 zone/object 列表段落，供战术层 prompt 注入。

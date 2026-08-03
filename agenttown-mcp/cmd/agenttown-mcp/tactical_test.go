@@ -632,6 +632,83 @@ func TestSlotDurationMinute(t *testing.T) {
 	}
 }
 
+func TestBuildSlotDurationHint_Remaining(t *testing.T) {
+	cases := []struct {
+		name      string
+		slot      string
+		timeOfDay string
+		wantSub   string
+		notWant   string
+	}{
+		{
+			name:      "remaining less than total",
+			slot:      "09:00-12:00",
+			timeOfDay: "10:30",
+			wantSub:   "剩余约 90 分钟（已过去 90 分钟）",
+			notWant:   "约 180 分钟",
+		},
+		{
+			name:      "slot expired",
+			slot:      "09:00-12:00",
+			timeOfDay: "12:30",
+			wantSub:   "已过期",
+			notWant:   "剩余约",
+		},
+		{
+			name:      "timeOfDay before slot start",
+			slot:      "09:00-12:00",
+			timeOfDay: "08:00",
+			wantSub:   "约 180 分钟",
+			notWant:   "剩余约",
+		},
+		{
+			name:      "timeOfDay equals slot start",
+			slot:      "09:00-12:00",
+			timeOfDay: "09:00",
+			wantSub:   "约 180 分钟",
+			notWant:   "剩余约",
+		},
+		{
+			name:      "empty timeOfDay falls back to full duration",
+			slot:      "09:00-12:00",
+			timeOfDay: "",
+			wantSub:   "约 180 分钟",
+			notWant:   "剩余约",
+		},
+		{
+			name:      "invalid timeOfDay falls back to full duration",
+			slot:      "09:00-12:00",
+			timeOfDay: "invalid",
+			wantSub:   "约 180 分钟",
+			notWant:   "剩余约",
+		},
+		{
+			name:      "invalid slot returns empty",
+			slot:      "abc-xyz",
+			timeOfDay: "10:00",
+			wantSub:   "",
+			notWant:   "当前时段",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := buildSlotDurationHint(c.slot, c.timeOfDay)
+			if c.wantSub == "" {
+				if got != "" {
+					t.Errorf("buildSlotDurationHint(%q, %q) = %q, want empty", c.slot, c.timeOfDay, got)
+				}
+				return
+			}
+			if !strings.Contains(got, c.wantSub) {
+				t.Errorf("buildSlotDurationHint(%q, %q) = %q, want substring %q", c.slot, c.timeOfDay, got, c.wantSub)
+			}
+			if c.notWant != "" && strings.Contains(got, c.notWant) {
+				t.Errorf("buildSlotDurationHint(%q, %q) = %q, should NOT contain %q", c.slot, c.timeOfDay, got, c.notWant)
+			}
+		})
+	}
+}
+
 // ─── 动态 cmd 派生（Phase 2） ────────────────────────────────
 
 // TestBuildTacticalToolList_NewCmdDerived verifies that a UE-pushed new cmd
