@@ -96,7 +96,9 @@ func buildTacticalToolList(agentID string, registry *CapabilityRegistry) (string
 
 // tacticalPromptBody 是 prompt 的固定骨架，%s 占位符依次为：
 // goal / zone / timeOfDay / energy / fatigue / joint_wear / health /
-// hintLine / slotDurationHint / kbContext / toolCount / toolList。
+// hintLine / slotDurationHint / kbContext / toolCount / toolList / exampleBlock。
+// exampleBlock 由 buildTacticalExample 动态从 KB 取合法 id 生成，避免示例
+// 本身编造 KB 外 id（旧版示例写死 main_workshop / workbench_01 诱导 LLM 跟随编造）。
 const tacticalPromptBody = `[战术层/任务分解] 当前时段目标：%s
 你目前在：%s，游戏时间 %s。
 物理状态：能量 %.0f、疲劳 %.0f、关节磨损 %.0f、健康 %.0f。
@@ -112,15 +114,48 @@ const tacticalPromptBody = `[战术层/任务分解] 当前时段目标：%s
 1. 第一行输出 {"inner_thought":"一句话内心独白"}
 2. 后续每行输出一个 {"action":"工具名","params":{...}}，3-5 步，按执行顺序排列
 3. 第一步通常是 move_to_location 到目标区域
-4. move_to_location 的 target、interact 的 target_object_id、work_at_workbench 的 target_object_id 必须从上面的可用列表中选取，禁止编造
+4. move_to_location 的 target、interact 的 target_object_id、work_at_workbench 的 target_object_id、patrol_zone 的 target_zone 必须严格使用上面"可前往区域"和"可交互物体"中给出的 id，禁止编造、禁止拼接 zone/interaction 信息
 5. 每行一个 JSON 对象，不要输出 JSON 数组，不要输出 markdown 围栏，不要输出任何其他文字
 6. 必须以字符 {"inner_thought 开头，不要输出步骤说明、不要解释、不要编号列表、不要 markdown 加粗
 7. 步骤总时长应接近当前 slot 时长，避免过短导致队列提前耗尽触发重分解
 
-示例：
-{"inner_thought":"先去车间再开始装配"}
-{"action":"move_to_location","params":{"target":"main_workshop"}}
-{"action":"work_at_workbench","params":{"target_object_id":"workbench_01","duration_sec":14400}}`
+示例（id 来自上方可用列表，不可照抄示例中的 id）：
+%s`
+
+// buildTacticalExample 根据当前 KB 动态构造示例，确保示例中出现的
+// zone id / object id 都在 KB 中合法存在。KB 为空时返回一个不引用
+// 任何具体 id 的通用示例，避免误导 LLM 编造。
+func buildTacticalExample(kb *worldkb.KB) string {
+	if kb == nil {
+		return `{"inner_thought":"先去目标区域再开始作业"}
+{"action":"move_to_location","params":{"target":"<上方可前往区域的 id>"}}
+{"action":"work_at_workbench","params":{"target_object_id":"<上方可交互物体的 id>","duration_sec":3600}}`
+	}
+	zoneID := ""
+	if zs := kb.ListZones(); len(zs) > 0 {
+		zoneID = zs[0].ID
+	}
+	objID := ""
+	if os := kb.ListObjects(); len(os) > 0 {
+		objID = os[0].ID
+	}
+	if zoneID == "" && objID == "" {
+		return `{"inner_thought":"先去目标区域再开始作业"}
+{"action":"move_to_location","params":{"target":"<上方可前往区域的 id>"}}
+{"action":"work_at_workbench","params":{"target_object_id":"<上方可交互物体的 id>","duration_sec":3600}}`
+	}
+	exZone := zoneID
+	if exZone == "" {
+		exZone = "<上方可前往区域的 id>"
+	}
+	exObj := objID
+	if exObj == "" {
+		exObj = "<上方可交互物体的 id>"
+	}
+	return fmt.Sprintf(`{"inner_thought":"先去目标区域再开始作业"}
+{"action":"move_to_location","params":{"target":"%s"}}
+{"action":"work_at_workbench","params":{"target_object_id":"%s","duration_sec":3600}}`, exZone, exObj)
+}
 
 // buildTacticalPrompt 填充战术层 prompt 模板。kb 用于注入可用 zone/location/object
 // 列表，避免 LLM 编造不存在的 ID（如 workbench_02、archives）。
@@ -141,7 +176,8 @@ func buildTacticalPrompt(goal, zone, timeOfDay, slot string, physical *protocol.
 	}
 	toolList, toolCount := buildTacticalToolList(agentID, registry)
 	return fmt.Sprintf(tacticalPromptBody, goal, zone, timeOfDay, e, f, j, h,
-		hintLine, buildSlotDurationHint(slot), buildKBContext(kb), toolCount, toolList)
+		hintLine, buildSlotDurationHint(slot), buildKBContext(kb), toolCount, toolList,
+		buildTacticalExample(kb))
 }
 
 // buildSlotDurationHint 根据slot "HH:MM-HH:MM" 构造一行提示文本。
@@ -170,6 +206,10 @@ func slotDurationMinute(slot string) int {
 }
 
 // buildKBContext 拼接可用 zone/object 列表段落，供战术层 prompt 注入。
+//
+// 格式设计原则：每个 object 单独占一行，明确分离 id / 所在 zone / 可用 interaction，
+// 避免 LLM 把 "id|zone[interactions]" 这种拼接串整体当作 target_object_id 复制。
+// zone 也单独一行列出，避免与 object 拼接造成歧义。
 func buildKBContext(kb *worldkb.KB) string {
 	if kb == nil {
 		return ""
@@ -179,30 +219,30 @@ func buildKBContext(kb *worldkb.KB) string {
 		parts := make([]string, 0, len(zs))
 		for _, z := range zs {
 			if z.DisplayName != "" && z.DisplayName != z.ID {
-				parts = append(parts, fmt.Sprintf("%s(%s)", z.DisplayName, z.ID))
+				parts = append(parts, fmt.Sprintf("%s（id=%s）", z.DisplayName, z.ID))
 			} else {
 				parts = append(parts, z.ID)
 			}
 		}
-		lines = append(lines, "可前往区域: "+strings.Join(parts, "、")+"。")
+		lines = append(lines, "可前往区域（move_to_location 的 target 用 id）: "+strings.Join(parts, "、")+"。")
 	}
 	if os := kb.ListObjects(); len(os) > 0 {
-		parts := make([]string, 0, len(os))
+		lines = append(lines, "可交互物体（interact/work_at_workbench 的 target_object_id 用 id，interact 的 interaction 用下列可用动词）:")
 		for _, o := range os {
 			label := o.ID
 			if o.DisplayName != "" && o.DisplayName != o.ID {
-				label = fmt.Sprintf("%s(%s)", o.DisplayName, o.ID)
+				label = fmt.Sprintf("%s（id=%s）", o.DisplayName, o.ID)
 			}
-			// 追加 zone_id 以保留 zone-object 归属（原 locations[] 行已移除）。
+			zoneInfo := ""
 			if o.ZoneID != "" {
-				label += "|" + o.ZoneID
+				zoneInfo = "，位于 zone=" + o.ZoneID
 			}
+			interactionInfo := ""
 			if len(o.AvailableInteractions) > 0 {
-				label += "[" + strings.Join(o.AvailableInteractions, "/") + "]"
+				interactionInfo = "，可用 interaction: " + strings.Join(o.AvailableInteractions, "/")
 			}
-			parts = append(parts, label)
+			lines = append(lines, "  - "+label+zoneInfo+interactionInfo)
 		}
-		lines = append(lines, "可交互物体: "+strings.Join(parts, "、")+"。")
 	}
 	if len(lines) == 0 {
 		return ""

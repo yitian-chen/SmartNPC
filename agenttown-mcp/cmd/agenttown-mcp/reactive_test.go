@@ -107,13 +107,13 @@ func TestParseReactiveDecision_Continue(t *testing.T) {
 
 // TestParseReactiveDecision_ActValid verifies act with valid cmd + params.
 func TestParseReactiveDecision_ActValid(t *testing.T) {
-	raw := `{"reaction":"act","reason":"紧急避让","action":{"cmd":"move_to","params":{"target":"rest_area"}}}`
+	raw := `{"reaction":"act","reason":"紧急避让","action":{"cmd":"move_to_location","params":{"target":"rest_area"}}}`
 	dec := parseReactiveDecision(raw)
 	if dec.Reaction != ReactionAct {
 		t.Errorf("reaction: got %q, want act", dec.Reaction)
 	}
-	if dec.Action == nil || dec.Action.Cmd != "move_to" {
-		t.Errorf("action: got %+v, want move_to", dec.Action)
+	if dec.Action == nil || dec.Action.Cmd != "move_to_location" {
+		t.Errorf("action: got %+v, want move_to_location", dec.Action)
 	}
 	if dec.Action.Params["target"] != "rest_area" {
 		t.Errorf("params.target: got %v, want rest_area", dec.Action.Params["target"])

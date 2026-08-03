@@ -24,7 +24,7 @@ type strategicCaller interface {
 
 const strategicPromptTemplate = `[战略层/每日规划] 现在是仿真时间 06:00，新的一天开始了。
 
-昨日总结：%s
+%s
 
 请基于你的角色身份和性格，规划今天一天的活动安排。
 
@@ -35,8 +35,9 @@ const strategicPromptTemplate = `[战略层/每日规划] 现在是仿真时间 
 4. 每个时段时长不少于 60 分钟（起止时间差 ≥ 60 分钟）。短活动（如午休 30 分钟、短暂维修）合并到相邻时段，不要单独成段——调度器按整点采样，短于 60 分钟的时段会被跳过
 5. 只输出 JSON 数组，不要任何其他文字
 6. 必须以字符 [ 开头，以字符 ] 结尾，不要输出设计思路、不要解释、不要 markdown 围栏
+7. goal 中提到的地点、人物、设备必须是你的角色设定和当前世界知识中存在的，不得编造未提及的人物或设施
 
-示例：[{"time":"06:00-07:00","goal":"起床晨检，慢速活动关节"},{"time":"07:00-12:00","goal":"装配作业，盯紧小柯"},{"time":"12:00-13:00","goal":"午间停工会检查公差，饭后短暂补电"}]`
+示例：[{"time":"06:00-07:00","goal":"起床晨检，慢速活动关节"},{"time":"07:00-12:00","goal":"上午车间装配作业，盯紧关键工序"},{"time":"12:00-13:00","goal":"午间停工，检查公差记录并短暂补电休息"}]`
 
 // defaultDailyPlan 是战略层解析失败时的兜底计划。
 // 不返回空字符串是为了避免整天 Wait(60s) 瘫痪——兜底计划虽然无个性，
@@ -47,13 +48,19 @@ const defaultDailyPlan = "06:00-12:00: 上午车间装配作业\n" +
 	"13:00-18:00: 下午继续装配作业\n" +
 	"18:00-22:00: 充电保养与写工作日志"
 
-const hardcodedYesterdaySummary = "昨天在车间装配8小时，整理了零件分类，晚上在充电站充电休息，关节有点酸。下班时小柯说明天请假一天，让我心里有点空落落的"
+// yesterdaySummaryForFirstDay 是首日启动时注入的"昨日总结"。
+//
+// 早期版本写死了"小柯/充电站"等具体人物和设施，但当 KB 不包含这些
+// 元素时（如最小化测试 KB 或换地图运行），LLM 会被诱导在战略计划里
+// 编造这些 KB 外概念。改为中性表述：只描述抽象活动模式（装配/休息/
+// 充电），不点名任何人物或具体设施，由 LLM 根据 KB 自行具象化。
+const yesterdaySummaryForFirstDay = "昨天按计划完成了车间装配和设备巡检，下午体力下降明显，晚上进入低功耗休息状态，关节略有磨损"
 
 // generateDailyPlan 调 LLM 生成当日计划，返回格式化字符串（每行 "时段: 目标"）。
 // 任一步失败均回退到 defaultDailyPlan，保证战术层有目标可分解、
 // 仿真不瘫痪。返回 "" 仅表示连兜底计划都没用上（理论上不会发生）。
 func generateDailyPlan(ctx context.Context, sc strategicCaller, agentID string, logger *slog.Logger) string {
-	prompt := fmt.Sprintf(strategicPromptTemplate, hardcodedYesterdaySummary)
+	prompt := fmt.Sprintf(strategicPromptTemplate, "昨日总结："+yesterdaySummaryForFirstDay)
 	logger.Info("[MCP→Hermes/STRATEGIC-PROMPT]", "agent_id", agentID, "text", prompt)
 
 	resp, err := sc.SendWithSummary(ctx, prompt, "")

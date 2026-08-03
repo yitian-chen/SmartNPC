@@ -465,35 +465,50 @@ func TestBuildTacticalPrompt_InjectsKBContext(t *testing.T) {
 	kb := loadTestKB(t)
 	prompt := buildTacticalPrompt("装配", "main_workshop", "09:00", "09:00-12:00",
 		&protocol.PhysicalState{Energy: 75, Fatigue: 30, JointWear: 5, Health: 90}, kb, "", nil, "")
-	// 应包含所有区域（新 schema 7 zones）
-	if !strings.Contains(prompt, "main_workshop") || !strings.Contains(prompt, "central_plaza") ||
-		!strings.Contains(prompt, "logistics_hub") || !strings.Contains(prompt, "repair_bay") ||
-		!strings.Contains(prompt, "residential_quarters") || !strings.Contains(prompt, "archive_station") ||
-		!strings.Contains(prompt, "recycling_yard") {
-		t.Errorf("prompt should list all 7 zones, got: %s", prompt)
+	// 应包含 KB 中所有 zone（assets/world_kb.yaml 当前是 7-zone 工业园区）
+	for _, zID := range []string{"main_workshop", "central_plaza", "logistics_hub", "repair_bay", "residential_quarters", "archive_station", "recycling_yard"} {
+		if !strings.Contains(prompt, zID) {
+			t.Errorf("prompt should list zone %q, got: %s", zID, prompt)
+		}
 	}
-	// 应包含所有物体（原 locations 已合并进 objects）
-	if !strings.Contains(prompt, "workbench_01") || !strings.Contains(prompt, "charging_station_01") ||
-		!strings.Contains(prompt, "rest_bench_01") {
-		t.Errorf("prompt should list all 3 objects, got: %s", prompt)
+	// 应包含所有 object
+	for _, oID := range []string{"workbench_01", "charging_station_01", "rest_bench_01"} {
+		if !strings.Contains(prompt, oID) {
+			t.Errorf("prompt should list object %q, got: %s", oID, prompt)
+		}
 	}
-	// 应包含可交互物体及其动作
+	// 应包含"可交互物体"段落标题及交互动词
 	if !strings.Contains(prompt, "可交互物体") {
 		t.Errorf("prompt should contain '可交互物体' section, got: %s", prompt)
 	}
 	if !strings.Contains(prompt, "assemble") || !strings.Contains(prompt, "charge") || !strings.Contains(prompt, "rest") {
-		t.Errorf("prompt should list available actions on objects, got: %s", prompt)
+		t.Errorf("prompt should list available interactions on objects, got: %s", prompt)
+	}
+	// 验证新格式：每个 object 单独一行，明确分离 id/zone/interaction
+	// 不应再出现旧的 "id|zone[interactions]" 拼接格式
+	if strings.Contains(prompt, "workbench_01|main_workshop[") {
+		t.Errorf("prompt should not contain legacy 'id|zone[interactions]' format, got: %s", prompt)
+	}
+	// 应包含明确的 id/zone/interaction 标注
+	if !strings.Contains(prompt, "id=workbench_01") {
+		t.Errorf("prompt should contain 'id=workbench_01' label, got: %s", prompt)
+	}
+	if !strings.Contains(prompt, "位于 zone=main_workshop") {
+		t.Errorf("prompt should contain '位于 zone=main_workshop', got: %s", prompt)
 	}
 }
 
 func TestBuildTacticalPrompt_NilKB(t *testing.T) {
 	// nil KB 时不应崩溃，也不应包含 KB 上下文段落
 	prompt := buildTacticalPrompt("装配", "main_workshop", "09:00", "", nil, nil, "", nil, "")
-	if strings.Contains(prompt, "可前往区域") {
-		t.Errorf("prompt should not contain '可前往区域' when KB is nil, got: %s", prompt)
+	// 不应出现 KB 段落标题（"可前往区域（..."、"可交互物体（..."）
+	// 注意：示例 fallback 文本里会提到"上方可前往区域的 id"作为占位提示，
+	// 这是引导文字而非 KB 内容，不应被此断言拦截——所以用更精确的段落标题匹配。
+	if strings.Contains(prompt, "可前往区域（move_to_location") {
+		t.Errorf("prompt should not contain '可前往区域' section when KB is nil, got: %s", prompt)
 	}
-	if strings.Contains(prompt, "可交互物体") {
-		t.Errorf("prompt should not contain '可交互物体' when KB is nil, got: %s", prompt)
+	if strings.Contains(prompt, "可交互物体（interact") {
+		t.Errorf("prompt should not contain '可交互物体' section when KB is nil, got: %s", prompt)
 	}
 }
 

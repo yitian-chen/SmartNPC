@@ -183,8 +183,17 @@ func (r *reactiveRunner) buildInput(agentID string, ac *agentContext, trigger Re
 		plan = plan[:400] + "…"
 	}
 
+	// 从 KB 查 agent 显示名，供 prompt 中角色称呼使用（避免硬编码"老陈"）。
+	agentName := ""
+	if r.kb != nil {
+		if agent := r.kb.GetAgent(agentID); agent != nil {
+			agentName = agent.DisplayName
+		}
+	}
+
 	return ReactiveInput{
 		AgentID:       agentID,
+		AgentName:     agentName,
 		TimeOfDay:     tod,
 		Zone:          zone,
 		Energy:        energy,
@@ -367,8 +376,9 @@ func (r *reactiveRunner) execute(agentID string, ac *agentContext, dec ReactiveD
 }
 
 // mapReactionAction 把 ReactionAction 映射到 ws.SendAction 需要的 (cmd, params)。
-// 反应层允许的 cmd 子集由 isValidReactionCmd 限制（move_to / speak / emote /
-// wait / interact），与战术层 mapTacticalAction 的对应分支共享映射逻辑。
+// 反应层允许的 cmd 子集由 isValidReactionCmd 限制（move_to_location /
+// move_to_agent / speak / emote / wait / interact），与战术层 mapTacticalAction
+// 的对应分支共享映射逻辑。
 func mapReactionAction(ra ReactionAction, kb *worldkb.KB) (string, map[string]any, error) {
 	pa := plannedAction{Action: ra.Cmd, Params: ra.Params}
 	cmd, params, err := mapTacticalAction(pa, kb)

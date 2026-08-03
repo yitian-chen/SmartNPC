@@ -72,6 +72,7 @@ const periodicTriggerInterval = 4
 // 提取后传入，避免 reactive.go 直接依赖 agentContext（便于单元测试）。
 type ReactiveInput struct {
 	AgentID       string
+	AgentName     string // agent 显示名（如"老陈"），用于 prompt 中角色称呼；空则降级为 AgentID
 	TimeOfDay     string // "HH:MM" 游戏时间
 	Zone          string // 当前区域 id
 	Energy        float64
@@ -88,7 +89,9 @@ type ReactiveInput struct {
 
 // reactivePromptTemplate 是反应层 prompt 模板。用 fmt.Sprintf 填充。
 // 中文 prompt（qwen2.5 中文表现好），严格约束 JSON 输出。
-const reactivePromptTemplate = `你是 NPC 老陈的反应决策模块。当前情况需要你判断是否打断当前行动。
+// agentName 由调用方注入，避免在此处硬编码"老陈"等具体角色名——
+// 反应层应服务于任意 agent，而非特定 NPC。
+const reactivePromptTemplate = `你是 NPC %s 的反应决策模块。当前情况需要你判断是否打断当前行动。
 
 【当前状态】
 游戏时间：%s
@@ -116,13 +119,14 @@ const reactivePromptTemplate = `你是 NPC 老陈的反应决策模块。当前�
 
 判断要点：
 - 战术层规划的动作通常是合理的，除非有明确理由，否则 continue
+- 物理状态告警时（体力<40、疲劳>60、健康<50）应认真考虑 interrupt 或 replan 让 NPC 休息/充电，不要无脑 continue
 - 仅在物理状态告警、事件突发、或当前动作明显不合理时才 interrupt/act
 - replan 是"重大"决策：当你认为整个 action 队列都应作废、重新规划时使用，而非单个 action 不合适（单个不合适用 interrupt/act）。30 分钟内至多触发 1 次 replan，请慎重
 
 请输出 JSON，格式严格如下，不要输出 JSON 以外的任何内容：
 {"reaction": "continue|observe|interrupt|act|replan", "reason": "简短理由", "action": {"cmd": "...", "params": {...}}}
 
-action 字段仅在 reaction=act 时填写，cmd 可选：move_to / speak / emote / wait / interact。
+action 字段仅在 reaction=act 时填写，cmd 可选：move_to_location / move_to_agent / speak / emote / wait / interact。
 reaction=replan 时不要填 action 字段。
 不要输出 JSON 以外的任何内容。`
 
@@ -152,7 +156,12 @@ func buildReactivePrompt(in ReactiveInput) string {
 	if detail == "" {
 		detail = string(in.Trigger)
 	}
+	agentName := in.AgentName
+	if agentName == "" {
+		agentName = in.AgentID
+	}
 	return fmt.Sprintf(reactivePromptTemplate,
+		agentName,
 		in.TimeOfDay, in.Zone,
 		in.Energy, in.Fatigue, in.Health,
 		currentAction,
@@ -215,9 +224,12 @@ func stripCodeFence(s string) string {
 
 // isValidReactionCmd 校验 reaction action 的 cmd 是否在允许列表内。
 // 仅原子短动作（不含复合动作——复合动作应由战术层规划）。
+// 工具名与 tacticalToolMeta / mapTacticalAction 保持一致：move_to_location
+// 而非旧的 move_to，否则 reaction=act 给出 move_to_location 会被拒绝
+// 降级为 interrupt，使 act 决策永远走不到下发路径。
 func isValidReactionCmd(cmd string) bool {
 	switch cmd {
-	case "move_to", "speak", "emote", "wait", "interact":
+	case "move_to_location", "move_to_agent", "speak", "emote", "wait", "interact":
 		return true
 	}
 	return false
