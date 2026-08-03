@@ -327,6 +327,7 @@ type Envelope struct {
 | `heartbeat` | 双向 | 心跳保活 | 每 5 秒 |
 | `error` | 双向 | 错误上报 | 异常情况 |
 | `capability_registry` | UE→Agent | NPC 能力声明（哪些 cmd 可执行） | UE 连接后 / 能力变更时 |
+| `world_kb` | UE→Agent | 世界知识库下发（generated + authored） | UE 连接后（首个 `agent_registered` 之前） |
 
 ### 动作生命周期
 
@@ -430,6 +431,14 @@ energy / fatigue / joint_wear / health，通过 `state_report` 权威通道上�
 4. 启动 Hermes → 等 `:8642` 就绪 + MCP 日志出现 `session initialized`
 5. 启动 Mock UE → 预检查通过后运行
 6. 仿真日志统一写入 `logs/YYYY-MM-DD/sim.log`（MCP 独占，无需合并）
+
+**UE 连接消息序列**（硬约束）：UE 连接 MCP 后按以下顺序首发系统消息：
+1. `world_kb`（`agent_id="system"`）— 推送完整世界 KB（generated + authored JSON），MCP 合并+落盘+swap 内存 KB。**必须在首个 `agent_registered` 之前**，确保 worker 启动时捕获新 KB
+2. `agent_registered` — 触发 Hermes 会话重置 + worker 启动
+3. `capability_registry` — 声明 NPC 能力，MCP 动态增删工具
+4. `resync` → `state_report` → `perception_update` …
+
+`world_kb` 仅在启动窗口内（首个 `agent_registered` 之前）接受；之后到达的 `world_kb` 被拒绝并告警（worker goroutine 已持 kb 指针，热替换会竞态）。合并失败保留旧 KB + 不写盘。
 
 ### Mock UE Busy 状态
 
