@@ -246,7 +246,36 @@ func TestMapDebugCmd(t *testing.T) {
 		{"", "", false},
 	}
 	for _, c := range cases {
-		got, ok := mapDebugCmd(c.cmd)
+		got, ok := mapDebugCmd(c.cmd, nil, "")
+		if ok != c.wantOK {
+			t.Errorf("mapDebugCmd(%q) ok=%v, want %v", c.cmd, ok, c.wantOK)
+			continue
+		}
+		if ok && got != c.wantCmd {
+			t.Errorf("mapDebugCmd(%q) = %q, want %q", c.cmd, got, c.wantCmd)
+		}
+	}
+}
+
+// TestMapDebugCmd_RegistryDerived verifies mapDebugCmd resolves UE-pushed new
+// cmds via registry lookup (Phase 3).
+func TestMapDebugCmd_RegistryDerived(t *testing.T) {
+	reg := NewCapabilityRegistry()
+	reg.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
+		{Cmd: protocol.CmdMoveToLocation, Kind: "atomic"},
+		{Cmd: "WaveHand", Kind: "atomic"},
+	})
+	cases := []struct {
+		cmd      string
+		wantCmd  string
+		wantOK   bool
+	}{
+		{"move_to_location", protocol.CmdMoveToLocation, true}, // built-in
+		{"wave_hand", "WaveHand", true},                         // new cmd via registry
+		{"fly_to", "", false},                                   // not in registry
+	}
+	for _, c := range cases {
+		got, ok := mapDebugCmd(c.cmd, reg, "H-01")
 		if ok != c.wantOK {
 			t.Errorf("mapDebugCmd(%q) ok=%v, want %v", c.cmd, ok, c.wantOK)
 			continue

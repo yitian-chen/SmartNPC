@@ -1516,41 +1516,28 @@ func toFloat64(v any) (float64, error) {
 	}
 }
 
-// mapDebugCmd 把 debug 端点的 cmd 名映射到 protocol 常量。
-// 每个 composite cmd 直接对应自己的 protocol 常量，不再走统一 ExecuteComposite。
-func mapDebugCmd(cmd string) (protoCmd string, ok bool) {
-	switch cmd {
-	case "move_to_location":
-		return protocol.CmdMoveToLocation, true
-	case "move_to_agent":
-		return protocol.CmdMoveToAgent, true
-	case "turn_to":
-		return protocol.CmdTurnTo, true
-	case "play_montage":
-		return protocol.CmdPlayMontage, true
-	case "speak":
-		return protocol.CmdSpeak, true
-	case "emote":
-		return protocol.CmdEmote, true
-	case "interact":
-		return protocol.CmdInteractSmartObject, true
-	case "wait":
-		return protocol.CmdWait, true
-	case "work_at_workbench":
-		return protocol.CmdWorkAtWorkbench, true
-	case "work_at_workshop":
-		return protocol.CmdWorkAtWorkshop, true
-	case "chat_with":
-		return protocol.CmdChatWith, true
-	case "repair_target":
-		return protocol.CmdRepairTarget, true
-	case "charge_at_station":
-		return protocol.CmdChargeAtStation, true
-	case "patrol_zone":
-		return protocol.CmdPatrolZone, true
-	default:
+// mapDebugCmd 把 debug 端点的 cmd 名（tool_name, snake_case）映射到 UE cmd
+// （PascalCase protocol 常量）。
+//
+// registry != nil 时从 EffectiveActions(agentID) 通过 CmdToToolName 反查，
+// 覆盖内置 14 cmd 与 UE 通过 capability_registry 新推送的 cmd。
+// registry == nil 时降级为 BuiltinToolSpecs 静态查找（向后兼容旧测试）。
+// scan_area/stop 没有 UE cmd（RequiredCmd=""），不通过此路径下发。
+func mapDebugCmd(cmd string, registry *CapabilityRegistry, agentID string) (protoCmd string, ok bool) {
+	if registry != nil {
+		for _, act := range registry.EffectiveActions(agentID) {
+			if tools.CmdToToolName(act.Cmd) == cmd {
+				return act.Cmd, true
+			}
+		}
 		return "", false
 	}
+	for _, spec := range tools.BuiltinToolSpecs() {
+		if spec.Name == cmd && spec.RequiredCmd != "" {
+			return spec.RequiredCmd, true
+		}
+	}
+	return "", false
 }
 
 // buildDebugParams 根据 cmd 处理 params：move_to_location 走 kb 解析，
@@ -1588,7 +1575,7 @@ func handleDebugAction(ctx context.Context, logger *slog.Logger, ws *wsserver.Se
 		return
 	}
 
-	protoCmd, ok := mapDebugCmd(req.Cmd)
+	protoCmd, ok := mapDebugCmd(req.Cmd, capabilityRegistryRef, req.AgentID)
 	if !ok {
 		w.WriteHeader(http.StatusBadRequest)
 		_ = json.NewEncoder(w).Encode(debugActionResponse{Error: fmt.Sprintf("unknown cmd: %q", req.Cmd)})
