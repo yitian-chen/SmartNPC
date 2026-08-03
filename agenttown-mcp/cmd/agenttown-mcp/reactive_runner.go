@@ -22,6 +22,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -200,6 +201,15 @@ func (r *reactiveRunner) buildInput(agentID string, ac *agentContext, trigger Re
 	// 派生 reaction=act 可用 cmd 列表文本，供 prompt 注入。
 	availableCmds := buildReactiveCmdList(capabilityRegistryRef, agentID)
 
+	// 实时从 dailyPlan 计算 slot，避免长动作在途时 currentSlot stale。
+	// __debug__ 前缀的 slot 是 /debug/schedule 注入的临时覆盖，保留原值。
+	liveSlot := ac.currentSlot
+	if !strings.HasPrefix(ac.currentSlot, "__debug__") {
+		if _, s, _ := selectCurrentGoal(ac.dailyPlan, tod); s != "" {
+			liveSlot = s
+		}
+	}
+
 	return ReactiveInput{
 		AgentID:           agentID,
 		AgentName:         agentName,
@@ -211,7 +221,7 @@ func (r *reactiveRunner) buildInput(agentID string, ac *agentContext, trigger Re
 		CurrentAction:     currentAction,
 		ElapsedSec:        elapsedSec,
 		ActionSrc:         actionSrc,
-		CurrentSlot:       ac.currentSlot,
+		CurrentSlot:       liveSlot,
 		DailyPlan:         plan,
 		Trigger:           trigger,
 		TriggerDetail:     detail,
