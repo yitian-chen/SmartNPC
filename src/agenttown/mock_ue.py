@@ -117,6 +117,23 @@ class ObjectInfo:
 
 
 @dataclass
+class AgentInfo:
+    """One agent entry from world_kb.yaml. Fields align with the MCP
+    Go-side worldkb.Agent struct (pkg/worldkb/types.go)."""
+    id: str
+    display_name: str = ""
+    description: str = ""
+    type: str = ""
+    profession: str = ""
+    personality: Dict[str, Any] = field(default_factory=dict)
+    initial_zone: str = ""
+    initial_position: List[float] = field(default_factory=lambda: [0, 0, 0])
+    actor_class: str = ""
+    action_table: str = ""
+    main_behavior_tree: str = ""
+
+
+@dataclass
 class WorldKB:
     """In-memory World Knowledge Base loaded from world_kb.yaml.
 
@@ -128,6 +145,9 @@ class WorldKB:
     """
     zones: Dict[str, ZoneInfo] = field(default_factory=dict)
     objects: Dict[str, ObjectInfo] = field(default_factory=dict)
+    agents: List[AgentInfo] = field(default_factory=list)
+    narrative: Dict[str, str] = field(default_factory=dict)
+    version: str = ""
 
     def zone_entry(self, zone_id: str) -> Optional[List[float]]:
         z = self.zones.get(zone_id)
@@ -174,8 +194,12 @@ class WorldKB:
         return [oid for oid, obj in self.objects.items() if obj.zone_id == zone_id]
 
 
-def load_world_kb(path: str) -> WorldKB:
-    """Load world_kb.yaml into a WorldKB instance.
+def load_world_kb(path: str) -> Tuple[WorldKB, Dict[str, Any]]:
+    """Load world_kb.yaml into a WorldKB instance + the raw yaml dict.
+
+    The raw dict is kept so _send_world_kb can split it back into
+    generated/authored halves for the MCP merge pipeline (which needs
+    the two blobs separately).
 
     Raises FileNotFoundError / ValueError on structural errors. Callers
     should treat any exception as fatal — Mock UE cannot resolve semantic
@@ -231,7 +255,28 @@ def load_world_kb(path: str) -> WorldKB:
             tags=list(raw_obj.get("tags", []) or []),
         )
 
-    return kb
+    for raw_agent in data.get("agents", []) or []:
+        aid = raw_agent.get("id", "")
+        if not aid:
+            raise ValueError(f"agent missing id in {path}: {raw_agent}")
+        kb.agents.append(AgentInfo(
+            id=aid,
+            display_name=raw_agent.get("display_name", aid),
+            description=raw_agent.get("description", ""),
+            type=raw_agent.get("type", ""),
+            profession=raw_agent.get("profession", ""),
+            personality=raw_agent.get("personality", {}) or {},
+            initial_zone=raw_agent.get("initial_zone", ""),
+            initial_position=list(raw_agent.get("initial_position", [0, 0, 0])),
+            actor_class=raw_agent.get("actor_class", ""),
+            action_table=raw_agent.get("action_table", ""),
+            main_behavior_tree=raw_agent.get("main_behavior_tree", ""),
+        ))
+
+    kb.narrative = data.get("narrative", {}) or {}
+    kb.version = data.get("version", "")
+
+    return kb, data
 
 # Composite action nominal durations (seconds) when not given explicitly
 COMPOSITE_DEFAULT_SEC = 1800.0  # 30 min
@@ -369,12 +414,16 @@ class MockUE:
 
         # World KB — single source of truth for zone/location/object data.
         # Fail-fast: Mock UE cannot resolve semantic targets without it.
+        # `kb` is the typed view (queries, NPC init); `kb_yaml` is the raw
+        # dict kept for _send_world_kb, which splits it back into
+        # generated/authored halves for the MCP merge pipeline.
         try:
-            self.kb = load_world_kb(world_kb_path)
+            self.kb, self.kb_yaml = load_world_kb(world_kb_path)
         except Exception as e:
             raise SystemExit(f"[FATAL] failed to load world_kb from {world_kb_path!r}: {e}")
         logger.info(f"[KB] loaded {len(self.kb.zones)} zones, "
-                    f"{len(self.kb.objects)} objects from {world_kb_path}")
+                    f"{len(self.kb.objects)} objects, {len(self.kb.agents)} agents "
+                    f"from {world_kb_path}")
 
         # Seed NPC defaults. KB does not yet expose agent defaults, so we
         # use the long-standing defaults (H-01 in main_workshop). When KB
