@@ -43,6 +43,11 @@ const reactiveCallTimeout = 20 * time.Second
 
 // reactiveRunner 持有反应层运行所需的全部依赖。
 // 通过 package-level `reactiveRunnerRef` 在 main() 中注入，WS handler 调用。
+//
+// registry 不在此缓存：main() 中 capabilityRegistryRef 的赋值晚于
+// reactiveRunnerRef 的构造，且 UE 可能在运行时重连推送新的
+// capability_registry。因此 trigger() 时通过 capabilityRegistryRef
+// 取最新引用（nil 表示未启用 capability 过滤，降级为内置硬编码列表）。
 type reactiveRunner struct {
 	ollama *ollama.Client
 	ws     *wsserver.Server
@@ -135,8 +140,9 @@ func (r *reactiveRunner) trigger(agentID string, ac *agentContext, trigger React
 	r.logger.Info("[反应层/RESPONSE]",
 		"agent_id", agentID, "trigger", trigger, "raw", raw)
 
-	// 5. 解析决策
-	dec := parseReactiveDecision(raw)
+	// 5. 解析决策（registry 通过 capabilityRegistryRef 懒取，支持 UE 运行时重连推送新 capability）
+	registry := capabilityRegistryRef
+	dec := parseReactiveDecision(raw, registry, agentID)
 	r.logger.Info("[反应层/决策]",
 		"agent_id", agentID, "reaction", dec.Reaction, "reason", dec.Reason,
 		"trigger", trigger,
@@ -191,21 +197,25 @@ func (r *reactiveRunner) buildInput(agentID string, ac *agentContext, trigger Re
 		}
 	}
 
+	// 派生 reaction=act 可用 cmd 列表文本，供 prompt 注入。
+	availableCmds := buildReactiveCmdList(capabilityRegistryRef, agentID)
+
 	return ReactiveInput{
-		AgentID:       agentID,
-		AgentName:     agentName,
-		TimeOfDay:     tod,
-		Zone:          zone,
-		Energy:        energy,
-		Fatigue:       fatigue,
-		Health:        health,
-		CurrentAction: currentAction,
-		ElapsedSec:    elapsedSec,
-		ActionSrc:     actionSrc,
-		CurrentSlot:   ac.currentSlot,
-		DailyPlan:     plan,
-		Trigger:       trigger,
-		TriggerDetail: detail,
+		AgentID:           agentID,
+		AgentName:         agentName,
+		TimeOfDay:         tod,
+		Zone:              zone,
+		Energy:            energy,
+		Fatigue:           fatigue,
+		Health:            health,
+		CurrentAction:     currentAction,
+		ElapsedSec:        elapsedSec,
+		ActionSrc:         actionSrc,
+		CurrentSlot:       ac.currentSlot,
+		DailyPlan:         plan,
+		Trigger:           trigger,
+		TriggerDetail:     detail,
+		AvailableCmdsText: availableCmds,
 	}
 }
 
@@ -283,7 +293,8 @@ func (r *reactiveRunner) execute(agentID string, ac *agentContext, dec ReactiveD
 			_ = r.ws.SendStopAction(agentID, actionID)
 		}
 		// 映射并下发新 action
-		cmd, params, err := mapReactionAction(*dec.Action, r.kb)
+		// 反应层允许的 cmd 子集由 isValidReactionCmd 从 registry 派生。
+		cmd, params, err := mapReactionAction(*dec.Action, agentID, r.kb, capabilityRegistryRef)
 		if err != nil {
 			r.logger.Warn("[反应层] action 映射失败",
 				"agent_id", agentID, "cmd", dec.Action.Cmd, "err", err)
@@ -376,12 +387,13 @@ func (r *reactiveRunner) execute(agentID string, ac *agentContext, dec ReactiveD
 }
 
 // mapReactionAction 把 ReactionAction 映射到 ws.SendAction 需要的 (cmd, params)。
-// 反应层允许的 cmd 子集由 isValidReactionCmd 限制（move_to_location /
-// move_to_agent / speak / emote / wait / interact），与战术层 mapTacticalAction
-// 的对应分支共享映射逻辑。
-func mapReactionAction(ra ReactionAction, kb *worldkb.KB) (string, map[string]any, error) {
+// 反应层允许的 cmd 子集由 isValidReactionCmd 限制（registry != nil 时从 registry
+// 的原子 cmd 派生，nil 时降级为内置硬编码列表），与战术层 mapTacticalAction
+// 的对应分支共享映射逻辑。registry/agentID 透传给 mapTacticalAction 以支持
+// 新 cmd 的 passthrough 默认分支。
+func mapReactionAction(ra ReactionAction, agentID string, kb *worldkb.KB, registry *CapabilityRegistry) (string, map[string]any, error) {
 	pa := plannedAction{Action: ra.Cmd, Params: ra.Params}
-	cmd, params, err := mapTacticalAction(pa, kb)
+	cmd, params, err := mapTacticalAction(pa, agentID, kb, registry)
 	if err != nil {
 		return "", nil, fmt.Errorf("map reaction action %q: %w", ra.Cmd, err)
 	}

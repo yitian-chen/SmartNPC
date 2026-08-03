@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"strings"
 
+	"github.com/AgentTown/agenttown-mcp/adapters/agenttown/tools"
 	"github.com/AgentTown/agenttown-mcp/pkg/protocol"
 	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
 )
@@ -32,66 +33,157 @@ const (
 	sourceTactical actionSource = "tactical"
 )
 
-// tacticalToolMeta 是战术层可选用工具的元数据表，同时是 prompt 工具列表段、
-// action 合法性校验、cmd 依赖关系的单一来源（替代原 tacticalValidActions
-// 全局 map + tacticalPromptTemplate 硬编码 bullet 列表）。
-//
-// 顺序即 prompt 中展示的顺序；scan_area/stop 不在此表（战术层不可排队）。
-var tacticalToolMeta = []struct {
+// tacticalToolEntry 是战术层 prompt 工具列表段的单条目，由 buildTacticalToolEntries
+// 产出。Name 是 LLM 看到的工具名（snake_case），RequiredCmd 是对应 UE cmd
+// （PascalCase），Desc/Params 是 prompt 中展示的中文描述与 params 示例。
+type tacticalToolEntry struct {
 	Name        string
-	RequiredCmd string // 该工具依赖的 UE cmd；"" 表示不依赖 UE（理论上不会出现在此表）
-	Desc        string // prompt 中的工具描述
-	Params      string // prompt 中的 params 示例
+	RequiredCmd string
+	Desc        string
+	Params      string
+}
+
+// tacticalToolOverride 是内置 14 工具的 prompt 文案覆盖表（hand-tuned 中文
+// 描述与 params 示例）。键为 tool_name（snake_case）。
+//
+// UE 通过 capability_registry 新推送的 cmd 不在此表内：其 Desc/Params 由
+// CapabilityAction.Description 与参数 schema 派生（见 buildTacticalToolEntries）。
+// 内置工具保留人工调优的中文文案，确保 prompt 质量稳定；新 cmd 文案质量
+// 依赖 UE 推送的 description 字段，但功能上不受影响。
+var tacticalToolOverride = map[string]struct {
+	Desc   string
+	Params string
 }{
-	// Atomic tools (8)
-	{"move_to_location", protocol.CmdMoveToLocation, "移动到目标位置", `{"target":"区域或位置id"}`},
-	{"move_to_agent", protocol.CmdMoveToAgent, "跟随目标agent", `{"target_agent_id":"...","speed":"walk|run"}`},
-	{"turn_to", protocol.CmdTurnTo, "转向目标", `{"target_agent_id":"实体id"} 或 {"direction":[dx,dy,dz]}`},
-	{"play_montage", protocol.CmdPlayMontage, "播放蒙太奇", `{"montage_id":"...","wait_finish":true}`},
-	{"speak", protocol.CmdSpeak, "说话", `{"content":"...","target_agent_id":"目标agent_id（可空）"}`},
-	{"emote", protocol.CmdEmote, "表达情绪", `{"emotion":"happy|sad|...","mode":"oneshot|sustained"}`},
-	{"interact", protocol.CmdInteractSmartObject, "与智能物体交互", `{"target_object_id":"...","interaction":"动词"}`},
-	{"wait", protocol.CmdWait, "原地等待", `{"duration_sec":秒数}`},
-	// Composite tools (6)
-	{"work_at_workbench", protocol.CmdWorkAtWorkbench, "在工作台装配", `{"target_object_id":"工作台id","duration_sec":秒数}`},
-	{"work_at_workshop", protocol.CmdWorkAtWorkshop, "车间例行工作", `{}`},
-	{"chat_with", protocol.CmdChatWith, "与其他agent聊天", `{"target_agent_id":"...","topic":"话题（可选）"}`},
-	{"repair_target", protocol.CmdRepairTarget, "修理其他agent", `{"target_agent_id":"...","tool_id":"工具id（可选）"}`},
-	{"charge_at_station", protocol.CmdChargeAtStation, "充电", `{"target_object_id":"充电站id（可空）"}`},
-	{"patrol_zone", protocol.CmdPatrolZone, "巡逻区域", `{"target_zone":"区域id","duration_sec":秒数}`},
+	"move_to_location":  {"移动到目标位置", `{"target":"区域或位置id"}`},
+	"move_to_agent":     {"跟随目标agent", `{"target_agent_id":"...","speed":"walk|run"}`},
+	"turn_to":           {"转向目标", `{"target_agent_id":"实体id"} 或 {"direction":[dx,dy,dz]}`},
+	"play_montage":      {"播放蒙太奇", `{"montage_id":"...","wait_finish":true}`},
+	"speak":             {"说话", `{"content":"...","target_agent_id":"目标agent_id（可空）"}`},
+	"emote":             {"表达情绪", `{"emotion":"happy|sad|...","mode":"oneshot|sustained"}`},
+	"interact":          {"与智能物体交互", `{"target_object_id":"...","interaction":"动词"}`},
+	"wait":              {"原地等待", `{"duration_sec":秒数}`},
+	"work_at_workbench": {"在工作台装配", `{"target_object_id":"工作台id","duration_sec":秒数}`},
+	"work_at_workshop":  {"车间例行工作", `{}`},
+	"chat_with":         {"与其他agent聊天", `{"target_agent_id":"...","topic":"话题（可选）"}`},
+	"repair_target":     {"修理其他agent", `{"target_agent_id":"...","tool_id":"工具id（可选）"}`},
+	"charge_at_station": {"充电", `{"target_object_id":"充电站id（可空）"}`},
+	"patrol_zone":       {"巡逻区域", `{"target_zone":"区域id","duration_sec":秒数}`},
 }
 
 // tacticalActionAvailable 判断 action 是否为战术层可用工具，且其依赖的
 // cmd 在 registry 中对 agentID 有效。registry == nil 时降级为仅检查是否
 // 内置战术工具（向后兼容测试与未启用 capability 的场景）。
+//
+// scan_area / stop 不属于战术层排队工具，无论 registry 是否 nil 都返回 false。
 func tacticalActionAvailable(action, agentID string, registry *CapabilityRegistry) bool {
-	for _, tm := range tacticalToolMeta {
-		if tm.Name != action {
-			continue
+	if registry == nil {
+		for _, spec := range tools.BuiltinToolSpecs() {
+			if spec.Name == action && spec.Name != "scan_area" && spec.Name != "stop" {
+				return true
+			}
 		}
-		if registry == nil {
+		return false
+	}
+	for _, act := range registry.EffectiveActions(agentID) {
+		if tools.CmdToToolName(act.Cmd) == action {
 			return true
 		}
-		return tm.RequiredCmd == "" || registry.HasCmd(agentID, tm.RequiredCmd)
 	}
 	return false
 }
 
-// buildTacticalToolList 按 registry 对 agentID 的有效能力集过滤
-// tacticalToolMeta，构造 prompt 中的工具 bullet 列表。registry == nil
-// 时返回全量列表（向后兼容）。
+// buildTacticalToolList 按 registry 对 agentID 的有效能力集构造 prompt 中的
+// 工具 bullet 列表。registry == nil 时降级为全量内置工具（向后兼容）。
 // 返回 (拼接好的 bullet 段, 可用工具数)。
 func buildTacticalToolList(agentID string, registry *CapabilityRegistry) (string, int) {
-	lines := make([]string, 0, len(tacticalToolMeta))
-	count := 0
-	for _, tm := range tacticalToolMeta {
-		if registry != nil && !registry.HasCmd(agentID, tm.RequiredCmd) {
+	entries := buildTacticalToolEntries(agentID, registry)
+	lines := make([]string, 0, len(entries))
+	for _, e := range entries {
+		lines = append(lines, fmt.Sprintf("- %s: %s。params: %s", e.Name, e.Desc, e.Params))
+	}
+	return strings.Join(lines, "\n"), len(entries)
+}
+
+// buildTacticalToolEntries 构造战术层工具列表的中间表示。
+//
+// registry != nil 时从 EffectiveActions(agentID) 派生：内置工具的 Desc/Params
+// 走 tacticalToolOverride 覆盖文案，新 cmd 从 CapabilityAction.Description
+// 与参数 schema 派生。
+//
+// registry == nil 时降级为 BuiltinToolSpecs 全量（去掉 scan_area/stop），
+// 文案一律走 tacticalToolOverride（覆盖文案对内置工具必存在）。
+func buildTacticalToolEntries(agentID string, registry *CapabilityRegistry) []tacticalToolEntry {
+	if registry == nil {
+		specs := tools.BuiltinToolSpecs()
+		out := make([]tacticalToolEntry, 0, len(specs))
+		for _, spec := range specs {
+			if spec.Name == "scan_area" || spec.Name == "stop" {
+				continue
+			}
+			entry := tacticalToolEntry{Name: spec.Name, RequiredCmd: spec.RequiredCmd}
+			if ov, ok := tacticalToolOverride[spec.Name]; ok {
+				entry.Desc, entry.Params = ov.Desc, ov.Params
+			} else {
+				// 防御性：覆盖表遗漏时降级为工具名 + {}（不应到达，覆盖表应齐全）
+				entry.Desc, entry.Params = spec.Name, "{}"
+			}
+			out = append(out, entry)
+		}
+		return out
+	}
+	actions := registry.EffectiveActions(agentID)
+	out := make([]tacticalToolEntry, 0, len(actions))
+	for _, act := range actions {
+		name := tools.CmdToToolName(act.Cmd)
+		if name == "scan_area" || name == "stop" {
 			continue
 		}
-		lines = append(lines, fmt.Sprintf("- %s: %s。params: %s", tm.Name, tm.Desc, tm.Params))
-		count++
+		entry := tacticalToolEntry{Name: name, RequiredCmd: act.Cmd}
+		if ov, ok := tacticalToolOverride[name]; ok {
+			entry.Desc, entry.Params = ov.Desc, ov.Params
+		} else {
+			entry.Desc = act.Description
+			if entry.Desc == "" {
+				entry.Desc = name
+			}
+			entry.Params = buildToolParamHint(act.Params)
+		}
+		out = append(out, entry)
 	}
-	return strings.Join(lines, "\n"), count
+	return out
+}
+
+// buildToolParamHint 从 CapabilityParam 列表派生 prompt 中的 params 示例文本。
+// 例：[{Name:"target_object_id",Type:"string",Required:true},{Name:"duration_sec",Type:"number"}]
+// → `{"target_object_id":"...","duration_sec":秒数}`
+func buildToolParamHint(params []protocol.CapabilityParam) string {
+	if len(params) == 0 {
+		return "{}"
+	}
+	parts := make([]string, 0, len(params))
+	for _, p := range params {
+		parts = append(parts, fmt.Sprintf("%s:%s", p.Name, paramPlaceholder(p)))
+	}
+	return "{" + strings.Join(parts, ",") + "}"
+}
+
+// paramPlaceholder 按 CapabilityParam.Type 返回 prompt 占位符文本。
+func paramPlaceholder(p protocol.CapabilityParam) string {
+	switch p.Type {
+	case "number":
+		return "秒数"
+	case "bool":
+		return "true|false"
+	case "vector":
+		return "[x,y,z]"
+	case "enum":
+		if len(p.EnumValues) > 0 {
+			return strings.Join(p.EnumValues, "|")
+		}
+		return "..."
+	default:
+		return "..."
+	}
 }
 
 // tacticalPromptBody 是 prompt 的固定骨架，%s 占位符依次为：
@@ -481,7 +573,12 @@ func filterValidActions(actions []plannedAction, registry *CapabilityRegistry, a
 // 复合工具 → 各自 Composite cmd；原子工具 → 各自 Atomic cmd；
 // move_to_location 需 KB 解析坐标。映射规则与 composite.go/atomic.go
 // 工具处理函数一致。非法/不可排队工具返回 err，调用方跳过。
-func mapTacticalAction(pa plannedAction, kb *worldkb.KB) (cmd string, params map[string]any, err error) {
+//
+// registry != nil 时，未匹配内置 case 的 action 走默认 passthrough 路径：
+// 从 registry.EffectiveActions(agentID) 反查 cmd，params 原样转发。这覆盖
+// UE 通过 capability_registry 新推送的 cmd（无强类型 Go struct，依赖通用工具
+// 注册路径）。registry == nil 时默认分支返回 err（向后兼容旧测试）。
+func mapTacticalAction(pa plannedAction, agentID string, kb *worldkb.KB, registry *CapabilityRegistry) (cmd string, params map[string]any, err error) {
 	switch pa.Action {
 	// ─── Composite tools → 各自 cmd ───
 	case "work_at_workbench":
@@ -589,6 +686,21 @@ func mapTacticalAction(pa plannedAction, kb *worldkb.KB) (cmd string, params map
 			"duration_sec": toFloat(pa.Params["duration_sec"]),
 		}, nil
 	default:
+		// 新 cmd passthrough：从 registry 反查 cmd，params 原样转发
+		if registry == nil {
+			return "", nil, fmt.Errorf("unknown/unsupported tactical action: %s", pa.Action)
+		}
+		for _, act := range registry.EffectiveActions(agentID) {
+			if tools.CmdToToolName(act.Cmd) != pa.Action {
+				continue
+			}
+			// 复制 params 避免调用方误改原 map
+			out := make(map[string]any, len(pa.Params))
+			for k, v := range pa.Params {
+				out[k] = v
+			}
+			return act.Cmd, out, nil
+		}
 		return "", nil, fmt.Errorf("unknown/unsupported tactical action: %s", pa.Action)
 	}
 }

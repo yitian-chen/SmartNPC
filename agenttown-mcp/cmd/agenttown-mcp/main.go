@@ -601,7 +601,7 @@ func (a *agentContext) popAndSendQueueAction(ctx context.Context, agentID string
 	a.actionQueue = a.actionQueue[1:]
 	a.mu.Unlock()
 
-	cmd, params, err := mapTacticalAction(pa, kb)
+	cmd, params, err := mapTacticalAction(pa, agentID, kb, capabilityRegistryRef)
 	if err != nil {
 		logger.Warn("[战术层] action 映射失败，跳过", "agent_id", agentID, "action", pa.Action, "err", err)
 		// 跳过这一个，signal 让 worker 处理下一个（若队列空则触发 refill）

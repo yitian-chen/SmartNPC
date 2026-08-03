@@ -216,7 +216,7 @@ func TestStreamAccumulator_FiltersInvalidAction(t *testing.T) {
 func TestMapTacticalAction_Composite(t *testing.T) {
 	kb := loadTestKB(t)
 	pa := plannedAction{Action: "work_at_workbench", Params: map[string]any{"target_object_id": "workbench_01", "duration_sec": float64(14400)}}
-	cmd, params, err := mapTacticalAction(pa, kb)
+	cmd, params, err := mapTacticalAction(pa, "", kb, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -234,7 +234,7 @@ func TestMapTacticalAction_Composite(t *testing.T) {
 func TestMapTacticalAction_MoveToResolvesKB(t *testing.T) {
 	kb := loadTestKB(t)
 	pa := plannedAction{Action: "move_to_location", Params: map[string]any{"target": "main_workshop"}}
-	cmd, params, err := mapTacticalAction(pa, kb)
+	cmd, params, err := mapTacticalAction(pa, "", kb, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -253,7 +253,7 @@ func TestMapTacticalAction_MoveToResolvesKB(t *testing.T) {
 func TestMapTacticalAction_MoveToUnknownTarget(t *testing.T) {
 	kb := loadTestKB(t)
 	pa := plannedAction{Action: "move_to_location", Params: map[string]any{"target": "nonexistent_place"}}
-	if _, _, err := mapTacticalAction(pa, kb); err == nil {
+	if _, _, err := mapTacticalAction(pa, "", kb, nil); err == nil {
 		t.Fatal("expected error for unknown target")
 	}
 }
@@ -261,7 +261,7 @@ func TestMapTacticalAction_MoveToUnknownTarget(t *testing.T) {
 func TestMapTacticalAction_Speak(t *testing.T) {
 	kb := loadTestKB(t)
 	pa := plannedAction{Action: "speak", Params: map[string]any{"content": "你好", "target_agent_id": "H-02"}}
-	cmd, params, err := mapTacticalAction(pa, kb)
+	cmd, params, err := mapTacticalAction(pa, "", kb, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -279,7 +279,7 @@ func TestMapTacticalAction_Speak(t *testing.T) {
 func TestMapTacticalAction_EmoteDefaultMode(t *testing.T) {
 	kb := loadTestKB(t)
 	pa := plannedAction{Action: "emote", Params: map[string]any{"emotion": "happy"}}
-	cmd, params, err := mapTacticalAction(pa, kb)
+	cmd, params, err := mapTacticalAction(pa, "", kb, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -294,7 +294,7 @@ func TestMapTacticalAction_EmoteDefaultMode(t *testing.T) {
 func TestMapTacticalAction_EmoteSustainedMode(t *testing.T) {
 	kb := loadTestKB(t)
 	pa := plannedAction{Action: "emote", Params: map[string]any{"emotion": "sad", "mode": "sustained"}}
-	_, params, err := mapTacticalAction(pa, kb)
+	_, params, err := mapTacticalAction(pa, "", kb, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -306,7 +306,7 @@ func TestMapTacticalAction_EmoteSustainedMode(t *testing.T) {
 func TestMapTacticalAction_UnknownAction(t *testing.T) {
 	kb := loadTestKB(t)
 	pa := plannedAction{Action: "fly_to", Params: map[string]any{}}
-	if _, _, err := mapTacticalAction(pa, kb); err == nil {
+	if _, _, err := mapTacticalAction(pa, "", kb, nil); err == nil {
 		t.Fatal("expected error for unknown action")
 	}
 }
@@ -628,6 +628,112 @@ func TestSlotDurationMinute(t *testing.T) {
 		got := slotDurationMinute(c.slot)
 		if got != c.want {
 			t.Errorf("slotDurationMinute(%q) = %d, want %d", c.slot, got, c.want)
+		}
+	}
+}
+
+// ─── 动态 cmd 派生（Phase 2） ────────────────────────────────
+
+// TestBuildTacticalToolList_NewCmdDerived verifies that a UE-pushed new cmd
+// (not in BuiltinToolSpecs) appears in the tactical prompt tool list with
+// Desc/Params derived from CapabilityAction metadata.
+func TestBuildTacticalToolList_NewCmdDerived(t *testing.T) {
+	reg := NewCapabilityRegistry()
+	reg.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
+		{Cmd: protocol.CmdMoveToLocation, Kind: "atomic"},
+		{
+			Cmd:         "WaveHand",
+			Kind:        "atomic",
+			Description: "挥手致意",
+			Params: []protocol.CapabilityParam{
+				{Name: "target_agent_id", Type: "string", Required: true},
+				{Name: "duration_sec", Type: "number"},
+			},
+		},
+	})
+	list, count := buildTacticalToolList("H-01", reg)
+	if count != 2 {
+		t.Fatalf("tool count=%d, want 2 (move_to_location + wave_hand)", count)
+	}
+	if !strings.Contains(list, "- wave_hand:") {
+		t.Errorf("tool list should contain wave_hand bullet, got: %s", list)
+	}
+	if !strings.Contains(list, "挥手致意") {
+		t.Errorf("tool list should contain derived Desc '挥手致意', got: %s", list)
+	}
+	// Params hint should include both param names
+	if !strings.Contains(list, "target_agent_id") || !strings.Contains(list, "duration_sec") {
+		t.Errorf("tool list should include param names, got: %s", list)
+	}
+}
+
+// TestTacticalActionAvailable_NewCmdAccepted verifies tacticalActionAvailable
+// accepts a UE-pushed new cmd via registry lookup.
+func TestTacticalActionAvailable_NewCmdAccepted(t *testing.T) {
+	reg := NewCapabilityRegistry()
+	reg.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
+		{Cmd: "WaveHand", Kind: "atomic"},
+	})
+	if !tacticalActionAvailable("wave_hand", "H-01", reg) {
+		t.Error("wave_hand should be available when registry declares WaveHand")
+	}
+	if tacticalActionAvailable("fly_to", "H-01", reg) {
+		t.Error("fly_to should not be available (not in registry)")
+	}
+}
+
+// TestMapTacticalAction_NewCmdPassthrough verifies mapTacticalAction passes
+// through params verbatim for a UE-pushed new cmd.
+func TestMapTacticalAction_NewCmdPassthrough(t *testing.T) {
+	reg := NewCapabilityRegistry()
+	reg.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
+		{Cmd: "WaveHand", Kind: "atomic"},
+	})
+	pa := plannedAction{Action: "wave_hand", Params: map[string]any{"target_agent_id": "H-02"}}
+	cmd, params, err := mapTacticalAction(pa, "H-01", nil, reg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cmd != "WaveHand" {
+		t.Errorf("cmd=%q, want WaveHand", cmd)
+	}
+	if params["target_agent_id"] != "H-02" {
+		t.Errorf("params=%v, want target_agent_id=H-02 passthrough", params)
+	}
+}
+
+// TestMapTacticalAction_NewCmdNilRegistryErrors verifies the default branch
+// returns an error when registry is nil (backward compat — unknown action).
+func TestMapTacticalAction_NewCmdNilRegistryErrors(t *testing.T) {
+	pa := plannedAction{Action: "wave_hand", Params: map[string]any{}}
+	if _, _, err := mapTacticalAction(pa, "", nil, nil); err == nil {
+		t.Fatal("expected error for unknown action with nil registry")
+	}
+}
+
+// TestBuildTacticalToolEntries_NilRegistryBuiltinFullSet verifies the nil
+// registry fallback returns all 14 built-in tools (minus scan_area/stop).
+func TestBuildTacticalToolEntries_NilRegistryBuiltinFullSet(t *testing.T) {
+	entries := buildTacticalToolEntries("", nil)
+	// 16 built-in specs - scan_area - stop = 14
+	if len(entries) != 14 {
+		t.Fatalf("nil registry entry count=%d, want 14 (all built-in minus scan_area/stop)", len(entries))
+	}
+	seen := make(map[string]bool)
+	for _, e := range entries {
+		seen[e.Name] = true
+	}
+	if seen["scan_area"] || seen["stop"] {
+		t.Errorf("scan_area/stop should not appear in tactical tool list")
+	}
+	for _, name := range []string{
+		"move_to_location", "move_to_agent", "turn_to", "play_montage",
+		"speak", "emote", "interact", "wait",
+		"work_at_workbench", "work_at_workshop", "chat_with", "repair_target",
+		"charge_at_station", "patrol_zone",
+	} {
+		if !seen[name] {
+			t.Errorf("missing built-in tool %q in nil-registry fallback", name)
 		}
 	}
 }

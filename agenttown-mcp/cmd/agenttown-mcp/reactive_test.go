@@ -93,7 +93,7 @@ func TestBuildReactivePrompt_EmptyTriggerDetail(t *testing.T) {
 // TestParseReactiveDecision_Continue verifies a clean continue decision.
 func TestParseReactiveDecision_Continue(t *testing.T) {
 	raw := `{"reaction":"continue","reason":"无需打断"}`
-	dec := parseReactiveDecision(raw)
+	dec := parseReactiveDecision(raw, nil, "")
 	if dec.Reaction != ReactionContinue {
 		t.Errorf("reaction: got %q, want continue", dec.Reaction)
 	}
@@ -108,7 +108,7 @@ func TestParseReactiveDecision_Continue(t *testing.T) {
 // TestParseReactiveDecision_ActValid verifies act with valid cmd + params.
 func TestParseReactiveDecision_ActValid(t *testing.T) {
 	raw := `{"reaction":"act","reason":"紧急避让","action":{"cmd":"move_to_location","params":{"target":"rest_area"}}}`
-	dec := parseReactiveDecision(raw)
+	dec := parseReactiveDecision(raw, nil, "")
 	if dec.Reaction != ReactionAct {
 		t.Errorf("reaction: got %q, want act", dec.Reaction)
 	}
@@ -124,7 +124,7 @@ func TestParseReactiveDecision_ActValid(t *testing.T) {
 // action field downgrades to interrupt.
 func TestParseReactiveDecision_ActMissingAction(t *testing.T) {
 	raw := `{"reaction":"act","reason":"想打断"}`
-	dec := parseReactiveDecision(raw)
+	dec := parseReactiveDecision(raw, nil, "")
 	if dec.Reaction != ReactionInterrupt {
 		t.Errorf("reaction: got %q, want interrupt (downgrade)", dec.Reaction)
 	}
@@ -140,7 +140,7 @@ func TestParseReactiveDecision_ActMissingAction(t *testing.T) {
 // cmd downgrades to interrupt.
 func TestParseReactiveDecision_ActInvalidCmd(t *testing.T) {
 	raw := `{"reaction":"act","reason":"x","action":{"cmd":"fly","params":{}}}`
-	dec := parseReactiveDecision(raw)
+	dec := parseReactiveDecision(raw, nil, "")
 	if dec.Reaction != ReactionInterrupt {
 		t.Errorf("reaction: got %q, want interrupt (invalid cmd downgrade)", dec.Reaction)
 	}
@@ -150,7 +150,7 @@ func TestParseReactiveDecision_ActInvalidCmd(t *testing.T) {
 // falls back to continue.
 func TestParseReactiveDecision_MalformedJSON(t *testing.T) {
 	raw := `这不是 JSON`
-	dec := parseReactiveDecision(raw)
+	dec := parseReactiveDecision(raw, nil, "")
 	if dec.Reaction != ReactionContinue {
 		t.Errorf("reaction: got %q, want continue (parse fail fallback)", dec.Reaction)
 	}
@@ -163,7 +163,7 @@ func TestParseReactiveDecision_MalformedJSON(t *testing.T) {
 // outside the enum falls back to continue.
 func TestParseReactiveDecision_UnknownReaction(t *testing.T) {
 	raw := `{"reaction":"dance","reason":"x"}`
-	dec := parseReactiveDecision(raw)
+	dec := parseReactiveDecision(raw, nil, "")
 	if dec.Reaction != ReactionContinue {
 		t.Errorf("reaction: got %q, want continue (unknown enum fallback)", dec.Reaction)
 	}
@@ -174,7 +174,7 @@ func TestParseReactiveDecision_UnknownReaction(t *testing.T) {
 
 func TestParseReactiveDecision_Replan(t *testing.T) {
 	raw := `{"reaction":"replan","reason":"fatigue=75 已突破警戒带，当前装配任务不合理"}`
-	dec := parseReactiveDecision(raw)
+	dec := parseReactiveDecision(raw, nil, "")
 	if dec.Reaction != ReactionReplan {
 		t.Errorf("reaction: got %q, want replan", dec.Reaction)
 	}
@@ -216,7 +216,7 @@ func TestBuildReactivePrompt_ReplanOption(t *testing.T) {
 // output is correctly extracted.
 func TestParseReactiveDecision_CodeFence(t *testing.T) {
 	raw := "```json\n{\"reaction\":\"interrupt\",\"reason\":\"体力过低\"}\n```"
-	dec := parseReactiveDecision(raw)
+	dec := parseReactiveDecision(raw, nil, "")
 	if dec.Reaction != ReactionInterrupt {
 		t.Errorf("reaction: got %q, want interrupt", dec.Reaction)
 	}
@@ -238,7 +238,7 @@ func TestParseReactiveDecision_AllEnums(t *testing.T) {
 		{`{"reaction":"replan","reason":"fatigue 过高"}`, ReactionReplan},
 	}
 	for _, c := range cases {
-		dec := parseReactiveDecision(c.raw)
+		dec := parseReactiveDecision(c.raw, nil, "")
 		if dec.Reaction != c.want {
 			t.Errorf("raw %q: reaction got %q, want %q", c.raw, dec.Reaction, c.want)
 		}
@@ -544,7 +544,7 @@ func TestMapReactionAction(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			cmd, _, err := mapReactionAction(c.ra, kb)
+			cmd, _, err := mapReactionAction(c.ra, "", kb, nil)
 			if c.wantErr {
 				if err == nil {
 					t.Fatal("expected error, got nil")
@@ -636,4 +636,153 @@ func mustMarshalPerception(t *testing.T, zone, tod string) json.RawMessage {
 		t.Fatalf("marshal perception: %v", err)
 	}
 	return b
+}
+
+// ─── 动态 cmd 派生（Phase 2） ────────────────────────────────
+
+// TestIsValidReactionCmd_RegistryDerived verifies isValidReactionCmd derives
+// the allowed list from registry's atomic cmds (minus reactionExcludedCmds).
+func TestIsValidReactionCmd_RegistryDerived(t *testing.T) {
+	reg := NewCapabilityRegistry()
+	reg.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
+		{Cmd: protocol.CmdMoveToLocation, Kind: "atomic"},
+		{Cmd: protocol.CmdSpeak, Kind: "atomic"},
+		{Cmd: protocol.CmdTurnTo, Kind: "atomic"},       // excluded
+		{Cmd: protocol.CmdWorkAtWorkbench, Kind: "composite"}, // composite excluded
+		{Cmd: "WaveHand", Kind: "atomic"},               // new cmd accepted
+	})
+	cases := []struct {
+		cmd  string
+		want bool
+	}{
+		{"move_to_location", true},
+		{"speak", true},
+		{"wave_hand", true},
+		{"turn_to", false},      // in reactionExcludedCmds
+		{"work_at_workbench", false}, // composite, not atomic
+		{"fly_to", false},      // not in registry
+	}
+	for _, c := range cases {
+		if got := isValidReactionCmd(c.cmd, reg, "H-01"); got != c.want {
+			t.Errorf("isValidReactionCmd(%q)=%v, want %v", c.cmd, got, c.want)
+		}
+	}
+}
+
+// TestIsValidReactionCmd_NilRegistryFallback verifies nil registry falls back
+// to the built-in hardcoded list (backward compat).
+func TestIsValidReactionCmd_NilRegistryFallback(t *testing.T) {
+	for _, cmd := range []string{"move_to_location", "move_to_agent", "speak", "emote", "wait", "interact"} {
+		if !isValidReactionCmd(cmd, nil, "") {
+			t.Errorf("nil registry: %q should be valid (built-in fallback)", cmd)
+		}
+	}
+	for _, cmd := range []string{"fly_to", "wave_hand", "work_at_workbench"} {
+		if isValidReactionCmd(cmd, nil, "") {
+			t.Errorf("nil registry: %q should NOT be valid (not in built-in fallback)", cmd)
+		}
+	}
+}
+
+// TestParseReactiveDecision_ActNewCmd verifies act with a UE-pushed new cmd
+// is accepted when registry declares it as atomic.
+func TestParseReactiveDecision_ActNewCmd(t *testing.T) {
+	reg := NewCapabilityRegistry()
+	reg.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
+		{Cmd: "WaveHand", Kind: "atomic"},
+	})
+	raw := `{"reaction":"act","reason":"打招呼","action":{"cmd":"wave_hand","params":{"target_agent_id":"H-02"}}}`
+	dec := parseReactiveDecision(raw, reg, "H-01")
+	if dec.Reaction != ReactionAct {
+		t.Errorf("reaction: got %q, want act", dec.Reaction)
+	}
+	if dec.Action == nil || dec.Action.Cmd != "wave_hand" {
+		t.Errorf("action: got %+v, want wave_hand", dec.Action)
+	}
+}
+
+// TestParseReactiveDecision_ActCompositeCmdDowngrades verifies act with a
+// composite cmd (e.g. work_at_workbench) downgrades to interrupt — reaction
+// layer only allows atomic short actions.
+func TestParseReactiveDecision_ActCompositeCmdDowngrades(t *testing.T) {
+	reg := NewCapabilityRegistry()
+	reg.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
+		{Cmd: protocol.CmdWorkAtWorkbench, Kind: "composite"},
+	})
+	raw := `{"reaction":"act","reason":"开工","action":{"cmd":"work_at_workbench","params":{}}}`
+	dec := parseReactiveDecision(raw, reg, "H-01")
+	if dec.Reaction != ReactionInterrupt {
+		t.Errorf("reaction: got %q, want interrupt (composite downgrade)", dec.Reaction)
+	}
+}
+
+// TestBuildReactiveCmdList_RegistryDerived verifies the prompt cmd list text
+// is derived from registry's atomic cmds (minus excluded).
+func TestBuildReactiveCmdList_RegistryDerived(t *testing.T) {
+	reg := NewCapabilityRegistry()
+	reg.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
+		{Cmd: protocol.CmdMoveToLocation, Kind: "atomic"},
+		{Cmd: protocol.CmdSpeak, Kind: "atomic"},
+		{Cmd: protocol.CmdTurnTo, Kind: "atomic"}, // excluded
+		{Cmd: "WaveHand", Kind: "atomic"},
+		{Cmd: protocol.CmdWorkAtWorkbench, Kind: "composite"}, // composite excluded
+	})
+	list := buildReactiveCmdList(reg, "H-01")
+	for _, want := range []string{"move_to_location", "speak", "wave_hand"} {
+		if !strings.Contains(list, want) {
+			t.Errorf("cmd list missing %q, got: %s", want, list)
+		}
+	}
+	if strings.Contains(list, "turn_to") {
+		t.Errorf("cmd list should exclude turn_to (reactionExcludedCmds), got: %s", list)
+	}
+	if strings.Contains(list, "work_at_workbench") {
+		t.Errorf("cmd list should exclude composite cmds, got: %s", list)
+	}
+}
+
+// TestBuildReactiveCmdList_NilRegistryFallback verifies nil registry falls
+// back to the built-in default list.
+func TestBuildReactiveCmdList_NilRegistryFallback(t *testing.T) {
+	list := buildReactiveCmdList(nil, "")
+	for _, want := range []string{"move_to_location", "move_to_agent", "speak", "emote", "wait", "interact"} {
+		if !strings.Contains(list, want) {
+			t.Errorf("nil fallback list missing %q, got: %s", want, list)
+		}
+	}
+}
+
+// TestBuildReactivePrompt_RegistryCmdsInjected verifies the prompt picks up
+// AvailableCmdsText from ReactiveInput (which buildInput derives from registry).
+func TestBuildReactivePrompt_RegistryCmdsInjected(t *testing.T) {
+	in := ReactiveInput{
+		AgentID:           "H-01",
+		TimeOfDay:         "14:30",
+		Zone:              "main_workshop",
+		AvailableCmdsText: "move_to_location / speak / wave_hand",
+	}
+	prompt := buildReactivePrompt(in)
+	if !strings.Contains(prompt, "move_to_location / speak / wave_hand") {
+		t.Errorf("prompt should inject AvailableCmdsText, got: %s", prompt)
+	}
+}
+
+// TestMapReactionAction_NewCmdPassthrough verifies mapReactionAction passes
+// through a UE-pushed new cmd via mapTacticalAction's default branch.
+func TestMapReactionAction_NewCmdPassthrough(t *testing.T) {
+	reg := NewCapabilityRegistry()
+	reg.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
+		{Cmd: "WaveHand", Kind: "atomic"},
+	})
+	ra := ReactionAction{Cmd: "wave_hand", Params: map[string]any{"target_agent_id": "H-02"}}
+	cmd, params, err := mapReactionAction(ra, "H-01", nil, reg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cmd != "WaveHand" {
+		t.Errorf("cmd=%q, want WaveHand", cmd)
+	}
+	if params["target_agent_id"] != "H-02" {
+		t.Errorf("params=%v, want passthrough", params)
+	}
 }

@@ -83,8 +83,8 @@ func TestCmdToToolName_Builtin(t *testing.T) {
 		{protocol.CmdSpeak, "speak"},
 	}
 	for _, c := range cases {
-		if got := cmdToToolName(c.cmd); got != c.want {
-			t.Errorf("cmdToToolName(%q)=%q, want %q", c.cmd, got, c.want)
+		if got := CmdToToolName(c.cmd); got != c.want {
+			t.Errorf("CmdToToolName(%q)=%q, want %q", c.cmd, got, c.want)
 		}
 	}
 }
@@ -97,8 +97,8 @@ func TestCmdToToolName_NewCmd(t *testing.T) {
 		{"Fly", "fly"},
 	}
 	for _, c := range cases {
-		if got := cmdToToolName(c.cmd); got != c.want {
-			t.Errorf("cmdToToolName(%q)=%q, want %q (pascalToSnake fallback)", c.cmd, got, c.want)
+		if got := CmdToToolName(c.cmd); got != c.want {
+			t.Errorf("CmdToToolName(%q)=%q, want %q (pascalToSnake fallback)", c.cmd, got, c.want)
 		}
 	}
 }

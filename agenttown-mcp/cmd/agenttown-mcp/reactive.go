@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/AgentTown/agenttown-mcp/adapters/agenttown/tools"
 	"github.com/AgentTown/agenttown-mcp/pkg/protocol"
 )
 
@@ -71,26 +72,30 @@ const periodicTriggerInterval = 4
 // ReactiveInput 聚合反应层决策所需的输入状态。由 main.go 从 agentContext
 // 提取后传入，避免 reactive.go 直接依赖 agentContext（便于单元测试）。
 type ReactiveInput struct {
-	AgentID       string
-	AgentName     string // agent 显示名（如"老陈"），用于 prompt 中角色称呼；空则降级为 AgentID
-	TimeOfDay     string // "HH:MM" 游戏时间
-	Zone          string // 当前区域 id
-	Energy        float64
-	Fatigue       float64
-	Health        float64
-	CurrentAction string // 当前在途 action 的可读描述（如 "WorkAtWorkbench(target_object_id=workbench_01)"），空=无在途
-	ElapsedSec    int    // 当前 action 已执行秒数
-	ActionSrc     string // 在途 action 来源：tactical / hermes / 空
-	CurrentSlot   string // 当前战术时段 "HH:MM-HH:MM"，空=未分解
-	DailyPlan     string // 战略层每日计划摘要（格式化字符串），空=未生成
-	Trigger       ReactiveTrigger
-	TriggerDetail string // 触发原因详情
+	AgentID           string
+	AgentName         string // agent 显示名（如"老陈"），用于 prompt 中角色称呼；空则降级为 AgentID
+	TimeOfDay         string // "HH:MM" 游戏时间
+	Zone              string // 当前区域 id
+	Energy            float64
+	Fatigue           float64
+	Health            float64
+	CurrentAction     string // 当前在途 action 的可读描述（如 "WorkAtWorkbench(target_object_id=workbench_01)"），空=无在途
+	ElapsedSec        int    // 当前 action 已执行秒数
+	ActionSrc         string // 在途 action 来源：tactical / hermes / 空
+	CurrentSlot       string // 当前战术时段 "HH:MM-HH:MM"，空=未分解
+	DailyPlan         string // 战略层每日计划摘要（格式化字符串），空=未生成
+	Trigger           ReactiveTrigger
+	TriggerDetail     string // 触发原因详情
+	AvailableCmdsText string // reaction=act 可用 cmd 列表文本，由 buildInput 从 registry 派生；空=降级为内置列表
 }
 
 // reactivePromptTemplate 是反应层 prompt 模板。用 fmt.Sprintf 填充。
 // 中文 prompt（qwen2.5 中文表现好），严格约束 JSON 输出。
 // agentName 由调用方注入，避免在此处硬编码"老陈"等具体角色名——
 // 反应层应服务于任意 agent，而非特定 NPC。
+//
+// 第 12 个占位符 %s 是 reaction=act 可用 cmd 列表，由 buildReactiveCmdList
+// 从 registry 派生（nil registry 时降级为内置原子 cmd 子集）。
 const reactivePromptTemplate = `你是 NPC %s 的反应决策模块。当前情况需要你判断是否打断当前行动。
 
 【当前状态】
@@ -126,11 +131,13 @@ const reactivePromptTemplate = `你是 NPC %s 的反应决策模块。当前情�
 请输出 JSON，格式严格如下，不要输出 JSON 以外的任何内容：
 {"reaction": "continue|observe|interrupt|act|replan", "reason": "简短理由", "action": {"cmd": "...", "params": {...}}}
 
-action 字段仅在 reaction=act 时填写，cmd 可选：move_to_location / move_to_agent / speak / emote / wait / interact。
+action 字段仅在 reaction=act 时填写，cmd 可选：%s。
 reaction=replan 时不要填 action 字段。
 不要输出 JSON 以外的任何内容。`
 
 // buildReactivePrompt 构造反应层 prompt。纯函数，便于测试。
+// AvailableCmdsText 由 buildInput 从 registry 派生后注入；空串降级为
+// 内置原子 cmd 列表（向后兼容）。
 func buildReactivePrompt(in ReactiveInput) string {
 	currentAction := in.CurrentAction
 	if currentAction == "" {
@@ -160,6 +167,10 @@ func buildReactivePrompt(in ReactiveInput) string {
 	if agentName == "" {
 		agentName = in.AgentID
 	}
+	cmds := in.AvailableCmdsText
+	if cmds == "" {
+		cmds = defaultReactiveCmdList()
+	}
 	return fmt.Sprintf(reactivePromptTemplate,
 		agentName,
 		in.TimeOfDay, in.Zone,
@@ -169,7 +180,17 @@ func buildReactivePrompt(in ReactiveInput) string {
 		slot,
 		plan,
 		detail,
+		cmds,
 	)
+}
+
+// defaultReactiveCmdList 是 registry == nil 时的降级 cmd 列表，与 Phase 1
+// 之前硬编码在 prompt 里的字符串保持一致（move_to_location / move_to_agent /
+// speak / emote / wait / interact）。
+func defaultReactiveCmdList() string {
+	return strings.Join([]string{
+		"move_to_location", "move_to_agent", "speak", "emote", "wait", "interact",
+	}, " / ")
 }
 
 // parseReactiveDecision 解析 Ollama 输出为 ReactiveDecision。
@@ -179,7 +200,10 @@ func buildReactivePrompt(in ReactiveInput) string {
 //   - reaction 字段不在枚举内 → 视为 continue
 //   - act 但 action 为空或 cmd 非法 → 降级为 interrupt
 //   - action.params 不完整 → 保留原样，由调用方在发 action 时兜底
-func parseReactiveDecision(raw string) ReactiveDecision {
+//
+// registry != nil 时，cmd 合法性由 isValidReactionCmd 从 registry 的原子
+// cmd 集合派生；nil 时降级为内置硬编码列表（向后兼容旧测试）。
+func parseReactiveDecision(raw string, registry *CapabilityRegistry, agentID string) ReactiveDecision {
 	// Ollama 有时会输出 ```json ... ``` 包裹的 JSON，提取出来。
 	cleaned := stripCodeFence(raw)
 	dec := ReactiveDecision{Reaction: ReactionContinue} // 默认 continue
@@ -196,7 +220,7 @@ func parseReactiveDecision(raw string) ReactiveDecision {
 	}
 	// act 但 action 缺失/非法 → 降级 interrupt
 	if dec.Reaction == ReactionAct {
-		if dec.Action == nil || !isValidReactionCmd(dec.Action.Cmd) {
+		if dec.Action == nil || !isValidReactionCmd(dec.Action.Cmd, registry, agentID) {
 			dec.Reaction = ReactionInterrupt
 			dec.Reason = "act_downgrade: " + dec.Reason
 			dec.Action = nil
@@ -222,17 +246,68 @@ func stripCodeFence(s string) string {
 	return strings.TrimSpace(s)
 }
 
+// reactionExcludedCmds 是反应层始终不允许的 cmd 集合（即使 registry 声明
+// 了对应原子 cmd）。这些 cmd 要么属于战术层排队动作（复合行为不应作为反应
+// 层的临时打断），要么在反应层无意义（turn_to 仅调整朝向、play_montage 是
+// 美术资源驱动）。这是 MCP 层决策，不由 UE 控制。
+var reactionExcludedCmds = map[string]struct{}{
+	protocol.CmdTurnTo:      {},
+	protocol.CmdPlayMontage: {},
+}
+
 // isValidReactionCmd 校验 reaction action 的 cmd 是否在允许列表内。
 // 仅原子短动作（不含复合动作——复合动作应由战术层规划）。
-// 工具名与 tacticalToolMeta / mapTacticalAction 保持一致：move_to_location
+//
+// registry != nil 时：从 registry.EffectiveActions(agentID) 取 Kind=="atomic"
+// 的 cmd，减去 reactionExcludedCmds，得到允许集合。
+// registry == nil 时：降级为内置硬编码列表（向后兼容旧测试）。
+//
+// 工具名与 tacticalToolOverride / mapTacticalAction 保持一致：move_to_location
 // 而非旧的 move_to，否则 reaction=act 给出 move_to_location 会被拒绝
 // 降级为 interrupt，使 act 决策永远走不到下发路径。
-func isValidReactionCmd(cmd string) bool {
-	switch cmd {
-	case "move_to_location", "move_to_agent", "speak", "emote", "wait", "interact":
-		return true
+func isValidReactionCmd(cmd string, registry *CapabilityRegistry, agentID string) bool {
+	if registry == nil {
+		switch cmd {
+		case "move_to_location", "move_to_agent", "speak", "emote", "wait", "interact":
+			return true
+		}
+		return false
+	}
+	for _, act := range registry.EffectiveActions(agentID) {
+		if act.Kind != "atomic" {
+			continue
+		}
+		if _, excluded := reactionExcludedCmds[act.Cmd]; excluded {
+			continue
+		}
+		if tools.CmdToToolName(act.Cmd) == cmd {
+			return true
+		}
 	}
 	return false
+}
+
+// buildReactiveCmdList 构造 prompt 中 reaction=act 可用 cmd 列表文本。
+// registry != nil 时从 EffectiveActions 派生（仅 atomic，去掉 excluded）；
+// nil 时降级为 defaultReactiveCmdList。
+func buildReactiveCmdList(registry *CapabilityRegistry, agentID string) string {
+	if registry == nil {
+		return defaultReactiveCmdList()
+	}
+	var names []string
+	for _, act := range registry.EffectiveActions(agentID) {
+		if act.Kind != "atomic" {
+			continue
+		}
+		if _, excluded := reactionExcludedCmds[act.Cmd]; excluded {
+			continue
+		}
+		names = append(names, tools.CmdToToolName(act.Cmd))
+	}
+	if len(names) == 0 {
+		return defaultReactiveCmdList()
+	}
+	return strings.Join(names, " / ")
 }
 
 // truncate 截断字符串到 maxLen，超出加省略号。

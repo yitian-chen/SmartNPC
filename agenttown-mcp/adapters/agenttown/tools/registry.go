@@ -162,7 +162,7 @@ func ReconcileTools(s *mcp.Server, ex Executor, kb *worldkb.KB, logger *slog.Log
 			continue
 		}
 		registerGenericActionTool(s, ex, logger, a)
-		newDynamic[cmdToToolName(a.Cmd)] = struct{}{}
+		newDynamic[CmdToToolName(a.Cmd)] = struct{}{}
 	}
 
 	// Step 4: drop previously-dynamic tools that are no longer present.
@@ -188,11 +188,13 @@ var (
 	dynamicToolMu    func() // nil in production; tests may set to sync.Mutex methods
 )
 
-// cmdToToolName maps a UE cmd (PascalCase) to the MCP tool name (snake_case).
+// CmdToToolName maps a UE cmd (PascalCase) to the MCP tool name (snake_case).
 // Built-in cmds consult BuiltinToolSpecs to honor non-trivial shortenings
 // (e.g. InteractSmartObject→interact). Cmds not in BuiltinToolSpecs fall
-// back to pascalToSnake.
-func cmdToToolName(cmd string) string {
+// back to pascalToSnake. Exported so the tactical/reactive layers in main
+// can derive the same tool_name ↔ cmd correspondence when filtering actions
+// or building prompts from the capability registry.
+func CmdToToolName(cmd string) string {
 	for _, spec := range BuiltinToolSpecs() {
 		if spec.RequiredCmd == cmd {
 			return spec.Name
@@ -243,7 +245,7 @@ func snakeToPascal(s string) string {
 // Uses the non-generic (*Server).AddTool method so the InputSchema can be
 // a runtime-constructed map[string]any rather than a compile-time struct.
 func registerGenericActionTool(s *mcp.Server, ex Executor, logger *slog.Logger, action protocol.CapabilityAction) {
-	toolName := cmdToToolName(action.Cmd)
+	toolName := CmdToToolName(action.Cmd)
 	schema := buildInputSchemaFromParams(action.Params)
 	s.AddTool(&mcp.Tool{
 		Name:        toolName,
