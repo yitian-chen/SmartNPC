@@ -39,7 +39,7 @@ func init() {
 }
 
 // debugKBResponse 是 /debug/kb 的响应体。结构故意保持紧凑——只暴露
-// 前端下拉需要的字段（id/display_name/zone_id/available_actions），
+// 前端下拉需要的字段（id/display_name/zone_id/available_interactions），
 // 不泄露坐标等内部数据。
 type debugKBResponse struct {
 	Zones   []debugKBZone   `json:"zones"`

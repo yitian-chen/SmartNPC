@@ -7,13 +7,16 @@ import (
 
 func TestAllToolInputsRequireAgentAndDecisionEpoch(t *testing.T) {
 	inputs := []any{
-		WorkAssembleInput{}, PatrolRouteInput{}, ChargeAtInput{}, RepairTargetInput{},
-		SocialChatWithInput{}, RestIdleInput{}, ArchiveResearchInput{},
-		MoveToInput{}, TurnToInput{}, SpeakInput{}, EmoteInput{}, InteractInput{},
-		WaitInput{}, ScanAreaInput{}, StopInput{},
+		// Composite tools (6)
+		WorkAtWorkbenchInput{}, WorkAtWorkshopInput{}, ChatWithInput{}, RepairTargetInput{},
+		ChargeAtStationInput{}, PatrolZoneInput{},
+		// Atomic tools (8) + control tools (stop/scan_area)
+		MoveToLocationInput{}, MoveToAgentInput{}, TurnToInput{}, PlayMontageInput{},
+		SpeakInput{}, EmoteInput{}, InteractInput{}, WaitInput{},
+		ScanAreaInput{}, StopInput{},
 	}
-	if len(inputs) != 15 {
-		t.Fatalf("input count=%d, want 15", len(inputs))
+	if len(inputs) != 16 {
+		t.Fatalf("input count=%d, want 16", len(inputs))
 	}
 	for _, input := range inputs {
 		typeOf := reflect.TypeOf(input)

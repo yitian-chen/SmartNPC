@@ -77,7 +77,7 @@ type ReactiveInput struct {
 	Energy        float64
 	Fatigue       float64
 	Health        float64
-	CurrentAction string // 当前在途 action 的可读描述（如 "work_assemble(target=workbench_01)"），空=无在途
+	CurrentAction string // 当前在途 action 的可读描述（如 "WorkAtWorkbench(target_object_id=workbench_01)"），空=无在途
 	ElapsedSec    int    // 当前 action 已执行秒数
 	ActionSrc     string // 在途 action 来源：tactical / hermes / 空
 	CurrentSlot   string // 当前战术时段 "HH:MM-HH:MM"，空=未分解

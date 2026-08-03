@@ -134,8 +134,8 @@ func TestHandleDebugKB_NilKBReturnsEmpty(t *testing.T) {
 func TestHandleDebugCap_ReturnsAgents(t *testing.T) {
 	reg := NewCapabilityRegistry()
 	reg.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
-		{Cmd: protocol.CmdMoveTo, Kind: "atomic", Description: "move"},
-		{Cmd: protocol.CmdStop, Kind: "atomic", Description: "stop"},
+		{Cmd: protocol.CmdMoveToLocation, Kind: "atomic", Description: "move"},
+		{Cmd: protocol.CmdSpeak, Kind: "atomic", Description: "speak"},
 	})
 	logger := slog.Default()
 
@@ -161,9 +161,9 @@ func TestHandleDebugCap_ReturnsAgents(t *testing.T) {
 	if len(sys) != 2 {
 		t.Fatalf("system actions len = %d; want 2", len(sys))
 	}
-	// Sorted by Cmd: MoveTo < Stop
-	if sys[0].Cmd != protocol.CmdMoveTo || sys[1].Cmd != protocol.CmdStop {
-		t.Errorf("system actions order = %s, %s; want MoveTo, Stop", sys[0].Cmd, sys[1].Cmd)
+	// Sorted by Cmd: MoveToLocation < Speak
+	if sys[0].Cmd != protocol.CmdMoveToLocation || sys[1].Cmd != protocol.CmdSpeak {
+		t.Errorf("system actions order = %s, %s; want MoveToLocation, Speak", sys[0].Cmd, sys[1].Cmd)
 	}
 }
 

@@ -201,7 +201,7 @@ func (r *reactiveRunner) buildInput(agentID string, ac *agentContext, trigger Re
 }
 
 // describeAction 把 cmd + params 构造为人类可读的描述，供反应层 prompt 使用。
-// 例如：move_to(target=workbench_01) / work_assemble(target=workbench_01, duration_min=60)
+// 例如：MoveToLocation(target=workbench_01) / WorkAtWorkbench(target_object_id=workbench_01, duration_sec=3600)
 func describeAction(cmd string, params map[string]any) string {
 	if cmd == "" {
 		return ""
@@ -209,8 +209,9 @@ func describeAction(cmd string, params map[string]any) string {
 	if len(params) == 0 {
 		return cmd
 	}
-	// 只提取关键参数：target / duration_min / dest / content
-	keys := []string{"target", "duration_min", "dest", "content", "emotion", "duration_sec"}
+	// 只提取关键参数：target / target_object_id / target_zone / target_agent_id /
+	// duration_sec / dest / content / emotion / topic
+	keys := []string{"target", "target_object_id", "target_zone", "target_agent_id", "dest", "duration_sec", "content", "emotion", "topic"}
 	var parts []string
 	for _, k := range keys {
 		if v, ok := params[k]; ok && v != nil {

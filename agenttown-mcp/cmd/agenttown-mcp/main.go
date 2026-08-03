@@ -58,7 +58,7 @@ type agentContext struct {
 	latestPerception      json.RawMessage
 	currentTask           *protocol.CurrentTaskProgress
 	currentActionID       string                 // 当前执行中的 action_id（mu 保护），空表示无执行中动作
-	currentActionCmd      string                 // mu 保护，当前在途 action 的 cmd（如 move_to / work_assemble），用于反应层 prompt
+	currentActionCmd      string                 // mu 保护，当前在途 action 的 cmd（如 MoveToLocation / WorkAtWorkbench），用于反应层 prompt
 	currentActionParams   map[string]any         // mu 保护，当前在途 action 的 params，用于反应层 prompt
 	currentActionStart    time.Time              // mu 保护，当前在途 action 的开始时间，用于反应层计算 elapsed
 	pendingActionTimeouts map[string]*time.Timer // action_id → 超时 timer（mu 保护），约定 §5.2 action_completed 1.5× 估值超时
@@ -1361,9 +1361,9 @@ func runStdio(ctx context.Context, logger *slog.Logger, server *mcp.Server) {
 // 联调 debug 端点：终端通过 curl POST 触发 MCP 向 UE 发 action_command。
 // 仅联调用，无认证。复用 ws.Call（含 action_started ACK 等待）。
 //
-// 请求体：{"agent_id":"H-01","cmd":"move_to","params":{"target":"workbench_01"}}
-// cmd 支持：move_to / speak / interact / wait / charge_at / work_assemble /
-// archive_research / rest_idle。其中 move_to 走 kb.GetPosition 解析坐标，
+// 请求体：{"agent_id":"H-01","cmd":"MoveToLocation","params":{"target":"workbench_01"}}
+// cmd 支持：MoveToLocation / Speak / InteractSmartObject / Wait / ChargeAtStation /
+// WorkAtWorkbench 等 14 cmd。其中 MoveToLocation 走 kb.GetPosition 解析坐标，
 // 其他 cmd 直接透传 params 给 ws.Call。
 //
 // force（默认 true）：先发 stop_action 停掉战术层正在执行的 idle wait，
@@ -1411,50 +1411,52 @@ type debugScheduleResponse struct {
 	Error        string          `json:"error,omitempty"`
 }
 
-// resolveDebugMoveTo 把 move_to 的参数解析成 ws.Call 需要的完整参数。
-// 与 tactical.go:433 的 move_to 分支保持一致：dest + target + kind + speed。
+// resolveDebugMoveToLocation 把 move_to_location 的参数解析成 ws.Call 需要的完整参数。
+// 与 tactical.go 的 move_to_location 分支保持一致：dest + speed。
 //
 // 支持两种输入模式：
-//  1. 直接传坐标：params.dest = [x, y, z]（UE5 cm）。跳过 kb 解析，
-//     kind 默认 "coord"，target 字段空。适用于临时调试未知位置。
+//  1. 直接传坐标：params.dest = [x, y, z]（UE5 cm）。跳过 kb 解析。
+//     适用于临时调试未知位置。
 //  2. 传 target id：params.target = "workbench_01" / "main_workshop"。
-//     走 kb.GetPosition 解析坐标和 kind。
+//     走 kb.GetPosition 解析坐标。
 //
 // 两种模式都没有 → 报错。同时传时 dest 优先（更明确）。
-func resolveDebugMoveTo(params map[string]any, kb *worldkb.KB) (map[string]any, error) {
+func resolveDebugMoveToLocation(params map[string]any, kb *worldkb.KB) (map[string]any, error) {
 	// 模式 1：直接传 dest 坐标
 	if dest, ok := params["dest"]; ok && dest != nil {
 		coords, err := parseDestCoords(dest)
 		if err != nil {
 			return nil, fmt.Errorf("parse dest: %w", err)
 		}
-		// 调用方可选传 target 作为日志标签（仅标识用途，不参与解析）
-		target, _ := params["target"].(string)
+		speed, _ := params["speed"].(string)
+		if speed == "" {
+			speed = "walk"
+		}
 		return map[string]any{
-			"dest":   coords,
-			"target": target, // 可空
-			"kind":   "coord",
-			"speed":  "walk",
+			"dest":  coords,
+			"speed": speed,
 		}, nil
 	}
 
 	// 模式 2：传 target id 走 kb 解析
 	target, _ := params["target"].(string)
 	if target == "" {
-		return nil, errors.New("move_to requires params.dest ([x,y,z]) or params.target (kb id)")
+		return nil, errors.New("move_to_location requires params.dest ([x,y,z]) or params.target (kb id)")
 	}
 	if kb == nil {
 		return nil, errors.New("world kb not loaded, cannot resolve target (use params.dest for raw coords)")
 	}
-	coord, kind, err := kb.GetPosition(target)
+	coord, _, err := kb.GetPosition(target)
 	if err != nil {
 		return nil, fmt.Errorf("resolve target %q: %w", target, err)
 	}
+	speed, _ := params["speed"].(string)
+	if speed == "" {
+		speed = "walk"
+	}
 	return map[string]any{
-		"dest":   []float64{coord[0], coord[1], coord[2]},
-		"target": target,
-		"kind":   kind,
-		"speed":  "walk",
+		"dest":  []float64{coord[0], coord[1], coord[2]},
+		"speed": speed,
 	}, nil
 }
 
@@ -1516,43 +1518,49 @@ func toFloat64(v any) (float64, error) {
 }
 
 // mapDebugCmd 把 debug 端点的 cmd 名映射到 protocol 常量。
-// 复合 action（charge_at / work_assemble / archive_research / rest_idle）统一走
-// CmdExecuteComposite，params 里需要带 name 字段（调用方传的 cmd 名）。
+// 每个 composite cmd 直接对应自己的 protocol 常量，不再走统一 ExecuteComposite。
 func mapDebugCmd(cmd string) (protoCmd string, ok bool) {
 	switch cmd {
-	case "move_to":
-		return protocol.CmdMoveTo, true
+	case "move_to_location":
+		return protocol.CmdMoveToLocation, true
+	case "move_to_agent":
+		return protocol.CmdMoveToAgent, true
+	case "turn_to":
+		return protocol.CmdTurnTo, true
+	case "play_montage":
+		return protocol.CmdPlayMontage, true
 	case "speak":
 		return protocol.CmdSpeak, true
+	case "emote":
+		return protocol.CmdEmote, true
 	case "interact":
 		return protocol.CmdInteractSmartObject, true
 	case "wait":
 		return protocol.CmdWait, true
-	case "charge_at", "work_assemble", "archive_research", "rest_idle":
-		return protocol.CmdExecuteComposite, true
+	case "work_at_workbench":
+		return protocol.CmdWorkAtWorkbench, true
+	case "work_at_workshop":
+		return protocol.CmdWorkAtWorkshop, true
+	case "chat_with":
+		return protocol.CmdChatWith, true
+	case "repair_target":
+		return protocol.CmdRepairTarget, true
+	case "charge_at_station":
+		return protocol.CmdChargeAtStation, true
+	case "patrol_zone":
+		return protocol.CmdPatrolZone, true
 	default:
 		return "", false
 	}
 }
 
-// buildDebugParams 根据 cmd 处理 params：move_to 走 kb 解析，
-// 复合 action 加 name 字段，其他直接透传。
+// buildDebugParams 根据 cmd 处理 params：move_to_location 走 kb 解析，
+// 其他直接透传（composite cmd 不再需要 name 字段，每个 cmd 独立）。
 func buildDebugParams(cmd string, params map[string]any, kb *worldkb.KB) (map[string]any, error) {
-	if cmd == "move_to" {
-		return resolveDebugMoveTo(params, kb)
+	if cmd == "move_to_location" {
+		return resolveDebugMoveToLocation(params, kb)
 	}
-	// 复合 action 需要 name 字段告诉 UE 执行哪个具体动作
-	switch cmd {
-	case "charge_at", "work_assemble", "archive_research", "rest_idle":
-		out := make(map[string]any, len(params)+1)
-		for k, v := range params {
-			out[k] = v
-		}
-		out["name"] = cmd
-		return out, nil
-	default:
-		return params, nil
-	}
+	return params, nil
 }
 
 func handleDebugAction(ctx context.Context, logger *slog.Logger, ws *wsserver.Server, kb *worldkb.KB, lookupAgent func(string) *agentContext, w http.ResponseWriter, r *http.Request) {

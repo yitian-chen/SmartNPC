@@ -77,25 +77,29 @@ type ToolSpec struct {
 // Order is irrelevant — ReconcileTools reads it as a set.
 func BuiltinToolSpecs() []ToolSpec {
 	return []ToolSpec{
-		// Atomic tools.
-		{Name: "move_to", RequiredCmd: protocol.CmdMoveTo},
+		// Atomic tools (8).
+		{Name: "move_to_location", RequiredCmd: protocol.CmdMoveToLocation},
+		{Name: "move_to_agent", RequiredCmd: protocol.CmdMoveToAgent},
 		{Name: "turn_to", RequiredCmd: protocol.CmdTurnTo},
+		{Name: "play_montage", RequiredCmd: protocol.CmdPlayMontage},
 		{Name: "speak", RequiredCmd: protocol.CmdSpeak},
 		{Name: "emote", RequiredCmd: protocol.CmdEmote},
 		{Name: "interact", RequiredCmd: protocol.CmdInteractSmartObject},
 		{Name: "wait", RequiredCmd: protocol.CmdWait},
-		{Name: "stop", RequiredCmd: protocol.CmdStop},
+		// stop has no UE cmd dependency — it sends the stop_action control
+		// message (TypeStopAction), not an action_command. RequiredCmd is
+		// "" so ReconcileTools never removes it based on capability state.
+		{Name: "stop", RequiredCmd: ""},
 		// scan_area has no UE cmd — it triggers an immediate
 		// perception_update via RequestScan, not an action_command.
 		{Name: "scan_area", RequiredCmd: ""},
-		// Composite tools — all translate to ExecuteComposite.
-		{Name: "work_assemble", RequiredCmd: protocol.CmdExecuteComposite},
-		{Name: "patrol_route", RequiredCmd: protocol.CmdExecuteComposite},
-		{Name: "charge_at", RequiredCmd: protocol.CmdExecuteComposite},
-		{Name: "repair_target", RequiredCmd: protocol.CmdExecuteComposite},
-		{Name: "social_chat_with", RequiredCmd: protocol.CmdExecuteComposite},
-		{Name: "rest_idle", RequiredCmd: protocol.CmdExecuteComposite},
-		{Name: "archive_research", RequiredCmd: protocol.CmdExecuteComposite},
+		// Composite tools (6) — each maps to its own Composite cmd.
+		{Name: "work_at_workbench", RequiredCmd: protocol.CmdWorkAtWorkbench},
+		{Name: "work_at_workshop", RequiredCmd: protocol.CmdWorkAtWorkshop},
+		{Name: "chat_with", RequiredCmd: protocol.CmdChatWith},
+		{Name: "repair_target", RequiredCmd: protocol.CmdRepairTarget},
+		{Name: "charge_at_station", RequiredCmd: protocol.CmdChargeAtStation},
+		{Name: "patrol_zone", RequiredCmd: protocol.CmdPatrolZone},
 	}
 }
 

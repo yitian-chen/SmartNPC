@@ -19,7 +19,7 @@ func TestBuildReactivePrompt_Defaults(t *testing.T) {
 		Energy:        45,
 		Fatigue:       30,
 		Health:        90,
-		CurrentAction: "work_assemble(target=workbench_01, duration_min=60)",
+		CurrentAction: "WorkAtWorkbench(target_object_id=workbench_01, duration_sec=3600)",
 		ElapsedSec:    120,
 		ActionSrc:     "tactical",
 		CurrentSlot:   "14:00-18:00",
@@ -30,7 +30,7 @@ func TestBuildReactivePrompt_Defaults(t *testing.T) {
 	prompt := buildReactivePrompt(in)
 	for _, want := range []string{
 		"14:30", "main_workshop", "45", "30", "90",
-		"work_assemble(target=workbench_01, duration_min=60)",
+		"WorkAtWorkbench(target_object_id=workbench_01, duration_sec=3600)",
 		"tactical", "14:00-18:00", "14:00-18:00 工作组装",
 		"zone rest_area→main_workshop",
 	} {
@@ -193,7 +193,7 @@ func TestBuildReactivePrompt_ReplanOption(t *testing.T) {
 		TimeOfDay:    "14:00",
 		Zone:         "main_workshop",
 		Energy:       80, Fatigue: 75, Health: 90,
-		CurrentAction: "work_assemble(target=workbench_01)",
+		CurrentAction: "WorkAtWorkbench(target_object_id=workbench_01)",
 		ActionSrc:     "tactical",
 		CurrentSlot:   "13:00-17:00",
 		DailyPlan:     "13:00-17:00 下午装配",
@@ -385,11 +385,11 @@ func TestDescribeAction(t *testing.T) {
 		want   string
 	}{
 		{"empty cmd", "", nil, ""},
-		{"no params", "wait", nil, "wait"},
-		{"empty params map", "move_to", map[string]any{}, "move_to"},
-		{"target", "move_to", map[string]any{"target": "workbench_01"}, "move_to(target=workbench_01)"},
-		{"multiple keys", "work_assemble", map[string]any{"target": "workbench_01", "duration_min": 60}, "work_assemble(target=workbench_01, duration_min=60)"},
-		{"irrelevant keys ignored", "speak", map[string]any{"foo": "bar", "content": "hello"}, "speak(content=hello)"},
+		{"no params", protocol.CmdWait, nil, protocol.CmdWait},
+		{"empty params map", protocol.CmdMoveToLocation, map[string]any{}, protocol.CmdMoveToLocation},
+		{"target", protocol.CmdMoveToLocation, map[string]any{"target": "workbench_01"}, "MoveToLocation(target=workbench_01)"},
+		{"multiple keys", protocol.CmdWorkAtWorkbench, map[string]any{"target_object_id": "workbench_01", "duration_sec": 3600}, "WorkAtWorkbench(target_object_id=workbench_01, duration_sec=3600)"},
+		{"irrelevant keys ignored", protocol.CmdSpeak, map[string]any{"foo": "bar", "content": "hello"}, "Speak(content=hello)"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -517,9 +517,9 @@ func TestMapReactionAction(t *testing.T) {
 		wantErr bool
 	}{
 		{
-			name:    "move_to valid",
-			ra:      ReactionAction{Cmd: "move_to", Params: map[string]any{"target": "workbench_01"}},
-			wantCmd: protocol.CmdMoveTo,
+			name:    "move_to_location valid",
+			ra:      ReactionAction{Cmd: "move_to_location", Params: map[string]any{"target": "workbench_01"}},
+			wantCmd: protocol.CmdMoveToLocation,
 		},
 		{
 			name:    "wait valid",
@@ -532,8 +532,8 @@ func TestMapReactionAction(t *testing.T) {
 			wantCmd: protocol.CmdSpeak,
 		},
 		{
-			name:    "move_to unknown target",
-			ra:      ReactionAction{Cmd: "move_to", Params: map[string]any{"target": "nonexistent"}},
+			name:    "move_to_location unknown target",
+			ra:      ReactionAction{Cmd: "move_to_location", Params: map[string]any{"target": "nonexistent"}},
 			wantErr: true,
 		},
 		{
@@ -570,8 +570,8 @@ func TestReactiveRunner_BuildInput(t *testing.T) {
 	ac.latestPerception = mustMarshalPerception(t, zone, "14:30")
 	ac.latestPhysical = &protocol.PhysicalState{Energy: 18, Fatigue: 85, Health: 75, JointWear: 20}
 	ac.currentActionID = "act_001"
-	ac.currentActionCmd = "work_assemble"
-	ac.currentActionParams = map[string]any{"target": "workbench_01", "duration_min": 60}
+	ac.currentActionCmd = protocol.CmdWorkAtWorkbench
+	ac.currentActionParams = map[string]any{"target_object_id": "workbench_01", "duration_sec": 3600}
 	ac.mu.Unlock()
 
 	in := r.buildInput("H-01", ac, TriggerPhysicalAlert, "energy 22→18")
@@ -594,7 +594,7 @@ func TestReactiveRunner_BuildInput(t *testing.T) {
 		t.Errorf("Health: got %v, want 75", in.Health)
 	}
 	// CurrentAction 现在是可读描述（cmd + 关键 params），不再是 actionID
-	if in.CurrentAction != "work_assemble(target=workbench_01, duration_min=60)" {
+	if in.CurrentAction != "WorkAtWorkbench(target_object_id=workbench_01, duration_sec=3600)" {
 		t.Errorf("CurrentAction: got %q, want readable description", in.CurrentAction)
 	}
 	if in.Trigger != TriggerPhysicalAlert {

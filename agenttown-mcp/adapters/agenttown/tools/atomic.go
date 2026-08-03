@@ -13,31 +13,47 @@ import (
 	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
 )
 
-// Atomic tools (§6.4) translate to their corresponding cmd. Each carries
-// agent_id as the first parameter. Semantic targets (e.g. "工作台") are
-// resolved to coordinates by Mock UE (which owns the world), so the Agent
-// never touches coordinates.
+// Atomic tools (§2.3) translate to their corresponding cmd. Each carries
+// agent_id as the first parameter. Per 约定13, static targets are resolved
+// to coordinates by the MCP layer (via World KB) before dispatch; dynamic
+// targets (target_agent_id) are passed through for UE-side Actor lookup.
 
-// MoveToInput — atomic: move to a semantic target.
-type MoveToInput struct {
-	AgentID       string `json:"agent_id" jsonschema:"the NPC's id"`
-	DecisionEpoch int64  `json:"decision_epoch" jsonschema:"required epoch from the current decision_context"`
-	Target        string `json:"target"   jsonschema:"semantic destination: zone id or location id, e.g. main_workshop, workbench_01"`
+// MoveToLocationInput — atomic: move to a static coordinate.
+// The MCP layer resolves the semantic target to a coordinate via the
+// World KB before dispatching. UE receives {dest, speed}.
+type MoveToLocationInput struct {
+	AgentID       string  `json:"agent_id" jsonschema:"the NPC's id"`
+	DecisionEpoch int64   `json:"decision_epoch" jsonschema:"required epoch from the current decision_context"`
+	Target        string  `json:"target" jsonschema:"semantic destination: zone id or object id, e.g. main_workshop, workbench_01"`
+	Speed         string  `json:"speed,omitempty" jsonschema:"walk or run (default walk)"`
 }
 
-// TurnToInput — atomic: face a target.
+// MoveToAgentInput — atomic: follow a dynamic agent target.
+// UE resolves target_agent_id to an Actor at runtime and follows it.
+type MoveToAgentInput struct {
+	AgentID        string  `json:"agent_id" jsonschema:"the NPC's id"`
+	DecisionEpoch  int64   `json:"decision_epoch" jsonschema:"required epoch from the current decision_context"`
+	TargetAgentID  string  `json:"target_agent_id" jsonschema:"the agent to follow"`
+	Speed          string  `json:"speed,omitempty" jsonschema:"walk or run (default walk)"`
+	StopDistance   float64 `json:"stop_distance,omitempty" jsonschema:"stopping distance in cm"`
+	KeepFollowing  bool    `json:"keep_following,omitempty" jsonschema:"whether to keep following if the target moves"`
+}
+
+// TurnToInput — atomic: face a target agent or direction.
 type TurnToInput struct {
-	AgentID       string `json:"agent_id" jsonschema:"the NPC's id"`
-	DecisionEpoch int64  `json:"decision_epoch" jsonschema:"required epoch from the current decision_context"`
-	Target        string `json:"target"   jsonschema:"entity id to face"`
+	AgentID        string  `json:"agent_id" jsonschema:"the NPC's id"`
+	DecisionEpoch  int64   `json:"decision_epoch" jsonschema:"required epoch from the current decision_context"`
+	TargetAgentID  string  `json:"target_agent_id,omitempty" jsonschema:"agent id to face (mutually exclusive with direction)"`
+	Direction      []float64 `json:"direction,omitempty" jsonschema:"target heading vector [dx,dy,dz] (mutually exclusive with target_agent_id)"`
 }
 
 // SpeakInput — atomic: say something.
 type SpeakInput struct {
-	AgentID       string `json:"agent_id" jsonschema:"the NPC's id"`
-	DecisionEpoch int64  `json:"decision_epoch" jsonschema:"required epoch from the current decision_context"`
-	Content       string `json:"content"  jsonschema:"what to say"`
-	Target        string `json:"target,omitempty" jsonschema:"target agent id (empty = to nearby)"`
+	AgentID        string  `json:"agent_id" jsonschema:"the NPC's id"`
+	DecisionEpoch  int64   `json:"decision_epoch" jsonschema:"required epoch from the current decision_context"`
+	Content        string  `json:"content"  jsonschema:"what to say"`
+	TargetAgentID  string  `json:"target_agent_id,omitempty" jsonschema:"target agent id (empty = public speech)"`
+	AudioURL       string  `json:"audio_url,omitempty" jsonschema:"TTS audio URL (empty = subtitle only)"`
 }
 
 // EmoteInput — atomic: express an emotion.
@@ -50,10 +66,10 @@ type EmoteInput struct {
 
 // InteractInput — atomic: interact with a smart object.
 type InteractInput struct {
-	AgentID       string `json:"agent_id" jsonschema:"the NPC's id"`
-	DecisionEpoch int64  `json:"decision_epoch" jsonschema:"required epoch from the current decision_context"`
-	ObjectID      string `json:"object_id" jsonschema:"smart object id, e.g. workbench_01"`
-	Action        string `json:"action"    jsonschema:"verb from the object's available_actions"`
+	AgentID         string `json:"agent_id" jsonschema:"the NPC's id"`
+	DecisionEpoch   int64  `json:"decision_epoch" jsonschema:"required epoch from the current decision_context"`
+	TargetObjectID  string `json:"target_object_id" jsonschema:"smart object id, e.g. workbench_01"`
+	Interaction     string `json:"interaction"    jsonschema:"verb from the object's available_interactions"`
 }
 
 // WaitInput — atomic: wait in place.
@@ -70,41 +86,80 @@ type ScanAreaInput struct {
 }
 
 // StopInput — atomic: stop the current action.
+// Note: stop does not translate to a CmdStop action_command; it sends the
+// stop_action control message (TypeStopAction). RequiredCmd is "" so
+// ReconcileTools never removes it based on capability_registry state.
 type StopInput struct {
 	AgentID       string `json:"agent_id" jsonschema:"the NPC's id"`
 	DecisionEpoch int64  `json:"decision_epoch" jsonschema:"required epoch from the current decision_context"`
 }
 
+// PlayMontageInput — atomic: play a registered montage.
+type PlayMontageInput struct {
+	AgentID       string `json:"agent_id" jsonschema:"the NPC's id"`
+	DecisionEpoch int64  `json:"decision_epoch" jsonschema:"required epoch from the current decision_context"`
+	MontageID     string `json:"montage_id" jsonschema:"registered montage name"`
+	WaitFinish    bool   `json:"wait_finish,omitempty" jsonschema:"whether to wait for playback to finish (default true)"`
+}
+
 // registerAtomic installs the atomic-behavior tools.
 func registerAtomic(s *mcp.Server, ex Executor, kb *worldkb.KB, logger *slog.Logger) {
-	// move_to → MoveTo
+	// move_to_location → MoveToLocation
 	//
-	// Semantic target resolution (方案 A): the LLM still passes a semantic
-	// ID (e.g. "workbench_01") as `target`, but the MCP layer translates it
-	// to a coordinate via the World KB before dispatching to UE. UE receives
-	// {dest, target, kind, speed} — `dest` is the authoritative coordinate,
-	// `target`+`kind` are metadata so UE can reverse-lookup current_location
-	// without maintaining its own semantic→coordinate map.
+	// Static target resolution (约定13): the LLM passes a semantic ID
+	// (e.g. "workbench_01") as `target`, and the MCP layer translates it
+	// to a coordinate via the World KB before dispatching to UE. UE
+	// receives {dest, speed} — dest is the authoritative coordinate.
 	mcp.AddTool(s, &mcp.Tool{
-		Name:        "move_to",
+		Name:        "move_to_location",
 		Description: "Move to a semantic destination (zone or object id). The MCP layer resolves it to a coordinate via the World KB.",
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, in MoveToInput) (*mcp.CallToolResult, ackResult, error) {
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in MoveToLocationInput) (*mcp.CallToolResult, ackResult, error) {
 		if in.AgentID == "" || in.Target == "" {
 			return nil, ackResult{}, fmt.Errorf("agent_id and target are required")
 		}
-		logToolCall("move_to", in.AgentID, in.DecisionEpoch, in)
-		coord, kind, err := kb.GetPosition(in.Target)
+		logToolCall("move_to_location", in.AgentID, in.DecisionEpoch, in)
+		coord, _, err := kb.GetPosition(in.Target)
 		if err != nil {
-			return nil, ackResult{}, fmt.Errorf("move_to: %w", err)
+			return nil, ackResult{}, fmt.Errorf("move_to_location: %w", err)
 		}
-		ack, err := ex.SendAction(ctx, in.AgentID, in.DecisionEpoch, protocol.CmdMoveTo, map[string]any{
-			"dest":   []float64{coord[0], coord[1], coord[2]},
-			"target": in.Target,
-			"kind":   kind,
-			"speed":  "walk",
+		speed := in.Speed
+		if speed == "" {
+			speed = "walk"
+		}
+		ack, err := ex.SendAction(ctx, in.AgentID, in.DecisionEpoch, protocol.CmdMoveToLocation, map[string]any{
+			"dest":  []float64{coord[0], coord[1], coord[2]},
+			"speed": speed,
 		})
 		if err != nil {
-			return nil, ackResult{}, fmt.Errorf("move_to: %w", err)
+			return nil, ackResult{}, fmt.Errorf("move_to_location: %w", err)
+		}
+		return nil, buildAckResult(ack, in.DecisionEpoch), nil
+	})
+
+	// move_to_agent → MoveToAgent
+	//
+	// Dynamic target (约定13): UE resolves target_agent_id to an Actor
+	// at runtime via AgentBridgeClient.FindAgentActor and follows it.
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "move_to_agent",
+		Description: "Follow a dynamic agent target. UE resolves the target at runtime.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in MoveToAgentInput) (*mcp.CallToolResult, ackResult, error) {
+		if in.AgentID == "" || in.TargetAgentID == "" {
+			return nil, ackResult{}, fmt.Errorf("agent_id and target_agent_id are required")
+		}
+		logToolCall("move_to_agent", in.AgentID, in.DecisionEpoch, in)
+		speed := in.Speed
+		if speed == "" {
+			speed = "walk"
+		}
+		ack, err := ex.SendAction(ctx, in.AgentID, in.DecisionEpoch, protocol.CmdMoveToAgent, map[string]any{
+			"target_agent_id": in.TargetAgentID,
+			"speed":           speed,
+			"stop_distance":   in.StopDistance,
+			"keep_following":  in.KeepFollowing,
+		})
+		if err != nil {
+			return nil, ackResult{}, fmt.Errorf("move_to_agent: %w", err)
 		}
 		return nil, buildAckResult(ack, in.DecisionEpoch), nil
 	})
@@ -112,17 +167,44 @@ func registerAtomic(s *mcp.Server, ex Executor, kb *worldkb.KB, logger *slog.Log
 	// turn_to → TurnTo
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "turn_to",
-		Description: "Face a specific entity. Useful before speaking or interacting.",
+		Description: "Face a specific agent or heading direction. Useful before speaking or interacting.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in TurnToInput) (*mcp.CallToolResult, ackResult, error) {
-		if in.AgentID == "" || in.Target == "" {
-			return nil, ackResult{}, fmt.Errorf("agent_id and target are required")
+		if in.AgentID == "" {
+			return nil, ackResult{}, fmt.Errorf("agent_id is required")
+		}
+		if in.TargetAgentID == "" && len(in.Direction) == 0 {
+			return nil, ackResult{}, fmt.Errorf("either target_agent_id or direction is required")
 		}
 		logToolCall("turn_to", in.AgentID, in.DecisionEpoch, in)
-		ack, err := ex.SendAction(ctx, in.AgentID, in.DecisionEpoch, protocol.CmdTurnTo, map[string]any{
-			"target": in.Target,
-		})
+		params := map[string]any{}
+		if in.TargetAgentID != "" {
+			params["target_agent_id"] = in.TargetAgentID
+		}
+		if len(in.Direction) > 0 {
+			params["direction"] = in.Direction
+		}
+		ack, err := ex.SendAction(ctx, in.AgentID, in.DecisionEpoch, protocol.CmdTurnTo, params)
 		if err != nil {
 			return nil, ackResult{}, fmt.Errorf("turn_to: %w", err)
+		}
+		return nil, buildAckResult(ack, in.DecisionEpoch), nil
+	})
+
+	// play_montage → PlayMontage
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "play_montage",
+		Description: "Play a registered montage animation.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in PlayMontageInput) (*mcp.CallToolResult, ackResult, error) {
+		if in.AgentID == "" || in.MontageID == "" {
+			return nil, ackResult{}, fmt.Errorf("agent_id and montage_id are required")
+		}
+		logToolCall("play_montage", in.AgentID, in.DecisionEpoch, in)
+		ack, err := ex.SendAction(ctx, in.AgentID, in.DecisionEpoch, protocol.CmdPlayMontage, map[string]any{
+			"montage_id":  in.MontageID,
+			"wait_finish": in.WaitFinish,
+		})
+		if err != nil {
+			return nil, ackResult{}, fmt.Errorf("play_montage: %w", err)
 		}
 		return nil, buildAckResult(ack, in.DecisionEpoch), nil
 	})
@@ -137,9 +219,9 @@ func registerAtomic(s *mcp.Server, ex Executor, kb *worldkb.KB, logger *slog.Log
 		}
 		logToolCall("speak", in.AgentID, in.DecisionEpoch, in)
 		ack, err := ex.SendAction(ctx, in.AgentID, in.DecisionEpoch, protocol.CmdSpeak, map[string]any{
-			"content":   in.Content,
-			"target":    in.Target,
-			"audio_url": nil,
+			"content":         in.Content,
+			"target_agent_id": in.TargetAgentID,
+			"audio_url":       in.AudioURL,
 		})
 		if err != nil {
 			return nil, ackResult{}, fmt.Errorf("speak: %w", err)
@@ -173,15 +255,15 @@ func registerAtomic(s *mcp.Server, ex Executor, kb *worldkb.KB, logger *slog.Log
 	// interact → InteractSmartObject
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "interact",
-		Description: "Interact with a smart object using a verb from its available_actions.",
+		Description: "Interact with a smart object using a verb from its available_interactions.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in InteractInput) (*mcp.CallToolResult, ackResult, error) {
-		if in.AgentID == "" || in.ObjectID == "" || in.Action == "" {
-			return nil, ackResult{}, fmt.Errorf("agent_id, object_id and action are required")
+		if in.AgentID == "" || in.TargetObjectID == "" || in.Interaction == "" {
+			return nil, ackResult{}, fmt.Errorf("agent_id, target_object_id and interaction are required")
 		}
 		logToolCall("interact", in.AgentID, in.DecisionEpoch, in)
 		ack, err := ex.SendAction(ctx, in.AgentID, in.DecisionEpoch, protocol.CmdInteractSmartObject, map[string]any{
-			"object_id": in.ObjectID,
-			"action":    in.Action,
+			"target_object_id": in.TargetObjectID,
+			"interaction":      in.Interaction,
 		})
 		if err != nil {
 			return nil, ackResult{}, fmt.Errorf("interact: %w", err)
@@ -246,7 +328,7 @@ func registerAtomic(s *mcp.Server, ex Executor, kb *worldkb.KB, logger *slog.Log
 
 	// stop → 发送 stop_action 停止当前在途 action（P1 恢复）。
 	// actionID 为空时由 Executor 查 agentContext.currentActionID。
-	// 无在途 action 时 no-op，返回 OK。
+	// 无在途 action 时 no-op，返回 OK。不依赖任何 Cmd* 常量。
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "stop",
 		Description: "Stop the current action. No-op if no action is running.",

@@ -73,16 +73,26 @@ const (
 )
 
 // action_command cmd constants (§2.3).
+// Data-driven via UE's DT_ActionBTMap; these are the framework-builtin
+// representative cmds. Atomic = standalone minimal action; Composite =
+// pre-registered high-level behavior tree.
 const (
-	CmdMoveTo              = "MoveTo"
+	// Atomic cmds (8).
+	CmdMoveToLocation      = "MoveToLocation"
+	CmdMoveToAgent         = "MoveToAgent"
 	CmdTurnTo              = "TurnTo"
-	CmdPlayAnimation       = "PlayAnimation"
+	CmdPlayMontage         = "PlayMontage"
 	CmdSpeak               = "Speak"
 	CmdEmote               = "Emote"
 	CmdWait                = "Wait"
 	CmdInteractSmartObject = "InteractSmartObject"
-	CmdExecuteComposite    = "ExecuteComposite"
-	CmdStop                = "Stop"
+	// Composite cmds (6).
+	CmdWorkAtWorkbench  = "WorkAtWorkbench"
+	CmdWorkAtWorkshop   = "WorkAtWorkshop"
+	CmdChatWith         = "ChatWith"
+	CmdRepairTarget     = "RepairTarget"
+	CmdChargeAtStation  = "ChargeAtStation"
+	CmdPatrolZone       = "PatrolZone"
 )
 
 // action_completed result constants (§2.3).

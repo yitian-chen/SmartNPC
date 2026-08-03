@@ -13,8 +13,8 @@ import (
 
 // plannedAction 是战术层分解出的单步 action，对应一个 MCP 工具调用。
 type plannedAction struct {
-	Action string         `json:"action"` // 工具名：work_assemble / move_to / ...
-	Params map[string]any `json:"params"` // 工具参数（LLM 原样输出，duration_min 等未换算）
+	Action string         `json:"action"` // 工具名：work_at_workbench / move_to_location / ...
+	Params map[string]any `json:"params"` // 工具参数（LLM 原样输出，duration_sec 等未换算）
 }
 
 // ndjsonLine 是战术层 NDJSON 输出的单行判别联合体：要么是 inner_thought，要么是一个 action。
@@ -43,19 +43,22 @@ var tacticalToolMeta = []struct {
 	Desc        string // prompt 中的工具描述
 	Params      string // prompt 中的 params 示例
 }{
-	{"move_to", protocol.CmdMoveTo, "移动到目标位置", `{"target":"区域或位置id"}`},
-	{"turn_to", protocol.CmdTurnTo, "转向目标", `{"target":"实体id"}`},
-	{"speak", protocol.CmdSpeak, "说话", `{"content":"...","target":"目标agent_id（可空）"}`},
+	// Atomic tools (8)
+	{"move_to_location", protocol.CmdMoveToLocation, "移动到目标位置", `{"target":"区域或位置id"}`},
+	{"move_to_agent", protocol.CmdMoveToAgent, "跟随目标agent", `{"target_agent_id":"...","speed":"walk|run"}`},
+	{"turn_to", protocol.CmdTurnTo, "转向目标", `{"target_agent_id":"实体id"} 或 {"direction":[dx,dy,dz]}`},
+	{"play_montage", protocol.CmdPlayMontage, "播放蒙太奇", `{"montage_id":"...","wait_finish":true}`},
+	{"speak", protocol.CmdSpeak, "说话", `{"content":"...","target_agent_id":"目标agent_id（可空）"}`},
 	{"emote", protocol.CmdEmote, "表达情绪", `{"emotion":"happy|sad|...","mode":"oneshot|sustained"}`},
-	{"interact", protocol.CmdInteractSmartObject, "与智能物体交互", `{"object_id":"...","action":"动词"}`},
+	{"interact", protocol.CmdInteractSmartObject, "与智能物体交互", `{"target_object_id":"...","interaction":"动词"}`},
 	{"wait", protocol.CmdWait, "原地等待", `{"duration_sec":秒数}`},
-	{"work_assemble", protocol.CmdExecuteComposite, "在工作台装配", `{"target":"工作台id","duration_min":分钟}`},
-	{"patrol_route", protocol.CmdExecuteComposite, "巡逻路线", `{"route_id":"路线id"}`},
-	{"charge_at", protocol.CmdExecuteComposite, "充电", `{"station_id":"充电站id","duration_min":分钟}`},
-	{"repair_target", protocol.CmdExecuteComposite, "修理其他agent", `{"target_agent_id":"..."}`},
-	{"social_chat_with", protocol.CmdExecuteComposite, "与其他agent聊天", `{"target_agent_id":"..."}`},
-	{"rest_idle", protocol.CmdExecuteComposite, "休息", `{"duration_min":分钟}`},
-	{"archive_research", protocol.CmdExecuteComposite, "档案研究", `{"duration_min":分钟}`},
+	// Composite tools (6)
+	{"work_at_workbench", protocol.CmdWorkAtWorkbench, "在工作台装配", `{"target_object_id":"工作台id","duration_sec":秒数}`},
+	{"work_at_workshop", protocol.CmdWorkAtWorkshop, "车间例行工作", `{}`},
+	{"chat_with", protocol.CmdChatWith, "与其他agent聊天", `{"target_agent_id":"...","topic":"话题（可选）"}`},
+	{"repair_target", protocol.CmdRepairTarget, "修理其他agent", `{"target_agent_id":"...","tool_id":"工具id（可选）"}`},
+	{"charge_at_station", protocol.CmdChargeAtStation, "充电", `{"target_object_id":"充电站id（可空）"}`},
+	{"patrol_zone", protocol.CmdPatrolZone, "巡逻区域", `{"target_zone":"区域id","duration_sec":秒数}`},
 }
 
 // tacticalActionAvailable 判断 action 是否为战术层可用工具，且其依赖的
@@ -108,16 +111,16 @@ const tacticalPromptBody = `[战术层/任务分解] 当前时段目标：%s
 要求：
 1. 第一行输出 {"inner_thought":"一句话内心独白"}
 2. 后续每行输出一个 {"action":"工具名","params":{...}}，3-5 步，按执行顺序排列
-3. 第一步通常是 move_to 到目标区域
-4. move_to 的 target、interact 的 object_id、work_assemble 的 target 必须从上面的可用列表中选取，禁止编造
+3. 第一步通常是 move_to_location 到目标区域
+4. move_to_location 的 target、interact 的 target_object_id、work_at_workbench 的 target_object_id 必须从上面的可用列表中选取，禁止编造
 5. 每行一个 JSON 对象，不要输出 JSON 数组，不要输出 markdown 围栏，不要输出任何其他文字
 6. 必须以字符 {"inner_thought 开头，不要输出步骤说明、不要解释、不要编号列表、不要 markdown 加粗
 7. 步骤总时长应接近当前 slot 时长，避免过短导致队列提前耗尽触发重分解
 
 示例：
 {"inner_thought":"先去车间再开始装配"}
-{"action":"move_to","params":{"target":"main_workshop"}}
-{"action":"work_assemble","params":{"target":"workbench_01","duration_min":240}}`
+{"action":"move_to_location","params":{"target":"main_workshop"}}
+{"action":"work_at_workbench","params":{"target_object_id":"workbench_01","duration_sec":14400}}`
 
 // buildTacticalPrompt 填充战术层 prompt 模板。kb 用于注入可用 zone/location/object
 // 列表，避免 LLM 编造不存在的 ID（如 workbench_02、archives）。
@@ -435,69 +438,97 @@ func filterValidActions(actions []plannedAction, registry *CapabilityRegistry, a
 }
 
 // mapTacticalAction 把战术层 plannedAction 映射到 ws.SendAction 的 (cmd, params)。
-// 复合工具 → CmdExecuteComposite；原子工具 → 各自 cmd；move_to 需 KB 解析坐标。
-// 映射规则与 composite.go/atomic.go 工具处理函数一致。
-// 非法/不可排队工具返回 err，调用方跳过。
+// 复合工具 → 各自 Composite cmd；原子工具 → 各自 Atomic cmd；
+// move_to_location 需 KB 解析坐标。映射规则与 composite.go/atomic.go
+// 工具处理函数一致。非法/不可排队工具返回 err，调用方跳过。
 func mapTacticalAction(pa plannedAction, kb *worldkb.KB) (cmd string, params map[string]any, err error) {
 	switch pa.Action {
-	// ─── 复合工具 → ExecuteComposite ───
-	case "work_assemble":
-		return protocol.CmdExecuteComposite, map[string]any{
-			"name":         "work_assemble",
-			"target":       pa.Params["target"],
-			"duration_sec": toFloat(pa.Params["duration_min"]) * 60,
-		}, nil
-	case "patrol_route":
-		return protocol.CmdExecuteComposite, map[string]any{
-			"name":     "patrol_route",
-			"route_id": pa.Params["route_id"],
-		}, nil
-	case "charge_at":
-		return protocol.CmdExecuteComposite, map[string]any{
-			"name":         "charge_at",
-			"station_id":   pa.Params["station_id"],
-			"duration_sec": toFloat(pa.Params["duration_min"]) * 60,
-		}, nil
-	case "repair_target":
-		return protocol.CmdExecuteComposite, map[string]any{
-			"name":            "repair_target",
-			"target_agent_id": pa.Params["target_agent_id"],
-		}, nil
-	case "social_chat_with":
-		return protocol.CmdExecuteComposite, map[string]any{
-			"name":            "social_chat_with",
-			"target_agent_id": pa.Params["target_agent_id"],
-		}, nil
-	case "rest_idle":
-		return protocol.CmdExecuteComposite, map[string]any{
-			"name":         "rest_idle",
-			"duration_sec": toFloat(pa.Params["duration_min"]) * 60,
-		}, nil
-	case "archive_research":
-		return protocol.CmdExecuteComposite, map[string]any{
-			"name":         "archive_research",
-			"duration_sec": toFloat(pa.Params["duration_min"]) * 60,
-		}, nil
-	// ─── 原子工具 ───
-	case "move_to":
-		target, _ := pa.Params["target"].(string)
-		coord, kind, e := kb.GetPosition(target) // 与 atomic.go:95 一致
-		if e != nil {
-			return "", nil, fmt.Errorf("move_to resolve %q: %w", target, e)
+	// ─── Composite tools → 各自 cmd ───
+	case "work_at_workbench":
+		params := map[string]any{
+			"target_object_id": pa.Params["target_object_id"],
 		}
-		return protocol.CmdMoveTo, map[string]any{
-			"dest":   []float64{coord[0], coord[1], coord[2]},
-			"target": target,
-			"kind":   kind,
-			"speed":  "walk",
+		if d := toFloat(pa.Params["duration_sec"]); d > 0 {
+			params["duration_sec"] = d
+		}
+		return protocol.CmdWorkAtWorkbench, params, nil
+	case "work_at_workshop":
+		return protocol.CmdWorkAtWorkshop, map[string]any{}, nil
+	case "chat_with":
+		params := map[string]any{
+			"target_agent_id": pa.Params["target_agent_id"],
+		}
+		if t, ok := pa.Params["topic"].(string); ok && t != "" {
+			params["topic"] = t
+		}
+		return protocol.CmdChatWith, params, nil
+	case "repair_target":
+		params := map[string]any{
+			"target_agent_id": pa.Params["target_agent_id"],
+		}
+		if t, ok := pa.Params["tool_id"].(string); ok && t != "" {
+			params["tool_id"] = t
+		}
+		return protocol.CmdRepairTarget, params, nil
+	case "charge_at_station":
+		params := map[string]any{}
+		if s, ok := pa.Params["target_object_id"].(string); ok && s != "" {
+			params["target_object_id"] = s
+		}
+		return protocol.CmdChargeAtStation, params, nil
+	case "patrol_zone":
+		params := map[string]any{
+			"target_zone": pa.Params["target_zone"],
+		}
+		if d := toFloat(pa.Params["duration_sec"]); d > 0 {
+			params["duration_sec"] = d
+		}
+		return protocol.CmdPatrolZone, params, nil
+	// ─── Atomic tools ───
+	case "move_to_location":
+		target, _ := pa.Params["target"].(string)
+		coord, _, e := kb.GetPosition(target) // 与 atomic.go 一致
+		if e != nil {
+			return "", nil, fmt.Errorf("move_to_location resolve %q: %w", target, e)
+		}
+		speed, _ := pa.Params["speed"].(string)
+		if speed == "" {
+			speed = "walk"
+		}
+		return protocol.CmdMoveToLocation, map[string]any{
+			"dest":  []float64{coord[0], coord[1], coord[2]},
+			"speed": speed,
+		}, nil
+	case "move_to_agent":
+		speed, _ := pa.Params["speed"].(string)
+		if speed == "" {
+			speed = "walk"
+		}
+		return protocol.CmdMoveToAgent, map[string]any{
+			"target_agent_id": pa.Params["target_agent_id"],
+			"speed":           speed,
+			"stop_distance":   toFloat(pa.Params["stop_distance"]),
+			"keep_following":  pa.Params["keep_following"],
 		}, nil
 	case "turn_to":
-		return protocol.CmdTurnTo, map[string]any{"target": pa.Params["target"]}, nil
+		params := map[string]any{}
+		if t, ok := pa.Params["target_agent_id"].(string); ok && t != "" {
+			params["target_agent_id"] = t
+		}
+		if d, ok := pa.Params["direction"].([]float64); ok && len(d) > 0 {
+			params["direction"] = d
+		}
+		return protocol.CmdTurnTo, params, nil
+	case "play_montage":
+		return protocol.CmdPlayMontage, map[string]any{
+			"montage_id":  pa.Params["montage_id"],
+			"wait_finish": pa.Params["wait_finish"],
+		}, nil
 	case "speak":
 		return protocol.CmdSpeak, map[string]any{
-			"content":   pa.Params["content"],
-			"target":    pa.Params["target"],
-			"audio_url": nil,
+			"content":         pa.Params["content"],
+			"target_agent_id": pa.Params["target_agent_id"],
+			"audio_url":       pa.Params["audio_url"],
 		}, nil
 	case "emote":
 		mode, _ := pa.Params["mode"].(string)
@@ -510,8 +541,8 @@ func mapTacticalAction(pa plannedAction, kb *worldkb.KB) (cmd string, params map
 		}, nil
 	case "interact":
 		return protocol.CmdInteractSmartObject, map[string]any{
-			"object_id": pa.Params["object_id"],
-			"action":    pa.Params["action"],
+			"target_object_id": pa.Params["target_object_id"],
+			"interaction":      pa.Params["interaction"],
 		}, nil
 	case "wait":
 		return protocol.CmdWait, map[string]any{
