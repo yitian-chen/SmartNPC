@@ -1129,9 +1129,8 @@ func main() {
 			// the new global capability set. Per-agent overrides
 			// don't change the global tool list — the guardedExecutor
 			// enforces per-agent capability at SendAction time.
-			tools.ReconcileTools(server, executor, kb, logger, func(cmd string) bool {
-				return capabilityRegistry.HasCmd(protocol.SystemAgentID, cmd)
-			})
+			tools.ReconcileTools(server, executor, kb, logger,
+				capabilityRegistry.EffectiveActions(protocol.SystemAgentID))
 		case protocol.TypeWorldKB:
 			// UE pushes the full world KB (generated + authored JSON blobs)
 			// on connection. MCP merges, persists, and swaps the in-memory
