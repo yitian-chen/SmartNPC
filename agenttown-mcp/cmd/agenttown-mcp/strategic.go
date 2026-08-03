@@ -5,10 +5,18 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 
 	"github.com/AgentTown/agenttown-mcp/pkg/hermes"
 	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
+)
+
+// 日程校验常量。MCP 无 day-range flag，与 defaultDailyPlan 保持一致。
+const (
+	dayStartMinute = 6 * 60  // 06:00
+	dayEndMinute   = 22 * 60 // 22:00
+	minSlotMinutes = 60      // 时段最短时长，短于此会被丢弃
 )
 
 // dailyPlanItem 是战略层输出的单条计划。
@@ -126,8 +134,9 @@ func generateDailyPlan(ctx context.Context, sc strategicCaller, agentID string, 
 			"agent_id", agentID, "raw", truncateText(raw, 200), "err", err, "fallback", fallback)
 		return fallback
 	}
+	items = normalizeDailyPlan(items)
 	if len(items) == 0 {
-		logger.Warn("[战略层] 计划解析为空数组，使用默认计划兜底", "agent_id", agentID)
+		logger.Warn("[战略层] 计划校验后为空，使用默认计划兜底", "agent_id", agentID)
 		return buildDefaultDailyPlan(kb)
 	}
 	plan := formatDailyPlan(items)
@@ -205,6 +214,58 @@ func parseDailyPlan(raw string) ([]dailyPlanItem, error) {
 		return nil, fmt.Errorf("unmarshal: %w", err)
 	}
 	return items, nil
+}
+
+// normalizeDailyPlan 校验并补全解析后的每日计划：
+//  1. 丢弃时长 <60min 的时段（调度器按 60min 采样，短时段大概率不被命中）
+//  2. 按起始时间排序
+//  3. 首段前伸到 06:00（若 LLM 从 07:00 开始，06:00-07:00 会成空白）
+//  4. 填补中间空白：前段 end < 后段 start 时延长前段
+//  5. 末段后延到 22:00（若 LLM 只规划到 18:00，18:00-22:00 会触发 idle wait 瘫痪）
+//
+// 全部被丢弃时返回 nil，调用方走 buildDefaultDailyPlan(kb) 兜底。
+func normalizeDailyPlan(items []dailyPlanItem) []dailyPlanItem {
+	// 1. 过滤短时段。
+	valid := make([]dailyPlanItem, 0, len(items))
+	for _, it := range items {
+		start, end, ok := splitPlanRange(it.Time)
+		if !ok || end-start < minSlotMinutes {
+			continue
+		}
+		valid = append(valid, it)
+	}
+	if len(valid) == 0 {
+		return nil
+	}
+	// 2. 按起始时间排序。
+	sort.Slice(valid, func(i, j int) bool {
+		si, _, _ := splitPlanRange(valid[i].Time)
+		sj, _, _ := splitPlanRange(valid[j].Time)
+		return si < sj
+	})
+	// 3. 首段前伸到 dayStart。
+	if s, e, ok := splitPlanRange(valid[0].Time); ok && s > dayStartMinute {
+		valid[0].Time = fmtMinute(dayStartMinute) + "-" + fmtMinute(e)
+	}
+	// 4. 填补中间空白。
+	for i := 0; i < len(valid)-1; i++ {
+		_, ei, _ := splitPlanRange(valid[i].Time)
+		sj, _, _ := splitPlanRange(valid[i+1].Time)
+		if ei < sj {
+			si, _, _ := splitPlanRange(valid[i].Time)
+			valid[i].Time = fmtMinute(si) + "-" + fmtMinute(sj)
+		}
+	}
+	// 5. 末段后延到 dayEnd。
+	if s, e, ok := splitPlanRange(valid[len(valid)-1].Time); ok && e < dayEndMinute {
+		valid[len(valid)-1].Time = fmtMinute(s) + "-" + fmtMinute(dayEndMinute)
+	}
+	return valid
+}
+
+// fmtMinute 把从午夜起的分钟数格式化为 "HH:MM"。
+func fmtMinute(m int) string {
+	return fmt.Sprintf("%02d:%02d", m/60, m%60)
 }
 
 // formatDailyPlan 把计划格式化为多行字符串。

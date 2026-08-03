@@ -277,6 +277,106 @@ func TestBuildDefaultDailyPlan_WithKB(t *testing.T) {
 	}
 }
 
+// ─── normalizeDailyPlan ─────────────────────────────────────
+
+func TestNormalizeDailyPlan_DropsShortSlots(t *testing.T) {
+	items := []dailyPlanItem{
+		{Time: "06:00-06:30", Goal: "短时段"}, // 30min, 应被丢弃
+		{Time: "06:30-12:00", Goal: "上午工作"},
+		{Time: "12:00-22:00", Goal: "下午到晚上"},
+	}
+	got := normalizeDailyPlan(items)
+	if len(got) != 2 {
+		t.Fatalf("got %d items, want 2 (short slot dropped)", len(got))
+	}
+	for _, it := range got {
+		if it.Goal == "短时段" {
+			t.Errorf("short slot should have been dropped: %+v", got)
+		}
+	}
+}
+
+func TestNormalizeDailyPlan_FillsGap(t *testing.T) {
+	items := []dailyPlanItem{
+		{Time: "06:00-10:00", Goal: "上午"},
+		{Time: "14:00-22:00", Goal: "下午"}, // 10:00-14:00 是空白
+	}
+	got := normalizeDailyPlan(items)
+	if len(got) != 2 {
+		t.Fatalf("got %d items, want 2", len(got))
+	}
+	if got[0].Time != "06:00-14:00" {
+		t.Errorf("first slot should be extended to fill gap: got %q, want 06:00-14:00", got[0].Time)
+	}
+	if got[1].Time != "14:00-22:00" {
+		t.Errorf("second slot unchanged: got %q", got[1].Time)
+	}
+}
+
+func TestNormalizeDailyPlan_ExtendsFirstSlot(t *testing.T) {
+	items := []dailyPlanItem{
+		{Time: "07:00-12:00", Goal: "上午"}, // 06:00-07:00 空白
+		{Time: "12:00-22:00", Goal: "下午"},
+	}
+	got := normalizeDailyPlan(items)
+	if got[0].Time != "06:00-12:00" {
+		t.Errorf("first slot should start at 06:00: got %q, want 06:00-12:00", got[0].Time)
+	}
+}
+
+func TestNormalizeDailyPlan_ExtendsLastSlot(t *testing.T) {
+	items := []dailyPlanItem{
+		{Time: "06:00-12:00", Goal: "上午"},
+		{Time: "12:00-18:00", Goal: "下午"}, // 18:00-22:00 空白
+	}
+	got := normalizeDailyPlan(items)
+	if got[len(got)-1].Time != "12:00-22:00" {
+		t.Errorf("last slot should end at 22:00: got %q, want 12:00-22:00", got[len(got)-1].Time)
+	}
+}
+
+func TestNormalizeDailyPlan_AllDropped(t *testing.T) {
+	items := []dailyPlanItem{
+		{Time: "06:00-06:30", Goal: "短1"},
+		{Time: "07:00-07:15", Goal: "短2"},
+	}
+	got := normalizeDailyPlan(items)
+	if got != nil {
+		t.Errorf("all slots dropped should return nil, got %+v", got)
+	}
+}
+
+func TestNormalizeDailyPlan_AlreadyValid(t *testing.T) {
+	items := []dailyPlanItem{
+		{Time: "06:00-12:00", Goal: "上午"},
+		{Time: "12:00-22:00", Goal: "下午"},
+	}
+	got := normalizeDailyPlan(items)
+	if len(got) != 2 {
+		t.Fatalf("got %d items, want 2", len(got))
+	}
+	if got[0].Time != "06:00-12:00" || got[1].Time != "12:00-22:00" {
+		t.Errorf("already-valid plan should be unchanged: got %+v", got)
+	}
+}
+
+func TestFmtMinute(t *testing.T) {
+	cases := []struct {
+		min  int
+		want string
+	}{
+		{0, "00:00"},
+		{360, "06:00"},
+		{1320, "22:00"},
+		{901, "15:01"},
+	}
+	for _, c := range cases {
+		if got := fmtMinute(c.min); got != c.want {
+			t.Errorf("fmtMinute(%d) = %q, want %q", c.min, got, c.want)
+		}
+	}
+}
+
 // ─── selectPlanInjection ─────────────────────────────────────
 
 func TestSelectPlanInjection_EmptyPlan(t *testing.T) {
