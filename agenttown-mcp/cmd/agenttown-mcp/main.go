@@ -678,6 +678,11 @@ var reactiveRunnerRef *reactiveRunner
 // 内置工具）。main() 启动时赋值。
 var capabilityRegistryRef *CapabilityRegistry
 
+// kbRef 是当前生效的 world KB 指针（package-level 供 debug handler 引用）。
+// worldKBSwap 成功后同步更新；runHTTP 的 /debug/kb handler 读 kbRef 而不是
+// 闭包捕获的 kb 参数，确保 UE 推送新 KB 后 /debug/kb 返回最新数据。
+var kbRef *worldkb.KB
+
 // tacticalRefill 调战术层 LLM 流式分解当前时段 goal，边接收边入队，
 // 首 action 在流式期间即提前下发以降低体感延迟。成功返回 true。
 func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
@@ -990,6 +995,7 @@ func main() {
 		"objects", len(kb.Objects),
 		"agents", len(kb.Agents),
 	)
+	kbRef = kb // expose to /debug/kb handler
 
 	// ─── 反应层 Ollama 客户端 ────────────────────────────────────
 	// --ollama-url="" 显式禁用反应层；否则初始化客户端（即使 Ollama 进程
@@ -1147,6 +1153,7 @@ func main() {
 				return
 			}
 			kb = newKB
+		kbRef = newKB // sync /debug/kb handler
 			// Re-register tools so their closures capture the new kb.
 			// AddTool is idempotent (replaces same-named tools).
 			tools.RegisterAll(server, executor, kb, logger)
@@ -1313,9 +1320,10 @@ func runHTTP(ctx context.Context, logger *slog.Logger, server *mcp.Server, addr 
 			handleDebugUI(w, r)
 			return
 		}
-		// /debug/kb — 返回 world_kb 摘要供前端下拉填充
+		// /debug/kb — 返回 world_kb 摘要供前端下拉填充。读 kbRef 而不是
+		// 闭包捕获的 kb 参数，确保 worldKBSwap 后返回最新 KB。
 		if r.URL.Path == "/debug/kb" {
-			handleDebugKB(w, r, kb, logger)
+			handleDebugKB(w, r, kbRef, logger)
 			return
 		}
 		// /debug/cap — 返回 capability_registry 状态供 e2e 黑盒验证
