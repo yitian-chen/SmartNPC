@@ -19,6 +19,7 @@ Message flow:
 import asyncio
 import json
 import logging
+import math
 import os
 import time as _time
 import uuid
@@ -566,10 +567,20 @@ class MockUE:
                     f"{len(self.kb.objects)} objects, {len(self.kb.agents)} agents "
                     f"from {world_kb_path}")
 
-        # Seed NPC defaults. KB does not yet expose agent defaults, so we
-        # use the long-standing defaults (H-01 in main_workshop). When KB
-        # gains agent entries, this can be driven from there.
-        self.npc = NPCState(current_zone="main_workshop", position=[20000.0, 10000.0, 0.0])
+        # Seed NPC from the first agent entry in the KB. First phase is
+        # single-agent; agents[0] is the active NPC. ue5_ref has no yaml
+        # counterpart (actor_class is the UE path, not the blueprint short
+        # name), so it keeps the NPCState default.
+        if not self.kb.agents:
+            raise SystemExit(f"[FATAL] no agents in world_kb {world_kb_path!r}")
+        agent0 = self.kb.agents[0]
+        self.npc = NPCState(
+            agent_id=agent0.id,
+            name=agent0.display_name or agent0.id,
+            agent_type=agent0.type or "humanoid",
+            current_zone=agent0.initial_zone,
+            position=list(agent0.initial_position),
+        )
         self.time = GameTime(speed=time_speed)
 
         self._ws = None
@@ -886,10 +897,15 @@ class MockUE:
             if obj is None:
                 continue
             name = obj.display_name or oid
+            # Euclidean distance on the XY plane (UE5 cm). Z is ignored —
+            # multi-floor navigation is out of scope for phase 1.
+            dx = self.npc.position[0] - obj.actor_position[0]
+            dy = self.npc.position[1] - obj.actor_position[1]
+            distance = math.sqrt(dx * dx + dy * dy)
             objs.append({
                 "id": oid,
                 "name": name,
-                "distance": 8.0,
+                "distance": round(distance, 1),
                 "state": obj.default_state or "idle",
                 "available_actions": list(obj.available_interactions),
             })
@@ -1175,42 +1191,39 @@ class MockUE:
         text is what the NPC sees in the next decision context under
         "动作完成 ... details={...}". Kept intentionally short (one paragraph)
         so it stays inside the tool-result injection without bloating context.
+
+        Text is assembled from the KB's ``description`` + ``category`` fields
+        rather than hardcoded object IDs, so any object in any test world_kb
+        yields a sensible report. The ``charging_station`` category gets one
+        extra line with the NPC's current battery reading, since that's the
+        only category-specific signal Mock UE can produce.
         """
         obj = self.kb.objects.get(object_id)
         name = (obj.display_name if obj else "") or object_id
         actions = (obj.available_interactions if obj else [])
-        # NPC's current animation hints at what it was just doing.
+        description = (obj.description if obj else "") or "外观正常，未见明显异常。"
         busy = self.npc.busy_action_id is not None
-        # Build a per-object-type report. The descriptions are deterministic
-        # but varied enough that inspecting different objects yields different
-        # information, so the NPC has a reason to inspect each one.
-        if object_id == "workbench_01":
-            lines = [
-                f"{name}：工作台台面平整，夹具定位准确，无松动。",
-                "工具槽内扳手、扭力起子齐备，最近一次使用留下的切屑已清理。",
-                "传动皮带张力正常，未见打滑痕迹。",
-                f"当前状态：{'作业中' if busy else '待机'}，可执行 {('/'.join(actions))}。",
-            ]
-        elif object_id == "charging_station_01":
+
+        lines: List[str] = []
+        # Lead with the authored description (already a full sentence).
+        if not description.endswith(("。", ".", "！", "!", "？", "?")):
+            description = description + "。"
+        lines.append(f"{name}：{description}")
+        # Category-specific extra signal. charging_station is the only
+        # category where Mock UE has live telemetry (battery reading);
+        # other categories just report busy/idle state.
+        if obj and obj.category == "charging_station":
             p = self.npc.physical
-            lines = [
-                f"{name}：充电接口无氧化，线缆绝缘完好，接头锁定顺畅。",
-                "充电模块自检通过，输出电压稳定在标称值。",
-                f"当前状态：{'充电中' if busy else '空闲'}，可执行 {('/'.join(actions))}。",
-                f"本机电池读数 {p.energy:.0f}%，建议电量低于 30% 时及时补能。",
-            ]
-        elif object_id == "rest_bench_01":
-            lines = [
-                f"{name}：长椅结构稳固，靠背无松动，表面无异物。",
-                "周边地面整洁，应急照明指示正常。",
-                f"当前状态：{'有人占用' if busy else '空位'}，可执行 {('/'.join(actions))}。",
-            ]
+            lines.append(
+                f"当前状态：{'充电中' if busy else '空闲'}，"
+                f"可执行 {('/'.join(actions)) if actions else '无'}，"
+                f"本机电池读数 {p.energy:.0f}%，建议电量低于 30% 时及时补能。"
+            )
         else:
-            # Generic fallback for any future object.
-            lines = [
-                f"{name}：外观正常，未见明显异常。",
-                f"可执行动作：{('/'.join(actions)) if actions else '无'}。",
-            ]
+            lines.append(
+                f"当前状态：{'作业中' if busy else '待机'}，"
+                f"可执行 {('/'.join(actions)) if actions else '无'}。"
+            )
         text = "".join(lines)
         logger.info(f"[INSPECT] {object_id} -> {text[:60]}...")
         return {"inspection": text, "object_id": object_id}
@@ -1230,7 +1243,6 @@ class MockUE:
         # Face the movement direction (yaw).
         dx, dy = dest[0] - old_pos[0], dest[1] - old_pos[1]
         if dx or dy:
-            import math
             self.npc.rotation[1] = (math.degrees(math.atan2(dy, dx))) % 360.0
         self.npc.position = list(dest)
 

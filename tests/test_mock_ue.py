@@ -212,9 +212,12 @@ class InspectTests(unittest.IsolatedAsyncioTestCase):
         details = payload.get("details") or {}
         self.assertIn("inspection", details)
         text = details["inspection"]
-        self.assertIn("充电", text)
         # Charging station inspection must surface the NPC's own battery level
-        # so the NPC can decide whether it needs to charge.
+        # so the NPC can decide whether it needs to charge. The description
+        # text itself is authored in world_kb.yaml (currently "充能" not
+        # "充电"), so only assert on the category-specific signal Mock UE
+        # synthesizes — the battery reading line.
+        self.assertIn("电池读数", text)
         self.assertIn("75", text)
         self.assertIn("charge", text)
 
