@@ -90,6 +90,27 @@ func TestBuildReactivePrompt_EmptyTriggerDetail(t *testing.T) {
 	}
 }
 
+// TestBuildReactivePrompt_PhysicalAlertHardRule 验证 prompt 明确禁止
+// 物理告警时输出 continue/observe（Fix C 的 prompt 强化部分）。
+func TestBuildReactivePrompt_PhysicalAlertHardRule(t *testing.T) {
+	in := ReactiveInput{
+		AgentID:   "H-01",
+		TimeOfDay: "14:30",
+		Zone:      "main_workshop",
+		Energy:    45,
+		Fatigue:   70,
+		Health:    90,
+		Trigger:   TriggerPeriodic,
+	}
+	prompt := buildReactivePrompt(in)
+	if !strings.Contains(prompt, "必须输出 interrupt 或 replan") {
+		t.Errorf("prompt should contain hard rule for physical alert, got:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "禁止输出 continue/observe") {
+		t.Errorf("prompt should explicitly forbid continue/observe under alert, got:\n%s", prompt)
+	}
+}
+
 // TestParseReactiveDecision_Continue verifies a clean continue decision.
 func TestParseReactiveDecision_Continue(t *testing.T) {
 	raw := `{"reaction":"continue","reason":"无需打断"}`

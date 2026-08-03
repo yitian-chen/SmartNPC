@@ -124,7 +124,7 @@ const reactivePromptTemplate = `你是 NPC %s 的反应决策模块。当前情�
 
 判断要点：
 - 战术层规划的动作通常是合理的，除非有明确理由，否则 continue
-- 物理状态告警时（体力<40、疲劳>60、健康<50）应认真考虑 interrupt 或 replan 让 NPC 休息/充电，不要无脑 continue
+- 物理状态告警时（体力<40、疲劳>60、健康<50）必须输出 interrupt 或 replan 让 NPC 休息/充电，禁止输出 continue/observe
 - 仅在物理状态告警、事件突发、或当前动作明显不合理时才 interrupt/act
 - replan 是"重大"决策：当你认为整个 action 队列都应作废、重新规划时使用，而非单个 action 不合适（单个不合适用 interrupt/act）。30 分钟内至多触发 1 次 replan，请慎重
 
@@ -428,3 +428,35 @@ const reactivePeriodicDedupeWindow = 45 * time.Second
 // 该去抖在 execute() 的 replan 分支内检查（不在 trigger() 第一层），按 agent 全局，
 // 不按 trigger/detail——replan 是 agent 级决策，不是单个触发的事件。
 const replanDedupeWindow = 30 * time.Minute
+
+// upgradeIfPhysicalAlert 是代码层兜底：当物理状态告警（fatigue>60 / energy<40 /
+// health<50）而 LLM 仍输出 continue/observe 时，强制升级为 interrupt。
+//
+// 动机：实测 qwen2.5:7b 在 fatigue=80+ 时仍输出 observe（"物理状态尚可"），
+// 仅靠 prompt 约束不可靠。代码层强制保证物理告警时 agent 真正停下来。
+// 升级后的 interrupt 会清空 actionQueue + 设置 replanHint（见 execute），
+// 引导战术层 refill 时规划休息/充电。
+//
+// 注意：仅升级 continue/observe，不影响 act/replan/interrupt 决策。
+// trigger=physical_alert 时 LLM 通常已给出 interrupt，此函数主要覆盖
+// periodic/zone_change 触发时物理状态已告警但 LLM 忽视的情况。
+func upgradeIfPhysicalAlert(input ReactiveInput, dec ReactiveDecision) ReactiveDecision {
+	if dec.Reaction != ReactionContinue && dec.Reaction != ReactionObserve {
+		return dec
+	}
+	alert := ""
+	if input.Fatigue > fatigueAlertThreshold {
+		alert = fmt.Sprintf("疲劳=%.0f超过%.0f", input.Fatigue, fatigueAlertThreshold)
+	} else if input.Energy < energyAlertThreshold {
+		alert = fmt.Sprintf("体力=%.0f低于%.0f", input.Energy, energyAlertThreshold)
+	} else if input.Health < healthAlertThreshold {
+		alert = fmt.Sprintf("健康=%.0f低于%.0f", input.Health, healthAlertThreshold)
+	} else {
+		return dec
+	}
+	origReason := dec.Reason
+	dec.Reaction = ReactionInterrupt
+	dec.Reason = "物理状态告警自动升级(" + alert + ")；原决策=" + string(dec.Reaction) + "/" + origReason
+	dec.Action = nil
+	return dec
+}

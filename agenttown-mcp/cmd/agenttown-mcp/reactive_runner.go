@@ -144,6 +144,9 @@ func (r *reactiveRunner) trigger(agentID string, ac *agentContext, trigger React
 	// 5. 解析决策（registry 通过 capabilityRegistryRef 懒取，支持 UE 运行时重连推送新 capability）
 	registry := capabilityRegistryRef
 	dec := parseReactiveDecision(raw, registry, agentID)
+	// 代码层兜底：物理状态告警时强制升级 continue/observe 为 interrupt。
+	// LLM 在 fatigue=80+ 时仍可能输出 observe，仅靠 prompt 约束不可靠。
+	dec = upgradeIfPhysicalAlert(input, dec)
 	r.logger.Info("[反应层/决策]",
 		"agent_id", agentID, "reaction", dec.Reaction, "reason", dec.Reason,
 		"trigger", trigger,
@@ -273,20 +276,31 @@ func (r *reactiveRunner) execute(agentID string, ac *agentContext, dec ReactiveD
 		return
 
 	case ReactionInterrupt:
+		// 清空战术层队列 + 设置 replanHint，防止 worker 在 stop_action 后
+		// 立即 pop 下一个排队 action 继续执行（会让 interrupt 无效）。
+		// replanHint 让下次 tacticalRefill 看到 interrupt 原因，引导 LLM
+		// 规划与 interrupt 原因相符的动作（如疲劳→休息/充电）。
 		ac.mu.Lock()
 		actionID := ac.currentActionID
+		queueLen := len(ac.actionQueue)
+		ac.actionQueue = nil
+		if dec.Reason != "" {
+			ac.replanHint = dec.Reason
+		}
 		ac.mu.Unlock()
 		if actionID == "" {
-			r.logger.Debug("[反应层] interrupt 但无在途 action，跳过",
-				"agent_id", agentID)
+			r.logger.Debug("[反应层] interrupt 但无在途 action，已清空队列",
+				"agent_id", agentID, "queue_len", queueLen)
+			// 无在途 action 时 signal worker，让其看到 queue 空 + replanHint 后 refill
+			ac.signal()
 			return
 		}
 		if err := r.ws.SendStopAction(agentID, actionID); err != nil {
 			r.logger.Warn("[反应层] stop_action 发送失败",
 				"agent_id", agentID, "action_id", actionID, "err", err)
 		} else {
-			r.logger.Info("[反应层] 已发 stop_action 打断在途 action",
-				"agent_id", agentID, "action_id", actionID)
+			r.logger.Info("[反应层] 已发 stop_action 打断在途 action 并清空队列",
+				"agent_id", agentID, "action_id", actionID, "queue_len", queueLen)
 		}
 
 	case ReactionAct:
