@@ -54,16 +54,21 @@ TYPE_EVENT_NOTIFICATION = "event_notification"  # director-injected event (P1 �
 TYPE_CAPABILITY_REGISTRY = "capability_registry"  # UE → MCP: declare NPC cmds
 TYPE_WORLD_KB = "world_kb"  # UE → MCP: push full world KB (generated + authored) on connect
 
-# cmd constants
-CMD_MOVE_TO = "MoveTo"
+# cmd constants (14: 8 atomic + 6 composite, per protocol §2.3)
+CMD_MOVE_TO_LOCATION = "MoveToLocation"
+CMD_MOVE_TO_AGENT = "MoveToAgent"
 CMD_TURN_TO = "TurnTo"
-CMD_PLAY_ANIMATION = "PlayAnimation"
+CMD_PLAY_MONTAGE = "PlayMontage"
 CMD_SPEAK = "Speak"
 CMD_EMOTE = "Emote"
 CMD_WAIT = "Wait"
 CMD_INTERACT = "InteractSmartObject"
-CMD_EXECUTE_COMPOSITE = "ExecuteComposite"
-CMD_STOP = "Stop"
+CMD_WORK_AT_WORKBENCH = "WorkAtWorkbench"
+CMD_WORK_AT_WORKSHOP = "WorkAtWorkshop"
+CMD_CHAT_WITH = "ChatWith"
+CMD_REPAIR_TARGET = "RepairTarget"
+CMD_CHARGE_AT_STATION = "ChargeAtStation"
+CMD_PATROL_ZONE = "PatrolZone"
 
 # Default capability actions advertised to MCP on connect. Each entry
 # mirrors the MCP-side CapabilityAction struct (pkg/protocol/messages.go):
@@ -72,53 +77,83 @@ CMD_STOP = "Stop"
 # This is the authoritative global default (agent_id="system"). Tests or
 # alternate worlds can override by passing `capability_actions=` to
 # MockUE.__init__. If a future mock_ue drops support for a cmd (e.g.
-# stops honoring PlayAnimation), removing it here makes MCP stop
+# stops honoring PlayMontage), removing it here makes MCP stop
 # advertising tools that depend on it.
 DEFAULT_CAPABILITY_ACTIONS: List[Dict[str, Any]] = [
     {
-        "cmd": CMD_MOVE_TO,
+        "cmd": CMD_MOVE_TO_LOCATION,
         "kind": "atomic",
-        "description": "移动到目标位置",
-        "usage_hint": "target 可填 zone ID、object ID 或语义名称；MCP 解析为坐标后下发",
-        "estimated_duration_sec": 30,
+        "description": "移动到静态坐标",
+        "usage_hint": "需要到达某个位置时使用；dest 由 MCP 解析为 [x,y,z] 坐标",
+        "estimated_duration_sec": 10,
         "params": [
-            {"name": "target", "type": "string",
-             "description": "目标位置或语义目标 ID", "required": True},
+            {"name": "dest", "type": "vector",
+             "description": "目标世界坐标 [x,y,z]，单位为厘米", "required": True},
+            {"name": "speed", "type": "enum",
+             "description": "移动速度档位", "required": False,
+             "default_value": "walk", "enum_values": ["walk", "run"]},
+        ],
+    },
+    {
+        "cmd": CMD_MOVE_TO_AGENT,
+        "kind": "atomic",
+        "description": "移动到动态 agent 身边",
+        "usage_hint": "需要靠近或跟随其他 agent 时使用",
+        "estimated_duration_sec": 10,
+        "params": [
+            {"name": "target_agent_id", "type": "string",
+             "description": "目标 agent ID", "required": True},
+            {"name": "speed", "type": "enum",
+             "description": "移动速度档位", "required": False,
+             "default_value": "walk", "enum_values": ["walk", "run"]},
+            {"name": "stop_distance", "type": "number",
+             "description": "停止距离（厘米）", "required": False,
+             "default_value": "150"},
+            {"name": "keep_following", "type": "bool",
+             "description": "true=持续跟随；false=到达后停止", "required": False,
+             "default_value": "false"},
         ],
     },
     {
         "cmd": CMD_TURN_TO,
         "kind": "atomic",
         "description": "转身面向目标",
-        "usage_hint": "target 同 MoveTo 的语义目标解析规则",
+        "usage_hint": "需要转向某个 agent 或方向时使用",
         "estimated_duration_sec": 5,
         "params": [
-            {"name": "target", "type": "string",
-             "description": "目标朝向 ID", "required": True},
+            {"name": "target_agent_id", "type": "string",
+             "description": "目标 agent ID（与 direction 二选一）", "required": False},
+            {"name": "direction", "type": "vector",
+             "description": "方向向量 [dx,dy,dz]（与 target_agent_id 二选一）", "required": False},
         ],
     },
     {
-        "cmd": CMD_PLAY_ANIMATION,
+        "cmd": CMD_PLAY_MONTAGE,
         "kind": "atomic",
-        "description": "播放动画",
-        "usage_hint": "animation 取值取决于 NPC 动画表；空闲时优先用 Emote 表达情绪",
+        "description": "播放蒙太奇动画",
+        "usage_hint": "需要播放特定动画时使用；空闲情绪表达优先用 Emote",
         "estimated_duration_sec": 10,
         "params": [
-            {"name": "animation", "type": "string",
-             "description": "动画名称", "required": True},
+            {"name": "montage_id", "type": "string",
+             "description": "蒙太奇动画 ID", "required": True},
+            {"name": "wait_finish", "type": "bool",
+             "description": "是否等待动画播放完成", "required": False,
+             "default_value": "true"},
         ],
     },
     {
         "cmd": CMD_SPEAK,
         "kind": "atomic",
         "description": "对目标说话",
-        "usage_hint": "target 可空表示自言自语；content 控制话语长度",
+        "usage_hint": "target_agent_id 可空表示自言自语；content 控制话语长度",
         "estimated_duration_sec": 10,
         "params": [
             {"name": "content", "type": "string",
              "description": "说话内容", "required": True},
-            {"name": "target", "type": "string",
-             "description": "对话目标 ID（可空）", "required": False},
+            {"name": "target_agent_id", "type": "string",
+             "description": "对话目标 agent ID（可空）", "required": False},
+            {"name": "audio_url", "type": "string",
+             "description": "可选音频 URL", "required": False},
         ],
     },
     {
@@ -130,18 +165,19 @@ DEFAULT_CAPABILITY_ACTIONS: List[Dict[str, Any]] = [
         "params": [
             {"name": "emotion", "type": "string",
              "description": "情绪类型", "required": True},
-            {"name": "mode", "type": "string",
-             "description": "oneshot 或 sustained", "required": False},
+            {"name": "mode", "type": "enum",
+             "description": "oneshot 或 sustained", "required": False,
+             "default_value": "oneshot", "enum_values": ["oneshot", "sustained"]},
         ],
     },
     {
         "cmd": CMD_WAIT,
         "kind": "atomic",
         "description": "原地等待",
-        "usage_hint": "duration_sec 上限 600；更长等待应使用 ExecuteComposite 的 rest_idle",
+        "usage_hint": "duration_sec 上限 600；更长等待应使用复合行为",
         "estimated_duration_sec": 60,
         "params": [
-            {"name": "duration_sec", "type": "integer",
+            {"name": "duration_sec", "type": "number",
              "description": "等待秒数", "required": True},
         ],
     },
@@ -149,37 +185,90 @@ DEFAULT_CAPABILITY_ACTIONS: List[Dict[str, Any]] = [
         "cmd": CMD_INTERACT,
         "kind": "atomic",
         "description": "与智能对象交互",
-        "usage_hint": "object_id 必须存在于 world_kb.objects；action 取值见该对象的 available_interactions",
+        "usage_hint": "target_object_id 必须存在于 world_kb.objects；interaction 取值见该对象的 available_interactions",
         "estimated_duration_sec": 15,
         "params": [
-            {"name": "object_id", "type": "string",
+            {"name": "target_object_id", "type": "string",
              "description": "智能对象 ID", "required": True},
-            {"name": "action", "type": "string",
+            {"name": "interaction", "type": "string",
              "description": "交互动作", "required": True},
         ],
     },
     {
-        "cmd": CMD_EXECUTE_COMPOSITE,
+        "cmd": CMD_WORK_AT_WORKBENCH,
         "kind": "composite",
-        "description": "执行复合行为（封装一段时长内的多步骤活动）",
-        "usage_hint": "action 取值：work_assemble / patrol_route / charge_at / repair_target / social_chat_with / rest_idle / archive_research；duration_min 内部 ×60 转 duration_sec",
+        "description": "在工作台装配",
+        "usage_hint": "target_object_id 为工作台 ID；duration_sec 可选",
         "estimated_duration_sec": 600,
         "params": [
-            {"name": "action", "type": "string",
-             "description": "复合行为类型", "required": True},
-            {"name": "target", "type": "string",
-             "description": "目标 ID", "required": False},
-            {"name": "duration_min", "type": "integer",
-             "description": "持续分钟数", "required": False},
+            {"name": "target_object_id", "type": "string",
+             "description": "工作台 ID", "required": True},
+            {"name": "duration_sec", "type": "number",
+             "description": "持续秒数（可选）", "required": False},
         ],
     },
     {
-        "cmd": CMD_STOP,
-        "kind": "atomic",
-        "description": "停止当前在途动作",
-        "usage_hint": "无需参数；UE 端校验 action_id 匹配后中断当前动作",
-        "estimated_duration_sec": 1,
-        "params": [],
+        "cmd": CMD_WORK_AT_WORKSHOP,
+        "kind": "composite",
+        "description": "车间例行工作",
+        "usage_hint": "无需特定目标；duration_sec 可选",
+        "estimated_duration_sec": 600,
+        "params": [
+            {"name": "duration_sec", "type": "number",
+             "description": "持续秒数（可选）", "required": False},
+        ],
+    },
+    {
+        "cmd": CMD_CHAT_WITH,
+        "kind": "composite",
+        "description": "与其他 agent 聊天",
+        "usage_hint": "target_agent_id 必填；topic 可选",
+        "estimated_duration_sec": 300,
+        "params": [
+            {"name": "target_agent_id", "type": "string",
+             "description": "聊天目标 agent ID", "required": True},
+            {"name": "topic", "type": "string",
+             "description": "聊天话题（可选）", "required": False},
+        ],
+    },
+    {
+        "cmd": CMD_REPAIR_TARGET,
+        "kind": "composite",
+        "description": "修理目标 agent",
+        "usage_hint": "target_agent_id 必填；tool_id 可选",
+        "estimated_duration_sec": 600,
+        "params": [
+            {"name": "target_agent_id", "type": "string",
+             "description": "要修理的 agent ID", "required": True},
+            {"name": "tool_id", "type": "string",
+             "description": "工具 ID（可选）", "required": False},
+        ],
+    },
+    {
+        "cmd": CMD_CHARGE_AT_STATION,
+        "kind": "composite",
+        "description": "充电",
+        "usage_hint": "target_object_id 可空（自动选最近充电站）；duration_sec 可选",
+        "estimated_duration_sec": 600,
+        "params": [
+            {"name": "target_object_id", "type": "string",
+             "description": "充电站 ID（可空）", "required": False},
+            {"name": "duration_sec", "type": "number",
+             "description": "充电秒数（可选）", "required": False},
+        ],
+    },
+    {
+        "cmd": CMD_PATROL_ZONE,
+        "kind": "composite",
+        "description": "巡逻区域",
+        "usage_hint": "target_zone 必填；duration_sec 可选",
+        "estimated_duration_sec": 600,
+        "params": [
+            {"name": "target_zone", "type": "string",
+             "description": "巡逻区域 ID", "required": True},
+            {"name": "duration_sec", "type": "number",
+             "description": "巡逻秒数（可选）", "required": False},
+        ],
     },
 ]
 
@@ -544,17 +633,26 @@ COMPOSITE_DEFAULT_SEC = 1800.0  # 30 min
 # Physical evolution rates per game-minute, keyed by activity class.
 # `interval` in _evolve_physical is in game-minutes (perception_interval=30),
 # so multiply these by `interval` to get the per-tick delta.
-# charge_at actively restores energy and relieves fatigue (no joint wear —
-# the robot is docked, not moving). rest_idle is light recovery. The default
-# composite rate (work_assemble / patrol_route / repair_target /
-# social_chat_with / archive_research) keeps the pre-fix work-like drain.
+# ChargeAtStation actively restores energy and relieves fatigue (no joint
+# wear — the robot is docked, not moving). The default composite rate
+# (WorkAtWorkbench / WorkAtWorkshop / PatrolZone / ChatWith /
+# RepairTarget) keeps the work-like drain. Keyed by cmd constant so the
+# removal of busy_composite_name (post-14-cmd migration) still lets
+# _evolve_physical pick the right rate from busy_cmd alone.
 PHYS_RATES = {
-    "charge_at":  {"energy": +0.10, "fatigue": -0.15, "joint_wear": 0.0},
-    "rest_idle":  {"energy": -0.01, "fatigue": -0.07, "joint_wear": 0.0},
-    "_default":   {"energy": -0.05, "fatigue": +0.20, "joint_wear": +0.05},
+    CMD_CHARGE_AT_STATION: {"energy": +0.10, "fatigue": -0.15, "joint_wear": 0.0},
+    "_default":            {"energy": -0.05, "fatigue": +0.20, "joint_wear": +0.05},
 }
 # Passive (non-busy) drain — applied when no composite action is running.
 PHYS_RATES_PASSIVE = {"energy": -0.02, "fatigue": +0.05, "joint_wear": 0.0}
+
+# Composite cmds — the 6 long-running composite actions. Used by
+# _estimate_duration (all busy) and _evolve_physical (PHYS_RATES lookup).
+# Atomic busy cmds (e.g. Wait) use PASSIVE rate, not the work-like default.
+COMPOSITE_CMDS = frozenset({
+    CMD_WORK_AT_WORKBENCH, CMD_WORK_AT_WORKSHOP, CMD_CHAT_WITH,
+    CMD_REPAIR_TARGET, CMD_CHARGE_AT_STATION, CMD_PATROL_ZONE,
+})
 
 # Physical-state delta thresholds (约定5)
 DELTA_THRESHOLD = {"energy": 5.0, "fatigue": 5.0, "health": 5.0, "joint_wear": 1.0}
@@ -617,11 +715,10 @@ class NPCState:
     # Busy state for long-running actions
     busy_action_id: Optional[str] = None
     busy_cmd: Optional[str] = None
-    # Composite action name (e.g. "charge_at", "work_assemble") when
-    # busy_cmd == CMD_EXECUTE_COMPOSITE, else None. Used by
-    # _evolve_physical to pick the right physical-evolution rate — without
-    # it, charge_at drained energy instead of restoring it.
-    busy_composite_name: Optional[str] = None
+    # busy_cmd alone distinguishes all composite actions after the 14-cmd
+    # migration (ChargeAtStation vs WorkAtWorkbench vs ...). The old
+    # busy_composite_name field (needed when all composites shared
+    # CmdExecuteComposite) has been removed.
     busy_until_min: Optional[int] = None  # absolute game-minute
     busy_started_ms: Optional[int] = None
 
@@ -1055,7 +1152,11 @@ class MockUE:
             return
 
         # Busy guard: reject disruptive commands while busy.
-        DISRUPTIVE = {CMD_MOVE_TO, CMD_TURN_TO, CMD_INTERACT, CMD_EXECUTE_COMPOSITE, CMD_WAIT}
+        DISRUPTIVE = {
+            CMD_MOVE_TO_LOCATION, CMD_MOVE_TO_AGENT, CMD_TURN_TO, CMD_INTERACT, CMD_WAIT,
+            CMD_WORK_AT_WORKBENCH, CMD_WORK_AT_WORKSHOP, CMD_CHAT_WITH,
+            CMD_REPAIR_TARGET, CMD_CHARGE_AT_STATION, CMD_PATROL_ZONE,
+        }
         if self.npc.busy_action_id is not None and cmd in DISRUPTIVE:
             remaining = max(0, (self.npc.busy_until_min or 0) - self.time.total_minutes)
             await self._send_action_started(
@@ -1078,12 +1179,9 @@ class MockUE:
             busy_game_min = max(1, int(est_sec / 60.0))
             self.npc.busy_action_id = action_id
             self.npc.busy_cmd = cmd
-            # Track the composite name so _evolve_physical can distinguish
-            # restorative actions (charge_at/rest_idle) from work-like ones.
-            if cmd == CMD_EXECUTE_COMPOSITE:
-                self.npc.busy_composite_name = params.get("name", "") or None
-            else:
-                self.npc.busy_composite_name = None
+            # After the 14-cmd migration, busy_cmd alone distinguishes all
+            # composite actions (ChargeAtStation / WorkAtWorkbench / ...),
+            # so the old busy_composite_name field is no longer needed.
             self.npc.busy_until_min = self.time.total_minutes + busy_game_min
             self.npc.busy_started_ms = int(_time.time() * 1000)
             self.npc.current_animation = "work"
@@ -1103,32 +1201,36 @@ class MockUE:
     def _validate_target(self, cmd: str, params: Dict[str, Any]) -> str:
         """Return a non-empty rejection reason when targeting a non‑existent
         zone, location, object, or route.  An empty return means valid."""
-        if cmd == CMD_MOVE_TO:
-            # move_to (方案 A): MCP 层已解析坐标，UE 只校验 dest 是 3 元数组。
+        if cmd == CMD_MOVE_TO_LOCATION:
+            # MoveToLocation: MCP 层已解析坐标，UE 只校验 dest 是 3 元数组。
             dest = params.get("dest")
             if not isinstance(dest, list) or len(dest) != 3:
-                return f"move_to requires dest:[x,y,z], got: {dest!r}"
+                return f"MoveToLocation requires dest:[x,y,z], got: {dest!r}"
             for v in dest:
                 if not isinstance(v, (int, float)):
-                    return f"move_to dest entries must be numeric, got: {dest!r}"
+                    return f"MoveToLocation dest entries must be numeric, got: {dest!r}"
+        elif cmd == CMD_MOVE_TO_AGENT:
+            # MoveToAgent: target_agent_id 必填，UE 端不校验 agent 存在性
+            # （多 agent 场景由 MCP 注册表管理，UE 仅按 ID 寻路）
+            tid = params.get("target_agent_id", "")
+            if not tid:
+                return "MoveToAgent requires target_agent_id"
         elif cmd == CMD_INTERACT:
-            obj = params.get("object_id", "")
+            obj = params.get("target_object_id", "")
             if obj and obj not in self.kb.objects:
                 return f"unknown object: {obj} (available: {list(self.kb.objects)})"
-        elif cmd == CMD_EXECUTE_COMPOSITE:
-            name = params.get("name", "")
-            if name == "patrol_route":
-                route = params.get("route_id", "")
-                if route and not self.kb.is_target(route):
-                    return f"unknown patrol route: {route}"
-            elif name == "work_assemble":
-                target = params.get("target", "")
-                if target and target not in self.kb.objects:
-                    return f"unknown workbench: {target}"
-            elif name == "charge_at":
-                station = params.get("station_id", "")
-                if station and not self.kb.is_target(station):
-                    return f"unknown charging station: {station}"
+        elif cmd == CMD_WORK_AT_WORKBENCH:
+            target = params.get("target_object_id", "")
+            if target and target not in self.kb.objects:
+                return f"unknown workbench: {target}"
+        elif cmd == CMD_CHARGE_AT_STATION:
+            station = params.get("target_object_id", "")
+            if station and not self.kb.is_target(station):
+                return f"unknown charging station: {station}"
+        elif cmd == CMD_PATROL_ZONE:
+            zone = params.get("target_zone", "")
+            if zone and zone not in self.kb.zones:
+                return f"unknown patrol zone: {zone}"
         return ""
 
     async def _handle_stop_action(self, payload: Dict[str, Any]):
@@ -1152,18 +1254,23 @@ class MockUE:
 
     def _estimate_duration(self, cmd: str, params: Dict[str, Any]) -> Tuple[float, bool]:
         """Return (estimated_duration_sec, is_long_running)."""
-        if cmd == CMD_EXECUTE_COMPOSITE:
+        # Composite cmds (6): all long-running, duration from params or default.
+        if cmd in COMPOSITE_CMDS:
             dur = float(params.get("duration_sec", COMPOSITE_DEFAULT_SEC))
             return dur, True
         if cmd == CMD_WAIT:
             # Wait 是长动作：占用 NPC 直到游戏时间推进过 busy_until_min，
             # 避免被当作短动作立即完成导致 MCP 侧忙循环（sendIdleWait 路径）。
             return float(params.get("duration_sec", 5)), True
-        if cmd == CMD_MOVE_TO:
+        if cmd == CMD_MOVE_TO_LOCATION:
+            return 120.0, False   # ~2 min walk
+        if cmd == CMD_MOVE_TO_AGENT:
             return 120.0, False   # ~2 min walk
         if cmd == CMD_INTERACT:
             return 300.0, False   # ~5 min
-        # TurnTo/Speak/Emote/Stop: near-instant
+        if cmd == CMD_PLAY_MONTAGE:
+            return 10.0, False
+        # TurnTo/Speak/Emote: near-instant
         return 1.0, False
 
     def _apply_command_effects(self, cmd: str, params: Dict[str, Any], starting: bool) -> Optional[Dict[str, Any]]:
@@ -1171,19 +1278,27 @@ class MockUE:
 
         Returns an optional ``details`` dict for short-running actions — the
         caller passes it to ``_send_action_completed`` so the result reaches
-        the agent. Currently only ``interact`` with ``action=inspect`` returns
-        meaningful content; other commands return None (empty details).
+        the agent. Currently only ``interact`` with ``interaction=inspect``
+        returns meaningful content; other commands return None (empty details).
         """
-        if cmd == CMD_MOVE_TO:
-            # 方案 A: MCP 已解析坐标，UE 直接用 dest。
-            # target+kind 是 metadata，用于精确设置 current_location。
+        if cmd == CMD_MOVE_TO_LOCATION:
+            # MCP 已解析坐标，UE 直接用 dest。
             dest = params.get("dest")
-            target = params.get("target", "")
-            kind = params.get("kind", "")
             if isinstance(dest, list) and len(dest) == 3:
-                self._move_to(list(dest), target=target or None, kind=kind or None)
+                self._move_to(list(dest))
+        elif cmd == CMD_MOVE_TO_AGENT:
+            # MoveToAgent: 无多 agent 模拟，记录意图即可。
+            # 真实 UE 会寻路到 target_agent_id 当前位置；Mock UE 单 agent
+            # 场景下退化为原地等待目标出现。
+            tid = params.get("target_agent_id", "")
+            if tid:
+                logger.info(f"[MOVE_TO_AGENT] target={tid} (mock: no multi-agent sim)")
         elif cmd == CMD_TURN_TO:
             self.npc.rotation[1] = (self.npc.rotation[1] + 90.0) % 360.0
+        elif cmd == CMD_PLAY_MONTAGE:
+            montage = params.get("montage_id", "")
+            if montage:
+                logger.info(f"[MONTAGE] {montage}")
         elif cmd == CMD_SPEAK:
             content = params.get("content", "")
             logger.info(f"[SPEAK] {content[:60]}")
@@ -1194,21 +1309,22 @@ class MockUE:
                 self.npc.current_emote = emotion
             else:
                 self.npc.current_emote = None
-        elif cmd == CMD_EXECUTE_COMPOSITE:
-            name = params.get("name", "")
-            if name == "charge_at":
-                pass  # energy restored gradually in loop
-            elif name in ("work_assemble", "archive_research", "repair_target"):
-                pass  # fatigue accrues in loop
+        elif cmd in (CMD_WORK_AT_WORKBENCH, CMD_WORK_AT_WORKSHOP,
+                     CMD_CHAT_WITH, CMD_REPAIR_TARGET, CMD_PATROL_ZONE):
+            # 工作类复合行为：疲劳在 _evolve_physical 循环中累积，这里不产生 details。
+            pass
+        elif cmd == CMD_CHARGE_AT_STATION:
+            # 充电：能量在 _evolve_physical 循环中恢复（PHYS_RATES 已按 cmd 区分）。
+            pass
         elif cmd == CMD_INTERACT:
-            # inspect 是只读查询：根据 object_id 生成设备检查报告，通过
+            # inspect 是只读查询：根据 target_object_id 生成设备检查报告，通过
             # action_completed.details 返回，流经 MCP "动作完成" 行进入下一轮
             # 决策上下文。其他 interact 动作（assemble/charge 等）由对应
             # 复合动作处理，这里不产生额外 details。
-            action = params.get("action", "")
-            object_id = params.get("object_id", "")
-            if action == "inspect" and object_id:
-                return self._inspect_object(object_id)
+            interaction = params.get("interaction", "")
+            target_object_id = params.get("target_object_id", "")
+            if interaction == "inspect" and target_object_id:
+                return self._inspect_object(target_object_id)
         # Physical drain applied gradually in perception loop.
         return None
 
@@ -1295,7 +1411,6 @@ class MockUE:
     def _clear_busy(self):
         self.npc.busy_action_id = None
         self.npc.busy_cmd = None
-        self.npc.busy_composite_name = None
         self.npc.busy_until_min = None
         self.npc.busy_started_ms = None
         self.npc.current_animation = "idle"
@@ -1545,17 +1660,16 @@ class MockUE:
     def _evolve_physical(self):
         """Gradually change physical state based on current activity.
 
-        Rates are per game-minute (``interval`` is in game-minutes). Composite
-        actions pick their rate from PHYS_RATES keyed by the composite name —
-        charge_at restores energy and relieves fatigue, rest_idle is light
-        recovery, other composites keep the work-like drain. Non-busy periods
-        use the passive drain.
+        Rates are per game-minute (``interval`` is in game-minutes). After
+        the 14-cmd migration, composite actions are keyed directly by
+        busy_cmd (ChargeAtStation restores energy, other composites use the
+        work-like default). Atomic busy cmds (e.g. Wait) and non-busy
+        periods use the passive drain — same as pre-migration behavior.
         """
         p = self.npc.physical
         interval = self.perception_interval
-        if self.npc.busy_cmd == CMD_EXECUTE_COMPOSITE and self.npc.busy_action_id:
-            name = self.npc.busy_composite_name
-            rate = PHYS_RATES.get(name) or PHYS_RATES["_default"]
+        if self.npc.busy_cmd in COMPOSITE_CMDS and self.npc.busy_action_id:
+            rate = PHYS_RATES.get(self.npc.busy_cmd) or PHYS_RATES["_default"]
         else:
             rate = PHYS_RATES_PASSIVE
         p.energy = max(0, min(100, p.energy + interval * rate["energy"]))

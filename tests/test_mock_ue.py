@@ -5,7 +5,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from agenttown.mock_ue import MockUE, CMD_EXECUTE_COMPOSITE, DEFAULT_CAPABILITY_ACTIONS, PHYS_RATES, PHYS_RATES_PASSIVE
+from agenttown.mock_ue import (
+    MockUE, DEFAULT_CAPABILITY_ACTIONS, PHYS_RATES, PHYS_RATES_PASSIVE,
+    COMPOSITE_CMDS,
+    CMD_MOVE_TO_LOCATION, CMD_MOVE_TO_AGENT, CMD_TURN_TO, CMD_PLAY_MONTAGE,
+    CMD_SPEAK, CMD_EMOTE, CMD_WAIT, CMD_INTERACT,
+    CMD_WORK_AT_WORKBENCH, CMD_WORK_AT_WORKSHOP, CMD_CHAT_WITH,
+    CMD_REPAIR_TARGET, CMD_CHARGE_AT_STATION, CMD_PATROL_ZONE,
+)
 
 class ScenarioInjectionTests(unittest.TestCase):
     def make_ue(self):
@@ -77,15 +84,15 @@ class AgentRoutingTests(unittest.IsolatedAsyncioTestCase):
             "type": "action_command",
             "agent_id": "H-01",
             "seq": 1,
-            "payload": {"action_id": "act_patrol", "cmd": "ExecuteComposite",
-                        "params": {"name": "patrol_route", "route_id": "morning_patrol"}},
+            "payload": {"action_id": "act_patrol", "cmd": "PatrolZone",
+                        "params": {"target_zone": "nonexistent_zone"}},
         })
         import json
         self.assertGreaterEqual(len(ue._ws.sent), 1)
         ack = json.loads(ue._ws.sent[0])
         self.assertEqual(ack["type"], "action_started")
         self.assertEqual(ack["payload"]["accepted"], False)
-        self.assertIn("unknown patrol route", ack["payload"]["reject_reason"])
+        self.assertIn("unknown patrol zone", ack["payload"]["reject_reason"])
 
     async def test_unknown_move_target_is_rejected(self):
         class FakeWS:
@@ -101,8 +108,8 @@ class AgentRoutingTests(unittest.IsolatedAsyncioTestCase):
             "type": "action_command",
             "agent_id": "H-01",
             "seq": 1,
-            "payload": {"action_id": "act_move", "cmd": "MoveTo",
-                        "params": {"target": "narnia"}},
+            "payload": {"action_id": "act_move", "cmd": "MoveToLocation",
+                        "params": {"dest": "not_an_array"}},
         })
         import json
         ack = json.loads(ue._ws.sent[0])
@@ -169,7 +176,7 @@ class InspectTests(unittest.IsolatedAsyncioTestCase):
         ue.npc.physical.energy = 75.0
         return ue, FakeWS
 
-    async def _send_interact(self, ue, object_id, action):
+    async def _send_interact(self, ue, target_object_id, interaction):
         await ue._handle_envelope({
             "type": "action_command",
             "agent_id": "H-01",
@@ -177,7 +184,7 @@ class InspectTests(unittest.IsolatedAsyncioTestCase):
             "payload": {
                 "action_id": "act_inspect",
                 "cmd": "InteractSmartObject",
-                "params": {"object_id": object_id, "action": action},
+                "params": {"target_object_id": target_object_id, "interaction": interaction},
             },
         })
 
@@ -272,8 +279,7 @@ class InspectTests(unittest.IsolatedAsyncioTestCase):
 
         ue, _ = self._make_ue()
         ue.npc.busy_action_id = "act_other"
-        ue.npc.busy_cmd = CMD_EXECUTE_COMPOSITE
-        ue.npc.busy_composite_name = "work_assemble"
+        ue.npc.busy_cmd = CMD_WORK_AT_WORKBENCH
         ue.npc.busy_until_min = ue.time.total_minutes + 30
         await self._send_interact(ue, "workbench_01", "inspect")
 
@@ -317,7 +323,7 @@ class InspectTests(unittest.IsolatedAsyncioTestCase):
 
 class CapabilityRegistryTests(unittest.IsolatedAsyncioTestCase):
     """Tests for the capability_registry message — the cmd set Mock UE
-    advertises to MCP on connect. Covers the default 9-cmd constant and
+    advertises to MCP on connect. Covers the default 14-cmd constant and
     the injectable override path used by alternate worlds/tests."""
 
     def _make_ue(self, **kwargs):
@@ -340,16 +346,18 @@ class CapabilityRegistryTests(unittest.IsolatedAsyncioTestCase):
                 return msg["payload"]
         return None
 
-    async def test_default_capability_registry_has_nine_cmds(self):
+    async def test_default_capability_registry_has_fourteen_cmds(self):
         ue, _ = self._make_ue()
         await ue._send_capability_registry()
         payload = self._capability_payload(ue)
         self.assertIsNotNone(payload, "capability_registry not sent")
         cmds = [a["cmd"] for a in payload["actions"]]
-        # The 9 cmds defined by the protocol.
+        # The 14 cmds defined by the protocol §2.3 (8 atomic + 6 composite).
         self.assertEqual(sorted(cmds), sorted([
-            "MoveTo", "TurnTo", "PlayAnimation", "Speak", "Emote",
-            "Wait", "InteractSmartObject", "ExecuteComposite", "Stop",
+            "MoveToLocation", "MoveToAgent", "TurnTo", "PlayMontage", "Speak",
+            "Emote", "Wait", "InteractSmartObject",
+            "WorkAtWorkbench", "WorkAtWorkshop", "ChatWith", "RepairTarget",
+            "ChargeAtStation", "PatrolZone",
         ]))
 
     async def test_default_actions_carry_usage_hint(self):
@@ -367,10 +375,10 @@ class CapabilityRegistryTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_capability_actions_override(self):
         # An alternate world passes a reduced cmd set — Mock UE should
-        # advertise exactly that set, not the default 9.
+        # advertise exactly that set, not the default 14.
         reduced = [
-            {"cmd": "MoveTo", "kind": "atomic", "description": "移动",
-             "estimated_duration_sec": 30, "params": []},
+            {"cmd": "MoveToLocation", "kind": "atomic", "description": "移动",
+             "estimated_duration_sec": 10, "params": []},
             {"cmd": "Speak", "kind": "atomic", "description": "说话",
              "estimated_duration_sec": 10, "params": []},
         ]
@@ -378,7 +386,7 @@ class CapabilityRegistryTests(unittest.IsolatedAsyncioTestCase):
         await ue._send_capability_registry()
         payload = self._capability_payload(ue)
         cmds = [a["cmd"] for a in payload["actions"]]
-        self.assertEqual(cmds, ["MoveTo", "Speak"])
+        self.assertEqual(cmds, ["MoveToLocation", "Speak"])
 
     async def test_default_capability_actions_constant_matches_sent(self):
         # The constant and the sent payload should be the same object —
@@ -392,28 +400,27 @@ class CapabilityRegistryTests(unittest.IsolatedAsyncioTestCase):
 
 
 class PhysicalEvolutionTests(unittest.TestCase):
-    """Tests for _evolve_physical rate branching by composite action name.
+    """Tests for _evolve_physical rate branching by composite cmd.
 
     Regression guard for the bug where charge_at drained energy instead of
     restoring it because _evolve_physical treated all composite actions as
-    work-like (the composite name wasn't tracked on the NPC state).
+    work-like (the composite cmd wasn't tracked on the NPC state).
     """
 
     def make_ue(self):
         return MockUE(log_dir="logs")
 
-    def _set_busy_composite(self, ue, name):
-        """Put the NPC into a busy composite action with the given name."""
-        ue.npc.busy_cmd = CMD_EXECUTE_COMPOSITE
+    def _set_busy(self, ue, cmd):
+        """Put the NPC into a busy action with the given cmd constant."""
+        ue.npc.busy_cmd = cmd
         ue.npc.busy_action_id = "act_test"
-        ue.npc.busy_composite_name = name
 
     def test_charge_at_restores_energy_and_reduces_fatigue(self):
         ue = self.make_ue()
         ue.npc.physical.energy = 50.0
         ue.npc.physical.fatigue = 60.0
         ue.npc.physical.joint_wear = 10.0
-        self._set_busy_composite(ue, "charge_at")
+        self._set_busy(ue, CMD_CHARGE_AT_STATION)
 
         energy_before = ue.npc.physical.energy
         fatigue_before = ue.npc.physical.fatigue
@@ -424,57 +431,34 @@ class PhysicalEvolutionTests(unittest.TestCase):
         # Energy must go UP — this is the core regression. The pre-fix code
         # applied the work-like drain (-0.05/min) to charge_at.
         self.assertGreater(ue.npc.physical.energy, energy_before,
-                           "charge_at must restore energy, not drain it")
+                           "ChargeAtStation must restore energy, not drain it")
         # Fatigue must go DOWN.
         self.assertLess(ue.npc.physical.fatigue, fatigue_before,
-                        "charge_at must relieve fatigue, not accrue it")
+                        "ChargeAtStation must relieve fatigue, not accrue it")
         # Joint wear must not increase while docked.
         self.assertEqual(ue.npc.physical.joint_wear, joint_before,
-                         "charge_at must not add joint wear")
+                         "ChargeAtStation must not add joint wear")
 
     def test_charge_at_rate_matches_phys_rates_constant(self):
         ue = self.make_ue()
         interval = ue.perception_interval
         ue.npc.physical.energy = 50.0
         ue.npc.physical.fatigue = 60.0
-        self._set_busy_composite(ue, "charge_at")
+        self._set_busy(ue, CMD_CHARGE_AT_STATION)
         ue._evolve_physical()
-        rate = PHYS_RATES["charge_at"]
+        rate = PHYS_RATES[CMD_CHARGE_AT_STATION]
         self.assertAlmostEqual(ue.npc.physical.energy, 50.0 + interval * rate["energy"])
         self.assertAlmostEqual(ue.npc.physical.fatigue, 60.0 + interval * rate["fatigue"])
 
-    def test_rest_idle_reduces_fatigue_with_minimal_energy_drain(self):
-        ue = self.make_ue()
-        ue.npc.physical.energy = 80.0
-        ue.npc.physical.fatigue = 70.0
-        ue.npc.physical.joint_wear = 5.0
-        self._set_busy_composite(ue, "rest_idle")
-
-        energy_before = ue.npc.physical.energy
-        fatigue_before = ue.npc.physical.fatigue
-        joint_before = ue.npc.physical.joint_wear
-
-        ue._evolve_physical()
-
-        # Fatigue goes down — rest_idle was broken by the same root cause.
-        self.assertLess(ue.npc.physical.fatigue, fatigue_before,
-                        "rest_idle must relieve fatigue")
-        # Energy drain is minimal (much less than the work rate).
-        drain = energy_before - ue.npc.physical.energy
-        self.assertLess(drain, 1.0,
-                        f"rest_idle energy drain should be minimal, got {drain}")
-        # Joint wear unchanged.
-        self.assertEqual(ue.npc.physical.joint_wear, joint_before)
-
-    def test_work_assemble_keeps_work_like_drain(self):
-        """The default composite rate (work_assemble etc.) must keep the
+    def test_work_at_workbench_keeps_work_like_drain(self):
+        """The default composite rate (WorkAtWorkbench etc.) must keep the
         pre-fix drain behavior — this guards against accidentally flipping
         the sign or dropping the rate during the refactor."""
         ue = self.make_ue()
         ue.npc.physical.energy = 80.0
         ue.npc.physical.fatigue = 30.0
         ue.npc.physical.joint_wear = 5.0
-        self._set_busy_composite(ue, "work_assemble")
+        self._set_busy(ue, CMD_WORK_AT_WORKBENCH)
 
         energy_before = ue.npc.physical.energy
         fatigue_before = ue.npc.physical.fatigue
@@ -483,11 +467,11 @@ class PhysicalEvolutionTests(unittest.TestCase):
         ue._evolve_physical()
 
         self.assertLess(ue.npc.physical.energy, energy_before,
-                        "work_assemble must drain energy")
+                        "WorkAtWorkbench must drain energy")
         self.assertGreater(ue.npc.physical.fatigue, fatigue_before,
-                           "work_assemble must accrue fatigue")
+                           "WorkAtWorkbench must accrue fatigue")
         self.assertGreater(ue.npc.physical.joint_wear, joint_before,
-                           "work_assemble must accrue joint wear")
+                           "WorkAtWorkbench must accrue joint wear")
         # And the delta must match the _default rate exactly.
         interval = ue.perception_interval
         rate = PHYS_RATES["_default"]
@@ -495,13 +479,15 @@ class PhysicalEvolutionTests(unittest.TestCase):
         self.assertAlmostEqual(ue.npc.physical.fatigue, fatigue_before + interval * rate["fatigue"])
         self.assertAlmostEqual(ue.npc.physical.joint_wear, joint_before + interval * rate["joint_wear"])
 
-    def test_unknown_composite_name_falls_back_to_default_drain(self):
-        """An unregistered composite name must fall back to the work-like
+    def test_unknown_composite_cmd_falls_back_to_default_drain(self):
+        """An unregistered composite cmd must fall back to the work-like
         default rate rather than crashing or silently no-oping."""
         ue = self.make_ue()
         ue.npc.physical.energy = 80.0
         ue.npc.physical.fatigue = 30.0
-        self._set_busy_composite(ue, "some_future_composite")
+        # Use a composite cmd not in PHYS_RATES (PatrolZone has no specific
+        # rate → falls back to _default).
+        self._set_busy(ue, CMD_PATROL_ZONE)
         ue._evolve_physical()
         # Should drain like work, not raise.
         self.assertLess(ue.npc.physical.energy, 80.0)
@@ -530,7 +516,7 @@ class PhysicalEvolutionTests(unittest.TestCase):
         ue = self.make_ue()
         ue.npc.physical.energy = 99.0
         ue.npc.physical.fatigue = 10.0
-        self._set_busy_composite(ue, "charge_at")
+        self._set_busy(ue, CMD_CHARGE_AT_STATION)
         # One tick would push energy past 100; must clamp.
         ue._evolve_physical()
         self.assertLessEqual(ue.npc.physical.energy, 100.0,
@@ -541,15 +527,15 @@ class PhysicalEvolutionTests(unittest.TestCase):
         ue = self.make_ue()
         ue.npc.physical.energy = 50.0
         ue.npc.physical.fatigue = 1.0
-        self._set_busy_composite(ue, "charge_at")
+        self._set_busy(ue, CMD_CHARGE_AT_STATION)
         ue._evolve_physical()
         self.assertGreaterEqual(ue.npc.physical.fatigue, 0.0,
                                 "fatigue must not go below 0")
         self.assertEqual(ue.npc.physical.fatigue, 0.0)
 
-    def test_busy_composite_name_set_on_composite_start(self):
-        """When a composite action starts, busy_composite_name must be
-        populated from params['name'] so _evolve_physical can branch on it."""
+    def test_busy_cmd_set_on_composite_start(self):
+        """When a composite action starts, busy_cmd must be set to the
+        composite cmd constant so _evolve_physical can branch on it."""
         import json
 
         class FakeWS:
@@ -578,10 +564,9 @@ class PhysicalEvolutionTests(unittest.TestCase):
                 "seq": 1,
                 "payload": {
                     "action_id": "act_charge",
-                    "cmd": "ExecuteComposite",
+                    "cmd": "ChargeAtStation",
                     "params": {
-                        "name": "charge_at",
-                        "station_id": "charging_station_01",
+                        "target_object_id": "charging_station_01",
                         "duration_sec": 1800,
                     },
                 },
@@ -589,64 +574,60 @@ class PhysicalEvolutionTests(unittest.TestCase):
 
         asyncio.run(_run())
 
-        self.assertEqual(ue.npc.busy_composite_name, "charge_at",
-                         "busy_composite_name must be set to 'charge_at'")
-        self.assertEqual(ue.npc.busy_cmd, CMD_EXECUTE_COMPOSITE)
+        self.assertEqual(ue.npc.busy_cmd, CMD_CHARGE_AT_STATION,
+                         "busy_cmd must be set to ChargeAtStation")
         self.assertIsNotNone(ue.npc.busy_action_id)
 
         # Now evolve — energy must go up (the whole point of the fix).
         energy_before = ue.npc.physical.energy
         ue._evolve_physical()
         self.assertGreater(ue.npc.physical.energy, energy_before,
-                           "charge_at started via _handle_envelope must restore energy")
+                           "ChargeAtStation started via _handle_envelope must restore energy")
 
-    def test_busy_composite_name_cleared_on_stop(self):
-        """_clear_busy must reset busy_composite_name so a subsequent
-        passive tick doesn't keep applying the composite rate."""
+    def test_busy_cmd_cleared_on_stop(self):
+        """_clear_busy must reset busy_cmd so a subsequent passive tick
+        doesn't keep applying the composite rate."""
         ue = self.make_ue()
-        self._set_busy_composite(ue, "charge_at")
-        self.assertEqual(ue.npc.busy_composite_name, "charge_at")
+        self._set_busy(ue, CMD_CHARGE_AT_STATION)
+        self.assertEqual(ue.npc.busy_cmd, CMD_CHARGE_AT_STATION)
         ue._clear_busy()
-        self.assertIsNone(ue.npc.busy_composite_name)
         self.assertIsNone(ue.npc.busy_cmd)
         self.assertIsNone(ue.npc.busy_action_id)
 
-    def test_non_composite_busy_does_not_set_composite_name(self):
-        """A busy non-composite action (e.g. none here) must leave
-        busy_composite_name as None so the passive rate applies."""
+    def test_atomic_busy_uses_passive_rate(self):
+        """A busy atomic action (e.g. Wait) must use the passive rate, not
+        the work-like composite default. Only composite cmds trigger
+        PHYS_RATES lookup."""
         ue = self.make_ue()
-        # Simulate a busy non-composite state manually.
-        ue.npc.busy_cmd = "MoveTo"  # not CMD_EXECUTE_COMPOSITE
-        ue.npc.busy_action_id = "act_move"
-        ue.npc.busy_composite_name = None
+        ue.npc.busy_cmd = CMD_WAIT
+        ue.npc.busy_action_id = "act_wait"
         ue.npc.physical.energy = 80.0
         ue.npc.physical.fatigue = 30.0
         ue._evolve_physical()
-        # MoveTo is not CMD_EXECUTE_COMPOSITE, so passive rate applies.
+        # Wait uses passive rate (not the composite _default).
         interval = ue.perception_interval
         self.assertAlmostEqual(ue.npc.physical.energy, 80.0 + interval * PHYS_RATES_PASSIVE["energy"])
 
     def test_completion_tick_uses_composite_rate_not_passive(self):
         """Regression: on the tick where game time crosses busy_until_min,
         _evolve_physical must still apply the composite rate (e.g.
-        charge_at restoring energy), not the passive rate.
+        ChargeAtStation restoring energy), not the passive rate.
 
         The bug was that _clear_busy() ran before _evolve_physical(),
         so the completion tick saw no busy action and used the passive
-        drain — charge_at's last tick would LOSE energy instead of
+        drain — ChargeAtStation's last tick would LOSE energy instead of
         gaining it.
         """
         ue = self.make_ue()
         interval = ue.perception_interval  # 30 game-min
 
-        # Charge_at: 1 tick duration (30 game-min).
+        # ChargeAtStation: 1 tick duration (30 game-min).
         ue.time.hour = 12
         ue.time.minute = 0
         ue.npc.physical.energy = 50.0
         ue.npc.physical.fatigue = 60.0
         ue.npc.busy_action_id = "act_charge"
-        ue.npc.busy_cmd = CMD_EXECUTE_COMPOSITE
-        ue.npc.busy_composite_name = "charge_at"
+        ue.npc.busy_cmd = CMD_CHARGE_AT_STATION
         ue.npc.busy_until_min = ue.time.total_minutes + interval  # completes this tick
         ue.npc.busy_started_ms = int(_time.time() * 1000)
 
@@ -659,14 +640,14 @@ class PhysicalEvolutionTests(unittest.TestCase):
         # BEFORE clearing busy, so the composite rate applies.
         ue._evolve_physical()
 
-        rate = PHYS_RATES["charge_at"]
+        rate = PHYS_RATES[CMD_CHARGE_AT_STATION]
         expected_energy = 50.0 + interval * rate["energy"]
         self.assertAlmostEqual(ue.npc.physical.energy, expected_energy,
-                               msg="completion tick must use charge_at rate, "
+                               msg="completion tick must use ChargeAtStation rate, "
                                    f"not passive; got {ue.npc.physical.energy}, "
                                    f"expected {expected_energy}")
         self.assertGreater(ue.npc.physical.energy, energy_before,
-                           "charge_at's completion tick must restore energy, "
+                           "ChargeAtStation's completion tick must restore energy, "
                            "not drain it (the passive rate would drain)")
 
         # Now clear busy (completion).
