@@ -207,9 +207,10 @@ const tacticalPromptBody = `[战术层/任务分解] 当前时段目标：%s
 2. 后续每行输出一个 {"action":"工具名","params":{...}}，3-5 步，按执行顺序排列
 3. 第一步通常是 move_to_location 到目标区域
 4. move_to_location 的 target、interact 的 target_object_id、work_at_workbench 的 target_object_id、patrol_zone 的 target_zone 必须严格使用上面"可前往区域"和"可交互物体"中给出的 id，禁止编造、禁止拼接 zone/interaction 信息
-5. 每行一个 JSON 对象，不要输出 JSON 数组，不要输出 markdown 围栏，不要输出任何其他文字
-6. 必须以字符 {"inner_thought 开头，不要输出步骤说明、不要解释、不要编号列表、不要 markdown 加粗
-7. 步骤总时长应接近当前 slot 时长，避免过短导致队列提前耗尽触发重分解
+5. interact / work_at_workbench / charge_at_station 必须在 object 所在 zone 调用——若当前 zone（上方"你目前在"给出的 zone）与 object 所在 zone（上方"可交互物体"每行"位于 zone=xxx"给出的）不同，必须先 move_to_location 到该 zone；例如 object 位于 zone=main_workshop 时，必须先 move_to_location(main_workshop) 再 interact/work_at_workbench
+6. 每行一个 JSON 对象，不要输出 JSON 数组，不要输出 markdown 围栏，不要输出任何其他文字
+7. 必须以字符 {"inner_thought 开头，不要输出步骤说明、不要解释、不要编号列表、不要 markdown 加粗
+8. 步骤总时长应接近当前 slot 时长，避免过短导致队列提前耗尽触发重分解
 
 示例（id 来自上方可用列表，不可照抄示例中的 id）：
 %s`

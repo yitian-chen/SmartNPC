@@ -535,6 +535,20 @@ func TestBuildTacticalPrompt_NoHint(t *testing.T) {
 	}
 }
 
+// TestBuildTacticalPrompt_ZoneObjectDependency 验证 prompt 包含明确的
+// zone-object 依赖约束，引导 LLM 在调用 interact/work_at_workbench/charge_at_station
+// 前先 move_to_location 到 object 所在 zone（Fix A）。
+func TestBuildTacticalPrompt_ZoneObjectDependency(t *testing.T) {
+	prompt := buildTacticalPrompt("装配", "main_workshop", "09:00", "09:00-12:00",
+		&protocol.PhysicalState{Energy: 75, Fatigue: 30, JointWear: 5, Health: 90}, nil, "", nil, "")
+	if !strings.Contains(prompt, "interact / work_at_workbench / charge_at_station 必须在 object 所在 zone 调用") {
+		t.Errorf("prompt should contain zone-object dependency rule, got: %s", prompt)
+	}
+	if !strings.Contains(prompt, "必须先 move_to_location 到该 zone") {
+		t.Errorf("prompt should instruct to move_to_location first, got: %s", prompt)
+	}
+}
+
 // ─── registry-aware tactical prompt / filtering ─────────────
 
 func TestBuildTacticalPrompt_RegistryFiltersTools(t *testing.T) {
