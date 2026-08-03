@@ -65,6 +65,124 @@ CMD_INTERACT = "InteractSmartObject"
 CMD_EXECUTE_COMPOSITE = "ExecuteComposite"
 CMD_STOP = "Stop"
 
+# Default capability actions advertised to MCP on connect. Each entry
+# mirrors the MCP-side CapabilityAction struct (pkg/protocol/messages.go):
+# {cmd, kind, description, usage_hint, estimated_duration_sec, params}.
+#
+# This is the authoritative global default (agent_id="system"). Tests or
+# alternate worlds can override by passing `capability_actions=` to
+# MockUE.__init__. If a future mock_ue drops support for a cmd (e.g.
+# stops honoring PlayAnimation), removing it here makes MCP stop
+# advertising tools that depend on it.
+DEFAULT_CAPABILITY_ACTIONS: List[Dict[str, Any]] = [
+    {
+        "cmd": CMD_MOVE_TO,
+        "kind": "atomic",
+        "description": "移动到目标位置",
+        "usage_hint": "target 可填 zone ID、object ID 或语义名称；MCP 解析为坐标后下发",
+        "estimated_duration_sec": 30,
+        "params": [
+            {"name": "target", "type": "string",
+             "description": "目标位置或语义目标 ID", "required": True},
+        ],
+    },
+    {
+        "cmd": CMD_TURN_TO,
+        "kind": "atomic",
+        "description": "转身面向目标",
+        "usage_hint": "target 同 MoveTo 的语义目标解析规则",
+        "estimated_duration_sec": 5,
+        "params": [
+            {"name": "target", "type": "string",
+             "description": "目标朝向 ID", "required": True},
+        ],
+    },
+    {
+        "cmd": CMD_PLAY_ANIMATION,
+        "kind": "atomic",
+        "description": "播放动画",
+        "usage_hint": "animation 取值取决于 NPC 动画表；空闲时优先用 Emote 表达情绪",
+        "estimated_duration_sec": 10,
+        "params": [
+            {"name": "animation", "type": "string",
+             "description": "动画名称", "required": True},
+        ],
+    },
+    {
+        "cmd": CMD_SPEAK,
+        "kind": "atomic",
+        "description": "对目标说话",
+        "usage_hint": "target 可空表示自言自语；content 控制话语长度",
+        "estimated_duration_sec": 10,
+        "params": [
+            {"name": "content", "type": "string",
+             "description": "说话内容", "required": True},
+            {"name": "target", "type": "string",
+             "description": "对话目标 ID（可空）", "required": False},
+        ],
+    },
+    {
+        "cmd": CMD_EMOTE,
+        "kind": "atomic",
+        "description": "表现情绪表情",
+        "usage_hint": "mode=oneshot 一次性表情；mode=sustained 持续到下次覆盖",
+        "estimated_duration_sec": 5,
+        "params": [
+            {"name": "emotion", "type": "string",
+             "description": "情绪类型", "required": True},
+            {"name": "mode", "type": "string",
+             "description": "oneshot 或 sustained", "required": False},
+        ],
+    },
+    {
+        "cmd": CMD_WAIT,
+        "kind": "atomic",
+        "description": "原地等待",
+        "usage_hint": "duration_sec 上限 600；更长等待应使用 ExecuteComposite 的 rest_idle",
+        "estimated_duration_sec": 60,
+        "params": [
+            {"name": "duration_sec", "type": "integer",
+             "description": "等待秒数", "required": True},
+        ],
+    },
+    {
+        "cmd": CMD_INTERACT,
+        "kind": "atomic",
+        "description": "与智能对象交互",
+        "usage_hint": "object_id 必须存在于 world_kb.objects；action 取值见该对象的 available_interactions",
+        "estimated_duration_sec": 15,
+        "params": [
+            {"name": "object_id", "type": "string",
+             "description": "智能对象 ID", "required": True},
+            {"name": "action", "type": "string",
+             "description": "交互动作", "required": True},
+        ],
+    },
+    {
+        "cmd": CMD_EXECUTE_COMPOSITE,
+        "kind": "composite",
+        "description": "执行复合行为（封装一段时长内的多步骤活动）",
+        "usage_hint": "action 取值：work_assemble / patrol_route / charge_at / repair_target / social_chat_with / rest_idle / archive_research；duration_min 内部 ×60 转 duration_sec",
+        "estimated_duration_sec": 600,
+        "params": [
+            {"name": "action", "type": "string",
+             "description": "复合行为类型", "required": True},
+            {"name": "target", "type": "string",
+             "description": "目标 ID", "required": False},
+            {"name": "duration_min", "type": "integer",
+             "description": "持续分钟数", "required": False},
+        ],
+    },
+    {
+        "cmd": CMD_STOP,
+        "kind": "atomic",
+        "description": "停止当前在途动作",
+        "usage_hint": "无需参数；UE 端校验 action_id 匹配后中断当前动作",
+        "estimated_duration_sec": 1,
+        "params": [],
+    },
+]
+
 # result constants
 RESULT_SUCCESS = "success"
 RESULT_FAILED = "failed"
@@ -548,11 +666,22 @@ class MockUE:
         scenario_file: Optional[str] = None,
         log_dir: str = "logs",
         world_kb_path: str = "assets/world_kb.yaml",
+        capability_actions: Optional[List[Dict[str, Any]]] = None,
     ):
         self.mcp_ws_url = mcp_ws_url
         self.mode = mode
         self.perception_interval = perception_interval
         self.log_dir = log_dir
+
+        # Capability registry — the cmd set this Mock UE advertises to MCP
+        # on connect. Defaults to the module-level 9-cmd constant; tests or
+        # alternate worlds can pass a reduced set (e.g. drop PlayAnimation
+        # for an NPC that doesn't support it) to drive MCP-side tool
+        # reconciliation without touching the constant.
+        self._capability_actions = (
+            capability_actions if capability_actions is not None
+            else DEFAULT_CAPABILITY_ACTIONS
+        )
 
         # World KB — single source of truth for zone/location/object data.
         # Fail-fast: Mock UE cannot resolve semantic targets without it.
@@ -710,112 +839,12 @@ class MockUE:
         this to drive tactical-layer prompt generation and dynamic
         MCP tool registration (AddTool/RemoveTools).
 
-        The list mirrors the 9 cmds the protocol defines and that
-        _handle_action_command actually accepts. If a future mock_ue
-        drops support for a cmd (e.g. stops honoring PlayAnimation),
-        removing it here makes MCP stop advertising tools that depend
-        on it.
+        The action list comes from self._capability_actions, which
+        defaults to DEFAULT_CAPABILITY_ACTIONS (9 cmd constant) and can
+        be overridden via the `capability_actions=` constructor param.
         """
         await self._send(TYPE_CAPABILITY_REGISTRY, SYSTEM_AGENT_ID, {
-            "actions": [
-                {
-                    "cmd": CMD_MOVE_TO,
-                    "kind": "atomic",
-                    "description": "移动到目标位置",
-                    "estimated_duration_sec": 30,
-                    "params": [
-                        {"name": "target", "type": "string",
-                         "description": "目标位置或语义目标 ID", "required": True},
-                    ],
-                },
-                {
-                    "cmd": CMD_TURN_TO,
-                    "kind": "atomic",
-                    "description": "转身面向目标",
-                    "estimated_duration_sec": 5,
-                    "params": [
-                        {"name": "target", "type": "string",
-                         "description": "目标朝向 ID", "required": True},
-                    ],
-                },
-                {
-                    "cmd": CMD_PLAY_ANIMATION,
-                    "kind": "atomic",
-                    "description": "播放动画",
-                    "estimated_duration_sec": 10,
-                    "params": [
-                        {"name": "animation", "type": "string",
-                         "description": "动画名称", "required": True},
-                    ],
-                },
-                {
-                    "cmd": CMD_SPEAK,
-                    "kind": "atomic",
-                    "description": "对目标说话",
-                    "estimated_duration_sec": 10,
-                    "params": [
-                        {"name": "content", "type": "string",
-                         "description": "说话内容", "required": True},
-                        {"name": "target", "type": "string",
-                         "description": "对话目标 ID（可空）", "required": False},
-                    ],
-                },
-                {
-                    "cmd": CMD_EMOTE,
-                    "kind": "atomic",
-                    "description": "表现情绪表情",
-                    "estimated_duration_sec": 5,
-                    "params": [
-                        {"name": "emotion", "type": "string",
-                         "description": "情绪类型", "required": True},
-                        {"name": "mode", "type": "string",
-                         "description": "oneshot 或 sustained", "required": False},
-                    ],
-                },
-                {
-                    "cmd": CMD_WAIT,
-                    "kind": "atomic",
-                    "description": "原地等待",
-                    "estimated_duration_sec": 60,
-                    "params": [
-                        {"name": "duration_sec", "type": "integer",
-                         "description": "等待秒数", "required": True},
-                    ],
-                },
-                {
-                    "cmd": CMD_INTERACT,
-                    "kind": "atomic",
-                    "description": "与智能对象交互",
-                    "estimated_duration_sec": 15,
-                    "params": [
-                        {"name": "object_id", "type": "string",
-                         "description": "智能对象 ID", "required": True},
-                        {"name": "action", "type": "string",
-                         "description": "交互动作", "required": True},
-                    ],
-                },
-                {
-                    "cmd": CMD_EXECUTE_COMPOSITE,
-                    "kind": "composite",
-                    "description": "执行复合行为（封装一段时长内的多步骤活动）",
-                    "estimated_duration_sec": 600,
-                    "params": [
-                        {"name": "action", "type": "string",
-                         "description": "复合行为类型", "required": True},
-                        {"name": "target", "type": "string",
-                         "description": "目标 ID", "required": False},
-                        {"name": "duration_min", "type": "integer",
-                         "description": "持续分钟数", "required": False},
-                    ],
-                },
-                {
-                    "cmd": CMD_STOP,
-                    "kind": "atomic",
-                    "description": "停止当前在途动作",
-                    "estimated_duration_sec": 1,
-                    "params": [],
-                },
-            ],
+            "actions": self._capability_actions,
         })
 
     async def _send_world_kb(self):
