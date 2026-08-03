@@ -1,9 +1,10 @@
 package worldkb
 
-// merger.go implements the deep-merge pipeline that combines
-// world.generated.json (UE-exported facts) with world.authored.json
-// (human narrative) into a single MergedKB, per
-// docs/AgentTown_WorldKB_Design.md §8.
+// merger.go implements the deep-merge pipeline that combines the
+// generated half (UE-exported spatial facts) with the authored half
+// (human narrative) into a single KB. Inputs arrive as JSON bytes via
+// the world_kb WebSocket message; see MergeAndWriteBytes for the
+// runtime entry point.
 //
 // Merge rules (§8.2):
 //   - Entity existence is keyed by generated (zone/object/agent must exist
@@ -11,17 +12,17 @@ package worldkb
 //   - Authored same-name scalar fields override generated.
 //   - Dict fields: recursive deep merge.
 //   - Array fields: authored fully replaces generated (no whitelist yet).
-//   - connected_to: authored is authoritative; duplicates removed; targets
-//     validated by the validator.
+//   - Connections: authored is authoritative; targets validated by validator.
 //   - Protected spatial fields (bounds/entry_point/actor_path/...) come only
 //     from generated — authored structurally cannot set them.
 //   - Authored dangling IDs (not in generated) are errors.
 //   - Generated entities without authored narrative are warnings (not fatal).
+//   - Per-agent relationships (NEW schema: authored.agents[id].relationships)
+//     are flattened into kb.Relationships.
 
 import (
 	"encoding/json"
 	"fmt"
-	"os"
 	"sort"
 )
 
@@ -42,20 +43,20 @@ func Merge(gen *GeneratedDoc, auth *AuthoredDoc) (*KB, []MergeWarning, error) {
 		return nil, nil, fmt.Errorf("generated and authored documents must both be non-nil")
 	}
 
-	// Schema version sanity (§8.5).
-	if gen.SchemaVersion != auth.SchemaVersion {
+	// Schema version sanity: NEW schema uses auth.Version (string) vs gen.SchemaVersion.
+	// Keep the check for forward compatibility — both default to "1.0".
+	if gen.SchemaVersion != auth.Version {
 		return nil, nil, fmt.Errorf("schema version mismatch: generated=%q authored=%q",
-			gen.SchemaVersion, auth.SchemaVersion)
+			gen.SchemaVersion, auth.Version)
 	}
 
 	var warnings []MergeWarning
 
 	kb := &KB{
 		Version: gen.SchemaVersion,
-		Site: Site{
-			ID:          auth.Site.ID,
-			DisplayName: auth.Site.DisplayName,
-			Description: auth.Site.Description,
+		Narrative: Narrative{
+			Setting: auth.Narrative.Setting,
+			Theme:   auth.Narrative.Theme,
 		},
 	}
 
@@ -85,10 +86,15 @@ func Merge(gen *GeneratedDoc, auth *AuthoredDoc) (*KB, []MergeWarning, error) {
 		if err != nil {
 			return nil, nil, fmt.Errorf("generated zone %q: %w", gz.ID, err)
 		}
+		// Rotation is optional in NEW schema — default to zero if absent.
+		rotation, err := toVec3Optional(gz.Bounds.Rotation, "bounds.rotation", gz.ID)
+		if err != nil {
+			return nil, nil, fmt.Errorf("generated zone %q: %w", gz.ID, err)
+		}
 
 		mz := Zone{
 			ID:          gz.ID,
-			Bounds:      Bounds{Center: center, Extent: extent},
+			Bounds:      Bounds{Center: center, Extent: extent, Rotation: rotation},
 			EntryPoint:  entry,
 			EntryFacing: facing,
 		}
@@ -97,11 +103,12 @@ func Merge(gen *GeneratedDoc, auth *AuthoredDoc) (*KB, []MergeWarning, error) {
 		if az, ok := auth.Zones[gz.ID]; ok {
 			mz.DisplayName = az.DisplayName
 			mz.Description = az.Description
-			mz.ConnectedTo = dedupStrings(az.ConnectedTo)
+			mz.Aliases = dedupStrings(az.Aliases)
+			mz.Connections = convertAuthoredConnections(az.Connections)
 		} else {
 			warnings = append(warnings, MergeWarning{
 				EntityType: "zone", EntityID: gz.ID,
-				Message: "generated zone has no authored narrative (display_name/description/connected_to missing)",
+				Message: "generated zone has no authored narrative (display_name/description/connections missing)",
 			})
 		}
 
@@ -140,26 +147,22 @@ func Merge(gen *GeneratedDoc, auth *AuthoredDoc) (*KB, []MergeWarning, error) {
 		}
 
 		mo := Object{
-			ID:                go_.ID,
-			Category:          go_.Category,
-			ZoneID:            go_.ZoneID,
-			ActorClass:        go_.ActorClass,
-			ActorPosition:     actorPos,
-			InteractionPoint:  ip,
-			InteractionFacing: ifacing,
-			AvailableActions:  go_.AvailableActions,
-			DefaultState:      go_.DefaultState,
-			InteractionRadius: defaultInteractionRadius,
+			ID:                    go_.ID,
+			Category:              go_.Category,
+			ZoneID:                go_.ZoneID,
+			ActorClass:            go_.ActorClass,
+			ActorPosition:         actorPos,
+			InteractionPoint:      ip,
+			InteractionFacing:     ifacing,
+			AvailableInteractions: go_.AvailableInteractions,
+			DefaultState:          go_.DefaultState,
+			InteractionRadius:     defaultInteractionRadius,
 		}
 
 		if ao, ok := auth.Objects[go_.ID]; ok {
 			mo.DisplayName = ao.DisplayName
 			mo.Description = ao.Description
-			mo.RequiredRoles = ao.RequiredRoles
-			mo.Capacity = ao.Capacity
-			if ao.InteractionRadius > 0 {
-				mo.InteractionRadius = ao.InteractionRadius
-			}
+			mo.Tags = ao.Tags
 		} else {
 			warnings = append(warnings, MergeWarning{
 				EntityType: "object", EntityID: go_.ID,
@@ -204,14 +207,35 @@ func Merge(gen *GeneratedDoc, auth *AuthoredDoc) (*KB, []MergeWarning, error) {
 
 		if aa, ok := auth.Agents[ga.ID]; ok {
 			ma.DisplayName = aa.DisplayName
-			ma.Role = aa.Role
-			ma.Personality = aa.Personality
-			ma.HomeZone = aa.HomeZone
-			ma.CoreMemories = aa.CoreMemories
+			ma.Description = aa.Description
+			ma.Profession = aa.Profession
+			ma.Personality = Personality{
+				Traits:      aa.Personality.Traits,
+				SpeechStyle: aa.Personality.SpeechStyle,
+			}
+			// NEW schema: authored.agents[id].initial_zone is allowed to override
+			// the generated initial_zone if explicitly set (acts as a narrative
+			// refinement). Protected-field enforcement stays on spatial coords.
+			if aa.InitialZone != "" {
+				ma.InitialZone = aa.InitialZone
+			}
+			// Flatten per-agent relationships into kb.Relationships.
+			for i, r := range aa.Relationships {
+				if r.From == "" || r.To == "" {
+					return nil, nil, fmt.Errorf("authored.agents[%q].relationships[%d]: missing from/to", ga.ID, i)
+				}
+				kb.Relationships = append(kb.Relationships, Relationship{
+					From:        r.From,
+					To:          r.To,
+					Familiarity: r.Familiarity,
+					Affection:   r.Affection,
+					Type:        r.Type,
+				})
+			}
 		} else {
 			warnings = append(warnings, MergeWarning{
 				EntityType: "agent", EntityID: ga.ID,
-				Message: "generated agent has no authored narrative (display_name/role/home_zone missing)",
+				Message: "generated agent has no authored narrative (display_name/profession/personality missing)",
 			})
 		}
 
@@ -225,26 +249,32 @@ func Merge(gen *GeneratedDoc, auth *AuthoredDoc) (*KB, []MergeWarning, error) {
 		}
 	}
 
-	// ---- Relationships (fully from authored) ----
-	for i, r := range auth.Relationships {
-		if r.From == "" || r.To == "" {
-			return nil, nil, fmt.Errorf("authored.relationships[%d]: missing from/to", i)
-		}
-		kb.Relationships = append(kb.Relationships, Relationship{
-			From:        r.From,
-			To:          r.To,
-			Familiarity: r.Familiarity,
-			Affection:   r.Affection,
-			Type:        r.Type,
-		})
-	}
-
 	// Deterministic ordering: sort all entity slices by ID.
 	sort.SliceStable(kb.Zones, func(i, j int) bool { return kb.Zones[i].ID < kb.Zones[j].ID })
 	sort.SliceStable(kb.Objects, func(i, j int) bool { return kb.Objects[i].ID < kb.Objects[j].ID })
 	sort.SliceStable(kb.Agents, func(i, j int) bool { return kb.Agents[i].ID < kb.Agents[j].ID })
 
+	// Build lookup indexes after sorting so map pointers are stable.
+	kb.buildIndex()
+
 	return kb, warnings, nil
+}
+
+// convertAuthoredConnections converts NEW schema's structured connections
+// (with type/bidirectional) into the KB Connection type.
+func convertAuthoredConnections(conns []AuthoredConnection) []Connection {
+	if len(conns) == 0 {
+		return nil
+	}
+	out := make([]Connection, 0, len(conns))
+	for _, c := range conns {
+		out = append(out, Connection{
+			To:            c.To,
+			Type:          c.Type,
+			Bidirectional: c.Bidirectional,
+		})
+	}
+	return out
 }
 
 // dedupStrings returns a copy of s with duplicates removed, preserving order.
@@ -263,63 +293,42 @@ func dedupStrings(s []string) []string {
 	return out
 }
 
-// MergeAndWrite is the one-shot pipeline used by the MCP --auto-merge-world-kb
-// startup flag and by the worldkb-merge CLI. It loads the two source JSONs,
-// merges them, validates the result, and atomically writes world_kb.yaml +
-// manifest.json. Returns the merged KB so callers can use it directly
-// without re-loading the file they just wrote.
+// MergeAndWriteBytes accepts the generated and authored documents as raw JSON
+// bytes (typically received from a UE-pushed world_kb WebSocket message),
+// merges, validates, atomically writes world_kb.yaml, optionally writes a
+// manifest, and returns the merged KB ready for in-memory swap.
+// It merges, validates, atomically writes world_kb.yaml, optionally writes
+// a manifest, and returns the merged KB ready for in-memory swap.
 //
-// Path semantics:
-//   - genPath / authPath: input JSON files (must exist).
-//   - outPath: world_kb.yaml is written here (atomic temp-file + rename).
-//   - manifestPath: if non-empty, manifest.json is written here.
-//   - If manifestPath is empty, no manifest is written.
-//
-// Failures:
-//   - I/O errors (missing files, permission denied) wrap the underlying error.
-//   - Schema mismatch / dangling authored IDs / protected-field violations
-//     return the merge error directly.
-//   - Validation errors (after a successful merge) return the first Issue
-//     with SeverityError wrapped in an error.
-func MergeAndWrite(genPath, authPath, outPath, manifestPath string) (*KB, error) {
-	gen, err := loadGeneratedDoc(genPath)
-	if err != nil {
-		return nil, fmt.Errorf("load generated: %w", err)
+// outPath: world_kb.yaml target (atomic temp-file + rename).
+// manifestPath: if non-empty, manifest.json is written here. The manifest's
+// SHA256 hashes are computed from genBytes/authBytes directly (no disk re-read).
+func MergeAndWriteBytes(genBytes, authBytes []byte, outPath, manifestPath string) (*KB, error) {
+	var gen GeneratedDoc
+	if err := json.Unmarshal(genBytes, &gen); err != nil {
+		return nil, fmt.Errorf("parse generated: %w", err)
 	}
-	auth, err := loadAuthoredDoc(authPath)
-	if err != nil {
-		return nil, fmt.Errorf("load authored: %w", err)
+	var auth AuthoredDoc
+	if err := json.Unmarshal(authBytes, &auth); err != nil {
+		return nil, fmt.Errorf("parse authored: %w", err)
 	}
 
-	kb, _, err := Merge(gen, auth)
+	kb, _, err := Merge(&gen, &auth)
 	if err != nil {
 		return nil, fmt.Errorf("merge: %w", err)
 	}
 
 	if issues := Validate(kb); issues.HasErrors() {
-		// Surface the first error; subsequent errors are in issues.Errors
-		// but a single wrapped error is enough for fail-fast startup.
 		first := issues.Errors[0]
 		return nil, fmt.Errorf("validate: [%s] %s: %s", first.Entity, first.Code, first.Message)
 	}
 
-	if _, err := WriteYAML(kb, outPath); err != nil {
+	mergedBytes, err := WriteYAML(kb, outPath)
+	if err != nil {
 		return nil, fmt.Errorf("write yaml: %w", err)
 	}
 
 	if manifestPath != "" {
-		genBytes, err := os.ReadFile(genPath)
-		if err != nil {
-			return nil, fmt.Errorf("read generated for manifest: %w", err)
-		}
-		authBytes, err := os.ReadFile(authPath)
-		if err != nil {
-			return nil, fmt.Errorf("read authored for manifest: %w", err)
-		}
-		mergedBytes, err := os.ReadFile(outPath)
-		if err != nil {
-			return nil, fmt.Errorf("read merged for manifest: %w", err)
-		}
 		sourceMap := ""
 		if gen.Source.MapPackage != "" {
 			sourceMap = gen.Source.MapPackage
@@ -330,30 +339,4 @@ func MergeAndWrite(genPath, authPath, outPath, manifestPath string) (*KB, error)
 	}
 
 	return kb, nil
-}
-
-// loadGeneratedDoc parses a world.generated.json file.
-func loadGeneratedDoc(path string) (*GeneratedDoc, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	var doc GeneratedDoc
-	if err := json.Unmarshal(data, &doc); err != nil {
-		return nil, fmt.Errorf("parse %s: %w", path, err)
-	}
-	return &doc, nil
-}
-
-// loadAuthoredDoc parses a world.authored.json file.
-func loadAuthoredDoc(path string) (*AuthoredDoc, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	var doc AuthoredDoc
-	if err := json.Unmarshal(data, &doc); err != nil {
-		return nil, fmt.Errorf("parse %s: %w", path, err)
-	}
-	return &doc, nil
 }

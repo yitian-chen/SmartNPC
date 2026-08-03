@@ -678,6 +678,11 @@ var reactiveRunnerRef *reactiveRunner
 // 内置工具）。main() 启动时赋值。
 var capabilityRegistryRef *CapabilityRegistry
 
+// kbRef 是当前生效的 world KB 指针（package-level 供 debug handler 引用）。
+// worldKBSwap 成功后同步更新；runHTTP 的 /debug/kb handler 读 kbRef 而不是
+// 闭包捕获的 kb 参数，确保 UE 推送新 KB 后 /debug/kb 返回最新数据。
+var kbRef *worldkb.KB
+
 // tacticalRefill 调战术层 LLM 流式分解当前时段 goal，边接收边入队，
 // 首 action 在流式期间即提前下发以降低体感延迟。成功返回 true。
 func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
@@ -898,15 +903,9 @@ func main() {
 		mcpAPIKey          = flag.String("mcp-api-key", "", "if set, require this Bearer token on /mcp")
 		httpAllowAnyOrigin = flag.Bool("http-allow-any-origin", true,
 			"disable origin / localhost restrictions so cross-host clients can connect")
-	worldKBPath    = flag.String("world-kb", "assets/world_kb.yaml", "path to world_kb.yaml (required, fail-fast on error)")
-	autoMergeKB    = flag.Bool("auto-merge-world-kb", false,
-		"before loading, run worldkb merge pipeline to regenerate world_kb.yaml from world.generated.json + world.authored.json (fail-fast on merge/validation error)")
-	worldGeneratedJSON = flag.String("world-generated-json", "assets/world.generated.json",
-		"path to world.generated.json (used only when --auto-merge-world-kb is set)")
-	worldAuthoredJSON  = flag.String("world-authored-json", "assets/world.authored.json",
-		"path to world.authored.json (used only when --auto-merge-world-kb is set)")
+	worldKBPath = flag.String("world-kb", "assets/world_kb.yaml", "path to world_kb.yaml (required, fail-fast on error)")
 	worldKBManifest    = flag.String("world-kb-manifest", "assets/world_kb.manifest.json",
-		"path to write world_kb.manifest.json (used only when --auto-merge-world-kb is set; empty skips manifest)")
+		"path to write world_kb.manifest.json (empty skips manifest; written when UE pushes world_kb)")
 	tacticalStream = flag.Bool("tactical-stream", false,
 		"enable streaming for tactical layer LLM calls (experimental: only helps if upstream LLM emits tokens incrementally)")
 	ollamaURL = flag.String("ollama-url", "http://localhost:11434",
@@ -982,44 +981,21 @@ func main() {
 	// so a load failure is fatal. Loaded before registering agents so the
 	// perception worker can safely close over it.
 	//
-	// --auto-merge-world-kb: 在 Load 之前先调 merge pipeline 重生成 YAML。
-	// UE 端导出新的 world.generated.json 后，下次启动 MCP 即可自动合并，
-	// 无需手动跑 worldkb-merge CLI。失败按 fail-fast 退出。
-	var kb *worldkb.KB
-	if *autoMergeKB {
-		logger.Info("auto-merging world kb",
-			"generated", *worldGeneratedJSON,
-			"authored", *worldAuthoredJSON,
-			"out", *worldKBPath,
-			"manifest", *worldKBManifest,
-		)
-		mergedKB, err := worldkb.MergeAndWrite(*worldGeneratedJSON, *worldAuthoredJSON, *worldKBPath, *worldKBManifest)
-		if err != nil {
-			logger.Error("auto-merge world kb failed", "err", err)
-			os.Exit(1)
-		}
-		// 直接复用 mergedKB，省一次 Load；与磁盘文件应一致。
-		kb = mergedKB
-		logger.Info("world kb auto-merged",
-			"path", *worldKBPath,
-			"zones", len(kb.Zones),
-			"objects", len(kb.Objects),
-			"agents", len(kb.Agents),
-		)
-	} else {
-		var err error
-		kb, err = worldkb.Load(*worldKBPath)
-		if err != nil {
-			logger.Error("failed to load world_kb", "path", *worldKBPath, "err", err)
-			os.Exit(1)
-		}
-		logger.Info("world kb loaded",
-			"path", *worldKBPath,
-			"zones", len(kb.Zones),
-			"objects", len(kb.Objects),
-			"agents", len(kb.Agents),
-		)
+	// UE pushes an updated KB via the world_kb WebSocket message on connect
+	// (handled by worldKBSwap → MergeAndWriteBytes); this Load is the
+	// startup seed before UE connects.
+	kb, err := worldkb.Load(*worldKBPath)
+	if err != nil {
+		logger.Error("failed to load world_kb", "path", *worldKBPath, "err", err)
+		os.Exit(1)
 	}
+	logger.Info("world kb loaded",
+		"path", *worldKBPath,
+		"zones", len(kb.Zones),
+		"objects", len(kb.Objects),
+		"agents", len(kb.Agents),
+	)
+	kbRef = kb // expose to /debug/kb handler
 
 	// ─── 反应层 Ollama 客户端 ────────────────────────────────────
 	// --ollama-url="" 显式禁用反应层；否则初始化客户端（即使 Ollama 进程
@@ -1052,6 +1028,11 @@ func main() {
 	// Per-agent context (Phase 1: single agent, but keyed for multi-NPC).
 	var agentsMu sync.Mutex
 	var nextAgentEpoch int64
+	// firstAgentRegistered gates the world_kb startup window: once any agent
+	// has been registered, subsequent world_kb pushes are rejected (the KB
+	// is now in active use by worker goroutines / tools / reactive runner).
+	// Guarded by agentsMu.
+	var firstAgentRegistered bool
 	agents := make(map[string]*agentContext)
 	lookupAgent := func(id string) *agentContext {
 		agentsMu.Lock()
@@ -1064,6 +1045,7 @@ func main() {
 		if ac, ok := agents[id]; ok {
 			return ac, false // reconnect: preserve current lifecycle and session
 		}
+		firstAgentRegistered = true
 		nextAgentEpoch++
 		ac, workerCtx := newAgentContext(ctx, nextAgentEpoch)
 		// 战略层/战术层各用一个独立 LLM client 实例（独立 session 链）。
@@ -1150,6 +1132,42 @@ func main() {
 			tools.ReconcileTools(server, executor, kb, logger, func(cmd string) bool {
 				return capabilityRegistry.HasCmd(protocol.SystemAgentID, cmd)
 			})
+		case protocol.TypeWorldKB:
+			// UE pushes the full world KB (generated + authored JSON blobs)
+			// on connection. MCP merges, persists, and swaps the in-memory
+			// KB. Only accepted before the first agent_registered — after
+			// that, worker goroutines hold kb pointers and hot-swap would
+			// race. Handler holds agentsMu for the full duration so a
+			// concurrent agent_registered cannot start workers mid-swap.
+			agentsMu.Lock()
+			newKB, err := worldKBSwap(firstAgentRegistered, payload, *worldKBPath, *worldKBManifest)
+			if err != nil {
+				agentsMu.Unlock()
+				if errors.Is(err, errAgentWindowClosed) {
+					logger.Warn("world_kb rejected: agents already registered, startup window closed",
+						"agent_id", agentID)
+				} else {
+					logger.Error("world_kb merge failed, keeping existing KB",
+						"err", err, "path", *worldKBPath)
+				}
+				return
+			}
+			kb = newKB
+		kbRef = newKB // sync /debug/kb handler
+			// Re-register tools so their closures capture the new kb.
+			// AddTool is idempotent (replaces same-named tools).
+			tools.RegisterAll(server, executor, kb, logger)
+			if reactiveRunnerRef != nil {
+				reactiveRunnerRef.kb = kb
+			}
+			agentsMu.Unlock()
+			logger.Info("world_kb merged and persisted",
+				"path", *worldKBPath,
+				"manifest", *worldKBManifest,
+				"zones", len(kb.Zones),
+				"objects", len(kb.Objects),
+				"agents", len(kb.Agents),
+			)
 		case protocol.TypeAgentRegistered:
 			// First registration = new day. Re-registration after reconnect =
 			// restore, keep the per-agent strategic/tactical sessions
@@ -1302,9 +1320,15 @@ func runHTTP(ctx context.Context, logger *slog.Logger, server *mcp.Server, addr 
 			handleDebugUI(w, r)
 			return
 		}
-		// /debug/kb — 返回 world_kb 摘要供前端下拉填充
+		// /debug/kb — 返回 world_kb 摘要供前端下拉填充。读 kbRef 而不是
+		// 闭包捕获的 kb 参数，确保 worldKBSwap 后返回最新 KB。
 		if r.URL.Path == "/debug/kb" {
-			handleDebugKB(w, r, kb, logger)
+			handleDebugKB(w, r, kbRef, logger)
+			return
+		}
+		// /debug/cap — 返回 capability_registry 状态供 e2e 黑盒验证
+		if r.URL.Path == "/debug/cap" {
+			handleDebugCap(w, r, capabilityRegistryRef, logger)
 			return
 		}
 		http.NotFound(w, r)
@@ -1861,3 +1885,35 @@ func handleDebugSchedule(ctx context.Context, logger *slog.Logger, ws *wsserver.
 
 // Ensure the guarded adapter satisfies the tools.Executor interface.
 var _ tools.Executor = (*guardedExecutor)(nil)
+
+// errAgentWindowClosed is returned by worldKBSwap when the startup window
+// has already closed (at least one agent_registered processed). Callers
+// distinguish this from merge/parse errors to log appropriately.
+var errAgentWindowClosed = errors.New("world_kb rejected: startup window closed (agents already registered)")
+
+// worldKBSwap processes a world_kb WS payload: validates the startup window,
+// unmarshals the generated+authored blobs, merges them via the worldkb
+// pipeline, and persists the result to kbPath (+ manifest if non-empty).
+// Returns the new KB for the caller to swap in.
+//
+// If firstAgentRegistered is true, returns errAgentWindowClosed without
+// touching the payload or disk. If the payload is malformed or the merge
+// fails, returns the underlying error without writing to disk.
+//
+// The caller is responsible for the kb pointer swap, tools.RegisterAll
+// re-registration, and reactiveRunnerRef.kb assignment — these side
+// effects require main()-local state that this pure function does not see.
+func worldKBSwap(firstAgentRegistered bool, payload json.RawMessage, kbPath, manifestPath string) (*worldkb.KB, error) {
+	if firstAgentRegistered {
+		return nil, errAgentWindowClosed
+	}
+	var wkb protocol.WorldKBPayload
+	if err := json.Unmarshal(payload, &wkb); err != nil {
+		return nil, fmt.Errorf("parse world_kb payload: %w", err)
+	}
+	newKB, err := worldkb.MergeAndWriteBytes(wkb.Generated, wkb.Authored, kbPath, manifestPath)
+	if err != nil {
+		return nil, fmt.Errorf("merge world_kb: %w", err)
+	}
+	return newKB, nil
+}

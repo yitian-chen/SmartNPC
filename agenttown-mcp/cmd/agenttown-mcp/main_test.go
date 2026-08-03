@@ -3,15 +3,18 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 
 	"github.com/AgentTown/agenttown-mcp/pkg/hermes"
 	"github.com/AgentTown/agenttown-mcp/pkg/protocol"
 	"github.com/AgentTown/agenttown-mcp/pkg/wsserver"
+	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
 )
 
 // ─── 战术层队列辅助与 completion 路由 ──────────────────────────
@@ -911,5 +914,147 @@ func TestParseScheduleText(t *testing.T) {
 				t.Errorf("goal: got %q, want %q", goal, c.wantGoal)
 			}
 		})
+	}
+}
+
+// ─── world_kb handler (worldKBSwap) ─────────────────────────────
+
+// buildWorldKBPayload 构造一个合法的 world_kb payload（最小 generated+authored）。
+func buildWorldKBPayload(t *testing.T) []byte {
+	t.Helper()
+	gen := map[string]any{
+		"$schema": "agenttown-world-generated/v1", "schema_version": "1.0",
+		"zones": []map[string]any{
+			{"id": "zone1", "bounds": map[string]any{"center": []int{0, 0, 0}, "extent": []int{1, 1, 1}},
+				"entry_point": []int{0, 0, 0}, "entry_facing": []int{1, 0, 0}},
+		},
+		"objects": []map[string]any{}, "agents": []map[string]any{},
+	}
+	auth := map[string]any{
+		"version": "1.0", "narrative": map[string]any{"setting": "测试", "theme": "t"},
+		"zones":   map[string]any{"zone1": map[string]any{"display_name": "Z1"}},
+		"objects": map[string]any{}, "agents": map[string]any{},
+	}
+	p := protocol.WorldKBPayload{
+		PushedAt:  "2026-07-31T03:00:00Z",
+		Generated: mustJSON(t, gen),
+		Authored:  mustJSON(t, auth),
+	}
+	out, err := json.Marshal(p)
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	return out
+}
+
+func mustJSON(t *testing.T, v any) json.RawMessage {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	return b
+}
+
+// TestWorldKBSwap_AcceptedBeforeAgentRegistered 验证启动窗口内接受 world_kb：
+// 返回非 nil KB + 无错误 + YAML 落盘可重载。
+func TestWorldKBSwap_AcceptedBeforeAgentRegistered(t *testing.T) {
+	dir := t.TempDir()
+	outPath := dir + "/world_kb.yaml"
+	manifestPath := dir + "/world_kb.manifest.json"
+	payload := buildWorldKBPayload(t)
+
+	newKB, err := worldKBSwap(false, payload, outPath, manifestPath)
+	if err != nil {
+		t.Fatalf("worldKBSwap: %v", err)
+	}
+	if newKB == nil {
+		t.Fatal("newKB should not be nil on success")
+	}
+	if len(newKB.Zones) != 1 || newKB.Zones[0].ID != "zone1" {
+		t.Errorf("zone mismatch: %+v", newKB.Zones)
+	}
+	if newKB.GetZone("zone1") == nil {
+		t.Error("index not built — GetZone returned nil")
+	}
+	// YAML 落盘可重载。
+	reloaded, err := worldkb.Load(outPath)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if reloaded.Narrative.Setting != "测试" {
+		t.Errorf("narrative.setting = %q, want 测试", reloaded.Narrative.Setting)
+	}
+	// Manifest 落盘。
+	if _, err := os.Stat(manifestPath); err != nil {
+		t.Errorf("manifest not written: %v", err)
+	}
+}
+
+// TestWorldKBSwap_RejectedAfterAgentRegistered 验证首个 agent_registered
+// 之后到达的 world_kb 被拒绝：返回 errAgentWindowClosed + 不写盘。
+func TestWorldKBSwap_RejectedAfterAgentRegistered(t *testing.T) {
+	dir := t.TempDir()
+	outPath := dir + "/world_kb.yaml"
+	payload := buildWorldKBPayload(t)
+
+	_, err := worldKBSwap(true, payload, outPath, "")
+	if !errors.Is(err, errAgentWindowClosed) {
+		t.Fatalf("expected errAgentWindowClosed, got: %v", err)
+	}
+	// 不应写盘。
+	if _, statErr := os.Stat(outPath); statErr == nil {
+		t.Error("out file should NOT exist after rejection")
+	}
+}
+
+// TestWorldKBSwap_BadPayloadPreservesOldKB 验证 payload 损坏时返回错误
+// 且不写盘（调用方据此保留旧 KB）。
+func TestWorldKBSwap_BadPayloadPreservesOldKB(t *testing.T) {
+	dir := t.TempDir()
+	outPath := dir + "/world_kb.yaml"
+
+	_, err := worldKBSwap(false, json.RawMessage("{not json"), outPath, "")
+	if err == nil {
+		t.Fatal("expected parse error for malformed payload")
+	}
+	if errors.Is(err, errAgentWindowClosed) {
+		t.Fatal("parse error should not be masked as window-closed")
+	}
+	if _, statErr := os.Stat(outPath); statErr == nil {
+		t.Error("out file should NOT exist after parse failure")
+	}
+}
+
+// TestWorldKBSwap_MergeErrorPreservesOldKB 验证 merge 失败（schema 不匹配）
+// 时返回错误且不写盘。
+func TestWorldKBSwap_MergeErrorPreservesOldKB(t *testing.T) {
+	dir := t.TempDir()
+	outPath := dir + "/world_kb.yaml"
+
+	// schema_version=9.9 vs authored version=1.0 → merge error.
+	gen := map[string]any{
+		"schema_version": "9.9",
+		"zones":          []map[string]any{}, "objects": []map[string]any{}, "agents": []map[string]any{},
+	}
+	auth := map[string]any{
+		"version": "1.0", "narrative": map[string]any{"setting": "x"},
+		"zones": map[string]any{}, "objects": map[string]any{}, "agents": map[string]any{},
+	}
+	p := protocol.WorldKBPayload{
+		Generated: mustJSON(t, gen),
+		Authored:  mustJSON(t, auth),
+	}
+	payload, _ := json.Marshal(p)
+
+	_, err := worldKBSwap(false, payload, outPath, "")
+	if err == nil {
+		t.Fatal("expected merge error for schema mismatch")
+	}
+	if errors.Is(err, errAgentWindowClosed) {
+		t.Fatal("merge error should not be masked as window-closed")
+	}
+	if _, statErr := os.Stat(outPath); statErr == nil {
+		t.Error("out file should NOT exist after merge failure")
 	}
 }

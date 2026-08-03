@@ -1,5 +1,7 @@
 package protocol
 
+import "encoding/json"
+
 // This file defines the payload struct for each message type (§2.3).
 // The envelope carries these as json.RawMessage in its Payload field.
 
@@ -221,4 +223,20 @@ type CapabilityParam struct {
 	Description string   `json:"description,omitempty"`
 	Required    bool     `json:"required"`
 	Enum        []string `json:"enum,omitempty"`
+}
+
+// ─── world_kb (UE → MCP, world knowledge base push) ─────────────
+
+// WorldKBPayload is the payload of a world_kb message. UE pushes the full
+// world KB as two JSON blobs on connection: the generated half (spatial
+// facts exported by the editor) and the authored half (human narrative
+// overlay). MCP merges them via the worldkb pipeline.
+//
+// Generated and Authored are json.RawMessage to keep the protocol package
+// independent of the worldkb package — the handler unmarshals them into
+// worldkb.GeneratedDoc / worldkb.AuthoredDoc after dispatch.
+type WorldKBPayload struct {
+	PushedAt  string          `json:"pushed_at"`           // RFC3339, optional diagnostic
+	Generated json.RawMessage `json:"generated"`           // world.generated.json blob
+	Authored  json.RawMessage `json:"authored"`            // world.authored.json blob
 }

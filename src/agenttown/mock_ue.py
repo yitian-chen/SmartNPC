@@ -19,6 +19,7 @@ Message flow:
 import asyncio
 import json
 import logging
+import math
 import os
 import time as _time
 import uuid
@@ -51,6 +52,7 @@ TYPE_RESYNC = "resync"        # reconnect: exchange last_received_seq (约定11)
 TYPE_EVENT_LOST = "event_lost"  # reconnect: buffer rollover warning
 TYPE_EVENT_NOTIFICATION = "event_notification"  # director-injected event (P1 实时通道)
 TYPE_CAPABILITY_REGISTRY = "capability_registry"  # UE → MCP: declare NPC cmds
+TYPE_WORLD_KB = "world_kb"  # UE → MCP: push full world KB (generated + authored) on connect
 
 # cmd constants
 CMD_MOVE_TO = "MoveTo"
@@ -62,6 +64,124 @@ CMD_WAIT = "Wait"
 CMD_INTERACT = "InteractSmartObject"
 CMD_EXECUTE_COMPOSITE = "ExecuteComposite"
 CMD_STOP = "Stop"
+
+# Default capability actions advertised to MCP on connect. Each entry
+# mirrors the MCP-side CapabilityAction struct (pkg/protocol/messages.go):
+# {cmd, kind, description, usage_hint, estimated_duration_sec, params}.
+#
+# This is the authoritative global default (agent_id="system"). Tests or
+# alternate worlds can override by passing `capability_actions=` to
+# MockUE.__init__. If a future mock_ue drops support for a cmd (e.g.
+# stops honoring PlayAnimation), removing it here makes MCP stop
+# advertising tools that depend on it.
+DEFAULT_CAPABILITY_ACTIONS: List[Dict[str, Any]] = [
+    {
+        "cmd": CMD_MOVE_TO,
+        "kind": "atomic",
+        "description": "移动到目标位置",
+        "usage_hint": "target 可填 zone ID、object ID 或语义名称；MCP 解析为坐标后下发",
+        "estimated_duration_sec": 30,
+        "params": [
+            {"name": "target", "type": "string",
+             "description": "目标位置或语义目标 ID", "required": True},
+        ],
+    },
+    {
+        "cmd": CMD_TURN_TO,
+        "kind": "atomic",
+        "description": "转身面向目标",
+        "usage_hint": "target 同 MoveTo 的语义目标解析规则",
+        "estimated_duration_sec": 5,
+        "params": [
+            {"name": "target", "type": "string",
+             "description": "目标朝向 ID", "required": True},
+        ],
+    },
+    {
+        "cmd": CMD_PLAY_ANIMATION,
+        "kind": "atomic",
+        "description": "播放动画",
+        "usage_hint": "animation 取值取决于 NPC 动画表；空闲时优先用 Emote 表达情绪",
+        "estimated_duration_sec": 10,
+        "params": [
+            {"name": "animation", "type": "string",
+             "description": "动画名称", "required": True},
+        ],
+    },
+    {
+        "cmd": CMD_SPEAK,
+        "kind": "atomic",
+        "description": "对目标说话",
+        "usage_hint": "target 可空表示自言自语；content 控制话语长度",
+        "estimated_duration_sec": 10,
+        "params": [
+            {"name": "content", "type": "string",
+             "description": "说话内容", "required": True},
+            {"name": "target", "type": "string",
+             "description": "对话目标 ID（可空）", "required": False},
+        ],
+    },
+    {
+        "cmd": CMD_EMOTE,
+        "kind": "atomic",
+        "description": "表现情绪表情",
+        "usage_hint": "mode=oneshot 一次性表情；mode=sustained 持续到下次覆盖",
+        "estimated_duration_sec": 5,
+        "params": [
+            {"name": "emotion", "type": "string",
+             "description": "情绪类型", "required": True},
+            {"name": "mode", "type": "string",
+             "description": "oneshot 或 sustained", "required": False},
+        ],
+    },
+    {
+        "cmd": CMD_WAIT,
+        "kind": "atomic",
+        "description": "原地等待",
+        "usage_hint": "duration_sec 上限 600；更长等待应使用 ExecuteComposite 的 rest_idle",
+        "estimated_duration_sec": 60,
+        "params": [
+            {"name": "duration_sec", "type": "integer",
+             "description": "等待秒数", "required": True},
+        ],
+    },
+    {
+        "cmd": CMD_INTERACT,
+        "kind": "atomic",
+        "description": "与智能对象交互",
+        "usage_hint": "object_id 必须存在于 world_kb.objects；action 取值见该对象的 available_interactions",
+        "estimated_duration_sec": 15,
+        "params": [
+            {"name": "object_id", "type": "string",
+             "description": "智能对象 ID", "required": True},
+            {"name": "action", "type": "string",
+             "description": "交互动作", "required": True},
+        ],
+    },
+    {
+        "cmd": CMD_EXECUTE_COMPOSITE,
+        "kind": "composite",
+        "description": "执行复合行为（封装一段时长内的多步骤活动）",
+        "usage_hint": "action 取值：work_assemble / patrol_route / charge_at / repair_target / social_chat_with / rest_idle / archive_research；duration_min 内部 ×60 转 duration_sec",
+        "estimated_duration_sec": 600,
+        "params": [
+            {"name": "action", "type": "string",
+             "description": "复合行为类型", "required": True},
+            {"name": "target", "type": "string",
+             "description": "目标 ID", "required": False},
+            {"name": "duration_min", "type": "integer",
+             "description": "持续分钟数", "required": False},
+        ],
+    },
+    {
+        "cmd": CMD_STOP,
+        "kind": "atomic",
+        "description": "停止当前在途动作",
+        "usage_hint": "无需参数；UE 端校验 action_id 匹配后中断当前动作",
+        "estimated_duration_sec": 1,
+        "params": [],
+    },
+]
 
 # result constants
 RESULT_SUCCESS = "success"
@@ -110,10 +230,26 @@ class ObjectInfo:
     interaction_point: List[float] = field(default_factory=lambda: [0, 0, 0])
     interaction_facing: List[float] = field(default_factory=lambda: [0, 0, 0])
     interaction_radius: float = 0.0
-    available_actions: List[str] = field(default_factory=list)
+    available_interactions: List[str] = field(default_factory=list)
     default_state: str = ""
-    required_roles: List[str] = field(default_factory=list)
-    capacity: int = 0
+    tags: List[str] = field(default_factory=list)
+
+
+@dataclass
+class AgentInfo:
+    """One agent entry from world_kb.yaml. Fields align with the MCP
+    Go-side worldkb.Agent struct (pkg/worldkb/types.go)."""
+    id: str
+    display_name: str = ""
+    description: str = ""
+    type: str = ""
+    profession: str = ""
+    personality: Dict[str, Any] = field(default_factory=dict)
+    initial_zone: str = ""
+    initial_position: List[float] = field(default_factory=lambda: [0, 0, 0])
+    actor_class: str = ""
+    action_table: str = ""
+    main_behavior_tree: str = ""
 
 
 @dataclass
@@ -128,6 +264,9 @@ class WorldKB:
     """
     zones: Dict[str, ZoneInfo] = field(default_factory=dict)
     objects: Dict[str, ObjectInfo] = field(default_factory=dict)
+    agents: List[AgentInfo] = field(default_factory=list)
+    narrative: Dict[str, str] = field(default_factory=dict)
+    version: str = ""
 
     def zone_entry(self, zone_id: str) -> Optional[List[float]]:
         z = self.zones.get(zone_id)
@@ -174,8 +313,153 @@ class WorldKB:
         return [oid for oid, obj in self.objects.items() if obj.zone_id == zone_id]
 
 
-def load_world_kb(path: str) -> WorldKB:
-    """Load world_kb.yaml into a WorldKB instance.
+# Default values for generated-document header fields. editor_label and
+# actor_path are UE-editor metadata that the merged yaml does not keep
+# (they are generated-only); _send_world_kb fills them with empty strings
+# so the MCP merge pipeline receives a structurally-complete payload.
+_GENERATOR_DEFAULT = {"name": "MockUE", "version": "0.1.0"}
+_SOURCE_DEFAULT = {"map_package": "", "map_name": ""}
+_COORD_SYSTEM_DEFAULT = {
+    "space": "UE5_world", "distance_unit": "centimeter",
+    "rotation_unit": "degree", "rotation_order": "pitch_yaw_roll",
+}
+
+
+def split_yaml_to_generated_authored(yaml_data: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """Split a merged world_kb.yaml dict back into generated/authored halves.
+
+    The MCP merge pipeline (MergeAndWriteBytes) expects the two blobs
+    separately, but the on-disk yaml is the merged product. This function
+    reverses the merge by applying the field-ownership rules from
+    agenttown-mcp/pkg/worldkb/schema.go (protectedZoneFields /
+    protectedObjectFields / protectedAgentFields):
+
+      - Spatial/fact fields (bounds, entry_point, actor_position, ...) go
+        to `generated`.
+      - Narrative fields (display_name, description, aliases, tags,
+        profession, personality, relationships, connections) go to
+        `authored`.
+      - generated-only editor metadata (editor_label, actor_path) is not
+        preserved in the merged yaml; we fill empty strings here. MCP
+        does not consume these fields downstream.
+
+    `relationships` is per-agent in authored; the merged yaml stores it
+    at top-level `relationships`, so we read from there when per-agent
+    entries are absent.
+    """
+    # ─── generated half ──────────────────────────────────────────
+    gen_zones = []
+    for z in yaml_data.get("zones", []) or []:
+        bounds = z.get("bounds", {}) or {}
+        gen_zones.append({
+            "id": z.get("id", ""),
+            "editor_label": "",
+            "actor_path": "",
+            "bounds": {
+                "center": bounds.get("center", [0, 0, 0]),
+                "extent": bounds.get("extent", [0, 0, 0]),
+                "rotation": bounds.get("rotation", [0, 0, 0]),
+            },
+            "entry_point": z.get("entry_point", [0, 0, 0]),
+            "entry_facing": z.get("entry_facing", [0, 0, 0]),
+        })
+
+    gen_objects = []
+    for o in yaml_data.get("objects", []) or []:
+        gen_objects.append({
+            "id": o.get("id", ""),
+            "category": o.get("category", ""),
+            "zone_id": o.get("zone_id", ""),
+            "editor_label": "",
+            "actor_class": o.get("actor_class", ""),
+            "actor_position": o.get("actor_position", [0, 0, 0]),
+            "interaction_point": o.get("interaction_point", [0, 0, 0]),
+            "interaction_facing": o.get("interaction_facing", [0, 0, 0]),
+            "available_interactions": o.get("available_interactions", []) or [],
+            "default_state": o.get("default_state", ""),
+        })
+
+    gen_agents = []
+    for a in yaml_data.get("agents", []) or []:
+        gen_agents.append({
+            "id": a.get("id", ""),
+            "type": a.get("type", ""),
+            "initial_zone": a.get("initial_zone", ""),
+            "editor_label": "",
+            "actor_class": a.get("actor_class", ""),
+            "initial_position": a.get("initial_position", [0, 0, 0]),
+            "action_table": a.get("action_table", ""),
+            "main_behavior_tree": a.get("main_behavior_tree", ""),
+        })
+
+    generated = {
+        "$schema": "agenttown-world-generated/v1",
+        "schema_version": yaml_data.get("version", "1.0"),
+        "generated_at": _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime()),
+        "generator": dict(_GENERATOR_DEFAULT),
+        "source": dict(_SOURCE_DEFAULT),
+        "coordinate_system": dict(_COORD_SYSTEM_DEFAULT),
+        "zones": gen_zones,
+        "objects": gen_objects,
+        "agents": gen_agents,
+        "validation_summary": {"errors": 0, "warnings": 0},
+    }
+
+    # ─── authored half ───────────────────────────────────────────
+    auth_zones: Dict[str, Any] = {}
+    for z in yaml_data.get("zones", []) or []:
+        zid = z.get("id", "")
+        if not zid:
+            continue
+        auth_zones[zid] = {
+            "display_name": z.get("display_name", zid),
+            "description": z.get("description", ""),
+            "aliases": z.get("aliases", []) or [],
+            "connections": z.get("connections", []) or [],
+        }
+
+    auth_objects: Dict[str, Any] = {}
+    for o in yaml_data.get("objects", []) or []:
+        oid = o.get("id", "")
+        if not oid:
+            continue
+        auth_objects[oid] = {
+            "display_name": o.get("display_name", oid),
+            "description": o.get("description", ""),
+            "tags": o.get("tags", []) or [],
+        }
+
+    auth_agents: Dict[str, Any] = {}
+    for a in yaml_data.get("agents", []) or []:
+        aid = a.get("id", "")
+        if not aid:
+            continue
+        auth_agents[aid] = {
+            "display_name": a.get("display_name", aid),
+            "description": a.get("description", ""),
+            "profession": a.get("profession", ""),
+            "personality": a.get("personality", {}) or {},
+            "initial_zone": a.get("initial_zone", ""),
+            "relationships": a.get("relationships", []) or [],
+        }
+
+    authored = {
+        "version": yaml_data.get("version", "1.0"),
+        "narrative": yaml_data.get("narrative", {}) or {},
+        "zones": auth_zones,
+        "objects": auth_objects,
+        "agents": auth_agents,
+    }
+
+    return generated, authored
+
+
+def load_world_kb(path: str) -> Tuple[WorldKB, Dict[str, Any]]:
+    """Load world_kb.yaml into a WorldKB instance + the raw yaml dict.
+
+    The raw dict is kept so _send_world_kb can split it back into
+    generated/authored halves for the MCP merge pipeline (which needs
+    the two blobs separately).
 
     Raises FileNotFoundError / ValueError on structural errors. Callers
     should treat any exception as fatal — Mock UE cannot resolve semantic
@@ -226,13 +510,33 @@ def load_world_kb(path: str) -> WorldKB:
             interaction_point=list(raw_obj.get("interaction_point", [0, 0, 0])),
             interaction_facing=list(raw_obj.get("interaction_facing", [0, 0, 0])),
             interaction_radius=radius,
-            available_actions=list(raw_obj.get("available_actions", []) or []),
+            available_interactions=list(raw_obj.get("available_interactions", []) or []),
             default_state=raw_obj.get("default_state", ""),
-            required_roles=list(raw_obj.get("required_roles", []) or []),
-            capacity=int(raw_obj.get("capacity", 0)),
+            tags=list(raw_obj.get("tags", []) or []),
         )
 
-    return kb
+    for raw_agent in data.get("agents", []) or []:
+        aid = raw_agent.get("id", "")
+        if not aid:
+            raise ValueError(f"agent missing id in {path}: {raw_agent}")
+        kb.agents.append(AgentInfo(
+            id=aid,
+            display_name=raw_agent.get("display_name", aid),
+            description=raw_agent.get("description", ""),
+            type=raw_agent.get("type", ""),
+            profession=raw_agent.get("profession", ""),
+            personality=raw_agent.get("personality", {}) or {},
+            initial_zone=raw_agent.get("initial_zone", ""),
+            initial_position=list(raw_agent.get("initial_position", [0, 0, 0])),
+            actor_class=raw_agent.get("actor_class", ""),
+            action_table=raw_agent.get("action_table", ""),
+            main_behavior_tree=raw_agent.get("main_behavior_tree", ""),
+        ))
+
+    kb.narrative = data.get("narrative", {}) or {}
+    kb.version = data.get("version", "")
+
+    return kb, data
 
 # Composite action nominal durations (seconds) when not given explicitly
 COMPOSITE_DEFAULT_SEC = 1800.0  # 30 min
@@ -362,25 +666,50 @@ class MockUE:
         scenario_file: Optional[str] = None,
         log_dir: str = "logs",
         world_kb_path: str = "assets/world_kb.yaml",
+        capability_actions: Optional[List[Dict[str, Any]]] = None,
     ):
         self.mcp_ws_url = mcp_ws_url
         self.mode = mode
         self.perception_interval = perception_interval
         self.log_dir = log_dir
 
+        # Capability registry — the cmd set this Mock UE advertises to MCP
+        # on connect. Defaults to the module-level 9-cmd constant; tests or
+        # alternate worlds can pass a reduced set (e.g. drop PlayAnimation
+        # for an NPC that doesn't support it) to drive MCP-side tool
+        # reconciliation without touching the constant.
+        self._capability_actions = (
+            capability_actions if capability_actions is not None
+            else DEFAULT_CAPABILITY_ACTIONS
+        )
+
         # World KB — single source of truth for zone/location/object data.
         # Fail-fast: Mock UE cannot resolve semantic targets without it.
+        # `kb` is the typed view (queries, NPC init); `kb_yaml` is the raw
+        # dict kept for _send_world_kb, which splits it back into
+        # generated/authored halves for the MCP merge pipeline.
         try:
-            self.kb = load_world_kb(world_kb_path)
+            self.kb, self.kb_yaml = load_world_kb(world_kb_path)
         except Exception as e:
             raise SystemExit(f"[FATAL] failed to load world_kb from {world_kb_path!r}: {e}")
         logger.info(f"[KB] loaded {len(self.kb.zones)} zones, "
-                    f"{len(self.kb.objects)} objects from {world_kb_path}")
+                    f"{len(self.kb.objects)} objects, {len(self.kb.agents)} agents "
+                    f"from {world_kb_path}")
 
-        # Seed NPC defaults. KB does not yet expose agent defaults, so we
-        # use the long-standing defaults (H-01 in main_workshop). When KB
-        # gains agent entries, this can be driven from there.
-        self.npc = NPCState(current_zone="main_workshop", position=[20000.0, 10000.0, 0.0])
+        # Seed NPC from the first agent entry in the KB. First phase is
+        # single-agent; agents[0] is the active NPC. ue5_ref has no yaml
+        # counterpart (actor_class is the UE path, not the blueprint short
+        # name), so it keeps the NPCState default.
+        if not self.kb.agents:
+            raise SystemExit(f"[FATAL] no agents in world_kb {world_kb_path!r}")
+        agent0 = self.kb.agents[0]
+        self.npc = NPCState(
+            agent_id=agent0.id,
+            name=agent0.display_name or agent0.id,
+            agent_type=agent0.type or "humanoid",
+            current_zone=agent0.initial_zone,
+            position=list(agent0.initial_position),
+        )
         self.time = GameTime(speed=time_speed)
 
         self._ws = None
@@ -510,112 +839,32 @@ class MockUE:
         this to drive tactical-layer prompt generation and dynamic
         MCP tool registration (AddTool/RemoveTools).
 
-        The list mirrors the 9 cmds the protocol defines and that
-        _handle_action_command actually accepts. If a future mock_ue
-        drops support for a cmd (e.g. stops honoring PlayAnimation),
-        removing it here makes MCP stop advertising tools that depend
-        on it.
+        The action list comes from self._capability_actions, which
+        defaults to DEFAULT_CAPABILITY_ACTIONS (9 cmd constant) and can
+        be overridden via the `capability_actions=` constructor param.
         """
         await self._send(TYPE_CAPABILITY_REGISTRY, SYSTEM_AGENT_ID, {
-            "actions": [
-                {
-                    "cmd": CMD_MOVE_TO,
-                    "kind": "atomic",
-                    "description": "移动到目标位置",
-                    "estimated_duration_sec": 30,
-                    "params": [
-                        {"name": "target", "type": "string",
-                         "description": "目标位置或语义目标 ID", "required": True},
-                    ],
-                },
-                {
-                    "cmd": CMD_TURN_TO,
-                    "kind": "atomic",
-                    "description": "转身面向目标",
-                    "estimated_duration_sec": 5,
-                    "params": [
-                        {"name": "target", "type": "string",
-                         "description": "目标朝向 ID", "required": True},
-                    ],
-                },
-                {
-                    "cmd": CMD_PLAY_ANIMATION,
-                    "kind": "atomic",
-                    "description": "播放动画",
-                    "estimated_duration_sec": 10,
-                    "params": [
-                        {"name": "animation", "type": "string",
-                         "description": "动画名称", "required": True},
-                    ],
-                },
-                {
-                    "cmd": CMD_SPEAK,
-                    "kind": "atomic",
-                    "description": "对目标说话",
-                    "estimated_duration_sec": 10,
-                    "params": [
-                        {"name": "content", "type": "string",
-                         "description": "说话内容", "required": True},
-                        {"name": "target", "type": "string",
-                         "description": "对话目标 ID（可空）", "required": False},
-                    ],
-                },
-                {
-                    "cmd": CMD_EMOTE,
-                    "kind": "atomic",
-                    "description": "表现情绪表情",
-                    "estimated_duration_sec": 5,
-                    "params": [
-                        {"name": "emotion", "type": "string",
-                         "description": "情绪类型", "required": True},
-                        {"name": "mode", "type": "string",
-                         "description": "oneshot 或 sustained", "required": False},
-                    ],
-                },
-                {
-                    "cmd": CMD_WAIT,
-                    "kind": "atomic",
-                    "description": "原地等待",
-                    "estimated_duration_sec": 60,
-                    "params": [
-                        {"name": "duration_sec", "type": "integer",
-                         "description": "等待秒数", "required": True},
-                    ],
-                },
-                {
-                    "cmd": CMD_INTERACT,
-                    "kind": "atomic",
-                    "description": "与智能对象交互",
-                    "estimated_duration_sec": 15,
-                    "params": [
-                        {"name": "object_id", "type": "string",
-                         "description": "智能对象 ID", "required": True},
-                        {"name": "action", "type": "string",
-                         "description": "交互动作", "required": True},
-                    ],
-                },
-                {
-                    "cmd": CMD_EXECUTE_COMPOSITE,
-                    "kind": "composite",
-                    "description": "执行复合行为（封装一段时长内的多步骤活动）",
-                    "estimated_duration_sec": 600,
-                    "params": [
-                        {"name": "action", "type": "string",
-                         "description": "复合行为类型", "required": True},
-                        {"name": "target", "type": "string",
-                         "description": "目标 ID", "required": False},
-                        {"name": "duration_min", "type": "integer",
-                         "description": "持续分钟数", "required": False},
-                    ],
-                },
-                {
-                    "cmd": CMD_STOP,
-                    "kind": "atomic",
-                    "description": "停止当前在途动作",
-                    "estimated_duration_sec": 1,
-                    "params": [],
-                },
-            ],
+            "actions": self._capability_actions,
+        })
+
+    async def _send_world_kb(self):
+        """Push the full world KB (generated + authored) to MCP on connect.
+
+        Sent FIRST in the connection sequence (before agent_registered)
+        so MCP can merge + persist + swap its in-memory KB before any
+        agent starts running. MCP only accepts this before the first
+        agent_registered (startup window); later pushes are rejected.
+
+        The payload is built dynamically from self.kb_yaml (the raw dict
+        loaded by load_world_kb) via split_yaml_to_generated_authored,
+        so swapping assets/world_kb.yaml is enough to drive a new world
+        — no hardcoded JSON to keep in sync.
+        """
+        generated, authored = split_yaml_to_generated_authored(self.kb_yaml)
+        await self._send(TYPE_WORLD_KB, SYSTEM_AGENT_ID, {
+            "pushed_at": _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime()),
+            "generated": generated,
+            "authored": authored,
         })
 
     async def _send_agent_unregistered(self, reason: str):
@@ -677,12 +926,17 @@ class MockUE:
             if obj is None:
                 continue
             name = obj.display_name or oid
+            # Euclidean distance on the XY plane (UE5 cm). Z is ignored —
+            # multi-floor navigation is out of scope for phase 1.
+            dx = self.npc.position[0] - obj.actor_position[0]
+            dy = self.npc.position[1] - obj.actor_position[1]
+            distance = math.sqrt(dx * dx + dy * dy)
             objs.append({
                 "id": oid,
                 "name": name,
-                "distance": 8.0,
+                "distance": round(distance, 1),
                 "state": obj.default_state or "idle",
-                "available_actions": list(obj.available_actions),
+                "available_actions": list(obj.available_interactions),
             })
         return objs
 
@@ -966,42 +1220,39 @@ class MockUE:
         text is what the NPC sees in the next decision context under
         "动作完成 ... details={...}". Kept intentionally short (one paragraph)
         so it stays inside the tool-result injection without bloating context.
+
+        Text is assembled from the KB's ``description`` + ``category`` fields
+        rather than hardcoded object IDs, so any object in any test world_kb
+        yields a sensible report. The ``charging_station`` category gets one
+        extra line with the NPC's current battery reading, since that's the
+        only category-specific signal Mock UE can produce.
         """
         obj = self.kb.objects.get(object_id)
         name = (obj.display_name if obj else "") or object_id
-        actions = (obj.available_actions if obj else [])
-        # NPC's current animation hints at what it was just doing.
+        actions = (obj.available_interactions if obj else [])
+        description = (obj.description if obj else "") or "外观正常，未见明显异常。"
         busy = self.npc.busy_action_id is not None
-        # Build a per-object-type report. The descriptions are deterministic
-        # but varied enough that inspecting different objects yields different
-        # information, so the NPC has a reason to inspect each one.
-        if object_id == "workbench_01":
-            lines = [
-                f"{name}：工作台台面平整，夹具定位准确，无松动。",
-                "工具槽内扳手、扭力起子齐备，最近一次使用留下的切屑已清理。",
-                "传动皮带张力正常，未见打滑痕迹。",
-                f"当前状态：{'作业中' if busy else '待机'}，可执行 {('/'.join(actions))}。",
-            ]
-        elif object_id == "charging_station_01":
+
+        lines: List[str] = []
+        # Lead with the authored description (already a full sentence).
+        if not description.endswith(("。", ".", "！", "!", "？", "?")):
+            description = description + "。"
+        lines.append(f"{name}：{description}")
+        # Category-specific extra signal. charging_station is the only
+        # category where Mock UE has live telemetry (battery reading);
+        # other categories just report busy/idle state.
+        if obj and obj.category == "charging_station":
             p = self.npc.physical
-            lines = [
-                f"{name}：充电接口无氧化，线缆绝缘完好，接头锁定顺畅。",
-                "充电模块自检通过，输出电压稳定在标称值。",
-                f"当前状态：{'充电中' if busy else '空闲'}，可执行 {('/'.join(actions))}。",
-                f"本机电池读数 {p.energy:.0f}%，建议电量低于 30% 时及时补能。",
-            ]
-        elif object_id == "rest_bench_01":
-            lines = [
-                f"{name}：长椅结构稳固，靠背无松动，表面无异物。",
-                "周边地面整洁，应急照明指示正常。",
-                f"当前状态：{'有人占用' if busy else '空位'}，可执行 {('/'.join(actions))}。",
-            ]
+            lines.append(
+                f"当前状态：{'充电中' if busy else '空闲'}，"
+                f"可执行 {('/'.join(actions)) if actions else '无'}，"
+                f"本机电池读数 {p.energy:.0f}%，建议电量低于 30% 时及时补能。"
+            )
         else:
-            # Generic fallback for any future object.
-            lines = [
-                f"{name}：外观正常，未见明显异常。",
-                f"可执行动作：{('/'.join(actions)) if actions else '无'}。",
-            ]
+            lines.append(
+                f"当前状态：{'作业中' if busy else '待机'}，"
+                f"可执行 {('/'.join(actions)) if actions else '无'}。"
+            )
         text = "".join(lines)
         logger.info(f"[INSPECT] {object_id} -> {text[:60]}...")
         return {"inspection": text, "object_id": object_id}
@@ -1021,7 +1272,6 @@ class MockUE:
         # Face the movement direction (yaw).
         dx, dy = dest[0] - old_pos[0], dest[1] - old_pos[1]
         if dx or dy:
-            import math
             self.npc.rotation[1] = (math.degrees(math.atan2(dy, dx))) % 360.0
         self.npc.position = list(dest)
 
@@ -1184,6 +1434,11 @@ class MockUE:
                 else:
                     logger.info(f"[RECONNECT] reconnected to MCP at {self.mcp_ws_url}")
 
+                # Push the full world KB FIRST so MCP can merge + persist
+                # + swap its in-memory KB before any agent_registered
+                # starts workers. MCP only accepts this during the startup
+                # window (before first agent_registered).
+                await self._send_world_kb()
                 # Re-register all agents (§4.2). agent_registered triggers the
                 # MCP Hermes session reset on the initial connect; on reconnect
                 # the MCP matches by agent_id.

@@ -7,6 +7,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/AgentTown/agenttown-mcp/pkg/protocol"
 )
 
 // TestHandleDebugUI_ReturnsHTML verifies /debug/ returns the embedded HTML page.
@@ -88,14 +90,14 @@ func TestHandleDebugKB_ReturnsZonesAndObjects(t *testing.T) {
 				t.Errorf("workbench_01 zone_id: got %q, want main_workshop", o.ZoneID)
 			}
 			foundAssemble := false
-			for _, a := range o.AvailableActions {
+			for _, a := range o.AvailableInteractions {
 				if a == "assemble" {
 					foundAssemble = true
 					break
 				}
 			}
 			if !foundAssemble {
-				t.Errorf("workbench_01 available_actions should contain assemble, got %v", o.AvailableActions)
+				t.Errorf("workbench_01 available_interactions should contain assemble, got %v", o.AvailableInteractions)
 			}
 			break
 		}
@@ -122,5 +124,65 @@ func TestHandleDebugKB_NilKBReturnsEmpty(t *testing.T) {
 	if len(resp.Zones) != 0 || len(resp.Objects) != 0 {
 		t.Errorf("nil KB should return empty arrays, got zones=%d objs=%d",
 			len(resp.Zones), len(resp.Objects))
+	}
+}
+
+// TestHandleDebugCap_ReturnsAgents verifies /debug/cap returns the
+// registry snapshot keyed by agentID, with the global default under
+// "system". Used by the e2e test to black-box-verify that mock_ue's
+// capability_registry message was registered on the MCP side.
+func TestHandleDebugCap_ReturnsAgents(t *testing.T) {
+	reg := NewCapabilityRegistry()
+	reg.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
+		{Cmd: protocol.CmdMoveTo, Kind: "atomic", Description: "move"},
+		{Cmd: protocol.CmdStop, Kind: "atomic", Description: "stop"},
+	})
+	logger := slog.Default()
+
+	req := httptest.NewRequest(http.MethodGet, "/debug/cap", nil)
+	rec := httptest.NewRecorder()
+	handleDebugCap(rec, req, reg, logger)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200", rec.Code)
+	}
+	ct := rec.Header().Get("Content-Type")
+	if !strings.Contains(ct, "application/json") {
+		t.Errorf("Content-Type: got %q, want application/json", ct)
+	}
+	var snap CapabilitySnapshot
+	if err := json.NewDecoder(rec.Body).Decode(&snap); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	sys, ok := snap.Agents[protocol.SystemAgentID]
+	if !ok {
+		t.Fatal("Agents missing \"system\" key")
+	}
+	if len(sys) != 2 {
+		t.Fatalf("system actions len = %d; want 2", len(sys))
+	}
+	// Sorted by Cmd: MoveTo < Stop
+	if sys[0].Cmd != protocol.CmdMoveTo || sys[1].Cmd != protocol.CmdStop {
+		t.Errorf("system actions order = %s, %s; want MoveTo, Stop", sys[0].Cmd, sys[1].Cmd)
+	}
+}
+
+// TestHandleDebugCap_NilRegistryReturnsEmpty verifies nil registry
+// doesn't panic and returns an empty snapshot.
+func TestHandleDebugCap_NilRegistryReturnsEmpty(t *testing.T) {
+	logger := slog.Default()
+	req := httptest.NewRequest(http.MethodGet, "/debug/cap", nil)
+	rec := httptest.NewRecorder()
+	handleDebugCap(rec, req, nil, logger)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200", rec.Code)
+	}
+	var snap CapabilitySnapshot
+	if err := json.NewDecoder(rec.Body).Decode(&snap); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(snap.Agents) != 0 {
+		t.Errorf("nil registry should return empty agents, got %d", len(snap.Agents))
 	}
 }

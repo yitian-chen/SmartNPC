@@ -80,7 +80,8 @@ func TestValidate_ZoneConnectionRefInvalid(t *testing.T) {
 	gen := minimalGenerated()
 	auth := minimalAuthored()
 	auth.Zones["main_workshop"] = AuthoredZone{
-		DisplayName: "x", ConnectedTo: []string{"nonexistent_zone"},
+		DisplayName: "x",
+		Connections: []AuthoredConnection{{To: "nonexistent_zone", Type: "road"}},
 	}
 	kb, _, err := Merge(gen, auth)
 	if err != nil {

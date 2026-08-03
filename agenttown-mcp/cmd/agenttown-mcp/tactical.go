@@ -194,8 +194,8 @@ func buildKBContext(kb *worldkb.KB) string {
 			if o.ZoneID != "" {
 				label += "|" + o.ZoneID
 			}
-			if len(o.AvailableActions) > 0 {
-				label += "[" + strings.Join(o.AvailableActions, "/") + "]"
+			if len(o.AvailableInteractions) > 0 {
+				label += "[" + strings.Join(o.AvailableInteractions, "/") + "]"
 			}
 			parts = append(parts, label)
 		}

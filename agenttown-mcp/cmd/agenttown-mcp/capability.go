@@ -104,6 +104,36 @@ func (r *CapabilityRegistry) Clear(agentID string) {
 	delete(r.perAgent, agentID)
 }
 
+// CapabilitySnapshot is the JSON-friendly view of the registry state,
+// returned by /debug/cap for black-box e2e verification. The global
+// default is keyed under protocol.SystemAgentID ("system"); every
+// per-agent override is keyed under its agentID.
+type CapabilitySnapshot struct {
+	Agents map[string][]protocol.CapabilityAction `json:"agents"`
+}
+
+// Snapshot returns a deep-copy view of the current registry: global
+// default under the "system" key plus every per-agent override. Actions
+// are sorted by Cmd for deterministic output. Safe for concurrent use.
+func (r *CapabilityRegistry) Snapshot() CapabilitySnapshot {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := CapabilitySnapshot{Agents: make(map[string][]protocol.CapabilityAction, 1+len(r.perAgent))}
+	appendSorted := func(m map[string]protocol.CapabilityAction) []protocol.CapabilityAction {
+		acts := make([]protocol.CapabilityAction, 0, len(m))
+		for _, a := range m {
+			acts = append(acts, a)
+		}
+		sort.Slice(acts, func(i, j int) bool { return acts[i].Cmd < acts[j].Cmd })
+		return acts
+	}
+	out.Agents[protocol.SystemAgentID] = appendSorted(r.global)
+	for agentID, m := range r.perAgent {
+		out.Agents[agentID] = appendSorted(m)
+	}
+	return out
+}
+
 // BuiltinCmdCapabilities is the default capability set seeded at startup
 // so the system works even if UE never sends a capability_registry
 // message. It lists all 9 cmds the protocol defines with the same

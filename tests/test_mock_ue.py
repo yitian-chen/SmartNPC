@@ -5,7 +5,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from agenttown.mock_ue import MockUE, CMD_EXECUTE_COMPOSITE, PHYS_RATES, PHYS_RATES_PASSIVE
+from agenttown.mock_ue import MockUE, CMD_EXECUTE_COMPOSITE, DEFAULT_CAPABILITY_ACTIONS, PHYS_RATES, PHYS_RATES_PASSIVE
 
 class ScenarioInjectionTests(unittest.TestCase):
     def make_ue(self):
@@ -212,9 +212,12 @@ class InspectTests(unittest.IsolatedAsyncioTestCase):
         details = payload.get("details") or {}
         self.assertIn("inspection", details)
         text = details["inspection"]
-        self.assertIn("充电", text)
         # Charging station inspection must surface the NPC's own battery level
-        # so the NPC can decide whether it needs to charge.
+        # so the NPC can decide whether it needs to charge. The description
+        # text itself is authored in world_kb.yaml (currently "充能" not
+        # "充电"), so only assert on the category-specific signal Mock UE
+        # synthesizes — the battery reading line.
+        self.assertIn("电池读数", text)
         self.assertIn("75", text)
         self.assertIn("charge", text)
 
@@ -302,7 +305,7 @@ class InspectTests(unittest.IsolatedAsyncioTestCase):
         from agenttown.mock_ue import ObjectInfo
         ue.kb.objects["future_obj"] = ObjectInfo(
             id="future_obj", display_name="未来设备",
-            available_actions=["inspect", "operate"],
+            available_interactions=["inspect", "operate"],
         )
         details = ue._inspect_object("future_obj")
         self.assertIn("inspection", details)
@@ -310,6 +313,82 @@ class InspectTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("未来设备", text)
         self.assertIn("operate", text)
         self.assertIn("正常", text)  # generic phrasing
+
+
+class CapabilityRegistryTests(unittest.IsolatedAsyncioTestCase):
+    """Tests for the capability_registry message — the cmd set Mock UE
+    advertises to MCP on connect. Covers the default 9-cmd constant and
+    the injectable override path used by alternate worlds/tests."""
+
+    def _make_ue(self, **kwargs):
+        class FakeWS:
+            def __init__(self):
+                self.sent = []
+
+            async def send(self, frame):
+                self.sent.append(frame)
+
+        ue = MockUE(log_dir="logs", **kwargs)
+        ue._ws = FakeWS()
+        return ue, FakeWS
+
+    def _capability_payload(self, ue):
+        import json
+        for frame in ue._ws.sent:
+            msg = json.loads(frame)
+            if msg.get("type") == "capability_registry":
+                return msg["payload"]
+        return None
+
+    async def test_default_capability_registry_has_nine_cmds(self):
+        ue, _ = self._make_ue()
+        await ue._send_capability_registry()
+        payload = self._capability_payload(ue)
+        self.assertIsNotNone(payload, "capability_registry not sent")
+        cmds = [a["cmd"] for a in payload["actions"]]
+        # The 9 cmds defined by the protocol.
+        self.assertEqual(sorted(cmds), sorted([
+            "MoveTo", "TurnTo", "PlayAnimation", "Speak", "Emote",
+            "Wait", "InteractSmartObject", "ExecuteComposite", "Stop",
+        ]))
+
+    async def test_default_actions_carry_usage_hint(self):
+        # Every default action should carry a non-empty usage_hint — MCP's
+        # CapabilityAction struct marks it omitempty, but Mock UE should
+        # always populate it so the tactical-layer prompt has guidance.
+        ue, _ = self._make_ue()
+        await ue._send_capability_registry()
+        payload = self._capability_payload(ue)
+        for action in payload["actions"]:
+            self.assertIn("usage_hint", action,
+                          f"cmd {action['cmd']} missing usage_hint")
+            self.assertTrue(action["usage_hint"].strip(),
+                            f"cmd {action['cmd']} has empty usage_hint")
+
+    async def test_capability_actions_override(self):
+        # An alternate world passes a reduced cmd set — Mock UE should
+        # advertise exactly that set, not the default 9.
+        reduced = [
+            {"cmd": "MoveTo", "kind": "atomic", "description": "移动",
+             "estimated_duration_sec": 30, "params": []},
+            {"cmd": "Speak", "kind": "atomic", "description": "说话",
+             "estimated_duration_sec": 10, "params": []},
+        ]
+        ue, _ = self._make_ue(capability_actions=reduced)
+        await ue._send_capability_registry()
+        payload = self._capability_payload(ue)
+        cmds = [a["cmd"] for a in payload["actions"]]
+        self.assertEqual(cmds, ["MoveTo", "Speak"])
+
+    async def test_default_capability_actions_constant_matches_sent(self):
+        # The constant and the sent payload should be the same object —
+        # guards against accidental divergence if someone adds a cmd to
+        # the constant but forgets to update _send_capability_registry
+        # (or vice versa).
+        ue, _ = self._make_ue()
+        await ue._send_capability_registry()
+        payload = self._capability_payload(ue)
+        self.assertEqual(payload["actions"], DEFAULT_CAPABILITY_ACTIONS)
 
 
 class PhysicalEvolutionTests(unittest.TestCase):
