@@ -215,38 +215,56 @@ const tacticalPromptBody = `[战术层/任务分解] 当前时段目标：%s
 %s`
 
 // buildTacticalExample 根据当前 KB 动态构造示例，确保示例中出现的
-// zone id / object id 都在 KB 中合法存在。KB 为空时返回一个不引用
-// 任何具体 id 的通用示例，避免误导 LLM 编造。
+// zone id / object id 都在 KB 中合法存在，且示例工具与 object category
+// 语义匹配（workbench→work_at_workbench，charging_station→charge_at_station，
+// 其他→interact）。KB 为空时返回不引用任何具体 id 的通用示例。
 func buildTacticalExample(kb *worldkb.KB) string {
-	if kb == nil {
-		return `{"inner_thought":"先去目标区域再开始作业"}
+	const genericExample = `{"inner_thought":"先去目标区域再开始作业"}
 {"action":"move_to_location","params":{"target":"<上方可前往区域的 id>"}}
-{"action":"work_at_workbench","params":{"target_object_id":"<上方可交互物体的 id>","duration_sec":3600}}`
+{"action":"interact","params":{"target_object_id":"<上方可交互物体的 id>","interaction":"<可用 interaction>"}}`
+	if kb == nil {
+		return genericExample
 	}
 	zoneID := ""
 	if zs := kb.ListZones(); len(zs) > 0 {
 		zoneID = zs[0].ID
 	}
-	objID := ""
-	if os := kb.ListObjects(); len(os) > 0 {
-		objID = os[0].ID
-	}
-	if zoneID == "" && objID == "" {
-		return `{"inner_thought":"先去目标区域再开始作业"}
-{"action":"move_to_location","params":{"target":"<上方可前往区域的 id>"}}
-{"action":"work_at_workbench","params":{"target_object_id":"<上方可交互物体的 id>","duration_sec":3600}}`
+	objs := kb.ListObjects()
+	if zoneID == "" && len(objs) == 0 {
+		return genericExample
 	}
 	exZone := zoneID
 	if exZone == "" {
 		exZone = "<上方可前往区域的 id>"
 	}
-	exObj := objID
-	if exObj == "" {
-		exObj = "<上方可交互物体的 id>"
+	// 无 object 时用通用 interact 占位。
+	if len(objs) == 0 {
+		return fmt.Sprintf(`{"inner_thought":"先去目标区域再开始作业"}
+{"action":"move_to_location","params":{"target":"%s"}}
+{"action":"interact","params":{"target_object_id":"<上方可交互物体的 id>","interaction":"<可用 interaction>"}}`, exZone)
 	}
-	return fmt.Sprintf(`{"inner_thought":"先去目标区域再开始作业"}
+	obj := objs[0]
+	exObj := obj.ID
+	// 按 category 选示例工具，避免 work_at_workbench 配 charging_station 的错配。
+	switch obj.Category {
+	case "workbench":
+		return fmt.Sprintf(`{"inner_thought":"先去目标区域再开始作业"}
 {"action":"move_to_location","params":{"target":"%s"}}
 {"action":"work_at_workbench","params":{"target_object_id":"%s","duration_sec":3600}}`, exZone, exObj)
+	case "charging_station":
+		return fmt.Sprintf(`{"inner_thought":"先去目标区域补充能量"}
+{"action":"move_to_location","params":{"target":"%s"}}
+{"action":"charge_at_station","params":{"target_object_id":"%s"}}`, exZone, exObj)
+	default:
+		// rest_bench 或未知 category：用 interact + 第一个可用 interaction。
+		verb := "<可用 interaction>"
+		if len(obj.AvailableInteractions) > 0 {
+			verb = obj.AvailableInteractions[0]
+		}
+		return fmt.Sprintf(`{"inner_thought":"先去目标区域再开始作业"}
+{"action":"move_to_location","params":{"target":"%s"}}
+{"action":"interact","params":{"target_object_id":"%s","interaction":"%s"}}`, exZone, exObj, verb)
+	}
 }
 
 // buildTacticalPrompt 填充战术层 prompt 模板。kb 用于注入可用 zone/location/object

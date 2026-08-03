@@ -737,3 +737,77 @@ func TestBuildTacticalToolEntries_NilRegistryBuiltinFullSet(t *testing.T) {
 		}
 	}
 }
+
+// ─── buildTacticalExample (category-aware) ──────────────────
+
+func TestBuildTacticalExample_ChargingStationFirst(t *testing.T) {
+	// 回归测试：当前 KB 第一个 object 是 charging_station_01（category=charging_station），
+	// 示例必须用 charge_at_station，不能用 work_at_workbench 配 charging_station。
+	kb := loadTestKB(t)
+	got := buildTacticalExample(kb)
+	if !strings.Contains(got, "charge_at_station") {
+		t.Errorf("example should use charge_at_station for charging_station category: %q", got)
+	}
+	if !strings.Contains(got, "charging_station_01") {
+		t.Errorf("example should reference charging_station_01: %q", got)
+	}
+	if strings.Contains(got, "work_at_workbench") {
+		t.Errorf("example must NOT use work_at_workbench for charging station: %q", got)
+	}
+}
+
+func TestBuildTacticalExample_WorkbenchOnly(t *testing.T) {
+	// KB 只含 workbench 时示例应用 work_at_workbench。
+	kb := &worldkb.KB{
+		Zones:  []worldkb.Zone{{ID: "main_workshop", DisplayName: "车间"}},
+		Objects: []worldkb.Object{{
+			ID:                    "wb_01",
+			DisplayName:           "工作台",
+			Category:              "workbench",
+			ZoneID:                "main_workshop",
+			AvailableInteractions: []string{"assemble", "inspect"},
+		}},
+	}
+	got := buildTacticalExample(kb)
+	if !strings.Contains(got, "work_at_workbench") {
+		t.Errorf("example should use work_at_workbench for workbench category: %q", got)
+	}
+	if !strings.Contains(got, "wb_01") {
+		t.Errorf("example should reference wb_01: %q", got)
+	}
+}
+
+func TestBuildTacticalExample_RestBenchOnly(t *testing.T) {
+	// KB 只含 rest_bench（category 无专用复合工具）时示例应用 interact + rest。
+	kb := &worldkb.KB{
+		Zones:  []worldkb.Zone{{ID: "rest_area", DisplayName: "休息区"}},
+		Objects: []worldkb.Object{{
+			ID:                    "bench_01",
+			DisplayName:           "长椅",
+			Category:              "rest_bench",
+			ZoneID:                "rest_area",
+			AvailableInteractions: []string{"rest"},
+		}},
+	}
+	got := buildTacticalExample(kb)
+	if !strings.Contains(got, `"action":"interact"`) {
+		t.Errorf("example should use interact for rest_bench category: %q", got)
+	}
+	if !strings.Contains(got, `"interaction":"rest"`) {
+		t.Errorf("example should use interaction=rest: %q", got)
+	}
+	if strings.Contains(got, "work_at_workbench") || strings.Contains(got, "charge_at_station") {
+		t.Errorf("example must NOT use composite tools for rest_bench: %q", got)
+	}
+}
+
+func TestBuildTacticalExample_NilKB(t *testing.T) {
+	// nil KB 返回通用占位示例，不引用任何具体 id。
+	got := buildTacticalExample(nil)
+	if !strings.Contains(got, "inner_thought") {
+		t.Errorf("nil KB example should still contain inner_thought: %q", got)
+	}
+	if strings.Contains(got, "work_at_workbench") || strings.Contains(got, "charge_at_station") {
+		t.Errorf("nil KB example should not reference specific composite tools: %q", got)
+	}
+}

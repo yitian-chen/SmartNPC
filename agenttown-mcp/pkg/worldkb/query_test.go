@@ -153,6 +153,9 @@ func TestListObjects(t *testing.T) {
 			if o.DisplayName == "" {
 				t.Errorf("workbench_01 has empty DisplayName")
 			}
+			if o.Category != "workbench" {
+				t.Errorf("workbench_01 Category = %q, want \"workbench\"", o.Category)
+			}
 			if o.ZoneID != "main_workshop" {
 				t.Errorf("workbench_01 ZoneID = %q, want main_workshop", o.ZoneID)
 			}
