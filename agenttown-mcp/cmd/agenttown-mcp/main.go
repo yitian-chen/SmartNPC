@@ -1318,6 +1318,11 @@ func runHTTP(ctx context.Context, logger *slog.Logger, server *mcp.Server, addr 
 			handleDebugKB(w, r, kb, logger)
 			return
 		}
+		// /debug/cap — 返回 capability_registry 状态供 e2e 黑盒验证
+		if r.URL.Path == "/debug/cap" {
+			handleDebugCap(w, r, capabilityRegistryRef, logger)
+			return
+		}
 		http.NotFound(w, r)
 	})
 

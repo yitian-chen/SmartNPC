@@ -102,3 +102,19 @@ func handleDebugKB(w http.ResponseWriter, r *http.Request, kb *worldkb.KB, logge
 		logger.Warn("[debug/kb] encode failed", "err", err)
 	}
 }
+
+// handleDebugCap 返回 capability_registry 当前状态，供 e2e 测试黑盒验证。
+// 结构：{"agents": {"system": [{cmd,kind,...}], "H-01": [...]}}
+// global default 始终以 "system" key 暴露，per-agent override 以各自 agentID 暴露。
+func handleDebugCap(w http.ResponseWriter, r *http.Request, cap *CapabilityRegistry, logger *slog.Logger) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+	if cap == nil {
+		logger.Warn("[debug/cap] capability registry is nil, returning empty")
+		_ = json.NewEncoder(w).Encode(CapabilitySnapshot{})
+		return
+	}
+	if err := json.NewEncoder(w).Encode(cap.Snapshot()); err != nil {
+		logger.Warn("[debug/cap] encode failed", "err", err)
+	}
+}

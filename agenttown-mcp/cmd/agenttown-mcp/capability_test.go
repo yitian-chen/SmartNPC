@@ -132,3 +132,70 @@ func TestCapabilityRegistry_EffectiveActionsSortedByCmd(t *testing.T) {
 		t.Errorf("EffectiveActions order = %v; want %v", gotCmds, want)
 	}
 }
+
+// TestCapabilityRegistry_Snapshot_GlobalOnly verifies Snapshot returns
+// the global default under the "system" key with actions sorted by Cmd,
+// and no per-agent entries when only the global has been registered.
+func TestCapabilityRegistry_Snapshot_GlobalOnly(t *testing.T) {
+	r := NewCapabilityRegistry()
+	r.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
+		{Cmd: protocol.CmdWait, Kind: "atomic"},
+		{Cmd: protocol.CmdMoveTo, Kind: "atomic"},
+	})
+	snap := r.Snapshot()
+	if len(snap.Agents) != 1 {
+		t.Fatalf("Snapshot.Agents len = %d; want 1 (system only)", len(snap.Agents))
+	}
+	sys, ok := snap.Agents[protocol.SystemAgentID]
+	if !ok {
+		t.Fatal("Snapshot.Agents missing \"system\" key")
+	}
+	if len(sys) != 2 {
+		t.Fatalf("system actions len = %d; want 2", len(sys))
+	}
+	// Sorted by Cmd.
+	want := []string{protocol.CmdMoveTo, protocol.CmdWait}
+	gotCmds := make([]string, len(sys))
+	for i, a := range sys {
+		gotCmds[i] = a.Cmd
+	}
+	if !reflect.DeepEqual(gotCmds, want) {
+		t.Errorf("system actions order = %v; want %v", gotCmds, want)
+	}
+}
+
+// TestCapabilityRegistry_Snapshot_WithPerAgent verifies Snapshot exposes
+// both the global "system" key and each per-agent override as independent
+// entries, each sorted by Cmd.
+func TestCapabilityRegistry_Snapshot_WithPerAgent(t *testing.T) {
+	r := NewCapabilityRegistry()
+	r.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
+		{Cmd: protocol.CmdMoveTo, Kind: "atomic"},
+		{Cmd: protocol.CmdWait, Kind: "atomic"},
+	})
+	r.Register("H-01", []protocol.CapabilityAction{
+		{Cmd: protocol.CmdStop, Kind: "atomic"},
+		{Cmd: protocol.CmdSpeak, Kind: "atomic"},
+	})
+	snap := r.Snapshot()
+	if len(snap.Agents) != 2 {
+		t.Fatalf("Snapshot.Agents len = %d; want 2 (system + H-01)", len(snap.Agents))
+	}
+	sys := snap.Agents[protocol.SystemAgentID]
+	if len(sys) != 2 {
+		t.Errorf("system actions len = %d; want 2", len(sys))
+	}
+	h01 := snap.Agents["H-01"]
+	if len(h01) != 2 {
+		t.Errorf("H-01 actions len = %d; want 2", len(h01))
+	}
+	// H-01 sorted by Cmd: Speak < Stop
+	wantH01 := []string{protocol.CmdSpeak, protocol.CmdStop}
+	gotCmds := make([]string, len(h01))
+	for i, a := range h01 {
+		gotCmds[i] = a.Cmd
+	}
+	if !reflect.DeepEqual(gotCmds, wantH01) {
+		t.Errorf("H-01 actions order = %v; want %v", gotCmds, wantH01)
+	}
+}
