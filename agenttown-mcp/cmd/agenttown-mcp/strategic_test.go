@@ -12,12 +12,14 @@ import (
 
 // fakeStrategicCaller 实现 strategicCaller 接口，用于单测。
 type fakeStrategicCaller struct {
-	resp        *hermes.Response
-	err         error
-	resetCalled bool
+	resp          *hermes.Response
+	err           error
+	capturedInput string
+	resetCalled   bool
 }
 
-func (f *fakeStrategicCaller) SendWithSummary(_ context.Context, _, _ string) (*hermes.Response, error) {
+func (f *fakeStrategicCaller) SendWithSummary(_ context.Context, input, _ string) (*hermes.Response, error) {
+	f.capturedInput = input
 	return f.resp, f.err
 }
 
@@ -130,7 +132,7 @@ func TestFormatDailyPlan_MultipleItems(t *testing.T) {
 
 func TestGenerateDailyPlan_HTTPError(t *testing.T) {
 	sc := &fakeStrategicCaller{err: errors.New("network down")}
-	plan := generateDailyPlan(context.Background(), sc, "H-01", slog.Default())
+	plan := generateDailyPlan(context.Background(), sc, "H-01", nil, slog.Default())
 	// HTTP 错误现在回退到 defaultDailyPlan 而不是空字符串，
 	// 保证战术层有目标可分解、仿真不瘫痪。
 	if plan != defaultDailyPlan {
@@ -144,7 +146,7 @@ func TestGenerateDailyPlan_HTTPError(t *testing.T) {
 func TestGenerateDailyPlan_ValidResponse(t *testing.T) {
 	raw := `[{"time":"06:00-07:00","goal":"起床晨检"},{"time":"07:00-12:00","goal":"车间装配"}]`
 	sc := &fakeStrategicCaller{resp: makeStrategicResponse(raw)}
-	plan := generateDailyPlan(context.Background(), sc, "H-01", slog.Default())
+	plan := generateDailyPlan(context.Background(), sc, "H-01", nil, slog.Default())
 	if plan == "" {
 		t.Fatal("got empty plan, want non-empty")
 	}
@@ -158,11 +160,85 @@ func TestGenerateDailyPlan_ValidResponse(t *testing.T) {
 
 func TestGenerateDailyPlan_ParseFail(t *testing.T) {
 	sc := &fakeStrategicCaller{resp: makeStrategicResponse("今天天气不错，我打算去车间转转。")}
-	plan := generateDailyPlan(context.Background(), sc, "H-01", slog.Default())
+	plan := generateDailyPlan(context.Background(), sc, "H-01", nil, slog.Default())
 	// 解析失败现在回退到 defaultDailyPlan 而不是空字符串，
 	// 避免整天 Wait(60s) 瘫痪。
 	if plan != defaultDailyPlan {
 		t.Errorf("got %q, want defaultDailyPlan on parse failure", plan)
+	}
+}
+
+// ─── buildStrategicContext ───────────────────────────────────
+
+func TestBuildStrategicContext_WithKB(t *testing.T) {
+	kb := loadTestKB(t)
+	got := buildStrategicContext(kb, "H-01")
+	if got == "" {
+		t.Fatal("got empty context, want non-empty for valid KB")
+	}
+	// 角色段：包含 agent 显示名和职业
+	if !strings.Contains(got, "老陈") {
+		t.Errorf("context missing agent display name '老陈': %q", got)
+	}
+	if !strings.Contains(got, "车间主管") {
+		t.Errorf("context missing agent profession '车间主管': %q", got)
+	}
+	if !strings.Contains(got, "【你的角色】") {
+		t.Errorf("context missing '【你的角色】' header: %q", got)
+	}
+	// 世界知识段：包含 zone id 和 object id
+	if !strings.Contains(got, "main_workshop") {
+		t.Errorf("context missing zone id 'main_workshop': %q", got)
+	}
+	if !strings.Contains(got, "workbench_01") {
+		t.Errorf("context missing object id 'workbench_01': %q", got)
+	}
+	if !strings.Contains(got, "【世界知识】") {
+		t.Errorf("context missing '【世界知识】' header: %q", got)
+	}
+}
+
+func TestBuildStrategicContext_NilKB(t *testing.T) {
+	// kb == nil 时降级返回空串，不 panic、不阻断 prompt 构造。
+	got := buildStrategicContext(nil, "H-01")
+	if got != "" {
+		t.Errorf("got %q, want empty string for nil KB", got)
+	}
+}
+
+func TestBuildStrategicContext_AgentNotFound(t *testing.T) {
+	// KB 存在但 agentID 不在 KB 中：跳过角色段，仍注入世界知识段。
+	kb := loadTestKB(t)
+	got := buildStrategicContext(kb, "NONEXISTENT-99")
+	if strings.Contains(got, "【你的角色】") {
+		t.Errorf("should not include persona section for unknown agent: %q", got)
+	}
+	if !strings.Contains(got, "【世界知识】") {
+		t.Errorf("should still include world KB section even if agent unknown: %q", got)
+	}
+}
+
+// ─── generateDailyPlan KB injection ──────────────────────────
+
+func TestGenerateDailyPlan_KBInjectedIntoPrompt(t *testing.T) {
+	// 验证 generateDailyPlan 把 KB 内容注入 prompt：用 fake caller 捕获
+	// input，检查包含 agent 显示名和 zone id（证明 KB 上下文已进入 prompt）。
+	kb := loadTestKB(t)
+	raw := `[{"time":"06:00-07:00","goal":"起床晨检"}]`
+	sc := &fakeStrategicCaller{resp: makeStrategicResponse(raw)}
+	_ = generateDailyPlan(context.Background(), sc, "H-01", kb, slog.Default())
+	prompt := sc.capturedInput
+	if prompt == "" {
+		t.Fatal("captured prompt is empty")
+	}
+	if !strings.Contains(prompt, "老陈") {
+		t.Errorf("prompt missing agent display name '老陈': %q", prompt)
+	}
+	if !strings.Contains(prompt, "main_workshop") {
+		t.Errorf("prompt missing zone id 'main_workshop': %q", prompt)
+	}
+	if !strings.Contains(prompt, "【你的角色】") {
+		t.Errorf("prompt missing '【你的角色】' section header: %q", prompt)
 	}
 }
 

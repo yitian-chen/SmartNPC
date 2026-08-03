@@ -293,7 +293,7 @@ func runPerceptionWorker(
 	logger *slog.Logger,
 ) {
 	// 战略层：进入感知循环前生成当日计划。
-	plan := generateDailyPlan(ctx, ac.strategicHc, agentID, logger)
+	plan := generateDailyPlan(ctx, ac.strategicHc, agentID, kb, logger)
 	ac.mu.Lock()
 	ac.dailyPlan = plan
 	ac.mu.Unlock()

@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/AgentTown/agenttown-mcp/pkg/hermes"
+	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
 )
 
 // dailyPlanItem 是战略层输出的单条计划。
@@ -26,6 +27,8 @@ const strategicPromptTemplate = `[战略层/每日规划] 现在是仿真时间 
 
 %s
 
+%s
+
 请基于你的角色身份和性格，规划今天一天的活动安排。
 
 要求：
@@ -35,7 +38,7 @@ const strategicPromptTemplate = `[战略层/每日规划] 现在是仿真时间 
 4. 每个时段时长不少于 60 分钟（起止时间差 ≥ 60 分钟）。短活动（如午休 30 分钟、短暂维修）合并到相邻时段，不要单独成段——调度器按整点采样，短于 60 分钟的时段会被跳过
 5. 只输出 JSON 数组，不要任何其他文字
 6. 必须以字符 [ 开头，以字符 ] 结尾，不要输出设计思路、不要解释、不要 markdown 围栏
-7. goal 中提到的地点、人物、设备必须是你的角色设定和当前世界知识中存在的，不得编造未提及的人物或设施
+7. goal 中提到的地点、人物、设备必须是【你的角色】和【世界知识】中存在的，不得编造未提及的人物或设施
 
 示例：[{"time":"06:00-07:00","goal":"起床晨检，慢速活动关节"},{"time":"07:00-12:00","goal":"上午车间装配作业，盯紧关键工序"},{"time":"12:00-13:00","goal":"午间停工，检查公差记录并短暂补电休息"}]`
 
@@ -59,8 +62,13 @@ const yesterdaySummaryForFirstDay = "昨天按计划完成了车间装配和设�
 // generateDailyPlan 调 LLM 生成当日计划，返回格式化字符串（每行 "时段: 目标"）。
 // 任一步失败均回退到 defaultDailyPlan，保证战术层有目标可分解、
 // 仿真不瘫痪。返回 "" 仅表示连兜底计划都没用上（理论上不会发生）。
-func generateDailyPlan(ctx context.Context, sc strategicCaller, agentID string, logger *slog.Logger) string {
-	prompt := fmt.Sprintf(strategicPromptTemplate, "昨日总结："+yesterdaySummaryForFirstDay)
+// kb 用于注入【你的角色】+【世界知识】段，让 LLM 看到 KB 内合法的
+// zone/object/agent 名，避免编造 KB 外概念（如换 KB 后仍写"车间"）。
+// kb == nil 时降级为无 KB 上下文的纯角色 prompt（向后兼容）。
+func generateDailyPlan(ctx context.Context, sc strategicCaller, agentID string, kb *worldkb.KB, logger *slog.Logger) string {
+	prompt := fmt.Sprintf(strategicPromptTemplate,
+		buildStrategicContext(kb, agentID),
+		"昨日总结："+yesterdaySummaryForFirstDay)
 	logger.Info("[MCP→Hermes/STRATEGIC-PROMPT]", "agent_id", agentID, "text", prompt)
 
 	resp, err := sc.SendWithSummary(ctx, prompt, "")
@@ -88,6 +96,44 @@ func generateDailyPlan(ctx context.Context, sc strategicCaller, agentID string, 
 	plan := formatDailyPlan(items)
 	logger.Info("[战略层] 每日计划生成成功", "agent_id", agentID, "items", len(items), "plan", plan)
 	return plan
+}
+
+// buildStrategicContext 构造战略层 prompt 的 KB 上下文段，包含两段：
+//   - 【你的角色】：从 kb.GetAgent(agentID) 取 DisplayName/Profession/
+//     Description/Personality.Traits/Personality.SpeechStyle 拼成角色描述。
+//   - 【世界知识】：复用 buildKBContext(kb)（与战术层同源），列出 KB 内
+//     所有 zone/object id + 显示名，让 LLM 知道哪些地点/设施可写进计划。
+//
+// kb == nil 时返回空串（降级路径，不阻断 prompt 构造）。
+// agent 在 KB 中不存在时跳过【你的角色】段，仅注入【世界知识】。
+func buildStrategicContext(kb *worldkb.KB, agentID string) string {
+	if kb == nil {
+		return ""
+	}
+	var sb strings.Builder
+	if a := kb.GetAgent(agentID); a != nil {
+		sb.WriteString("【你的角色】\n")
+		if a.DisplayName != "" {
+			sb.WriteString("名字：" + a.DisplayName + "\n")
+		}
+		if a.Profession != "" {
+			sb.WriteString("职业：" + a.Profession + "\n")
+		}
+		if a.Description != "" {
+			sb.WriteString("背景：" + a.Description + "\n")
+		}
+		if len(a.Personality.Traits) > 0 {
+			sb.WriteString("性格特质：" + strings.Join(a.Personality.Traits, "、") + "\n")
+		}
+		if a.Personality.SpeechStyle != "" {
+			sb.WriteString("说话风格：" + a.Personality.SpeechStyle + "\n")
+		}
+	}
+	if kbCtx := buildKBContext(kb); kbCtx != "" {
+		sb.WriteString("【世界知识】\n")
+		sb.WriteString(kbCtx)
+	}
+	return sb.String()
 }
 
 // parseDailyPlan 从 LLM 原始输出中解析 JSON 数组。
