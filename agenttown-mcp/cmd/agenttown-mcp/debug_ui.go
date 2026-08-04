@@ -112,6 +112,11 @@ func handleDebugKB(w http.ResponseWriter, r *http.Request, kb *worldkb.KB, logge
 // tool_name 字段由 tools.CmdToToolName(act.Cmd) 派生，前端下拉用 tool_name
 // 作 value，使其与 mapDebugCmd 的 tool_name 匹配路径以及前端 cmd 特殊处理
 // （如 cmd === 'move_to_location'）保持一致。
+//
+// 合成 Stop 能力项始终追加到每个 agent 列表末尾（不写进 registry 的
+// EffectiveActions/Snapshot，避免影响战术层 prompt 与 ReconcileTools）。
+// Stop 不对应 action_command，而是发 stop_action 控制消息；在 debug 下拉里
+// 始终可见，不受 capability_registry 注册内容变化影响。
 func handleDebugCap(w http.ResponseWriter, r *http.Request, cap *CapabilityRegistry, logger *slog.Logger) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -123,18 +128,34 @@ func handleDebugCap(w http.ResponseWriter, r *http.Request, cap *CapabilityRegis
 	snap := cap.Snapshot()
 	resp := debugCapResponse{Agents: make(map[string][]debugCapAction, len(snap.Agents))}
 	for agentID, acts := range snap.Agents {
-		enriched := make([]debugCapAction, 0, len(acts))
+		// +1 给合成 Stop 项预留容量
+		enriched := make([]debugCapAction, 0, len(acts)+1)
 		for _, a := range acts {
 			enriched = append(enriched, debugCapAction{
 				CapabilityAction: a,
 				ToolName:         tools.CmdToToolName(a.Cmd),
 			})
 		}
+		enriched = append(enriched, stopCapabilityAction)
 		resp.Agents[agentID] = enriched
 	}
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
 		logger.Warn("[debug/cap] encode failed", "err", err)
 	}
+}
+
+// stopCapabilityAction 是始终保留在 /debug/cap 响应中的合成 Stop 能力项。
+// Stop 不对应 action_command（它发 stop_action 控制消息），但联调同事需要
+// 在 debug 下拉里始终可见、不受 capability_registry 注册影响。仅用于 debug
+// 展示，不写进 CapabilityRegistry 的 EffectiveActions/Snapshot，避免影响战术层
+// prompt 工具列表与 ReconcileTools 的工具增删。
+var stopCapabilityAction = debugCapAction{
+	CapabilityAction: protocol.CapabilityAction{
+		Cmd:         "Stop",
+		Kind:        "atomic",
+		Description: "停止当前在途动作（发送 stop_action 控制消息）",
+	},
+	ToolName: "stop",
 }
 
 // debugCapAction 是 /debug/cap 返回的 action 项，在 protocol.CapabilityAction
