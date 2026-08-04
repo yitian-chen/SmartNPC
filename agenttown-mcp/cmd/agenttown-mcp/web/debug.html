@@ -256,25 +256,9 @@
     <div class="field">
       <label for="cmd">cmd <span class="req">*</span></label>
       <select id="cmd" onchange="onCmdChange()">
-        <optgroup label="原子 cmd（8）">
-          <option value="move_to_location">move_to_location — 移动到目标位置</option>
-          <option value="move_to_agent">move_to_agent — 跟随目标 agent</option>
-          <option value="turn_to">turn_to — 转向目标</option>
-          <option value="play_montage">play_montage — 播放蒙太奇</option>
-          <option value="speak">speak — 说话</option>
-          <option value="emote">emote — 表达情绪</option>
-          <option value="interact">interact — 与智能物体交互</option>
-          <option value="wait">wait — 原地等待</option>
-        </optgroup>
-        <optgroup label="复合 cmd（6）">
-          <option value="work_at_workbench">work_at_workbench — 工作台装配</option>
-          <option value="work_at_workshop">work_at_workshop — 车间例行工作</option>
-          <option value="chat_with">chat_with — 与其他 agent 聊天</option>
-          <option value="repair_target">repair_target — 修理目标</option>
-          <option value="charge_at_station">charge_at_station — 充电</option>
-          <option value="patrol_zone">patrol_zone — 巡逻区域</option>
-        </optgroup>
+        <!-- 由 rebuildCmdDropdown() 从 /debug/cap 动态填充 -->
       </select>
+      <div class="hint">工具列表来自 capability_registry（每 5s 轮询 /debug/cap 自动更新）</div>
     </div>
 
     <div id="params-form">
@@ -354,15 +338,18 @@
 <script>
 // ─── 全局状态 ────────────────────────────────────────────
 let kbData = { zones: [], objects: [] };
+let capData = { agents: {} }; // capability_registry 快照（来自 /debug/cap）
+let capVersion = ''; // capability 版本号（cmd 列表 hash），用于变化检测
 let history = []; // 最近 20 条
 
 // ─── 初始化 ──────────────────────────────────────────────
 async function init() {
-  await Promise.all([loadStatus(), loadKB()]);
+  await Promise.all([loadStatus(), loadKB(), loadCap()]);
   onCmdChange();
   updateSchedCurlPreview();
-  // 定时刷新状态徽章（每 5s）
+  // 定时刷新状态徽章 + capability（每 5s）
   setInterval(loadStatus, 5000);
+  setInterval(loadCap, 5000);
 }
 
 async function loadStatus() {
@@ -393,292 +380,365 @@ async function loadKB() {
   }
 }
 
+// ─── capability 加载和 cmd 下拉动态构建 ─────────────────
+async function loadCap() {
+  try {
+    const r = await fetch('/debug/cap');
+    if (!r.ok) return;
+    const j = await r.json();
+    const newVersion = computeCapVersion(j);
+    if (newVersion !== capVersion) {
+      capVersion = newVersion;
+      capData = j || { agents: {} };
+      rebuildCmdDropdown();
+    }
+  } catch (e) {
+    console.warn('loadCap failed:', e);
+  }
+}
+
+// computeCapVersion 用 system agent 的 cmd 列表排序拼接做版本号。
+// 足以检测"UE 重发 capability_registry 导致 cmd 集合变化"的场景；
+// 参数级变化（如 default_value 微调）不触发重建，避免抖动。
+function computeCapVersion(snap) {
+  const acts = (snap && snap.agents && snap.agents.system) || [];
+  return acts.map(a => a.cmd).slice().sort().join(',');
+}
+
+// effectiveCapabilities 返回当前生效的 cmd 列表。
+// 当前固定用 system 全局能力（BuiltinCmdCapabilities seed 或 UE 推送的 capability_registry）。
+// 若未来需要 per-agent 差异化，可在此读 capData.agents[agentID]。
+function effectiveCapabilities() {
+  return (capData.agents && capData.agents.system) || [];
+}
+
+// findCapability 从 capData 查找指定 cmd 的 CapabilityAction。
+function findCapability(cmd) {
+  return effectiveCapabilities().find(a => a.cmd === cmd) || null;
+}
+
+// rebuildCmdDropdown 根据 capability 快照重建 cmd 下拉，按 Kind 分组。
+// 保留当前选择值（若新列表仍包含该 cmd），否则选第一个。
+function rebuildCmdDropdown() {
+  const sel = document.getElementById('cmd');
+  const acts = effectiveCapabilities();
+  const atomic = acts.filter(a => a.kind === 'atomic');
+  const composite = acts.filter(a => a.kind === 'composite');
+  const prevValue = sel.value;
+  sel.innerHTML = '';
+  if (atomic.length) {
+    const g = document.createElement('optgroup');
+    g.label = `原子 cmd（${atomic.length}）`;
+    atomic.forEach(a => {
+      g.appendChild(new Option(`${a.cmd} — ${a.description || ''}`, a.cmd));
+    });
+    sel.appendChild(g);
+  }
+  if (composite.length) {
+    const g = document.createElement('optgroup');
+    g.label = `复合 cmd（${composite.length}）`;
+    composite.forEach(a => {
+      g.appendChild(new Option(`${a.cmd} — ${a.description || ''}`, a.cmd));
+    });
+    sel.appendChild(g);
+  }
+  // 恢复选择或选第一个
+  if (prevValue && [...sel.options].some(o => o.value === prevValue)) {
+    sel.value = prevValue;
+  } else if (sel.options.length > 0) {
+    sel.value = sel.options[0].value;
+  }
+  onCmdChange(); // 重建参数表单
+}
+
 // ─── 动态 params 表单 ─────────────────────────────────────
-const CMD_PARAM_SPECS = {
-  move_to_location: [
-    // 模式切换：target id（走 kb 解析） / 直接坐标（UE5 cm）
-    { name: '__move_mode', label: '输入模式', type: 'select-move-mode', required: false,
-      hint: 'target id 由 MCP 解析坐标；坐标模式直接传 [x,y,z] UE5 cm' },
-    // target id 模式（默认）
-    { name: 'target', label: 'target', type: 'select-kb-target', required: true,
-      hint: 'zone 或 location id，MCP 自动解析坐标',
-      modeVisibility: 'target_id' },
-    // 坐标模式
-    { name: 'dest_x', label: 'dest.x', type: 'number', required: true, default: 20000,
-      hint: 'UE5 厘米（X 轴）', modeVisibility: 'coord' },
-    { name: 'dest_y', label: 'dest.y', type: 'number', required: true, default: 10000,
-      hint: 'UE5 厘米（Y 轴）', modeVisibility: 'coord' },
-    { name: 'dest_z', label: 'dest.z', type: 'number', required: true, default: 0,
-      hint: 'UE5 厘米（Z 轴）', modeVisibility: 'coord' },
-    { name: 'speed', label: 'speed', type: 'select-speed', required: false, default: 'walk',
-      hint: '移动速度档位：walk / run' },
-  ],
-  move_to_agent: [
-    { name: 'target_agent_id', label: 'target_agent_id', type: 'text', required: true, default: 'H-02',
-      hint: '要跟随的目标 agent id' },
-    { name: 'speed', label: 'speed', type: 'select-speed', required: false, default: 'walk',
-      hint: '移动速度档位：walk / run' },
-    { name: 'stop_distance', label: 'stop_distance', type: 'number', required: false, default: 150,
-      hint: '停止距离（UE5 厘米）' },
-    { name: 'keep_following', label: 'keep_following', type: 'select-bool', required: false, default: false,
-      hint: 'true=持续跟随；false=到达后停止' },
-  ],
-  turn_to: [
-    { name: 'target_agent_id', label: 'target_agent_id', type: 'text', required: false, default: '',
-      hint: '要转向的目标 agent id（与 direction 二选一）' },
-    { name: 'direction', label: 'direction', type: 'text', required: false, default: '',
-      hint: '方向向量 [dx,dy,dz]（与 target_agent_id 二选一）' },
-  ],
-  play_montage: [
-    { name: 'montage_id', label: 'montage_id', type: 'text', required: true, default: 'wave',
-      hint: '蒙太奇动画 id' },
-    { name: 'wait_finish', label: 'wait_finish', type: 'select-bool', required: false, default: true,
-      hint: '是否等待动画播放完成' },
-  ],
-  speak: [
-    { name: 'content', label: 'content', type: 'text', required: true, hint: '说话内容' },
-    { name: 'target_agent_id', label: 'target_agent_id', type: 'text', required: false, default: '',
-      hint: '目标 agent_id，空串=自言自语' },
-    { name: 'audio_url', label: 'audio_url', type: 'text', required: false, default: '',
-      hint: '可选音频 URL' },
-  ],
-  emote: [
-    { name: 'emotion', label: 'emotion', type: 'text', required: true, default: 'happy',
-      hint: '情绪类型（happy / sad / angry / ...）' },
-    { name: 'mode', label: 'mode', type: 'select-emote-mode', required: false, default: 'oneshot',
-      hint: 'oneshot=单次；sustained=持续' },
-  ],
-  interact: [
-    { name: 'target_object_id', label: 'target_object_id', type: 'select-kb-object', required: true,
-      hint: '智能物体 id' },
-    { name: 'interaction', label: 'interaction', type: 'select-object-interaction', required: true,
-      hint: '交互动作（选项随 target_object_id 变化）' },
-  ],
-  wait: [
-    { name: 'duration_sec', label: 'duration_sec', type: 'number', required: true, default: 30,
-      hint: '等待秒数' },
-  ],
-  work_at_workbench: [
-    { name: 'target_object_id', label: 'target_object_id', type: 'select-kb-object', required: true,
-      hint: '工作台 id', filterInteractions: ['assemble'] },
-    { name: 'duration_sec', label: 'duration_sec', type: 'number', required: false, default: 3600,
-      hint: '装配秒数（可选）' },
-  ],
-  work_at_workshop: [
-    { name: 'duration_sec', label: 'duration_sec', type: 'number', required: false, default: 3600,
-      hint: '车间工作秒数（可选）' },
-  ],
-  chat_with: [
-    { name: 'target_agent_id', label: 'target_agent_id', type: 'text', required: true, default: 'H-02',
-      hint: '聊天目标 agent id' },
-    { name: 'topic', label: 'topic', type: 'text', required: false, default: '',
-      hint: '聊天话题（可选）' },
-  ],
-  repair_target: [
-    { name: 'target_agent_id', label: 'target_agent_id', type: 'text', required: true, default: 'H-02',
-      hint: '要修理的目标 agent id' },
-    { name: 'tool_id', label: 'tool_id', type: 'text', required: false, default: '',
-      hint: '工具 id（可选）' },
-  ],
-  charge_at_station: [
-    { name: 'target_object_id', label: 'target_object_id', type: 'select-kb-object', required: false,
-      hint: '充电桩 id（可空，自动选最近）', filterInteractions: ['charge'] },
-    { name: 'duration_sec', label: 'duration_sec', type: 'number', required: false, default: 1800,
-      hint: '充电秒数（可选）' },
-  ],
-  patrol_zone: [
-    { name: 'target_zone', label: 'target_zone', type: 'select-kb-zone', required: true,
-      hint: '巡逻区域 id' },
-    { name: 'duration_sec', label: 'duration_sec', type: 'number', required: false, default: 1800,
-      hint: '巡逻秒数（可选）' },
-  ],
-};
+// 参数 type → 表单控件映射；KB 联动按参数名启发式判断。
+// move_to_location 的 target id / 坐标模式切换是前端独有的 UX 增强，
+// 不在 capability_registry 描述里，通过 cmd 特判注入。
+
+// buildFieldSpec 把 CapabilityParam 转成前端字段规格。
+function buildFieldSpec(param, cmd) {
+  const spec = {
+    name: param.name,
+    label: param.name,
+    required: !!param.required,
+    hint: param.description || '',
+    default: param.default_value || '',
+  };
+  // KB 联动：按参数名启发式判断
+  if (param.name === 'target_object_id') {
+    spec.type = 'select-kb-object';
+    spec.filterInteractions = inferFilterInteractions(cmd);
+  } else if (param.name === 'target_zone') {
+    spec.type = 'select-kb-zone';
+  } else if (param.name === 'target' && param.type === 'string') {
+    spec.type = 'select-kb-target';
+  } else if (cmd === 'interact' && param.name === 'interaction') {
+    // interact cmd 的 interaction 参数：选项随 target_object_id 的 available_interactions 联动
+    spec.type = 'select-object-interaction';
+  } else if (param.type === 'enum') {
+    spec.type = 'select-enum';
+    spec.enumValues = param.enum_values || [];
+  } else if (param.type === 'bool') {
+    spec.type = 'select-bool';
+  } else if (param.type === 'number') {
+    spec.type = 'number';
+  } else if (param.type === 'vector') {
+    spec.type = 'text';
+    spec.hint = (spec.hint ? spec.hint + '；' : '') + '格式 [x,y,z]';
+  } else {
+    spec.type = 'text';
+  }
+  return spec;
+}
+
+// inferFilterInteractions 按 cmd 推导 target_object_id 的 interaction 过滤器。
+// charge_at_station 只显示带 charge 的 object；work_at_workbench 只显示带 assemble 的。
+function inferFilterInteractions(cmd) {
+  switch (cmd) {
+    case 'charge_at_station': return ['charge'];
+    case 'work_at_workbench': return ['assemble'];
+    default: return null;
+  }
+}
 
 function onCmdChange() {
   const cmd = document.getElementById('cmd').value;
-  const spec = CMD_PARAM_SPECS[cmd] || [];
+  const action = findCapability(cmd);
   const container = document.getElementById('params-form');
   container.innerHTML = '';
 
-  if (spec.length === 0) {
+  if (!action || !action.params || action.params.length === 0) {
     container.innerHTML = '<div class="empty-state">该 cmd 无参数</div>';
     updateCurlPreview();
     return;
   }
 
-  spec.forEach(field => {
-    const div = document.createElement('div');
-    div.className = 'field';
-    // 注意：不在 div 上设 data-field-name，否则 querySelector('[data-field-name="..."]')
-    // 会命中 div（父元素先于 input 出现）而非 input/select，导致 .value 为 undefined。
-    // data-field-name 只设在 input/select 上；div 用 data-mode-visibility 控制可见性。
+  // move_to_location 特殊处理：注入模式选择器 + target/dest 字段按模式切换
+  if (cmd === 'move_to_location') {
+    renderMoveToLocationFields(container, action);
+    updateObjectInteractionOptions();
+    updateCurlPreview();
+    return;
+  }
 
-    // 模式可见性：move_to_location 的 target / dest_x/y/z 字段根据模式切换显示
-    if (field.modeVisibility) {
-      div.dataset.modeVisibility = field.modeVisibility;
-      // 默认 coord 模式 → target_id 字段初始隐藏
-      div.style.display = (field.modeVisibility === 'coord') ? '' : 'none';
-    }
-
-    const label = document.createElement('label');
-    label.htmlFor = `param-${field.name}`;
-    label.innerHTML = `params.${field.name}${field.required ? ' <span class="req">*</span>' : ''}`;
-    div.appendChild(label);
-
-    let input;
-    switch (field.type) {
-      case 'select-move-mode':
-        input = document.createElement('select');
-        input.id = `param-${field.name}`;
-        input.dataset.fieldName = field.name;
-        input.dataset.modeGroup = 'move_to_location';
-        [
-          { v: 'target_id', t: 'target id（kb 解析）' },
-          { v: 'coord', t: '直接坐标（UE5 cm）' },
-        ].forEach(o => {
-          const opt = document.createElement('option');
-          opt.value = o.v; opt.textContent = o.t;
-          input.appendChild(opt);
-        });
-        input.value = 'coord'; // 默认直接坐标模式
-        input.onchange = () => { toggleMoveModeVisibility(input.value); updateCurlPreview(); };
-        // 标记为模式控制器，collectRequest 时跳过
-        input.dataset.isModeController = '1';
-        break;
-
-      case 'select-speed':
-        input = document.createElement('select');
-        input.id = `param-${field.name}`;
-        input.dataset.fieldName = field.name;
-        ['walk', 'run'].forEach(v => {
-          const opt = document.createElement('option');
-          opt.value = v; opt.textContent = v;
-          input.appendChild(opt);
-        });
-        input.value = field.default || 'walk';
-        input.onchange = updateCurlPreview;
-        break;
-
-      case 'select-bool':
-        input = document.createElement('select');
-        input.id = `param-${field.name}`;
-        input.dataset.fieldName = field.name;
-        input.dataset.boolField = '1';
-        [
-          { v: 'true', t: 'true' },
-          { v: 'false', t: 'false' },
-        ].forEach(o => {
-          const opt = document.createElement('option');
-          opt.value = o.v; opt.textContent = o.t;
-          input.appendChild(opt);
-        });
-        input.value = String(field.default != null ? field.default : false);
-        input.onchange = updateCurlPreview;
-        break;
-
-      case 'select-emote-mode':
-        input = document.createElement('select');
-        input.id = `param-${field.name}`;
-        input.dataset.fieldName = field.name;
-        ['oneshot', 'sustained'].forEach(v => {
-          const opt = document.createElement('option');
-          opt.value = v; opt.textContent = v;
-          input.appendChild(opt);
-        });
-        input.value = field.default || 'oneshot';
-        input.onchange = updateCurlPreview;
-        break;
-
-      case 'select-kb-target':
-        input = document.createElement('select');
-        input.id = `param-${field.name}`;
-        input.dataset.fieldName = field.name;
-        // 标记该字段所属模式，便于切换显示/隐藏
-        if (field.modeVisibility) input.dataset.modeVisibility = field.modeVisibility;
-        // zones
-        const zg = document.createElement('optgroup');
-        zg.label = 'Zones（区域）';
-        (kbData.zones || []).forEach(z => {
-          const o = document.createElement('option');
-          o.value = z.id; o.textContent = `${z.id} — ${z.display_name}`;
-          zg.appendChild(o);
-        });
-        input.appendChild(zg);
-        // objects（合并了原 locations）
-        const og = document.createElement('optgroup');
-        og.label = 'Objects（物体）';
-        (kbData.objects || []).forEach(o => {
-          const opt = document.createElement('option');
-          opt.value = o.id; opt.textContent = `${o.id} — ${o.display_name} (in ${o.zone_id})`;
-          og.appendChild(opt);
-        });
-        input.appendChild(og);
-        if (kbData.objects && kbData.objects.length > 0) {
-          input.value = kbData.objects[0].id;
-        }
-        break;
-
-      case 'select-kb-zone':
-        input = document.createElement('select');
-        input.id = `param-${field.name}`;
-        input.dataset.fieldName = field.name;
-        (kbData.zones || []).forEach(z => {
-          const opt = document.createElement('option');
-          opt.value = z.id; opt.textContent = `${z.id} — ${z.display_name}`;
-          input.appendChild(opt);
-        });
-        input.onchange = updateCurlPreview;
-        break;
-
-      case 'select-kb-object':
-        input = document.createElement('select');
-        input.id = `param-${field.name}`;
-        input.dataset.fieldName = field.name;
-        input.onchange = () => { updateObjectInteractionOptions(); updateCurlPreview(); };
-        (kbData.objects || []).forEach(o => {
-          if (field.filterInteractions && !field.filterInteractions.some(a => (o.available_interactions || []).includes(a))) return;
-          const opt = document.createElement('option');
-          opt.value = o.id; opt.textContent = `${o.id} — ${o.display_name}`;
-          input.appendChild(opt);
-        });
-        break;
-
-      case 'select-object-interaction':
-        input = document.createElement('select');
-        input.id = `param-${field.name}`;
-        input.dataset.fieldName = field.name;
-        // 选项由 updateObjectInteractionOptions 动态填
-        break;
-
-      case 'number':
-        input = document.createElement('input');
-        input.type = 'number';
-        input.id = `param-${field.name}`;
-        input.value = field.default != null ? field.default : 0;
-        input.dataset.fieldName = field.name;
-        input.oninput = updateCurlPreview;
-        break;
-
-      default: // text
-        input = document.createElement('input');
-        input.type = 'text';
-        input.id = `param-${field.name}`;
-        input.value = field.default != null ? field.default : '';
-        input.dataset.fieldName = field.name;
-        input.oninput = updateCurlPreview;
-    }
-    div.appendChild(input);
-
-    if (field.hint) {
-      const h = document.createElement('div');
-      h.className = 'hint'; h.textContent = field.hint;
-      div.appendChild(h);
-    }
-    container.appendChild(div);
+  // 通用：按 capability 声明的 params 逐个渲染
+  action.params.forEach(p => {
+    const spec = buildFieldSpec(p, cmd);
+    renderField(container, spec);
   });
-
   updateObjectInteractionOptions();
   updateCurlPreview();
+}
+
+// renderMoveToLocationFields 为 move_to_location 注入 target id / 坐标模式切换。
+// capability 声明了 dest（vector）+ speed（enum）；target id 模式是前端增强。
+function renderMoveToLocationFields(container, action) {
+  // 模式选择器
+  const modeSpec = {
+    name: '__move_mode', label: '输入模式', type: 'select-move-mode', required: false,
+    hint: 'target id 由 MCP 解析坐标；坐标模式直接传 [x,y,z] UE5 cm',
+  };
+  renderField(container, modeSpec);
+
+  // target id 模式字段（前端增强，不在 capability 描述里）
+  const targetSpec = {
+    name: 'target', label: 'target', type: 'select-kb-target', required: true,
+    hint: 'zone 或 location id，MCP 自动解析坐标',
+    modeVisibility: 'target_id',
+  };
+  renderField(container, targetSpec);
+
+  // 坐标模式字段：从 capability 的 dest（vector）参数拆成 x/y/z
+  const destParam = action.params.find(p => p.name === 'dest');
+  if (destParam) {
+    ['dest_x', 'dest_y', 'dest_z'].forEach((name, i) => {
+      const spec = {
+        name, label: name, type: 'number', required: true,
+        default: [20000, 10000, 0][i],
+        hint: 'UE5 厘米' + (i === 0 ? '（X 轴）' : i === 1 ? '（Y 轴）' : '（Z 轴）'),
+        modeVisibility: 'coord',
+      };
+      renderField(container, spec);
+    });
+  }
+
+  // speed 字段（capability 里的 enum 参数）
+  const speedParam = action.params.find(p => p.name === 'speed');
+  if (speedParam) {
+    const spec = buildFieldSpec(speedParam, 'move_to_location');
+    renderField(container, spec);
+  }
+
+  // 默认 coord 模式 → target_id 字段初始隐藏
+  toggleMoveModeVisibility('coord');
+}
+
+// renderField 渲染单个字段到 container。控件生成逻辑提取自原 onCmdChange 的 switch。
+function renderField(container, field) {
+  const div = document.createElement('div');
+  div.className = 'field';
+
+  // 模式可见性：move_to_location 的 target / dest_x/y/z 字段根据模式切换显示
+  if (field.modeVisibility) {
+    div.dataset.modeVisibility = field.modeVisibility;
+    div.style.display = (field.modeVisibility === 'coord') ? '' : 'none';
+  }
+
+  const label = document.createElement('label');
+  label.htmlFor = `param-${field.name}`;
+  label.innerHTML = `params.${field.name}${field.required ? ' <span class="req">*</span>' : ''}`;
+  div.appendChild(label);
+
+  let input;
+  switch (field.type) {
+    case 'select-move-mode':
+      input = document.createElement('select');
+      input.id = `param-${field.name}`;
+      input.dataset.fieldName = field.name;
+      input.dataset.modeGroup = 'move_to_location';
+      [
+        { v: 'target_id', t: 'target id（kb 解析）' },
+        { v: 'coord', t: '直接坐标（UE5 cm）' },
+      ].forEach(o => {
+        const opt = document.createElement('option');
+        opt.value = o.v; opt.textContent = o.t;
+        input.appendChild(opt);
+      });
+      input.value = 'coord'; // 默认直接坐标模式
+      input.onchange = () => { toggleMoveModeVisibility(input.value); updateCurlPreview(); };
+      input.dataset.isModeController = '1';
+      break;
+
+    case 'select-speed':
+      input = document.createElement('select');
+      input.id = `param-${field.name}`;
+      input.dataset.fieldName = field.name;
+      ['walk', 'run'].forEach(v => {
+        const opt = document.createElement('option');
+        opt.value = v; opt.textContent = v;
+        input.appendChild(opt);
+      });
+      input.value = field.default || 'walk';
+      input.onchange = updateCurlPreview;
+      break;
+
+    case 'select-bool':
+      input = document.createElement('select');
+      input.id = `param-${field.name}`;
+      input.dataset.fieldName = field.name;
+      input.dataset.boolField = '1';
+      [
+        { v: 'true', t: 'true' },
+        { v: 'false', t: 'false' },
+      ].forEach(o => {
+        const opt = document.createElement('option');
+        opt.value = o.v; opt.textContent = o.t;
+        input.appendChild(opt);
+      });
+      input.value = String(field.default === 'true' || field.default === true);
+      input.onchange = updateCurlPreview;
+      break;
+
+    case 'select-enum':
+      input = document.createElement('select');
+      input.id = `param-${field.name}`;
+      input.dataset.fieldName = field.name;
+      (field.enumValues || []).forEach(v => {
+        const opt = document.createElement('option');
+        opt.value = v; opt.textContent = v;
+        input.appendChild(opt);
+      });
+      input.value = field.default || (field.enumValues && field.enumValues[0]) || '';
+      input.onchange = updateCurlPreview;
+      break;
+
+    case 'select-kb-target':
+      input = document.createElement('select');
+      input.id = `param-${field.name}`;
+      input.dataset.fieldName = field.name;
+      if (field.modeVisibility) input.dataset.modeVisibility = field.modeVisibility;
+      // zones
+      const zg = document.createElement('optgroup');
+      zg.label = 'Zones（区域）';
+      (kbData.zones || []).forEach(z => {
+        const o = document.createElement('option');
+        o.value = z.id; o.textContent = `${z.id} — ${z.display_name}`;
+        zg.appendChild(o);
+      });
+      input.appendChild(zg);
+      // objects
+      const og = document.createElement('optgroup');
+      og.label = 'Objects（物体）';
+      (kbData.objects || []).forEach(o => {
+        const opt = document.createElement('option');
+        opt.value = o.id; opt.textContent = `${o.id} — ${o.display_name} (in ${o.zone_id})`;
+        og.appendChild(opt);
+      });
+      input.appendChild(og);
+      if (kbData.objects && kbData.objects.length > 0) {
+        input.value = kbData.objects[0].id;
+      }
+      input.onchange = updateCurlPreview;
+      break;
+
+    case 'select-kb-zone':
+      input = document.createElement('select');
+      input.id = `param-${field.name}`;
+      input.dataset.fieldName = field.name;
+      (kbData.zones || []).forEach(z => {
+        const opt = document.createElement('option');
+        opt.value = z.id; opt.textContent = `${z.id} — ${z.display_name}`;
+        input.appendChild(opt);
+      });
+      input.onchange = updateCurlPreview;
+      break;
+
+    case 'select-kb-object':
+      input = document.createElement('select');
+      input.id = `param-${field.name}`;
+      input.dataset.fieldName = field.name;
+      input.onchange = () => { updateObjectInteractionOptions(); updateCurlPreview(); };
+      (kbData.objects || []).forEach(o => {
+        if (field.filterInteractions && !field.filterInteractions.some(a => (o.available_interactions || []).includes(a))) return;
+        const opt = document.createElement('option');
+        opt.value = o.id; opt.textContent = `${o.id} — ${o.display_name}`;
+        input.appendChild(opt);
+      });
+      break;
+
+    case 'select-object-interaction':
+      input = document.createElement('select');
+      input.id = `param-${field.name}`;
+      input.dataset.fieldName = field.name;
+      // 选项由 updateObjectInteractionOptions 动态填
+      break;
+
+    case 'number':
+      input = document.createElement('input');
+      input.type = 'number';
+      input.id = `param-${field.name}`;
+      input.value = field.default != null && field.default !== '' ? field.default : 0;
+      input.dataset.fieldName = field.name;
+      input.oninput = updateCurlPreview;
+      break;
+
+    default: // text
+      input = document.createElement('input');
+      input.type = 'text';
+      input.id = `param-${field.name}`;
+      input.value = field.default != null ? field.default : '';
+      input.dataset.fieldName = field.name;
+      input.oninput = updateCurlPreview;
+  }
+  div.appendChild(input);
+
+  if (field.hint) {
+    const h = document.createElement('div');
+    h.className = 'hint'; h.textContent = field.hint;
+    div.appendChild(h);
+  }
+  container.appendChild(div);
 }
 
 function updateObjectInteractionOptions() {
