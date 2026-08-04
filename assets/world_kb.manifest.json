@@ -1,8 +1,7 @@
 {
   "schema_version": "1.0",
-  "generated_sha256": "052d71429c1192bf2229e78ddefb36eb476d9f7e73d4292e8ebc679bd4a80365",
-  "authored_sha256": "8043414fdf04336cf9cf987b3e3e54932220d612040edc093c52305c5dd1a3ce",
-  "merged_sha256": "dd2fa0b0b0ab9c2a5269bd15c808b40799487998021cadee215bc64e31c7ad72",
-  "source_map": "/Game/AgentTown/Maps/L_IndustrialTown",
-  "merged_at": "2026-07-31T10:05:29Z"
+  "generated_sha256": "89d8ad7ace597690ac4a40e5634903de38d2903779d0aeff655cc7d550417e2d",
+  "authored_sha256": "48956c2234e16ba3bcec6cf658db7932835e968010979b77282c2feaf9c01921",
+  "merged_sha256": "8dbf71535ce91a92aa7841358a550a998213aed3b9cbda793fb1d79e6c452b28",
+  "merged_at": "2026-08-04T02:22:42Z"
 }
