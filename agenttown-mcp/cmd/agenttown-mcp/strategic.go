@@ -47,6 +47,7 @@ const strategicPromptTemplate = `[战略层/每日规划] 现在是仿真时间 
 5. 只输出 JSON 数组，不要任何其他文字
 6. 必须以字符 [ 开头，以字符 ] 结尾，不要输出设计思路、不要解释、不要 markdown 围栏
 7. goal 中提到的地点、人物、设备必须是【你的角色】和【世界知识】中存在的，不得编造未提及的人物或设施
+8. 若 goal 涉及"使用/操作/检查/交互"某设施，该设施必须位于【区域设施映射】中标注为有物体的 zone——映射中标注"无可交互物体"的 zone 不能作为 interact 类活动的目的地（只能用于移动/巡逻/路过/休息）
 
 示例：[{"time":"06:00-07:00","goal":"起床晨检，慢速活动关节"},{"time":"07:00-12:00","goal":"上午车间装配作业，盯紧关键工序"},{"time":"12:00-13:00","goal":"午间停工，检查公差记录并短暂补电休息"}]`
 
@@ -144,14 +145,18 @@ func generateDailyPlan(ctx context.Context, sc strategicCaller, agentID string, 
 	return plan
 }
 
-// buildStrategicContext 构造战略层 prompt 的 KB 上下文段，包含两段：
+// buildStrategicContext 构造战略层 prompt 的 KB 上下文段，包含三段：
 //   - 【你的角色】：从 kb.GetAgent(agentID) 取 DisplayName/Profession/
 //     Description/Personality.Traits/Personality.SpeechStyle 拼成角色描述。
 //   - 【世界知识】：复用 buildKBContext(kb)（与战术层同源），列出 KB 内
 //     所有 zone/object id + 显示名，让 LLM 知道哪些地点/设施可写进计划。
+//   - 【区域设施映射】：按 zone 列出每个区域下有哪些可交互物体（以及哪些
+//     zone 无可交互物体）。战略层 LLM 据此避免生成"去无 object 的 zone 做
+//     interact"的 goal——此类 goal 会让战术层 LLM 陷入"想 interact 但
+//     当前 zone 没有 object"的死角，诱发 zone-object 错配。
 //
 // kb == nil 时返回空串（降级路径，不阻断 prompt 构造）。
-// agent 在 KB 中不存在时跳过【你的角色】段，仅注入【世界知识】。
+// agent 在 KB 中不存在时跳过【你的角色】段，仅注入【世界知识】+【区域设施映射】。
 func buildStrategicContext(kb *worldkb.KB, agentID string) string {
 	if kb == nil {
 		return ""
@@ -178,6 +183,64 @@ func buildStrategicContext(kb *worldkb.KB, agentID string) string {
 	if kbCtx := buildKBContext(kb); kbCtx != "" {
 		sb.WriteString("【世界知识】\n")
 		sb.WriteString(kbCtx)
+	}
+	if zom := buildStrategicZoneObjectMap(kb); zom != "" {
+		sb.WriteString("【区域设施映射】\n")
+		sb.WriteString(zom)
+	}
+	return sb.String()
+}
+
+// buildStrategicZoneObjectMap 构造"每个 zone 下有哪些可交互物体"的映射视图。
+//
+// 战略层 LLM 只看 buildKBContext 时难以判断哪些 zone 有可交互设施、哪些
+// zone 是空的——buildKBContext 把 zones 和 objects 分两段列出，LLM 要
+// 自行交叉比对 zone_id 才能知道"archive_station 下没有 object"。这导致
+// 战略层生成"去档案馆翻图纸""回维修厂保养设备"等需要 object 的 goal，
+// 但目标 zone 实际无 object，战术层 LLM 被逼到死角只能错配其他 zone 的 object。
+//
+// 本函数按 zone 声明顺序列出每个 zone 下的 object（用显示名+id），
+// 无 object 的 zone 显式标注"无可交互物体"，让战略层 LLM 一眼看出
+// 哪些 zone 能做 interact 类活动、哪些只能做移动/巡逻/等待。
+//
+// KB 为空或无 zone 时返回空串（降级，不阻断 prompt 构造）。
+func buildStrategicZoneObjectMap(kb *worldkb.KB) string {
+	if kb == nil {
+		return ""
+	}
+	zones := kb.ListZones()
+	if len(zones) == 0 {
+		return ""
+	}
+	objs := kb.ListObjects()
+	// 按 zone id 分组 object。
+	byZone := make(map[string][]worldkb.ObjectInfo, len(zones))
+	for _, o := range objs {
+		if o.ZoneID == "" {
+			continue
+		}
+		byZone[o.ZoneID] = append(byZone[o.ZoneID], o)
+	}
+	var sb strings.Builder
+	for _, z := range zones {
+		label := z.ID
+		if z.DisplayName != "" && z.DisplayName != z.ID {
+			label = fmt.Sprintf("%s（id=%s）", z.DisplayName, z.ID)
+		}
+		objsInZone := byZone[z.ID]
+		if len(objsInZone) == 0 {
+			sb.WriteString("  - " + label + "：无可交互物体\n")
+			continue
+		}
+		parts := make([]string, 0, len(objsInZone))
+		for _, o := range objsInZone {
+			olabel := o.ID
+			if o.DisplayName != "" && o.DisplayName != o.ID {
+				olabel = fmt.Sprintf("%s（id=%s）", o.DisplayName, o.ID)
+			}
+			parts = append(parts, olabel)
+		}
+		sb.WriteString("  - " + label + "：" + strings.Join(parts, "、") + "\n")
 	}
 	return sb.String()
 }

@@ -3,11 +3,12 @@ package main
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"strings"
 	"testing"
 
 	"github.com/AgentTown/agenttown-mcp/pkg/hermes"
-	"log/slog"
+	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
 )
 
 // fakeStrategicCaller 实现 strategicCaller 接口，用于单测。
@@ -478,5 +479,64 @@ func TestSelectPlanInjection_OvernightSlotEarlyMorning(t *testing.T) {
 	}
 	if !strings.HasPrefix(inj, "[今日计划]") {
 		t.Errorf("first decision should inject full plan, got %q", inj)
+	}
+}
+
+// ─── buildStrategicZoneObjectMap ─────────────────────────────
+
+func TestBuildStrategicZoneObjectMap_RealKB(t *testing.T) {
+	// 真实 KB：7 个 zone，3 个 object（分别在 central_plaza/residential_quarters/
+	// main_workshop）。映射应列出全部 7 个 zone，有 object 的标注 object，
+	// 无 object 的显式标注"无可交互物体"。
+	kb := loadTestKB(t)
+	got := buildStrategicZoneObjectMap(kb)
+	if got == "" {
+		t.Fatal("got empty map for valid KB")
+	}
+	// 有 object 的 zone 应出现其 object id。
+	if !strings.Contains(got, "charging_station_01") {
+		t.Errorf("map should list charging_station_01 under central_plaza: %q", got)
+	}
+	if !strings.Contains(got, "workbench_01") {
+		t.Errorf("map should list workbench_01 under main_workshop: %q", got)
+	}
+	if !strings.Contains(got, "rest_bench_01") {
+		t.Errorf("map should list rest_bench_01 under residential_quarters: %q", got)
+	}
+	// 无 object 的 zone 应显式标注（让战略层 LLM 知道这些 zone 不能做 interact）。
+	if !strings.Contains(got, "无可交互物体") {
+		t.Errorf("map should explicitly mark empty zones: %q", got)
+	}
+	// archive_station 在真实 KB 中无 object，应被标注为空。
+	if !strings.Contains(got, "archive_station") {
+		t.Errorf("map should list archive_station: %q", got)
+	}
+}
+
+func TestBuildStrategicZoneObjectMap_NilKB(t *testing.T) {
+	got := buildStrategicZoneObjectMap(nil)
+	if got != "" {
+		t.Errorf("nil KB should return empty map, got %q", got)
+	}
+}
+
+func TestBuildStrategicZoneObjectMap_EmptyZones(t *testing.T) {
+	// KB 无 zone 时返回空串（降级路径）。
+	kb := &worldkb.KB{}
+	got := buildStrategicZoneObjectMap(kb)
+	if got != "" {
+		t.Errorf("KB with no zones should return empty map, got %q", got)
+	}
+}
+
+func TestBuildStrategicContext_ContainsZoneObjectMap(t *testing.T) {
+	// buildStrategicContext 应包含【区域设施映射】段，让战略层 LLM 看到映射。
+	kb := loadTestKB(t)
+	got := buildStrategicContext(kb, "H-01")
+	if !strings.Contains(got, "【区域设施映射】") {
+		t.Errorf("context missing '【区域设施映射】' header: %q", got)
+	}
+	if !strings.Contains(got, "无可交互物体") {
+		t.Errorf("context should mark empty zones in map: %q", got)
 	}
 }
