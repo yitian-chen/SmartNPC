@@ -44,11 +44,6 @@ const reactiveCallTimeout = 20 * time.Second
 
 // reactiveRunner 持有反应层运行所需的全部依赖。
 // 通过 package-level `reactiveRunnerRef` 在 main() 中注入，WS handler 调用。
-//
-// registry 不在此缓存：main() 中 capabilityRegistryRef 的赋值晚于
-// reactiveRunnerRef 的构造，且 UE 可能在运行时重连推送新的
-// capability_registry。因此 trigger() 时通过 capabilityRegistryRef
-// 取最新引用（nil 表示未启用 capability 过滤，降级为内置硬编码列表）。
 type reactiveRunner struct {
 	ollama *ollama.Client
 	ws     *wsserver.Server
@@ -57,7 +52,7 @@ type reactiveRunner struct {
 
 	// mu 串行化 Ollama 调用。多触发源（perception/state/event）并发到达时
 	// 排队执行，避免本地模型过载。持有期间包括 Ollama 调用 + 决策执行
-	// （stop_action / SendAction），确保决策基于的状态不被并发触发覆盖。
+	// （stop_action），确保决策基于的状态不被并发触发覆盖。
 	mu sync.Mutex
 }
 
@@ -82,7 +77,7 @@ func newReactiveRunner(client *ollama.Client, ws *wsserver.Server, kb *worldkb.K
 //  3. 构造 prompt（从 agentContext 读当前状态）
 //  4. 调 Ollama（3s 超时）
 //  5. 解析决策（容错：失败默认 continue）
-//  6. 执行：continue/observe 不动作；interrupt 发 stop_action；act 先 stop 再下发新 action
+//  6. 执行：continue/observe 不动作；replan 调战术层重规划并 stop 在途 action
 //
 // 任何步骤失败都静默降级，不影响战术层正常运行。
 func (r *reactiveRunner) trigger(agentID string, ac *agentContext, trigger ReactiveTrigger, detail string) {
@@ -141,9 +136,8 @@ func (r *reactiveRunner) trigger(agentID string, ac *agentContext, trigger React
 	r.logger.Info("[反应层/RESPONSE]",
 		"agent_id", agentID, "trigger", trigger, "raw", raw)
 
-	// 5. 解析决策（registry 通过 capabilityRegistryRef 懒取，支持 UE 运行时重连推送新 capability）
-	registry := capabilityRegistryRef
-	dec := parseReactiveDecision(raw, registry, agentID)
+	// 5. 解析决策（容错：失败默认 continue）
+	dec := parseReactiveDecision(raw)
 	// 代码层兜底：物理状态告警时强制升级 continue/observe 为 interrupt。
 	// LLM 在 fatigue=80+ 时仍可能输出 observe，仅靠 prompt 约束不可靠。
 	dec = upgradeIfPhysicalAlert(input, dec)
@@ -201,9 +195,6 @@ func (r *reactiveRunner) buildInput(agentID string, ac *agentContext, trigger Re
 		}
 	}
 
-	// 派生 reaction=act 可用 cmd 列表文本，供 prompt 注入。
-	availableCmds := buildReactiveCmdList(capabilityRegistryRef, agentID)
-
 	// 实时从 dailyPlan 计算 slot，避免长动作在途时 currentSlot stale。
 	// __debug__ 前缀的 slot 是 /debug/schedule 注入的临时覆盖，保留原值。
 	liveSlot := ac.currentSlot
@@ -228,7 +219,6 @@ func (r *reactiveRunner) buildInput(agentID string, ac *agentContext, trigger Re
 		DailyPlan:         plan,
 		Trigger:           trigger,
 		TriggerDetail:     detail,
-		AvailableCmdsText: availableCmds,
 	}
 }
 
@@ -268,77 +258,12 @@ func joinStrings(ss []string, sep string) string {
 	return out
 }
 
-// execute 执行反应层决策。interrupt/act 会发 stop_action 打断在途 action。
+// execute 执行反应层决策。replan 会调战术层重规划并打断在途 action。
 func (r *reactiveRunner) execute(agentID string, ac *agentContext, dec ReactiveDecision) {
 	switch dec.Reaction {
 	case ReactionContinue, ReactionObserve:
 		// 不打断，仅日志（trigger 已记录决策）
 		return
-
-	case ReactionInterrupt:
-		// 清空战术层队列 + 设置 replanHint，防止 worker 在 stop_action 后
-		// 立即 pop 下一个排队 action 继续执行（会让 interrupt 无效）。
-		// replanHint 让下次 tacticalRefill 看到 interrupt 原因，引导 LLM
-		// 规划与 interrupt 原因相符的动作（如疲劳→休息/充电）。
-		ac.mu.Lock()
-		actionID := ac.currentActionID
-		queueLen := len(ac.actionQueue)
-		ac.actionQueue = nil
-		if dec.Reason != "" {
-			ac.replanHint = dec.Reason
-		}
-		ac.mu.Unlock()
-		if actionID == "" {
-			r.logger.Debug("[反应层] interrupt 但无在途 action，已清空队列",
-				"agent_id", agentID, "queue_len", queueLen)
-			// 无在途 action 时 signal worker，让其看到 queue 空 + replanHint 后 refill
-			ac.signal()
-			return
-		}
-		if err := r.ws.SendStopAction(agentID, actionID); err != nil {
-			r.logger.Warn("[反应层] stop_action 发送失败",
-				"agent_id", agentID, "action_id", actionID, "err", err)
-		} else {
-			r.logger.Info("[反应层] 已发 stop_action 打断在途 action 并清空队列",
-				"agent_id", agentID, "action_id", actionID, "queue_len", queueLen)
-		}
-
-	case ReactionAct:
-		if dec.Action == nil {
-			r.logger.Warn("[反应层] act 但 action 为空（不应到达，parseReactiveDecision 已降级）",
-				"agent_id", agentID)
-			return
-		}
-		// 先停当前在途 action（若有）
-		ac.mu.Lock()
-		actionID := ac.currentActionID
-		ac.mu.Unlock()
-		if actionID != "" {
-			_ = r.ws.SendStopAction(agentID, actionID)
-		}
-		// 映射并下发新 action
-		// 反应层允许的 cmd 子集由 isValidReactionCmd 从 registry 派生。
-		cmd, params, err := mapReactionAction(*dec.Action, agentID, r.kb, capabilityRegistryRef)
-		if err != nil {
-			r.logger.Warn("[反应层] action 映射失败",
-				"agent_id", agentID, "cmd", dec.Action.Cmd, "err", err)
-			return
-		}
-		ack, err := r.ws.SendAction(context.Background(), agentID, cmd, params)
-		if err != nil {
-			r.logger.Warn("[反应层] action 下发失败",
-				"agent_id", agentID, "cmd", cmd, "err", err)
-			return
-		}
-		if ack != nil {
-			// 反应层下发的 action 标记 sourceHermes（不进战术队列，completion
-			// 不触发 pop），并通过 armActionTimeout 注册超时回收。
-			ac.recordActionStarted(ack.ActionID, cmd, params, 0, sourceHermes)
-			ac.armActionTimeout(ack.ActionID, ack.EstimatedDurationSec, r.ws, agentID,
-				func(string) *agentContext { return ac })
-			r.logger.Info("[反应层] act 已下发新 action",
-				"agent_id", agentID, "cmd", cmd, "action_id", ack.ActionID)
-		}
 
 	case ReactionReplan:
 		// replan：先规划后打断，防止角色无 action。
@@ -375,13 +300,18 @@ func (r *reactiveRunner) execute(agentID string, ac *agentContext, dec ReactiveD
 		// 3. 调战术层重规划（用 context.Background()，战术层需 30s，
 		//    不复用反应层的 8s ctx）。规划期间 agent 继续原 action，
 		//    worker 被 replanInProgress 守卫挡住不 pop 不 refill。
-		//    规划失败 → 不打断原 action（损失最小）。
 		r.logger.Info("[反应层] replan 开始，规划期间保持原 action",
 			"agent_id", agentID, "replan_reason", dec.Reason)
 		ok := ac.tacticalRefillForReplan(context.Background(), agentID, r.ws, r.kb, r.logger, dec.Reason)
 		if !ok {
-			r.logger.Warn("[反应层] replan 规划失败，保持原 action 不打断",
+			// 规划失败：仍需打断坏 action，否则 agent 继续执行触发 replan 的
+			// 不合理 action（如疲劳仍工作），且旧队列也可能已过期。清空队列 +
+			// 清 currentActionID + stop_action，让 worker 醒来后通过自然
+			// tacticalRefill 路径基于当前状态重新规划（replanHint 已注入）。
+			// 提前清除 replanInProgress 让 worker 能直接 refill，不阻塞。
+			r.logger.Warn("[反应层] replan 规划失败，打断原 action 让 worker 自然 refill",
 				"agent_id", agentID, "replan_reason", dec.Reason)
+			r.fallbackStopAndRefill(agentID, ac, dec.Reason)
 			return
 		}
 
@@ -410,16 +340,48 @@ func (r *reactiveRunner) execute(agentID string, ac *agentContext, dec ReactiveD
 	}
 }
 
-// mapReactionAction 把 ReactionAction 映射到 ws.SendAction 需要的 (cmd, params)。
-// 反应层允许的 cmd 子集由 isValidReactionCmd 限制（registry != nil 时从 registry
-// 的原子 cmd 派生，nil 时降级为内置硬编码列表），与战术层 mapTacticalAction
-// 的对应分支共享映射逻辑。registry/agentID 透传给 mapTacticalAction 以支持
-// 新 cmd 的 passthrough 默认分支。
-func mapReactionAction(ra ReactionAction, agentID string, kb *worldkb.KB, registry *CapabilityRegistry) (string, map[string]any, error) {
-	pa := plannedAction{Action: ra.Cmd, Params: ra.Params}
-	cmd, params, err := mapTacticalAction(pa, agentID, kb, registry)
-	if err != nil {
-		return "", nil, fmt.Errorf("map reaction action %q: %w", ra.Cmd, err)
+// fallbackStopAndRefill 是 replan 规划失败后的兜底：清空旧队列 + 清在途追踪 +
+// 发 stop_action + signal worker。worker 醒来后通过自然 tacticalRefill 路径
+// 基于当前状态重新规划（replanHint 已注入战术层 prompt）。
+//
+// 关键点：提前清除 replanInProgress + currentActionID，让 worker 的
+// hasInFlightAction()/replanInProgress 守卫都不阻止 refill，避免
+// "stop_action 后等 action_completed 才能 refill" 的 75 游戏分钟延迟。
+// 旧 action 的超时 timer 必须取消，防止 fire 后误清新 currentActionID。
+// 旧 action 的 action_completed 迟到时 currentActionID 已不匹配，自然忽略。
+func (r *reactiveRunner) fallbackStopAndRefill(agentID string, ac *agentContext, reason string) {
+	ac.mu.Lock()
+	actionID := ac.currentActionID
+	queueLen := len(ac.actionQueue)
+	ac.actionQueue = nil
+	ac.currentActionID = ""
+	ac.currentActionCmd = ""
+	ac.currentActionParams = nil
+	ac.currentActionStart = time.Time{}
+	ac.currentActionSrc = ""
+	ac.replanInProgress = false
+	ac.replanHint = reason
+	ac.lastReplanAt = time.Now() // 防止 30 分钟内反复 replan 失败
+	if actionID != "" {
+		if timer, ok := ac.pendingActionTimeouts[actionID]; ok {
+			timer.Stop()
+			delete(ac.pendingActionTimeouts, actionID)
+		}
 	}
-	return cmd, params, nil
+	ac.mu.Unlock()
+
+	if actionID != "" {
+		if err := r.ws.SendStopAction(agentID, actionID); err != nil {
+			r.logger.Warn("[反应层] replan 失败后 stop_action 发送失败",
+				"agent_id", agentID, "action_id", actionID, "err", err)
+		} else {
+			r.logger.Info("[反应层] replan 失败，已 stop 原 action，worker 将自然 refill",
+				"agent_id", agentID, "action_id", actionID,
+				"queue_len", queueLen, "replan_reason", reason)
+		}
+	} else {
+		r.logger.Info("[反应层] replan 失败，无在途 action，worker 将自然 refill",
+			"agent_id", agentID, "queue_len", queueLen, "replan_reason", reason)
+	}
+	ac.signal()
 }

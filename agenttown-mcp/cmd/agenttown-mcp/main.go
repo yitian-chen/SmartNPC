@@ -204,7 +204,7 @@ func (a *agentContext) recordActionCompletion(completion protocol.ActionComplete
 
 // recordEventNotification 处理环境事件通知。反应层：返回 trigger 信息供
 // message handler 异步触发 reactiveRunner。环境事件不打断战术队列——
-// reactiveRunner 决策若为 interrupt/act 才会发 stop_action。
+// reactiveRunner 决策若为 replan 才会发 stop_action。
 func (a *agentContext) recordEventNotification(event protocol.EventNotificationPayload) (ReactiveTrigger, string) {
 	// 提取事件类型用于去抖键（事件 id 每次不同，去抖会失效；type 是合理维度）
 	eventType, _ := event.Event["type"].(string)
@@ -283,7 +283,8 @@ func cloneTask(task *protocol.CurrentTaskProgress) *protocol.CurrentTaskProgress
 
 // runPerceptionWorker 是战术层队列驱动的状态机：wake → UE 连接检查 →
 // pop 队列下一个 action；队列空则 tacticalRefill，无 goal/失败则发短 wait。
-// 反应层移除后：感知/事件不再触发 LLM 决策，下一时段由 tacticalRefill 自纠正。
+// 反应层仅 continue/observe/replan：replan 通过 tacticalRefillForReplan
+// 重规划并打断在途 action，不打断 worker 正常的 pop/refill 循环。
 func runPerceptionWorker(
 	ctx context.Context,
 	agentID string,
@@ -723,9 +724,9 @@ func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
 	physical := clonePhysical(a.latestPhysical)
 	tacticalHc := a.tacticalHc
 	kbRef := kb
-	// 读取 replanHint（反应层 interrupt/act 设置的"上次中断原因"），让战术层
+	// 读取 replanHint（反应层 replan 设置的"上次中断原因"），让战术层
 	// LLM 看到中断理由（如"疲劳>60需要休息"）从而规划休息/充电动作，而非
-	// 继续规划工作动作导致循环 interrupt。消费后清空，避免下次 refill 误用。
+	// 继续规划工作动作导致循环 replan。消费后清空，避免下次 refill 误用。
 	hint := a.replanHint
 	a.replanHint = ""
 	a.actionQueue = nil

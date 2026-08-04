@@ -9,7 +9,7 @@ AgentTown_v3 — AI NPC 模拟系统。一期单 Agent（H-01 老陈，车间主
 **三层决策架构**（2026-07 落地）：
 - **战略层**（`strategic.go`）：每日 06:00 生成当天计划（`dailyPlan`），一条 LLM 调用产出 7 个时段的 goal
 - **战术层**（`tactical.go`）：每个时段把 goal 分解为 3-5 个 action 进 `actionQueue`，worker 逐个 pop 下发 UE
-- **反应层**（`reactive.go` + `reactive_runner.go`）：监听 zone 变化/动作完成/物理警戒/周期触发，调本地 Ollama 决策 continue/observe/act/interrupt/replan
+- **反应层**（`reactive.go` + `reactive_runner.go`）：监听 zone 变化/动作完成/物理警戒/周期触发，调本地 Ollama 决策 continue/observe/replan
 
 **LLM 后端可切换**（`--llm-backend` flag）：
 - `hermes`（默认）：MCP → Hermes Gateway → Venus/DeepSeek
@@ -69,9 +69,7 @@ graph TB
         R2 --> R3{"决策"}
         R3 -->|continue| R4[不打断]
         R3 -->|observe| R4
-        R3 -->|act| R5[stop + 新 action]
-        R3 -->|interrupt| R6[stop 当前]
-        R3 -->|replan| R7[战术层重规划]
+        R3 -->|replan| R7[战术层重规划<br/>+ stop 当前]
     end
     S2 --> T1
     T4 --> UE
@@ -85,7 +83,7 @@ graph TB
 - **`debugOverride`**：仅阻止 worker 的 idle-wait refill（main.go:327），**不阻止**正在 LLM 调用中的 refill——所以 `/debug/schedule` handler 会同时设 `replanInProgress=true` + `debugOverride=true`
 - **`currentSlot` 加 `__debug__` 前缀**：防止注入的 slot 和 dailyPlan 同名 slot 碰撞触发 `redecomposeCount >= 1` 限制
 - **反应层去抖**：`lastReactiveAt` map 按 trigger 类型去抖（periodic 60s / zone_change 45s）
-- **反应层 replan**：决策为 `replan` 时调 `ac.tacticalRefillForReplan`，会重置 `actionQueue` 重新调战术层 LLM
+- **反应层 replan**：决策为 `replan` 时调 `ac.tacticalRefillForReplan`，会重置 `actionQueue` 重新调战术层 LLM。规划失败时调 `fallbackStopAndRefill`：清空队列 + 清在途追踪 + stop_action + signal worker，让 worker 通过自然 `tacticalRefill` 路径重新规划（避免 75 游戏分钟延迟）
 
 ### LLM 后端切换
 
@@ -446,7 +444,7 @@ UE 推送新 `world_kb` 后，MCP 重启即自动适配全链路，无需改任�
 
 - **战略层 prompt 注入 KB**：`generateDailyPlan` 接收 `kb`，`buildStrategicContext(kb, agentID)` 构造【你的角色】+【世界知识】两段——角色段从 `kb.GetAgent(agentID)` 取 `DisplayName`/`Profession`/`Description`/`Personality`；世界知识段复用 `buildKBContext(kb)`（与战术层同源）列出全部 zone/object id。LLM 据此规划当日计划，不会编造 KB 外概念。
 - **战术层工具列表动态派生**：`capability_registry` 驱动 `ReconcileTools` 增删工具；`buildTacticalToolEntries` 按 registry 对 agent 的有效能力集生成 prompt 工具列表；`buildTacticalExample(kb)` 从 KB 取首个 zone/object 作示例。新 cmd 由 `registerGenericActionTool` 自动注册通用工具。
-- **反应层 cmd 列表动态派生**：`isValidReactionCmd` / `buildReactiveCmdList` 从 registry 派生原子 cmd 集合（排除 `TurnTo`/`PlayMontage`）。
+- **反应层决策简化**：反应层仅支持 `continue`/`observe`/`replan` 三种决策（已移除 `interrupt`/`act`）。物理告警时代码层 `upgradeIfPhysicalAlert` 强制升级 continue/observe → replan。
 - **工具 jsonschema 描述去硬编码 id**：`MoveToLocationInput.Target` / `InteractInput.TargetObjectID` / `WorkAtWorkbenchInput.AgentID` 等不再写死 `e.g. main_workshop`/`workbench_01`/`"H-01"`，改为引用 `world_kb`，LLM 从 prompt 注入的【世界知识】段获取合法 id。
 - **兜底每日计划从 KB 派生**：`buildDefaultDailyPlan(kb)` 用首个 zone 显示名 + 首个 object 显示名组装工作时段；`kb == nil` 时降级为中性表述（不引用"车间"/"装配"/"充电"等当前 KB 专属词）。
 
@@ -758,7 +756,7 @@ model: deepseek-v4-flash-ioa             # 模型 ID（见 `codebuddy --help` �
 2. **战术层输出 schema 漂移**：模型偶尔把 `target` 放顶层而非 `params` 内，或发明不存在的动作（如 `patrol_route`）和路线。"巡检"类目标强诱导漂移。**部分缓解**：战略层 prompt 现注入【你的角色】+【世界知识】段（`buildStrategicContext`），LLM 可见 KB 内合法 zone/object/agent 名，减少编造 KB 外概念；工具 jsonschema 描述已去硬编码 id 示例
 3. **战术层队列提前耗尽**：模型给的 action 总时长不够 slot 时长，触发频繁重分解（50 秒内重调 LLM），浪费 token
 4. **反应层冷启动超时**：Ollama 模型卸载后首 call >8s 超时，预热后稳定 1.3s
-5. **反应层 0% 打断率**：当前 prompt 强偏向 continue/observe，从未触发 act/interrupt/replan（成本中心问题）
+5. **反应层 0% replan 率**：当前 prompt 强偏向 continue/observe，从未触发 replan（成本中心问题）
 
 ## 规划中重构
 

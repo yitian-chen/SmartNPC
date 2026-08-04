@@ -3,7 +3,7 @@
 // 反应层用本地 Ollama 模型（qwen2.5:7b）低延迟处理突发事件，决策是否
 // 打断战术层在途 action。与战略/战术层独立，无会话链累积，每轮独立 prompt。
 //
-// 决策输出四种反应：continue / observe / interrupt / act。
+// 决策输出三种反应：continue / observe / replan。
 // 详见 docs/AgentTown_Reactive_Layer.md。
 
 package main
@@ -14,7 +14,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/AgentTown/agenttown-mcp/adapters/agenttown/tools"
 	"github.com/AgentTown/agenttown-mcp/pkg/protocol"
 )
 
@@ -22,24 +21,15 @@ import (
 type ReactionKind string
 
 const (
-	ReactionContinue  ReactionKind = "continue"  // 不打断，让当前行动继续
-	ReactionObserve   ReactionKind = "observe"   // 不打断，记录事件供战术层参考
-	ReactionInterrupt ReactionKind = "interrupt" // 打断当前 action（发 stop_action）
-	ReactionAct       ReactionKind = "act"       // 打断并立即执行新 action
-	ReactionReplan    ReactionKind = "replan"    // 触发战术层重新规划整个时段
+	ReactionContinue ReactionKind = "continue" // 不打断，让当前行动继续
+	ReactionObserve  ReactionKind = "observe"  // 不打断，记录事件供战术层参考
+	ReactionReplan   ReactionKind = "replan"   // 触发战术层重新规划整个时段
 )
 
 // ReactiveDecision 是反应层期望从 Ollama 拿到的 JSON 决策。
 type ReactiveDecision struct {
-	Reaction ReactionKind    `json:"reaction"`
-	Reason   string          `json:"reason"`
-	Action   *ReactionAction `json:"action,omitempty"`
-}
-
-// ReactionAction 是 reaction=act 时要立即下发的动作。
-type ReactionAction struct {
-	Cmd    string                 `json:"cmd"`
-	Params map[string]interface{} `json:"params"`
+	Reaction ReactionKind `json:"reaction"`
+	Reason   string       `json:"reason"`
 }
 
 // ReactiveTrigger 标识触发原因，用于去抖和日志。
@@ -86,16 +76,12 @@ type ReactiveInput struct {
 	DailyPlan         string // 战略层每日计划摘要（格式化字符串），空=未生成
 	Trigger           ReactiveTrigger
 	TriggerDetail     string // 触发原因详情
-	AvailableCmdsText string // reaction=act 可用 cmd 列表文本，由 buildInput 从 registry 派生；空=降级为内置列表
 }
 
 // reactivePromptTemplate 是反应层 prompt 模板。用 fmt.Sprintf 填充。
 // 中文 prompt（qwen2.5 中文表现好），严格约束 JSON 输出。
 // agentName 由调用方注入，避免在此处硬编码"老陈"等具体角色名——
 // 反应层应服务于任意 agent，而非特定 NPC。
-//
-// 第 12 个占位符 %s 是 reaction=act 可用 cmd 列表，由 buildReactiveCmdList
-// 从 registry 派生（nil registry 时降级为内置原子 cmd 子集）。
 const reactivePromptTemplate = `你是 NPC %s 的反应决策模块。当前情况需要你判断是否打断当前行动。
 
 【当前状态】
@@ -118,26 +104,19 @@ const reactivePromptTemplate = `你是 NPC %s 的反应决策模块。当前情�
 【可选反应】
 - continue：不打断，让当前行动继续
 - observe：不打断，记录这个事件供后续参考
-- interrupt：打断当前行动（会发送 stop_action）
-- act：打断当前行动并立即执行一个新动作
 - replan：当前时段的整个战术规划已不合理（如时段目标与实际冲突、物理状态无法支撑剩余 action），请求战术层基于当前状态重新分解本时段 goal
 
 判断要点：
 - 战术层规划的动作通常是合理的，除非有明确理由，否则 continue
-- 物理状态告警时（体力<40、疲劳>60、健康<50）必须输出 interrupt 或 replan 让 NPC 休息/充电，禁止输出 continue/observe
-- 仅在物理状态告警、事件突发、或当前动作明显不合理时才 interrupt/act
-- replan 是"重大"决策：当你认为整个 action 队列都应作废、重新规划时使用，而非单个 action 不合适（单个不合适用 interrupt/act）。30 分钟内至多触发 1 次 replan，请慎重
+- 物理状态告警时（体力<40、疲劳>60、健康<50）必须输出 replan 让 NPC 休息/充电，禁止输出 continue/observe
+- replan 是"重大"决策：当你认为整个 action 队列都应作废、重新规划时使用。30 分钟内至多触发 1 次 replan，请慎重
 
 请输出 JSON，格式严格如下，不要输出 JSON 以外的任何内容：
-{"reaction": "continue|observe|interrupt|act|replan", "reason": "简短理由", "action": {"cmd": "...", "params": {...}}}
+{"reaction": "continue|observe|replan", "reason": "简短理由"}
 
-action 字段仅在 reaction=act 时填写，cmd 可选：%s。
-reaction=replan 时不要填 action 字段。
 不要输出 JSON 以外的任何内容。`
 
 // buildReactivePrompt 构造反应层 prompt。纯函数，便于测试。
-// AvailableCmdsText 由 buildInput 从 registry 派生后注入；空串降级为
-// 内置原子 cmd 列表（向后兼容）。
 func buildReactivePrompt(in ReactiveInput) string {
 	currentAction := in.CurrentAction
 	if currentAction == "" {
@@ -167,10 +146,6 @@ func buildReactivePrompt(in ReactiveInput) string {
 	if agentName == "" {
 		agentName = in.AgentID
 	}
-	cmds := in.AvailableCmdsText
-	if cmds == "" {
-		cmds = defaultReactiveCmdList()
-	}
 	return fmt.Sprintf(reactivePromptTemplate,
 		agentName,
 		in.TimeOfDay, in.Zone,
@@ -180,17 +155,7 @@ func buildReactivePrompt(in ReactiveInput) string {
 		slot,
 		plan,
 		detail,
-		cmds,
 	)
-}
-
-// defaultReactiveCmdList 是 registry == nil 时的降级 cmd 列表，与 Phase 1
-// 之前硬编码在 prompt 里的字符串保持一致（move_to_location / move_to_agent /
-// speak / emote / wait / interact）。
-func defaultReactiveCmdList() string {
-	return strings.Join([]string{
-		"move_to_location", "move_to_agent", "speak", "emote", "wait", "interact",
-	}, " / ")
 }
 
 // parseReactiveDecision 解析 Ollama 输出为 ReactiveDecision。
@@ -198,12 +163,10 @@ func defaultReactiveCmdList() string {
 // 容错策略（与文档 P0.3 一致）：
 //   - JSON 解析失败 → 视为 continue（最保守）
 //   - reaction 字段不在枚举内 → 视为 continue
-//   - act 但 action 为空或 cmd 非法 → 降级为 interrupt
-//   - action.params 不完整 → 保留原样，由调用方在发 action 时兜底
 //
-// registry != nil 时，cmd 合法性由 isValidReactionCmd 从 registry 的原子
-// cmd 集合派生；nil 时降级为内置硬编码列表（向后兼容旧测试）。
-func parseReactiveDecision(raw string, registry *CapabilityRegistry, agentID string) ReactiveDecision {
+// 反应层仅支持 continue/observe/replan 三种决策；历史上存在的
+// interrupt/act 已移除，若模型仍输出这些值则降级为 continue。
+func parseReactiveDecision(raw string) ReactiveDecision {
 	// Ollama 有时会输出 ```json ... ``` 包裹的 JSON，提取出来。
 	cleaned := stripCodeFence(raw)
 	dec := ReactiveDecision{Reaction: ReactionContinue} // 默认 continue
@@ -213,18 +176,10 @@ func parseReactiveDecision(raw string, registry *CapabilityRegistry, agentID str
 	}
 	// 枚举校验
 	switch dec.Reaction {
-	case ReactionContinue, ReactionObserve, ReactionInterrupt, ReactionAct, ReactionReplan:
+	case ReactionContinue, ReactionObserve, ReactionReplan:
 		// ok
 	default:
 		return ReactiveDecision{Reaction: ReactionContinue, Reason: "unknown_reaction: " + string(dec.Reaction)}
-	}
-	// act 但 action 缺失/非法 → 降级 interrupt
-	if dec.Reaction == ReactionAct {
-		if dec.Action == nil || !isValidReactionCmd(dec.Action.Cmd, registry, agentID) {
-			dec.Reaction = ReactionInterrupt
-			dec.Reason = "act_downgrade: " + dec.Reason
-			dec.Action = nil
-		}
 	}
 	return dec
 }
@@ -244,70 +199,6 @@ func stripCodeFence(s string) string {
 		s = s[:i]
 	}
 	return strings.TrimSpace(s)
-}
-
-// reactionExcludedCmds 是反应层始终不允许的 cmd 集合（即使 registry 声明
-// 了对应原子 cmd）。这些 cmd 要么属于战术层排队动作（复合行为不应作为反应
-// 层的临时打断），要么在反应层无意义（turn_to 仅调整朝向、play_montage 是
-// 美术资源驱动）。这是 MCP 层决策，不由 UE 控制。
-var reactionExcludedCmds = map[string]struct{}{
-	protocol.CmdTurnTo:      {},
-	protocol.CmdPlayMontage: {},
-}
-
-// isValidReactionCmd 校验 reaction action 的 cmd 是否在允许列表内。
-// 仅原子短动作（不含复合动作——复合动作应由战术层规划）。
-//
-// registry != nil 时：从 registry.EffectiveActions(agentID) 取 Kind=="atomic"
-// 的 cmd，减去 reactionExcludedCmds，得到允许集合。
-// registry == nil 时：降级为内置硬编码列表（向后兼容旧测试）。
-//
-// 工具名与 tacticalToolOverride / mapTacticalAction 保持一致：move_to_location
-// 而非旧的 move_to，否则 reaction=act 给出 move_to_location 会被拒绝
-// 降级为 interrupt，使 act 决策永远走不到下发路径。
-func isValidReactionCmd(cmd string, registry *CapabilityRegistry, agentID string) bool {
-	if registry == nil {
-		switch cmd {
-		case "move_to_location", "move_to_agent", "speak", "emote", "wait", "interact":
-			return true
-		}
-		return false
-	}
-	for _, act := range registry.EffectiveActions(agentID) {
-		if act.Kind != "atomic" {
-			continue
-		}
-		if _, excluded := reactionExcludedCmds[act.Cmd]; excluded {
-			continue
-		}
-		if tools.CmdToToolName(act.Cmd) == cmd {
-			return true
-		}
-	}
-	return false
-}
-
-// buildReactiveCmdList 构造 prompt 中 reaction=act 可用 cmd 列表文本。
-// registry != nil 时从 EffectiveActions 派生（仅 atomic，去掉 excluded）；
-// nil 时降级为 defaultReactiveCmdList。
-func buildReactiveCmdList(registry *CapabilityRegistry, agentID string) string {
-	if registry == nil {
-		return defaultReactiveCmdList()
-	}
-	var names []string
-	for _, act := range registry.EffectiveActions(agentID) {
-		if act.Kind != "atomic" {
-			continue
-		}
-		if _, excluded := reactionExcludedCmds[act.Cmd]; excluded {
-			continue
-		}
-		names = append(names, tools.CmdToToolName(act.Cmd))
-	}
-	if len(names) == 0 {
-		return defaultReactiveCmdList()
-	}
-	return strings.Join(names, " / ")
 }
 
 // truncate 截断字符串到 maxLen，超出加省略号。
@@ -430,15 +321,15 @@ const reactivePeriodicDedupeWindow = 45 * time.Second
 const replanDedupeWindow = 30 * time.Minute
 
 // upgradeIfPhysicalAlert 是代码层兜底：当物理状态告警（fatigue>60 / energy<40 /
-// health<50）而 LLM 仍输出 continue/observe 时，强制升级为 interrupt。
+// health<50）而 LLM 仍输出 continue/observe 时，强制升级为 replan。
 //
 // 动机：实测 qwen2.5:7b 在 fatigue=80+ 时仍输出 observe（"物理状态尚可"），
-// 仅靠 prompt 约束不可靠。代码层强制保证物理告警时 agent 真正停下来。
-// 升级后的 interrupt 会清空 actionQueue + 设置 replanHint（见 execute），
-// 引导战术层 refill 时规划休息/充电。
+// 仅靠 prompt 约束不可靠。代码层强制保证物理告警时 agent 真正停下来重规划。
+// 升级后的 replan 会调战术层重新分解当前时段 goal（见 execute），引导 LLM
+// 规划休息/充电。
 //
-// 注意：仅升级 continue/observe，不影响 act/replan/interrupt 决策。
-// trigger=physical_alert 时 LLM 通常已给出 interrupt，此函数主要覆盖
+// 注意：仅升级 continue/observe，不影响 replan 决策。
+// trigger=physical_alert 时 LLM 通常已给出 replan，此函数主要覆盖
 // periodic/zone_change 触发时物理状态已告警但 LLM 忽视的情况。
 func upgradeIfPhysicalAlert(input ReactiveInput, dec ReactiveDecision) ReactiveDecision {
 	if dec.Reaction != ReactionContinue && dec.Reaction != ReactionObserve {
@@ -455,9 +346,8 @@ func upgradeIfPhysicalAlert(input ReactiveInput, dec ReactiveDecision) ReactiveD
 		return dec
 	}
 	origReason := dec.Reason
-	origReaction := dec.Reaction // 在修改前捕获，避免 reason 误显示为 interrupt
-	dec.Reaction = ReactionInterrupt
+	origReaction := dec.Reaction // 在修改前捕获，避免 reason 误显示
+	dec.Reaction = ReactionReplan
 	dec.Reason = "物理状态告警自动升级(" + alert + ")；原决策=" + string(origReaction) + "/" + origReason
-	dec.Action = nil
 	return dec
 }
