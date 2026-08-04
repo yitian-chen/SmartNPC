@@ -36,9 +36,12 @@ const (
 // tacticalToolEntry 是战术层 prompt 工具列表段的单条目，由 buildTacticalToolEntries
 // 产出。Name 是 LLM 看到的工具名（snake_case），RequiredCmd 是对应 UE cmd
 // （PascalCase），Desc/Params 是 prompt 中展示的中文描述与 params 示例。
+// Kind 取 "atomic" 或 "composite"，决定 prompt 中的 [原子]/[复合] 标签——
+// 战术层 prompt 据此引导 LLM 优先使用复合动作（见 tacticalPromptBody）。
 type tacticalToolEntry struct {
 	Name        string
 	RequiredCmd string
+	Kind        string // "atomic" | "composite"
 	Desc        string
 	Params      string
 }
@@ -94,14 +97,37 @@ func tacticalActionAvailable(action, agentID string, registry *CapabilityRegistr
 
 // buildTacticalToolList 按 registry 对 agentID 的有效能力集构造 prompt 中的
 // 工具 bullet 列表。registry == nil 时降级为全量内置工具（向后兼容）。
-// 返回 (拼接好的 bullet 段, 可用工具数)。
+// 返回 (拼接好的 bullet 段, 可用工具数)。每行附 [复合]/[原子] 标签，便于
+// LLM 区分长耗时复合动作与短耗时原子动作，配合 prompt 的复合优先策略。
 func buildTacticalToolList(agentID string, registry *CapabilityRegistry) (string, int) {
 	entries := buildTacticalToolEntries(agentID, registry)
 	lines := make([]string, 0, len(entries))
 	for _, e := range entries {
-		lines = append(lines, fmt.Sprintf("- %s: %s。params: %s", e.Name, e.Desc, e.Params))
+		lines = append(lines, fmt.Sprintf("- %s [%s]: %s。params: %s", e.Name, kindLabel(e.Kind), e.Desc, e.Params))
 	}
 	return strings.Join(lines, "\n"), len(entries)
+}
+
+// kindLabel 把 Kind 字段映射为 prompt 中的中文标签；空值默认按"原子"处理
+// （新 cmd 推送时若未填 Kind，保守视为原子动作）。
+func kindLabel(kind string) string {
+	if kind == "composite" {
+		return "复合"
+	}
+	return "原子"
+}
+
+// builtinToolKind 返回内置工具的 Kind（"atomic" | "composite"）。
+// 用于 registry == nil 时（向后兼容场景）从工具名推断 Kind。
+// 6 个复合工具硬编码列表与 BuiltinToolSpecs 中的 composite 段一致。
+func builtinToolKind(name string) string {
+	switch name {
+	case "work_at_workbench", "work_at_workshop", "chat_with",
+		"repair_target", "charge_at_station", "patrol_zone":
+		return "composite"
+	default:
+		return "atomic"
+	}
 }
 
 // buildTacticalToolEntries 构造战术层工具列表的中间表示。
@@ -120,7 +146,7 @@ func buildTacticalToolEntries(agentID string, registry *CapabilityRegistry) []ta
 			if spec.Name == "scan_area" || spec.Name == "stop" {
 				continue
 			}
-			entry := tacticalToolEntry{Name: spec.Name, RequiredCmd: spec.RequiredCmd}
+			entry := tacticalToolEntry{Name: spec.Name, RequiredCmd: spec.RequiredCmd, Kind: builtinToolKind(spec.Name)}
 			if ov, ok := tacticalToolOverride[spec.Name]; ok {
 				entry.Desc, entry.Params = ov.Desc, ov.Params
 			} else {
@@ -138,7 +164,13 @@ func buildTacticalToolEntries(agentID string, registry *CapabilityRegistry) []ta
 		if name == "scan_area" || name == "stop" {
 			continue
 		}
-		entry := tacticalToolEntry{Name: name, RequiredCmd: act.Cmd}
+		// act.Kind 通常由 capability_registry 显式给出；空值默认 "atomic"，
+		// 与 kindLabel 的容错保持一致。
+		kind := act.Kind
+		if kind == "" {
+			kind = builtinToolKind(name)
+		}
+		entry := tacticalToolEntry{Name: name, RequiredCmd: act.Cmd, Kind: kind}
 		if ov, ok := tacticalToolOverride[name]; ok {
 			entry.Desc, entry.Params = ov.Desc, ov.Params
 		} else {
@@ -191,26 +223,36 @@ func paramPlaceholder(p protocol.CapabilityParam) string {
 // hintLine / slotDurationHint / kbContext / toolCount / toolList / exampleBlock。
 // exampleBlock 由 buildTacticalExample 动态从 KB 取合法 id 生成，避免示例
 // 本身编造 KB 外 id（旧版示例写死 main_workshop / workbench_01 诱导 LLM 跟随编造）。
+//
+// 复合优先策略（2026-08）：工具分复合/原子两类，prompt 引导 LLM 优先使用
+// 复合动作——若目标语义匹配某复合动作（如"装配"→work_at_workbench、"充电"
+// →charge_at_station），输出 1-2 步即可（通常 move_to_location + 1 个复合
+// 动作；若已在目标 zone 可直接 1 个复合动作）。仅当没有匹配的复合动作时，
+// 才用 2-5 个原子动作组合实现目标。这降低了输出 token、减少 schema 漂移，
+// 也让队列总时长更接近 slot 时长（复合动作本身即覆盖整段工作时间）。
 const tacticalPromptBody = `[战术层/任务分解] 当前时段目标：%s
 你目前在：%s，游戏时间 %s。
 物理状态：能量 %.0f、疲劳 %.0f、关节磨损 %.0f、健康 %.0f。
 
-请把这个目标分解为 3-5 步具体的 action，按顺序执行。
+请把这个目标分解为一个或多个 action，按顺序执行。
 %s
 %s
 %s
-可用工具（仅限以下 %d 个，禁止使用 scan_area / stop）：
+可用工具（仅限以下 %d 个，禁止使用 scan_area / stop）。工具分两类：
+- 复合动作（标记 [复合]）：长耗时、单步即可完成一段工作（如装配、充电、巡逻、聊天）。若目标语义与某复合动作匹配，应优先使用复合动作。
+- 原子动作（标记 [原子]）：短耗时、作为基本 building block（如移动、说话、等待、交互）。仅当复合动作无法覆盖 schedule 要求时，才用 2-5 个原子动作组合实现。
 %s
 
 要求：
 1. 第一行输出 {"inner_thought":"一句话内心独白"}
-2. 后续每行输出一个 {"action":"工具名","params":{...}}，3-5 步，按执行顺序排列
-3. 第一步通常是 move_to_location 到目标区域
-4. move_to_location 的 target、interact 的 target_object_id、work_at_workbench 的 target_object_id、patrol_zone 的 target_zone 必须严格使用上面"可前往区域"和"可交互物体"中给出的 id，禁止编造、禁止拼接 zone/interaction 信息
-5. interact / work_at_workbench / charge_at_station 必须在 object 所在 zone 调用——若当前 zone（上方"你目前在"给出的 zone）与 object 所在 zone（上方"可交互物体"每行"位于 zone=xxx"给出的）不同，必须先 move_to_location 到该 zone；例如 object 位于 zone=main_workshop 时，必须先 move_to_location(main_workshop) 再 interact/work_at_workbench
-6. 每行一个 JSON 对象，不要输出 JSON 数组，不要输出 markdown 围栏，不要输出任何其他文字
-7. 必须以字符 {"inner_thought 开头，不要输出步骤说明、不要解释、不要编号列表、不要 markdown 加粗
-8. 步骤总时长应接近当前 slot 时长，避免过短导致队列提前耗尽触发重分解
+2. 后续每行输出一个 {"action":"工具名","params":{...}}，按执行顺序排列
+3. 优先使用复合动作：若存在与目标语义匹配的复合动作，输出 1-2 步即可（通常是 move_to_location 到目标区域 + 1 个复合动作；若当前 zone 已与复合动作所需 zone 一致，可直接输出 1 个复合动作）
+4. 仅当没有匹配的复合动作时，才用 2-5 个原子动作组合实现目标
+5. move_to_location 的 target、interact 的 target_object_id、work_at_workbench 的 target_object_id、patrol_zone 的 target_zone 必须严格使用上面"可前往区域"和"可交互物体"中给出的 id，禁止编造、禁止拼接 zone/interaction 信息
+6. interact / work_at_workbench / charge_at_station 必须在 object 所在 zone 调用——若当前 zone（上方"你目前在"给出的 zone）与 object 所在 zone（上方"可交互物体"每行"位于 zone=xxx"给出的）不同，必须先 move_to_location 到该 zone；例如 object 位于 zone=main_workshop 时，必须先 move_to_location(main_workshop) 再 interact/work_at_workbench
+7. 每行一个 JSON 对象，不要输出 JSON 数组，不要输出 markdown 围栏，不要输出任何其他文字
+8. 必须以字符 {"inner_thought 开头，不要输出步骤说明、不要解释、不要编号列表、不要 markdown 加粗
+9. 步骤总时长应接近当前 slot 时长，避免过短导致队列提前耗尽触发重分解；复合动作通常自带较长 duration，1 个复合动作往往即可覆盖整个 slot
 
 示例（id 来自上方可用列表，不可照抄示例中的 id）：
 %s`

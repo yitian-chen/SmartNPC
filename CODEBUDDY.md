@@ -8,7 +8,7 @@ AgentTown_v3 — AI NPC 模拟系统。一期单 Agent（H-01 老陈，车间主
 
 **三层决策架构**（2026-07 落地）：
 - **战略层**（`strategic.go`）：每日 06:00 生成当天计划（`dailyPlan`），一条 LLM 调用产出 7 个时段的 goal
-- **战术层**（`tactical.go`）：每个时段把 goal 分解为 3-5 个 action 进 `actionQueue`，worker 逐个 pop 下发 UE
+- **战术层**（`tactical.go`）：每个时段把 goal 分解为 1-5 个 action 进 `actionQueue`（复合优先：匹配复合动作时 1-2 步即可，否则 2-5 个原子动作组合），worker 逐个 pop 下发 UE
 - **反应层**（`reactive.go` + `reactive_runner.go`）：监听 zone 变化/动作完成/物理警戒/周期触发，调本地 Ollama 决策 continue/observe/replan
 
 **LLM 后端可切换**（`--llm-backend` flag）：
@@ -61,7 +61,7 @@ graph TB
     end
     subgraph 战术层["战术层 tactical.go"]
         T1["队列空 → selectCurrentGoal<br/>按 game_time 选 dailyPlan 时段"] --> T2["generateTacticalPlan<br/>1 次 LLM 调用"]
-        T2 --> T3["actionQueue<br/>3-5 个 plannedAction"]
+        T2 --> T3["actionQueue<br/>1-5 个 plannedAction<br/>(复合优先: 匹配时 1-2 步)"]
         T3 --> T4["popAndSendQueueAction<br/>逐个下发 UE"]
     end
     subgraph 反应层["反应层 reactive_runner.go"]

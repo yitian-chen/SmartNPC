@@ -563,14 +563,14 @@ func TestBuildTacticalPrompt_RegistryFiltersTools(t *testing.T) {
 	prompt := buildTacticalPrompt("装配", "main_workshop", "09:00", "09:00-12:00",
 		&protocol.PhysicalState{Energy: 75, Fatigue: 30, JointWear: 5, Health: 90}, nil, "", reg, "H-01")
 	// Tool bullet list should contain move_to_location and wait.
-	if !strings.Contains(prompt, "- move_to_location:") || !strings.Contains(prompt, "- wait:") {
-		t.Errorf("prompt should list move_to_location and wait as bullets, got: %s", prompt)
+	if !strings.Contains(prompt, "- move_to_location [原子]:") || !strings.Contains(prompt, "- wait [原子]:") {
+		t.Errorf("prompt should list move_to_location and wait as [原子] bullets, got: %s", prompt)
 	}
 	// Tool bullet list should NOT contain composite tools (composite cmds unavailable).
 	// Check the bullet prefix specifically — the hardcoded example section
 	// mentions work_at_workbench regardless, which is a separate prompt-quality concern.
-	if strings.Contains(prompt, "- work_at_workbench:") || strings.Contains(prompt, "- charge_at_station:") {
-		t.Errorf("prompt should NOT list composite tools as bullets (composite cmds unavailable), got: %s", prompt)
+	if strings.Contains(prompt, "- work_at_workbench [复合]:") || strings.Contains(prompt, "- charge_at_station [复合]:") {
+		t.Errorf("prompt should NOT list composite tools as [复合] bullets (composite cmds unavailable), got: %s", prompt)
 	}
 	// Count in header should match available tools (2).
 	if !strings.Contains(prompt, "仅限以下 2 个") {
@@ -594,11 +594,11 @@ func TestBuildTacticalPrompt_PerAgentOverride(t *testing.T) {
 	promptH02 := buildTacticalPrompt("装配", "main_workshop", "09:00", "09:00-12:00",
 		&protocol.PhysicalState{Energy: 75}, nil, "", reg, "H-02")
 	// Check bullet prefix — example section is hardcoded and not registry-aware.
-	if !strings.Contains(promptH01, "- work_at_workbench:") {
-		t.Errorf("H-01 prompt should list composite tools as bullets (global default), got: %s", promptH01)
+	if !strings.Contains(promptH01, "- work_at_workbench [复合]:") {
+		t.Errorf("H-01 prompt should list composite tools as [复合] bullets (global default), got: %s", promptH01)
 	}
-	if strings.Contains(promptH02, "- work_at_workbench:") {
-		t.Errorf("H-02 prompt should NOT list composite tools as bullets (per-agent override), got: %s", promptH02)
+	if strings.Contains(promptH02, "- work_at_workbench [复合]:") {
+		t.Errorf("H-02 prompt should NOT list composite tools as [复合] bullets (per-agent override), got: %s", promptH02)
 	}
 }
 
@@ -747,8 +747,8 @@ func TestBuildTacticalToolList_NewCmdDerived(t *testing.T) {
 	if count != 2 {
 		t.Fatalf("tool count=%d, want 2 (move_to_location + wave_hand)", count)
 	}
-	if !strings.Contains(list, "- wave_hand:") {
-		t.Errorf("tool list should contain wave_hand bullet, got: %s", list)
+	if !strings.Contains(list, "- wave_hand [原子]:") {
+		t.Errorf("tool list should contain wave_hand bullet with [原子] kind label, got: %s", list)
 	}
 	if !strings.Contains(list, "挥手致意") {
 		t.Errorf("tool list should contain derived Desc '挥手致意', got: %s", list)
