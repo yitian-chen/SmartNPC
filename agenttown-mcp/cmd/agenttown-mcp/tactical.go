@@ -219,6 +219,11 @@ const tacticalPromptBody = `[战术层/任务分解] 当前时段目标：%s
 // zone id / object id 都在 KB 中合法存在，且示例工具与 object category
 // 语义匹配（workbench→work_at_workbench，charging_station→charge_at_station，
 // 其他→interact）。KB 为空时返回不引用任何具体 id 的通用示例。
+//
+// 关键约束：示例中的 move_to_location target 必须与示例 object 的 ZoneID
+// 一致——否则示例本身就违反 prompt 中"interact 必须在 object 所在 zone 调用"
+// 的约束 #5，LLM 会模仿错误模式（先 move 到任意 zone，再调用任意 object）。
+// 因此有 object 时 exZone 取 obj.ZoneID 而非 ListZones()[0]。
 func buildTacticalExample(kb *worldkb.KB) string {
 	const genericExample = `{"inner_thought":"先去目标区域再开始作业"}
 {"action":"move_to_location","params":{"target":"<上方可前往区域的 id>"}}
@@ -226,26 +231,29 @@ func buildTacticalExample(kb *worldkb.KB) string {
 	if kb == nil {
 		return genericExample
 	}
-	zoneID := ""
-	if zs := kb.ListZones(); len(zs) > 0 {
-		zoneID = zs[0].ID
-	}
 	objs := kb.ListObjects()
-	if zoneID == "" && len(objs) == 0 {
+	zones := kb.ListZones()
+	if len(zones) == 0 && len(objs) == 0 {
 		return genericExample
 	}
-	exZone := zoneID
-	if exZone == "" {
-		exZone = "<上方可前往区域的 id>"
-	}
-	// 无 object 时用通用 interact 占位。
+	// 无 object 时用第一个 zone（或占位符）作示例 target。
 	if len(objs) == 0 {
+		exZone := "<上方可前往区域的 id>"
+		if len(zones) > 0 {
+			exZone = zones[0].ID
+		}
 		return fmt.Sprintf(`{"inner_thought":"先去目标区域再开始作业"}
 {"action":"move_to_location","params":{"target":"%s"}}
 {"action":"interact","params":{"target_object_id":"<上方可交互物体的 id>","interaction":"<可用 interaction>"}}`, exZone)
 	}
 	obj := objs[0]
 	exObj := obj.ID
+	// 有 object 时示例 zone 必须取 obj.ZoneID，保证示例 zone-object 配对正确。
+	// obj.ZoneID 为空（KB 数据异常）时降级为占位符，避免拼出错配的 zone id。
+	exZone := obj.ZoneID
+	if exZone == "" {
+		exZone = "<上方可前往区域的 id>"
+	}
 	// 按 category 选示例工具，避免 work_at_workbench 配 charging_station 的错配。
 	switch obj.Category {
 	case "workbench":

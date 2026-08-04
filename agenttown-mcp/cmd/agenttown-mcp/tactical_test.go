@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"path/filepath"
 	"strings"
@@ -900,5 +901,40 @@ func TestBuildTacticalExample_NilKB(t *testing.T) {
 	}
 	if strings.Contains(got, "work_at_workbench") || strings.Contains(got, "charge_at_station") {
 		t.Errorf("nil KB example should not reference specific composite tools: %q", got)
+	}
+}
+
+func TestBuildTacticalExample_ZoneObjectPairing(t *testing.T) {
+	// 回归测试：示例中 move_to_location 的 target 必须与示例 object 的 ZoneID
+	// 一致。旧版取 ListZones()[0] 作示例 zone，但 ListZones()[0]=archive_station
+	// 与 ListObjects()[0]=charging_station_01（在 central_plaza）不在同一 zone，
+	// 示例本身错配，LLM 模仿后产生 zone-object 错配。
+	kb := loadTestKB(t)
+	objs := kb.ListObjects()
+	if len(objs) == 0 {
+		t.Skip("KB has no objects, pairing test not applicable")
+	}
+	firstObj := objs[0]
+	wantZone := firstObj.ZoneID
+	if wantZone == "" {
+		t.Skip("first object has no ZoneID, cannot verify pairing")
+	}
+	got := buildTacticalExample(kb)
+	// 示例应包含 move_to_location 到 wantZone，且引用 firstObj.ID。
+	moveLine := fmt.Sprintf(`{"action":"move_to_location","params":{"target":"%s"}}`, wantZone)
+	if !strings.Contains(got, moveLine) {
+		t.Errorf("example should move_to_location(%s) to match object's ZoneID, got: %q", wantZone, got)
+	}
+	if !strings.Contains(got, firstObj.ID) {
+		t.Errorf("example should reference first object %q, got: %q", firstObj.ID, got)
+	}
+	// 反向验证：不应出现 ListZones()[0]（若它与 object 的 ZoneID 不同）。
+	firstZone := kb.ListZones()[0]
+	if firstZone.ID != wantZone {
+		badLine := fmt.Sprintf(`{"action":"move_to_location","params":{"target":"%s"}}`, firstZone.ID)
+		if strings.Contains(got, badLine) {
+			t.Errorf("example must NOT move_to_location(%s) — object %s is in %s, got: %q",
+				firstZone.ID, firstObj.ID, wantZone, got)
+		}
 	}
 }
