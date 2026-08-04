@@ -335,6 +335,17 @@ func buildTacticalPrompt(goal, zone, timeOfDay, slot string, physical *protocol.
 	if hint != "" {
 		hintLine = "【上次中断原因】" + hint + "（请据此调整本轮规划）"
 	}
+	// 物理告警强约束段：当 hint 含"物理状态告警"标记时（由 upgradeIfPhysicalAlert
+	// 设置），在 prompt 中插入显式禁令——禁止工作类动作、要求恢复类动作。
+	// 与 physicalAlertOverrideGoal（代码层改 goal）配合形成双保险：即使 LLM
+	// 看到 override 后的恢复 goal，强约束段也防止它"自作主张"规划工作动作。
+	if strings.Contains(hint, "物理状态告警") {
+		hintLine += "\n【物理告警强制约束】当前物理状态已突破警戒阈值，必须立即规划恢复类动作：\n" +
+			"- 优先 charge_at_station（充电）补能\n" +
+			"- 充电后若仍疲劳高，追加 wait 或 rest 类动作\n" +
+			"- 禁止规划 work_at_workbench / work_at_workshop / patrol_zone 等消耗体能的动作\n" +
+			"- 禁止规划 move_to 到非充电站区域（除非当前已在充电站）"
+	}
 	toolList, toolCount := buildTacticalToolList(agentID, registry)
 	return fmt.Sprintf(tacticalPromptBody, goal, zone, timeOfDay, e, f, j, h,
 		hintLine, buildSlotDurationHint(slot, timeOfDay), buildKBContext(kb), toolCount, toolList,
@@ -388,6 +399,32 @@ func slotDurationMinute(slot string) int {
 		return -1
 	}
 	return e - s
+}
+
+// physicalAlertOverrideGoal 检测 replanHint 是否含物理告警标记，
+// 若是则根据 physical 状态生成恢复类 goal 替换原 goal。
+//
+// 动机：反应层 upgradeIfPhysicalAlert 强制升级 continue/observe → replan 后，
+// replanHint 含"物理状态告警自动升级(...)"。但战术层仍用原 goal 调 LLM，
+// LLM 看到原 goal "车间装配作业" + 软引导 hint，仍规划 work_at_workbench。
+// 此函数在代码层强制把 goal 改为恢复类 goal，配合 prompt 强约束段双保险。
+//
+// 返回 (overrideGoal, true) 当 hint 含"物理状态告警"且 physical 确有告警；
+// 否则返回 (origGoal, false)。
+func physicalAlertOverrideGoal(hint, origGoal string, physical *protocol.PhysicalState) (string, bool) {
+	if !strings.Contains(hint, "物理状态告警") || physical == nil {
+		return origGoal, false
+	}
+	switch {
+	case physical.Fatigue > fatigueAlertThreshold:
+		return "前往充电站休息补能（疲劳过高，停止工作）", true
+	case physical.Energy < energyAlertThreshold:
+		return "前往充电站补能（体力过低）", true
+	case physical.Health < healthAlertThreshold:
+		return "前往维修点检修（健康过低）", true
+	default:
+		return origGoal, false
+	}
 }
 
 // buildKBContext 拼接可用 zone/object 列表段落，供战术层 prompt 注入。
