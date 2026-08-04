@@ -55,10 +55,14 @@ type AudibleEvent struct {
 	Content string `json:"content"`
 }
 
-// Environment is ambient world info.
+// Environment is ambient world info. 按约定 19，游戏时间由 UE（DS）权威：
+// GameTimeSec 是唯一权威源（累计秒），TimeOfDaySec / DayCount 为派生字段。
 type Environment struct {
-	TimeOfDay string `json:"time_of_day"`
-	Weather   string `json:"weather"`
+	GameTimeSec  float64 `json:"game_time_sec"`             // 权威游戏时间（累计秒，DS 权威）
+	TimeOfDaySec float64 `json:"time_of_day_sec"`           // 派生：当天秒数 0-86400
+	DayCount     int     `json:"day_count"`                 // 派生：第几天（从 0 开始）
+	TimeScale    float64 `json:"time_scale"`                // 时间倍速（游戏秒/现实秒）
+	Weather      string  `json:"weather,omitempty"`         // 天气（可选）
 }
 
 // ─── scan_area (Agent → UE control) ─────────────────────────────

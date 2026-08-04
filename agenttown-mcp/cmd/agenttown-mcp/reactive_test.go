@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -558,18 +559,38 @@ func TestReactiveRunner_BuildInput_DefaultsPhysicalWhenNil(t *testing.T) {
 }
 
 // mustMarshalPerception constructs a minimal perception JSON for testing.
+// tod 是 "HH:MM" 格式，按约定 19 转为 time_of_day_sec / game_time_sec 等字段。
 func mustMarshalPerception(t *testing.T, zone, tod string) json.RawMessage {
 	t.Helper()
 	zonePtr := zone
+	todSec := parseTodToSec(t, tod)
 	p := protocol.PerceptionPayload{
 		Location:    protocol.Location{CurrentZone: &zonePtr},
-		Environment: protocol.Environment{TimeOfDay: tod},
+		Environment: protocol.Environment{GameTimeSec: todSec, TimeOfDaySec: todSec, DayCount: 0, TimeScale: 60},
 	}
 	b, err := json.Marshal(p)
 	if err != nil {
 		t.Fatalf("marshal perception: %v", err)
 	}
 	return b
+}
+
+// parseTodToSec 把 "HH:MM" 转为当天秒数（测试辅助）。
+func parseTodToSec(t *testing.T, tod string) float64 {
+	t.Helper()
+	parts := strings.Split(tod, ":")
+	if len(parts) != 2 {
+		t.Fatalf("parseTodToSec: invalid tod %q", tod)
+	}
+	h, err := strconv.Atoi(parts[0])
+	if err != nil {
+		t.Fatalf("parseTodToSec: invalid hour %q: %v", tod, err)
+	}
+	m, err := strconv.Atoi(parts[1])
+	if err != nil {
+		t.Fatalf("parseTodToSec: invalid minute %q: %v", tod, err)
+	}
+	return float64(h*3600 + m*60)
 }
 
 // ─── 动态 cmd 派生（Phase 2） ────────────────────────────────

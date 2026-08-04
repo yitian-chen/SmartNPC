@@ -20,7 +20,7 @@ func TestEnvelopeRoundTrip(t *testing.T) {
 		},
 		AudibleEvents:    []AudibleEvent{},
 		CurrentAnimation: "idle",
-		Environment:      Environment{TimeOfDay: "14:23", Weather: "clear"},
+		Environment:      Environment{GameTimeSec: 51780, TimeOfDaySec: 51780, DayCount: 0, TimeScale: 60, Weather: "clear"},
 	}
 	raw, err := json.Marshal(pp)
 	if err != nil {
@@ -53,7 +53,7 @@ func TestEnvelopeRoundTrip(t *testing.T) {
 	if err := json.Unmarshal(got.Payload, &gotPP); err != nil {
 		t.Fatalf("unmarshal payload: %v", err)
 	}
-	if gotPP.Environment.TimeOfDay != "14:23" || len(gotPP.NearbyObjects) != 1 {
+	if gotPP.Environment.TimeOfDaySec != 51780 || len(gotPP.NearbyObjects) != 1 {
 		t.Fatalf("payload fields lost: %+v", gotPP)
 	}
 	if gotPP.NearbyObjects[0].Name != "工作台一号" {

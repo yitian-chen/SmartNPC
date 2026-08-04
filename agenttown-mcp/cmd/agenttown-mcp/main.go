@@ -352,15 +352,27 @@ func runPerceptionWorker(
 	}
 }
 
-// extractTimeOfDay 从 perception_update payload 中提取 "HH:MM" 格式的游戏时间。
-// 战术层用它判断当前时段、选 goal。失败返回空串。
-// 用于按需注入每日计划（判断时段边界跨越）。失败返回空串。
+// extractTimeOfDay 从 perception_update payload 中提取游戏时间，返回 "HH:MM" 格式。
+// 按约定 19，UE 推送 environment.time_of_day_sec（当天秒数 0-86400）作为派生字段，
+// 这里转为 "HH:MM" 供战术层时段判断（selectCurrentGoal / idleWaitSeconds）与 LLM prompt
+// 展示使用。失败或字段非法返回空串。
 func extractTimeOfDay(raw json.RawMessage) string {
 	var p protocol.PerceptionPayload
 	if err := json.Unmarshal(raw, &p); err != nil {
 		return ""
 	}
-	return p.Environment.TimeOfDay
+	return formatTodSec(p.Environment.TimeOfDaySec)
+}
+
+// formatTodSec 把 time_of_day_sec（0-86400）转为 "HH:MM"。越界返回空串。
+func formatTodSec(todSec float64) string {
+	if todSec < 0 || todSec >= 86400 {
+		return ""
+	}
+	totalSec := int(todSec)
+	hh := totalSec / 3600
+	mm := (totalSec % 3600) / 60
+	return fmt.Sprintf("%02d:%02d", hh, mm)
 }
 
 type guardedExecutor struct {

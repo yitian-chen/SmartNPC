@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -32,7 +34,7 @@ func TestBuildInput_LiveSlot(t *testing.T) {
 		name           string
 		currentSlot    string
 		dailyPlan      string
-		timeOfDay      string // perception_update.environment.time_of_day
+		timeOfDay      string // perception_update.environment 时间，"HH:MM" 格式（测试内转 time_of_day_sec）
 		wantSlot       string
 	}{
 		{
@@ -71,7 +73,15 @@ func TestBuildInput_LiveSlot(t *testing.T) {
 			ac.currentSlot = c.currentSlot
 			ac.dailyPlan = c.dailyPlan
 			// 注入 perception 让 latestTimeOfDayLocked 返回 c.timeOfDay
-			ac.latestPerception = []byte(`{"environment":{"time_of_day":"` + c.timeOfDay + `"},"location":{}}`)
+			// 按约定 19，environment 用 time_of_day_sec（当天秒数）。
+			parts := strings.Split(c.timeOfDay, ":")
+			if len(parts) != 2 {
+				t.Fatalf("invalid timeOfDay %q", c.timeOfDay)
+			}
+			h, _ := strconv.Atoi(parts[0])
+			m, _ := strconv.Atoi(parts[1])
+			todSec := h*3600 + m*60
+			ac.latestPerception = []byte(fmt.Sprintf(`{"environment":{"time_of_day_sec":%d},"location":{}}`, todSec))
 			ac.mu.Unlock()
 
 			r := &reactiveRunner{}

@@ -656,7 +656,7 @@ func TestTacticalRefillForReplan_LLMFail(t *testing.T) {
 	setQueueForTest(ac, oldQueue)
 	// 构造一个含 time_of_day 的 perception，使 selectCurrentGoal 能匹配到 slot
 	percJSON, _ := json.Marshal(protocol.PerceptionPayload{
-		Environment: protocol.Environment{TimeOfDay: "09:00"},
+		Environment: protocol.Environment{GameTimeSec: 32400, TimeOfDaySec: 32400, DayCount: 0, TimeScale: 60},
 	})
 	ac.mu.Lock()
 	ac.tacticalHc = newFailedHermesClient()
@@ -692,7 +692,7 @@ func TestTacticalRefill_ConsumesReplanHint(t *testing.T) {
 	ac, _ := newAgentContext(context.Background())
 	// 构造能让 selectCurrentGoal 命中的 perception + dailyPlan
 	percJSON, _ := json.Marshal(protocol.PerceptionPayload{
-		Environment: protocol.Environment{TimeOfDay: "09:00"},
+		Environment: protocol.Environment{GameTimeSec: 32400, TimeOfDaySec: 32400, DayCount: 0, TimeScale: 60},
 	})
 	ac.mu.Lock()
 	ac.tacticalHc = newFailedHermesClient() // LLM 必失败，但 hint 读取/清空在调用前
@@ -715,7 +715,7 @@ func TestTacticalRefill_ConsumesReplanHint(t *testing.T) {
 func TestTacticalRefill_NoHintDoesNotPanic(t *testing.T) {
 	ac, _ := newAgentContext(context.Background())
 	percJSON, _ := json.Marshal(protocol.PerceptionPayload{
-		Environment: protocol.Environment{TimeOfDay: "09:00"},
+		Environment: protocol.Environment{GameTimeSec: 32400, TimeOfDaySec: 32400, DayCount: 0, TimeScale: 60},
 	})
 	ac.mu.Lock()
 	ac.tacticalHc = newFailedHermesClient()
@@ -1193,5 +1193,45 @@ func TestIdleWaitSeconds_InvalidSlot(t *testing.T) {
 	// slot 解析失败 → 60
 	if got := idleWaitSeconds("invalid", "13:15", 3); got != 60 {
 		t.Errorf("invalid slot should return 60, got %d", got)
+	}
+}
+
+// TestFormatTodSec 验证 time_of_day_sec → "HH:MM" 转换（约定 19）。
+func TestFormatTodSec(t *testing.T) {
+	cases := []struct {
+		todSec float64
+		want   string
+	}{
+		{0, "00:00"},
+		{21600, "06:00"},
+		{32400, "09:00"},
+		{50400, "14:00"},
+		{51780, "14:23"},
+		{86399, "23:59"},
+		{-1, ""},      // 越界
+		{86400, ""},   // 越界
+	}
+	for _, c := range cases {
+		if got := formatTodSec(c.todSec); got != c.want {
+			t.Errorf("formatTodSec(%v) = %q, want %q", c.todSec, got, c.want)
+		}
+	}
+}
+
+// TestExtractTimeOfDay_NewEnvShape 验证按约定 19 新 environment 字段
+// (time_of_day_sec 等派生字段) 提取 "HH:MM" 时间。
+func TestExtractTimeOfDay_NewEnvShape(t *testing.T) {
+	raw := json.RawMessage(`{"environment":{"game_time_sec":32400,"time_of_day_sec":32400,"day_count":0,"time_scale":60}}`)
+	if got := extractTimeOfDay(raw); got != "09:00" {
+		t.Errorf("extractTimeOfDay = %q, want 09:00", got)
+	}
+}
+
+// TestExtractTimeOfDay_LegacyEmptyEnv 验证 environment 缺失时返回 "00:00"
+// （零值为合法时间 00:00，不视为错误——约定 19 假定 UE 每次都携带 environment）。
+func TestExtractTimeOfDay_LegacyEmptyEnv(t *testing.T) {
+	raw := json.RawMessage(`{"location":{}}`)
+	if got := extractTimeOfDay(raw); got != "00:00" {
+		t.Errorf("extractTimeOfDay on empty env = %q, want 00:00 (zero value)", got)
 	}
 }
