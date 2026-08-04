@@ -158,12 +158,16 @@ func TestHandleDebugCap_ReturnsAgents(t *testing.T) {
 	if !ok {
 		t.Fatal("Agents missing \"system\" key")
 	}
-	if len(sys) != 2 {
-		t.Fatalf("system actions len = %d; want 2", len(sys))
+	// handleDebugCap 始终追加合成 Stop 项，所以 len = 注册数 + 1
+	if len(sys) != 3 {
+		t.Fatalf("system actions len = %d; want 3 (2 registered + 1 synthetic Stop)", len(sys))
 	}
-	// Sorted by Cmd: MoveToLocation < Speak
+	// 前 2 项按 Cmd 排序：MoveToLocation < Speak；末尾是合成 Stop
 	if sys[0].Cmd != protocol.CmdMoveToLocation || sys[1].Cmd != protocol.CmdSpeak {
 		t.Errorf("system actions order = %s, %s; want MoveToLocation, Speak", sys[0].Cmd, sys[1].Cmd)
+	}
+	if sys[2].Cmd != "Stop" {
+		t.Errorf("system actions[2].Cmd = %q; want Stop (synthetic)", sys[2].Cmd)
 	}
 }
 
@@ -209,13 +213,15 @@ func TestHandleDebugCap_ToolNameField(t *testing.T) {
 		t.Fatalf("decode: %v", err)
 	}
 	sys := resp.Agents[protocol.SystemAgentID]
-	if len(sys) != 3 {
-		t.Fatalf("system actions len = %d; want 3", len(sys))
+	// 3 registered + 1 synthetic Stop
+	if len(sys) != 4 {
+		t.Fatalf("system actions len = %d; want 4 (3 registered + 1 synthetic Stop)", len(sys))
 	}
 	wantTool := map[string]string{
 		"MoveToLocation":      "move_to_location",
 		"InteractSmartObject": "interact",
 		"MoveTo":              "move_to",
+		"Stop":                "stop",
 	}
 	for _, a := range sys {
 		got := a.ToolName
@@ -227,6 +233,46 @@ func TestHandleDebugCap_ToolNameField(t *testing.T) {
 		if got != want {
 			t.Errorf("tool_name for %q = %q, want %q", a.Cmd, got, want)
 		}
+	}
+}
+
+// TestHandleDebugCap_AlwaysIncludesStop verifies /debug/cap always appends
+// a synthetic Stop capability to every agent's list, regardless of what's
+// registered. This satisfies the colleague's requirement that `stop` is
+// always in the cmd list, unaffected by capability_registry registration.
+func TestHandleDebugCap_AlwaysIncludesStop(t *testing.T) {
+	reg := NewCapabilityRegistry()
+	// 空注册（仅 global seed 由 Register 写入）；Stop 也应出现
+	reg.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
+		{Cmd: protocol.CmdSpeak, Kind: "atomic"},
+	})
+	reg.Register("H-01", []protocol.CapabilityAction{
+		{Cmd: protocol.CmdMoveToLocation, Kind: "atomic"},
+	})
+	logger := slog.Default()
+	req := httptest.NewRequest(http.MethodGet, "/debug/cap", nil)
+	rec := httptest.NewRecorder()
+	handleDebugCap(rec, req, reg, logger)
+
+	var resp debugCapResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	// 每个 agent 列表末尾都应有 Stop
+	for agentID, acts := range resp.Agents {
+		foundStop := false
+		for _, a := range acts {
+			if a.Cmd == "Stop" && a.ToolName == "stop" && a.Kind == "atomic" {
+				foundStop = true
+				break
+			}
+		}
+		if !foundStop {
+			t.Errorf("agent %q: synthetic Stop not found in /debug/cap response", agentID)
+		}
+	}
+	if len(resp.Agents) == 0 {
+		t.Fatal("no agents in response")
 	}
 }
 
@@ -266,5 +312,24 @@ func TestMapDebugCmd_AcceptsBothForms(t *testing.T) {
 	// Unknown cmd returns false
 	if _, ok := mapDebugCmd("Nonexistent", reg, agentID); ok {
 		t.Errorf("mapDebugCmd(Nonexistent) should return false")
+	}
+}
+
+// TestMapDebugCmd_StopNotMatched verifies mapDebugCmd does NOT match "stop"
+// or "Stop" — stop is a synthetic cmd handled by a special branch in
+// handleDebugAction (which dispatches via ws.SendStopAction, not ws.Call).
+// Stop is deliberately absent from EffectiveActions, so mapDebugCmd returns
+// false; this test guards against accidental future registration of Stop in
+// the registry that would route it through the action_command path.
+func TestMapDebugCmd_StopNotMatched(t *testing.T) {
+	reg := NewCapabilityRegistry()
+	reg.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
+		{Cmd: protocol.CmdMoveToLocation, Kind: "atomic"},
+	})
+	const agentID = "H-01"
+	for _, input := range []string{"stop", "Stop"} {
+		if _, ok := mapDebugCmd(input, reg, agentID); ok {
+			t.Errorf("mapDebugCmd(%q) = ok; want false (stop is handled by special-case dispatch, not mapDebugCmd)", input)
+		}
 	}
 }

@@ -1660,6 +1660,28 @@ func handleDebugAction(ctx context.Context, logger *slog.Logger, ws *wsserver.Se
 		return
 	}
 
+	// stop 是合成 cmd：不发 action_command，而是发 stop_action 控制消息停止
+	// 当前在途动作。始终可用，不依赖 capability_registry 注册（也不进
+	// EffectiveActions，避免污染战术层 prompt 与 ReconcileTools）。前端下拉
+	// 始终展示此项（handleDebugCap 注入合成 Stop 能力项）。
+	if req.Cmd == "stop" || req.Cmd == "Stop" {
+		if !ws.IsConnected() {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_ = json.NewEncoder(w).Encode(debugActionResponse{Error: "no mock ue connected"})
+			return
+		}
+		if err := ws.SendStopAction(req.AgentID, ""); err != nil {
+			w.WriteHeader(http.StatusBadGateway)
+			_ = json.NewEncoder(w).Encode(debugActionResponse{Error: "stop_action failed: " + err.Error()})
+			return
+		}
+		logger.Info("[debug/action] manual stop",
+			"agent_id", req.AgentID, "cmd", req.Cmd)
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(debugActionResponse{OK: true, Accepted: true})
+		return
+	}
+
 	protoCmd, ok := mapDebugCmd(req.Cmd, capabilityRegistryRef, req.AgentID)
 	if !ok {
 		w.WriteHeader(http.StatusBadRequest)
