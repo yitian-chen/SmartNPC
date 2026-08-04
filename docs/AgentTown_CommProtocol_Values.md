@@ -309,7 +309,10 @@ graph TB
     "current_animation": "walk",
     "current_emote": null,
     "environment": {
-      "time_of_day": "14:23",
+      "game_time_sec": 50400.0,
+      "time_of_day_sec": 50400.0,
+      "day_count": 0,
+      "time_scale": 1.0,
       "weather": "clear"
     },
     "scan_id": "scan_001"
@@ -329,8 +332,26 @@ graph TB
 | audible_events | array | 听到的声音/广播 |
 | current_animation | string | 当前播放的动画 |
 | current_emote | string/null | **当前正在表现的情绪状态**（持续型 emote 的回报，供 Agent 感知"我此刻的情绪表现"，解决 #4 情绪一致性） |
-| environment | object | 环境信息 |
+| environment | object | 环境信息（含**权威游戏时间**，见下） |
 | scan_id | string (可选) | 用于关联 `scan_area` 请求与即时感知响应（仅即时扫描感知携带，常规定期感知为空） |
+
+**environment 对象字段**：
+
+| environment 字段 | 类型 | 说明 |
+|------------------|------|------|
+| game_time_sec | float | **权威游戏时间**（累计秒，DS 权威）。Agent 侧所有日程判断基于此值 |
+| time_of_day_sec | float | 派生字段：`game_time_sec % 86400`，表示"现在几点"（当天秒数 0-86400），便于直接判断时段 |
+| day_count | int | 派生字段：`floor(game_time_sec / 86400)`，第几天（从 0 开始） |
+| time_scale | float | 时间倍速（如 60 = 游戏 1 秒 = 现实 1 分钟），Agent 侧据此换算"游戏内时长 ↔ 现实时长" |
+| weather | string (可选) | 天气（未来扩展） |
+
+> **约定 19（游戏时间权威，2026-08-04 新增）**：
+> - **时间由 UE（DS）权威**，Agent 进程是**时间读取方**，不自行定义"现在几点"。
+> - `game_time_sec` 是**唯一权威源**；`time_of_day_sec` / `day_count` 均为派生字段，Agent 无需重复计算，直接用即可。
+> - Agent 侧日程（schedule）应基于 `time_of_day_sec` / `day_count` 生成（如"第 1 天 07:00 上班"），到点通过 `action_command` 触发对应行为。
+> - **同步时机**：每次 `perception_update` 都携带 `environment`（默认每 3 秒一次）；**WebSocket 连接成功后 UE 会立即广播一次感知**，使 Agent 第一时间校准时钟。
+> - **初始值**：`game_time_sec` 从 `UAgentBridgeSettings.StartGameTimeSec`（默认第 1 天 06:00 = 21600 秒）开始累加；`time_scale` 由 `UAgentBridgeSettings.TimeScale` 控制。
+> - **时间语义是"计划点"而非"动作时长"**：Agent 的日程（如"07:00-12:00 上班"）描述的是"这段时间应该做某事"，对应 UE 侧的复合行为是**循环可中断**的（见约定 20），而非硬跑满时长。
 
 #### action_command（Agent → UE）
 
@@ -688,6 +709,14 @@ graph TB
 > **约定 8（ACK 机制，解决 #3）**：UE 收到 `action_command` 后**必须**在 2 秒内回 `action_started`。
 > - Agent 侧凭 action_started 区分"指令丢失/UE 未收到"（超时未收到 ACK → 重发或重决策）与"正在执行中"（收到 ACK 但尚未 completed）。
 > - 执行超时以 action_started 中的 `estimated_duration_sec` 为基准动态设定，不再使用固定 60 秒（解决长复合动作如 assemble 18000 秒的超时误判）。
+
+> **约定 20（动作时长契约，2026-08-04 新增）**：
+> - **动作不是"跑满预估时长"，而是"持续运行直到被叫停/目标达成"**。复合行为（如 `WorkShift` 对应"07:00-12:00 上班"）应设计成**循环执行 + 可中断**，而非硬跑 `estimated_duration_sec` 秒。
+> - **提前退出是常态，不是错误**：
+    >   - *正常提前*：Agent 根据游戏时间（`environment.time_of_day_sec`）判断当前日程段结束（如到 12:00），发 `stop_action` → UE 回 `action_completed {result: interrupted}` → Agent 进入下一段日程。
+>   - *异常提前*：动作失败（寻路不可达等）→ UE 回 `action_completed {result: failed}` → Agent 重决策。
+> - **Agent 无需知道 UE 能跑多久**：因为动作可中断，Agent 靠周期性读取游戏时间来管理时长，不依赖 UE 单次执行能持续多久。
+> - **`estimated_duration_sec` 的定位是"超时兜底"而非"精确时长契约"**：当 UE 动作异常卡死、超过 `estimated_duration_sec × 1.5` 仍未回 `action_completed` 时，Agent 认为卡死并 `stop_action` 介入。它**不承诺** UE 一定会执行那么久，也不限制 UE 必须提前完成。
 
 #### action_completed（UE → Agent）
 
@@ -1144,9 +1173,13 @@ sequenceDiagram
     Agent->>Agent: Capability Registry Loader 解析并缓存能力清单
     Agent->>Agent: WorldKB Loader/Merger 合并生成 world_kb.yaml
 
+    Note over UE: time sync (already-registered agents)
+    UE->>Agent: perception_update {environment.game_time_sec, ...} (per agent)
+
     UE->>UE: all RobotActors BeginPlay
     loop each robot
         UE->>Agent: agent_registered {agent_id, type, position}
+        UE->>Agent: perception_update (first, with environment time)
         Agent->>Agent: create Agent Mind instance
         Agent->>Agent: load Persona from World KB (authored)
     end
@@ -1158,6 +1191,8 @@ sequenceDiagram
 ```
 
 > **初始化数据时序**：`capability_registry` 与 `world_kb` 在连接建立后、`agent_registered` 逐条上报前推送。Agent 侧先完成能力清单与世界认知的解析，再创建各 Agent Mind，保证 Mind 在首次决策时已具备完整能力与场景上下文。
+>
+> **时间同步**：连接成功后，UE 立即对已注册的 Agent 广播一次 `perception_update`（携带 `environment.game_time_sec`），使 Agent 第一时间校准游戏时钟；之后随每次感知持续同步（默认 3 秒一次）。后续每个 Agent 在 `agent_registered` 后也会收到其首次感知（同样携带环境时间）。
 
 ### 4.2 重连机制
 

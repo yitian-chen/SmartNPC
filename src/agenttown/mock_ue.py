@@ -743,6 +743,27 @@ class GameTime:
     def time_of_day(self) -> str:
         return f"{self.hour:02d}:{self.minute:02d}"
 
+    # ── 约定 19：游戏时间权威字段（UE DS 推送给 Agent） ─────────────
+    @property
+    def time_of_day_sec(self) -> float:
+        """当天秒数 0-86400。"""
+        return self.hour * 3600.0 + self.minute * 60.0
+
+    @property
+    def day_count(self) -> int:
+        """第几天（从 0 开始；Mock UE 内部 day 从 1 开始，对外暴露 day-1）。"""
+        return self.day - 1
+
+    @property
+    def game_time_sec(self) -> float:
+        """权威游戏时间（累计秒）= day_count*86400 + time_of_day_sec。"""
+        return self.day_count * 86400.0 + self.time_of_day_sec
+
+    @property
+    def time_scale(self) -> float:
+        """时间倍速（游戏秒/现实秒）。"""
+        return self.speed
+
     def advance(self, game_minutes: float):
         total = int(self.total_minutes + game_minutes)
         self.hour = (total // 60) % 24
@@ -1011,7 +1032,10 @@ class MockUE:
             "current_animation": self.npc.current_animation,
             "current_emote": self.npc.current_emote,
             "environment": {
-                "time_of_day": self.time.time_of_day,
+                "game_time_sec": self.time.game_time_sec,
+                "time_of_day_sec": self.time.time_of_day_sec,
+                "day_count": self.time.day_count,
+                "time_scale": self.time.time_scale,
                 "weather": "clear",
             },
         }
