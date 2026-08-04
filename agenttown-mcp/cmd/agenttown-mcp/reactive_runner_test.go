@@ -83,6 +83,44 @@ func TestBuildInput_LiveSlot(t *testing.T) {
 	}
 }
 
+// TestUpgradeIfPhysicalAlert_ReasonContainsOrigReaction 验证升级后的 reason
+// 字符串包含原始 Reaction（而非误显示为 interrupt）。这是 P2 修复的核心：
+// 修复前 reason 会显示"原决策=interrupt"，修复后正确显示"原决策=observe/continue"。
+func TestUpgradeIfPhysicalAlert_ReasonContainsOrigReaction(t *testing.T) {
+	cases := []struct {
+		name         string
+		input        ReactiveInput
+		dec          ReactiveDecision
+		wantOrigKind string
+	}{
+		{
+			name:         "observe upgraded, reason should contain observe",
+			input:        ReactiveInput{Fatigue: 80, Energy: 70, Health: 100},
+			dec:          ReactiveDecision{Reaction: ReactionObserve, Reason: "状态尚可"},
+			wantOrigKind: "observe",
+		},
+		{
+			name:         "continue upgraded, reason should contain continue",
+			input:        ReactiveInput{Fatigue: 70, Energy: 50, Health: 100},
+			dec:          ReactiveDecision{Reaction: ReactionContinue, Reason: "继续行动"},
+			wantOrigKind: "continue",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := upgradeIfPhysicalAlert(c.input, c.dec)
+			wantSub := "原决策=" + c.wantOrigKind + "/"
+			if !strings.Contains(got.Reason, wantSub) {
+				t.Errorf("Reason = %q, want substring %q", got.Reason, wantSub)
+			}
+			// 确保不误显示"原决策=interrupt"
+			if strings.Contains(got.Reason, "原决策=interrupt") {
+				t.Errorf("Reason = %q, should NOT contain '原决策=interrupt'", got.Reason)
+			}
+		})
+	}
+}
+
 // TestExecute_InterruptClearsQueue 验证 ReactionInterrupt 清空 actionQueue
 // 并设置 replanHint，防止 worker 在 stop_action 后立即 pop 下一个排队 action。
 // 这是 Fix B 的核心：interrupt 必须真正让 agent 停下来，而不是只 stop 当前

@@ -455,8 +455,9 @@ func upgradeIfPhysicalAlert(input ReactiveInput, dec ReactiveDecision) ReactiveD
 		return dec
 	}
 	origReason := dec.Reason
+	origReaction := dec.Reaction // 在修改前捕获，避免 reason 误显示为 interrupt
 	dec.Reaction = ReactionInterrupt
-	dec.Reason = "物理状态告警自动升级(" + alert + ")；原决策=" + string(dec.Reaction) + "/" + origReason
+	dec.Reason = "物理状态告警自动升级(" + alert + ")；原决策=" + string(origReaction) + "/" + origReason
 	dec.Action = nil
 	return dec
 }
