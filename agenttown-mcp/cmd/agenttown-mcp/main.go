@@ -1598,9 +1598,19 @@ func toFloat64(v any) (float64, error) {
 // 覆盖内置 14 cmd 与 UE 通过 capability_registry 新推送的 cmd。
 // registry == nil 时降级为 BuiltinToolSpecs 静态查找（向后兼容旧测试）。
 // scan_area/stop 没有 UE cmd（RequiredCmd=""），不通过此路径下发。
+//
+// 兼容两种 cmd 形式：
+//   - raw cmd（PascalCase，如 "MoveTo"）：与 capability_registry 中的 Cmd 字段一致
+//   - tool_name（snake_case，如 "move_to"）：与 MCP 工具名一致，旧版硬编码下拉用此形式
+//
+// 优先匹配 raw cmd；若无再匹配 tool_name，避免歧义（理论上两者不会碰撞：
+// raw cmd 必含大写字母或为单词，tool_name 必含下划线或全小写）。
 func mapDebugCmd(cmd string, registry *CapabilityRegistry, agentID string) (protoCmd string, ok bool) {
 	if registry != nil {
 		for _, act := range registry.EffectiveActions(agentID) {
+			if act.Cmd == cmd {
+				return act.Cmd, true
+			}
 			if tools.CmdToToolName(act.Cmd) == cmd {
 				return act.Cmd, true
 			}

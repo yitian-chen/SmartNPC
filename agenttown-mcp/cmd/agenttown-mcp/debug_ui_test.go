@@ -186,3 +186,85 @@ func TestHandleDebugCap_NilRegistryReturnsEmpty(t *testing.T) {
 		t.Errorf("nil registry should return empty agents, got %d", len(snap.Agents))
 	}
 }
+
+// TestHandleDebugCap_ToolNameField verifies /debug/cap enriches each action
+// with a tool_name field derived from tools.CmdToToolName, so the frontend
+// dropdown can use tool_name as the option value (matching mapDebugCmd's
+// tool_name matching path and frontend cmd-specific logic like
+// cmd === 'move_to_location').
+func TestHandleDebugCap_ToolNameField(t *testing.T) {
+	reg := NewCapabilityRegistry()
+	reg.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
+		{Cmd: protocol.CmdMoveToLocation, Kind: "atomic"},           // tool_name: move_to_location
+		{Cmd: protocol.CmdInteractSmartObject, Kind: "atomic"},      // tool_name: interact (special shortening)
+		{Cmd: "MoveTo", Kind: "atomic"},                             // tool_name: move_to (pascalToSnake fallback)
+	})
+	logger := slog.Default()
+	req := httptest.NewRequest(http.MethodGet, "/debug/cap", nil)
+	rec := httptest.NewRecorder()
+	handleDebugCap(rec, req, reg, logger)
+
+	var resp debugCapResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	sys := resp.Agents[protocol.SystemAgentID]
+	if len(sys) != 3 {
+		t.Fatalf("system actions len = %d; want 3", len(sys))
+	}
+	wantTool := map[string]string{
+		"MoveToLocation":      "move_to_location",
+		"InteractSmartObject": "interact",
+		"MoveTo":              "move_to",
+	}
+	for _, a := range sys {
+		got := a.ToolName
+		want, ok := wantTool[a.Cmd]
+		if !ok {
+			t.Errorf("unexpected cmd %q", a.Cmd)
+			continue
+		}
+		if got != want {
+			t.Errorf("tool_name for %q = %q, want %q", a.Cmd, got, want)
+		}
+	}
+}
+
+// TestMapDebugCmd_AcceptsBothForms verifies mapDebugCmd accepts both
+// the raw cmd (PascalCase, e.g. "MoveTo") and the tool_name (snake_case,
+// e.g. "move_to"). This is the fix for the HTTP 400 "unknown cmd" bug
+// where the frontend dropdown sent the raw cmd but mapDebugCmd only
+// matched tool_name.
+func TestMapDebugCmd_AcceptsBothForms(t *testing.T) {
+	reg := NewCapabilityRegistry()
+	reg.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
+		{Cmd: "MoveTo", Kind: "atomic"},
+		{Cmd: protocol.CmdMoveToLocation, Kind: "atomic"},
+	})
+	const agentID = "H-01"
+
+	cases := []struct {
+		input string
+		want  string
+	}{
+		{"MoveTo", "MoveTo"},             // raw cmd form
+		{"move_to", "MoveTo"},            // tool_name form (pascalToSnake fallback)
+		{"MoveToLocation", "MoveToLocation"},         // raw cmd form (builtin)
+		{"move_to_location", "MoveToLocation"},       // tool_name form (builtin)
+	}
+	for _, c := range cases {
+		got, ok := mapDebugCmd(c.input, reg, agentID)
+		if !ok {
+			t.Errorf("mapDebugCmd(%q) = !ok, want %q", c.input, c.want)
+			continue
+		}
+		if got != c.want {
+			t.Errorf("mapDebugCmd(%q) = %q, want %q", c.input, got, c.want)
+		}
+	}
+
+	// Unknown cmd returns false
+	if _, ok := mapDebugCmd("Nonexistent", reg, agentID); ok {
+		t.Errorf("mapDebugCmd(Nonexistent) should return false")
+	}
+}

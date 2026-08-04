@@ -20,6 +20,8 @@ import (
 	"log/slog"
 	"net/http"
 
+	"github.com/AgentTown/agenttown-mcp/adapters/agenttown/tools"
+	"github.com/AgentTown/agenttown-mcp/pkg/protocol"
 	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
 )
 
@@ -104,17 +106,46 @@ func handleDebugKB(w http.ResponseWriter, r *http.Request, kb *worldkb.KB, logge
 }
 
 // handleDebugCap 返回 capability_registry 当前状态，供 e2e 测试黑盒验证。
-// 结构：{"agents": {"system": [{cmd,kind,...}], "H-01": [...]}}
+// 结构：{"agents": {"system": [{cmd, tool_name, kind, ...}], "H-01": [...]}}
 // global default 始终以 "system" key 暴露，per-agent override 以各自 agentID 暴露。
+//
+// tool_name 字段由 tools.CmdToToolName(act.Cmd) 派生，前端下拉用 tool_name
+// 作 value，使其与 mapDebugCmd 的 tool_name 匹配路径以及前端 cmd 特殊处理
+// （如 cmd === 'move_to_location'）保持一致。
 func handleDebugCap(w http.ResponseWriter, r *http.Request, cap *CapabilityRegistry, logger *slog.Logger) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
 	if cap == nil {
 		logger.Warn("[debug/cap] capability registry is nil, returning empty")
-		_ = json.NewEncoder(w).Encode(CapabilitySnapshot{})
+		_ = json.NewEncoder(w).Encode(debugCapResponse{})
 		return
 	}
-	if err := json.NewEncoder(w).Encode(cap.Snapshot()); err != nil {
+	snap := cap.Snapshot()
+	resp := debugCapResponse{Agents: make(map[string][]debugCapAction, len(snap.Agents))}
+	for agentID, acts := range snap.Agents {
+		enriched := make([]debugCapAction, 0, len(acts))
+		for _, a := range acts {
+			enriched = append(enriched, debugCapAction{
+				CapabilityAction: a,
+				ToolName:         tools.CmdToToolName(a.Cmd),
+			})
+		}
+		resp.Agents[agentID] = enriched
+	}
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
 		logger.Warn("[debug/cap] encode failed", "err", err)
 	}
+}
+
+// debugCapAction 是 /debug/cap 返回的 action 项，在 protocol.CapabilityAction
+// 之上追加 tool_name 字段（仅 debug 用，不进协议层）。
+type debugCapAction struct {
+	protocol.CapabilityAction
+	ToolName string `json:"tool_name"`
+}
+
+// debugCapResponse 是 /debug/cap 的响应结构，与 CapabilitySnapshot 同构但
+// action 项替换为 debugCapAction。
+type debugCapResponse struct {
+	Agents map[string][]debugCapAction `json:"agents"`
 }
