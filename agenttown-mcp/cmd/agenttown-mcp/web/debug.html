@@ -412,13 +412,16 @@ function effectiveCapabilities() {
   return (capData.agents && capData.agents.system) || [];
 }
 
-// findCapability 从 capData 查找指定 cmd 的 CapabilityAction。
-function findCapability(cmd) {
-  return effectiveCapabilities().find(a => a.cmd === cmd) || null;
+// findCapability 从 capData 查找指定 tool_name（或 cmd）的 CapabilityAction。
+// 下拉的 value 是 tool_name，所以优先按 tool_name 匹配；兼容按 cmd 匹配。
+function findCapability(cmdOrToolName) {
+  return effectiveCapabilities().find(a => a.tool_name === cmdOrToolName || a.cmd === cmdOrToolName) || null;
 }
 
 // rebuildCmdDropdown 根据 capability 快照重建 cmd 下拉，按 Kind 分组。
-// 保留当前选择值（若新列表仍包含该 cmd），否则选第一个。
+// option 的 value 用 tool_name（snake_case），与 mapDebugCmd 的 tool_name
+// 匹配路径以及前端 cmd 特殊处理（如 cmd === 'move_to_location'）保持一致。
+// 保留当前选择值（若新列表仍包含该 tool_name），否则选第一个。
 function rebuildCmdDropdown() {
   const sel = document.getElementById('cmd');
   const acts = effectiveCapabilities();
@@ -430,7 +433,7 @@ function rebuildCmdDropdown() {
     const g = document.createElement('optgroup');
     g.label = `原子 cmd（${atomic.length}）`;
     atomic.forEach(a => {
-      g.appendChild(new Option(`${a.cmd} — ${a.description || ''}`, a.cmd));
+      g.appendChild(new Option(`${a.cmd} — ${a.description || ''}`, a.tool_name || a.cmd));
     });
     sel.appendChild(g);
   }
@@ -438,7 +441,7 @@ function rebuildCmdDropdown() {
     const g = document.createElement('optgroup');
     g.label = `复合 cmd（${composite.length}）`;
     composite.forEach(a => {
-      g.appendChild(new Option(`${a.cmd} — ${a.description || ''}`, a.cmd));
+      g.appendChild(new Option(`${a.cmd} — ${a.description || ''}`, a.tool_name || a.cmd));
     });
     sel.appendChild(g);
   }
