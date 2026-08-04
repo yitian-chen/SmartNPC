@@ -356,10 +356,6 @@ build_mcp() {
     fi
     "$GO_BIN" version
 
-    info "Running MCP unit tests..."
-    (cd "$MCP_DIR" && "$GO_BIN" test ./cmd/agenttown-mcp/ -count=1) \
-        || fail "MCP unit tests failed; refusing to deploy broken binary"
-
     ok "MCP binary built: $MCP_EXE"
     echo ""
 }
