@@ -1675,8 +1675,8 @@ func parseScheduleText(s string) (slot, goal string) {
 }
 
 // ─── /debug/schedule ─────────────────────────────────────────────
-// 联调 debug 端点：给战术层注入一条单行 schedule，战术层立即分解成 3-5 个 action
-// 入队，由 worker 异步下发到 UE。仅联调用，无认证。
+// 联调 debug 端点：给战术层注入一条单行 schedule，战术层立即分解成 1-5 个 action
+// 入队（复合优先：匹配复合动作时 1-2 步，否则 2-5 个原子动作），由 worker 异步下发到 UE。仅联调用，无认证。
 //
 // schedule 支持两种形态：
 //   - 带时间段："07:00-11:00: 车间装配作业"（时间段用于 prompt 提示步骤总时长）
