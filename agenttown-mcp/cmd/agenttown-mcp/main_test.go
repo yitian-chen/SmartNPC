@@ -682,6 +682,59 @@ func newFailedHermesClient() *hermes.Client {
 	return hermes.New(hermes.Config{URL: "http://127.0.0.1:1"})
 }
 
+// ─── tacticalRefill replanHint 测试 ──────────────────────────────
+
+// TestTacticalRefill_ConsumesReplanHint 验证 tacticalRefill 在调用前读取
+// ac.replanHint 并在调用后清空（即使 LLM 失败也清空）。
+// 这是 P1 修复的核心：反应层 interrupt 设置的 replanHint 必须传到战术层
+// prompt，让 LLM 知道中断原因（如"疲劳>60"）从而规划休息动作。
+func TestTacticalRefill_ConsumesReplanHint(t *testing.T) {
+	ac, _ := newAgentContext(context.Background())
+	// 构造能让 selectCurrentGoal 命中的 perception + dailyPlan
+	percJSON, _ := json.Marshal(protocol.PerceptionPayload{
+		Environment: protocol.Environment{TimeOfDay: "09:00"},
+	})
+	ac.mu.Lock()
+	ac.tacticalHc = newFailedHermesClient() // LLM 必失败，但 hint 读取/清空在调用前
+	ac.dailyPlan = "06:00-12:00: 上午装配\n12:00-13:00: 午休"
+	ac.latestPerception = percJSON
+	ac.replanHint = "疲劳=65超过60，需要休息"
+	ac.mu.Unlock()
+
+	_ = ac.tacticalRefill(context.Background(), "H-01", nil, nil, slog.Default())
+
+	ac.mu.Lock()
+	hint := ac.replanHint
+	ac.mu.Unlock()
+	if hint != "" {
+		t.Errorf("replanHint 应被 tacticalRefill 消费清空，仍剩 %q", hint)
+	}
+}
+
+// TestTacticalRefill_NoHintDoesNotPanic 验证无 hint 时 tacticalRefill 正常运行。
+func TestTacticalRefill_NoHintDoesNotPanic(t *testing.T) {
+	ac, _ := newAgentContext(context.Background())
+	percJSON, _ := json.Marshal(protocol.PerceptionPayload{
+		Environment: protocol.Environment{TimeOfDay: "09:00"},
+	})
+	ac.mu.Lock()
+	ac.tacticalHc = newFailedHermesClient()
+	ac.dailyPlan = "06:00-12:00: 上午装配\n12:00-13:00: 午休"
+	ac.latestPerception = percJSON
+	ac.replanHint = "" // 无 hint
+	ac.mu.Unlock()
+
+	// 不应 panic
+	_ = ac.tacticalRefill(context.Background(), "H-01", nil, nil, slog.Default())
+
+	ac.mu.Lock()
+	hint := ac.replanHint
+	ac.mu.Unlock()
+	if hint != "" {
+		t.Errorf("replanHint 应保持空，得到 %q", hint)
+	}
+}
+
 // ─── /debug/schedule 端点测试 ──────────────────────────────────
 //
 // 这些测试覆盖 handleDebugSchedule 的早期校验路径（method/JSON/字段/schedule

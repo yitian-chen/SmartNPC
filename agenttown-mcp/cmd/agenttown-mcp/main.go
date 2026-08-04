@@ -723,6 +723,11 @@ func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
 	physical := clonePhysical(a.latestPhysical)
 	tacticalHc := a.tacticalHc
 	kbRef := kb
+	// 读取 replanHint（反应层 interrupt/act 设置的"上次中断原因"），让战术层
+	// LLM 看到中断理由（如"疲劳>60需要休息"）从而规划休息/充电动作，而非
+	// 继续规划工作动作导致循环 interrupt。消费后清空，避免下次 refill 误用。
+	hint := a.replanHint
+	a.replanHint = ""
 	a.actionQueue = nil
 	a.mu.Unlock()
 
@@ -738,7 +743,7 @@ func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
 		// 流式路径：onAction 回调逐个入队 + 首 action 提前下发。
 		// 回调在 SendStreaming 的 onDelta 调用栈里同步执行（worker 仍阻塞在 tacticalRefill），
 		// 不跨回调持有 mu。
-		_, _, err = generateTacticalPlanStreaming(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, logger, "", capabilityRegistryRef,
+		_, _, err = generateTacticalPlanStreaming(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, logger, hint, capabilityRegistryRef,
 			func(pa plannedAction) {
 				a.mu.Lock()
 				a.actionQueue = append(a.actionQueue, pa)
@@ -752,7 +757,7 @@ func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
 		)
 	} else {
 		// 非流式路径（默认）：等完整响应后一次性填充队列。
-		actions, _, err = generateTacticalPlan(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, logger, "", capabilityRegistryRef)
+		actions, _, err = generateTacticalPlan(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, logger, hint, capabilityRegistryRef)
 		if err == nil {
 			a.mu.Lock()
 			a.actionQueue = actions
@@ -786,7 +791,7 @@ func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
 	logger.Info("[战术层] 队列已填充",
 		"agent_id", agentID, "slot", slot, "queue_len", queueLen,
 		"redecompose", isRedecompose, "redecompose_count", redecomposeCount,
-		"actions", string(actionsJSON))
+		"replan_hint", hint, "actions", string(actionsJSON))
 
 	// inner_thought 不再推送 UE（协议未定义 narrative 消息类型）。
 	// thought 仍在 tactical.go 的 [战术层] 分解成功 日志中记录，调试可见性保留。
