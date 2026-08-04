@@ -938,3 +938,120 @@ func TestBuildTacticalExample_ZoneObjectPairing(t *testing.T) {
 		}
 	}
 }
+
+// ─── physicalAlertOverrideGoal ────────────────────────────────
+
+func TestPhysicalAlertOverrideGoal_NoAlert(t *testing.T) {
+	origGoal := "车间装配作业"
+	// hint 不含"物理状态告警"标记 → 不 override
+	got, ok := physicalAlertOverrideGoal("上次中断原因：疲劳过高", origGoal, &protocol.PhysicalState{Fatigue: 80})
+	if ok {
+		t.Errorf("non-alert hint should not override, got goal=%q override=true", got)
+	}
+	if got != origGoal {
+		t.Errorf("non-alert hint should keep orig goal, got=%q want=%q", got, origGoal)
+	}
+}
+
+func TestPhysicalAlertOverrideGoal_NilPhysical(t *testing.T) {
+	origGoal := "车间装配作业"
+	got, ok := physicalAlertOverrideGoal("物理状态告警自动升级(疲劳=62超过60)", origGoal, nil)
+	if ok {
+		t.Errorf("nil physical should not override, got goal=%q override=true", got)
+	}
+	if got != origGoal {
+		t.Errorf("nil physical should keep orig goal, got=%q want=%q", got, origGoal)
+	}
+}
+
+func TestPhysicalAlertOverrideGoal_FatigueAlert(t *testing.T) {
+	origGoal := "车间装配作业"
+	got, ok := physicalAlertOverrideGoal(
+		"物理状态告警自动升级(疲劳=62超过60)；原决策=observe/...",
+		origGoal,
+		&protocol.PhysicalState{Fatigue: 62, Energy: 80, Health: 100},
+	)
+	if !ok {
+		t.Errorf("fatigue>60 should trigger override")
+	}
+	if !strings.Contains(got, "充电站") || !strings.Contains(got, "疲劳") {
+		t.Errorf("override goal should mention 充电站 and 疲劳, got=%q", got)
+	}
+}
+
+func TestPhysicalAlertOverrideGoal_EnergyAlert(t *testing.T) {
+	origGoal := "车间装配"
+	got, ok := physicalAlertOverrideGoal(
+		"物理状态告警自动升级(体力=35低于40)",
+		origGoal,
+		&protocol.PhysicalState{Fatigue: 30, Energy: 35, Health: 100},
+	)
+	if !ok {
+		t.Errorf("energy<40 should trigger override")
+	}
+	if !strings.Contains(got, "充电站") || !strings.Contains(got, "体力") {
+		t.Errorf("override goal should mention 充电站 and 体力, got=%q", got)
+	}
+}
+
+func TestPhysicalAlertOverrideGoal_HealthAlert(t *testing.T) {
+	origGoal := "车间装配"
+	got, ok := physicalAlertOverrideGoal(
+		"物理状态告警自动升级(健康=45低于50)",
+		origGoal,
+		&protocol.PhysicalState{Fatigue: 30, Energy: 80, Health: 45},
+	)
+	if !ok {
+		t.Errorf("health<50 should trigger override")
+	}
+	if !strings.Contains(got, "维修") {
+		t.Errorf("override goal should mention 维修, got=%q", got)
+	}
+}
+
+func TestPhysicalAlertOverrideGoal_FatigueTakesPrecedence(t *testing.T) {
+	// 同时 fatigue 高 + energy 低时，fatigue 优先（switch 顺序）
+	got, ok := physicalAlertOverrideGoal(
+		"物理状态告警",
+		"工作",
+		&protocol.PhysicalState{Fatigue: 70, Energy: 30, Health: 100},
+	)
+	if !ok {
+		t.Errorf("should trigger override")
+	}
+	if !strings.Contains(got, "疲劳") {
+		t.Errorf("fatigue should take precedence, got=%q", got)
+	}
+}
+
+// ─── buildTacticalPrompt 物理告警强约束段 ─────────────────────
+
+func TestBuildTacticalPrompt_PhysicalAlertConstraint(t *testing.T) {
+	kb := loadTestKB(t)
+	hint := "物理状态告警自动升级(疲劳=62超过60)；原决策=observe/..."
+	prompt := buildTacticalPrompt("前往充电站休息", "main_workshop", "13:15", "13:00-17:00",
+		&protocol.PhysicalState{Energy: 88, Fatigue: 62, JointWear: 0, Health: 100},
+		kb, hint, nil, "H-01")
+
+	if !strings.Contains(prompt, "【物理告警强制约束】") {
+		t.Errorf("prompt should contain physical alert constraint section, got: %s", prompt)
+	}
+	if !strings.Contains(prompt, "禁止规划 work_at_workbench") {
+		t.Errorf("prompt should forbid work_at_workbench, got: %s", prompt)
+	}
+	if !strings.Contains(prompt, "优先 charge_at_station") {
+		t.Errorf("prompt should prioritize charge_at_station, got: %s", prompt)
+	}
+}
+
+func TestBuildTacticalPrompt_NoPhysicalAlertConstraint(t *testing.T) {
+	kb := loadTestKB(t)
+	// 普通 hint（无"物理状态告警"标记）不应插入强约束段
+	prompt := buildTacticalPrompt("车间装配", "main_workshop", "09:00", "09:00-12:00",
+		&protocol.PhysicalState{Energy: 90, Fatigue: 20, JointWear: 0, Health: 100},
+		kb, "上次中断原因：zone 变化", nil, "H-01")
+
+	if strings.Contains(prompt, "【物理告警强制约束】") {
+		t.Errorf("non-physical-alert hint should NOT contain constraint section, got: %s", prompt)
+	}
+}

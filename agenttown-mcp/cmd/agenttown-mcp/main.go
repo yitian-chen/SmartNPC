@@ -554,7 +554,43 @@ func (a *agentContext) latestZoneLocked() string {
 	return ""
 }
 
-// sendIdleWait 发一个 60 秒的 wait，避免队列空且无 goal 时忙循环。
+// idleWaitSeconds 计算 sendIdleWait 应该发送的 Wait 秒数。
+//
+// 当 redecomposeCount 达上限（无法重分解）且 slot 剩余时间 > 60s 时，
+// 返回覆盖到 slot 末尾的长 Wait（clamp 上限 3600s），让 NPC 一次性 wait 到
+// 下一时段——redecomposeCount 在新时段重置后可重新分解，避免反复发
+// 60s Wait 形成死循环直到 game_time 跨入新时段。
+//
+// 其他情况（slot 解析失败/剩余 ≤ 60s/redecomposeCount 未达上限）返回 60。
+func idleWaitSeconds(slot, tod string, redecomposeCount int) int {
+	if redecomposeCount < 1 || slot == "" || tod == "" {
+		return 60
+	}
+	_, endMin := slotRangeMinute(slot)
+	curMin := parsePlanMinute(tod)
+	if endMin <= 0 || curMin < 0 || endMin <= curMin {
+		return 60
+	}
+	remaining := endMin - curMin
+	if remaining <= 60 {
+		return 60
+	}
+	waitSec := remaining * 60
+	if waitSec > 3600 {
+		waitSec = 3600
+	}
+	return waitSec
+}
+
+// sendIdleWait 发一个 wait 避免队列空且无 goal 时忙循环。
+//
+// 当 redecomposeCount 达上限（无法重分解）且 slot 剩余时间 > 60s 时，
+// 发覆盖到 slot 末尾的长 Wait（clamp 上限 3600s），让 NPC 一次性 wait 到
+// 下一时段——redecomposeCount 在新时段重置后可重新分解，避免反复发
+// 60s Wait 形成死循环直到 game_time 跨入新时段。
+//
+// 其他情况（slot 解析失败/剩余 ≤ 60s/redecomposeCount 未达上限）保持
+// 原行为：发 60s Wait。
 func (a *agentContext) sendIdleWait(ctx context.Context, agentID string, ws *wsserver.Server, logger *slog.Logger) {
 	if !ws.IsConnected() {
 		return
@@ -563,11 +599,22 @@ func (a *agentContext) sendIdleWait(ctx context.Context, agentID string, ws *wss
 	// 等 action_completed 自然唤醒 worker（completion 路径会 signal）。
 	a.mu.Lock()
 	inFlight := a.currentActionID != ""
-	a.mu.Unlock()
 	if inFlight {
+		a.mu.Unlock()
 		return
 	}
-	ack, err := ws.SendAction(ctx, agentID, protocol.CmdWait, map[string]any{"duration_sec": 60})
+	slot := a.currentSlot
+	redecomposeCount := a.redecomposeCount
+	tod := a.latestTimeOfDayLocked()
+	a.mu.Unlock()
+
+	waitSec := idleWaitSeconds(slot, tod, redecomposeCount)
+	if waitSec > 60 {
+		logger.Info("[战术层] queue 耗尽且 redecompose 达上限，发长 Wait 覆盖 slot 剩余",
+			"agent_id", agentID, "slot", slot, "tod", tod, "wait_sec", waitSec)
+	}
+
+	ack, err := ws.SendAction(ctx, agentID, protocol.CmdWait, map[string]any{"duration_sec": waitSec})
 	if err != nil {
 		logger.Debug("[战术层] idle wait 发送失败", "agent_id", agentID, "err", err)
 		return
@@ -707,15 +754,15 @@ func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
 		return false
 	}
 	// 同时段重复分解守卫：队列还有 action 时不 redecompose（继续执行剩余 action）；
-	// 队列空且已 redecompose ≥1 次才放弃，调用方发 idle wait 等下一时段。
-	// 阈值从 2 收紧到 1：避免队列提前耗尽时 50s 内连续重调 LLM 浪费 token
-	// （LLM 若 1 次重分解仍给不够时长的 plan，第 2 次大概率也不够，不如 idle wait）。
+	// 队列空且已 redecompose ≥3 次才放弃，调用方发长 idle wait 覆盖 slot 剩余。
+	// 阈值 3：给 LLM 多次调整机会（每次重分解会通过 replanHint 提示"上次时长不够"，
+	// LLM 可据此延长 plan），第 3 次仍不够则用长 Wait 兜底，避免无谓 token 消耗。
 	if slot == a.currentSlot {
 		if len(a.actionQueue) > 0 {
 			a.mu.Unlock()
 			return false // 队列有剩余，等它们执行完再考虑 redecompose
 		}
-		if a.redecomposeCount >= 1 {
+		if a.redecomposeCount >= 3 {
 			a.mu.Unlock()
 			return false
 		}
@@ -841,6 +888,16 @@ func (a *agentContext) tacticalRefillForReplan(
 	kbRef := kb
 	hint := replanHint
 	a.mu.Unlock()
+
+	// 物理告警 goal override：反应层 upgradeIfPhysicalAlert 触发的 replan
+	// 含"物理状态告警"标记，此时原 goal（如"车间装配"）应被替换为恢复类
+	// goal（如"前往充电站休息"），否则 LLM 仍按原 goal 规划工作动作。
+	overrideGoal, isOverride := physicalAlertOverrideGoal(hint, goal, physical)
+	if isOverride {
+		logger.Info("[战术层/replan] 物理告警 goal override",
+			"agent_id", agentID, "orig_goal", goal, "override_goal", overrideGoal, "hint", hint)
+		goal = overrideGoal
+	}
 
 	// 2. LLM 调用（30s 硬超时，与 tacticalRefill 一致）
 	tacticalCtx, tacticalCancel := context.WithTimeout(ctx, tacticalCallTimeout)
