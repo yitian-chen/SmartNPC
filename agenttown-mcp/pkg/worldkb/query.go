@@ -129,9 +129,12 @@ type ZoneInfo struct {
 
 // ObjectInfo is a compact object summary for prompt injection. Includes
 // ZoneID so consumers can express zone-object relationships in prompts.
+// Category lets consumers pick the right tool for the object type
+// (e.g. workbench→work_at_workbench, charging_station→charge_at_station).
 type ObjectInfo struct {
 	ID                    string
 	DisplayName           string
+	Category              string
 	ZoneID                string
 	AvailableInteractions []string
 }
@@ -165,6 +168,7 @@ func (k *KB) ListObjects() []ObjectInfo {
 		out = append(out, ObjectInfo{
 			ID:                    o.ID,
 			DisplayName:           o.DisplayName,
+			Category:              o.Category,
 			ZoneID:                o.ZoneID,
 			AvailableInteractions: interactions,
 		})

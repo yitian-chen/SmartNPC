@@ -5,9 +5,18 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 
 	"github.com/AgentTown/agenttown-mcp/pkg/hermes"
+	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
+)
+
+// 日程校验常量。MCP 无 day-range flag，与 defaultDailyPlan 保持一致。
+const (
+	dayStartMinute = 6 * 60  // 06:00
+	dayEndMinute   = 22 * 60 // 22:00
+	minSlotMinutes = 60      // 时段最短时长，短于此会被丢弃
 )
 
 // dailyPlanItem 是战略层输出的单条计划。
@@ -24,7 +33,9 @@ type strategicCaller interface {
 
 const strategicPromptTemplate = `[战略层/每日规划] 现在是仿真时间 06:00，新的一天开始了。
 
-昨日总结：%s
+%s
+
+%s
 
 请基于你的角色身份和性格，规划今天一天的活动安排。
 
@@ -35,32 +46,81 @@ const strategicPromptTemplate = `[战略层/每日规划] 现在是仿真时间 
 4. 每个时段时长不少于 60 分钟（起止时间差 ≥ 60 分钟）。短活动（如午休 30 分钟、短暂维修）合并到相邻时段，不要单独成段——调度器按整点采样，短于 60 分钟的时段会被跳过
 5. 只输出 JSON 数组，不要任何其他文字
 6. 必须以字符 [ 开头，以字符 ] 结尾，不要输出设计思路、不要解释、不要 markdown 围栏
+7. goal 中提到的地点、人物、设备必须是【你的角色】和【世界知识】中存在的，不得编造未提及的人物或设施
+8. 若 goal 涉及"使用/操作/检查/交互"某设施，该设施必须位于【区域设施映射】中标注为有物体的 zone——映射中标注"无可交互物体"的 zone 不能作为 interact 类活动的目的地（只能用于移动/巡逻/路过/休息）
 
-示例：[{"time":"06:00-07:00","goal":"起床晨检，慢速活动关节"},{"time":"07:00-12:00","goal":"装配作业，盯紧小柯"},{"time":"12:00-13:00","goal":"午间停工会检查公差，饭后短暂补电"}]`
+示例：[{"time":"06:00-07:00","goal":"起床晨检，慢速活动关节"},{"time":"07:00-12:00","goal":"上午车间装配作业，盯紧关键工序"},{"time":"12:00-13:00","goal":"午间停工，检查公差记录并短暂补电休息"}]`
 
-// defaultDailyPlan 是战略层解析失败时的兜底计划。
+// defaultDailyPlan 是 kb == nil 时的兜底计划（无 KB 上下文降级路径）。
+// buildDefaultDailyPlan(nil) 返回此常量。
+//
 // 不返回空字符串是为了避免整天 Wait(60s) 瘫痪——兜底计划虽然无个性，
 // 但能驱动战术层正常工作，让仿真继续运行而非停滞。
 // 时段覆盖 06-22，每段 ≥60min，符合调度器采样约束。
-const defaultDailyPlan = "06:00-12:00: 上午车间装配作业\n" +
-	"12:00-13:00: 午间停工检修与短暂补电\n" +
-	"13:00-18:00: 下午继续装配作业\n" +
-	"18:00-22:00: 充电保养与写工作日志"
+// 表述中性：不引用任何 KB 专属词（"车间"/"装配"/"充电"等），避免换 KB 后
+// 兜底计划仍诱导战术层编造 KB 外概念。
+const defaultDailyPlan = "06:00-12:00: 上午主要工作\n" +
+	"12:00-13:00: 午间停工与短暂休息\n" +
+	"13:00-18:00: 下午继续工作\n" +
+	"18:00-22:00: 保养与写工作日志"
 
-const hardcodedYesterdaySummary = "昨天在车间装配8小时，整理了零件分类，晚上在充电站充电休息，关节有点酸。下班时小柯说明天请假一天，让我心里有点空落落的"
+// buildDefaultDailyPlan 根据 KB 派生兜底每日计划。
+// kb == nil 时返回 defaultDailyPlan（中性表述，不引用任何 KB id）。
+// 有 KB 时：用第一个 zone 显示名作工作地点、第一个 object 显示名作工作内容
+// 组装上午/下午时段，午间和晚间保持中性。避免硬编码"车间"/"装配"等当前
+// KB 专属词——换 KB 后兜底计划自动适配新 KB 的地点/设施名。
+func buildDefaultDailyPlan(kb *worldkb.KB) string {
+	if kb == nil {
+		return defaultDailyPlan
+	}
+	zoneName := "主要区域"
+	if zs := kb.ListZones(); len(zs) > 0 {
+		if zs[0].DisplayName != "" {
+			zoneName = zs[0].DisplayName
+		} else {
+			zoneName = zs[0].ID
+		}
+	}
+	workName := "工作"
+	if os := kb.ListObjects(); len(os) > 0 {
+		if os[0].DisplayName != "" {
+			workName = os[0].DisplayName
+		} else {
+			workName = os[0].ID
+		}
+	}
+	return fmt.Sprintf("06:00-12:00: 上午在%s进行%s作业\n", zoneName, workName) +
+		"12:00-13:00: 午间停工与短暂休息\n" +
+		fmt.Sprintf("13:00-18:00: 下午继续%s作业\n", workName) +
+		"18:00-22:00: 保养与写工作日志"
+}
+
+// yesterdaySummaryForFirstDay 是首日启动时注入的"昨日总结"。
+//
+// 早期版本写死了"小柯/充电站"等具体人物和设施，但当 KB 不包含这些
+// 元素时（如最小化测试 KB 或换地图运行），LLM 会被诱导在战略计划里
+// 编造这些 KB 外概念。改为中性表述：只描述抽象活动模式（装配/休息/
+// 充电），不点名任何人物或具体设施，由 LLM 根据 KB 自行具象化。
+const yesterdaySummaryForFirstDay = "昨天按计划完成了车间装配和设备巡检，下午体力下降明显，晚上进入低功耗休息状态，关节略有磨损"
 
 // generateDailyPlan 调 LLM 生成当日计划，返回格式化字符串（每行 "时段: 目标"）。
-// 任一步失败均回退到 defaultDailyPlan，保证战术层有目标可分解、
+// 任一步失败均回退到 buildDefaultDailyPlan(kb)，保证战术层有目标可分解、
 // 仿真不瘫痪。返回 "" 仅表示连兜底计划都没用上（理论上不会发生）。
-func generateDailyPlan(ctx context.Context, sc strategicCaller, agentID string, logger *slog.Logger) string {
-	prompt := fmt.Sprintf(strategicPromptTemplate, hardcodedYesterdaySummary)
+// kb 用于注入【你的角色】+【世界知识】段，让 LLM 看到 KB 内合法的
+// zone/object/agent 名，避免编造 KB 外概念（如换 KB 后仍写"车间"）。
+// kb == nil 时降级为无 KB 上下文的纯角色 prompt（向后兼容）。
+func generateDailyPlan(ctx context.Context, sc strategicCaller, agentID string, kb *worldkb.KB, logger *slog.Logger) string {
+	prompt := fmt.Sprintf(strategicPromptTemplate,
+		buildStrategicContext(kb, agentID),
+		"昨日总结："+yesterdaySummaryForFirstDay)
 	logger.Info("[MCP→Hermes/STRATEGIC-PROMPT]", "agent_id", agentID, "text", prompt)
 
 	resp, err := sc.SendWithSummary(ctx, prompt, "")
 	if err != nil {
+		fallback := buildDefaultDailyPlan(kb)
 		logger.Warn("[战略层] 计划生成失败，使用默认计划兜底",
-			"agent_id", agentID, "err", err, "fallback", defaultDailyPlan)
-		return defaultDailyPlan
+			"agent_id", agentID, "err", err, "fallback", fallback)
+		return fallback
 	}
 	sc.ResetSession() // 战略调用一次性使用，立即清链
 
@@ -70,17 +130,119 @@ func generateDailyPlan(ctx context.Context, sc strategicCaller, agentID string, 
 
 	items, err := parseDailyPlan(raw)
 	if err != nil {
+		fallback := buildDefaultDailyPlan(kb)
 		logger.Warn("[战略层] 计划解析失败，使用默认计划兜底",
-			"agent_id", agentID, "raw", truncateText(raw, 200), "err", err, "fallback", defaultDailyPlan)
-		return defaultDailyPlan
+			"agent_id", agentID, "raw", truncateText(raw, 200), "err", err, "fallback", fallback)
+		return fallback
 	}
+	items = normalizeDailyPlan(items)
 	if len(items) == 0 {
-		logger.Warn("[战略层] 计划解析为空数组，使用默认计划兜底", "agent_id", agentID)
-		return defaultDailyPlan
+		logger.Warn("[战略层] 计划校验后为空，使用默认计划兜底", "agent_id", agentID)
+		return buildDefaultDailyPlan(kb)
 	}
 	plan := formatDailyPlan(items)
 	logger.Info("[战略层] 每日计划生成成功", "agent_id", agentID, "items", len(items), "plan", plan)
 	return plan
+}
+
+// buildStrategicContext 构造战略层 prompt 的 KB 上下文段，包含三段：
+//   - 【你的角色】：从 kb.GetAgent(agentID) 取 DisplayName/Profession/
+//     Description/Personality.Traits/Personality.SpeechStyle 拼成角色描述。
+//   - 【世界知识】：复用 buildKBContext(kb)（与战术层同源），列出 KB 内
+//     所有 zone/object id + 显示名，让 LLM 知道哪些地点/设施可写进计划。
+//   - 【区域设施映射】：按 zone 列出每个区域下有哪些可交互物体（以及哪些
+//     zone 无可交互物体）。战略层 LLM 据此避免生成"去无 object 的 zone 做
+//     interact"的 goal——此类 goal 会让战术层 LLM 陷入"想 interact 但
+//     当前 zone 没有 object"的死角，诱发 zone-object 错配。
+//
+// kb == nil 时返回空串（降级路径，不阻断 prompt 构造）。
+// agent 在 KB 中不存在时跳过【你的角色】段，仅注入【世界知识】+【区域设施映射】。
+func buildStrategicContext(kb *worldkb.KB, agentID string) string {
+	if kb == nil {
+		return ""
+	}
+	var sb strings.Builder
+	if a := kb.GetAgent(agentID); a != nil {
+		sb.WriteString("【你的角色】\n")
+		if a.DisplayName != "" {
+			sb.WriteString("名字：" + a.DisplayName + "\n")
+		}
+		if a.Profession != "" {
+			sb.WriteString("职业：" + a.Profession + "\n")
+		}
+		if a.Description != "" {
+			sb.WriteString("背景：" + a.Description + "\n")
+		}
+		if len(a.Personality.Traits) > 0 {
+			sb.WriteString("性格特质：" + strings.Join(a.Personality.Traits, "、") + "\n")
+		}
+		if a.Personality.SpeechStyle != "" {
+			sb.WriteString("说话风格：" + a.Personality.SpeechStyle + "\n")
+		}
+	}
+	if kbCtx := buildKBContext(kb); kbCtx != "" {
+		sb.WriteString("【世界知识】\n")
+		sb.WriteString(kbCtx)
+	}
+	if zom := buildStrategicZoneObjectMap(kb); zom != "" {
+		sb.WriteString("【区域设施映射】\n")
+		sb.WriteString(zom)
+	}
+	return sb.String()
+}
+
+// buildStrategicZoneObjectMap 构造"每个 zone 下有哪些可交互物体"的映射视图。
+//
+// 战略层 LLM 只看 buildKBContext 时难以判断哪些 zone 有可交互设施、哪些
+// zone 是空的——buildKBContext 把 zones 和 objects 分两段列出，LLM 要
+// 自行交叉比对 zone_id 才能知道"archive_station 下没有 object"。这导致
+// 战略层生成"去档案馆翻图纸""回维修厂保养设备"等需要 object 的 goal，
+// 但目标 zone 实际无 object，战术层 LLM 被逼到死角只能错配其他 zone 的 object。
+//
+// 本函数按 zone 声明顺序列出每个 zone 下的 object（用显示名+id），
+// 无 object 的 zone 显式标注"无可交互物体"，让战略层 LLM 一眼看出
+// 哪些 zone 能做 interact 类活动、哪些只能做移动/巡逻/等待。
+//
+// KB 为空或无 zone 时返回空串（降级，不阻断 prompt 构造）。
+func buildStrategicZoneObjectMap(kb *worldkb.KB) string {
+	if kb == nil {
+		return ""
+	}
+	zones := kb.ListZones()
+	if len(zones) == 0 {
+		return ""
+	}
+	objs := kb.ListObjects()
+	// 按 zone id 分组 object。
+	byZone := make(map[string][]worldkb.ObjectInfo, len(zones))
+	for _, o := range objs {
+		if o.ZoneID == "" {
+			continue
+		}
+		byZone[o.ZoneID] = append(byZone[o.ZoneID], o)
+	}
+	var sb strings.Builder
+	for _, z := range zones {
+		label := z.ID
+		if z.DisplayName != "" && z.DisplayName != z.ID {
+			label = fmt.Sprintf("%s（id=%s）", z.DisplayName, z.ID)
+		}
+		objsInZone := byZone[z.ID]
+		if len(objsInZone) == 0 {
+			sb.WriteString("  - " + label + "：无可交互物体\n")
+			continue
+		}
+		parts := make([]string, 0, len(objsInZone))
+		for _, o := range objsInZone {
+			olabel := o.ID
+			if o.DisplayName != "" && o.DisplayName != o.ID {
+				olabel = fmt.Sprintf("%s（id=%s）", o.DisplayName, o.ID)
+			}
+			parts = append(parts, olabel)
+		}
+		sb.WriteString("  - " + label + "：" + strings.Join(parts, "、") + "\n")
+	}
+	return sb.String()
 }
 
 // parseDailyPlan 从 LLM 原始输出中解析 JSON 数组。
@@ -115,6 +277,58 @@ func parseDailyPlan(raw string) ([]dailyPlanItem, error) {
 		return nil, fmt.Errorf("unmarshal: %w", err)
 	}
 	return items, nil
+}
+
+// normalizeDailyPlan 校验并补全解析后的每日计划：
+//  1. 丢弃时长 <60min 的时段（调度器按 60min 采样，短时段大概率不被命中）
+//  2. 按起始时间排序
+//  3. 首段前伸到 06:00（若 LLM 从 07:00 开始，06:00-07:00 会成空白）
+//  4. 填补中间空白：前段 end < 后段 start 时延长前段
+//  5. 末段后延到 22:00（若 LLM 只规划到 18:00，18:00-22:00 会触发 idle wait 瘫痪）
+//
+// 全部被丢弃时返回 nil，调用方走 buildDefaultDailyPlan(kb) 兜底。
+func normalizeDailyPlan(items []dailyPlanItem) []dailyPlanItem {
+	// 1. 过滤短时段。
+	valid := make([]dailyPlanItem, 0, len(items))
+	for _, it := range items {
+		start, end, ok := splitPlanRange(it.Time)
+		if !ok || end-start < minSlotMinutes {
+			continue
+		}
+		valid = append(valid, it)
+	}
+	if len(valid) == 0 {
+		return nil
+	}
+	// 2. 按起始时间排序。
+	sort.Slice(valid, func(i, j int) bool {
+		si, _, _ := splitPlanRange(valid[i].Time)
+		sj, _, _ := splitPlanRange(valid[j].Time)
+		return si < sj
+	})
+	// 3. 首段前伸到 dayStart。
+	if s, e, ok := splitPlanRange(valid[0].Time); ok && s > dayStartMinute {
+		valid[0].Time = fmtMinute(dayStartMinute) + "-" + fmtMinute(e)
+	}
+	// 4. 填补中间空白。
+	for i := 0; i < len(valid)-1; i++ {
+		_, ei, _ := splitPlanRange(valid[i].Time)
+		sj, _, _ := splitPlanRange(valid[i+1].Time)
+		if ei < sj {
+			si, _, _ := splitPlanRange(valid[i].Time)
+			valid[i].Time = fmtMinute(si) + "-" + fmtMinute(sj)
+		}
+	}
+	// 5. 末段后延到 dayEnd。
+	if s, e, ok := splitPlanRange(valid[len(valid)-1].Time); ok && e < dayEndMinute {
+		valid[len(valid)-1].Time = fmtMinute(s) + "-" + fmtMinute(dayEndMinute)
+	}
+	return valid
+}
+
+// fmtMinute 把从午夜起的分钟数格式化为 "HH:MM"。
+func fmtMinute(m int) string {
+	return fmt.Sprintf("%02d:%02d", m/60, m%60)
 }
 
 // formatDailyPlan 把计划格式化为多行字符串。

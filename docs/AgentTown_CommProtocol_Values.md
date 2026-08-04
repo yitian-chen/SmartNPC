@@ -12,7 +12,7 @@
 3. [数值系统设计](#三数值系统设计)
 4. [连接生命周期](#四连接生命周期)
 5. [错误处理与容错](#五错误处理与容错)
-6. [MCP 层设计](#六mcp-层设计agent-接入层)
+6. [总结](#六总结)
 
 ---
 
@@ -166,6 +166,8 @@ sequenceDiagram
 | UE → Agent | `state_report` | 按 agent_id → 对应 Agent Mind |
 | UE → Agent | `agent_registered` | → Agent Manager（创建新 Agent Mind） |
 | UE → Agent | `agent_unregistered` | → Agent Manager（销毁 Agent Mind） |
+| UE → Agent | `capability_registry` | `agent_id="system"` → Capability Registry Loader（更新能力清单） |
+| UE → Agent | `world_kb` | `agent_id="system"` → WorldKB Loader / Merger（更新世界认知） |
 | Agent → UE | `action_command` | 按 agent_id → UE 侧对应 RobotAgentComponent |
 | Agent → UE | `stop_action` | 按 agent_id → UE 侧对应 RobotAgentComponent |
 | Director → Agent | `event_notification` | 按 agent_id → 对应 Agent Mind（内部内存路由，不走网络） |
@@ -235,7 +237,7 @@ graph TB
 | `perception_update` | UE → Agent | 感知快照上报（**含空间状态；物理状态仅在变化超阈值时附带**） | 每 3 秒 / zone 变化 / 事件触发 |
 | `action_command` | Agent → UE | 下发动作指令 | 战术层/反应层产出新 action |
 | `action_started` | UE → Agent | **动作已接收并开始执行的回执（ACK）** | UE 收到 action_command 并成功启动后立即回 |
-| `action_completed` | UE → Agent | 动作完成回调 | MoveTo 完成 / StateTree 完成 |
+| `action_completed` | UE → Agent | 动作完成回调 | 原子 Action BT / 复合 Action BT 完成 |
 | `stop_action` | Agent → UE | 停止当前动作 | 反应层决定打断 |
 | `scan_area` | Agent → UE | 请求即时感知推送（携带 scan_id 关联响应） | scan_area 工具调用时，触发一次即时 perception_update |
 | `event_notification` | Agent → Agent | 事件通知（内部路由） | Director 投放事件 |
@@ -246,8 +248,12 @@ graph TB
 | `error` | 双向 | 错误上报 | 异常情况 |
 | `resync` | 双向 | 重连 seq 交换 | 重连后交换最后成功接收的 seq（详见 §4.2） |
 | `event_lost` | Agent → UE | 缓冲滚动丢失告警 | 重连时缓冲已滚动超出对方请求的 seq（详见 §4.2） |
+| `capability_registry` | UE → Agent | **Action 能力清单下发（数据驱动）** | 连接成功后自动推送（详见 §2.4） |
+| `world_kb` | UE → Agent | **世界知识库下发（generated + authored）** | 连接成功后自动推送（详见 §2.5） |
 
 > **控制消息补充**：`scan_area`、`resync`、`event_lost` 为协议级控制消息，承载工具触发/重连协调逻辑，不属于 Agent-UE 的业务消息范畴。
+>
+> **系统初始化消息**：`capability_registry` 与 `world_kb` 是**连接成功后 UE 主动下发的系统级数据初始化消息**（`agent_id="system"`），在 Agent 进程准备就绪后首先送达，Agent 据此构建能力认知与世界认知。二者不期待 ACK 回执。
 
 > **约定 5（感知 vs 状态分工，消除 #6 冗余）**：
 > - `perception_update` 负责**空间与环境感知**（position/rotation/zone/visible_agents/nearby_objects/audible_events/environment），**默认不携带 physical_state**；仅当某项物理数值自上次上报变化 ≥ 阈值（energy/fatigue/health 变化 ≥5，joint_wear 变化 ≥1）时，在 perception_update 中附带该变化项。
@@ -290,7 +296,7 @@ graph TB
         "name": "工作台一号",
         "distance": 8.0,
         "state": "idle",
-        "available_actions": ["assemble", "inspect"]
+        "available_interactions": ["assemble", "inspect"]
       }
     ],
     "audible_events": [
@@ -324,7 +330,7 @@ graph TB
 | current_animation | string | 当前播放的动画 |
 | current_emote | string/null | **当前正在表现的情绪状态**（持续型 emote 的回报，供 Agent 感知"我此刻的情绪表现"，解决 #4 情绪一致性） |
 | environment | object | 环境信息 |
-| scan_id | string (可选) | 用于关联 `scan_area` 请求与即时感知响应（由 MCP 层注入，仅即时扫描感知携带，常规定期感知为空） |
+| scan_id | string (可选) | 用于关联 `scan_area` 请求与即时感知响应（仅即时扫描感知携带，常规定期感知为空） |
 
 #### action_command（Agent → UE）
 
@@ -338,9 +344,9 @@ graph TB
   "agent_id": "H-01",
   "payload": {
     "action_id": "act_001",
-    "cmd": "MoveTo",
+    "cmd": "MoveToLocation",
     "params": {
-      "target": "workbench_01",
+      "dest": [160.0, 100.0, 0.0],
       "speed": "walk"
     }
   }
@@ -349,44 +355,310 @@ graph TB
 
 > **注**：`action_id` 位于 payload 内（遵循约定1）。`action_id` 由 **Agent 侧生成并保证同一 agent 内唯一**，UE 侧原样回传于 action_started/action_completed。
 
-**cmd 类型与 params 对应**：
+**cmd 分类总览（数据驱动，能力清单自动下发）**：
 
-| cmd | params | 说明 |
-|-----|--------|------|
-| `MoveTo` | {target: string, speed: "walk"\|"run"} | 原子：移动到语义目标（zone 或 location id，由 UE 侧解析为坐标） |
-| `TurnTo` | {target: agent_id} | 原子：转向目标 agent |
-| `PlayAnimation` | {anim_id: string, duration_sec: float} | 原子：播动画 |
-| `Speak` | {content: string, target: agent_id, audio_url: string\|null} | 原子：说话（audio_url 见约定6） |
-| `Emote` | {emotion: "happy"\|"sad"\|"worried"\|..., mode: "oneshot"\|"sustained"} | 原子：情绪表达（mode 见约定7） |
-| `Wait` | {duration_sec: float} | 原子：等待 |
-| `InteractSmartObject` | {object_id: string, action: string} | 原子：交互物件 |
-| `ExecuteComposite` | {name: string, target: string, duration_sec: float, ...} | 复合：启动 StateTree（参数平铺，详见下方示例） |
-| `Stop` | {} | 停止当前所有动作 |
+> **Action 只分为两类：原子行为（Atomic Action）与复合行为（Composite Action）。是否带参数、目标是否移动，均属于动作输入特征，不再作为 Action 分类依据。**
+
+| 分类 | 定义 | 主要用途 | 典型 cmd |
+|------|------|----------|----------|
+| **原子行为（Atomic）** | Agent 语义层中不可再拆分、且仍具独立意义的最小动作 | AI 临场反应、处理复合行为库未覆盖的特殊情况，也可作为复合行为 BT 的基础积木 | `MoveToLocation` / `MoveToAgent` / `TurnTo` / `Wait` / `InteractSmartObject` / `PlayMontage` / `Speak` / `Emote` |
+| **复合行为（Composite）** | 提前设计、验证并注册的高层行为能力，内部通常由多个原子行为或其他子行为树组成 | AI 的常规首选能力；封装稳定的工作、社交、充电、巡逻、救援等完整流程 | `WorkAtWorkbench` / `WorkAtWorkshop` / `ChatWith` / `RepairTarget` / `ChargeAtStation` / `PatrolZone` |
+
+**分类原则**：这里的“原子”是 **Agent 语义层原子**，不是 UE API 或 C++ 操作层原子。例如 `Speak` 在 UE 内部可能包含字幕、TTS、口型和动画，但对 Agent 而言“说这句话”仍是一个原子意图。
+
+**参数原则**：原子行为和复合行为都可以有参数，也可以没有参数。`WorkAtWorkshop {}` 是无参数复合行为，`WorkAtWorkbench {target_object_id}` 是有参数复合行为；二者仍属于同一类别。
+
+**协议兼容性**：分类信息属于能力描述元数据（`capability_registry` 中的 `kind` 字段），不新增信封字段，也不改变 `action_command.payload` 结构。UE 侧统一通过 `cmd → ActionBT` 配置表查找并运行行为树，无需为 Atomic / Composite 建立两套执行通道。
+
+**cmd 详细定义（代表性能力）**：
+
+> **重要：cmd 列表不是协议硬编码枚举，而是数据驱动的。** 实际可用 cmd 由 UE 侧全局 `DT_ActionBTMap`（`FActionBTTableRow` 数据表）配置，连接成功后通过 `capability_registry` 消息自动下发给 Agent 侧（见 §2.4）。下表仅列出框架内置的代表性原子/复合能力，项目可扩展。
+
+| cmd | 分类 | params | 说明 |
+|-----|------|--------|------|
+| `MoveToLocation` | Atomic | {dest: [x,y,z], speed?: "walk"\|"run"} | 移动到静态坐标；Agent 侧 Translator 已完成坐标解析 |
+| `MoveToAgent` | Atomic | {target_agent_id: string, speed?: "walk"\|"run", stop_distance?: float, keep_following?: bool} | 跟随动态 Agent；UE 侧运行时查 Actor |
+| `TurnTo` | Atomic | {target_agent_id: string} 或 {direction: [dx,dy,dz]} | 转向目标 Agent 或指定方向 |
+| `PlayMontage` | Atomic | {montage_id: string, wait_finish?: bool} | 播放已注册的蒙太奇 |
+| `Speak` | Atomic | {content: string, target_agent_id?: string, audio_url?: string\|null} | 说话；目标为空表示公开表达（audio_url 见约定6） |
+| `Emote` | Atomic | {emotion: string, mode: "oneshot"\|"sustained"} | 情绪表达（mode 见约定7） |
+| `Wait` | Atomic | {duration_sec: float} | 原地等待 |
+| `InteractSmartObject` | Atomic | {target_object_id: string, interaction: string} | 与 Smart Object 进行一次指定交互 |
+| `WorkAtWorkbench` | Composite | {target_object_id: string, duration_sec?: float} | 去指定工作台并完成工作流程 |
+| `WorkAtWorkshop` | Composite | {} | 去车间、选择可用工作台并执行例行工作 |
+| `ChatWith` | Composite | {target_agent_id: string, topic?: string} | 接近目标、面对目标、对话并结束交流 |
+| `RepairTarget` | Composite | {target_agent_id: string, tool_id?: string} | 接近、检查并修理指定机器人 |
+| `ChargeAtStation` | Composite | {target_object_id?: string} | 选择或使用指定充电位，持续到满足结束条件 |
+| `PatrolZone` | Composite | {target_zone: string, duration_sec?: float} | 进入区域并按区域策略巡逻 |
+
+> **兼容性说明**：原 `MoveTo` cmd 已拆分为 `MoveToLocation`（静态目标坐标）和 `MoveToAgent`（动态目标跟随）。旧代码若使用 `MoveTo`，语义等同 `MoveToLocation`。
+>
+> 原 `ExecuteComposite` / `ExecuteRoutine` 不再承担 Action 分类职责。推荐直接使用具有明确业务语义的 cmd（如 `WorkAtWorkbench`、`WorkAtWorkshop`、`ChatWith`），并通过 Action Registry 的 `ActionKind=Composite` 标记类别。兼容期可将旧 cmd 保留为别名，但新能力不再按“是否带参数”拆成两种入口。
 
 > **约定 6（Speak/TTS）**：`audio_url` 由 **Agent 侧预生成**（调用 TTS 服务后填入 URL）；若为 `null` 或 UE 侧拉取音频失败，UE **降级为纯字幕显示**，不阻塞动作。
 > **约定 7（Emote 模式）**：`mode="oneshot"` 为一次性表情（播完即止）；`mode="sustained"` 为持续情绪状态（UE 保持该情绪表现，并在 perception_update 的 `current_emote` 回报，直到下一个 sustained emote 或显式清除）。
+> **约定 13（目标解析责任）**：`params` 中目标类字段按**命名规范**区分静态/动态：
+> - **静态目标**（Zone / Location / SmartObject）：Agent 侧 Translator 查 World KB 翻译成坐标，字段名用 `target_position: [x,y,z]` / `target_zone: <id>` / `target_object_id: <id>`。UE 侧直接使用，无需再查。
+> - **动态目标**（Agent）：Agent 侧不解析位置，字段名用 `target_agent_id: "H-02"` / `follower_agent_id: <id>`。UE 侧通过 `AgentBridgeClient.FindAgentActor(id)` 运行时查 Actor，用 `MoveToActor` 自动跟随移动目标。
+> - **失败处理**：UE 侧查不到 `target_agent_id` 对应 Actor → 回 `error {UNKNOWN_AGENT}`。
 
-> **约定 6a（实现现状）**：当前第一期实现中，MCP 层 **未接入 TTS 服务**，`Speak` 工具始终填 `audio_url: null`，UE 侧仅做纯字幕显示。TTS 链路留待后续接入。
+**约定 14（Action 组装与优先级）**：
+>
+> - Agent **优先使用复合行为**完成常规目标；只有复合行为库无法表达当前意图或需要临场反应时，才组合原子行为。
+> - Agent 的战术计划可以混合编排 Atomic 与 Composite；通信层仍按 `action_id` **逐个串行派发**，每个动作收到 `action_completed` 后再派发下一项。
+> - 复合 Action BT 内部可以组合原子 Task 或其他子行为树，但只有最外层、直接对应网络 `action_id` 的 Action BT 可以写 `ActionResult` / 执行 `BTTask_FinishAction`；内部子树只返回 BT 的 Succeeded / Failed。
+> - 当某组原子行为被 Agent 高频重复组合时，应将其沉淀为新的复合行为，并注册到能力清单（`capability_registry`）。
 
-**ExecuteComposite 示例**（参数平铺在 params 内，不嵌套 params 子对象）：
+**Atomic 示例：跟随动态目标**：
 
 ```json
 {
-  "action_id": "act_007",
-  "cmd": "ExecuteComposite",
+  "action_id": "act_020",
+  "cmd": "MoveToAgent",
   "params": {
-    "name": "work_assemble",
-    "target": "workbench_01",
-    "duration_sec": 18000
+    "target_agent_id": "H-02",
+    "speed": "run",
+    "stop_distance": 200.0,
+    "keep_following": false
   }
 }
 ```
 
-> **复合动作参数说明**：不同复合动作的 params 字段因 `name` 而异，常见字段：
-> - `work_assemble` / `charge_at` / `rest_idle` / `archive_research`：`target`（可选）+ `duration_sec`
-> - `patrol_route`：`route_id`
-> - `repair_target` / `social_chat_with`：`target_agent_id`
-> 全部为语义 ID（zone/location/agent_id），由 UE 侧解析为具体坐标或对象引用。
+> `target_agent_id="H-02"` 是动态目标。UE 侧运行时查 Actor，并随目标位置更新移动请求。
+
+**Composite 示例：有参数的预设行为**：
+
+```json
+{
+  "action_id": "act_021",
+  "cmd": "WorkAtWorkbench",
+  "params": {
+    "target_object_id": "workbench_01",
+    "duration_sec": 7200
+  }
+}
+```
+
+> UE 侧通过 Action Registry 将 `WorkAtWorkbench` 映射到对应 Action BT。行为树内部完成寻找交互点、移动、转向、交互与工作循环，Agent 不需要逐步下发原子操作。
+
+**Composite 示例：无参数的预设行为**：
+
+```json
+{
+  "action_id": "act_022",
+  "cmd": "WorkAtWorkshop",
+  "params": {}
+}
+```
+
+> `WorkAtWorkshop` 自行选择可用工作台。它和有参数的 `WorkAtWorkbench` 同属 Composite，不再因是否带参数拆成不同 Action 类型。
+
+**Agent 战术层混合组装示例（Agent 内部计划，不是单条 WebSocket 消息）**：
+
+```json
+[
+  {
+    "cmd": "WorkAtWorkbench",
+    "params": {"target_object_id": "workbench_01", "duration_sec": 7200}
+  },
+  {
+    "cmd": "Speak",
+    "params": {"target_agent_id": "H-02", "content": "这批零件完成了，你来检查一下。"}
+  },
+  {
+    "cmd": "ChargeAtStation",
+    "params": {}
+  }
+]
+```
+
+> 该计划依次组合 Composite → Atomic → Composite。Agent 执行队列为每一项生成独立 `action_id`，收到上一项 `action_completed` 后再发送下一条 `action_command`。
+
+#### capability_registry（UE → Agent，Action 能力清单下发）
+
+> **用途**：WebSocket 连接成功后，UE **主动推送**当前全局 `DT_ActionBTMap` 中所有 Action 的能力清单。Agent 侧据此**自行拼接**可用 cmd 集合，无需手工维护能力表。新增/修改 Action 只需在 UE 数据表配置，重连后 Agent 自动获得最新能力。
+
+```json
+{
+  "version": "1.0",
+  "msg_id": "uuid-011",
+  "seq": 1011,
+  "timestamp": 1719456065000,
+  "type": "capability_registry",
+  "agent_id": "system",
+  "payload": {
+    "actions": [
+      {
+        "cmd": "MoveToLocation",
+        "kind": "atomic",
+        "description": "移动到静态坐标",
+        "usage_hint": "需要到达某个位置时使用",
+        "estimated_duration_sec": 10.0,
+        "params": [
+          {
+            "name": "dest",
+            "type": "vector",
+            "required": true,
+            "description": "目标世界坐标 [x,y,z]，单位为厘米",
+            "default_value": "",
+            "enum_values": []
+          },
+          {
+            "name": "speed",
+            "type": "enum",
+            "required": false,
+            "description": "移动速度档位",
+            "default_value": "walk",
+            "enum_values": ["walk", "run"]
+          }
+        ]
+      },
+      {
+        "cmd": "WorkAtWorkbench",
+        "kind": "composite",
+        "description": "去指定工作台并完成工作流程",
+        "usage_hint": "日常生产工作时使用",
+        "estimated_duration_sec": 7200.0,
+        "params": [
+          {
+            "name": "target_object_id",
+            "type": "string",
+            "required": true,
+            "description": "目标工作台的 Smart Object ID",
+            "default_value": "",
+            "enum_values": []
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+| payload 字段 | 类型 | 说明 |
+|--------------|------|------|
+| actions[].cmd | string | Action 指令名，对应 `action_command.payload.cmd` |
+| actions[].kind | string | `"atomic"` \| `"composite"`（对应 `EActionKind`） |
+| actions[].description | string | LLM 可读的动作描述 |
+| actions[].usage_hint | string | LLM 可读的使用时机提示 |
+| actions[].estimated_duration_sec | float | 预估执行时长，Agent 侧可作执行超时基准 |
+| actions[].params[].name | string | 参数名，对应 `action_command.payload.params` 中的键 |
+| actions[].params[].type | string | `"string"` \| `"number"` \| `"bool"` \| `"vector"` \| `"enum"` |
+| actions[].params[].required | bool | 是否必填 |
+| actions[].params[].description | string | 参数说明 |
+| actions[].params[].default_value | string | 缺省值（字符串化） |
+| actions[].params[].enum_values | array | 当 `type="enum"` 时的合法取值列表 |
+
+> **约定 15（能力下发时机）**：`capability_registry` 与 `world_kb` 在 WebSocket 连接成功回调中，与 `heartbeat` 一并按序发送。Agent 侧应将其视为**初始化数据**，在首个业务决策前完成解析缓存。二者均为 `agent_id="system"` 的系统级消息，不期待 ACK。
+>
+> **约定 16（Action 参数 ↔ Blackboard 映射）**：`capability_registry` 中的 `params[]` 不包含 UE 内部实现细节（如 Blackboard 键名 `BBKey`）。UE 侧 `ActionExecutor` 依据 `FActionParamSpec` 中的 `BBKey` 配置，将 `action_command.payload.params` 的 JSON 值写入行为树 Blackboard，Agent 侧无需关心映射关系。
+
+#### world_kb（UE → Agent，世界知识库下发）
+
+> **用途**：WebSocket 连接成功后，UE **主动推送**两份世界知识库文件的内容：`world.generated.json`（UE 编辑器扫描导出，可覆盖）与 `world.authored.json`（人工维护，不被 UE 覆盖）。Agent 侧收到后自行合并生成 `world_kb.yaml` 作为规划、检索与 Context Builder 的统一输入。**传输的是文件内容（JSON 对象），而非文件路径**，Agent 无需访问 UE 文件系统。
+
+```json
+{
+  "version": "1.0",
+  "msg_id": "uuid-012",
+  "seq": 1012,
+  "timestamp": 1719456066000,
+  "type": "world_kb",
+  "agent_id": "system",
+  "payload": {
+    "pushed_at": "2026-07-31T09:02:00.000Z",
+    "generated": {
+      "$schema": "agenttown-world-generated/v1",
+      "schema_version": "1.0",
+      "generated_at": "2026-07-31T08:30:00.000Z",
+      "generator": { "name": "AgentTownBridgeEditor", "version": "0.1.0" },
+      "source": { "map_package": "/Game/Maps/L_IndustrialTown", "map_name": "L_IndustrialTown" },
+      "coordinate_system": {
+        "space": "UE5_world",
+        "distance_unit": "centimeter",
+        "rotation_unit": "degree",
+        "rotation_order": "pitch_yaw_roll"
+      },
+      "zones": [
+        {
+          "id": "zone_workshop",
+          "editor_label": "Workshop",
+          "actor_path": "/Game/Maps/L_IndustrialTown.PersistentLevel.ZoneTriggerVolume_0",
+          "bounds": { "center": [1200, 3400, 0], "extent": [500, 400, 200], "rotation": [0, 0, 0] },
+          "entry_point": [1200, 3800, 0],
+          "entry_facing": [0, 1, 0]
+        }
+      ],
+      "objects": [
+        {
+          "id": "obj_workbench_01",
+          "category": "workbench",
+          "zone_id": "zone_workshop",
+          "editor_label": "Workbench 01",
+          "actor_class": "/Game/Blueprints/BP_Workbench.BP_Workbench_C",
+          "actor_position": [1150, 3350, 0],
+          "interaction_point": [1200, 3450, 0],
+          "interaction_facing": [0, -1, 0],
+          "available_interactions": ["assemble", "repair"],
+          "default_state": "idle"
+        }
+      ],
+      "agents": [
+        {
+          "id": "agent_chen",
+          "type": "humanoid",
+          "initial_zone": "zone_workshop",
+          "editor_label": "Lao Chen",
+          "actor_class": "/Game/Blueprints/BP_Worker.BP_Worker_C",
+          "initial_position": [1000, 3500, 0],
+          "action_table": "/Game/Data/AgentTown/DT_ActionBTMap",
+          "main_behavior_tree": "/Game/AI/BT/BT_MainRobot.BT_MainRobot"
+        }
+      ],
+      "validation_summary": { "errors": 0, "warnings": 0 }
+    },
+    "authored": {
+      "version": "1.0",
+      "zones": {
+        "zone_workshop": {
+          "display_name": "车间",
+          "description": "工业小镇的主车间，老陈在此组装零件",
+          "aliases": ["工坊", "工作间"],
+          "connections": [ { "to": "zone_square", "type": "road", "bidirectional": true } ]
+        }
+      },
+      "objects": {
+        "obj_workbench_01": {
+          "display_name": "1号工作台",
+          "description": "老陈的专属工作台",
+          "tags": ["crafting", "mechanical"]
+        }
+      },
+      "agents": {
+        "agent_chen": {
+          "display_name": "老陈",
+          "description": "经验丰富的机械师，性格沉稳",
+          "profession": "mechanic",
+          "personality": { "traits": ["calm", "meticulous", "hardworking"], "speech_style": "concise" },
+          "initial_zone": "zone_workshop",
+          "relationships": []
+        }
+      },
+      "narrative": { "setting": "工业小镇", "theme": "日常运转与协作" }
+    }
+  }
+}
+```
+
+| payload 字段 | 类型 | 说明 |
+|--------------|------|------|
+| pushed_at | string (ISO 8601 UTC) | UE 推送时的时间戳，Agent 侧可用于判断数据新鲜度 |
+| generated | object (必需) | `world.generated.json` 的**完整内容**（UE 导出，含 zones/objects/agents） |
+| authored | object (可选) | `world.authored.json` 的**完整内容**（人工维护）；文件不存在时省略该字段 |
+
+> **约定 17（World KB 只读推送）**：UE 侧以只读方式读取两份 JSON 文件，原样塞入 payload，不进行合并或转换。两份文件的合并（Deep Merge）职责完全在 Agent 侧（见 `AgentTown_WorldKB_Design.md`）。
+>
+> **约定 18（缺失处理）**：`world.generated.json` 缺失或解析失败 → UE 记 Warning 日志并跳过；`world.authored.json` 缺失（可选文件）→ 记 Verbose 日志并继续。若两者均缺失，UE 不发送 `world_kb` 消息。
 
 #### action_started（UE → Agent，动作接收回执 ACK）
 
@@ -498,7 +770,7 @@ graph TB
 
 | payload 字段 | 类型 | 说明 |
 |--------------|------|------|
-| scan_id | string | 由 MCP 层生成的唯一 ID，用于关联本次请求与对应的即时 perception_update 响应 |
+| scan_id | string | 唯一 ID，用于关联本次请求与对应的即时 perception_update 响应 |
 
 > **说明**：`scan_area` 是 scan_area 工具对应的协议消息，触发 UE 立即为指定 agent 生成一次 `perception_update`。该消息为 fire-and-forget（不期望 ACK 回执）；响应的 `perception_update` 中会回传相同的 `scan_id`，使 Agent 侧能够将即时感知与后续决策关联。
 
@@ -721,7 +993,7 @@ graph TB
 
 **例子**：老陈的 `joint_wear = 82`，`energy = 45`
 
-- **怎么变**：走路 → 关节磨损 +0.1（UE 每秒累积）；装配 → 能量下降（StateTree 里扣）；充电 → 能量上升（Smart Object 逻辑）
+- **怎么变**：走路 → 关节磨损 +0.1（UE 每秒累积）；装配 → 能量下降（Action BT / 交互逻辑中扣）；充电 → 能量上升（Smart Object 逻辑）
 - **Agent 需要吗**：需要，但不是实时。Agent 定期从 UE 拉取，作为 LLM 决策输入
 - **同步**：UE 是主人，随 `perception_update` 上报
 
@@ -812,11 +1084,11 @@ sequenceDiagram
     Mind->>Mind: action_queue = [move_to charging_station, charge_at]
 
     Mind->>Exec: stop_action {action_id: act_010}
-    Exec->>UE: stop StateTree ST_WorkAssemble
+    Exec->>UE: interrupt Action BT BT_WorkAtWorkbench
     UE->>Mind: action_completed {result: interrupted, progress: 0.6}
 
-    Mind->>Exec: action_command {cmd: MoveTo, dest: charging_station}
-    Note over Exec: LaoChen walks to charge
+    Mind->>Exec: action_command {cmd: ChargeAtStation, params: {}}
+    Note over Exec: LaoChen executes the charging composite action
 ```
 
 ### 3.7 World Director 怎么用这些数值
@@ -859,7 +1131,6 @@ sequenceDiagram
 
     Note over Agent: User starts Agent process first
     Agent->>Agent: WebSocket Server listen on 9090
-    Agent->>Agent: Load world_kb.yaml
     Agent->>Agent: Ready, waiting for connections
 
     Note over UE: User starts UE5 PIE
@@ -867,11 +1138,17 @@ sequenceDiagram
     UE->>Agent: WebSocket handshake
     Agent-->>UE: connection accepted
 
+    Note over UE: push system initialization data
+    UE->>Agent: capability_registry {actions: [...]} (agent_id=system)
+    UE->>Agent: world_kb {generated, authored, pushed_at} (agent_id=system)
+    Agent->>Agent: Capability Registry Loader 解析并缓存能力清单
+    Agent->>Agent: WorldKB Loader/Merger 合并生成 world_kb.yaml
+
     UE->>UE: all RobotActors BeginPlay
     loop each robot
         UE->>Agent: agent_registered {agent_id, type, position}
         Agent->>Agent: create Agent Mind instance
-        Agent->>Agent: load Persona from World KB
+        Agent->>Agent: load Persona from World KB (authored)
     end
 
     Note over Agent: all minds ready
@@ -879,6 +1156,8 @@ sequenceDiagram
     Note over Agent: Daily Plans generated
     Note over Agent: system running
 ```
+
+> **初始化数据时序**：`capability_registry` 与 `world_kb` 在连接建立后、`agent_registered` 逐条上报前推送。Agent 侧先完成能力清单与世界认知的解析，再创建各 Agent Mind，保证 Mind 在首次决策时已具备完整能力与场景上下文。
 
 ### 4.2 重连机制
 
@@ -896,6 +1175,7 @@ sequenceDiagram
     UE->>Agent: attempt reconnect
     alt success
         Agent-->>UE: connected
+        UE->>Agent: capability_registry + world_kb（重新推送）
         UE->>Agent: re-register all agents
         Agent->>Agent: restore Agent Mind states
         Note over UE,Agent: resumed
@@ -905,6 +1185,7 @@ sequenceDiagram
 ```
 
 **重连后的状态同步**：
+- UE 侧重新推送 `capability_registry`（能力清单，可能有变化）与 `world_kb`（世界认知，可能有变化）
 - UE 侧重新发送所有 `agent_registered`
 - Agent 侧根据 `agent_id` 匹配已有 Agent Mind（如果还在内存）
 - Agent 侧向 UE 请求当前所有 Agent 的 `state_report`（物理状态）+ 一次全量 `perception_update`（空间快照）
@@ -946,7 +1227,7 @@ sequenceDiagram
 | UE5 崩溃 | Agent 侧（断线） | Agent 侧保存状态，等待 UE 重连 |
 | LLM 调用失败 | Agent 侧 | 单次决策：重试 3 次 → 降级到本地小模型 → 本次返回默认行为（idle）。**连续 5 次决策均失败** → 进入安全模式 |
 | MoveTo 不可达 | UE 侧 | 发 `action_completed {result: failed}` → Agent 重新决策 |
-| StateTree 执行错误 | UE 侧 | 发 `error` 消息 → Agent 重新决策 |
+| Action BehaviorTree 执行错误 | UE 侧 | 发 `error` 消息 → Agent 重新决策 |
 | Agent Mind 内部异常 | Agent 侧 | 记录日志 → 该 Agent 进入 safe mode（只 idle） |
 | 消息格式错误 | 接收方 | 丢弃 + 发 `error {error_code: INVALID_MESSAGE}` 回报 |
 
@@ -958,7 +1239,7 @@ sequenceDiagram
 |------|----------|------------|
 | action_started 等待（ACK） | 2 秒 | 未收到 ACK，认为指令丢失 → 重发一次；再失败则重新决策 |
 | action_completed 等待 | `estimated_duration_sec × 1.5`（无估值时默认 60 秒） | 认为动作卡死 → 发 stop_action + 重新决策 |
-| LLM 调用 | 120 秒（DeepSeek 自部署响应较慢，10s 易误超时；可配置） | 重试 → 降级 |
+| LLM 调用 | 10 秒 | 重试 → 降级 |
 | 心跳响应 | 15 秒 | 认为断线 |
 | 重连尝试 | 3 秒间隔，指数退避到 30 秒 | 持续重试 |
 
@@ -978,154 +1259,18 @@ UE 侧收到 `idle` 后播放待机动画，机器人不会完全卡死。
 
 ---
 
-## 六、MCP 层设计（Agent 接入层）
-
-> 因第一期采用现成 Agent（Hermes，MCP 原生），在 Agent 与 UE 通信协议之间引入 **MCP 层**。它对下用本文定义的 WebSocket 协议连接 UE，对上以标准 MCP 暴露给 Agent。
-
-### 6.1 定位与职责
-
-MCP 层是 **UE WebSocket 协议 ⟷ Agent(MCP)** 的适配与语义化中枢，一体承担三项职责：
-
-```mermaid
-graph LR
-    subgraph UE["UE5 Process"]
-        WSC["AgentBridgeClient (WebSocket)"]
-    end
-    subgraph MCP["MCP 层 (Adapter + Semantic + Tools)"]
-        WSS["WebSocket Server<br/>收发协议消息"]
-        SEM["Semantic Engine<br/>zone/location → 第一人称叙事"]
-        PUSH["HTTP POST<br/>直推 Hermes /v1/responses"]
-        TOOLS["MCP Tools<br/>复合+原子行为 (带agent_id)"]
-    end
-    subgraph AG["Agent (Hermes)"]
-        MIND["Agent Mind"]
-    end
-
-    WSC <-->|"WebSocket JSON<br/>(本文协议)"| WSS
-    WSS --> SEM
-    SEM --> PUSH
-    PUSH -->|"HTTP POST<br/>/v1/responses"| MIND
-    MIND -->|"call tool (agent_id)"| TOOLS
-    TOOLS -->|"翻译为 action_command"| WSS
-```
-
-| 职责 | 说明 |
-|------|------|
-| **协议适配** | 作为 WebSocket 服务端接收 UE 的 `AgentBridgeClient` 连接，收发本文第二章定义的所有协议消息 |
-| **感知语义化** | 将原始感知（zone/location ID）翻译为**第一人称叙事**（认知层），在 MCP 层完成 |
-| **感知推送** | 通过 **HTTP POST 直推** Hermes Gateway 的 `/v1/responses` 端点，把语义化后的感知送入 Agent（不依赖 MCP 通知 / SSE） |
-| **工具暴露** | 向 Agent 暴露**复合 + 原子行为** MCP Tools，调用时翻译为 `action_command` 下发 UE |
-
-> **核心权衡**：本文 WebSocket 协议是"UE 主动推送"范式，MCP 是"Agent 调用工具"范式。MCP 层通过 **HTTP POST 推送（感知方向）+ Tool 调用（动作方向）** 弥合两种范式——感知走 HTTP 推送，动作走工具，方向清晰。
->
-> **实现说明**：原设计拟用 MCP server notification / SSE 推送感知给 Agent，但 Hermes Gateway 的接入形态是 HTTP `/v1/responses`（OpenAI Responses API 风格），不支持作为 MCP 客户端订阅 SSE 流。因此第一期改为 MCP 层主动向 Hermes Gateway 发起 HTTP POST，把感知叙事作为 `input` 字段送入。Tool 调用方向仍走标准 MCP（Hermes 作为 MCP 客户端连 MCP Server 的 `/mcp` 端点）。
-
-### 6.2 感知送达：HTTP POST 直推 Hermes
-
-UE 推来的 `perception_update` / `event_notification` / `action_started` / `action_completed` / `state_report`，经 MCP 层语义化后，**通过 HTTP POST 发送给 Hermes Gateway**（`POST /v1/responses`），作为一次 LLM 决策的输入 prompt。
-
-| UE 协议消息 | MCP 层处理 | 推送给 Agent 的形式 |
-|-------------|-----------|--------------------|
-| `perception_update` | 语义化为第一人称叙事 | HTTP POST `input` 字段：叙事文本（触发一次 LLM 决策） |
-| `event_notification` | 语义化事件描述 | 折入下次 perception 叙事文本携带 |
-| `action_started` | 作为 Tool 调用返回值给 LLM | 工具调用 ACK 结果（不单独推送） |
-| `action_completed` | 折入下次 perception 叙事 | 下次 perception 文本中追加 `[动作完成 action_id=... result=...]` 行 |
-| `state_report` | 缓存到 `latestPhysical` | 下次 perception 文本拼接时携带物理状态 |
-
-> **反应层打断**：当前第一期实现中，`event_notification`（紧急事件）并未走独立即时推送通道，而是折入下次 perception 叙事。这牺牲了反应层的实时打断能力，但简化了链路。后续若需实时打断，可考虑额外引入 SSE 通道或 Tool 调用回调。
-
-### 6.3 感知语义化（在 MCP 层）
-
-感知翻译在 MCP 层内完成，Agent 拿到的是"成品叙事"。当前实现为**单层翻译 + KB 兜底**：直接读取 UE 推来的 `perception_update.payload` 中已有的 `current_zone` / `current_location` / `visible_agents` / `nearby_objects` 等结构化字段，拼成第一人称中文叙事。MCP 层启动时加载 `world_kb.yaml`，叙事中的 zone 名和 object 名优先从 KB 查询中文名（如 `main_workshop` → "主生产车间"），UE payload 字段作为 fallback（KB 未命中或为 nil 时回退到原始 ID）。
-
-```
-UE perception_update.payload  →  MCP 层语义化  →  第一人称叙事
-current_zone: "main_workshop"   KB 查询 → "主生产车间"      "你在主生产车间。
-nearby_objects: [工作台一号]    UE Name 优先 / KB 兜底      附近可用: 工作台一号(assemble/inspect)。
-physical_state: {energy:100}    "电池100%"                 电池100% ，疲劳0，关节磨损0，健康100。"
-```
-
-MCP 层语义化后通过 HTTP POST 推送给 Hermes 的实际 payload 示例（第一期实现，叙事文本作为 `input` 字段）：
-
-```json
-{
-  "model": "h01",
-  "input": "[decision_context] agent_id=H-01 agent_epoch=1 decision_epoch=1\n[决策触发原因] 首次感知\n[当前任务] 无\n[感知] 清晨，时间06:00。\n你在main_workshop。\n电池100% ，疲劳0，关节磨损0，健康100。\n附近可用: 工作台一号(assemble/inspect), 充电桩一号(charge/inspect)。\n你现在想做什么？\n\n【重要】执行任何动作时必须调用对应的 MCP 工具..."
-}
-```
-
-> **说明**：MCP 层启动时加载 `assets/world_kb.yaml`（fail-fast，路径可通过 `--world-kb` flag 配置），叙事中的 zone 名和 object 名优先从 KB 查询中文名，UE payload 字段作为 fallback。原设计的"坐标→地点名"翻译（需要查 KB）现已部分回归 MCP 层：`move_to` 工具的语义目标解析由 MCP 层查 KB 完成（见 §6.4），UE 侧不再做语义→坐标翻译；但 UE 仍在 `perception_update` 中推送语义化字段名（如 `current_zone: "main_workshop"`），MCP 层用 KB 把它翻译成中文名呈现给 LLM。
->
-> **`[decision_context]` 头部**：MCP 层在叙事文本前拼接的决策上下文，含 `agent_id` / `agent_epoch` / `decision_epoch` / 触发原因 / 当前任务，用于 LLM 区分轮次与上下文。
-
-### 6.4 MCP Tools 定义（复合 + 原子，均带 agent_id + decision_epoch）
-
-Tools 参照子系统6，**复合行为 + 必要原子行为均开放给 LLM 调用**。**所有 tool 的前两个参数固定为 `agent_id` 和 `decision_epoch`**（单 MCP Server 服务多 NPC 的隔离手段 + 轮次关联）。MCP 层收到调用后翻译为对应 `action_command` 下发 UE。
-
-> **`decision_epoch` 参数说明**：每个 tool 调用携带当前决策轮次 ID（int64），用于：
-> - 在 MCP→UE 的 `action_command` 中标注是哪一轮决策产出的动作
-> - 在 sim.log 日志中关联 PERCEPTION / TOOL / RESPONSE 三种日志条目（同 `decision_epoch` 的记录属于同一决策回合）
-> - UE 侧可据此拒绝同一轮次的重复动作（如 "scan_area already pending"）
-
-**复合行为 Tools**（默认优先使用）：
-
-| MCP Tool | 参数 | 翻译为 action_command |
-|----------|------|----------------------|
-| `work_assemble` | agent_id, decision_epoch, target, duration_min | ExecuteComposite {name:"work_assemble"} |
-| `patrol_route` | agent_id, decision_epoch, route_id | ExecuteComposite {name:"patrol_route"} |
-| `charge_at` | agent_id, decision_epoch, station_id, duration_min | ExecuteComposite {name:"charge_at"} |
-| `repair_target` | agent_id, decision_epoch, target_agent_id | ExecuteComposite {name:"repair_target"} |
-| `social_chat_with` | agent_id, decision_epoch, target_agent_id | ExecuteComposite {name:"social_chat_with"} |
-| `rest_idle` | agent_id, decision_epoch, duration_min | ExecuteComposite {name:"rest_idle"} |
-| `archive_research` | agent_id, decision_epoch, duration_min | ExecuteComposite {name:"archive_research"} |
-
-**原子行为 Tools**（需精细控制时使用）：
-
-| MCP Tool | 参数 | 翻译为 action_command |
-|----------|------|----------------------|
-| `move_to` | agent_id, decision_epoch, target（语义ID） | MoveTo {dest:[x,y,z], target, kind, speed:"walk"}（MCP 层查 world_kb.yaml 解析坐标，方案 A） |
-| `turn_to` | agent_id, decision_epoch, target | TurnTo {target} |
-| `speak` | agent_id, decision_epoch, content, target | Speak {content, target, audio_url:null}（TTS 未接入，见约定6a） |
-| `emote` | agent_id, decision_epoch, emotion, mode | Emote {emotion, mode} |
-| `interact` | agent_id, decision_epoch, object_id, action | InteractSmartObject {object_id, action} |
-| `wait` | agent_id, decision_epoch, duration_sec | Wait {duration_sec} |
-| `scan_area` | agent_id, decision_epoch | scan_area 控制消息（请求一次即时 perception_update） |
-| `stop` | agent_id, decision_epoch | action_command {cmd:"Stop"}（停止当前所有动作） |
-
-> **语义目标解析（方案 A）**：`move_to` 接受**语义目标**（如 `move_to(target="workbench_01")`），由 **MCP 层查 `world_kb.yaml`** 解析为坐标（zone 用 `entry_point`，location 用 `interaction_point`），下发 `action_command` 携带 `{dest:[x,y,z], target, kind, speed}` —— `dest` 是权威坐标，`target`+`kind` 是 metadata 供 UE 反推 `current_location`（`kind=="location"` 时直接用 target，否则 UE 用坐标距离 `interaction_radius` 反推）。UE 侧不再做语义→坐标翻译。其他原子工具（`turn_to`/`interact`）和复合工具（`work_assemble`/`patrol_route`/`charge_at`）仍透传语义 ID，由 UE 侧解析。
->
-> **`stop` 工具实现说明**：当前 `stop` 工具翻译为 `action_command{cmd:"Stop"}` 空 params，而非协议 §2.3 定义的 `stop_action` 消息。这意味着停止动作不带 `action_id` 匹配校验（约定9 的竞态保护未实现）。后续若需精确停止特定动作，应改为发 `stop_action` 消息并携带 action_id。
-
-### 6.5 多 NPC 隔离：单 Server + agent_id 参数
-
-- **单个 MCP Server** 服务所有 NPC（第一期仅 1 个，但架构就绪）。
-- 每个 tool 调用**必须带 `agent_id`**，MCP 层据此翻译为对应 agent 的 `action_command`。
-- MCP 侧按 `agent_id` 维护独立的 `agentContext`（worker goroutine + perception 队列 + latestPhysical 缓存），感知推送互不干扰。
-- **第一期实现局限**：Hermes Client 当前是全局单例，所有 agent 共享同一条 `prevResponseID` 会话链。这意味着多 NPC 场景下会话上下文未严格隔离 —— 单 NPC 场景无影响，扩展到多 NPC 时需改为按 agent_id 维护独立 Hermes 会话。
-- **第一期**：只有 1 个 agent_id，流程完全打通即可；多 NPC 时需补 Hermes 会话隔离，但无需改协议。
-
-### 6.6 MCP 层与本协议的关系小结
-
-| 方向 | 范式 | 承载 |
-|------|------|------|
-| UE → Agent（感知/事件） | 推送 | WebSocket 协议消息 → 语义化 → **HTTP POST 到 Hermes /v1/responses** |
-| Agent → UE（动作） | 调用 | **MCP Tool 调用** → 翻译 → WebSocket `action_command` |
-
-> **结论**：MCP 层让本文定义的 WebSocket 协议对 Agent "隐形"——Agent 只看到"送来的叙事"和"可调的工具"，完全不感知底层坐标与协议细节。这既满足 Hermes 的 MCP 接入需求，又保持了 UE 端与协议层的独立与可复用。
-
----
-
-## 七、总结
+## 六、总结
 
 ### 通信架构核心
 
 | 项 | 答案 |
 |---|------|
 | 连接数 | 1 条 WebSocket |
-| 路由方式 | 消息带 `agent_id`，双方按 ID 路由 |
+| 路由方式 | 消息带 `agent_id`，双方按 ID 路由；系统级消息用 `agent_id="system"` |
 | UE 侧管理 | `AgentBridgeClient`（全局单例）+ `AgentRegistry` |
 | Agent 侧管理 | WebSocket Server + Message Router |
 | 广播 | Agent 进程内部内存操作，不走网络 |
+| 初始化数据 | 连接后自动推送 `capability_registry` + `world_kb`，Agent 侧自拼能力与世界观 |
 
 ### 数值系统核心
 
@@ -1137,16 +1282,6 @@ Tools 参照子系统6，**复合行为 + 必要原子行为均开放给 LLM 调
 | 任务状态 | Agent 是主人，不同步 |
 | Director 获取全局状态 | Agent Minds 定期上报（进程内部） |
 
-### MCP 层核心
-
-| 项 | 答案 |
-|---|------|
-| 定位 | UE WebSocket 协议 ⟷ Agent(MCP) 的适配 + 语义化中枢 |
-| 感知送达 | **HTTP POST 直推** Hermes `/v1/responses`（第一期实现；原设计为 SSE，因 Hermes 接入形态调整） |
-| 语义化 | 在 MCP 层完成：zone/location ID → 第一人称叙事（单层翻译，UE 侧已提供语义名） |
-| Tools | 复合 + 原子行为，均开放给 LLM，**统一带 agent_id + decision_epoch** |
-| 多 NPC | 单 MCP Server + agent_id 参数隔离（第一期 Hermes 会话隔离待补） |
-
 ### 设计原则
 
 1. **单连接 + agent_id 路由**：简化连接管理，便于调试
@@ -1154,11 +1289,10 @@ Tools 参照子系统6，**复合行为 + 必要原子行为均开放给 LLM 调
 3. **时间与坐标单位统一**：时间戳毫秒，坐标厘米
 4. **动作生命周期可靠**：command → started(ACK) → completed，停止有 ID 匹配校验
 5. **数值归属清晰**：物理 UE 管，心理 Agent 管，不交叉
-6. **感知/动作范式分离**：感知走 HTTP POST 推送，动作走 MCP Tool 调用
-7. **容错优先**：断线重连 + seq 重放补偿、超时降级、失败/安全模式分级
+6. **能力与世界观数据驱动**：`capability_registry` + `world_kb` 连接后自动下发，Agent 侧自行拼接与合并，UE 侧改数据表/地图即可更新能力与场景，无需改协议
+7. **容错优先**：断线重连 + 初始化数据重推 + seq 重放补偿、超时降级、失败/安全模式分级
 8. **可观测**：每条消息有 msg_id + seq，可追踪完整链路
-9. **MCP 层隔离底层**：Agent 只见叙事与工具，不感知坐标与协议细节
 
 ---
 
-*本文档定义了 Agent Town 的通信协议、数值系统与 MCP 接入层，作为实现的契约依据。*
+*本文档定义了 Agent Town 的通信协议与数值系统，作为实现的契约依据。*

@@ -136,49 +136,68 @@ func (r *CapabilityRegistry) Snapshot() CapabilitySnapshot {
 
 // BuiltinCmdCapabilities is the default capability set seeded at startup
 // so the system works even if UE never sends a capability_registry
-// message. It lists all 9 cmds the protocol defines with the same
-// descriptions the tactical layer previously hardcoded.
+// message. It lists all 14 cmds the protocol defines (§2.3) with params
+// schemas aligned to docs/AgentTown_CommProtocol_Values.md.
 //
 // UE that implements every cmd (e.g. mock_ue) is expected to send a
 // capability_registry message on connect that mirrors this list; doing
 // so overwrites the seed and becomes the authoritative declaration.
 var BuiltinCmdCapabilities = []protocol.CapabilityAction{
+	// ─── Atomic cmds (8) ─────────────────────────────────────────
 	{
-		Cmd:                  protocol.CmdMoveTo,
+		Cmd:                  protocol.CmdMoveToLocation,
 		Kind:                 "atomic",
-		Description:          "移动到指定目标位置或语义目标",
-		UsageHint:            "target 可填 zones/objects 中的 ID 或语义名称",
-		EstimatedDurationSec: 30,
+		Description:          "移动到静态坐标",
+		UsageHint:            "需要到达某个位置时使用",
+		EstimatedDurationSec: 10,
 		Params: []protocol.CapabilityParam{
-			{Name: "target", Type: "string", Description: "目标位置或语义目标 ID", Required: true},
+			{Name: "dest", Type: "vector", Description: "目标世界坐标 [x,y,z]，单位为厘米", Required: true},
+			{Name: "speed", Type: "enum", Description: "移动速度档位", DefaultValue: "walk", EnumValues: []string{"walk", "run"}},
+		},
+	},
+	{
+		Cmd:                  protocol.CmdMoveToAgent,
+		Kind:                 "atomic",
+		Description:          "跟随动态目标 Agent",
+		UsageHint:            "目标可能移动时使用；UE 侧运行时查 Actor",
+		EstimatedDurationSec: 15,
+		Params: []protocol.CapabilityParam{
+			{Name: "target_agent_id", Type: "string", Description: "目标 Agent ID", Required: true},
+			{Name: "speed", Type: "enum", Description: "移动速度档位", DefaultValue: "walk", EnumValues: []string{"walk", "run"}},
+			{Name: "stop_distance", Type: "number", Description: "停止距离（厘米）"},
+			{Name: "keep_following", Type: "bool", Description: "目标移动后是否继续跟随"},
 		},
 	},
 	{
 		Cmd:                  protocol.CmdTurnTo,
 		Kind:                 "atomic",
-		Description:          "转身面向指定目标",
+		Description:          "转向目标 Agent 或指定方向",
 		EstimatedDurationSec: 5,
 		Params: []protocol.CapabilityParam{
-			{Name: "target", Type: "string", Description: "目标朝向 ID", Required: true},
+			{Name: "target_agent_id", Type: "string", Description: "目标 Agent ID（与 direction 二选一）"},
+			{Name: "direction", Type: "vector", Description: "目标朝向向量 [dx,dy,dz]（与 target_agent_id 二选一）"},
 		},
 	},
 	{
-		Cmd:                  protocol.CmdPlayAnimation,
+		Cmd:                  protocol.CmdPlayMontage,
 		Kind:                 "atomic",
-		Description:          "播放一段动画",
+		Description:          "播放已注册的蒙太奇",
 		EstimatedDurationSec: 10,
 		Params: []protocol.CapabilityParam{
-			{Name: "animation", Type: "string", Description: "动画名称", Required: true},
+			{Name: "montage_id", Type: "string", Description: "蒙太奇名称", Required: true},
+			{Name: "wait_finish", Type: "bool", Description: "是否等待播放完成", DefaultValue: "true"},
 		},
 	},
 	{
 		Cmd:                  protocol.CmdSpeak,
 		Kind:                 "atomic",
 		Description:          "对目标说话",
+		UsageHint:            "target_agent_id 为空表示公开表达",
 		EstimatedDurationSec: 10,
 		Params: []protocol.CapabilityParam{
 			{Name: "content", Type: "string", Description: "说话内容", Required: true},
-			{Name: "target", Type: "string", Description: "对话目标 ID"},
+			{Name: "target_agent_id", Type: "string", Description: "对话目标 ID（可空）"},
+			{Name: "audio_url", Type: "string", Description: "TTS 音频 URL（可空，UE 降级为纯字幕）"},
 		},
 	},
 	{
@@ -188,44 +207,89 @@ var BuiltinCmdCapabilities = []protocol.CapabilityAction{
 		EstimatedDurationSec: 5,
 		Params: []protocol.CapabilityParam{
 			{Name: "emotion", Type: "string", Description: "情绪类型", Required: true},
-			{Name: "mode", Type: "string", Description: "表现模式"},
+			{Name: "mode", Type: "enum", Description: "oneshot 一次性；sustained 持续到下次覆盖", DefaultValue: "oneshot", EnumValues: []string{"oneshot", "sustained"}},
 		},
 	},
 	{
 		Cmd:                  protocol.CmdWait,
 		Kind:                 "atomic",
-		Description:          "原地等待一段时间",
+		Description:          "原地等待",
 		EstimatedDurationSec: 60,
 		Params: []protocol.CapabilityParam{
-			{Name: "duration_sec", Type: "integer", Description: "等待秒数", Required: true},
+			{Name: "duration_sec", Type: "number", Description: "等待秒数", Required: true},
 		},
 	},
 	{
 		Cmd:                  protocol.CmdInteractSmartObject,
 		Kind:                 "atomic",
-		Description:          "与智能对象交互",
+		Description:          "与 Smart Object 进行一次指定交互",
 		EstimatedDurationSec: 15,
 		Params: []protocol.CapabilityParam{
-			{Name: "object_id", Type: "string", Description: "智能对象 ID", Required: true},
-			{Name: "action", Type: "string", Description: "交互动作", Required: true},
+			{Name: "target_object_id", Type: "string", Description: "目标 Smart Object ID", Required: true},
+			{Name: "interaction", Type: "string", Description: "交互动作", Required: true},
 		},
 	},
+	// ─── Composite cmds (6) ──────────────────────────────────────
 	{
-		Cmd:                  protocol.CmdExecuteComposite,
+		Cmd:                  protocol.CmdWorkAtWorkbench,
 		Kind:                 "composite",
-		Description:          "执行复合行为（封装一段时长内的多步骤活动）",
-		UsageHint:            "duration_min 内部 ×60 转 duration_sec",
-		EstimatedDurationSec: 600,
+		Description:          "去指定工作台并完成工作流程",
+		UsageHint:            "日常生产工作时使用",
+		EstimatedDurationSec: 7200,
 		Params: []protocol.CapabilityParam{
-			{Name: "action", Type: "string", Description: "复合行为类型", Required: true},
-			{Name: "target", Type: "string", Description: "目标 ID"},
-			{Name: "duration_min", Type: "integer", Description: "持续分钟数"},
+			{Name: "target_object_id", Type: "string", Description: "目标工作台的 Smart Object ID", Required: true},
+			{Name: "duration_sec", Type: "number", Description: "持续秒数（可选）"},
 		},
 	},
 	{
-		Cmd:                  protocol.CmdStop,
-		Kind:                 "atomic",
-		Description:          "停止当前在途动作",
-		EstimatedDurationSec: 1,
+		Cmd:                  protocol.CmdWorkAtWorkshop,
+		Kind:                 "composite",
+		Description:          "去车间、选择可用工作台并执行例行工作",
+		UsageHint:            "无具体目标工作台时使用",
+		EstimatedDurationSec: 7200,
+		Params: []protocol.CapabilityParam{},
+	},
+	{
+		Cmd:                  protocol.CmdChatWith,
+		Kind:                 "composite",
+		Description:          "接近目标、面对目标、对话并结束交流",
+		UsageHint:            "社交场景使用",
+		EstimatedDurationSec: 300,
+		Params: []protocol.CapabilityParam{
+			{Name: "target_agent_id", Type: "string", Description: "对话目标 Agent ID", Required: true},
+			{Name: "topic", Type: "string", Description: "话题（可选）"},
+		},
+	},
+	{
+		Cmd:                  protocol.CmdRepairTarget,
+		Kind:                 "composite",
+		Description:          "接近、检查并修理指定机器人",
+		UsageHint:            "维修场景使用",
+		EstimatedDurationSec: 1800,
+		Params: []protocol.CapabilityParam{
+			{Name: "target_agent_id", Type: "string", Description: "待修理 Agent ID", Required: true},
+			{Name: "tool_id", Type: "string", Description: "工具 ID（可选）"},
+		},
+	},
+	{
+		Cmd:                  protocol.CmdChargeAtStation,
+		Kind:                 "composite",
+		Description:          "选择或使用指定充电位，持续到满足结束条件",
+		UsageHint:            "电量低时使用",
+		EstimatedDurationSec: 3600,
+		Params: []protocol.CapabilityParam{
+			{Name: "target_object_id", Type: "string", Description: "充电桩 ID（可空，空则自动选择）"},
+		},
+	},
+	{
+		Cmd:                  protocol.CmdPatrolZone,
+		Kind:                 "composite",
+		Description:          "进入区域并按区域策略巡逻",
+		UsageHint:            "巡检场景使用",
+		EstimatedDurationSec: 1800,
+		Params: []protocol.CapabilityParam{
+			{Name: "target_zone", Type: "string", Description: "目标区域 ID", Required: true},
+			{Name: "duration_sec", Type: "number", Description: "持续秒数（可选）"},
+		},
 	},
 }

@@ -19,7 +19,7 @@ func TestBuildReactivePrompt_Defaults(t *testing.T) {
 		Energy:        45,
 		Fatigue:       30,
 		Health:        90,
-		CurrentAction: "work_assemble(target=workbench_01, duration_min=60)",
+		CurrentAction: "WorkAtWorkbench(target_object_id=workbench_01, duration_sec=3600)",
 		ElapsedSec:    120,
 		ActionSrc:     "tactical",
 		CurrentSlot:   "14:00-18:00",
@@ -30,7 +30,7 @@ func TestBuildReactivePrompt_Defaults(t *testing.T) {
 	prompt := buildReactivePrompt(in)
 	for _, want := range []string{
 		"14:30", "main_workshop", "45", "30", "90",
-		"work_assemble(target=workbench_01, duration_min=60)",
+		"WorkAtWorkbench(target_object_id=workbench_01, duration_sec=3600)",
 		"tactical", "14:00-18:00", "14:00-18:00 工作组装",
 		"zone rest_area→main_workshop",
 	} {
@@ -90,6 +90,27 @@ func TestBuildReactivePrompt_EmptyTriggerDetail(t *testing.T) {
 	}
 }
 
+// TestBuildReactivePrompt_PhysicalAlertHardRule 验证 prompt 明确禁止
+// 物理告警时输出 continue/observe（Fix C 的 prompt 强化部分）。
+func TestBuildReactivePrompt_PhysicalAlertHardRule(t *testing.T) {
+	in := ReactiveInput{
+		AgentID:   "H-01",
+		TimeOfDay: "14:30",
+		Zone:      "main_workshop",
+		Energy:    45,
+		Fatigue:   70,
+		Health:    90,
+		Trigger:   TriggerPeriodic,
+	}
+	prompt := buildReactivePrompt(in)
+	if !strings.Contains(prompt, "必须输出 replan") {
+		t.Errorf("prompt should contain hard rule for physical alert, got:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "禁止输出 continue/observe") {
+		t.Errorf("prompt should explicitly forbid continue/observe under alert, got:\n%s", prompt)
+	}
+}
+
 // TestParseReactiveDecision_Continue verifies a clean continue decision.
 func TestParseReactiveDecision_Continue(t *testing.T) {
 	raw := `{"reaction":"continue","reason":"无需打断"}`
@@ -99,50 +120,6 @@ func TestParseReactiveDecision_Continue(t *testing.T) {
 	}
 	if dec.Reason != "无需打断" {
 		t.Errorf("reason: got %q, want 无需打断", dec.Reason)
-	}
-	if dec.Action != nil {
-		t.Errorf("action should be nil for continue, got %+v", dec.Action)
-	}
-}
-
-// TestParseReactiveDecision_ActValid verifies act with valid cmd + params.
-func TestParseReactiveDecision_ActValid(t *testing.T) {
-	raw := `{"reaction":"act","reason":"紧急避让","action":{"cmd":"move_to","params":{"target":"rest_area"}}}`
-	dec := parseReactiveDecision(raw)
-	if dec.Reaction != ReactionAct {
-		t.Errorf("reaction: got %q, want act", dec.Reaction)
-	}
-	if dec.Action == nil || dec.Action.Cmd != "move_to" {
-		t.Errorf("action: got %+v, want move_to", dec.Action)
-	}
-	if dec.Action.Params["target"] != "rest_area" {
-		t.Errorf("params.target: got %v, want rest_area", dec.Action.Params["target"])
-	}
-}
-
-// TestParseReactiveDecision_ActMissingAction verifies that act without
-// action field downgrades to interrupt.
-func TestParseReactiveDecision_ActMissingAction(t *testing.T) {
-	raw := `{"reaction":"act","reason":"想打断"}`
-	dec := parseReactiveDecision(raw)
-	if dec.Reaction != ReactionInterrupt {
-		t.Errorf("reaction: got %q, want interrupt (downgrade)", dec.Reaction)
-	}
-	if !strings.Contains(dec.Reason, "act_downgrade") {
-		t.Errorf("reason should mention downgrade: %q", dec.Reason)
-	}
-	if dec.Action != nil {
-		t.Errorf("action should be nil after downgrade")
-	}
-}
-
-// TestParseReactiveDecision_ActInvalidCmd verifies that act with unknown
-// cmd downgrades to interrupt.
-func TestParseReactiveDecision_ActInvalidCmd(t *testing.T) {
-	raw := `{"reaction":"act","reason":"x","action":{"cmd":"fly","params":{}}}`
-	dec := parseReactiveDecision(raw)
-	if dec.Reaction != ReactionInterrupt {
-		t.Errorf("reaction: got %q, want interrupt (invalid cmd downgrade)", dec.Reaction)
 	}
 }
 
@@ -181,10 +158,6 @@ func TestParseReactiveDecision_Replan(t *testing.T) {
 	if dec.Reason != "fatigue=75 已突破警戒带，当前装配任务不合理" {
 		t.Errorf("reason: got %q", dec.Reason)
 	}
-	// replan 不应携带 action 字段
-	if dec.Action != nil {
-		t.Errorf("replan should not carry action, got: %+v", dec.Action)
-	}
 }
 
 func TestBuildReactivePrompt_ReplanOption(t *testing.T) {
@@ -193,7 +166,7 @@ func TestBuildReactivePrompt_ReplanOption(t *testing.T) {
 		TimeOfDay:    "14:00",
 		Zone:         "main_workshop",
 		Energy:       80, Fatigue: 75, Health: 90,
-		CurrentAction: "work_assemble(target=workbench_01)",
+		CurrentAction: "WorkAtWorkbench(target_object_id=workbench_01)",
 		ActionSrc:     "tactical",
 		CurrentSlot:   "13:00-17:00",
 		DailyPlan:     "13:00-17:00 下午装配",
@@ -207,7 +180,7 @@ func TestBuildReactivePrompt_ReplanOption(t *testing.T) {
 	if !strings.Contains(prompt, "30 分钟内至多触发 1 次") {
 		t.Errorf("prompt should mention replan frequency limit, got: %s", prompt)
 	}
-	if !strings.Contains(prompt, "continue|observe|interrupt|act|replan") {
+	if !strings.Contains(prompt, "continue|observe|replan") {
 		t.Errorf("prompt JSON schema should include replan, got: %s", prompt)
 	}
 }
@@ -215,10 +188,10 @@ func TestBuildReactivePrompt_ReplanOption(t *testing.T) {
 // TestParseReactiveDecision_CodeFence verifies that ```json ... ``` wrapped
 // output is correctly extracted.
 func TestParseReactiveDecision_CodeFence(t *testing.T) {
-	raw := "```json\n{\"reaction\":\"interrupt\",\"reason\":\"体力过低\"}\n```"
+	raw := "```json\n{\"reaction\":\"replan\",\"reason\":\"体力过低\"}\n```"
 	dec := parseReactiveDecision(raw)
-	if dec.Reaction != ReactionInterrupt {
-		t.Errorf("reaction: got %q, want interrupt", dec.Reaction)
+	if dec.Reaction != ReactionReplan {
+		t.Errorf("reaction: got %q, want replan", dec.Reaction)
 	}
 	if dec.Reason != "体力过低" {
 		t.Errorf("reason: got %q, want 体力过低", dec.Reason)
@@ -233,14 +206,29 @@ func TestParseReactiveDecision_AllEnums(t *testing.T) {
 	}{
 		{`{"reaction":"continue"}`, ReactionContinue},
 		{`{"reaction":"observe"}`, ReactionObserve},
-		{`{"reaction":"interrupt"}`, ReactionInterrupt},
-		{`{"reaction":"act","action":{"cmd":"wait","params":{"duration_sec":5}}}`, ReactionAct},
 		{`{"reaction":"replan","reason":"fatigue 过高"}`, ReactionReplan},
 	}
 	for _, c := range cases {
 		dec := parseReactiveDecision(c.raw)
 		if dec.Reaction != c.want {
 			t.Errorf("raw %q: reaction got %q, want %q", c.raw, dec.Reaction, c.want)
+		}
+	}
+}
+
+// TestParseReactiveDecision_LegacyEnumsDowngrade verifies that removed enums
+// (interrupt/act) are downgraded to continue rather than causing errors.
+func TestParseReactiveDecision_LegacyEnumsDowngrade(t *testing.T) {
+	for _, raw := range []string{
+		`{"reaction":"interrupt","reason":"旧版本输出"}`,
+		`{"reaction":"act","reason":"旧版本输出"}`,
+	} {
+		dec := parseReactiveDecision(raw)
+		if dec.Reaction != ReactionContinue {
+			t.Errorf("legacy enum %q: got %q, want continue (downgrade)", raw, dec.Reaction)
+		}
+		if !strings.Contains(dec.Reason, "unknown_reaction") {
+			t.Errorf("reason should mention unknown_reaction: %q", dec.Reason)
 		}
 	}
 }
@@ -385,11 +373,11 @@ func TestDescribeAction(t *testing.T) {
 		want   string
 	}{
 		{"empty cmd", "", nil, ""},
-		{"no params", "wait", nil, "wait"},
-		{"empty params map", "move_to", map[string]any{}, "move_to"},
-		{"target", "move_to", map[string]any{"target": "workbench_01"}, "move_to(target=workbench_01)"},
-		{"multiple keys", "work_assemble", map[string]any{"target": "workbench_01", "duration_min": 60}, "work_assemble(target=workbench_01, duration_min=60)"},
-		{"irrelevant keys ignored", "speak", map[string]any{"foo": "bar", "content": "hello"}, "speak(content=hello)"},
+		{"no params", protocol.CmdWait, nil, protocol.CmdWait},
+		{"empty params map", protocol.CmdMoveToLocation, map[string]any{}, protocol.CmdMoveToLocation},
+		{"target", protocol.CmdMoveToLocation, map[string]any{"target": "workbench_01"}, "MoveToLocation(target=workbench_01)"},
+		{"multiple keys", protocol.CmdWorkAtWorkbench, map[string]any{"target_object_id": "workbench_01", "duration_sec": 3600}, "WorkAtWorkbench(target_object_id=workbench_01, duration_sec=3600)"},
+		{"irrelevant keys ignored", protocol.CmdSpeak, map[string]any{"foo": "bar", "content": "hello"}, "Speak(content=hello)"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -507,60 +495,6 @@ func TestReactiveRunner_EmptyTriggerNoOp(t *testing.T) {
 	r.trigger("H-01", ac, "", "detail")
 }
 
-// TestMapReactionAction verifies reaction action maps to protocol cmd via tactical mapper.
-func TestMapReactionAction(t *testing.T) {
-	kb := loadTestKB(t)
-	cases := []struct {
-		name    string
-		ra      ReactionAction
-		wantCmd string
-		wantErr bool
-	}{
-		{
-			name:    "move_to valid",
-			ra:      ReactionAction{Cmd: "move_to", Params: map[string]any{"target": "workbench_01"}},
-			wantCmd: protocol.CmdMoveTo,
-		},
-		{
-			name:    "wait valid",
-			ra:      ReactionAction{Cmd: "wait", Params: map[string]any{"duration_sec": 30}},
-			wantCmd: protocol.CmdWait,
-		},
-		{
-			name:    "speak valid",
-			ra:      ReactionAction{Cmd: "speak", Params: map[string]any{"content": "hello"}},
-			wantCmd: protocol.CmdSpeak,
-		},
-		{
-			name:    "move_to unknown target",
-			ra:      ReactionAction{Cmd: "move_to", Params: map[string]any{"target": "nonexistent"}},
-			wantErr: true,
-		},
-		{
-			name:    "unknown cmd",
-			ra:      ReactionAction{Cmd: "fly_to", Params: map[string]any{}},
-			wantErr: true,
-		},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			cmd, _, err := mapReactionAction(c.ra, kb)
-			if c.wantErr {
-				if err == nil {
-					t.Fatal("expected error, got nil")
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if cmd != c.wantCmd {
-				t.Errorf("cmd: got %q, want %q", cmd, c.wantCmd)
-			}
-		})
-	}
-}
-
 // TestReactiveRunner_BuildInput verifies buildInput reads agentContext state correctly.
 func TestReactiveRunner_BuildInput(t *testing.T) {
 	r := &reactiveRunner{}
@@ -570,8 +504,8 @@ func TestReactiveRunner_BuildInput(t *testing.T) {
 	ac.latestPerception = mustMarshalPerception(t, zone, "14:30")
 	ac.latestPhysical = &protocol.PhysicalState{Energy: 18, Fatigue: 85, Health: 75, JointWear: 20}
 	ac.currentActionID = "act_001"
-	ac.currentActionCmd = "work_assemble"
-	ac.currentActionParams = map[string]any{"target": "workbench_01", "duration_min": 60}
+	ac.currentActionCmd = protocol.CmdWorkAtWorkbench
+	ac.currentActionParams = map[string]any{"target_object_id": "workbench_01", "duration_sec": 3600}
 	ac.mu.Unlock()
 
 	in := r.buildInput("H-01", ac, TriggerPhysicalAlert, "energy 22→18")
@@ -594,7 +528,7 @@ func TestReactiveRunner_BuildInput(t *testing.T) {
 		t.Errorf("Health: got %v, want 75", in.Health)
 	}
 	// CurrentAction 现在是可读描述（cmd + 关键 params），不再是 actionID
-	if in.CurrentAction != "work_assemble(target=workbench_01, duration_min=60)" {
+	if in.CurrentAction != "WorkAtWorkbench(target_object_id=workbench_01, duration_sec=3600)" {
 		t.Errorf("CurrentAction: got %q, want readable description", in.CurrentAction)
 	}
 	if in.Trigger != TriggerPhysicalAlert {
@@ -637,3 +571,9 @@ func mustMarshalPerception(t *testing.T, zone, tod string) json.RawMessage {
 	}
 	return b
 }
+
+// ─── 动态 cmd 派生（Phase 2） ────────────────────────────────
+//
+// 反应层现已移除 act/interrupt，仅保留 continue/observe/replan。
+// isValidReactionCmd / buildReactiveCmdList / mapReactionAction 及相关测试
+// 已随之移除。

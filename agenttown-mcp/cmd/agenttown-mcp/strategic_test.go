@@ -3,21 +3,24 @@ package main
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"strings"
 	"testing"
 
 	"github.com/AgentTown/agenttown-mcp/pkg/hermes"
-	"log/slog"
+	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
 )
 
 // fakeStrategicCaller 实现 strategicCaller 接口，用于单测。
 type fakeStrategicCaller struct {
-	resp        *hermes.Response
-	err         error
-	resetCalled bool
+	resp          *hermes.Response
+	err           error
+	capturedInput string
+	resetCalled   bool
 }
 
-func (f *fakeStrategicCaller) SendWithSummary(_ context.Context, _, _ string) (*hermes.Response, error) {
+func (f *fakeStrategicCaller) SendWithSummary(_ context.Context, input, _ string) (*hermes.Response, error) {
+	f.capturedInput = input
 	return f.resp, f.err
 }
 
@@ -130,7 +133,7 @@ func TestFormatDailyPlan_MultipleItems(t *testing.T) {
 
 func TestGenerateDailyPlan_HTTPError(t *testing.T) {
 	sc := &fakeStrategicCaller{err: errors.New("network down")}
-	plan := generateDailyPlan(context.Background(), sc, "H-01", slog.Default())
+	plan := generateDailyPlan(context.Background(), sc, "H-01", nil, slog.Default())
 	// HTTP 错误现在回退到 defaultDailyPlan 而不是空字符串，
 	// 保证战术层有目标可分解、仿真不瘫痪。
 	if plan != defaultDailyPlan {
@@ -144,7 +147,7 @@ func TestGenerateDailyPlan_HTTPError(t *testing.T) {
 func TestGenerateDailyPlan_ValidResponse(t *testing.T) {
 	raw := `[{"time":"06:00-07:00","goal":"起床晨检"},{"time":"07:00-12:00","goal":"车间装配"}]`
 	sc := &fakeStrategicCaller{resp: makeStrategicResponse(raw)}
-	plan := generateDailyPlan(context.Background(), sc, "H-01", slog.Default())
+	plan := generateDailyPlan(context.Background(), sc, "H-01", nil, slog.Default())
 	if plan == "" {
 		t.Fatal("got empty plan, want non-empty")
 	}
@@ -158,11 +161,220 @@ func TestGenerateDailyPlan_ValidResponse(t *testing.T) {
 
 func TestGenerateDailyPlan_ParseFail(t *testing.T) {
 	sc := &fakeStrategicCaller{resp: makeStrategicResponse("今天天气不错，我打算去车间转转。")}
-	plan := generateDailyPlan(context.Background(), sc, "H-01", slog.Default())
+	plan := generateDailyPlan(context.Background(), sc, "H-01", nil, slog.Default())
 	// 解析失败现在回退到 defaultDailyPlan 而不是空字符串，
 	// 避免整天 Wait(60s) 瘫痪。
 	if plan != defaultDailyPlan {
 		t.Errorf("got %q, want defaultDailyPlan on parse failure", plan)
+	}
+}
+
+// ─── buildStrategicContext ───────────────────────────────────
+
+func TestBuildStrategicContext_WithKB(t *testing.T) {
+	kb := loadTestKB(t)
+	got := buildStrategicContext(kb, "H-01")
+	if got == "" {
+		t.Fatal("got empty context, want non-empty for valid KB")
+	}
+	// 角色段：包含 agent 显示名和职业
+	if !strings.Contains(got, "老陈") {
+		t.Errorf("context missing agent display name '老陈': %q", got)
+	}
+	if !strings.Contains(got, "车间主管") {
+		t.Errorf("context missing agent profession '车间主管': %q", got)
+	}
+	if !strings.Contains(got, "【你的角色】") {
+		t.Errorf("context missing '【你的角色】' header: %q", got)
+	}
+	// 世界知识段：包含 zone id 和 object id
+	if !strings.Contains(got, "main_workshop") {
+		t.Errorf("context missing zone id 'main_workshop': %q", got)
+	}
+	if !strings.Contains(got, "workbench_01") {
+		t.Errorf("context missing object id 'workbench_01': %q", got)
+	}
+	if !strings.Contains(got, "【世界知识】") {
+		t.Errorf("context missing '【世界知识】' header: %q", got)
+	}
+}
+
+func TestBuildStrategicContext_NilKB(t *testing.T) {
+	// kb == nil 时降级返回空串，不 panic、不阻断 prompt 构造。
+	got := buildStrategicContext(nil, "H-01")
+	if got != "" {
+		t.Errorf("got %q, want empty string for nil KB", got)
+	}
+}
+
+func TestBuildStrategicContext_AgentNotFound(t *testing.T) {
+	// KB 存在但 agentID 不在 KB 中：跳过角色段，仍注入世界知识段。
+	kb := loadTestKB(t)
+	got := buildStrategicContext(kb, "NONEXISTENT-99")
+	if strings.Contains(got, "【你的角色】") {
+		t.Errorf("should not include persona section for unknown agent: %q", got)
+	}
+	if !strings.Contains(got, "【世界知识】") {
+		t.Errorf("should still include world KB section even if agent unknown: %q", got)
+	}
+}
+
+// ─── generateDailyPlan KB injection ──────────────────────────
+
+func TestGenerateDailyPlan_KBInjectedIntoPrompt(t *testing.T) {
+	// 验证 generateDailyPlan 把 KB 内容注入 prompt：用 fake caller 捕获
+	// input，检查包含 agent 显示名和 zone id（证明 KB 上下文已进入 prompt）。
+	kb := loadTestKB(t)
+	raw := `[{"time":"06:00-07:00","goal":"起床晨检"}]`
+	sc := &fakeStrategicCaller{resp: makeStrategicResponse(raw)}
+	_ = generateDailyPlan(context.Background(), sc, "H-01", kb, slog.Default())
+	prompt := sc.capturedInput
+	if prompt == "" {
+		t.Fatal("captured prompt is empty")
+	}
+	if !strings.Contains(prompt, "老陈") {
+		t.Errorf("prompt missing agent display name '老陈': %q", prompt)
+	}
+	if !strings.Contains(prompt, "main_workshop") {
+		t.Errorf("prompt missing zone id 'main_workshop': %q", prompt)
+	}
+	if !strings.Contains(prompt, "【你的角色】") {
+		t.Errorf("prompt missing '【你的角色】' section header: %q", prompt)
+	}
+}
+
+// ─── buildDefaultDailyPlan ───────────────────────────────────
+
+func TestBuildDefaultDailyPlan_NilKB(t *testing.T) {
+	// kb == nil 返回 defaultDailyPlan 常量（中性表述，无 KB 专属词）。
+	got := buildDefaultDailyPlan(nil)
+	if got != defaultDailyPlan {
+		t.Errorf("got %q, want defaultDailyPlan %q", got, defaultDailyPlan)
+	}
+	// 中性表述不应包含旧 KB 专属词
+	for _, w := range []string{"车间", "装配", "充电"} {
+		if strings.Contains(got, w) {
+			t.Errorf("nil-KB fallback should not contain KB-specific word %q: %q", w, got)
+		}
+	}
+}
+
+func TestBuildDefaultDailyPlan_WithKB(t *testing.T) {
+	// 有 KB 时：兜底计划应包含第一个 zone 显示名 + 第一个 object 显示名。
+	kb := loadTestKB(t)
+	got := buildDefaultDailyPlan(kb)
+	// 第一个 zone 是 archive_station（显示名"档案馆与广播站"）
+	if !strings.Contains(got, "档案馆与广播站") {
+		t.Errorf("KB-derived plan should contain first zone display name: %q", got)
+	}
+	// 第一个 object 是 charging_station_01（显示名"综合充能站一号"）
+	if !strings.Contains(got, "综合充能站一号") {
+		t.Errorf("KB-derived plan should contain first object display name: %q", got)
+	}
+	// 时段格式可被 parseFormattedPlan 解析
+	items := parseFormattedPlan(got)
+	if len(items) != 4 {
+		t.Errorf("got %d plan items, want 4", len(items))
+	}
+}
+
+// ─── normalizeDailyPlan ─────────────────────────────────────
+
+func TestNormalizeDailyPlan_DropsShortSlots(t *testing.T) {
+	items := []dailyPlanItem{
+		{Time: "06:00-06:30", Goal: "短时段"}, // 30min, 应被丢弃
+		{Time: "06:30-12:00", Goal: "上午工作"},
+		{Time: "12:00-22:00", Goal: "下午到晚上"},
+	}
+	got := normalizeDailyPlan(items)
+	if len(got) != 2 {
+		t.Fatalf("got %d items, want 2 (short slot dropped)", len(got))
+	}
+	for _, it := range got {
+		if it.Goal == "短时段" {
+			t.Errorf("short slot should have been dropped: %+v", got)
+		}
+	}
+}
+
+func TestNormalizeDailyPlan_FillsGap(t *testing.T) {
+	items := []dailyPlanItem{
+		{Time: "06:00-10:00", Goal: "上午"},
+		{Time: "14:00-22:00", Goal: "下午"}, // 10:00-14:00 是空白
+	}
+	got := normalizeDailyPlan(items)
+	if len(got) != 2 {
+		t.Fatalf("got %d items, want 2", len(got))
+	}
+	if got[0].Time != "06:00-14:00" {
+		t.Errorf("first slot should be extended to fill gap: got %q, want 06:00-14:00", got[0].Time)
+	}
+	if got[1].Time != "14:00-22:00" {
+		t.Errorf("second slot unchanged: got %q", got[1].Time)
+	}
+}
+
+func TestNormalizeDailyPlan_ExtendsFirstSlot(t *testing.T) {
+	items := []dailyPlanItem{
+		{Time: "07:00-12:00", Goal: "上午"}, // 06:00-07:00 空白
+		{Time: "12:00-22:00", Goal: "下午"},
+	}
+	got := normalizeDailyPlan(items)
+	if got[0].Time != "06:00-12:00" {
+		t.Errorf("first slot should start at 06:00: got %q, want 06:00-12:00", got[0].Time)
+	}
+}
+
+func TestNormalizeDailyPlan_ExtendsLastSlot(t *testing.T) {
+	items := []dailyPlanItem{
+		{Time: "06:00-12:00", Goal: "上午"},
+		{Time: "12:00-18:00", Goal: "下午"}, // 18:00-22:00 空白
+	}
+	got := normalizeDailyPlan(items)
+	if got[len(got)-1].Time != "12:00-22:00" {
+		t.Errorf("last slot should end at 22:00: got %q, want 12:00-22:00", got[len(got)-1].Time)
+	}
+}
+
+func TestNormalizeDailyPlan_AllDropped(t *testing.T) {
+	items := []dailyPlanItem{
+		{Time: "06:00-06:30", Goal: "短1"},
+		{Time: "07:00-07:15", Goal: "短2"},
+	}
+	got := normalizeDailyPlan(items)
+	if got != nil {
+		t.Errorf("all slots dropped should return nil, got %+v", got)
+	}
+}
+
+func TestNormalizeDailyPlan_AlreadyValid(t *testing.T) {
+	items := []dailyPlanItem{
+		{Time: "06:00-12:00", Goal: "上午"},
+		{Time: "12:00-22:00", Goal: "下午"},
+	}
+	got := normalizeDailyPlan(items)
+	if len(got) != 2 {
+		t.Fatalf("got %d items, want 2", len(got))
+	}
+	if got[0].Time != "06:00-12:00" || got[1].Time != "12:00-22:00" {
+		t.Errorf("already-valid plan should be unchanged: got %+v", got)
+	}
+}
+
+func TestFmtMinute(t *testing.T) {
+	cases := []struct {
+		min  int
+		want string
+	}{
+		{0, "00:00"},
+		{360, "06:00"},
+		{1320, "22:00"},
+		{901, "15:01"},
+	}
+	for _, c := range cases {
+		if got := fmtMinute(c.min); got != c.want {
+			t.Errorf("fmtMinute(%d) = %q, want %q", c.min, got, c.want)
+		}
 	}
 }
 
@@ -267,5 +479,64 @@ func TestSelectPlanInjection_OvernightSlotEarlyMorning(t *testing.T) {
 	}
 	if !strings.HasPrefix(inj, "[今日计划]") {
 		t.Errorf("first decision should inject full plan, got %q", inj)
+	}
+}
+
+// ─── buildStrategicZoneObjectMap ─────────────────────────────
+
+func TestBuildStrategicZoneObjectMap_RealKB(t *testing.T) {
+	// 真实 KB：7 个 zone，3 个 object（分别在 central_plaza/residential_quarters/
+	// main_workshop）。映射应列出全部 7 个 zone，有 object 的标注 object，
+	// 无 object 的显式标注"无可交互物体"。
+	kb := loadTestKB(t)
+	got := buildStrategicZoneObjectMap(kb)
+	if got == "" {
+		t.Fatal("got empty map for valid KB")
+	}
+	// 有 object 的 zone 应出现其 object id。
+	if !strings.Contains(got, "charging_station_01") {
+		t.Errorf("map should list charging_station_01 under central_plaza: %q", got)
+	}
+	if !strings.Contains(got, "workbench_01") {
+		t.Errorf("map should list workbench_01 under main_workshop: %q", got)
+	}
+	if !strings.Contains(got, "rest_bench_01") {
+		t.Errorf("map should list rest_bench_01 under residential_quarters: %q", got)
+	}
+	// 无 object 的 zone 应显式标注（让战略层 LLM 知道这些 zone 不能做 interact）。
+	if !strings.Contains(got, "无可交互物体") {
+		t.Errorf("map should explicitly mark empty zones: %q", got)
+	}
+	// archive_station 在真实 KB 中无 object，应被标注为空。
+	if !strings.Contains(got, "archive_station") {
+		t.Errorf("map should list archive_station: %q", got)
+	}
+}
+
+func TestBuildStrategicZoneObjectMap_NilKB(t *testing.T) {
+	got := buildStrategicZoneObjectMap(nil)
+	if got != "" {
+		t.Errorf("nil KB should return empty map, got %q", got)
+	}
+}
+
+func TestBuildStrategicZoneObjectMap_EmptyZones(t *testing.T) {
+	// KB 无 zone 时返回空串（降级路径）。
+	kb := &worldkb.KB{}
+	got := buildStrategicZoneObjectMap(kb)
+	if got != "" {
+		t.Errorf("KB with no zones should return empty map, got %q", got)
+	}
+}
+
+func TestBuildStrategicContext_ContainsZoneObjectMap(t *testing.T) {
+	// buildStrategicContext 应包含【区域设施映射】段，让战略层 LLM 看到映射。
+	kb := loadTestKB(t)
+	got := buildStrategicContext(kb, "H-01")
+	if !strings.Contains(got, "【区域设施映射】") {
+		t.Errorf("context missing '【区域设施映射】' header: %q", got)
+	}
+	if !strings.Contains(got, "无可交互物体") {
+		t.Errorf("context should mark empty zones in map: %q", got)
 	}
 }

@@ -256,14 +256,24 @@
     <div class="field">
       <label for="cmd">cmd <span class="req">*</span></label>
       <select id="cmd" onchange="onCmdChange()">
-        <option value="move_to">move_to — 移动到目标位置</option>
-        <option value="speak">speak — 说话</option>
-        <option value="interact">interact — 与智能物体交互</option>
-        <option value="wait">wait — 原地等待</option>
-        <option value="charge_at">charge_at — 充电（复合）</option>
-        <option value="work_assemble">work_assemble — 工作台装配（复合）</option>
-        <option value="archive_research">archive_research — 档案研究（复合）</option>
-        <option value="rest_idle">rest_idle — 休息（复合）</option>
+        <optgroup label="原子 cmd（8）">
+          <option value="move_to_location">move_to_location — 移动到目标位置</option>
+          <option value="move_to_agent">move_to_agent — 跟随目标 agent</option>
+          <option value="turn_to">turn_to — 转向目标</option>
+          <option value="play_montage">play_montage — 播放蒙太奇</option>
+          <option value="speak">speak — 说话</option>
+          <option value="emote">emote — 表达情绪</option>
+          <option value="interact">interact — 与智能物体交互</option>
+          <option value="wait">wait — 原地等待</option>
+        </optgroup>
+        <optgroup label="复合 cmd（6）">
+          <option value="work_at_workbench">work_at_workbench — 工作台装配</option>
+          <option value="work_at_workshop">work_at_workshop — 车间例行工作</option>
+          <option value="chat_with">chat_with — 与其他 agent 聊天</option>
+          <option value="repair_target">repair_target — 修理目标</option>
+          <option value="charge_at_station">charge_at_station — 充电</option>
+          <option value="patrol_zone">patrol_zone — 巡逻区域</option>
+        </optgroup>
       </select>
     </div>
 
@@ -385,7 +395,7 @@ async function loadKB() {
 
 // ─── 动态 params 表单 ─────────────────────────────────────
 const CMD_PARAM_SPECS = {
-  move_to: [
+  move_to_location: [
     // 模式切换：target id（走 kb 解析） / 直接坐标（UE5 cm）
     { name: '__move_mode', label: '输入模式', type: 'select-move-mode', required: false,
       hint: 'target id 由 MCP 解析坐标；坐标模式直接传 [x,y,z] UE5 cm' },
@@ -400,41 +410,87 @@ const CMD_PARAM_SPECS = {
       hint: 'UE5 厘米（Y 轴）', modeVisibility: 'coord' },
     { name: 'dest_z', label: 'dest.z', type: 'number', required: true, default: 0,
       hint: 'UE5 厘米（Z 轴）', modeVisibility: 'coord' },
+    { name: 'speed', label: 'speed', type: 'select-speed', required: false, default: 'walk',
+      hint: '移动速度档位：walk / run' },
+  ],
+  move_to_agent: [
+    { name: 'target_agent_id', label: 'target_agent_id', type: 'text', required: true, default: 'H-02',
+      hint: '要跟随的目标 agent id' },
+    { name: 'speed', label: 'speed', type: 'select-speed', required: false, default: 'walk',
+      hint: '移动速度档位：walk / run' },
+    { name: 'stop_distance', label: 'stop_distance', type: 'number', required: false, default: 150,
+      hint: '停止距离（UE5 厘米）' },
+    { name: 'keep_following', label: 'keep_following', type: 'select-bool', required: false, default: false,
+      hint: 'true=持续跟随；false=到达后停止' },
+  ],
+  turn_to: [
+    { name: 'target_agent_id', label: 'target_agent_id', type: 'text', required: false, default: '',
+      hint: '要转向的目标 agent id（与 direction 二选一）' },
+    { name: 'direction', label: 'direction', type: 'text', required: false, default: '',
+      hint: '方向向量 [dx,dy,dz]（与 target_agent_id 二选一）' },
+  ],
+  play_montage: [
+    { name: 'montage_id', label: 'montage_id', type: 'text', required: true, default: 'wave',
+      hint: '蒙太奇动画 id' },
+    { name: 'wait_finish', label: 'wait_finish', type: 'select-bool', required: false, default: true,
+      hint: '是否等待动画播放完成' },
   ],
   speak: [
     { name: 'content', label: 'content', type: 'text', required: true, hint: '说话内容' },
-    { name: 'target', label: 'target', type: 'text', required: false, default: '',
+    { name: 'target_agent_id', label: 'target_agent_id', type: 'text', required: false, default: '',
       hint: '目标 agent_id，空串=自言自语' },
+    { name: 'audio_url', label: 'audio_url', type: 'text', required: false, default: '',
+      hint: '可选音频 URL' },
+  ],
+  emote: [
+    { name: 'emotion', label: 'emotion', type: 'text', required: true, default: 'happy',
+      hint: '情绪类型（happy / sad / angry / ...）' },
+    { name: 'mode', label: 'mode', type: 'select-emote-mode', required: false, default: 'oneshot',
+      hint: 'oneshot=单次；sustained=持续' },
   ],
   interact: [
-    { name: 'object_id', label: 'object_id', type: 'select-kb-object', required: true,
+    { name: 'target_object_id', label: 'target_object_id', type: 'select-kb-object', required: true,
       hint: '智能物体 id' },
-    { name: 'action', label: 'action', type: 'select-object-action', required: true,
-      hint: '动作词（选项随 object_id 变化）' },
+    { name: 'interaction', label: 'interaction', type: 'select-object-interaction', required: true,
+      hint: '交互动作（选项随 target_object_id 变化）' },
   ],
   wait: [
     { name: 'duration_sec', label: 'duration_sec', type: 'number', required: true, default: 30,
       hint: '等待秒数' },
   ],
-  charge_at: [
-    { name: 'station_id', label: 'station_id', type: 'select-kb-object', required: true,
-      hint: '充电桩 id', filterActions: ['charge'] },
-    { name: 'duration_min', label: 'duration_min', type: 'number', required: true, default: 30,
-      hint: '充电分钟数' },
+  work_at_workbench: [
+    { name: 'target_object_id', label: 'target_object_id', type: 'select-kb-object', required: true,
+      hint: '工作台 id', filterInteractions: ['assemble'] },
+    { name: 'duration_sec', label: 'duration_sec', type: 'number', required: false, default: 3600,
+      hint: '装配秒数（可选）' },
   ],
-  work_assemble: [
-    { name: 'target', label: 'target', type: 'select-kb-object', required: true,
-      hint: '工作台 id', filterActions: ['assemble'] },
-    { name: 'duration_min', label: 'duration_min', type: 'number', required: true, default: 60,
-      hint: '装配分钟数' },
+  work_at_workshop: [
+    { name: 'duration_sec', label: 'duration_sec', type: 'number', required: false, default: 3600,
+      hint: '车间工作秒数（可选）' },
   ],
-  archive_research: [
-    { name: 'duration_min', label: 'duration_min', type: 'number', required: true, default: 15,
-      hint: '档案研究分钟数' },
+  chat_with: [
+    { name: 'target_agent_id', label: 'target_agent_id', type: 'text', required: true, default: 'H-02',
+      hint: '聊天目标 agent id' },
+    { name: 'topic', label: 'topic', type: 'text', required: false, default: '',
+      hint: '聊天话题（可选）' },
   ],
-  rest_idle: [
-    { name: 'duration_min', label: 'duration_min', type: 'number', required: true, default: 10,
-      hint: '休息分钟数' },
+  repair_target: [
+    { name: 'target_agent_id', label: 'target_agent_id', type: 'text', required: true, default: 'H-02',
+      hint: '要修理的目标 agent id' },
+    { name: 'tool_id', label: 'tool_id', type: 'text', required: false, default: '',
+      hint: '工具 id（可选）' },
+  ],
+  charge_at_station: [
+    { name: 'target_object_id', label: 'target_object_id', type: 'select-kb-object', required: false,
+      hint: '充电桩 id（可空，自动选最近）', filterInteractions: ['charge'] },
+    { name: 'duration_sec', label: 'duration_sec', type: 'number', required: false, default: 1800,
+      hint: '充电秒数（可选）' },
+  ],
+  patrol_zone: [
+    { name: 'target_zone', label: 'target_zone', type: 'select-kb-zone', required: true,
+      hint: '巡逻区域 id' },
+    { name: 'duration_sec', label: 'duration_sec', type: 'number', required: false, default: 1800,
+      hint: '巡逻秒数（可选）' },
   ],
 };
 
@@ -457,7 +513,7 @@ function onCmdChange() {
     // 会命中 div（父元素先于 input 出现）而非 input/select，导致 .value 为 undefined。
     // data-field-name 只设在 input/select 上；div 用 data-mode-visibility 控制可见性。
 
-    // 模式可见性：move_to 的 target / dest_x/y/z 字段根据模式切换显示
+    // 模式可见性：move_to_location 的 target / dest_x/y/z 字段根据模式切换显示
     if (field.modeVisibility) {
       div.dataset.modeVisibility = field.modeVisibility;
       // 默认 coord 模式 → target_id 字段初始隐藏
@@ -475,7 +531,7 @@ function onCmdChange() {
         input = document.createElement('select');
         input.id = `param-${field.name}`;
         input.dataset.fieldName = field.name;
-        input.dataset.modeGroup = 'move_to';
+        input.dataset.modeGroup = 'move_to_location';
         [
           { v: 'target_id', t: 'target id（kb 解析）' },
           { v: 'coord', t: '直接坐标（UE5 cm）' },
@@ -488,6 +544,49 @@ function onCmdChange() {
         input.onchange = () => { toggleMoveModeVisibility(input.value); updateCurlPreview(); };
         // 标记为模式控制器，collectRequest 时跳过
         input.dataset.isModeController = '1';
+        break;
+
+      case 'select-speed':
+        input = document.createElement('select');
+        input.id = `param-${field.name}`;
+        input.dataset.fieldName = field.name;
+        ['walk', 'run'].forEach(v => {
+          const opt = document.createElement('option');
+          opt.value = v; opt.textContent = v;
+          input.appendChild(opt);
+        });
+        input.value = field.default || 'walk';
+        input.onchange = updateCurlPreview;
+        break;
+
+      case 'select-bool':
+        input = document.createElement('select');
+        input.id = `param-${field.name}`;
+        input.dataset.fieldName = field.name;
+        input.dataset.boolField = '1';
+        [
+          { v: 'true', t: 'true' },
+          { v: 'false', t: 'false' },
+        ].forEach(o => {
+          const opt = document.createElement('option');
+          opt.value = o.v; opt.textContent = o.t;
+          input.appendChild(opt);
+        });
+        input.value = String(field.default != null ? field.default : false);
+        input.onchange = updateCurlPreview;
+        break;
+
+      case 'select-emote-mode':
+        input = document.createElement('select');
+        input.id = `param-${field.name}`;
+        input.dataset.fieldName = field.name;
+        ['oneshot', 'sustained'].forEach(v => {
+          const opt = document.createElement('option');
+          opt.value = v; opt.textContent = v;
+          input.appendChild(opt);
+        });
+        input.value = field.default || 'oneshot';
+        input.onchange = updateCurlPreview;
         break;
 
       case 'select-kb-target':
@@ -519,24 +618,36 @@ function onCmdChange() {
         }
         break;
 
+      case 'select-kb-zone':
+        input = document.createElement('select');
+        input.id = `param-${field.name}`;
+        input.dataset.fieldName = field.name;
+        (kbData.zones || []).forEach(z => {
+          const opt = document.createElement('option');
+          opt.value = z.id; opt.textContent = `${z.id} — ${z.display_name}`;
+          input.appendChild(opt);
+        });
+        input.onchange = updateCurlPreview;
+        break;
+
       case 'select-kb-object':
         input = document.createElement('select');
         input.id = `param-${field.name}`;
         input.dataset.fieldName = field.name;
-        input.onchange = () => { updateObjectActionOptions(); updateCurlPreview(); };
+        input.onchange = () => { updateObjectInteractionOptions(); updateCurlPreview(); };
         (kbData.objects || []).forEach(o => {
-          if (field.filterActions && !field.filterActions.some(a => (o.available_actions || []).includes(a))) return;
+          if (field.filterInteractions && !field.filterInteractions.some(a => (o.available_interactions || []).includes(a))) return;
           const opt = document.createElement('option');
           opt.value = o.id; opt.textContent = `${o.id} — ${o.display_name}`;
           input.appendChild(opt);
         });
         break;
 
-      case 'select-object-action':
+      case 'select-object-interaction':
         input = document.createElement('select');
         input.id = `param-${field.name}`;
         input.dataset.fieldName = field.name;
-        // 选项由 updateObjectActionOptions 动态填
+        // 选项由 updateObjectInteractionOptions 动态填
         break;
 
       case 'number':
@@ -566,18 +677,18 @@ function onCmdChange() {
     container.appendChild(div);
   });
 
-  updateObjectActionOptions();
+  updateObjectInteractionOptions();
   updateCurlPreview();
 }
 
-function updateObjectActionOptions() {
-  // 找到 object_id select，根据其值更新 action select 的选项
-  const objSel = document.querySelector('[data-field-name="object_id"]');
-  const actSel = document.querySelector('[data-field-name="action"]');
+function updateObjectInteractionOptions() {
+  // 找到 target_object_id select，根据其值更新 interaction select 的选项
+  const objSel = document.querySelector('[data-field-name="target_object_id"]');
+  const actSel = document.querySelector('[data-field-name="interaction"]');
   if (!objSel || !actSel) return;
   const obj = (kbData.objects || []).find(o => o.id === objSel.value);
   actSel.innerHTML = '';
-  (obj && obj.available_actions || []).forEach(a => {
+  (obj && obj.available_interactions || []).forEach(a => {
     const o = document.createElement('option');
     o.value = a; o.textContent = a;
     actSel.appendChild(o);
@@ -592,10 +703,10 @@ function collectRequest() {
   const force = document.getElementById('force').checked;
   const params = {};
 
-  // move_to 特殊处理：根据当前模式收集不同字段
-  // - target_id 模式 → {target: "..."}
-  // - coord 模式    → {dest: [x, y, z]}
-  if (cmd === 'move_to') {
+  // move_to_location 特殊处理：根据当前模式收集 dest/target + speed
+  // - target_id 模式 → {target: "...", speed: "..."}
+  // - coord 模式    → {dest: [x, y, z], speed: "..."}
+  if (cmd === 'move_to_location') {
     const modeEl = document.querySelector('#params-form [data-field-name="__move_mode"]');
     const mode = modeEl ? modeEl.value : 'coord';
     if (mode === 'coord') {
@@ -607,6 +718,8 @@ function collectRequest() {
       const targetEl = document.querySelector('#params-form [data-field-name="target"]');
       if (targetEl) params.target = targetEl.value;
     }
+    const speedEl = document.querySelector('#params-form [data-field-name="speed"]');
+    if (speedEl) params.speed = speedEl.value;
     return { agent_id, cmd, params, force };
   }
 
@@ -619,12 +732,18 @@ function collectRequest() {
     if (el.type === 'number') {
       v = v === '' ? 0 : Number(v);
     }
+    // bool select 转 boolean
+    if (el.dataset.boolField === '1') {
+      v = (v === 'true');
+    }
+    // 空串字段不进 params（可选字段留空时跳过，避免发送空字符串干扰后端）
+    if (v === '') return;
     params[k] = v;
   });
   return { agent_id, cmd, params, force };
 }
 
-// toggleMoveModeVisibility 切换 move_to 的 target / 坐标输入可见性。
+// toggleMoveModeVisibility 切换 move_to_location 的 target / 坐标输入可见性。
 // mode = "target_id" 显示 target 下拉；"coord" 显示 dest_x/y/z 三个数字框。
 function toggleMoveModeVisibility(mode) {
   document.querySelectorAll('#params-form [data-mode-visibility]').forEach(div => {
@@ -822,10 +941,10 @@ function replayHistory(i) {
   if (forceEl) forceEl.checked = h.req.force !== false;
   onCmdChange();
 
-  // move_to 特殊处理：根据历史 params 内容切换模式
+  // move_to_location 特殊处理：根据历史 params 内容切换模式
   // - 有 dest 字段 → coord 模式，回填 x/y/z
   // - 有 target 字段 → target_id 模式，回填 target 下拉
-  if (h.req.cmd === 'move_to' && h.req.params) {
+  if (h.req.cmd === 'move_to_location' && h.req.params) {
     const modeEl = document.querySelector('#params-form [data-field-name="__move_mode"]');
     if (h.req.params.dest) {
       if (modeEl) { modeEl.value = 'coord'; toggleMoveModeVisibility('coord'); }
@@ -841,6 +960,11 @@ function replayHistory(i) {
       const tEl = document.querySelector('#params-form [data-field-name="target"]');
       if (tEl) tEl.value = h.req.params.target;
     }
+    // speed 字段回填
+    if (h.req.params.speed) {
+      const spEl = document.querySelector('#params-form [data-field-name="speed"]');
+      if (spEl) spEl.value = h.req.params.speed;
+    }
     updateCurlPreview();
     return;
   }
@@ -848,19 +972,26 @@ function replayHistory(i) {
   // 其他 cmd：通用回填
   Object.entries(h.req.params || {}).forEach(([k, v]) => {
     const el = document.querySelector(`#params-form [data-field-name="${k}"]`);
-    if (el) el.value = v;
+    if (el) {
+      // bool select 需要 string 值
+      if (el.dataset.boolField === '1') el.value = String(v);
+      else el.value = v;
+    }
   });
-  updateObjectActionOptions();
+  updateObjectInteractionOptions();
   Object.entries(h.req.params || {}).forEach(([k, v]) => {
     const el = document.querySelector(`#params-form [data-field-name="${k}"]`);
-    if (el) el.value = v;
+    if (el) {
+      if (el.dataset.boolField === '1') el.value = String(v);
+      else el.value = v;
+    }
   });
   updateCurlPreview();
 }
 
 function resetForm() {
   document.getElementById('agent_id').value = 'H-01';
-  document.getElementById('cmd').value = 'move_to';
+  document.getElementById('cmd').value = 'move_to_location';
   const forceEl = document.getElementById('force');
   if (forceEl) forceEl.checked = true;
   onCmdChange();

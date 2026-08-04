@@ -3,7 +3,7 @@
 // 反应层用本地 Ollama 模型（qwen2.5:7b）低延迟处理突发事件，决策是否
 // 打断战术层在途 action。与战略/战术层独立，无会话链累积，每轮独立 prompt。
 //
-// 决策输出四种反应：continue / observe / interrupt / act。
+// 决策输出三种反应：continue / observe / replan。
 // 详见 docs/AgentTown_Reactive_Layer.md。
 
 package main
@@ -21,24 +21,15 @@ import (
 type ReactionKind string
 
 const (
-	ReactionContinue  ReactionKind = "continue"  // 不打断，让当前行动继续
-	ReactionObserve   ReactionKind = "observe"   // 不打断，记录事件供战术层参考
-	ReactionInterrupt ReactionKind = "interrupt" // 打断当前 action（发 stop_action）
-	ReactionAct       ReactionKind = "act"       // 打断并立即执行新 action
-	ReactionReplan    ReactionKind = "replan"    // 触发战术层重新规划整个时段
+	ReactionContinue ReactionKind = "continue" // 不打断，让当前行动继续
+	ReactionObserve  ReactionKind = "observe"  // 不打断，记录事件供战术层参考
+	ReactionReplan   ReactionKind = "replan"   // 触发战术层重新规划整个时段
 )
 
 // ReactiveDecision 是反应层期望从 Ollama 拿到的 JSON 决策。
 type ReactiveDecision struct {
-	Reaction ReactionKind    `json:"reaction"`
-	Reason   string          `json:"reason"`
-	Action   *ReactionAction `json:"action,omitempty"`
-}
-
-// ReactionAction 是 reaction=act 时要立即下发的动作。
-type ReactionAction struct {
-	Cmd    string                 `json:"cmd"`
-	Params map[string]interface{} `json:"params"`
+	Reaction ReactionKind `json:"reaction"`
+	Reason   string       `json:"reason"`
 }
 
 // ReactiveTrigger 标识触发原因，用于去抖和日志。
@@ -71,24 +62,27 @@ const periodicTriggerInterval = 4
 // ReactiveInput 聚合反应层决策所需的输入状态。由 main.go 从 agentContext
 // 提取后传入，避免 reactive.go 直接依赖 agentContext（便于单元测试）。
 type ReactiveInput struct {
-	AgentID       string
-	TimeOfDay     string // "HH:MM" 游戏时间
-	Zone          string // 当前区域 id
-	Energy        float64
-	Fatigue       float64
-	Health        float64
-	CurrentAction string // 当前在途 action 的可读描述（如 "work_assemble(target=workbench_01)"），空=无在途
-	ElapsedSec    int    // 当前 action 已执行秒数
-	ActionSrc     string // 在途 action 来源：tactical / hermes / 空
-	CurrentSlot   string // 当前战术时段 "HH:MM-HH:MM"，空=未分解
-	DailyPlan     string // 战略层每日计划摘要（格式化字符串），空=未生成
-	Trigger       ReactiveTrigger
-	TriggerDetail string // 触发原因详情
+	AgentID           string
+	AgentName         string // agent 显示名（如"老陈"），用于 prompt 中角色称呼；空则降级为 AgentID
+	TimeOfDay         string // "HH:MM" 游戏时间
+	Zone              string // 当前区域 id
+	Energy            float64
+	Fatigue           float64
+	Health            float64
+	CurrentAction     string // 当前在途 action 的可读描述（如 "WorkAtWorkbench(target_object_id=workbench_01)"），空=无在途
+	ElapsedSec        int    // 当前 action 已执行秒数
+	ActionSrc         string // 在途 action 来源：tactical / hermes / 空
+	CurrentSlot       string // 当前战术时段 "HH:MM-HH:MM"，空=未分解
+	DailyPlan         string // 战略层每日计划摘要（格式化字符串），空=未生成
+	Trigger           ReactiveTrigger
+	TriggerDetail     string // 触发原因详情
 }
 
 // reactivePromptTemplate 是反应层 prompt 模板。用 fmt.Sprintf 填充。
 // 中文 prompt（qwen2.5 中文表现好），严格约束 JSON 输出。
-const reactivePromptTemplate = `你是 NPC 老陈的反应决策模块。当前情况需要你判断是否打断当前行动。
+// agentName 由调用方注入，避免在此处硬编码"老陈"等具体角色名——
+// 反应层应服务于任意 agent，而非特定 NPC。
+const reactivePromptTemplate = `你是 NPC %s 的反应决策模块。当前情况需要你判断是否打断当前行动。
 
 【当前状态】
 游戏时间：%s
@@ -110,20 +104,16 @@ const reactivePromptTemplate = `你是 NPC 老陈的反应决策模块。当前�
 【可选反应】
 - continue：不打断，让当前行动继续
 - observe：不打断，记录这个事件供后续参考
-- interrupt：打断当前行动（会发送 stop_action）
-- act：打断当前行动并立即执行一个新动作
 - replan：当前时段的整个战术规划已不合理（如时段目标与实际冲突、物理状态无法支撑剩余 action），请求战术层基于当前状态重新分解本时段 goal
 
 判断要点：
 - 战术层规划的动作通常是合理的，除非有明确理由，否则 continue
-- 仅在物理状态告警、事件突发、或当前动作明显不合理时才 interrupt/act
-- replan 是"重大"决策：当你认为整个 action 队列都应作废、重新规划时使用，而非单个 action 不合适（单个不合适用 interrupt/act）。30 分钟内至多触发 1 次 replan，请慎重
+- 物理状态告警时（体力<40、疲劳>60、健康<50）必须输出 replan 让 NPC 休息/充电，禁止输出 continue/observe
+- replan 是"重大"决策：当你认为整个 action 队列都应作废、重新规划时使用。30 分钟内至多触发 1 次 replan，请慎重
 
 请输出 JSON，格式严格如下，不要输出 JSON 以外的任何内容：
-{"reaction": "continue|observe|interrupt|act|replan", "reason": "简短理由", "action": {"cmd": "...", "params": {...}}}
+{"reaction": "continue|observe|replan", "reason": "简短理由"}
 
-action 字段仅在 reaction=act 时填写，cmd 可选：move_to / speak / emote / wait / interact。
-reaction=replan 时不要填 action 字段。
 不要输出 JSON 以外的任何内容。`
 
 // buildReactivePrompt 构造反应层 prompt。纯函数，便于测试。
@@ -152,7 +142,12 @@ func buildReactivePrompt(in ReactiveInput) string {
 	if detail == "" {
 		detail = string(in.Trigger)
 	}
+	agentName := in.AgentName
+	if agentName == "" {
+		agentName = in.AgentID
+	}
 	return fmt.Sprintf(reactivePromptTemplate,
+		agentName,
 		in.TimeOfDay, in.Zone,
 		in.Energy, in.Fatigue, in.Health,
 		currentAction,
@@ -168,8 +163,9 @@ func buildReactivePrompt(in ReactiveInput) string {
 // 容错策略（与文档 P0.3 一致）：
 //   - JSON 解析失败 → 视为 continue（最保守）
 //   - reaction 字段不在枚举内 → 视为 continue
-//   - act 但 action 为空或 cmd 非法 → 降级为 interrupt
-//   - action.params 不完整 → 保留原样，由调用方在发 action 时兜底
+//
+// 反应层仅支持 continue/observe/replan 三种决策；历史上存在的
+// interrupt/act 已移除，若模型仍输出这些值则降级为 continue。
 func parseReactiveDecision(raw string) ReactiveDecision {
 	// Ollama 有时会输出 ```json ... ``` 包裹的 JSON，提取出来。
 	cleaned := stripCodeFence(raw)
@@ -180,18 +176,10 @@ func parseReactiveDecision(raw string) ReactiveDecision {
 	}
 	// 枚举校验
 	switch dec.Reaction {
-	case ReactionContinue, ReactionObserve, ReactionInterrupt, ReactionAct, ReactionReplan:
+	case ReactionContinue, ReactionObserve, ReactionReplan:
 		// ok
 	default:
 		return ReactiveDecision{Reaction: ReactionContinue, Reason: "unknown_reaction: " + string(dec.Reaction)}
-	}
-	// act 但 action 缺失/非法 → 降级 interrupt
-	if dec.Reaction == ReactionAct {
-		if dec.Action == nil || !isValidReactionCmd(dec.Action.Cmd) {
-			dec.Reaction = ReactionInterrupt
-			dec.Reason = "act_downgrade: " + dec.Reason
-			dec.Action = nil
-		}
 	}
 	return dec
 }
@@ -211,16 +199,6 @@ func stripCodeFence(s string) string {
 		s = s[:i]
 	}
 	return strings.TrimSpace(s)
-}
-
-// isValidReactionCmd 校验 reaction action 的 cmd 是否在允许列表内。
-// 仅原子短动作（不含复合动作——复合动作应由战术层规划）。
-func isValidReactionCmd(cmd string) bool {
-	switch cmd {
-	case "move_to", "speak", "emote", "wait", "interact":
-		return true
-	}
-	return false
 }
 
 // truncate 截断字符串到 maxLen，超出加省略号。
@@ -341,3 +319,35 @@ const reactivePeriodicDedupeWindow = 45 * time.Second
 // 该去抖在 execute() 的 replan 分支内检查（不在 trigger() 第一层），按 agent 全局，
 // 不按 trigger/detail——replan 是 agent 级决策，不是单个触发的事件。
 const replanDedupeWindow = 30 * time.Minute
+
+// upgradeIfPhysicalAlert 是代码层兜底：当物理状态告警（fatigue>60 / energy<40 /
+// health<50）而 LLM 仍输出 continue/observe 时，强制升级为 replan。
+//
+// 动机：实测 qwen2.5:7b 在 fatigue=80+ 时仍输出 observe（"物理状态尚可"），
+// 仅靠 prompt 约束不可靠。代码层强制保证物理告警时 agent 真正停下来重规划。
+// 升级后的 replan 会调战术层重新分解当前时段 goal（见 execute），引导 LLM
+// 规划休息/充电。
+//
+// 注意：仅升级 continue/observe，不影响 replan 决策。
+// trigger=physical_alert 时 LLM 通常已给出 replan，此函数主要覆盖
+// periodic/zone_change 触发时物理状态已告警但 LLM 忽视的情况。
+func upgradeIfPhysicalAlert(input ReactiveInput, dec ReactiveDecision) ReactiveDecision {
+	if dec.Reaction != ReactionContinue && dec.Reaction != ReactionObserve {
+		return dec
+	}
+	alert := ""
+	if input.Fatigue > fatigueAlertThreshold {
+		alert = fmt.Sprintf("疲劳=%.0f超过%.0f", input.Fatigue, fatigueAlertThreshold)
+	} else if input.Energy < energyAlertThreshold {
+		alert = fmt.Sprintf("体力=%.0f低于%.0f", input.Energy, energyAlertThreshold)
+	} else if input.Health < healthAlertThreshold {
+		alert = fmt.Sprintf("健康=%.0f低于%.0f", input.Health, healthAlertThreshold)
+	} else {
+		return dec
+	}
+	origReason := dec.Reason
+	origReaction := dec.Reaction // 在修改前捕获，避免 reason 误显示
+	dec.Reaction = ReactionReplan
+	dec.Reason = "物理状态告警自动升级(" + alert + ")；原决策=" + string(origReaction) + "/" + origReason
+	return dec
+}

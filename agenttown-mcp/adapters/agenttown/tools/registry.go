@@ -14,7 +14,11 @@ package tools
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"log/slog"
+	"strings"
+	"unicode"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -77,58 +81,264 @@ type ToolSpec struct {
 // Order is irrelevant — ReconcileTools reads it as a set.
 func BuiltinToolSpecs() []ToolSpec {
 	return []ToolSpec{
-		// Atomic tools.
-		{Name: "move_to", RequiredCmd: protocol.CmdMoveTo},
+		// Atomic tools (8).
+		{Name: "move_to_location", RequiredCmd: protocol.CmdMoveToLocation},
+		{Name: "move_to_agent", RequiredCmd: protocol.CmdMoveToAgent},
 		{Name: "turn_to", RequiredCmd: protocol.CmdTurnTo},
+		{Name: "play_montage", RequiredCmd: protocol.CmdPlayMontage},
 		{Name: "speak", RequiredCmd: protocol.CmdSpeak},
 		{Name: "emote", RequiredCmd: protocol.CmdEmote},
 		{Name: "interact", RequiredCmd: protocol.CmdInteractSmartObject},
 		{Name: "wait", RequiredCmd: protocol.CmdWait},
-		{Name: "stop", RequiredCmd: protocol.CmdStop},
+		// stop has no UE cmd dependency — it sends the stop_action control
+		// message (TypeStopAction), not an action_command. RequiredCmd is
+		// "" so ReconcileTools never removes it based on capability state.
+		{Name: "stop", RequiredCmd: ""},
 		// scan_area has no UE cmd — it triggers an immediate
 		// perception_update via RequestScan, not an action_command.
 		{Name: "scan_area", RequiredCmd: ""},
-		// Composite tools — all translate to ExecuteComposite.
-		{Name: "work_assemble", RequiredCmd: protocol.CmdExecuteComposite},
-		{Name: "patrol_route", RequiredCmd: protocol.CmdExecuteComposite},
-		{Name: "charge_at", RequiredCmd: protocol.CmdExecuteComposite},
-		{Name: "repair_target", RequiredCmd: protocol.CmdExecuteComposite},
-		{Name: "social_chat_with", RequiredCmd: protocol.CmdExecuteComposite},
-		{Name: "rest_idle", RequiredCmd: protocol.CmdExecuteComposite},
-		{Name: "archive_research", RequiredCmd: protocol.CmdExecuteComposite},
+		// Composite tools (6) — each maps to its own Composite cmd.
+		{Name: "work_at_workbench", RequiredCmd: protocol.CmdWorkAtWorkbench},
+		{Name: "work_at_workshop", RequiredCmd: protocol.CmdWorkAtWorkshop},
+		{Name: "chat_with", RequiredCmd: protocol.CmdChatWith},
+		{Name: "repair_target", RequiredCmd: protocol.CmdRepairTarget},
+		{Name: "charge_at_station", RequiredCmd: protocol.CmdChargeAtStation},
+		{Name: "patrol_zone", RequiredCmd: protocol.CmdPatrolZone},
 	}
 }
 
 // ReconcileTools ensures the tools registered on s match the capability
-// set implied by hasCmd. Tools whose RequiredCmd is unavailable (and
-// isn't "") are removed via s.RemoveTools; the rest are (re-)registered
-// via RegisterAll (mcp.AddTool is idempotent — it replaces existing
-// tools with the same name).
+// set implied by effectiveActions (global scope). It is invoked on every
+// capability_registry message and is safe to call multiple times.
 //
-// hasCmd returns whether a given cmd is currently available to the
-// global/system scope. Per-agent capability enforcement happens
-// separately in the guardedExecutor (SendAction gates on
-// registry.HasCmd(agentID, cmd)).
+// Behavior:
+//  1. RegisterAll re-registers the 16 built-in tools (mcp.AddTool is
+//     idempotent — same-name tools are replaced).
+//  2. Built-in tools whose RequiredCmd is no longer in effectiveActions
+//     are removed via s.RemoveTools.
+//  3. effectiveActions entries whose Cmd is NOT in BuiltinToolSpecs are
+//     UE-newly-declared cmds — registerGenericActionTool registers a
+//     generic passthrough tool for each.
+//  4. Previously dynamically-registered tools that are no longer present
+//     in this round are removed.
 //
-// This is invoked on every capability_registry message and is safe to
-// call multiple times.
-func ReconcileTools(s *mcp.Server, ex Executor, kb *worldkb.KB, logger *slog.Logger, hasCmd func(string) bool) {
+// Per-agent capability enforcement happens separately in the
+// guardedExecutor (SendAction gates on registry.HasCmd(agentID, cmd)).
+func ReconcileTools(s *mcp.Server, ex Executor, kb *worldkb.KB, logger *slog.Logger, effectiveActions []protocol.CapabilityAction) {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	RegisterAll(s, ex, kb, logger)
+
+	// Build the set of cmds declared effective by UE (global scope).
+	effectiveCmdSet := make(map[string]struct{}, len(effectiveActions))
+	for _, a := range effectiveActions {
+		effectiveCmdSet[a.Cmd] = struct{}{}
+	}
+
+	// Identify built-in cmds for fast lookup.
+	builtinCmdSet := make(map[string]struct{})
+	for _, spec := range BuiltinToolSpecs() {
+		if spec.RequiredCmd != "" {
+			builtinCmdSet[spec.RequiredCmd] = struct{}{}
+		}
+	}
+
+	// Step 2: drop built-in tools whose RequiredCmd is no longer available.
 	var drop []string
 	for _, spec := range BuiltinToolSpecs() {
 		if spec.RequiredCmd == "" {
-			continue
+			continue // stop / scan_area are never capability-gated
 		}
-		if !hasCmd(spec.RequiredCmd) {
+		if _, ok := effectiveCmdSet[spec.RequiredCmd]; !ok {
 			drop = append(drop, spec.Name)
 		}
 	}
+
+	// Step 3: register generic tools for UE-newly-declared cmds.
+	newDynamic := make(map[string]struct{})
+	for _, a := range effectiveActions {
+		if _, isBuiltin := builtinCmdSet[a.Cmd]; isBuiltin {
+			continue
+		}
+		registerGenericActionTool(s, ex, logger, a)
+		newDynamic[CmdToToolName(a.Cmd)] = struct{}{}
+	}
+
+	// Step 4: drop previously-dynamic tools that are no longer present.
+	for name := range dynamicToolNames {
+		if _, still := newDynamic[name]; !still {
+			drop = append(drop, name)
+		}
+	}
+	dynamicToolNames = newDynamic
+
 	if len(drop) > 0 {
 		s.RemoveTools(drop...)
-		logger.Info("capability reconcile: removed tools for unavailable cmds", "tools", drop)
+		logger.Info("capability reconcile: removed tools", "tools", drop)
+	}
+}
+
+// dynamicToolNames tracks tools registered by registerGenericActionTool
+// so ReconcileTools can remove them when UE removes the corresponding cmd.
+// Guarded by dynamicToolMu because ReconcileTools may be called from
+// different goroutines in future scenarios (today single-goroutine).
+var (
+	dynamicToolNames = make(map[string]struct{})
+	dynamicToolMu    func() // nil in production; tests may set to sync.Mutex methods
+)
+
+// CmdToToolName maps a UE cmd (PascalCase) to the MCP tool name (snake_case).
+// Built-in cmds consult BuiltinToolSpecs to honor non-trivial shortenings
+// (e.g. InteractSmartObject→interact). Cmds not in BuiltinToolSpecs fall
+// back to pascalToSnake. Exported so the tactical/reactive layers in main
+// can derive the same tool_name ↔ cmd correspondence when filtering actions
+// or building prompts from the capability registry.
+func CmdToToolName(cmd string) string {
+	for _, spec := range BuiltinToolSpecs() {
+		if spec.RequiredCmd == cmd {
+			return spec.Name
+		}
+	}
+	return pascalToSnake(cmd)
+}
+
+// pascalToSnake converts PascalCase to snake_case.
+// MoveToLocation → move_to_location, TurnTo → turn_to.
+func pascalToSnake(s string) string {
+	if s == "" {
+		return ""
+	}
+	var b strings.Builder
+	for i, r := range s {
+		if i > 0 && unicode.IsUpper(r) {
+			b.WriteByte('_')
+		}
+		b.WriteRune(unicode.ToLower(r))
+	}
+	return b.String()
+}
+
+// snakeToPascal is the inverse of pascalToSnake.
+// move_to_location → MoveToLocation, interact → Interact.
+func snakeToPascal(s string) string {
+	if s == "" {
+		return ""
+	}
+	parts := strings.Split(s, "_")
+	for i, p := range parts {
+		if p == "" {
+			continue
+		}
+		parts[i] = strings.ToUpper(p[:1]) + p[1:]
+	}
+	return strings.Join(parts, "")
+}
+
+// registerGenericActionTool installs a generic passthrough tool for a
+// UE-declared cmd that is NOT one of the 14 built-in cmds. The tool's
+// InputSchema is derived from the CapabilityAction.Params schema; the
+// handler unmarshals args into a map and passes them verbatim to
+// ex.SendAction. agent_id and decision_epoch are extracted from the args
+// (matching the built-in tool convention) and not forwarded to UE.
+//
+// Uses the non-generic (*Server).AddTool method so the InputSchema can be
+// a runtime-constructed map[string]any rather than a compile-time struct.
+func registerGenericActionTool(s *mcp.Server, ex Executor, logger *slog.Logger, action protocol.CapabilityAction) {
+	toolName := CmdToToolName(action.Cmd)
+	schema := buildInputSchemaFromParams(action.Params)
+	s.AddTool(&mcp.Tool{
+		Name:        toolName,
+		Description: action.Description,
+		InputSchema: schema,
+	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		var args map[string]any
+		if err := json.Unmarshal(req.Params.Arguments, &args); err != nil {
+			return nil, fmt.Errorf("%s: parse args: %w", toolName, err)
+		}
+		agentID, _ := args["agent_id"].(string)
+		if agentID == "" {
+			return nil, fmt.Errorf("%s: agent_id is required", toolName)
+		}
+		epoch := toInt64(args["decision_epoch"])
+		// Strip meta fields; remaining keys are UE-facing params.
+		delete(args, "agent_id")
+		delete(args, "decision_epoch")
+		ack, err := ex.SendAction(ctx, agentID, epoch, action.Cmd, args)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", toolName, err)
+		}
+		out := buildAckResult(ack, epoch)
+		b, _ := json.Marshal(out)
+		return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: string(b)}}}, nil
+	})
+	logger.Info("capability reconcile: registered generic tool",
+		"tool", toolName, "cmd", action.Cmd)
+}
+
+// buildInputSchemaFromParams constructs a JSON Schema (as map[string]any)
+// for a generic passthrough tool. agent_id and decision_epoch are always
+// added as required string/integer fields; each CapabilityParam becomes a
+// property whose required flag reflects the param's Required field.
+func buildInputSchemaFromParams(params []protocol.CapabilityParam) map[string]any {
+	props := map[string]any{
+		"agent_id":       map[string]any{"type": "string", "description": "the NPC's id"},
+		"decision_epoch": map[string]any{"type": "integer", "description": "epoch from decision_context"},
+	}
+	required := []string{"agent_id", "decision_epoch"}
+	for _, p := range params {
+		prop := map[string]any{
+			"type":        jsonSchemaType(p.Type),
+			"description": p.Description,
+		}
+		if len(p.EnumValues) > 0 {
+			prop["enum"] = p.EnumValues
+		}
+		if p.DefaultValue != "" {
+			prop["default"] = p.DefaultValue
+		}
+		props[p.Name] = prop
+		if p.Required {
+			required = append(required, p.Name)
+		}
+	}
+	return map[string]any{
+		"type":       "object",
+		"properties": props,
+		"required":   required,
+	}
+}
+
+// jsonSchemaType maps a CapabilityParam.Type (string/number/bool/vector/enum)
+// to its JSON Schema type. vector→"array" (UE5 [x,y,z]); enum→"string"
+// (paired with the schema's "enum" field).
+func jsonSchemaType(t string) string {
+	switch t {
+	case "string", "enum":
+		return "string"
+	case "number":
+		return "number"
+	case "bool":
+		return "boolean"
+	case "vector":
+		return "array"
+	default:
+		return "string"
+	}
+}
+
+// toInt64 extracts an int64 from a map[string]any value, tolerating the
+// json package's float64 default for numbers.
+func toInt64(v any) int64 {
+	switch n := v.(type) {
+	case int64:
+		return n
+	case int:
+		return int64(n)
+	case float64:
+		return int64(n)
+	default:
+		return 0
 	}
 }
 

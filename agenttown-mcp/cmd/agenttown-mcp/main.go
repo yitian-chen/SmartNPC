@@ -58,7 +58,7 @@ type agentContext struct {
 	latestPerception      json.RawMessage
 	currentTask           *protocol.CurrentTaskProgress
 	currentActionID       string                 // 当前执行中的 action_id（mu 保护），空表示无执行中动作
-	currentActionCmd      string                 // mu 保护，当前在途 action 的 cmd（如 move_to / work_assemble），用于反应层 prompt
+	currentActionCmd      string                 // mu 保护，当前在途 action 的 cmd（如 MoveToLocation / WorkAtWorkbench），用于反应层 prompt
 	currentActionParams   map[string]any         // mu 保护，当前在途 action 的 params，用于反应层 prompt
 	currentActionStart    time.Time              // mu 保护，当前在途 action 的开始时间，用于反应层计算 elapsed
 	pendingActionTimeouts map[string]*time.Timer // action_id → 超时 timer（mu 保护），约定 §5.2 action_completed 1.5× 估值超时
@@ -204,7 +204,7 @@ func (a *agentContext) recordActionCompletion(completion protocol.ActionComplete
 
 // recordEventNotification 处理环境事件通知。反应层：返回 trigger 信息供
 // message handler 异步触发 reactiveRunner。环境事件不打断战术队列——
-// reactiveRunner 决策若为 interrupt/act 才会发 stop_action。
+// reactiveRunner 决策若为 replan 才会发 stop_action。
 func (a *agentContext) recordEventNotification(event protocol.EventNotificationPayload) (ReactiveTrigger, string) {
 	// 提取事件类型用于去抖键（事件 id 每次不同，去抖会失效；type 是合理维度）
 	eventType, _ := event.Event["type"].(string)
@@ -283,7 +283,8 @@ func cloneTask(task *protocol.CurrentTaskProgress) *protocol.CurrentTaskProgress
 
 // runPerceptionWorker 是战术层队列驱动的状态机：wake → UE 连接检查 →
 // pop 队列下一个 action；队列空则 tacticalRefill，无 goal/失败则发短 wait。
-// 反应层移除后：感知/事件不再触发 LLM 决策，下一时段由 tacticalRefill 自纠正。
+// 反应层仅 continue/observe/replan：replan 通过 tacticalRefillForReplan
+// 重规划并打断在途 action，不打断 worker 正常的 pop/refill 循环。
 func runPerceptionWorker(
 	ctx context.Context,
 	agentID string,
@@ -293,7 +294,7 @@ func runPerceptionWorker(
 	logger *slog.Logger,
 ) {
 	// 战略层：进入感知循环前生成当日计划。
-	plan := generateDailyPlan(ctx, ac.strategicHc, agentID, logger)
+	plan := generateDailyPlan(ctx, ac.strategicHc, agentID, kb, logger)
 	ac.mu.Lock()
 	ac.dailyPlan = plan
 	ac.mu.Unlock()
@@ -601,7 +602,7 @@ func (a *agentContext) popAndSendQueueAction(ctx context.Context, agentID string
 	a.actionQueue = a.actionQueue[1:]
 	a.mu.Unlock()
 
-	cmd, params, err := mapTacticalAction(pa, kb)
+	cmd, params, err := mapTacticalAction(pa, agentID, kb, capabilityRegistryRef)
 	if err != nil {
 		logger.Warn("[战术层] action 映射失败，跳过", "agent_id", agentID, "action", pa.Action, "err", err)
 		// 跳过这一个，signal 让 worker 处理下一个（若队列空则触发 refill）
@@ -723,6 +724,11 @@ func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
 	physical := clonePhysical(a.latestPhysical)
 	tacticalHc := a.tacticalHc
 	kbRef := kb
+	// 读取 replanHint（反应层 replan 设置的"上次中断原因"），让战术层
+	// LLM 看到中断理由（如"疲劳>60需要休息"）从而规划休息/充电动作，而非
+	// 继续规划工作动作导致循环 replan。消费后清空，避免下次 refill 误用。
+	hint := a.replanHint
+	a.replanHint = ""
 	a.actionQueue = nil
 	a.mu.Unlock()
 
@@ -738,7 +744,7 @@ func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
 		// 流式路径：onAction 回调逐个入队 + 首 action 提前下发。
 		// 回调在 SendStreaming 的 onDelta 调用栈里同步执行（worker 仍阻塞在 tacticalRefill），
 		// 不跨回调持有 mu。
-		_, _, err = generateTacticalPlanStreaming(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, logger, "", capabilityRegistryRef,
+		_, _, err = generateTacticalPlanStreaming(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, logger, hint, capabilityRegistryRef,
 			func(pa plannedAction) {
 				a.mu.Lock()
 				a.actionQueue = append(a.actionQueue, pa)
@@ -752,7 +758,7 @@ func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
 		)
 	} else {
 		// 非流式路径（默认）：等完整响应后一次性填充队列。
-		actions, _, err = generateTacticalPlan(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, logger, "", capabilityRegistryRef)
+		actions, _, err = generateTacticalPlan(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, logger, hint, capabilityRegistryRef)
 		if err == nil {
 			a.mu.Lock()
 			a.actionQueue = actions
@@ -786,7 +792,7 @@ func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
 	logger.Info("[战术层] 队列已填充",
 		"agent_id", agentID, "slot", slot, "queue_len", queueLen,
 		"redecompose", isRedecompose, "redecompose_count", redecomposeCount,
-		"actions", string(actionsJSON))
+		"replan_hint", hint, "actions", string(actionsJSON))
 
 	// inner_thought 不再推送 UE（协议未定义 narrative 消息类型）。
 	// thought 仍在 tactical.go 的 [战术层] 分解成功 日志中记录，调试可见性保留。
@@ -1129,9 +1135,8 @@ func main() {
 			// the new global capability set. Per-agent overrides
 			// don't change the global tool list — the guardedExecutor
 			// enforces per-agent capability at SendAction time.
-			tools.ReconcileTools(server, executor, kb, logger, func(cmd string) bool {
-				return capabilityRegistry.HasCmd(protocol.SystemAgentID, cmd)
-			})
+			tools.ReconcileTools(server, executor, kb, logger,
+				capabilityRegistry.EffectiveActions(protocol.SystemAgentID))
 		case protocol.TypeWorldKB:
 			// UE pushes the full world KB (generated + authored JSON blobs)
 			// on connection. MCP merges, persists, and swaps the in-memory
@@ -1361,9 +1366,9 @@ func runStdio(ctx context.Context, logger *slog.Logger, server *mcp.Server) {
 // 联调 debug 端点：终端通过 curl POST 触发 MCP 向 UE 发 action_command。
 // 仅联调用，无认证。复用 ws.Call（含 action_started ACK 等待）。
 //
-// 请求体：{"agent_id":"H-01","cmd":"move_to","params":{"target":"workbench_01"}}
-// cmd 支持：move_to / speak / interact / wait / charge_at / work_assemble /
-// archive_research / rest_idle。其中 move_to 走 kb.GetPosition 解析坐标，
+// 请求体：{"agent_id":"H-01","cmd":"MoveToLocation","params":{"target":"workbench_01"}}
+// cmd 支持：MoveToLocation / Speak / InteractSmartObject / Wait / ChargeAtStation /
+// WorkAtWorkbench 等 14 cmd。其中 MoveToLocation 走 kb.GetPosition 解析坐标，
 // 其他 cmd 直接透传 params 给 ws.Call。
 //
 // force（默认 true）：先发 stop_action 停掉战术层正在执行的 idle wait，
@@ -1411,50 +1416,52 @@ type debugScheduleResponse struct {
 	Error        string          `json:"error,omitempty"`
 }
 
-// resolveDebugMoveTo 把 move_to 的参数解析成 ws.Call 需要的完整参数。
-// 与 tactical.go:433 的 move_to 分支保持一致：dest + target + kind + speed。
+// resolveDebugMoveToLocation 把 move_to_location 的参数解析成 ws.Call 需要的完整参数。
+// 与 tactical.go 的 move_to_location 分支保持一致：dest + speed。
 //
 // 支持两种输入模式：
-//  1. 直接传坐标：params.dest = [x, y, z]（UE5 cm）。跳过 kb 解析，
-//     kind 默认 "coord"，target 字段空。适用于临时调试未知位置。
+//  1. 直接传坐标：params.dest = [x, y, z]（UE5 cm）。跳过 kb 解析。
+//     适用于临时调试未知位置。
 //  2. 传 target id：params.target = "workbench_01" / "main_workshop"。
-//     走 kb.GetPosition 解析坐标和 kind。
+//     走 kb.GetPosition 解析坐标。
 //
 // 两种模式都没有 → 报错。同时传时 dest 优先（更明确）。
-func resolveDebugMoveTo(params map[string]any, kb *worldkb.KB) (map[string]any, error) {
+func resolveDebugMoveToLocation(params map[string]any, kb *worldkb.KB) (map[string]any, error) {
 	// 模式 1：直接传 dest 坐标
 	if dest, ok := params["dest"]; ok && dest != nil {
 		coords, err := parseDestCoords(dest)
 		if err != nil {
 			return nil, fmt.Errorf("parse dest: %w", err)
 		}
-		// 调用方可选传 target 作为日志标签（仅标识用途，不参与解析）
-		target, _ := params["target"].(string)
+		speed, _ := params["speed"].(string)
+		if speed == "" {
+			speed = "walk"
+		}
 		return map[string]any{
-			"dest":   coords,
-			"target": target, // 可空
-			"kind":   "coord",
-			"speed":  "walk",
+			"dest":  coords,
+			"speed": speed,
 		}, nil
 	}
 
 	// 模式 2：传 target id 走 kb 解析
 	target, _ := params["target"].(string)
 	if target == "" {
-		return nil, errors.New("move_to requires params.dest ([x,y,z]) or params.target (kb id)")
+		return nil, errors.New("move_to_location requires params.dest ([x,y,z]) or params.target (kb id)")
 	}
 	if kb == nil {
 		return nil, errors.New("world kb not loaded, cannot resolve target (use params.dest for raw coords)")
 	}
-	coord, kind, err := kb.GetPosition(target)
+	coord, _, err := kb.GetPosition(target)
 	if err != nil {
 		return nil, fmt.Errorf("resolve target %q: %w", target, err)
 	}
+	speed, _ := params["speed"].(string)
+	if speed == "" {
+		speed = "walk"
+	}
 	return map[string]any{
-		"dest":   []float64{coord[0], coord[1], coord[2]},
-		"target": target,
-		"kind":   kind,
-		"speed":  "walk",
+		"dest":  []float64{coord[0], coord[1], coord[2]},
+		"speed": speed,
 	}, nil
 }
 
@@ -1515,44 +1522,37 @@ func toFloat64(v any) (float64, error) {
 	}
 }
 
-// mapDebugCmd 把 debug 端点的 cmd 名映射到 protocol 常量。
-// 复合 action（charge_at / work_assemble / archive_research / rest_idle）统一走
-// CmdExecuteComposite，params 里需要带 name 字段（调用方传的 cmd 名）。
-func mapDebugCmd(cmd string) (protoCmd string, ok bool) {
-	switch cmd {
-	case "move_to":
-		return protocol.CmdMoveTo, true
-	case "speak":
-		return protocol.CmdSpeak, true
-	case "interact":
-		return protocol.CmdInteractSmartObject, true
-	case "wait":
-		return protocol.CmdWait, true
-	case "charge_at", "work_assemble", "archive_research", "rest_idle":
-		return protocol.CmdExecuteComposite, true
-	default:
+// mapDebugCmd 把 debug 端点的 cmd 名（tool_name, snake_case）映射到 UE cmd
+// （PascalCase protocol 常量）。
+//
+// registry != nil 时从 EffectiveActions(agentID) 通过 CmdToToolName 反查，
+// 覆盖内置 14 cmd 与 UE 通过 capability_registry 新推送的 cmd。
+// registry == nil 时降级为 BuiltinToolSpecs 静态查找（向后兼容旧测试）。
+// scan_area/stop 没有 UE cmd（RequiredCmd=""），不通过此路径下发。
+func mapDebugCmd(cmd string, registry *CapabilityRegistry, agentID string) (protoCmd string, ok bool) {
+	if registry != nil {
+		for _, act := range registry.EffectiveActions(agentID) {
+			if tools.CmdToToolName(act.Cmd) == cmd {
+				return act.Cmd, true
+			}
+		}
 		return "", false
 	}
+	for _, spec := range tools.BuiltinToolSpecs() {
+		if spec.Name == cmd && spec.RequiredCmd != "" {
+			return spec.RequiredCmd, true
+		}
+	}
+	return "", false
 }
 
-// buildDebugParams 根据 cmd 处理 params：move_to 走 kb 解析，
-// 复合 action 加 name 字段，其他直接透传。
+// buildDebugParams 根据 cmd 处理 params：move_to_location 走 kb 解析，
+// 其他直接透传（composite cmd 不再需要 name 字段，每个 cmd 独立）。
 func buildDebugParams(cmd string, params map[string]any, kb *worldkb.KB) (map[string]any, error) {
-	if cmd == "move_to" {
-		return resolveDebugMoveTo(params, kb)
+	if cmd == "move_to_location" {
+		return resolveDebugMoveToLocation(params, kb)
 	}
-	// 复合 action 需要 name 字段告诉 UE 执行哪个具体动作
-	switch cmd {
-	case "charge_at", "work_assemble", "archive_research", "rest_idle":
-		out := make(map[string]any, len(params)+1)
-		for k, v := range params {
-			out[k] = v
-		}
-		out["name"] = cmd
-		return out, nil
-	default:
-		return params, nil
-	}
+	return params, nil
 }
 
 func handleDebugAction(ctx context.Context, logger *slog.Logger, ws *wsserver.Server, kb *worldkb.KB, lookupAgent func(string) *agentContext, w http.ResponseWriter, r *http.Request) {
@@ -1581,7 +1581,7 @@ func handleDebugAction(ctx context.Context, logger *slog.Logger, ws *wsserver.Se
 		return
 	}
 
-	protoCmd, ok := mapDebugCmd(req.Cmd)
+	protoCmd, ok := mapDebugCmd(req.Cmd, capabilityRegistryRef, req.AgentID)
 	if !ok {
 		w.WriteHeader(http.StatusBadRequest)
 		_ = json.NewEncoder(w).Encode(debugActionResponse{Error: fmt.Sprintf("unknown cmd: %q", req.Cmd)})
