@@ -22,6 +22,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/AgentTown/agenttown-mcp/pkg/llmtypes"
 )
 
 // DefaultTokenThreshold is the point at which the client auto-summarizes
@@ -479,51 +481,16 @@ type sseFailed struct {
 	} `json:"error"`
 }
 
-// Response is the (subset of the) OpenAI Responses shape Hermes returns.
-type Response struct {
-	ID     string  `json:"id"`
-	Status string  `json:"status"`
-	Model  string  `json:"model"`
-	Output []Block `json:"output"`
-	Usage  Usage   `json:"usage"`
-}
-
-// Block is one entry in Response.Output.
-type Block struct {
-	Type    string    `json:"type"`
-	Role    string    `json:"role,omitempty"`
-	Content []Content `json:"content,omitempty"`
-}
-
-// Content is one piece of a message Block.
-type Content struct {
-	Type string `json:"type"`
-	Text string `json:"text,omitempty"`
-}
-
-// Usage reports token counts.
-type Usage struct {
-	InputTokens  int `json:"input_tokens"`
-	OutputTokens int `json:"output_tokens"`
-	TotalTokens  int `json:"total_tokens"`
-}
-
-// ExtractText returns the assistant's narrative text from the response.
-func (r *Response) ExtractText() string {
-	if r == nil {
-		return ""
-	}
-	for _, b := range r.Output {
-		if b.Type == "message" && b.Role == "assistant" {
-			for _, c := range b.Content {
-				if c.Type == "output_text" {
-					return c.Text
-				}
-			}
-		}
-	}
-	return ""
-}
+// Transitional type aliases — canonical definitions live in pkg/llmtypes.
+// pkg/hermes will be removed in a follow-up commit; external callers should
+// migrate to pkg/llmtypes directly. The aliases keep internal client code
+// (and any transient external references) compiling without qualification.
+type (
+	Response = llmtypes.Response
+	Block    = llmtypes.Block
+	Content  = llmtypes.Content
+	Usage    = llmtypes.Usage
+)
 
 // ErrNoHermesResponse is returned when the gateway returns an empty body.
 var ErrNoHermesResponse = errors.New("hermes returned no response")

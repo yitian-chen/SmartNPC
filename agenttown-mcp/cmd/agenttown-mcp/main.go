@@ -36,6 +36,7 @@ import (
 	"github.com/AgentTown/agenttown-mcp/adapters/agenttown/tools"
 	"github.com/AgentTown/agenttown-mcp/internal/log"
 	"github.com/AgentTown/agenttown-mcp/pkg/hermes"
+	"github.com/AgentTown/agenttown-mcp/pkg/llmtypes"
 	"github.com/AgentTown/agenttown-mcp/pkg/ollama"
 	"github.com/AgentTown/agenttown-mcp/pkg/protocol"
 	"github.com/AgentTown/agenttown-mcp/pkg/transport"
@@ -717,8 +718,8 @@ var tacticalCallTimeout = 60 * time.Second
 // *hermes.Client（Hermes Gateway，OpenAI Responses 协议，默认）和 *venus.Client
 // （Venus 代理，OpenAI Chat Completions 协议）均实现此接口，通过 --llm-backend 切换。
 type llmClient interface {
-	SendWithSummary(ctx context.Context, input, summary string) (*hermes.Response, error)
-	SendStreaming(ctx context.Context, input string, onDelta func(string)) (*hermes.Response, error)
+	SendWithSummary(ctx context.Context, input, summary string) (*llmtypes.Response, error)
+	SendStreaming(ctx context.Context, input string, onDelta func(string)) (*llmtypes.Response, error)
 	ResetSession()
 }
 

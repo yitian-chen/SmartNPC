@@ -1,14 +1,14 @@
 // Package venus provides an HTTP client for the Venus LLM proxy's
-// OpenAI-compatible /v1/chat/completions endpoint. It is a drop-in
-// alternative to pkg/hermes for the strategic and tactical layers,
-// returning the same *hermes.Response shape so callers
-// (generateDailyPlan, generateTacticalPlan, generateTacticalPlanStreaming)
-// need no changes beyond accepting an interface.
+// OpenAI-compatible /v1/chat/completions endpoint. It is the strategic
+// and tactical layer LLM backend, returning the shared *llmtypes.Response
+// shape so callers (generateDailyPlan, generateTacticalPlan,
+// generateTacticalPlanStreaming) need no changes beyond accepting an
+// interface.
 //
-// Unlike hermes.Client, venus.Client does not maintain a session chain
-// (previous_response_id): each call is independent. This matches current
-// usage where both strategic and tactical layers call ResetSession()
-// immediately after every Send, so no cross-call state is required.
+// venus.Client does not maintain a session chain (previous_response_id):
+// each call is independent. This matches current usage where both
+// strategic and tactical layers call ResetSession() immediately after
+// every Send, so no cross-call state is required.
 //
 // The Venus proxy speaks the OpenAI Chat Completions API protocol:
 //
@@ -35,7 +35,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/AgentTown/agenttown-mcp/pkg/hermes"
+	"github.com/AgentTown/agenttown-mcp/pkg/llmtypes"
 )
 
 const (
@@ -55,9 +55,9 @@ type Config struct {
 
 // Client POSTs prompts to the Venus /v1/chat/completions endpoint.
 //
-// All calls are serialized via sendMu — same contract as hermes.Client,
-// so callers that swap between backends do not see concurrency behavior
-// changes.
+// All calls are serialized via sendMu — same contract as a session-chain
+// backend, so callers that swap between backends do not see concurrency
+// behavior changes.
 type Client struct {
 	cfg    Config
 	http   *http.Client
@@ -85,10 +85,10 @@ func New(cfg Config) *Client {
 
 // SendWithSummary POSTs input to Venus and returns the response.
 //
-// The summary parameter is accepted for hermes.Client signature compatibility
-// but is currently unused: both strategic and tactical layers pass "" and
-// rely on independent per-call sessions (no cross-call state to preserve).
-func (c *Client) SendWithSummary(ctx context.Context, input, summary string) (*hermes.Response, error) {
+// The summary parameter is accepted for interface compatibility but is
+// currently unused: both strategic and tactical layers pass "" and rely
+// on independent per-call sessions (no cross-call state to preserve).
+func (c *Client) SendWithSummary(ctx context.Context, input, summary string) (*llmtypes.Response, error) {
 	c.sendMu.Lock()
 	defer c.sendMu.Unlock()
 	if err := ctx.Err(); err != nil {
@@ -102,7 +102,7 @@ func (c *Client) SendWithSummary(ctx context.Context, input, summary string) (*h
 // text delta received. It blocks until the stream terminates (data: [DONE]
 // or error) and returns the final Response assembled from the accumulated
 // deltas.
-func (c *Client) SendStreaming(ctx context.Context, input string, onDelta func(delta string)) (*hermes.Response, error) {
+func (c *Client) SendStreaming(ctx context.Context, input string, onDelta func(delta string)) (*llmtypes.Response, error) {
 	c.sendMu.Lock()
 	defer c.sendMu.Unlock()
 	if err := ctx.Err(); err != nil {
@@ -113,14 +113,15 @@ func (c *Client) SendStreaming(ctx context.Context, input string, onDelta func(d
 
 // ResetSession is a no-op for venus.Client. Venus has no session chain
 // (each /v1/chat/completions call is independent), but the method is
-// required to satisfy the llmClient interface shared with hermes.Client.
+// required to satisfy the llmClient interface shared with backends that
+// do maintain session state.
 func (c *Client) ResetSession() {
 	// Intentionally empty.
 }
 
 // doSend performs the HTTP POST and parses the response. For streaming
 // requests, onDelta is invoked for each text delta. Caller MUST hold sendMu.
-func (c *Client) doSend(ctx context.Context, input string, stream bool, onDelta func(string)) (*hermes.Response, error) {
+func (c *Client) doSend(ctx context.Context, input string, stream bool, onDelta func(string)) (*llmtypes.Response, error) {
 	body := request{
 		Model:     c.cfg.Model,
 		MaxTokens: c.cfg.MaxTokens,
@@ -167,8 +168,8 @@ func (c *Client) doSend(ctx context.Context, input string, stream bool, onDelta 
 }
 
 // parseResponse decodes a non-streaming OpenAI Chat Completions response
-// and converts it to *hermes.Response.
-func (c *Client) parseResponse(r io.Reader) (*hermes.Response, error) {
+// and converts it to *llmtypes.Response.
+func (c *Client) parseResponse(r io.Reader) (*llmtypes.Response, error) {
 	raw, err := io.ReadAll(r)
 	if err != nil {
 		return nil, fmt.Errorf("read body: %w", err)
@@ -177,7 +178,7 @@ func (c *Client) parseResponse(r io.Reader) (*hermes.Response, error) {
 	if err := json.Unmarshal(raw, &or); err != nil {
 		return nil, fmt.Errorf("unmarshal response: %w", err)
 	}
-	return or.toHermes(c.cfg.Model), nil
+	return or.toLlmTypes(c.cfg.Model), nil
 }
 
 // parseStream decodes an SSE stream from the OpenAI Chat Completions API.
@@ -189,17 +190,17 @@ func (c *Client) parseResponse(r io.Reader) (*hermes.Response, error) {
 //	data: [DONE]
 //
 // Comment / keepalive lines start with ':'.
-func (c *Client) parseStream(r io.Reader, onDelta func(string)) (*hermes.Response, error) {
+func (c *Client) parseStream(r io.Reader, onDelta func(string)) (*llmtypes.Response, error) {
 	sc := bufio.NewScanner(r)
 	// SSE events can carry a large chunk payload; allow up to 1MB per line.
 	sc.Buffer(make([]byte, 0, 64*1024), 1<<20)
 
 	var (
-		hr       hermes.Response
-		textBuf  strings.Builder
-		respID   string
-		usage    *openaiUsage
-		gotDone  bool
+		hr      llmtypes.Response
+		textBuf strings.Builder
+		respID  string
+		usage   *openaiUsage
+		gotDone bool
 	)
 
 	for sc.Scan() {
@@ -264,24 +265,24 @@ func (c *Client) parseStream(r io.Reader, onDelta func(string)) (*hermes.Respons
 	return &hr, nil
 }
 
-// finalizeStream populates the hermes.Response fields from accumulated
+// finalizeStream populates the llmtypes.Response fields from accumulated
 // stream state. If usage is nil (stream_options not supported), token
 // counts are left as zero — they're only used for logging, not for
 // session reset logic.
-func (c *Client) finalizeStream(hr *hermes.Response, textBuf *strings.Builder, respID string, usage *openaiUsage) {
+func (c *Client) finalizeStream(hr *llmtypes.Response, textBuf *strings.Builder, respID string, usage *openaiUsage) {
 	hr.ID = respID
 	hr.Status = "completed"
 	hr.Model = c.cfg.Model
-	hr.Output = []hermes.Block{{
+	hr.Output = []llmtypes.Block{{
 		Type: "message",
 		Role: "assistant",
-		Content: []hermes.Content{{
+		Content: []llmtypes.Content{{
 			Type: "output_text",
 			Text: textBuf.String(),
 		}},
 	}}
 	if usage != nil {
-		hr.Usage = hermes.Usage{
+		hr.Usage = llmtypes.Usage{
 			InputTokens:  usage.PromptTokens,
 			OutputTokens: usage.CompletionTokens,
 			TotalTokens:  usage.TotalTokens,
@@ -343,11 +344,11 @@ type openaiChunk struct {
 	Usage   *openaiUsage   `json:"usage,omitempty"`
 }
 
-// toHermes converts the OpenAI response to *hermes.Response so callers
+// toLlmTypes converts the OpenAI response to *llmtypes.Response so callers
 // can use ExtractText() and Usage.TotalTokens unchanged.
 // modelFallback is used when the response Model is empty or "default"
 // (Venus returns "default" rather than the actual model name).
-func (or *openaiResponse) toHermes(modelFallback string) *hermes.Response {
+func (or *openaiResponse) toLlmTypes(modelFallback string) *llmtypes.Response {
 	var text string
 	for _, ch := range or.Choices {
 		text += ch.Message.Content
@@ -356,19 +357,19 @@ func (or *openaiResponse) toHermes(modelFallback string) *hermes.Response {
 	if model == "" || model == "default" {
 		model = modelFallback
 	}
-	return &hermes.Response{
+	return &llmtypes.Response{
 		ID:     or.ID,
 		Status: "completed",
 		Model:  model,
-		Output: []hermes.Block{{
+		Output: []llmtypes.Block{{
 			Type: "message",
 			Role: "assistant",
-			Content: []hermes.Content{{
+			Content: []llmtypes.Content{{
 				Type: "output_text",
 				Text: text,
 			}},
 		}},
-		Usage: hermes.Usage{
+		Usage: llmtypes.Usage{
 			InputTokens:  or.Usage.PromptTokens,
 			OutputTokens: or.Usage.CompletionTokens,
 			TotalTokens:  or.Usage.TotalTokens,

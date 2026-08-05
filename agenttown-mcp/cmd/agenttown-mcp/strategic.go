@@ -8,7 +8,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/AgentTown/agenttown-mcp/pkg/hermes"
+	"github.com/AgentTown/agenttown-mcp/pkg/llmtypes"
 	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
 )
 
@@ -25,9 +25,9 @@ type dailyPlanItem struct {
 	Goal string `json:"goal"`
 }
 
-// strategicCaller 是 hermes.Client 的窄接口，便于单测 mock。
+// strategicCaller 是 LLM 客户端的窄接口，便于单测 mock。
 type strategicCaller interface {
-	SendWithSummary(ctx context.Context, input, summary string) (*hermes.Response, error)
+	SendWithSummary(ctx context.Context, input, summary string) (*llmtypes.Response, error)
 	ResetSession()
 }
 

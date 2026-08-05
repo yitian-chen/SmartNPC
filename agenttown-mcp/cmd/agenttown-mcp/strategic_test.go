@@ -7,19 +7,19 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/AgentTown/agenttown-mcp/pkg/hermes"
+	"github.com/AgentTown/agenttown-mcp/pkg/llmtypes"
 	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
 )
 
 // fakeStrategicCaller 实现 strategicCaller 接口，用于单测。
 type fakeStrategicCaller struct {
-	resp          *hermes.Response
+	resp          *llmtypes.Response
 	err           error
 	capturedInput string
 	resetCalled   bool
 }
 
-func (f *fakeStrategicCaller) SendWithSummary(_ context.Context, input, _ string) (*hermes.Response, error) {
+func (f *fakeStrategicCaller) SendWithSummary(_ context.Context, input, _ string) (*llmtypes.Response, error) {
 	f.capturedInput = input
 	return f.resp, f.err
 }
@@ -27,13 +27,13 @@ func (f *fakeStrategicCaller) SendWithSummary(_ context.Context, input, _ string
 func (f *fakeStrategicCaller) ResetSession() { f.resetCalled = true }
 
 // makeStrategicResponse 构造一个 ExtractText 能提取出 text 的 Response。
-func makeStrategicResponse(text string) *hermes.Response {
-	return &hermes.Response{
+func makeStrategicResponse(text string) *llmtypes.Response {
+	return &llmtypes.Response{
 		Status: "completed",
-		Output: []hermes.Block{{
+		Output: []llmtypes.Block{{
 			Type: "message",
 			Role: "assistant",
-			Content: []hermes.Content{{
+			Content: []llmtypes.Content{{
 				Type: "output_text",
 				Text: text,
 			}},
