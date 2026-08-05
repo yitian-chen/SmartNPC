@@ -50,6 +50,11 @@ tmp/
 mcp
 scripts/analyze_latency.py
 
+# ─── world_kb 运行时产物 ─────────────────────────────────────
+# manifest.json 由 MCP 在 UE 推送 world_kb 时落盘（含 SHA256 + 时间戳），
+# 属于运行时产物，不应入库；world_kb.yaml 是手写权威源仍保留 tracked。
+assets/world_kb.manifest.json
+
 # ─── Hermes 裸金属运行时产物（根目录层级） ─────────────────
 # 裸金属跑 Hermes（不走 Docker）时，工作目录在 hermes/ 下，
 # 会产生 kanban.db / SOUL.md 副本等运行时文件。
