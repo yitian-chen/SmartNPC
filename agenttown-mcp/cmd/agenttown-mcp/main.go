@@ -82,9 +82,10 @@ type agentContext struct {
 	cancel         context.CancelFunc
 	stopped        bool
 	// replan 状态（mu 保护）
-	lastReplanAt     time.Time // wall-clock，30 min 去抖（replanDedupeWindow）
-	replanInProgress bool      // replan 规划进行中，阻止 worker 抢先 pop/refill
-	replanHint       string    // 传入战术层 prompt 的"上次中断原因"（replan reason）
+	lastReplanAt        time.Time // wall-clock，仅用于日志/调试
+	lastReplanGameTime  string    // 上次 replan 时的游戏时间 "HH:MM"，用于游戏时间去抖（replanDedupeGameMinutes）
+	replanInProgress    bool      // replan 规划进行中，阻止 worker 抢先 pop/refill
+	replanHint          string    // 传入战术层 prompt 的"上次中断原因"（replan reason）
 }
 
 func newAgentContext(parent context.Context, epochs ...int64) (*agentContext, context.Context) {

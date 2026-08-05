@@ -647,3 +647,55 @@ func parseTodToSec(t *testing.T, tod string) float64 {
 // 反应层现已移除 act/interrupt，仅保留 continue/observe/replan。
 // isValidReactionCmd / buildReactiveCmdList / mapReactionAction 及相关测试
 // 已随之移除。
+
+// ─── gameTimeDeltaMinutes（replan 游戏时间去抖） ───────────────
+
+func TestGameTimeDeltaMinutes_Normal(t *testing.T) {
+	got := gameTimeDeltaMinutes("06:00", "07:30")
+	if got != 90 {
+		t.Errorf("delta 06:00→07:30 = %d, want 90", got)
+	}
+}
+
+func TestGameTimeDeltaMinutes_SameTime(t *testing.T) {
+	got := gameTimeDeltaMinutes("11:00", "11:00")
+	if got != 0 {
+		t.Errorf("delta same time = %d, want 0", got)
+	}
+}
+
+func TestGameTimeDeltaMinutes_BelowWindow(t *testing.T) {
+	// 30 分钟差，应返回 30（< 60 分钟去抖窗口）
+	got := gameTimeDeltaMinutes("11:00", "11:30")
+	if got != 30 {
+		t.Errorf("delta 11:00→11:30 = %d, want 30", got)
+	}
+}
+
+func TestGameTimeDeltaMinutes_DayWrap(t *testing.T) {
+	// 跨日：23:30 → 00:30 应为 60 分钟，不是 -1380
+	got := gameTimeDeltaMinutes("23:30", "00:30")
+	if got != 60 {
+		t.Errorf("delta 23:30→00:30 = %d, want 60 (day wrap)", got)
+	}
+}
+
+func TestGameTimeDeltaMinutes_EmptyArgs(t *testing.T) {
+	// 任一为空返回 0（无去抖信息，允许触发）
+	if got := gameTimeDeltaMinutes("", "12:00"); got != 0 {
+		t.Errorf("delta empty prev = %d, want 0", got)
+	}
+	if got := gameTimeDeltaMinutes("12:00", ""); got != 0 {
+		t.Errorf("delta empty cur = %d, want 0", got)
+	}
+}
+
+func TestGameTimeDeltaMinutes_InvalidArgs(t *testing.T) {
+	// 解析失败返回 0
+	if got := gameTimeDeltaMinutes("abc", "12:00"); got != 0 {
+		t.Errorf("delta invalid prev = %d, want 0", got)
+	}
+	if got := gameTimeDeltaMinutes("12:00", "xyz"); got != 0 {
+		t.Errorf("delta invalid cur = %d, want 0", got)
+	}
+}

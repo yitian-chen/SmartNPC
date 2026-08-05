@@ -323,13 +323,14 @@ const reactiveDedupeWindow = 60 * time.Second
 // 但要有一定去抖，避免感知频率高（如 behavior 模式 15s 一次）时过度调用。
 const reactivePeriodicDedupeWindow = 45 * time.Second
 
-// replanDedupeWindow 限制 reaction=replan 的触发频率：wall-clock 30 分钟内至多 1 次。
-// 不做倍率换算——"至多一次"约束的是反应层决策频率（wall-clock 时间轴上的 Ollama
-// 调用、goroutine 调度），与游戏时间倍率无关。150x 下 30 wall-clock 分钟 ≈ 75 游戏小时，
-// 远超单日仿真（16 游戏小时 ≈ 6.4 wall-clock 分钟），确保 replan 是罕见重大事件。
-// 该去抖在 execute() 的 replan 分支内检查（不在 trigger() 第一层），按 agent 全局，
-// 不按 trigger/detail——replan 是 agent 级决策，不是单个触发的事件。
-const replanDedupeWindow = 30 * time.Minute
+// replanDedupeGameMinutes 限制 reaction=replan 的触发频率：1 游戏小时内至多 1 次。
+// 按游戏时间去抖（而非 wall-clock），因为仿真倍率最高 600x，wall-clock 窗口会
+// 在游戏时间轴上被放大到数十小时，导致整日仿真中合法 replan 全被第一次触发
+// 拦截（实测 150x 下 30 wall-clock 分钟 ≈ 75 游戏小时，远超 16 游戏小时的
+// 单日仿真）。1 游戏小时窗口确保物理告警在不同游戏时段都能触发有效 replan。
+// 该去抖在 execute() 的 replan 分支内检查（不在 trigger() 第一层），按 agent
+// 全局，不按 trigger/detail——replan 是 agent 级决策，不是单个触发的事件。
+const replanDedupeGameMinutes = 60
 
 // upgradeIfPhysicalAlert 是代码层兜底：当物理状态告警（fatigue>60 / energy<40 /
 // health<50）而 LLM 仍输出 continue/observe 时，强制升级为 replan。
@@ -361,4 +362,21 @@ func upgradeIfPhysicalAlert(input ReactiveInput, dec ReactiveDecision) ReactiveD
 	dec.Reaction = ReactionReplan
 	dec.Reason = "物理状态告警自动升级(" + alert + ")；原决策=" + string(origReaction) + "/" + origReason
 	return dec
+}
+
+// gameTimeDeltaMinutes 计算 "HH:MM" 形式的游戏时间差（cur - prev），单位分钟。
+// 用于 replan 去抖窗口判断（按游戏时间而非 wall-clock）。
+// 任一参数为空或解析失败返回 0（视为"无去抖信息，允许触发"）。
+// 处理跨日：cur < prev 时加 24h（1440 分钟）——单日仿真（06:00-22:00）一般不会命中。
+func gameTimeDeltaMinutes(prev, cur string) int {
+	p := parsePlanMinute(prev)
+	c := parsePlanMinute(cur)
+	if p < 0 || c < 0 {
+		return 0
+	}
+	delta := c - p
+	if delta < 0 {
+		delta += 1440 // 跨日 wrap
+	}
+	return delta
 }
