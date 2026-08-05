@@ -730,23 +730,9 @@ function buildFieldSpec(param, cmd) {
     hint: param.description || '',
     default: param.default_value || '',
   };
-  // KB 联动：按参数名启发式判断
-  // 同时兼容 built-in InteractInput.target_object_id 与 UE 推送的 smart_object
-  if (param.name === 'target_object_id' || param.name === 'smart_object') {
-    spec.type = 'select-kb-object';
-    spec.filterInteractions = inferFilterInteractions(cmd);
-  } else if (param.name === 'target_zone') {
-    spec.type = 'select-kb-zone';
-  } else if (param.name === 'target' && param.type === 'string') {
-    spec.type = 'select-kb-target';
-  } else if (cmd === 'interact' && param.name === 'interaction') {
-    // interact cmd 的 interaction 参数：capability_registry 声明为 string（非 enum），
-    // 渲染为自由输入框 + datalist 建议。当 smart_object 命中 KB object 时，
-    // 把该 object 的 available_interactions 作为建议项填入 datalist。
-    // 用户可输入任意值（capability 外的交互也能下发），也可从建议中选。
-    spec.type = 'text-with-datalist';
-    spec.datalistId = 'datalist-interaction';
-  } else if (param.type === 'enum') {
+  // capability_registry 声明的 type:string 字段统一用纯文本输入，
+  // 不再做 KB 联动下拉（KB 数据可能与 UE 实际不一致，下拉反而误导）。
+  if (param.type === 'enum') {
     spec.type = 'select-enum';
     spec.enumValues = param.enum_values || [];
   } else if (param.type === 'bool') {
@@ -762,15 +748,7 @@ function buildFieldSpec(param, cmd) {
   return spec;
 }
 
-// inferFilterInteractions 按 cmd 推导 target_object_id 的 interaction 过滤器。
-// charge_at_station 只显示带 charge 的 object；work_at_workbench 只显示带 assemble 的。
-function inferFilterInteractions(cmd) {
-  switch (cmd) {
-    case 'charge_at_station': return ['charge'];
-    case 'work_at_workbench': return ['assemble'];
-    default: return null;
-  }
-}
+// inferFilterInteractions 已移除：KB 联动下拉全部改为纯文本输入。
 
 function onCmdChange() {
   const cmd = document.getElementById('cmd').value;
@@ -787,7 +765,6 @@ function onCmdChange() {
   // move_to_location 特殊处理：注入模式选择器 + target/dest 字段按模式切换
   if (cmd === 'move_to_location') {
     renderMoveToLocationFields(container, action);
-    updateInteractionDatalist();
     updateCurlPreview();
     return;
   }
@@ -797,7 +774,6 @@ function onCmdChange() {
     const spec = buildFieldSpec(p, cmd);
     renderField(container, spec);
   });
-  updateInteractionDatalist();
   updateCurlPreview();
 }
 
@@ -813,7 +789,7 @@ function renderMoveToLocationFields(container, action) {
 
   // target id 模式字段（前端增强，不在 capability 描述里）
   const targetSpec = {
-    name: 'target', label: 'target', type: 'select-kb-target', required: true,
+    name: 'target', label: 'target', type: 'text', required: true,
     hint: 'zone 或 location id，MCP 自动解析坐标',
     modeVisibility: 'target_id',
   };
@@ -923,74 +899,6 @@ function renderField(container, field) {
       input.onchange = updateCurlPreview;
       break;
 
-    case 'select-kb-target':
-      input = document.createElement('select');
-      input.id = `param-${field.name}`;
-      input.dataset.fieldName = field.name;
-      if (field.modeVisibility) input.dataset.modeVisibility = field.modeVisibility;
-      // zones
-      const zg = document.createElement('optgroup');
-      zg.label = 'Zones（区域）';
-      (kbData.zones || []).forEach(z => {
-        const o = document.createElement('option');
-        o.value = z.id; o.textContent = `${z.id} — ${z.display_name}`;
-        zg.appendChild(o);
-      });
-      input.appendChild(zg);
-      // objects
-      const og = document.createElement('optgroup');
-      og.label = 'Objects（物体）';
-      (kbData.objects || []).forEach(o => {
-        const opt = document.createElement('option');
-        opt.value = o.id; opt.textContent = `${o.id} — ${o.display_name} (in ${o.zone_id})`;
-        og.appendChild(opt);
-      });
-      input.appendChild(og);
-      if (kbData.objects && kbData.objects.length > 0) {
-        input.value = kbData.objects[0].id;
-      }
-      input.onchange = updateCurlPreview;
-      break;
-
-    case 'select-kb-zone':
-      input = document.createElement('select');
-      input.id = `param-${field.name}`;
-      input.dataset.fieldName = field.name;
-      (kbData.zones || []).forEach(z => {
-        const opt = document.createElement('option');
-        opt.value = z.id; opt.textContent = `${z.id} — ${z.display_name}`;
-        input.appendChild(opt);
-      });
-      input.onchange = updateCurlPreview;
-      break;
-
-    case 'select-kb-object':
-      input = document.createElement('select');
-      input.id = `param-${field.name}`;
-      input.dataset.fieldName = field.name;
-      input.onchange = () => { updateInteractionDatalist(); updateCurlPreview(); };
-      (kbData.objects || []).forEach(o => {
-        if (field.filterInteractions && !field.filterInteractions.some(a => (o.available_interactions || []).includes(a))) return;
-        const opt = document.createElement('option');
-        opt.value = o.id; opt.textContent = `${o.id} — ${o.display_name}`;
-        input.appendChild(opt);
-      });
-      break;
-
-    case 'text-with-datalist': {
-      input = document.createElement('input');
-      input.type = 'text';
-      input.id = `param-${field.name}`;
-      input.value = field.default != null ? field.default : '';
-      input.dataset.fieldName = field.name;
-      input.setAttribute('list', field.datalistId);
-      input.oninput = updateCurlPreview;
-      const dl = document.createElement('datalist');
-      dl.id = field.datalistId;
-      div.appendChild(dl);
-      break;
-    }
-
     case 'number':
       input = document.createElement('input');
       input.type = 'number';
@@ -1016,22 +924,6 @@ function renderField(container, field) {
     div.appendChild(h);
   }
   container.appendChild(div);
-}
-
-function updateInteractionDatalist() {
-  // 找到 smart_object / target_object_id select，根据其值更新 interaction
-  // datalist 的建议项。datalist 不限制 input 的值，用户仍可自由输入。
-  const objSel = document.querySelector('[data-field-name="smart_object"]')
-              || document.querySelector('[data-field-name="target_object_id"]');
-  const dl = document.getElementById('datalist-interaction');
-  if (!objSel || !dl) return;
-  const obj = (kbData.objects || []).find(o => o.id === objSel.value);
-  dl.innerHTML = '';
-  (obj && obj.available_interactions || []).forEach(a => {
-    const o = document.createElement('option');
-    o.value = a; o.textContent = a;
-    dl.appendChild(o);
-  });
 }
 
 // ─── 收集表单 → 请求体 ───────────────────────────────────
@@ -1316,7 +1208,6 @@ function replayHistory(i) {
       else el.value = v;
     }
   });
-  updateInteractionDatalist();
   Object.entries(h.req.params || {}).forEach(([k, v]) => {
     const el = document.querySelector(`#params-form [data-field-name="${k}"]`);
     if (el) {
