@@ -113,7 +113,7 @@ func generateDailyPlan(ctx context.Context, sc strategicCaller, agentID string, 
 	prompt := fmt.Sprintf(strategicPromptTemplate,
 		buildStrategicContext(kb, agentID),
 		"昨日总结："+yesterdaySummaryForFirstDay)
-	logger.Info("[MCP→Hermes/STRATEGIC-PROMPT]", "agent_id", agentID, "text", prompt)
+	logger.Info("[MCP→LLM/STRATEGIC-PROMPT]", "agent_id", agentID, "text", prompt)
 
 	resp, err := sc.SendWithSummary(ctx, prompt, "")
 	if err != nil {
@@ -125,7 +125,7 @@ func generateDailyPlan(ctx context.Context, sc strategicCaller, agentID string, 
 	sc.ResetSession() // 战略调用一次性使用，立即清链
 
 	raw := resp.ExtractText()
-	logger.Info("[Hermes→MCP/STRATEGIC-RESPONSE]",
+	logger.Info("[LLM→MCP/STRATEGIC-RESPONSE]",
 		"agent_id", agentID, "tokens", resp.Usage.TotalTokens, "raw_len", len(raw), "raw", raw)
 
 	items, err := parseDailyPlan(raw)

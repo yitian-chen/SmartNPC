@@ -71,7 +71,7 @@ type ReactiveInput struct {
 	Health            float64
 	CurrentAction     string // 当前在途 action 的可读描述（如 "WorkAtWorkbench(target_object_id=workbench_01)"），空=无在途
 	ElapsedSec        int    // 当前 action 已执行秒数
-	ActionSrc         string // 在途 action 来源：tactical / hermes / 空
+	ActionSrc         string // 在途 action 来源：tactical / mcp_tool / 空
 	CurrentSlot       string // 当前战术时段 "HH:MM-HH:MM"，空=未分解
 	DailyPlan         string // 战略层每日计划摘要（格式化字符串），空=未生成
 	Trigger           ReactiveTrigger

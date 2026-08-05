@@ -29,7 +29,7 @@ type ndjsonLine struct {
 type actionSource string
 
 const (
-	sourceHermes   actionSource = "hermes"
+	sourceTool     actionSource = "mcp_tool"
 	sourceTactical actionSource = "tactical"
 )
 
@@ -474,8 +474,8 @@ func buildKBContext(kb *worldkb.KB) string {
 
 // generateTacticalPlan 调战术层 LLM 分解当前时段 goal（非流式路径）。
 // 返回分解出的 action 列表 + inner_thought（作为整个时段独白）。
-// 任一步失败返回 err，调用方决定回退到 Hermes。
-// 复用 strategicCaller 接口（hermes.Client 已满足）。
+// 任一步失败返回 err，调用方决定回退兜底。
+// 复用 strategicCaller 接口（venus.Client 已满足）。
 func generateTacticalPlan(
 	ctx context.Context,
 	tc strategicCaller,
@@ -488,7 +488,7 @@ func generateTacticalPlan(
 	registry *CapabilityRegistry,
 ) ([]plannedAction, string, error) {
 	prompt := buildTacticalPrompt(goal, zone, timeOfDay, slot, physical, kb, hint, registry, agentID)
-	logger.Info("[MCP→Hermes/TACTICAL-PROMPT]",
+	logger.Info("[MCP→LLM/TACTICAL-PROMPT]",
 		"agent_id", agentID, "goal", goal, "game_time", timeOfDay, "text", prompt,
 		"replan_hint", hint)
 
@@ -499,7 +499,7 @@ func generateTacticalPlan(
 	tc.ResetSession() // 战术调用一次性，立即清链（与战略层一致）
 
 	raw := resp.ExtractText()
-	logger.Info("[Hermes→MCP/TACTICAL-RESPONSE]",
+	logger.Info("[LLM→MCP/TACTICAL-RESPONSE]",
 		"agent_id", agentID, "tokens", resp.Usage.TotalTokens, "raw_len", len(raw), "raw", raw)
 
 	actions, thought, err := parseTacticalNDJSON(raw, registry, agentID)
@@ -521,8 +521,7 @@ func generateTacticalPlan(
 // action 即调 onAction 回调，使调用方能在首 action 到达时立即下发，
 // 将首动作体感延迟从 ~14s 降至 ~2-3s。
 //
-// 走 llmClient 接口（hermes.Client 和 venus.Client 均实现），由 main.go
-// 的 --llm-backend 决定具体后端。
+// 走 llmClient 接口（venus.Client 实现）。
 func generateTacticalPlanStreaming(
 	ctx context.Context,
 	tc llmClient,
@@ -535,7 +534,7 @@ func generateTacticalPlanStreaming(
 	onAction func(plannedAction),
 ) ([]plannedAction, string, error) {
 	prompt := buildTacticalPrompt(goal, zone, timeOfDay, slot, physical, kb, hint, registry, agentID)
-	logger.Info("[MCP→Hermes/TACTICAL-PROMPT]",
+	logger.Info("[MCP→LLM/TACTICAL-PROMPT]",
 		"agent_id", agentID, "goal", goal, "game_time", timeOfDay, "text", prompt,
 		"streaming", true, "replan_hint", hint)
 
@@ -555,7 +554,7 @@ func generateTacticalPlanStreaming(
 		acc.feed(delta)
 	})
 	if err != nil {
-		logger.Warn("[Hermes→MCP/TACTICAL-STREAM] stream error, keeping actions already parsed",
+		logger.Warn("[LLM→MCP/TACTICAL-STREAM] stream error, keeping actions already parsed",
 			"agent_id", agentID, "parsed_actions", len(actions), "err", err)
 		return actions, acc.thought, fmt.Errorf("tactical llm stream: %w", err)
 	}
@@ -563,7 +562,7 @@ func generateTacticalPlanStreaming(
 	tc.ResetSession()
 
 	raw := resp.ExtractText()
-	logger.Info("[Hermes→MCP/TACTICAL-RESPONSE]",
+	logger.Info("[LLM→MCP/TACTICAL-RESPONSE]",
 		"agent_id", agentID, "tokens", resp.Usage.TotalTokens, "raw_len", len(raw), "raw", raw, "streaming", true)
 
 	if len(actions) == 0 {

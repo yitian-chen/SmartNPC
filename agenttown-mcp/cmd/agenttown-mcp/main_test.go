@@ -207,13 +207,13 @@ func TestRecordActionStarted_SetsSource(t *testing.T) {
 		t.Fatalf("currentActionID=%q, want act_1", id)
 	}
 
-	ac.recordActionStarted("act_2", "Wait", map[string]any{"duration_sec": 30}, 2, sourceHermes)
+	ac.recordActionStarted("act_2", "Wait", map[string]any{"duration_sec": 30}, 2, sourceTool)
 	ac.mu.Lock()
 	src = ac.currentActionSrc
 	id = ac.currentActionID
 	ac.mu.Unlock()
-	if src != sourceHermes {
-		t.Fatalf("currentActionSrc=%q, want hermes", src)
+	if src != sourceTool {
+		t.Fatalf("currentActionSrc=%q, want mcp_tool", src)
 	}
 	if id != "act_2" {
 		t.Fatalf("currentActionID=%q, want act_2", id)
