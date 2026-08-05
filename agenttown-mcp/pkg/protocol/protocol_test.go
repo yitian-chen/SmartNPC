@@ -111,6 +111,19 @@ func TestActionLifecyclePayloads(t *testing.T) {
 	if json.Unmarshal(raw, &gotDone) != nil || gotDone.Result != ResultSuccess || gotDone.DurationMs != 30200 {
 		t.Fatalf("action_completed round-trip failed: %+v", gotDone)
 	}
+
+	// 验证 failed + reason 字段能正确 round-trip（UE 同事新增的 reason 字段）
+	failDone := ActionCompletedPayload{
+		ActionID: "act_002", Result: ResultFailed, Reason: "寻路不可达", Progress: 0.3,
+	}
+	rawFail, _ := json.Marshal(failDone)
+	var gotFail ActionCompletedPayload
+	if err := json.Unmarshal(rawFail, &gotFail); err != nil {
+		t.Fatalf("action_completed (failed) unmarshal failed: %v", err)
+	}
+	if gotFail.Reason != "寻路不可达" {
+		t.Errorf("action_completed reason round-trip failed: got %q, want %q", gotFail.Reason, "寻路不可达")
+	}
 }
 
 // TestStateReportPayload verifies the four physical values.

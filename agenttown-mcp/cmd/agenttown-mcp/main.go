@@ -200,7 +200,10 @@ func (a *agentContext) recordActionCompletion(completion protocol.ActionComplete
 	if completion.Result == protocol.ResultSuccess {
 		return true, "", ""
 	}
-	detail := fmt.Sprintf("result=%s progress=%.2f", completion.Result, completion.Progress)
+	// 异常完成：detail 注入 reaction 层 TriggerDetail，含 UE 给出的 reason
+	// （如"寻路不可达"），让 Ollama 看到 UE 侧的具体失败原因再决策。
+	detail := fmt.Sprintf("result=%s reason=%s progress=%.2f",
+		completion.Result, completion.Reason, completion.Progress)
 	return true, TriggerActionDone, detail
 }
 
@@ -1314,10 +1317,11 @@ func main() {
 				logger.Warn("action_completed dropped for unregistered agent", "agent_id", agentID)
 				return
 			}
-			queued, trigger, detail := ac.recordActionCompletion(completed)
-			logger.Info("action_completed", "agent_id", agentID,
-				"action_id", completed.ActionID, "result", completed.Result,
-				"progress", completed.Progress, "decision_queued", queued)
+		queued, trigger, detail := ac.recordActionCompletion(completed)
+		logger.Info("action_completed", "agent_id", agentID,
+			"action_id", completed.ActionID, "result", completed.Result,
+			"reason", completed.Reason, "progress", completed.Progress,
+			"decision_queued", queued)
 			if trigger != "" {
 				go reactiveRunnerRef.trigger(agentID, ac, trigger, detail)
 			}

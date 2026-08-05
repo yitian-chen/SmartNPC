@@ -105,6 +105,25 @@ func TestRecordActionCompletion_FailureTriggers(t *testing.T) {
 	}
 }
 
+// TestRecordActionCompletion_FailureDetailIncludesReason 验证异常完成的 detail
+// 包含 UE 回传的 reason 字段（如"寻路不可达"），让反应层 Ollama 能看到具体失败原因。
+func TestRecordActionCompletion_FailureDetailIncludesReason(t *testing.T) {
+	ac, _ := newAgentContext(context.Background())
+	_, trigger, detail := ac.recordActionCompletion(protocol.ActionCompletedPayload{
+		ActionID: "act_fail_2", Result: protocol.ResultFailed,
+		Reason: "寻路不可达", Progress: 0.3,
+	})
+	if trigger != TriggerActionDone {
+		t.Errorf("trigger: got %q, want %q", trigger, TriggerActionDone)
+	}
+	if !strings.Contains(detail, "reason=寻路不可达") {
+		t.Errorf("detail should contain UE reason: %q", detail)
+	}
+	if !strings.Contains(detail, "result=failed") {
+		t.Errorf("detail should contain result=failed: %q", detail)
+	}
+}
+
 func TestRecordEventNotification_ReturnsTrigger(t *testing.T) {
 	ac, _ := newAgentContext(context.Background())
 	setQueueForTest(ac, []plannedAction{

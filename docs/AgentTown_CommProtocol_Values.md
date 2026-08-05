@@ -732,6 +732,7 @@ graph TB
     "action_id": "act_001",
     "result": "success",
     "duration_ms": 30200,
+    "reason": "xxx",
     "progress": 1.0,
     "details": {}
   }
@@ -745,14 +746,25 @@ graph TB
 | `interrupted` | 被 stop_action 打断 |
 | `error` | 异常错误 |
 
+**payload 字段**：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `action_id` | string | UE 原样回传 Agent 下发时的 action_id |
+| `result` | enum | `success`/`failed`/`interrupted`/`error` |
+| `duration_ms` | int | 实际执行时长（毫秒） |
+| `reason` | string (可选) | 失败/打断/异常原因（如"寻路不可达"），success 时常为空。Agent 侧记入日志并折入反应层 TriggerDetail |
+| `progress` | float | 完成进度 0.0-1.0（interrupted 时表示被打断时的进度） |
+| `details` | object | 扩展信息（如 interrupted 时的 `completed_steps` / `interrupted_at_step`） |
+
 **interrupted 时带 progress**：
 
 ```json
 {
   "result": "interrupted",
+  "reason": "stop_action received",
   "progress": 0.6,
   "details": {
-    "reason": "stop_action received",
     "completed_steps": ["MoveTo", "TurnTo"],
     "interrupted_at_step": "PlayAssembleLoop"
   }
