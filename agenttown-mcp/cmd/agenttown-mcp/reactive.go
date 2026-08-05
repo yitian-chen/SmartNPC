@@ -44,13 +44,13 @@ const (
 	TriggerPeriodic      ReactiveTrigger = "periodic"        // 周期性触发：每 N 次感知强制评估
 )
 
-// 物理警戒带阈值。原 P0 设 energy<20 / health<30 / fatigue>80，但单日仿真
-// energy 最低只到约 80、fatigue 最高约 48，警戒带从未触发。放宽到预警级别，
-// 让 1-2 小时仿真就能自然触发物理类反应。
+// 物理警戒带阈值。fatigue 阈值从 60 提升到 80（配合 mock_ue 疲劳速率
+// 下调），让疲劳告警在下午中段（~14:00）自然触发而非上午 11:00 就打断
+// 工作。energy/health 阈值保留预警级别，让 1-2 小时仿真也能自然触发。
 const (
 	energyAlertThreshold  = 40.0 // energy 跌破此值触发"低电量预警"
 	healthAlertThreshold  = 50.0 // health 跌破此值触发"健康预警"
-	fatigueAlertThreshold = 60.0 // fatigue 突破此值触发"疲劳预警"
+	fatigueAlertThreshold = 80.0 // fatigue 突破此值触发"疲劳预警"
 )
 
 // periodicTriggerInterval 是周期性触发的感知次数间隔。
@@ -114,8 +114,8 @@ const reactivePromptTemplate = `你是 NPC %s 的反应决策模块。当前情�
 
 判断要点：
 - 战术层规划的动作通常是合理的，除非有明确理由，否则 continue
-- 物理状态告警时（体力<40、疲劳>60、健康<50）必须输出 replan 让 NPC 休息/充电，禁止输出 continue/observe
-- replan 是"重大"决策：当你认为整个 action 队列都应作废、重新规划时使用。30 分钟内至多触发 1 次 replan，请慎重
+- 物理状态告警时（体力<40、疲劳>80、健康<50）必须输出 replan 让 NPC 休息/充电，禁止输出 continue/observe
+- replan 是"重大"决策：当你认为整个 action 队列都应作废、重新规划时使用。1 游戏小时内至多触发 1 次 replan，请慎重
 
 请输出 JSON，格式严格如下，不要输出 JSON 以外的任何内容：
 {"reaction": "continue|observe|replan", "reason": "简短理由"}
@@ -332,10 +332,10 @@ const reactivePeriodicDedupeWindow = 45 * time.Second
 // 全局，不按 trigger/detail——replan 是 agent 级决策，不是单个触发的事件。
 const replanDedupeGameMinutes = 60
 
-// upgradeIfPhysicalAlert 是代码层兜底：当物理状态告警（fatigue>60 / energy<40 /
+// upgradeIfPhysicalAlert 是代码层兜底：当物理状态告警（fatigue>80 / energy<40 /
 // health<50）而 LLM 仍输出 continue/observe 时，强制升级为 replan。
 //
-// 动机：实测 qwen2.5:7b 在 fatigue=80+ 时仍输出 observe（"物理状态尚可"），
+// 动机：实测 qwen2.5:7b 在 fatigue 突破阈值时仍输出 observe（"物理状态尚可"），
 // 仅靠 prompt 约束不可靠。代码层强制保证物理告警时 agent 真正停下来重规划。
 // 升级后的 replan 会调战术层重新分解当前时段 goal（见 execute），引导 LLM
 // 规划休息/充电。

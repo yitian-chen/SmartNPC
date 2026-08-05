@@ -105,13 +105,13 @@ func TestUpgradeIfPhysicalAlert_ReasonContainsOrigReaction(t *testing.T) {
 	}{
 		{
 			name:         "observe upgraded, reason should contain observe",
-			input:        ReactiveInput{Fatigue: 80, Energy: 70, Health: 100},
+			input:        ReactiveInput{Fatigue: 82, Energy: 70, Health: 100},
 			dec:          ReactiveDecision{Reaction: ReactionObserve, Reason: "状态尚可"},
 			wantOrigKind: "observe",
 		},
 		{
 			name:         "continue upgraded, reason should contain continue",
-			input:        ReactiveInput{Fatigue: 70, Energy: 50, Health: 100},
+			input:        ReactiveInput{Fatigue: 82, Energy: 50, Health: 100},
 			dec:          ReactiveDecision{Reaction: ReactionContinue, Reason: "继续行动"},
 			wantOrigKind: "continue",
 		},
@@ -220,7 +220,7 @@ func TestUpgradeIfPhysicalAlert(t *testing.T) {
 	}{
 		{
 			name:     "fatigue alert upgrades observe to replan",
-			input:    ReactiveInput{Fatigue: 80, Energy: 70, Health: 100},
+			input:    ReactiveInput{Fatigue: 82, Energy: 70, Health: 100},
 			dec:      ReactiveDecision{Reaction: ReactionObserve, Reason: "状态尚可"},
 			wantKind: ReactionReplan,
 			wantSub:  "物理状态告警自动升级",
@@ -253,13 +253,13 @@ func TestUpgradeIfPhysicalAlert(t *testing.T) {
 		},
 		{
 			name:     "replan preserved even under alert",
-			input:    ReactiveInput{Fatigue: 80, Energy: 70, Health: 100},
+			input:    ReactiveInput{Fatigue: 82, Energy: 70, Health: 100},
 			dec:      ReactiveDecision{Reaction: ReactionReplan, Reason: "整体重新规划"},
 			wantKind: ReactionReplan,
 		},
 		{
 			name:     "boundary: fatigue exactly at threshold not upgraded",
-			input:    ReactiveInput{Fatigue: 60, Energy: 70, Health: 100},
+			input:    ReactiveInput{Fatigue: 80, Energy: 70, Health: 100},
 			dec:      ReactiveDecision{Reaction: ReactionObserve, Reason: "ok"},
 			wantKind: ReactionObserve,
 		},

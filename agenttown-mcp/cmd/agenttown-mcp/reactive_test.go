@@ -178,7 +178,7 @@ func TestBuildReactivePrompt_ReplanOption(t *testing.T) {
 	if !strings.Contains(prompt, "replan") {
 		t.Errorf("prompt should mention 'replan' option, got: %s", prompt)
 	}
-	if !strings.Contains(prompt, "30 分钟内至多触发 1 次") {
+	if !strings.Contains(prompt, "1 游戏小时内至多触发 1 次") {
 		t.Errorf("prompt should mention replan frequency limit, got: %s", prompt)
 	}
 	if !strings.Contains(prompt, "continue|observe|replan") {
@@ -357,14 +357,14 @@ func TestShouldTriggerReactive_HealthAlert(t *testing.T) {
 
 // TestShouldTriggerReactive_FatigueAlert verifies fatigue threshold crossing.
 func TestShouldTriggerReactive_FatigueAlert(t *testing.T) {
-	prev := &protocol.PhysicalState{Energy: 50, Health: 90, Fatigue: 55}
-	cur := &protocol.PhysicalState{Energy: 50, Health: 90, Fatigue: 62}
+	prev := &protocol.PhysicalState{Energy: 50, Health: 90, Fatigue: 75}
+	cur := &protocol.PhysicalState{Energy: 50, Health: 90, Fatigue: 82}
 	trig, detail := shouldTriggerReactive("z", "z", nil, nil, prev, cur)
 	if trig != TriggerPhysicalAlert {
 		t.Errorf("trigger: got %q, want physical_alert", trig)
 	}
-	if !strings.Contains(detail, "fatigue") || !strings.Contains(detail, "60") {
-		t.Errorf("detail should mention fatigue + 60: %q", detail)
+	if !strings.Contains(detail, "fatigue") || !strings.Contains(detail, "80") {
+		t.Errorf("detail should mention fatigue + 80: %q", detail)
 	}
 }
 
