@@ -8,15 +8,12 @@
 #
 # 启动组件：
 #   1. agenttown-mcp.exe (Windows, WS :9090 + HTTP :8760)  ← UE 连这个
-#   2. CodeBuddy Adapter (Windows, :8761, localhost only, 已弃用默认不启动)
 #
 # LLM 后端：MCP 直连 Venus（OpenAI Chat Completions 协议），
 # 凭据 VENUS_API_KEY 从 .env 读取，启动时透传给 MCP 进程。
 #
 # 用法：
-#   bash start-debug.sh                # 默认全启
-#   bash start-debug.sh --no-adapter   # 跳过 Adapter（已是默认，向后兼容）
-#   bash start-debug.sh --with-adapter # 临时启动已弃用的 Adapter
+#   bash start-debug.sh                # 启动
 #   bash start-debug.sh --stop         # 仅停止所有服务
 #
 # 前置：
@@ -48,17 +45,13 @@ MCP_DIR="$PROJECT_DIR/agenttown-mcp"
 MCP_EXE_NAME="${MCP_EXE_NAME:-agenttown-mcp.exe}"
 MCP_EXE="$MCP_DIR/$MCP_EXE_NAME"
 ENV_FILE="$PROJECT_DIR/.env"
-ADAPTER_SCRIPT="$PROJECT_DIR/src/agenttown/codebuddy_adapter.py"
-ADAPTER_PORT="${ADAPTER_PORT:-8761}"
 WS_PORT="${WS_PORT:-9090}"
 HTTP_PORT="${HTTP_PORT:-8760}"
-CLI_PORT="${CLI_PORT:-52001}"
 
 LOG_DATE=$(date +%Y-%m-%d)
 LOG_SUBDIR_BASE="$PROJECT_DIR/logs/$LOG_DATE"
 LOG_SUBDIR="${LOG_SUBDIR:-$LOG_SUBDIR_BASE}"
 MCP_LOG="$LOG_SUBDIR/debug-mcp.log"
-ADAPTER_LOG="$LOG_SUBDIR/debug-adapter.log"
 
 # ─── 加载 .env 到 shell 环境 ──────────────────────────────────
 # MCP 是 Windows exe，通过 .bat 启动；bash export 不会自动传给 cmd.exe，
@@ -83,16 +76,13 @@ VENUS_URL="${VENUS_URL:-http://v2.open.venus.oa.com/llmproxy}"
 VENUS_MODEL="${VENUS_MODEL:-qwen3.6-35b-a3b}"
 
 # ─── 参数 ──────────────────────────────────────────────────────
-# Adapter 已弃用（h01/h01-dev profile 直连 Venus，不再需要 CodeBuddy Adapter）。
-# 默认 false；如需临时调试 adapter，显式传 --with-adapter 启用。
-START_ADAPTER=false
 STOP_ONLY=false
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --no-adapter)  START_ADAPTER=false; shift ;;   # 向后兼容（已是默认值）
-        --with-adapter) START_ADAPTER=true; shift ;;    # 临时调试 adapter
         --stop)        STOP_ONLY=true; shift ;;
+        # 向后兼容：旧版有 Adapter/Hermes 相关 flag，现均已废弃，识别后忽略
+        --no-adapter|--with-adapter|--no-hermes|--no-rebuild) warn "$1 已废弃（Hermes/Adapter 已移除），忽略"; shift ;;
         -h|--help)
             echo "Usage: bash start-debug.sh [OPTIONS]"
             echo ""
@@ -100,7 +90,6 @@ while [[ $# -gt 0 ]]; do
             echo ""
             echo "Options:"
             echo "  --stop          仅停止所有服务，不重启"
-            echo "  --with-adapter  启动已弃用的 CodeBuddy Adapter（默认不启动，MCP 直连 Venus）"
             echo ""
             echo "UE 端连接地址：ws://<本机局域网IP>:$WS_PORT/ws"
             exit 0 ;;
@@ -149,10 +138,8 @@ fi
 
 # ─── 健康检查 ──────────────────────────────────────────────────
 # MCP 跑在 Windows（本脚本的核心设计），WSL 里访问要用 WIN_HOST。
-# Adapter 跑在 Windows，WSL 里访问要用 WIN_HOST。
 check_mcp_http() { curl -sf http://$WIN_HOST:$HTTP_PORT/healthz >/dev/null 2>&1; }
 check_mcp_ws()   { curl -sf http://$WIN_HOST:$WS_PORT/healthz >/dev/null 2>&1; }
-check_adapter()  { curl -sf http://$WIN_HOST:$ADAPTER_PORT/health >/dev/null 2>&1; }
 
 wait_for() {
     local name="$1" check_fn="$2" max_wait="${3:-30}" elapsed=0
@@ -254,15 +241,6 @@ stop_all() {
         kill_port_listeners "$port" "MCP"
     done
 
-    # Adapter
-    if $START_ADAPTER; then
-        info "Stopping existing Adapter..."
-        kill_port_listeners "$ADAPTER_PORT" "Adapter"
-    fi
-
-    # CodeBuddy CLI 子进程
-    kill_port_listeners "$CLI_PORT" "CLI subprocess"
-
     sleep 2
     echo ""
 }
@@ -321,97 +299,9 @@ build_mcp() {
     echo ""
 }
 
-# ─── Step 2: 启动 Adapter ─────────────────────────────────────
-start_adapter() {
-    info "=== Step 2: Start CodeBuddy Adapter (localhost:$ADAPTER_PORT) ==="
-
-    if [ ! -f "$ADAPTER_SCRIPT" ]; then
-        fail "Adapter script not found: $ADAPTER_SCRIPT"
-    fi
-
-    # 定位 Python（adapter 需要 httpx, pyyaml, fastapi, uvicorn）
-    # 优先用 venv（依赖齐全），其次 PATH 里的 python/python3/py
-    # Windows venv 里的可执行文件是 python.exe（无后缀的 python 不存在），
-    # 所以显式加 .exe 后缀检测。
-    local py_cmd=""
-    local venv_py="/c/Users/yitianchen/AppData/Local/hermes/hermes-agent/venv/Scripts/python.exe"
-    if [ -x "$venv_py" ]; then
-        if "$venv_py" -c "import httpx, yaml, fastapi, uvicorn" 2>/dev/null; then
-            py_cmd="$venv_py"
-            ok "  Using venv Python: $py_cmd"
-        fi
-    fi
-    if [ -z "$py_cmd" ]; then
-        for cmd in python python.exe python3 py; do
-            # command -v 返回路径后，再验证不是 Windows Store 的 stub
-            # （Store stub 执行会重定向到商店，import 必失败）
-            local resolved
-            resolved=$(command -v "$cmd" 2>/dev/null) || continue
-            case "$resolved" in
-                *WindowsApps*) continue ;;  # 跳过 Store stub
-            esac
-            if "$resolved" -c "import httpx, yaml, fastapi, uvicorn" 2>/dev/null; then
-                py_cmd="$resolved"
-                ok "  Using Python: $py_cmd"
-                break
-            fi
-        done
-    fi
-    if [ -z "$py_cmd" ]; then
-        fail "Python with deps (httpx, pyyaml, fastapi, uvicorn) not found.
-  Options:
-    1. Ensure venv exists: $venv_py
-    2. pip install httpx pyyaml fastapi uvicorn into your Python
-    3. Set PATH to include a Python that has these deps"
-    fi
-
-    mkdir -p "$LOG_SUBDIR"
-    : > "$ADAPTER_LOG"
-
-    # 路径转换：脚本可能在 Git Bash（用 cygpath）或 WSL（用 wslpath）运行。
-    # Windows Python 不认 /d/... 或 /mnt/d/... 风格路径，必须转成 D:\... 风格。
-    # cygpath 不理解 /mnt/d/ 挂载约定，会错误转成 D:\mnt\d\...；wslpath 才对。
-    local script_arg="$ADAPTER_SCRIPT"
-    if command -v wslpath &>/dev/null; then
-        # WSL 环境
-        script_arg=$(wslpath -w "$ADAPTER_SCRIPT" 2>/dev/null) || script_arg="$ADAPTER_SCRIPT"
-    elif command -v cygpath &>/dev/null; then
-        # Git Bash (MSYS) 环境
-        script_arg="$(cygpath -w "$ADAPTER_SCRIPT")"
-    fi
-
-    info "Starting adapter (log: logs/$LOG_DATE/debug-adapter.log)..."
-    info "  Python: $py_cmd"
-    info "  Script: $script_arg"
-    nohup "$py_cmd" "$script_arg" --port "$ADAPTER_PORT" --cli-port "$CLI_PORT" > "$ADAPTER_LOG" 2>&1 &
-    disown
-
-    info "Waiting for Adapter (max 20s)..."
-    local elapsed=0
-    while [ $elapsed -lt 20 ]; do
-        if check_adapter; then
-            ok "Adapter is up (localhost:$ADAPTER_PORT)"
-            local health
-            health=$(curl -sS http://localhost:$ADAPTER_PORT/health 2>/dev/null)
-            if echo "$health" | grep -q '"status":"ok"'; then
-                ok "  Adapter connected to CLI"
-            else
-                warn "  Adapter up but CLI not reachable: $health"
-                warn "  Start CodeBuddy CLI in a separate terminal: codebuddy"
-            fi
-            return 0
-        fi
-        sleep 2; elapsed=$((elapsed + 2)); printf "."
-    done
-    echo ""
-    warn "  Adapter failed. Last 15 lines:"
-    tail -15 "$ADAPTER_LOG" 2>/dev/null | sed 's/^/    /'
-    fail "  Adapter failed to start."
-}
-
-# ─── Step 3: 启动 MCP（监听 0.0.0.0，局域网可达）────────────
+# ─── Step 2: 启动 MCP（监听 0.0.0.0，局域网可达）────────────
 start_mcp() {
-    info "=== Step 3: Start agenttown-mcp (0.0.0.0:$WS_PORT + :$HTTP_PORT) ==="
+    info "=== Step 2: Start agenttown-mcp (0.0.0.0:$WS_PORT + :$HTTP_PORT) ==="
 
     if [ ! -f "$MCP_EXE" ]; then
         fail "MCP binary not found: $MCP_EXE. Run build step first."
@@ -491,9 +381,9 @@ EOF
     echo ""
 }
 
-# ─── Step 4: 打印联调信息 ─────────────────────────────────────
+# ─── Step 3: 打印联调信息 ─────────────────────────────────────
 print_summary() {
-    info "=== Step 4: Summary ==="
+    info "=== Step 3: Summary ==="
 
     local lan_ip
     lan_ip=$(detect_lan_ip)
@@ -510,16 +400,10 @@ print_summary() {
     echo -e "  ${BOLD}本机服务${NC}"
     echo -e "    MCP:        0.0.0.0:$WS_PORT (WS) + :$HTTP_PORT (HTTP)"
     echo -e "    LLM 后端:   Venus 直连（$VENUS_URL, model=$VENUS_MODEL）"
-    if $START_ADAPTER; then
-        echo -e "    Adapter:    localhost:$ADAPTER_PORT"
-    fi
     echo ""
     echo -e "  ${BOLD}日志${NC}"
     local log_rel="${LOG_SUBDIR#$PROJECT_DIR/}"
     echo -e "    MCP:     $log_rel/debug-mcp.log"
-    if $START_ADAPTER; then
-        echo -e "    Adapter: $log_rel/debug-adapter.log"
-    fi
     echo ""
     echo -e "  ${BOLD}协议文档${NC}"
     echo -e "    docs/AgentTown_CommProtocol_Values.md"
@@ -542,8 +426,6 @@ print_summary() {
 }
 
 # ─── --stop 选项 ──────────────────────────────────────────────
-# stop_all 内部用 START_ADAPTER 控制 是否停该组件，
-# 因此 --stop 默认停全部；--stop --no-adapter 则只跳过 Adapter，以此类推。
 if $STOP_ONLY; then
     stop_all
     ok "All services stopped."
@@ -565,6 +447,5 @@ mkdir -p "$LOG_SUBDIR"
 
 stop_all
 build_mcp
-$START_ADAPTER && start_adapter
 start_mcp
 print_summary

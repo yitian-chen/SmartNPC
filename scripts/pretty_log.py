@@ -14,6 +14,13 @@ sim.log 每行是一条 JSON，单行可能上千字（perception text 完整不
 
 2. 终端渲染（默认）：每条日志渲染成多行彩色文本。
 
+DEPRECATED 提示（2026-08）：
+    Hermes Gateway 已移除，MCP 直连 Venus。新日志使用 [MCP→LLM/...] 和
+    [LLM→MCP/...] 中性标签，不再产生 [MCP→Hermes/...] 或 Hermes/internal
+    条目。本脚本仍保留 --hermes 参数与旧标签解析能力，仅供查看历史日志
+    使用；后续版本可能删除。新日志的 LLM 标签可由 PERCEPTION / RESPONSE
+    / TOOL / STRATEGIC / TACTICAL 等通用过滤器匹配。
+
 用法：
     # HTML 报告（推荐）
     python scripts/pretty_log.py --html                   # 今天的日志
@@ -21,7 +28,7 @@ sim.log 每行是一条 JSON，单行可能上千字（perception text 完整不
     python scripts/pretty_log.py --html -f PERCEPTION     # 只看 PERCEPTION
     python scripts/pretty_log.py --html -o report.html    # 指定输出路径
     python scripts/pretty_log.py --html --no-open         # 生成但不自动打开
-    python scripts/pretty_log.py --html --hermes          # 整合 Hermes 容器日志
+    python scripts/pretty_log.py --html --hermes          # 整合 Hermes 容器日志（DEPRECATED，仅历史日志）
     python scripts/pretty_log.py --html --dev             # dev 实例（logs-dev/ + h01-dev）
 
     # 终端渲染
@@ -38,7 +45,8 @@ sim.log 每行是一条 JSON，单行可能上千字（perception text 完整不
     HERMES      Hermes/internal（Hermes 容器内部日志：LLM 调用/工具错误/Turn 结束）
     HEARTBEAT   心跳（默认隐藏，可显式过滤查看）
 
-整合 Hermes 日志（--hermes）：
+整合 Hermes 日志（--hermes，DEPRECATED）：
+    Hermes Gateway 已移除，仅供解析历史日志使用。
     默认读取 hermes/profiles/h01/logs/agent.log（容器内 UTC，自动转 +08:00 合并排序）。
     默认只保留 agent.conversation_loop / agent.tool_executor / run_agent /
     POST /v1/responses 行，以及任何 ERROR/WARNING；其余噪声（插件注册、健康检查、
@@ -1023,16 +1031,17 @@ def main() -> int:
     ap.add_argument(
         "--hermes",
         action="store_true",
-        help="整合 Hermes 容器日志（hermes/profiles/h01/logs/agent.log）按时间合并",
+        help="(DEPRECATED) 整合 Hermes 容器日志（hermes/profiles/h01/logs/agent.log）"
+             "按时间合并。Hermes Gateway 已移除，仅供解析历史日志使用。",
     )
     ap.add_argument(
         "--hermes-log",
-        help="Hermes 日志路径（默认 hermes/profiles/h01/logs/agent.log）",
+        help="(DEPRECATED) Hermes 日志路径（默认 hermes/profiles/h01/logs/agent.log）",
     )
     ap.add_argument(
         "--hermes-all",
         action="store_true",
-        help="显示 Hermes 日志全部条目（默认只保留 LLM 决策相关 + WARNING/ERROR）",
+        help="(DEPRECATED) 显示 Hermes 日志全部条目（默认只保留 LLM 决策相关 + WARNING/ERROR）",
     )
     ap.add_argument(
         "--dev",
