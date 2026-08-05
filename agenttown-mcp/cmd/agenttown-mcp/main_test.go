@@ -11,8 +11,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/AgentTown/agenttown-mcp/pkg/hermes"
 	"github.com/AgentTown/agenttown-mcp/pkg/protocol"
+	"github.com/AgentTown/agenttown-mcp/pkg/venus"
 	"github.com/AgentTown/agenttown-mcp/pkg/wsserver"
 	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
 )
@@ -639,7 +639,7 @@ func TestTacticalRefillForReplan_NoGoal(t *testing.T) {
 	ac, _ := newAgentContext(context.Background())
 	// 设置 tacticalHc 但不设 dailyPlan → selectCurrentGoal 返回 ""
 	ac.mu.Lock()
-	ac.tacticalHc = newFailedHermesClient()
+	ac.tacticalHc = newFailedVenusClient()
 	ac.dailyPlan = ""
 	ac.mu.Unlock()
 	ok := ac.tacticalRefillForReplan(context.Background(), "H-01", nil, nil, slog.Default(), "test hint")
@@ -659,7 +659,7 @@ func TestTacticalRefillForReplan_LLMFail(t *testing.T) {
 		Environment: protocol.Environment{GameTimeSec: 32400, TimeOfDaySec: 32400, DayCount: 0, TimeScale: 60},
 	})
 	ac.mu.Lock()
-	ac.tacticalHc = newFailedHermesClient()
+	ac.tacticalHc = newFailedVenusClient()
 	ac.dailyPlan = "06:00-12:00: 上午装配\n12:00-13:00: 午休"
 	ac.latestPerception = percJSON
 	ac.mu.Unlock()
@@ -676,10 +676,10 @@ func TestTacticalRefillForReplan_LLMFail(t *testing.T) {
 	}
 }
 
-// newFailedHermesClient 构造一个指向无效端口的 hermes.Client，
+// newFailedVenusClient 构造一个指向无效端口的 venus.Client，
 // 任何 LLM 调用都会因连接失败而返回 error。
-func newFailedHermesClient() *hermes.Client {
-	return hermes.New(hermes.Config{URL: "http://127.0.0.1:1"})
+func newFailedVenusClient() *venus.Client {
+	return venus.New(venus.Config{BaseURL: "http://127.0.0.1:1"})
 }
 
 // ─── tacticalRefill replanHint 测试 ──────────────────────────────
@@ -695,7 +695,7 @@ func TestTacticalRefill_ConsumesReplanHint(t *testing.T) {
 		Environment: protocol.Environment{GameTimeSec: 32400, TimeOfDaySec: 32400, DayCount: 0, TimeScale: 60},
 	})
 	ac.mu.Lock()
-	ac.tacticalHc = newFailedHermesClient() // LLM 必失败，但 hint 读取/清空在调用前
+	ac.tacticalHc = newFailedVenusClient() // LLM 必失败，但 hint 读取/清空在调用前
 	ac.dailyPlan = "06:00-12:00: 上午装配\n12:00-13:00: 午休"
 	ac.latestPerception = percJSON
 	ac.replanHint = "疲劳=65超过60，需要休息"
@@ -718,7 +718,7 @@ func TestTacticalRefill_NoHintDoesNotPanic(t *testing.T) {
 		Environment: protocol.Environment{GameTimeSec: 32400, TimeOfDaySec: 32400, DayCount: 0, TimeScale: 60},
 	})
 	ac.mu.Lock()
-	ac.tacticalHc = newFailedHermesClient()
+	ac.tacticalHc = newFailedVenusClient()
 	ac.dailyPlan = "06:00-12:00: 上午装配\n12:00-13:00: 午休"
 	ac.latestPerception = percJSON
 	ac.replanHint = "" // 无 hint

@@ -35,7 +35,6 @@ import (
 
 	"github.com/AgentTown/agenttown-mcp/adapters/agenttown/tools"
 	"github.com/AgentTown/agenttown-mcp/internal/log"
-	"github.com/AgentTown/agenttown-mcp/pkg/hermes"
 	"github.com/AgentTown/agenttown-mcp/pkg/llmtypes"
 	"github.com/AgentTown/agenttown-mcp/pkg/ollama"
 	"github.com/AgentTown/agenttown-mcp/pkg/protocol"
@@ -715,19 +714,15 @@ var tacticalStreamingEnabled bool
 var tacticalCallTimeout = 60 * time.Second
 
 // llmClient 是战略层/战术层 LLM 客户端的统一接口。
-// *hermes.Client（Hermes Gateway，OpenAI Responses 协议，默认）和 *venus.Client
-// （Venus 代理，OpenAI Chat Completions 协议）均实现此接口，通过 --llm-backend 切换。
+// *venus.Client（Venus 代理，OpenAI Chat Completions 协议）实现此接口。
 type llmClient interface {
 	SendWithSummary(ctx context.Context, input, summary string) (*llmtypes.Response, error)
 	SendStreaming(ctx context.Context, input string, onDelta func(string)) (*llmtypes.Response, error)
 	ResetSession()
 }
 
-// 编译期断言：两个 backend 都满足 llmClient 接口。
-var (
-	_ llmClient = (*hermes.Client)(nil)
-	_ llmClient = (*venus.Client)(nil)
-)
+// 编译期断言：venus.Client 满足 llmClient 接口。
+var _ llmClient = (*venus.Client)(nil)
 
 // reactiveRunnerRef 是进程级反应层执行器（package-level 便于 WS handler 调用）。
 // nil 表示反应层未启用（--ollama-url="" 或客户端初始化失败）。
@@ -973,9 +968,6 @@ func main() {
 		logLevel           = flag.String("log-level", "info", "log level: debug|info|warn|error")
 		httpAddr           = flag.String("http", ":8760", "MCP Streamable HTTP addr (empty = stdio)")
 		wsAddr             = flag.String("ws", ":9090", "WebSocket server addr for Mock UE")
-		hermesURL          = flag.String("hermes-url", "http://localhost:8642", "Hermes Gateway base URL")
-		hermesAPIKey       = flag.String("hermes-api-key", "agenttown-test-key", "Hermes Gateway bearer token")
-		hermesModel        = flag.String("hermes-model", "deepseek-v4-pro", "Hermes model name")
 		mcpAPIKey          = flag.String("mcp-api-key", "", "if set, require this Bearer token on /mcp")
 		httpAllowAnyOrigin = flag.Bool("http-allow-any-origin", true,
 			"disable origin / localhost restrictions so cross-host clients can connect")
@@ -992,11 +984,10 @@ func main() {
 		"CPU threads for Ollama inference (0=use default 16, -1=let Ollama decide). "+
 			"CPU inference on high-core-count machines often regresses past ~16 threads; "+
 			"benchmark to find the optimum for your host.")
-	// ─── 战略层/战术层 LLM backend 切换 ───────────────────────────
-	// 默认走 hermes：MCP → Hermes Gateway → 后端模型（由 Hermes config.yaml
-	// 决定，当前为 Venus qwen3.6-35b-a3b）。需要直连 Venus 绕过 Hermes 时切 venus。
-	llmBackend = flag.String("llm-backend", "hermes",
-		"LLM backend for strategic/tactical layers: hermes|venus")
+	// ─── 战略层/战术层 LLM backend ───────────────────────────────
+	// Venus 直连（OpenAI Chat Completions API）。Hermes Gateway 路径已移除。
+	llmBackend = flag.String("llm-backend", "venus",
+		"LLM backend for strategic/tactical layers (deprecated: only 'venus' is supported; flag will be removed)")
 	venusURL = flag.String("venus-url", "http://v2.open.venus.oa.com/llmproxy",
 		"Venus LLM proxy base URL (OpenAI Chat Completions API compatible)")
 	venusAPIKey = flag.String("venus-api-key", "",
@@ -1023,7 +1014,6 @@ func main() {
 		"http", *httpAddr,
 		"ws", *wsAddr,
 		"llm_backend", *llmBackend,
-		"hermes_url", *hermesURL,
 		"venus_url", *venusURL,
 		"venus_model", *venusModel,
 		"tactical_stream", tacticalStreamingEnabled,
@@ -1124,9 +1114,9 @@ func main() {
 		firstAgentRegistered = true
 		nextAgentEpoch++
 		ac, workerCtx := newAgentContext(ctx, nextAgentEpoch)
-		// 战略层/战术层各用一个独立 LLM client 实例（独立 session 链）。
-		// backend 由 --llm-backend 选择：hermes（默认，MCP → Hermes → 后端模型）
-		// 或 venus（直连 Venus OpenAI Chat Completions API，绕过 Hermes）。
+		// 战略层/战术层各用一个独立 LLM client 实例。
+		// backend 由 --llm-backend 选择：venus（直连 Venus OpenAI Chat
+		// Completions API）。Hermes Gateway 路径已移除。
 		switch *llmBackend {
 		case "venus":
 			venusAPIKeyValue := *venusAPIKey
@@ -1146,21 +1136,6 @@ func main() {
 				Model:   *venusModel,
 				Logger:  logger,
 				Timeout: *venusTimeout,
-			})
-		case "hermes":
-			ac.strategicHc = hermes.New(hermes.Config{
-				URL:              *hermesURL,
-				APIKey:           *hermesAPIKey,
-				Model:            *hermesModel,
-				Logger:           logger,
-				SkipSystemPrompt: true, // 战略层后端调用，不需要 RPG persona/skills/memory 注入
-			})
-			ac.tacticalHc = hermes.New(hermes.Config{
-				URL:              *hermesURL,
-				APIKey:           *hermesAPIKey,
-				Model:            *hermesModel,
-				Logger:           logger,
-				SkipSystemPrompt: true, // 战术层后端调用，不需要 RPG persona/skills/memory 注入
 			})
 		default:
 			// flag 校验已在 parse 后完成，此处不应到达；防御性日志。
