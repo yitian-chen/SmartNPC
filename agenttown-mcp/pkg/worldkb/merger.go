@@ -21,6 +21,7 @@ package worldkb
 //     are flattened into kb.Relationships.
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -307,6 +308,13 @@ func MergeAndWriteBytes(genBytes, authBytes []byte, outPath, manifestPath string
 	var gen GeneratedDoc
 	if err := json.Unmarshal(genBytes, &gen); err != nil {
 		return nil, fmt.Errorf("parse generated: %w", err)
+	}
+	// UE 推送 world_kb 时 authored 字段可能缺失（payload 里没这个 key）或为空，
+	// 导致上层传入 nil/[]byte{}。AuthoredDoc 是可选的人类覆盖层，空值应降级为
+	// 仅含 version 的空对象而非报错——否则 stable 端 UE 不发 authored 时每次
+	// 都 merge 失败。version 取 generated 的 schema_version 以通过 Merge 校验。
+	if len(bytes.TrimSpace(authBytes)) == 0 {
+		authBytes = []byte(fmt.Sprintf(`{"version":%q}`, gen.SchemaVersion))
 	}
 	var auth AuthoredDoc
 	if err := json.Unmarshal(authBytes, &auth); err != nil {

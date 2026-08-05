@@ -1,7 +1,9 @@
 package main
 
 import (
+	"log/slog"
 	"sort"
+	"strings"
 	"sync"
 
 	"github.com/AgentTown/agenttown-mcp/pkg/protocol"
@@ -20,13 +22,15 @@ type CapabilityRegistry struct {
 	mu       sync.RWMutex
 	global   map[string]protocol.CapabilityAction            // cmd -> action
 	perAgent map[string]map[string]protocol.CapabilityAction // agent_id -> (cmd -> action)
+	log      *slog.Logger
 }
 
 // NewCapabilityRegistry returns an empty registry.
-func NewCapabilityRegistry() *CapabilityRegistry {
+func NewCapabilityRegistry(log *slog.Logger) *CapabilityRegistry {
 	return &CapabilityRegistry{
 		global:   make(map[string]protocol.CapabilityAction),
 		perAgent: make(map[string]map[string]protocol.CapabilityAction),
+		log:      log,
 	}
 }
 
@@ -34,20 +38,44 @@ func NewCapabilityRegistry() *CapabilityRegistry {
 // writes to the global default; any other agentID writes to that agent's
 // override map. Existing entries for the same agent_id are replaced
 // wholesale (the new action list is the authoritative declaration).
+//
+// UE 推送的 capability_registry 偶发携带尾随/前导空格（如 "InteractSmartObject "），
+// 会污染下游 map key、工具名（AddTool 拒绝含空格名）和 HasCmd 校验。此处对
+// agentID、action.Cmd、action.Kind、param.Name 做 TrimSpace 兜底，并打日志说明
+// 规范化了哪些字段，便于 UE 侧定位源头。
 func (r *CapabilityRegistry) Register(agentID string, actions []protocol.CapabilityAction) {
+	agentID = strings.TrimSpace(agentID)
+	normalized := make([]protocol.CapabilityAction, len(actions))
+	for i, a := range actions {
+		origCmd := a.Cmd
+		origKind := a.Kind
+		a.Cmd = strings.TrimSpace(a.Cmd)
+		a.Kind = strings.TrimSpace(a.Kind)
+		for j := range a.Params {
+			a.Params[j].Name = strings.TrimSpace(a.Params[j].Name)
+		}
+		if r.log != nil && (a.Cmd != origCmd || a.Kind != origKind) {
+			r.log.Debug("capability_registry normalized whitespace",
+				"agent_id", agentID,
+				"orig_cmd", origCmd, "cmd", a.Cmd,
+				"orig_kind", origKind, "kind", a.Kind)
+		}
+		normalized[i] = a
+	}
+
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if agentID == "" || agentID == protocol.SystemAgentID {
 		// Replace global wholesale.
-		r.global = make(map[string]protocol.CapabilityAction, len(actions))
-		for _, a := range actions {
+		r.global = make(map[string]protocol.CapabilityAction, len(normalized))
+		for _, a := range normalized {
 			r.global[a.Cmd] = a
 		}
 		return
 	}
 	// Per-agent override: replace this agent's map wholesale.
-	m := make(map[string]protocol.CapabilityAction, len(actions))
-	for _, a := range actions {
+	m := make(map[string]protocol.CapabilityAction, len(normalized))
+	for _, a := range normalized {
 		m[a.Cmd] = a
 	}
 	r.perAgent[agentID] = m

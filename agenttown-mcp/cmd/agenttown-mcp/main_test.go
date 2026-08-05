@@ -260,7 +260,7 @@ func TestMapDebugCmd(t *testing.T) {
 // TestMapDebugCmd_RegistryDerived verifies mapDebugCmd resolves UE-pushed new
 // cmds via registry lookup (Phase 3).
 func TestMapDebugCmd_RegistryDerived(t *testing.T) {
-	reg := NewCapabilityRegistry()
+	reg := NewCapabilityRegistry(nil)
 	reg.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
 		{Cmd: protocol.CmdMoveToLocation, Kind: "atomic"},
 		{Cmd: "WaveHand", Kind: "atomic"},
