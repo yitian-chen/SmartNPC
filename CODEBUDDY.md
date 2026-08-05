@@ -11,10 +11,7 @@ AgentTown_v3 — AI NPC 模拟系统。一期单 Agent（H-01 老陈，车间主
 - **战术层**（`tactical.go`）：每个时段把 goal 分解为 1-5 个 action 进 `actionQueue`（复合优先：匹配复合动作时 1-2 步即可，否则 2-5 个原子动作组合），worker 逐个 pop 下发 UE
 - **反应层**（`reactive.go` + `reactive_runner.go`）：监听 zone 变化/动作完成/物理警戒/周期触发，调本地 Ollama 决策 continue/observe/replan
 
-**LLM 后端可切换**（`--llm-backend` flag）：
-- `hermes`（默认）：MCP → Hermes Gateway → Venus/DeepSeek
-- `venus`：MCP 直连 Venus（OpenAI Chat Completions 协议），跳过 Hermes
-- 反应层始终直连本地 Ollama，不走 Hermes/Venus
+**LLM 后端**：MCP 直连 Venus（OpenAI Chat Completions 协议），战略/战术层调用 Venus（`qwen3.6-35b-a3b`）。反应层始终直连本地 Ollama（`qwen2.5:7b`），不走 Venus。
 
 ## 架构总览
 
@@ -25,19 +22,14 @@ graph LR
     end
     subgraph WSL["WSL2 / Linux"]
         MCP["agenttown-mcp (Go)<br/>MCP Server + WS Server<br/>:8760 HTTP / :9090 WS<br/>三层决策：战略+战术+反应"]
-        DOCKER["Docker"]
-        HERMES["Hermes Gateway<br/>hermes-agent:latest<br/>:8642<br/>(可选, --llm-backend=hermes)"]
-        DOCKER --- HERMES
     end
     subgraph LLM["LLM 后端"]
         VENUS["Venus<br/>qwen3.6-35b-a3b<br/>(OpenAI 兼容)"]
         OLLAMA["Ollama 本地<br/>qwen2.5:7b<br/>(反应层专用)"]
     end
     UE <-->|"WebSocket :9090<br/>7-field Envelope"| MCP
-    MCP -->|"HTTP POST<br/>/v1/responses"| HERMES
-    MCP -.->|"HTTP POST<br/>/v1/chat/completions<br/>(--llm-backend=venus)"| VENUS
+    MCP -->|"HTTP POST<br/>/v1/chat/completions<br/>(战略/战术层)"| VENUS
     MCP -->|"HTTP POST<br/>/api/chat<br/>(反应层)"| OLLAMA
-    HERMES -->|"MCP Tool Calls<br/>/mcp :8760"| MCP
 ```
 
 ### 组件职责
@@ -46,7 +38,6 @@ graph LR
 |------|------|------|------|------|
 | Mock UE | Python 3.10+ | `src/agenttown/mock_ue.py` | — | 模拟 UE5：物理状态、空间状态、动作执行、感知推送 |
 | agenttown-mcp | Go 1.25+ | `agenttown-mcp/` | HTTP `:8760`, WS `:9090` | 协议适配、感知语义化、工具暴露、三层决策、LLM 桥接 |
-| Hermes Gateway | Docker | `docker/docker-compose.yml` | `:8642` | LLM Agent Mind（可选，`--llm-backend=hermes` 时启用） |
 | Venus | 远程 | `--venus-url` | — | OpenAI 兼容 LLM 服务（战略/战术层后端） |
 | Ollama | 本地 | `--ollama-url` | `:11434` | 反应层本地 LLM（qwen2.5:7b） |
 
@@ -85,28 +76,19 @@ graph TB
 - **反应层去抖**：`lastReactiveAt` map 按 trigger 类型去抖（periodic 60s / zone_change 45s）
 - **反应层 replan**：决策为 `replan` 时调 `ac.tacticalRefillForReplan`，会重置 `actionQueue` 重新调战术层 LLM。规划失败时调 `fallbackStopAndRefill`：清空队列 + 清在途追踪 + stop_action + signal worker，让 worker 通过自然 `tacticalRefill` 路径重新规划（避免 75 游戏分钟延迟）
 
-### LLM 后端切换
+### LLM 后端
 
-`--llm-backend` flag 选择战略/战术层的 LLM 通道：
+MCP 直连 Venus（OpenAI Chat Completions 协议），战略/战术层调用 Venus。反应层**始终**走 `pkg/ollama/client.go`（本地 Ollama，5-8s 超时），不受影响。
 
-| backend | 协议 | 路径 | 用途 |
-|---------|------|------|------|
-| `hermes`（默认） | OpenAI Responses | `pkg/hermes/client.go` | MCP → Hermes → Venus/DeepSeek，有会话链+摘要 |
-| `venus` | OpenAI Chat Completions | `pkg/venus/client.go` | MCP 直连 Venus，无会话链，每次全量 prompt |
-
-反应层**始终**走 `pkg/ollama/client.go`（本地 Ollama，5-8s 超时），不受 `--llm-backend` 影响。
-
-**切换示例**：
+**启动示例**：
 ```bash
-# 默认走 Hermes
-./agenttown-mcp --llm-backend=hermes --http :8760
-
-# 直连 Venus（取缔 Hermes 路径）
-./agenttown-mcp --llm-backend=venus \
+./agenttown-mcp --http :8760 --ws :9090 \
   --venus-url http://v2.open.venus.oa.com/llmproxy \
   --venus-api-key $VENUS_API_KEY \
   --venus-model qwen3.6-35b-a3b
 ```
+
+Venus 客户端无状态——每次调用全量 prompt，不复用会话链。战略/战术层 prompt 完全由 MCP 构造，所有上下文（角色、世界知识、物理状态）显式注入。
 
 ## 通信流向
 
@@ -115,19 +97,17 @@ sequenceDiagram
     participant UE as Mock UE
     participant WS as wsserver (MCP)
     participant Fmt as perception.Format
-    participant HC as hermes.Client
-    participant H as Hermes Gateway
+    participant LLM as venus.Client
     participant Tools as MCP Tools
 
     Note over UE: 感知循环 (每 N 游戏分钟，按模式配置)
     UE->>WS: perception_update {location, physical_delta, nearby_objects...}
     WS->>Fmt: 原始 payload → 第一人称叙事
-    Fmt->>HC: 格式化文本
-    HC->>H: POST /v1/responses {input, previous_response_id}
-    H-->>HC: 响应 (narrative 或 tool_call)
+    Fmt->>LLM: POST /v1/chat/completions {messages:[...]}
+    LLM-->>Fmt: 响应 (narrative 或 tool_call)
     
     alt 响应含工具调用
-        H->>Tools: MCP Tool Call (agent_id, params)
+        LLM->>Tools: MCP Tool Call (agent_id, params)
         Tools->>WS: SendAction → action_command
         WS->>UE: action_command {cmd, params}
         UE-->>WS: action_started (ACK ≤2s)
@@ -137,7 +117,7 @@ sequenceDiagram
         WS->>Fmt: 下次感知时折入叙事
     end
     
-    HC->>WS: narrative 文本
+    Fmt->>WS: narrative 文本
     WS->>UE: narrative {text} (显示用)
 ```
 
@@ -154,7 +134,7 @@ bash start.sh behavior --speed 100 --end 12  # 模式参数覆盖
 SKIP_MCP_BUILD=1 bash start.sh normal        # 跳过 Go 编译
 ```
 
-`start.sh` 执行顺序：**先停全部 → 编译+部署 MCP → 启动 MCP → 启动 Hermes → 启动 Mock UE → 仿真结束后合并日志**。每步健康检查通过才继续。
+`start.sh` 执行顺序：**先停全部 → 编译+部署 MCP → 启动 MCP → 启动 Mock UE → 仿真结束后合并日志**。每步健康检查通过才继续。
 
 ### Go 构建 / 测试
 
@@ -169,7 +149,7 @@ go test ./adapters/agenttown/perception/ -v -count=1        # 感知格式化测
 
 ### 日志检查
 
-**统一日志文件**：`logs/YYYY-MM-DD/sim.log`（MCP 进程独占写入，JSON Lines 格式，含 UE + MCP + Hermes 三层全链路；`YYYY-MM-DD` 为仿真启动日期）
+**统一日志文件**：`logs/YYYY-MM-DD/sim.log`（MCP 进程独占写入，JSON Lines 格式，含 UE + MCP + LLM 三层全链路；`YYYY-MM-DD` 为仿真启动日期）
 
 **推荐：用 `scripts/pretty_log.py` 可读化查看**（每条 JSON 渲染为多行，方向标记着色，长字段按行展开）：
 
@@ -180,46 +160,36 @@ python scripts/pretty_log.py --html 2026-07-20            # 指定日期
 python scripts/pretty_log.py --html -f PERCEPTION -n 50   # 最近 50 条 PERCEPTION
 python scripts/pretty_log.py --html -o report.html        # 指定输出路径
 python scripts/pretty_log.py --html --no-open             # 生成但不自动打开
-python scripts/pretty_log.py --html --hermes              # 整合 Hermes 容器日志（推荐）
-python scripts/pretty_log.py --html --hermes --hermes-all # 整合 Hermes 全部条目（含噪声）
-python scripts/pretty_log.py --html --hermes-log PATH     # 指定 Hermes 日志路径
 
 # 终端渲染
 python scripts/pretty_log.py                              # 查看今天的 sim.log
-python scripts/pretty_log.py -f PERCEPTION -n 5           # 最近 5 条 MCP→Hermes 感知原文
-python scripts/pretty_log.py -f RESPONSE -n 5             # 最近 5 条 Hermes 响应
+python scripts/pretty_log.py -f PERCEPTION -n 5           # 最近 5 条 MCP→LLM 感知原文
+python scripts/pretty_log.py -f RESPONSE -n 5             # 最近 5 条 LLM 响应
 python scripts/pretty_log.py --raw                        # 原始 JSON（grep/awk 友好）
 ```
 
 `--html` 模式生成独立 HTML 文件（默认 `logs/YYYY-MM-DD/sim_report.html`），自动打开浏览器，支持：
 - 点击条目展开/折叠详情
-- 顶部按钮按方向过滤（UE→MCP / MCP→UE / PERCEPTION / RESPONSE / TOOL / Hermes）
+- 顶部按钮按方向过滤（UE→MCP / MCP→UE / PERCEPTION / RESPONSE / TOOL / HEARTBEAT）
 - 搜索框（支持正则）
 - 长字段（perception text / payload）自然换行，不受终端宽度限制
 - 暗色主题，方向标记彩色高亮
 
-`--hermes` 模式整合 Hermes 容器日志（`hermes/profiles/h01/logs/agent.log`）：
-- Hermes 日志按时间戳与 sim.log 合并排序，统一展示
-- 容器内 UTC 时间自动转 +08:00，与 sim.log 对齐
-- 默认按 sim.log 时间范围过滤（前后扩展 5 分钟），仅保留同期条目
-- 默认只保留 LLM 决策相关条目（`agent.conversation_loop` / `agent.tool_executor` / `run_agent` / `POST /v1/responses`）以及所有 WARNING/ERROR，其余噪声默认隐藏
-- `--hermes-all` 显示全部条目（包括插件注册、健康检查、cron、housekeeping 等）
-- 新增 `Hermes/internal` 方向标签（红色边框）和 `Hermes` 过滤按钮
+**历史 Hermes 日志整合（DEPRECATED）**：`--hermes` 系列参数仅供解析 2026-08 之前的历史日志使用（Hermes Gateway 已移除）。新日志仅含 UE/MCP/LLM 三层，无 Hermes 容器日志。
 
-方向过滤器（`-f`）简写：`UE→MCP` / `MCP→UE` / `PERCEPTION` / `RESPONSE` / `TOOL` / `HERMES` / `HEARTBEAT`。heartbeat 默认隐藏。
+方向过滤器（`-f`）简写：`UE→MCP` / `MCP→UE` / `PERCEPTION` / `RESPONSE` / `TOOL` / `HEARTBEAT`。heartbeat 默认隐藏。
 
 **原始 grep（不渲染，单行 JSON）**：
 
 ```bash
 grep '\[UE→MCP\]' logs/YYYY-MM-DD/sim.log           # Mock UE → MCP（感知/状态/动作完成）
 grep '\[MCP→UE\]' logs/YYYY-MM-DD/sim.log           # MCP → Mock UE（动作命令/叙事）
-grep '\[MCP→Hermes/PERCEPTION\]' logs/YYYY-MM-DD/sim.log  # MCP → Hermes（感知文本）
-grep '\[Hermes→MCP/RESPONSE\]' logs/YYYY-MM-DD/sim.log   # Hermes → MCP（LLM 响应 + narrative）
-grep '\[Hermes→MCP/TOOL\]' logs/YYYY-MM-DD/sim.log       # Hermes 调用的工具
-grep '\[MCP→Hermes/STRATEGIC-PROMPT\]' logs/YYYY-MM-DD/sim.log   # 战略层 prompt（每日规划输入）
-grep '\[Hermes→MCP/STRATEGIC-RESPONSE\]' logs/YYYY-MM-DD/sim.log # 战略层 LLM 响应（每日计划 JSON）
-grep '\[MCP→Hermes/TACTICAL-PROMPT\]' logs/YYYY-MM-DD/sim.log    # 战术层 prompt（任务分解输入）
-grep '\[Hermes→MCP/TACTICAL-RESPONSE\]' logs/YYYY-MM-DD/sim.log  # 战术层 LLM 响应（actions JSON）
+grep '\[MCP→LLM/PERCEPTION\]' logs/YYYY-MM-DD/sim.log    # MCP → LLM（感知文本）
+grep '\[LLM→MCP/RESPONSE\]' logs/YYYY-MM-DD/sim.log      # LLM → MCP（LLM 响应 + narrative）
+grep '\[MCP→LLM/STRATEGIC-PROMPT\]' logs/YYYY-MM-DD/sim.log   # 战略层 prompt（每日规划输入）
+grep '\[LLM→MCP/STRATEGIC-RESPONSE\]' logs/YYYY-MM-DD/sim.log # 战略层 LLM 响应（每日计划 JSON）
+grep '\[MCP→LLM/TACTICAL-PROMPT\]' logs/YYYY-MM-DD/sim.log    # 战术层 prompt（任务分解输入）
+grep '\[LLM→MCP/TACTICAL-RESPONSE\]' logs/YYYY-MM-DD/sim.log  # 战术层 LLM 响应（actions JSON）
 grep '队列已填充' logs/YYYY-MM-DD/sim.log           # 战术层任务队列形成（含完整 actions）
 grep 'perception decision triggered' logs/YYYY-MM-DD/sim.log  # LLM 决策触发点
 grep 'state_report' logs/YYYY-MM-DD/sim.log         # 状态报告摘要
@@ -231,14 +201,11 @@ grep '"decision_epoch":1' logs/YYYY-MM-DD/sim.log   # 同一轮次的 PERCEPTION
 # 战术规划链路：TACTICAL-PROMPT → TACTICAL-RESPONSE → 队列已填充 → 下发 action
 # 例如查看某次战术分解的完整链路：
 grep -E 'TACTICAL-PROMPT|TACTICAL-RESPONSE|队列已填充|\[战术层\] 下发 action' logs/YYYY-MM-DD/sim.log
-
-# Hermes 容器日志（独立，不进 sim.log）
-wsl docker logs -f agenttown-h01
 ```
 
-**轮次关联**：`[MCP→Hermes/PERCEPTION]`、`[Hermes→MCP/TOOL]`、`[Hermes→MCP/RESPONSE]` 三种日志都带结构化字段 `agent_id` 和 `decision_epoch`，匹配这两个字段即可关联同一次决策回合的输入 prompt、工具调用、LLM 响应。同一 `decision_epoch` 的 TOOL 可能出现在 RESPONSE 之前（Hermes 在 LLM 流式输出时实时回调工具，而 RESPONSE 日志在 HTTP 响应完成后才写）。
+**轮次关联**：`[MCP→LLM/PERCEPTION]`、`[LLM→MCP/TOOL]`、`[LLM→MCP/RESPONSE]` 三种日志都带结构化字段 `agent_id` 和 `decision_epoch`，匹配这两个字段即可关联同一次决策回合的输入 prompt、工具调用、LLM 响应。同一 `decision_epoch` 的 TOOL 可能出现在 RESPONSE 之前（工具调用在 LLM 流式输出时实时回调，而 RESPONSE 日志在 HTTP 响应完成后才写）。
 
-**战术/战略层日志**：战略层和战术层使用独立的 Hermes session（不复用决策链），因此不带 `decision_epoch`。链路按 `agent_id` + 时间顺序关联：`[MCP→Hermes/STRATEGIC-PROMPT]` → `[Hermes→MCP/STRATEGIC-RESPONSE]` → `[战略层] 每日计划生成成功`；`[MCP→Hermes/TACTICAL-PROMPT]` → `[Hermes→MCP/TACTICAL-RESPONSE]` → `[战术层] 队列已填充`（含完整 actions JSON）→ `[战术层] 下发 action`（逐个 pop）。
+**战术/战略层日志**：战略层和战术层使用独立的 LLM 调用（无状态，不复用决策链），因此不带 `decision_epoch`。链路按 `agent_id` + 时间顺序关联：`[MCP→LLM/STRATEGIC-PROMPT]` → `[LLM→MCP/STRATEGIC-RESPONSE]` → `[战略层] 每日计划生成成功`；`[MCP→LLM/TACTICAL-PROMPT]` → `[LLM→MCP/TACTICAL-RESPONSE]` → `[战术层] 队列已填充`（含完整 actions JSON）→ `[战术层] 下发 action`（逐个 pop）。
 
 Mock UE 不再写独立日志文件，但控制台仍输出 `[PERCEPTION]`/`[STATE]`/`[SPEAK]` 等人类可读摘要供实时观察。
 
@@ -376,7 +343,7 @@ energy / fatigue / joint_wear / health，通过 `state_report` 权威通道上�
 
 ## MCP 工具
 
-所有工具在 `agenttown-mcp/adapters/agenttown/tools/`。15 个工具均以 `agent_id` 为第一参数、`decision_epoch` 为第二个必填参数。Hermes 侧工具名为 `mcp__agenttown__<tool_name>`（双下划线）。
+所有工具在 `agenttown-mcp/adapters/agenttown/tools/`。15 个工具均以 `agent_id` 为第一参数、`decision_epoch` 为第二个必填参数。
 
 **工具列表由 `capability_registry` 动态驱动**：UE 连接 MCP 后发送 `capability_registry` 声明可执行 cmd，MCP 据此调 `tools.ReconcileTools` 增删工具（`AddTool`/`RemoveTools`）。启动时 seed 内置 9 cmd 默认值（`BuiltinCmdCapabilities`），保证 UE 不发 `capability_registry` 也能跑。per-agent 差异化在 `guardedExecutor.SendAction` 这一咽喉点拦截——查 `CapabilityRegistry.HasCmd(agentID, cmd)`，不通过则拒绝下发。战术层 prompt 中的可用工具列表也按 registry 对 agentID 的有效能力集动态生成（`tacticalToolMeta` 是工具元数据单一来源）。
 
@@ -420,19 +387,18 @@ energy / fatigue / joint_wear / health，通过 `state_report` 权威通道上�
 
 ### 启动顺序（硬约束）
 
-**MCP 必须先于 Hermes 启动**。Hermes 启动时连接 MCP 发现工具，MCP 不可用则连接失败后 parked，工具不注册，LLM 只能纯叙述。
+MCP 是唯一的 LLM 调用入口，启动后即可接收感知事件、调用 Venus/Ollama、下发工具调用。
 
 正确顺序（`start.sh` 已保证）：
 1. 停掉所有旧进程
 2. 编译+部署 MCP 二进制到 WSL `~/agenttown-mcp`
 3. 启动 MCP → 等 `:8760` + `:9090` 就绪
-4. 启动 Hermes → 等 `:8642` 就绪 + MCP 日志出现 `session initialized`
-5. 启动 Mock UE → 预检查通过后运行
-6. 仿真日志统一写入 `logs/YYYY-MM-DD/sim.log`（MCP 独占，无需合并）
+4. 启动 Mock UE → 预检查通过后运行
+5. 仿真日志统一写入 `logs/YYYY-MM-DD/sim.log`（MCP 独占，无需合并）
 
 **UE 连接消息序列**（硬约束）：UE 连接 MCP 后按以下顺序首发系统消息：
 1. `world_kb`（`agent_id="system"`）— 推送完整世界 KB（generated + authored JSON），MCP 合并+落盘+swap 内存 KB。**必须在首个 `agent_registered` 之前**，确保 worker 启动时捕获新 KB
-2. `agent_registered` — 触发 Hermes 会话重置 + worker 启动
+2. `agent_registered` — 触发 worker 启动 + 战略层生成当日计划
 3. `capability_registry` — 声明 NPC 能力，MCP 动态增删工具
 4. `resync` → `state_report` → `perception_update` …
 
@@ -442,8 +408,10 @@ energy / fatigue / joint_wear / health，通过 `state_report` 权威通道上�
 
 UE 推送新 `world_kb` 后，MCP 重启即自动适配全链路，无需改任何代码：
 
-- **战略层 prompt 注入 KB**：`generateDailyPlan` 接收 `kb`，`buildStrategicContext(kb, agentID)` 构造【你的角色】+【世界知识】两段——角色段从 `kb.GetAgent(agentID)` 取 `DisplayName`/`Profession`/`Description`/`Personality`；世界知识段复用 `buildKBContext(kb)`（与战术层同源）列出全部 zone/object id。LLM 据此规划当日计划，不会编造 KB 外概念。
-- **战术层工具列表动态派生**：`capability_registry` 驱动 `ReconcileTools` 增删工具；`buildTacticalToolEntries` 按 registry 对 agent 的有效能力集生成 prompt 工具列表；`buildTacticalExample(kb)` 从 KB 取首个 zone/object 作示例。新 cmd 由 `registerGenericActionTool` 自动注册通用工具。
+- **战略层 prompt 注入 KB + 角色**：`generateDailyPlan` 接收 `kb`，`buildStrategicContext(kb, agentID)` 构造【你的角色】+【世界知识】两段——角色段复用 `buildAgentRoleContext(kb, agentID)`（三层决策共用 helper），从 `kb.GetAgent(agentID)` 取 `DisplayName`/`Profession`/`Description`/`Personality`；世界知识段复用 `buildKBContext(kb)`（与战术层同源）列出全部 zone/object id。LLM 据此规划当日计划，不会编造 KB 外概念。
+- **战术层 prompt 注入 KB + 角色**：`buildTacticalPrompt` 接收 `kb` 和 `agentID`，注入【你的角色】段（同样复用 `buildAgentRoleContext`）+【世界知识】段。战术层分解动作时体现 NPC 角色风格。
+- **反应层 prompt 注入角色**：`ReactiveInput.AgentRole` 由 `reactiveRunner.buildInput` 从 kb 取，注入反应层 prompt 开头。反应决策（continue/observe/replan）受 NPC 性格影响。
+- **工具列表动态派生**：`capability_registry` 驱动 `ReconcileTools` 增删工具；`buildTacticalToolEntries` 按 registry 对 agent 的有效能力集生成 prompt 工具列表；`buildTacticalExample(kb)` 从 KB 取首个 zone/object 作示例。新 cmd 由 `registerGenericActionTool` 自动注册通用工具。
 - **反应层决策简化**：反应层仅支持 `continue`/`observe`/`replan` 三种决策（已移除 `interrupt`/`act`）。物理告警时代码层 `upgradeIfPhysicalAlert` 强制升级 continue/observe → replan。
 - **工具 jsonschema 描述去硬编码 id**：`MoveToLocationInput.Target` / `InteractInput.TargetObjectID` / `WorkAtWorkbenchInput.AgentID` 等不再写死 `e.g. main_workshop`/`workbench_01`/`"H-01"`，改为引用 `world_kb`，LLM 从 prompt 注入的【世界知识】段获取合法 id。
 - **兜底每日计划从 KB 派生**：`buildDefaultDailyPlan(kb)` 用首个 zone 显示名 + 首个 object 显示名组装工作时段；`kb == nil` 时降级为中性表述（不引用"车间"/"装配"/"充电"等当前 KB 专属词）。
@@ -484,42 +452,39 @@ sequenceDiagram
 - 重连后交换 `resync{last_received_seq}`，重放 seq 之后的离散消息（action_completed/event_notification）
 - 连续状态（position/physical_state）不重放，以重连后最新快照为准
 - 缓冲滚动丢失则发 `event_lost` 告警
-- MCP 侧：首次 `agent_registered` 触发 Hermes 会话重置，重连再注册保留会话
+- MCP 侧：首次 `agent_registered` 触发 worker 启动 + 战略层生成当日计划，重连再注册保留状态
 
 ### 事件驱动决策与 epoch
 
-- 所有 perception 都更新最新世界缓存，但只有首次感知、动作完成、任务生命周期、关键环境变化、场景事件或物理警戒带变化才调用 Hermes
+- 所有 perception 都更新最新世界缓存，但只有首次感知、动作完成、任务生命周期、关键环境变化、场景事件或物理警戒带变化才调用 LLM
 - 纯时间变化、相同 scan_area、busy progress 普通变化不触发决策
-- Hermes 在途时合并触发原因，并只保留最新世界快照
+- LLM 调用在途时合并触发原因，并只保留最新世界快照
 - 每次实际决策生成单调递增 `decision_epoch`；全部 15 个工具必须携带当前 `[decision_context]` 中的 epoch
 - guarded executor 在发送 UE 前校验 Agent 已注册、在线、decision_epoch 当前有效且 WebSocket 已连接
 - `agent_unregistered` 立即失效当前决策；迟到工具调用被拒绝
 
-### Hermes 会话管理
+### LLM 调用
 
-- `hermes.Client` 通过 `previous_response_id` 链式维护会话
-- 每天首次 `agent_registered` 触发 `ResetSession()`，开启新会话
-- token 超 80K 时立即断链并保存本地结构化摘要；不再额外调用 LLM 摘要
-- 本地摘要只含时间位置、物理状态、当前任务、最近动作和环境事件，不保存 Hermes 叙事
-- **上游错误检测**：Hermes 将上游 LLM API 错误（如 HTTP 400 empty tool_calls）包装为 200 响应返回。MCP 检测 `tokens=0` + narrative 以 `HTTP 4`/`HTTP 5` 开头时，清空 `prevResponseID` 断链，返回 `ErrUpstreamError`，下一轮以全新会话开始
+MCP 直连 Venus（OpenAI Chat Completions 协议），无会话链——每次调用全量 prompt，不复用历史。战略/战术/反应三层各自构造完整 prompt：
+- **战略层**：每日 06:00 一次调用，输入 = `buildStrategicContext(kb, agentID)` + 7 时段模板，输出 = 当日 plan JSON
+- **战术层**：每个时段开始时调用，输入 = `buildTacticalPrompt(...)`（含角色/世界知识/物理状态/工具列表/示例），输出 = NDJSON actions
+- **反应层**：触发时调本地 Ollama（5-8s 超时），输入 = `buildReactivePrompt(in)`（含角色/状态/在途动作/触发原因），输出 = `{"reaction": "...", "reason": "..."}`
 
 ### 感知格式化
 
-Mock UE 推送 `perception_update` → MCP 的 `adapters/agenttown/perception/format.go` 转为第一人称叙事 → POST 给 Hermes。格式包括时段（清晨/上午/中午/下午/傍晚）、位置、物理状态、附近物体、pending action_completion 折入叙事。
+Mock UE 推送 `perception_update` → MCP 的 `adapters/agenttown/perception/format.go` 转为第一人称叙事 → POST 给 Venus（战略/战术层）或 Ollama（反应层）。格式包括时段（清晨/上午/中午/下午/傍晚）、位置、物理状态、附近物体、pending action_completion 折入叙事。
 
 ### stdio vs HTTP 模式
 
 `agenttown-mcp/cmd/agenttown-mcp/main.go` 运行模式由 `--http` flag 切换：
-- **HTTP 模式**（`--http :8760`）：Streamable HTTP 在 `/mcp`，健康检查 `/healthz`，状态 `/status`。Hermes 通过此端点发现工具。
+- **HTTP 模式**（`--http :8760`）：Streamable HTTP 在 `/mcp`，健康检查 `/healthz`，状态 `/status`。
 - stdio 模式（默认）：本地 MCP 客户端用。
 
 **stdio 模式禁止向 stdout 写日志**，否则污染 MCP 协议流。日志走 `internal/log` 打 stderr。
 
-### Docker 网络拓扑
+### 网络拓扑
 
-Hermes 在 Docker 容器中运行，MCP 在 WSL 宿主机。`docker-compose.yml` 中 `extra_hosts: ["host.docker.internal:host-gateway"]` 让容器内解析宿主机 IP。MCP 监听 `0.0.0.0:8760`，Hermes 通过 `http://host.docker.internal:8760/mcp` 连接。
-
-Mock UE 在 Windows 上通过 `ws://localhost:9090/ws` 连接 MCP（WSL2 localhost 转发）。
+MCP 监听 `0.0.0.0:8760`（HTTP）+ `0.0.0.0:9090`（WS）。Mock UE 通过 `ws://localhost:9090/ws` 连接（WSL2 localhost 转发）。Venus 远程服务通过 HTTPS 调用。Ollama 本地服务通过 `http://localhost:11434` 调用。
 
 ## 代码规范
 
@@ -528,7 +493,7 @@ Mock UE 在 Windows 上通过 `ws://localhost:9090/ws` 连接 MCP（WSL2 localho
 - 包注释和导出符号注释写英文
 - 新增 Go package 必须有 `*_test.go`
 - 测试命名 `Test<Func>_<Scenario>`；禁止启真实子进程，用 `InMemoryTransport` / mock
-- Python 代码用 `asyncio` + `websockets`，不用同步 HTTP 调用 Hermes（MCP 接管）
+- Python 代码用 `asyncio` + `websockets`，不用同步 HTTP 调用 LLM（MCP 接管所有 LLM 调用）
 - 日志走 `logging` 模块，不直接 `print`（调试除外）
 - WebSocket 库：Go 用 `github.com/coder/websocket`，Python 用 `websockets`
 
@@ -538,12 +503,11 @@ Mock UE 在 Windows 上通过 `ws://localhost:9090/ws` 连接 MCP（WSL2 localho
 
 ```bash
 cp .env.example .env
-# 编辑 .env，填入 HERMES_AGENT_API_KEY（占位值即可）和 VENUS_API_KEY
+# 编辑 .env，填入 VENUS_API_KEY
 ```
 
 关键环境变量（`.env`）：
-- `HERMES_AGENT_API_KEY` — 占位值即可（适配层复用 CLI OAuth，不校验）
-- `VENUS_API_KEY` — Venus 后端 API key（`--llm-backend=venus` 时必需）
+- `VENUS_API_KEY` — Venus 后端 API key（**必填**，MCP 直连 Venus 凭据）
 - `AGENTTOWN_MCP_HTTP` — MCP HTTP 监听（默认 `:8760`）
 - `AGENTTOWN_MCP_WS` — MCP WebSocket 监听（默认 `:9090`）
 
@@ -553,8 +517,6 @@ cp .env.example .env
 |------|--------|------|
 | `--http` | `:8760` | MCP HTTP 监听地址（空=stdio 模式） |
 | `--ws` | `:9090` | WebSocket 监听（Mock UE 连接） |
-| `--llm-backend` | `hermes` | `hermes` / `venus`，选战略/战术层后端 |
-| `--hermes-url` | `http://localhost:8642` | Hermes Gateway URL |
 | `--venus-url` | `http://v2.open.venus.oa.com/llmproxy` | Venus 后端 URL |
 | `--venus-api-key` | `""` | Venus API key（**必填**，否则 401） |
 | `--venus-model` | `qwen3.6-35b-a3b` | Venus 模型 ID |
@@ -570,7 +532,7 @@ cp .env.example .env
 
 ### 云开发环境（AnyDev / 远程 Linux）
 
-`start.sh` 是为 Windows+WSL+Docker 设计的，**纯 Linux 环境不能直接跑**。分组件启动：
+`start.sh` 是为 Windows+WSL 设计的，**纯 Linux 环境不能直接跑**。分组件启动：
 
 ```bash
 # 1. 编译 MCP
@@ -579,9 +541,8 @@ cd agenttown-mcp && go build -o ../mcp ./cmd/agenttown-mcp && cd ..
 # 2. 拷贝 .env（至少需要 VENUS_API_KEY）
 cp .env.example .env  # 填入 VENUS_API_KEY
 
-# 3. 启动 MCP（直连 Venus，跳过 Hermes）
-./mcp --llm-backend=venus \
-  --http :8760 --ws :9090 \
+# 3. 启动 MCP（直连 Venus）
+./mcp --http :8760 --ws :9090 \
   --venus-api-key "$VENUS_API_KEY" \
   --log-level debug 2>&1 | tee logs/$(date +%Y-%m-%d)/sim.log
 
@@ -595,8 +556,6 @@ ollama pull qwen2.5:7b-instruct-q4_K_M
 ```
 
 **云环境限制**：
-- 通常无 Docker-in-Docker → 跑不了 Hermes，必须用 `--llm-backend=venus`
-- 无 CodeBuddy CLI OAuth → CodeBuddy 适配层无法用
 - 内网工蜂 `git.woa.com` 一般可达，可用 HTTPS clone
 - Venus `v2.open.venus.oa.com` 需确认云端网络可达
 
@@ -630,7 +589,7 @@ cp .env.example /data/workspace/dev/.env
 ```bash
 # 终端 1
 cd /data/workspace/stable
-./mcp --llm-backend=venus --http :8760 --ws :9090 \
+./mcp --http :8760 --ws :9090 \
   --venus-api-key "$VENUS_API_KEY" --log-level debug
 
 # 终端 2
@@ -642,7 +601,7 @@ python3 src/run_day.py --mcp-ws ws://localhost:9090/ws
 ```bash
 # 终端 3
 cd /data/workspace/dev
-./mcp --llm-backend=venus --http :8770 --ws :9091 \
+./mcp --http :8770 --ws :9091 \
   --venus-api-key "$VENUS_API_KEY" --log-level debug
 
 # 终端 4
@@ -653,28 +612,6 @@ python3 src/run_day.py   # 默认连 :9091
 **端口隔离原则**：stable 用 `8760/9090`，dev 用 `8770/9091`，互不干扰，可同时运行各自独立的仿真。日志分别写入 `/data/workspace/{stable,dev}/logs/YYYY-MM-DD/sim.log`。
 
 **本地 Windows 对比**：本地用 `D:\SmartNPC_v3`（dev worktree，`dev-working` 分支）和 `D:\SmartNPC_v3-stable`（stable worktree，`master` 分支）两个 worktree 实现同样的分离，端口约定一致。
-
-### LLM 模型配置（Hermes 后端专用）
-
-Hermes 通过 CodeBuddy CLI 适配层（`src/agenttown/codebuddy_adapter.py`）调用公司模型，
-适配层会启动一个独立的 CLI 子进程（`codebuddy --serve --model <name>`），复用 CLI 的
-OAuth 认证。模型配置在 `src/agenttown/adapter_config.yaml`：
-
-```yaml
-cli_port: 52001                          # CLI 子进程监听端口
-model: deepseek-v4-flash-ioa             # 模型 ID（见 `codebuddy --help` 的 --model 参数）
-```
-
-**换模型步骤**（仅 `--llm-backend=hermes` 时相关）：
-1. 改 `src/agenttown/adapter_config.yaml` 的 `model` 字段
-2. 改 `hermes/profiles/h01/config.yaml` 的 `default` / `default_model` 字段（保持一致）
-3. 跑 `bash start.sh` 重启
-
-可用模型：`deepseek-v4-flash-ioa` / `deepseek-v4-pro-ioa` / `glm-5.2-internal-ioa` /
-`claude-sonnet-5` / `gpt-5.6-sol` / `gemini-3.1-pro` 等（完整列表见 `codebuddy --help`，
-实际能否使用取决于账号权限）。
-
-前置条件：CodeBuddy CLI 已登录（在终端跑 `codebuddy` 登录腾讯账号）。
 
 ## 文件地图
 
@@ -694,8 +631,8 @@ model: deepseek-v4-flash-ioa             # 模型 ID（见 `codebuddy --help` �
 | `agenttown-mcp/pkg/protocol/envelope.go` | Envelope + 12 消息类型 + 9 cmd + error_code 常量 |
 | `agenttown-mcp/pkg/protocol/messages.go` | 各消息 payload 结构体 + resync/event_lost/capability_registry |
 | `agenttown-mcp/pkg/wsserver/server.go` | WS 服务端：收发信封、seq、send buffer、重放、Call/SendAction |
-| `agenttown-mcp/pkg/hermes/client.go` | Hermes HTTP 客户端：会话链、token 阈值自动摘要重置、上游错误检测 |
-| `agenttown-mcp/pkg/venus/client.go` | Venus 客户端：OpenAI Chat Completions 协议直连 |
+| `agenttown-mcp/pkg/llmtypes/types.go` | LLM 共享响应类型（Response/Block/Content/Usage），venus/战略/战术层复用 |
+| `agenttown-mcp/pkg/venus/client.go` | Venus 客户端：OpenAI Chat Completions 协议直连（唯一战略/战术层后端） |
 | `agenttown-mcp/pkg/ollama/client.go` | Ollama 客户端：反应层专用，非流式 |
 | `agenttown-mcp/pkg/worldkb/loader.go` | world_kb.yaml 加载 + 内存索引 |
 | `agenttown-mcp/pkg/worldkb/types.go` | KB/Zone/Object/Agent 权威类型（新 schema） |
@@ -712,19 +649,19 @@ model: deepseek-v4-flash-ioa             # 模型 ID（见 `codebuddy --help` �
 | `assets/world_kb.yaml` | 世界 KB：7 zones / 3 objects / 1 agent（新 schema，locations 已合并进 objects） |
 | `assets/world_kb.manifest.json` | merge 产物：源 SHA256 + 时间戳（UE 推送 world_kb 时写入） |
 | `src/agenttown/mock_ue.py` | Mock UE：协议常量、NPCState、物理状态、感知循环、动作处理、重连+重放 |
-| `src/agenttown/codebuddy_adapter.py` | CodeBuddy CLI OpenAI 适配层（仅 Hermes 后端用） |
-| `src/agenttown/adapter_config.yaml` | 适配层配置：CLI 子进程端口 + 模型 ID |
 | `src/run_day.py` | Mock UE 启动入口 |
-| `hermes/profiles/h01/SKILL.md` | Hermes 工具使用指南 |
-| `start.sh` | 一键启动脚本（Windows+WSL+Docker 专用） |
-| `scripts/pretty_log.py` | 日志可读化工具（HTML 报告 + 终端渲染） |
+| `start.sh` | 一键启动脚本（Windows+WSL 专用） |
+| `start-debug.sh` | UE 联调启动脚本（MCP 跑 Windows 原生，监听 0.0.0.0） |
+| `start-dev.sh` | dev 实例启动 wrapper（偏移端口 8770/9091） |
+| `scripts/pretty_log.py` | 日志可读化工具（HTML 报告 + 终端渲染；--hermes 系列参数 DEPRECATED 仅供历史日志） |
 | `.env` | 环境变量（VENUS_API_KEY 等，不入库） |
+| `hermes/` | **存档保留**：Hermes Gateway profile/SOUL.md/SKILL.md，不再被任何代码加载，仅供历史参考 |
 
 ## Git 提交
 
 格式：`<type>(<scope>): <subject>`（祈使句）
 - type：`feat` / `fix` / `refactor` / `test` / `docs` / `chore` / `perf`
-- scope：`protocol` / `mcp` / `mock-ue` / `hermes` / `skill-md` / `docker` / `config` / `start-script` / `logging` / `codebuddy`
+- scope：`protocol` / `mcp` / `mock-ue` / `venus` / `config` / `start-script` / `logging` / `llmtypes`
 - **提交信息（subject 和 body）使用中文**
 
 用户没明说"commit"时不要主动 commit。
@@ -734,16 +671,16 @@ model: deepseek-v4-flash-ioa             # 模型 ID（见 `codebuddy --help` �
 | Milestone | 状态 | 说明 |
 |-----------|------|------|
 | M-1 世界快照定义 | ✅ | `docs/我的方案/场景与人物设定.md` |
-| M-2 LLM Gateway | ✅ | Hermes Gateway + DeepSeek |
-| M-3 Hermes Agent Mind | ✅ | SOUL.md + SKILL.md + profile |
+| M-2 LLM Gateway | ✅（已归档） | Hermes Gateway + DeepSeek，2026-08 移除 |
+| M-3 Hermes Agent Mind | ✅（已归档） | SOUL.md + SKILL.md + profile，2026-08 移除 |
 | M-4 Translator | ✅ | MCP 工具注册 |
 | M-5 Mock UE Bridge | ✅ | Python async + WebSocket |
 | MCP 层 | ✅ | Go agenttown-mcp，15 工具（7 复合+8 原子） |
 | 协议重构 Phase 1-7 | ✅ | 7 字段信封、11 消息类型、seq+ACK、物理四态、动作异步生命周期、断线重连+seq 重放 |
-| 端到端闭环 | ✅ | 感知→Hermes→工具→Mock UE 全链路验证 |
-| 上游错误检测 | ✅ | Hermes 400 错误自动断链重置会话 |
+| 端到端闭环 | ✅ | 感知→LLM→工具→Mock UE 全链路验证 |
 | 三层决策架构 | ✅ | 战略层（每日计划）+ 战术层（任务分解）+ 反应层（Ollama 打断） |
-| Venus 后端集成 | ✅ | `--llm-backend=venus` 直连，跳过 Hermes |
+| Venus 直连 | ✅ | MCP 直连 Venus，无状态调用，2026-08 取缔 Hermes |
+| 三层决策注入 NPC 性格 | ✅ | `buildAgentRoleContext` 共享 helper，战略/战术/反应层注入【你的角色】段 |
 | 反应层 P0-P1 | ✅ | 本地 Ollama + zone/physical/periodic 触发 + replan 决策 |
 | Debug 工具升级 | ✅ | `/debug/action` + `/debug/schedule`（注入 schedule 调试战术层） |
 | 战术层流式输出 | ✅ | `--tactical-stream` flag（默认关，DeepSeek 高峰排队时回退） |
@@ -752,16 +689,16 @@ model: deepseek-v4-flash-ioa             # 模型 ID（见 `codebuddy --help` �
 
 按严重度排序：
 
-1. **Hermes token 黑箱**：MCP 发出的战术层 prompt 仅 ~870 token，但 Hermes 实投 ~13k token，差值 ~12k 是 Hermes 服务端隐式拼接的 SOUL/SKILL/示例，MCP 不可见不可控。这是"取缔 Hermes、MCP 直连 Venus"重构的核心动机
-2. **战术层输出 schema 漂移**：模型偶尔把 `target` 放顶层而非 `params` 内，或发明不存在的动作（如 `patrol_route`）和路线。"巡检"类目标强诱导漂移。**部分缓解**：战略层 prompt 现注入【你的角色】+【世界知识】段（`buildStrategicContext`），LLM 可见 KB 内合法 zone/object/agent 名，减少编造 KB 外概念；工具 jsonschema 描述已去硬编码 id 示例
-3. **战术层队列提前耗尽**：模型给的 action 总时长不够 slot 时长，触发频繁重分解（50 秒内重调 LLM），浪费 token
-4. **反应层冷启动超时**：Ollama 模型卸载后首 call >8s 超时，预热后稳定 1.3s
-5. **反应层 0% replan 率**：当前 prompt 强偏向 continue/observe，从未触发 replan（成本中心问题）
+1. **战术层输出 schema 漂移**：模型偶尔把 `target` 放顶层而非 `params` 内，或发明不存在的动作（如 `patrol_route`）和路线。"巡检"类目标强诱导漂移。**部分缓解**：三层决策 prompt 现注入【你的角色】+【世界知识】段（`buildAgentRoleContext` + `buildKBContext`），LLM 可见 KB 内合法 zone/object/agent 名，减少编造 KB 外概念；工具 jsonschema 描述已去硬编码 id 示例
+2. **战术层队列提前耗尽**：模型给的 action 总时长不够 slot 时长，触发频繁重分解（50 秒内重调 LLM），浪费 token
+3. **反应层冷启动超时**：Ollama 模型卸载后首 call >8s 超时，预热后稳定 1.3s
+4. **反应层 0% replan 率**：当前 prompt 强偏向 continue/observe，从未触发 replan（成本中心问题）
 
-## 规划中重构
+## 历史重构记录
 
-**取缔 Hermes、MCP 回归无状态**（评估中）：
-- MCP 只负责转发感知事件、暴露 tools、与 UE ws 沟通
-- 所有带存储的功能移到新 memory 层（dailyPlan/actionQueue/对话历史等）
-- MCP 直连 Venus/Ollama
-- 详见 memory: `project_smartnpc_v3.md`
+**取缔 Hermes、MCP 回归无状态**（2026-08 完成）：
+- 移除 `pkg/hermes` 客户端、Docker 配置、启动脚本逻辑、`--llm-backend` flag
+- 抽取 `pkg/llmtypes` 共享类型，Venus 成为唯一战略/战术层后端
+- 三层决策注入 NPC 性格（`buildAgentRoleContext` 共享 helper）
+- `hermes/` 目录仅作存档保留，不再被任何代码加载
+- `scripts/pretty_log.py` `--hermes` 系列参数 DEPRECATED，仅供历史日志解析
