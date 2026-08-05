@@ -339,6 +339,41 @@ func TestMergeAndWriteBytes_BadJSONReturnsError(t *testing.T) {
 	}
 }
 
+// TestMergeAndWriteBytes_EmptyAuthoredDegradesGracefully 验证 UE 推送
+// world_kb 时 authored 字段缺失（nil）或为空白时，MergeAndWriteBytes 降级为
+// 空对象 {} 而非报错。复现 stable 端 2026-08-05 日志：UE 不发 authored，
+// MCP 报 "parse authored: unexpected end of JSON input"。
+func TestMergeAndWriteBytes_EmptyAuthoredDegradesGracefully(t *testing.T) {
+	dir := t.TempDir()
+	outPath := dir + "/world_kb.yaml"
+
+	genBytes, err := mwMarshal(minimalGenerated())
+	if err != nil {
+		t.Fatalf("marshal generated: %v", err)
+	}
+
+	// 三种空 authored 形态都应降级成功，不报 parse authored 错误。
+	for _, label := range []string{"nil", "empty", "whitespace-only"} {
+		var authBytes []byte
+		switch label {
+		case "nil":
+			authBytes = nil
+		case "empty":
+			authBytes = []byte("")
+		case "whitespace-only":
+			authBytes = []byte("  \n  ")
+		}
+		kb, err := MergeAndWriteBytes(genBytes, authBytes, outPath, "")
+		if err != nil {
+			t.Errorf("[%s] MergeAndWriteBytes returned error: %v; want nil (authored should degrade to {})", label, err)
+			continue
+		}
+		if kb == nil || len(kb.Zones) != 1 || len(kb.Agents) != 1 {
+			t.Errorf("[%s] unexpected kb: %+v", label, kb)
+		}
+	}
+}
+
 func TestMergeAndWriteBytes_EmptyManifestSkipped(t *testing.T) {
 	dir := t.TempDir()
 	outPath := dir + "/world_kb.yaml"
