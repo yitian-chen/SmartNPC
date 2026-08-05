@@ -1188,7 +1188,7 @@ func main() {
 	// works even if UE never sends a capability_registry message. UE
 	// (e.g. mock_ue) is expected to send one on connect to declare its
 	// actually-implemented cmds, overwriting this seed.
-	capabilityRegistry := NewCapabilityRegistry()
+	capabilityRegistry := NewCapabilityRegistry(logger)
 	capabilityRegistry.Register(protocol.SystemAgentID, BuiltinCmdCapabilities)
 	capabilityRegistryRef = capabilityRegistry // expose to tactical worker + debug handler
 

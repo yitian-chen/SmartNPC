@@ -132,7 +132,7 @@ func TestHandleDebugKB_NilKBReturnsEmpty(t *testing.T) {
 // "system". Used by the e2e test to black-box-verify that mock_ue's
 // capability_registry message was registered on the MCP side.
 func TestHandleDebugCap_ReturnsAgents(t *testing.T) {
-	reg := NewCapabilityRegistry()
+	reg := NewCapabilityRegistry(nil)
 	reg.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
 		{Cmd: protocol.CmdMoveToLocation, Kind: "atomic", Description: "move"},
 		{Cmd: protocol.CmdSpeak, Kind: "atomic", Description: "speak"},
@@ -197,7 +197,7 @@ func TestHandleDebugCap_NilRegistryReturnsEmpty(t *testing.T) {
 // tool_name matching path and frontend cmd-specific logic like
 // cmd === 'move_to_location').
 func TestHandleDebugCap_ToolNameField(t *testing.T) {
-	reg := NewCapabilityRegistry()
+	reg := NewCapabilityRegistry(nil)
 	reg.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
 		{Cmd: protocol.CmdMoveToLocation, Kind: "atomic"},           // tool_name: move_to_location
 		{Cmd: protocol.CmdInteractSmartObject, Kind: "atomic"},      // tool_name: interact (special shortening)
@@ -241,7 +241,7 @@ func TestHandleDebugCap_ToolNameField(t *testing.T) {
 // registered. This satisfies the colleague's requirement that `stop` is
 // always in the cmd list, unaffected by capability_registry registration.
 func TestHandleDebugCap_AlwaysIncludesStop(t *testing.T) {
-	reg := NewCapabilityRegistry()
+	reg := NewCapabilityRegistry(nil)
 	// 空注册（仅 global seed 由 Register 写入）；Stop 也应出现
 	reg.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
 		{Cmd: protocol.CmdSpeak, Kind: "atomic"},
@@ -282,7 +282,7 @@ func TestHandleDebugCap_AlwaysIncludesStop(t *testing.T) {
 // where the frontend dropdown sent the raw cmd but mapDebugCmd only
 // matched tool_name.
 func TestMapDebugCmd_AcceptsBothForms(t *testing.T) {
-	reg := NewCapabilityRegistry()
+	reg := NewCapabilityRegistry(nil)
 	reg.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
 		{Cmd: "MoveTo", Kind: "atomic"},
 		{Cmd: protocol.CmdMoveToLocation, Kind: "atomic"},
@@ -322,7 +322,7 @@ func TestMapDebugCmd_AcceptsBothForms(t *testing.T) {
 // false; this test guards against accidental future registration of Stop in
 // the registry that would route it through the action_command path.
 func TestMapDebugCmd_StopNotMatched(t *testing.T) {
-	reg := NewCapabilityRegistry()
+	reg := NewCapabilityRegistry(nil)
 	reg.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
 		{Cmd: protocol.CmdMoveToLocation, Kind: "atomic"},
 	})

@@ -8,7 +8,7 @@ import (
 )
 
 func TestCapabilityRegistry_GlobalDefault(t *testing.T) {
-	r := NewCapabilityRegistry()
+	r := NewCapabilityRegistry(nil)
 	r.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
 		{Cmd: protocol.CmdMoveToLocation, Kind: "atomic", Description: "move"},
 		{Cmd: protocol.CmdWait, Kind: "atomic", Description: "wait"},
@@ -27,7 +27,7 @@ func TestCapabilityRegistry_GlobalDefault(t *testing.T) {
 }
 
 func TestCapabilityRegistry_PerAgentOverrideWins(t *testing.T) {
-	r := NewCapabilityRegistry()
+	r := NewCapabilityRegistry(nil)
 	r.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
 		{Cmd: protocol.CmdMoveToLocation, Kind: "atomic", Description: "global-move"},
 		{Cmd: protocol.CmdWait, Kind: "atomic", Description: "global-wait"},
@@ -47,7 +47,7 @@ func TestCapabilityRegistry_PerAgentOverrideWins(t *testing.T) {
 }
 
 func TestCapabilityRegistry_PerAgentRejectsCmdAbsentEverywhere(t *testing.T) {
-	r := NewCapabilityRegistry()
+	r := NewCapabilityRegistry(nil)
 	r.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
 		{Cmd: protocol.CmdMoveToLocation, Kind: "atomic"},
 	})
@@ -58,7 +58,7 @@ func TestCapabilityRegistry_PerAgentRejectsCmdAbsentEverywhere(t *testing.T) {
 }
 
 func TestCapabilityRegistry_PerAgentOverrideReplacesGlobal(t *testing.T) {
-	r := NewCapabilityRegistry()
+	r := NewCapabilityRegistry(nil)
 	r.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
 		{Cmd: protocol.CmdMoveToLocation, Kind: "atomic"},
 	})
@@ -79,7 +79,7 @@ func TestCapabilityRegistry_PerAgentOverrideReplacesGlobal(t *testing.T) {
 }
 
 func TestCapabilityRegistry_RegisterReplacesWholesale(t *testing.T) {
-	r := NewCapabilityRegistry()
+	r := NewCapabilityRegistry(nil)
 	r.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
 		{Cmd: protocol.CmdMoveToLocation, Kind: "atomic"},
 		{Cmd: protocol.CmdWait, Kind: "atomic"},
@@ -99,7 +99,7 @@ func TestCapabilityRegistry_RegisterReplacesWholesale(t *testing.T) {
 }
 
 func TestCapabilityRegistry_ClearAgent(t *testing.T) {
-	r := NewCapabilityRegistry()
+	r := NewCapabilityRegistry(nil)
 	r.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
 		{Cmd: protocol.CmdMoveToLocation, Kind: "atomic"},
 	})
@@ -117,7 +117,7 @@ func TestCapabilityRegistry_ClearAgent(t *testing.T) {
 }
 
 func TestCapabilityRegistry_EffectiveActionsSortedByCmd(t *testing.T) {
-	r := NewCapabilityRegistry()
+	r := NewCapabilityRegistry(nil)
 	r.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
 		{Cmd: protocol.CmdWait, Kind: "atomic"},
 		{Cmd: protocol.CmdMoveToLocation, Kind: "atomic"},
@@ -139,7 +139,7 @@ func TestCapabilityRegistry_EffectiveActionsSortedByCmd(t *testing.T) {
 // the global default under the "system" key with actions sorted by Cmd,
 // and no per-agent entries when only the global has been registered.
 func TestCapabilityRegistry_Snapshot_GlobalOnly(t *testing.T) {
-	r := NewCapabilityRegistry()
+	r := NewCapabilityRegistry(nil)
 	r.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
 		{Cmd: protocol.CmdWait, Kind: "atomic"},
 		{Cmd: protocol.CmdMoveToLocation, Kind: "atomic"},
@@ -170,7 +170,7 @@ func TestCapabilityRegistry_Snapshot_GlobalOnly(t *testing.T) {
 // both the global "system" key and each per-agent override as independent
 // entries, each sorted by Cmd.
 func TestCapabilityRegistry_Snapshot_WithPerAgent(t *testing.T) {
-	r := NewCapabilityRegistry()
+	r := NewCapabilityRegistry(nil)
 	r.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
 		{Cmd: protocol.CmdMoveToLocation, Kind: "atomic"},
 		{Cmd: protocol.CmdWait, Kind: "atomic"},
@@ -199,5 +199,73 @@ func TestCapabilityRegistry_Snapshot_WithPerAgent(t *testing.T) {
 	}
 	if !reflect.DeepEqual(gotCmds, wantH01) {
 		t.Errorf("H-01 actions order = %v; want %v", gotCmds, wantH01)
+	}
+}
+
+// TestCapabilityRegistry_NormalizesWhitespace 验证 UE 推送的 capability_registry
+// 中 cmd/kind/param.name 带前导或尾随空格时，Register 会做 TrimSpace 兜底，
+// 避免污染下游 map key、工具名（AddTool 拒绝含空格名）和 HasCmd 校验。
+// 复现场景：stable 端日志 2026-08-05 显示 UE 发来 "InteractSmartObject " 带
+// 尾随空格，导致 AddTool 报 "invalid tool name"。
+func TestCapabilityRegistry_NormalizesWhitespace(t *testing.T) {
+	r := NewCapabilityRegistry(nil)
+	r.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
+		{
+			Cmd:        " InteractSmartObject ",
+			Kind:       " atomic ",
+			Params:     []protocol.CapabilityParam{{Name: " smart_object ", Type: "string"}},
+			UsageHint:  " 保留描述空格不动 ",
+		},
+		{Cmd: " MoveTo ", Kind: "atomic"},
+	})
+
+	// Cmd 应被 trim，HasCmd 用规范化后的 key 校验通过。
+	if !r.HasCmd("H-01", "InteractSmartObject") {
+		t.Errorf("HasCmd(InteractSmartObject) = false; want true (cmd should be trimmed)")
+	}
+	if !r.HasCmd("H-01", "MoveTo") {
+		t.Errorf("HasCmd(MoveTo) = false; want true (cmd should be trimmed)")
+	}
+	// 带空格的原值不应能查到（map key 是规范化后的）。
+	if r.HasCmd("H-01", " InteractSmartObject ") {
+		t.Errorf("HasCmd(' InteractSmartObject ') = true; want false (untrimmed key should not exist)")
+	}
+
+	acts := r.EffectiveActions("H-01")
+	if len(acts) != 2 {
+		t.Fatalf("EffectiveActions len = %d; want 2", len(acts))
+	}
+	// 找到 InteractSmartObject 那条，验证 Kind 和 Param.Name 都被 trim。
+	var got protocol.CapabilityAction
+	for _, a := range acts {
+		if a.Cmd == "InteractSmartObject" {
+			got = a
+			break
+		}
+	}
+	if got.Cmd != "InteractSmartObject" {
+		t.Fatalf("InteractSmartObject action not found after normalization")
+	}
+	if got.Kind != "atomic" {
+		t.Errorf("Kind = %q; want %q (should be trimmed)", got.Kind, "atomic")
+	}
+	if len(got.Params) != 1 || got.Params[0].Name != "smart_object" {
+		t.Errorf("Param.Name = %q; want %q (should be trimmed)", got.Params[0].Name, "smart_object")
+	}
+	// 描述性字段不应被 trim（保留 UE 原文）。
+	if got.UsageHint != " 保留描述空格不动 " {
+		t.Errorf("UsageHint = %q; want %q (descriptive fields should NOT be trimmed)",
+			got.UsageHint, " 保留描述空格不动 ")
+	}
+}
+
+// TestCapabilityRegistry_NormalizesAgentID 验证 agentID 也被 trim，
+// 避免 " system " 这样的输入被当作 per-agent override 而非 global default。
+func TestCapabilityRegistry_NormalizesAgentID(t *testing.T) {
+	r := NewCapabilityRegistry(nil)
+	// " system " 带空格应被规范化为 "system"，写入 global default。
+	r.Register(" system ", []protocol.CapabilityAction{{Cmd: "MoveTo", Kind: "atomic"}})
+	if !r.HasCmd("H-01", "MoveTo") {
+		t.Errorf("HasCmd(H-01, MoveTo) = false; want true (agentID ' system ' should normalize to global default)")
 	}
 }

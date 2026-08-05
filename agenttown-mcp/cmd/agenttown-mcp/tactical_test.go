@@ -595,7 +595,7 @@ func TestBuildTacticalPrompt_ZoneObjectDependency(t *testing.T) {
 func TestBuildTacticalPrompt_RegistryFiltersTools(t *testing.T) {
 	// Registry with only CmdMoveToLocation + CmdWait available — composite tools
 	// (which depend on composite cmds like CmdWorkAtWorkbench) should be filtered out.
-	reg := NewCapabilityRegistry()
+	reg := NewCapabilityRegistry(nil)
 	reg.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
 		{Cmd: protocol.CmdMoveToLocation, Kind: "atomic"},
 		{Cmd: protocol.CmdWait, Kind: "atomic"},
@@ -621,7 +621,7 @@ func TestBuildTacticalPrompt_RegistryFiltersTools(t *testing.T) {
 func TestBuildTacticalPrompt_PerAgentOverride(t *testing.T) {
 	// Global has CmdMoveToLocation + CmdWorkAtWorkbench; per-agent H-02 only
 	// has CmdMoveToLocation. H-02's prompt should NOT list composite tools.
-	reg := NewCapabilityRegistry()
+	reg := NewCapabilityRegistry(nil)
 	reg.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
 		{Cmd: protocol.CmdMoveToLocation, Kind: "atomic"},
 		{Cmd: protocol.CmdWorkAtWorkbench, Kind: "composite"},
@@ -643,7 +643,7 @@ func TestBuildTacticalPrompt_PerAgentOverride(t *testing.T) {
 }
 
 func TestFilterValidActions_RegistryFiltersCmd(t *testing.T) {
-	reg := NewCapabilityRegistry()
+	reg := NewCapabilityRegistry(nil)
 	reg.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
 		{Cmd: protocol.CmdMoveToLocation, Kind: "atomic"},
 		// CmdWorkAtWorkbench / CmdChargeAtStation absent → composite tools filtered.
@@ -770,7 +770,7 @@ func TestBuildSlotDurationHint_Remaining(t *testing.T) {
 // (not in BuiltinToolSpecs) appears in the tactical prompt tool list with
 // Desc/Params derived from CapabilityAction metadata.
 func TestBuildTacticalToolList_NewCmdDerived(t *testing.T) {
-	reg := NewCapabilityRegistry()
+	reg := NewCapabilityRegistry(nil)
 	reg.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
 		{Cmd: protocol.CmdMoveToLocation, Kind: "atomic"},
 		{
@@ -802,7 +802,7 @@ func TestBuildTacticalToolList_NewCmdDerived(t *testing.T) {
 // TestTacticalActionAvailable_NewCmdAccepted verifies tacticalActionAvailable
 // accepts a UE-pushed new cmd via registry lookup.
 func TestTacticalActionAvailable_NewCmdAccepted(t *testing.T) {
-	reg := NewCapabilityRegistry()
+	reg := NewCapabilityRegistry(nil)
 	reg.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
 		{Cmd: "WaveHand", Kind: "atomic"},
 	})
@@ -817,7 +817,7 @@ func TestTacticalActionAvailable_NewCmdAccepted(t *testing.T) {
 // TestMapTacticalAction_NewCmdPassthrough verifies mapTacticalAction passes
 // through params verbatim for a UE-pushed new cmd.
 func TestMapTacticalAction_NewCmdPassthrough(t *testing.T) {
-	reg := NewCapabilityRegistry()
+	reg := NewCapabilityRegistry(nil)
 	reg.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
 		{Cmd: "WaveHand", Kind: "atomic"},
 	})
