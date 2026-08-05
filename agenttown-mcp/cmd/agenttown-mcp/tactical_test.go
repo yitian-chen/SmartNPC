@@ -513,6 +513,46 @@ func TestBuildTacticalPrompt_NilKB(t *testing.T) {
 	}
 }
 
+// TestBuildTacticalPrompt_InjectsAgentRole 验证战术层 prompt 注入
+// 【你的角色】段：传 kb + agentID="H-01" 后，prompt 应包含从
+// buildAgentRoleContext 派生的角色画像（名字/职业/性格特质等）。
+// 这是 C4 的核心——战术层分解动作时应体现 NPC 角色（如"老陈"的
+// "沉稳"性格影响 action 选择与节奏），而非机械分解。
+func TestBuildTacticalPrompt_InjectsAgentRole(t *testing.T) {
+	kb := loadTestKB(t)
+	prompt := buildTacticalPrompt("装配", "main_workshop", "09:00", "09:00-12:00",
+		&protocol.PhysicalState{Energy: 75, Fatigue: 30, JointWear: 5, Health: 90},
+		kb, "", nil, "H-01")
+	if !strings.Contains(prompt, "【你的角色】") {
+		t.Errorf("prompt missing '【你的角色】' section header, got: %s", prompt)
+	}
+	for _, want := range []string{"老陈", "车间主管", "沉稳"} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("prompt missing role field %q, got: %s", want, prompt)
+		}
+	}
+}
+
+// TestBuildTacticalPrompt_NilKBNoRole 验证 kb==nil 时 prompt 不含
+// 【你的角色】段（roleLine 降级为空串，prompt 中仅留空行）。
+func TestBuildTacticalPrompt_NilKBNoRole(t *testing.T) {
+	prompt := buildTacticalPrompt("装配", "main_workshop", "09:00", "", nil, nil, "", nil, "")
+	if strings.Contains(prompt, "【你的角色】") {
+		t.Errorf("prompt should not contain '【你的角色】' when KB is nil, got: %s", prompt)
+	}
+}
+
+// TestBuildTacticalPrompt_AgentNotFoundNoRole 验证 KB 存在但 agentID
+// 不在 KB 中时也降级跳过【你的角色】段（buildAgentRoleContext 返回空串）。
+func TestBuildTacticalPrompt_AgentNotFoundNoRole(t *testing.T) {
+	kb := loadTestKB(t)
+	prompt := buildTacticalPrompt("装配", "main_workshop", "09:00", "",
+		nil, kb, "", nil, "NONEXISTENT-99")
+	if strings.Contains(prompt, "【你的角色】") {
+		t.Errorf("prompt should not include '【你的角色】' for unknown agent, got: %s", prompt)
+	}
+}
+
 func TestBuildTacticalPrompt_WithHint(t *testing.T) {
 	prompt := buildTacticalPrompt("装配", "main_workshop", "09:00", "09:00-12:00",
 		&protocol.PhysicalState{Energy: 75, Fatigue: 30, JointWear: 5, Health: 90}, nil,

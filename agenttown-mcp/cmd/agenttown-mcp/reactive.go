@@ -64,6 +64,7 @@ const periodicTriggerInterval = 4
 type ReactiveInput struct {
 	AgentID           string
 	AgentName         string // agent 显示名（如"老陈"），用于 prompt 中角色称呼；空则降级为 AgentID
+	AgentRole         string // 【你的角色】段（名字/职业/背景/性格/说话风格），由 buildAgentRoleContext 生成；空串=kb 不可用或 agent 不存在，prompt 中跳过此段
 	TimeOfDay         string // "HH:MM" 游戏时间
 	Zone              string // 当前区域 id
 	Energy            float64
@@ -82,7 +83,12 @@ type ReactiveInput struct {
 // 中文 prompt（qwen2.5 中文表现好），严格约束 JSON 输出。
 // agentName 由调用方注入，避免在此处硬编码"老陈"等具体角色名——
 // 反应层应服务于任意 agent，而非特定 NPC。
+// agentRole 由调用方从 kb 注入（buildAgentRoleContext），空串时该段降级为
+// "（无角色信息）"——保留段落占位让 LLM 知道该字段存在但当前不可用。
 const reactivePromptTemplate = `你是 NPC %s 的反应决策模块。当前情况需要你判断是否打断当前行动。
+
+【你的角色】
+%s
 
 【当前状态】
 游戏时间：%s
@@ -146,8 +152,13 @@ func buildReactivePrompt(in ReactiveInput) string {
 	if agentName == "" {
 		agentName = in.AgentID
 	}
+	agentRole := in.AgentRole
+	if agentRole == "" {
+		agentRole = "（无角色信息）"
+	}
 	return fmt.Sprintf(reactivePromptTemplate,
 		agentName,
+		agentRole,
 		in.TimeOfDay, in.Zone,
 		in.Energy, in.Fatigue, in.Health,
 		currentAction,

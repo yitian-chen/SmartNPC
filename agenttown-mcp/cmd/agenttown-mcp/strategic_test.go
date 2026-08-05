@@ -219,6 +219,53 @@ func TestBuildStrategicContext_AgentNotFound(t *testing.T) {
 	}
 }
 
+// ─── buildAgentRoleContext ────────────────────────────────────
+
+// TestBuildAgentRoleContext_WithKB 验证从真实 KB 取 H-01 的角色画像：
+// 名字/职业/背景/性格特质/说话风格五项应齐全，且不带【你的角色】标题
+// （标题由调用方决定——战略层 buildStrategicContext 加标题、战术层
+// buildTacticalPrompt 加标题，helper 本身只输出裸字段）。
+func TestBuildAgentRoleContext_WithKB(t *testing.T) {
+	kb := loadTestKB(t)
+	got := buildAgentRoleContext(kb, "H-01")
+	if got == "" {
+		t.Fatal("got empty role, want non-empty for valid KB + agent")
+	}
+	for _, want := range []string{
+		"名字：老陈",
+		"职业：车间主管",
+		"背景：车间主管机器人",
+		"性格特质：沉稳、念旧、重视工艺",
+		"说话风格：简洁，偶尔念叨老物件",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("role missing %q, got: %q", want, got)
+		}
+	}
+	// helper 不应包含段落标题——标题由调用方添加
+	if strings.Contains(got, "【你的角色】") {
+		t.Errorf("helper should not include section header, got: %q", got)
+	}
+}
+
+// TestBuildAgentRoleContext_NilKB 验证 nil KB 降级返回空串不 panic。
+func TestBuildAgentRoleContext_NilKB(t *testing.T) {
+	got := buildAgentRoleContext(nil, "H-01")
+	if got != "" {
+		t.Errorf("got %q, want empty for nil KB", got)
+	}
+}
+
+// TestBuildAgentRoleContext_AgentNotFound 验证 KB 存在但 agentID
+// 不在 KB 中时返回空串（降级路径，三层决策共用此 helper）。
+func TestBuildAgentRoleContext_AgentNotFound(t *testing.T) {
+	kb := loadTestKB(t)
+	got := buildAgentRoleContext(kb, "NONEXISTENT-99")
+	if got != "" {
+		t.Errorf("got %q, want empty for unknown agent", got)
+	}
+}
+
 // ─── generateDailyPlan KB injection ──────────────────────────
 
 func TestGenerateDailyPlan_KBInjectedIntoPrompt(t *testing.T) {

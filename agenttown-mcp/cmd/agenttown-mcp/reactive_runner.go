@@ -187,11 +187,16 @@ func (r *reactiveRunner) buildInput(agentID string, ac *agentContext, trigger Re
 		plan = plan[:400] + "…"
 	}
 
-	// 从 KB 查 agent 显示名，供 prompt 中角色称呼使用（避免硬编码"老陈"）。
+	// 从 KB 查 agent 显示名 + 完整角色段，供 prompt 中角色称呼与性格注入使用。
+	// agentName 用于 prompt 开头的 "你是 NPC %s" 称呼；agentRole 用于【你的角色】
+	// 段（由 buildAgentRoleContext 生成，含名字/职业/背景/性格/说话风格），
+	// 让反应层决策也参考角色性格（如"沉稳"→偏向 continue，"急躁"→偏向 replan）。
 	agentName := ""
+	agentRole := ""
 	if r.kb != nil {
 		if agent := r.kb.GetAgent(agentID); agent != nil {
 			agentName = agent.DisplayName
+			agentRole = buildAgentRoleContext(r.kb, agentID)
 		}
 	}
 
@@ -207,6 +212,7 @@ func (r *reactiveRunner) buildInput(agentID string, ac *agentContext, trigger Re
 	return ReactiveInput{
 		AgentID:           agentID,
 		AgentName:         agentName,
+		AgentRole:         agentRole,
 		TimeOfDay:         tod,
 		Zone:              zone,
 		Energy:            energy,

@@ -220,9 +220,11 @@ func paramPlaceholder(p protocol.CapabilityParam) string {
 
 // tacticalPromptBody 是 prompt 的固定骨架，%s 占位符依次为：
 // goal / zone / timeOfDay / energy / fatigue / joint_wear / health /
-// hintLine / slotDurationHint / kbContext / toolCount / toolList / exampleBlock。
-// exampleBlock 由 buildTacticalExample 动态从 KB 取合法 id 生成，避免示例
-// 本身编造 KB 外 id（旧版示例写死 main_workshop / workbench_01 诱导 LLM 跟随编造）。
+// roleLine / hintLine / slotDurationHint / kbContext / toolCount / toolList / exampleBlock。
+// roleLine 由 buildAgentRoleContext(kb, agentID) 生成（含【你的角色】标题），
+// kb==nil 或 agent 不存在时为空串。exampleBlock 由 buildTacticalExample
+// 动态从 KB 取合法 id 生成，避免示例本身编造 KB 外 id（旧版示例写死
+// main_workshop / workbench_01 诱导 LLM 跟随编造）。
 //
 // 复合优先策略（2026-08）：工具分复合/原子两类，prompt 引导 LLM 优先使用
 // 复合动作——若目标语义匹配某复合动作（如"装配"→work_at_workbench、"充电"
@@ -233,7 +235,7 @@ func paramPlaceholder(p protocol.CapabilityParam) string {
 const tacticalPromptBody = `[战术层/任务分解] 当前时段目标：%s
 你目前在：%s，游戏时间 %s。
 物理状态：能量 %.0f、疲劳 %.0f、关节磨损 %.0f、健康 %.0f。
-
+%s
 请把这个目标分解为一个或多个 action，按顺序执行。
 %s
 %s
@@ -326,10 +328,25 @@ func buildTacticalExample(kb *worldkb.KB) string {
 //
 // registry 非 nil 时，工具列表段按 registry 对 agentID 的有效能力集动态
 // 生成（per-agent 覆盖全局默认）；nil 时降级为全量内置工具（向后兼容）。
+// buildTacticalPrompt 填充战术层 prompt 模板。kb 用于注入可用 zone/location/object
+// 列表与 NPC 角色设定（buildAgentRoleContext），避免 LLM 编造不存在的 ID（如
+// workbench_02、archives）并让分解体现角色性格（如"沉稳"→先检查再开工）。
+// slot 形如 "HH:MM-HH:MM"，用于在 prompt 里提示当前时段时长，引导 LLM
+// 给出总时长接近 slot 时长的步骤，减少队列提前耗尽导致的重分解。
+// slot 为空或解析失败时该提示行降级为空，保持旧行为。
+//
+// registry 非 nil 时，工具列表段按 registry 对 agentID 的有效能力集动态
+// 生成（per-agent 覆盖全局默认）；nil 时降级为全量内置工具（向后兼容）。
 func buildTacticalPrompt(goal, zone, timeOfDay, slot string, physical *protocol.PhysicalState, kb *worldkb.KB, hint string, registry *CapabilityRegistry, agentID string) string {
 	e, f, j, h := 0.0, 0.0, 0.0, 0.0
 	if physical != nil {
 		e, f, j, h = physical.Energy, physical.Fatigue, physical.JointWear, physical.Health
+	}
+	// 【你的角色】段：从 kb 注入 NPC 性格画像，让战术层分解体现角色风格。
+	// kb==nil 或 agent 不存在时 roleLine 为空串，prompt 中该位置仅留空行。
+	roleLine := ""
+	if role := buildAgentRoleContext(kb, agentID); role != "" {
+		roleLine = "【你的角色】\n" + role
 	}
 	hintLine := ""
 	if hint != "" {
@@ -348,6 +365,7 @@ func buildTacticalPrompt(goal, zone, timeOfDay, slot string, physical *protocol.
 	}
 	toolList, toolCount := buildTacticalToolList(agentID, registry)
 	return fmt.Sprintf(tacticalPromptBody, goal, zone, timeOfDay, e, f, j, h,
+		roleLine,
 		hintLine, buildSlotDurationHint(slot, timeOfDay), buildKBContext(kb), toolCount, toolList,
 		buildTacticalExample(kb))
 }

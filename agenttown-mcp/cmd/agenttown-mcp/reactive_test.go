@@ -186,6 +186,55 @@ func TestBuildReactivePrompt_ReplanOption(t *testing.T) {
 	}
 }
 
+// TestBuildReactivePrompt_InjectsAgentRole 验证反应层 prompt 注入
+// 【你的角色】段：传 AgentRole 后，prompt 应包含该角色画像字段。
+// 这是 C4 的核心——反应层决策（continue/observe/replan）应受 NPC
+// 性格影响（如"沉稳"性格更倾向 observe 而非频繁 replan）。
+func TestBuildReactivePrompt_InjectsAgentRole(t *testing.T) {
+	role := "名字：老陈\n职业：车间主管\n性格特质：沉稳、念旧、重视工艺\n说话风格：简洁，偶尔念叨老物件\n"
+	in := ReactiveInput{
+		AgentID:       "H-01",
+		AgentName:     "老陈",
+		AgentRole:     role,
+		TimeOfDay:     "14:30",
+		Zone:          "main_workshop",
+		Energy:        45, Fatigue: 30, Health: 90,
+		CurrentAction: "WorkAtWorkbench(target_object_id=workbench_01)",
+		ActionSrc:     "tactical",
+		CurrentSlot:   "14:00-18:00",
+		DailyPlan:     "14:00-18:00 工作组装",
+		Trigger:       TriggerPeriodic,
+	}
+	prompt := buildReactivePrompt(in)
+	if !strings.Contains(prompt, "【你的角色】") {
+		t.Errorf("prompt missing '【你的角色】' section header, got: %s", prompt)
+	}
+	for _, want := range []string{"老陈", "车间主管", "沉稳"} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("prompt missing role field %q, got: %s", want, prompt)
+		}
+	}
+}
+
+// TestBuildReactivePrompt_EmptyAgentRole 验证 AgentRole 为空串时
+// prompt 中该段降级为"（无角色信息）"——保留段落占位让 LLM 知道
+// 该字段存在但当前不可用，不让 prompt 结构破碎。
+func TestBuildReactivePrompt_EmptyAgentRole(t *testing.T) {
+	in := ReactiveInput{
+		AgentID:   "H-01",
+		TimeOfDay: "14:30",
+		Zone:      "main_workshop",
+		Trigger:   TriggerPeriodic,
+	}
+	prompt := buildReactivePrompt(in)
+	if !strings.Contains(prompt, "【你的角色】") {
+		t.Errorf("prompt should still contain '【你的角色】' header when role empty, got: %s", prompt)
+	}
+	if !strings.Contains(prompt, "（无角色信息）") {
+		t.Errorf("prompt should fallback to '（无角色信息）' for empty AgentRole, got: %s", prompt)
+	}
+}
+
 // TestParseReactiveDecision_CodeFence verifies that ```json ... ``` wrapped
 // output is correctly extracted.
 func TestParseReactiveDecision_CodeFence(t *testing.T) {
