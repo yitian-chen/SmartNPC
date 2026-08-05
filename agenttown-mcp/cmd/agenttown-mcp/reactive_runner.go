@@ -7,7 +7,10 @@
 //   - 不阻塞战术层：trigger() 由 WS handler 通过 `go ...` 异步调用，
 //     战术 worker 不等待 Ollama 返回。
 //   - 串行化 Ollama 调用：进程级 mutex 避免多触发源并发打爆本地模型。
-//   - 60s 去抖：相同 (agentID, trigger, detail) 在窗口内不重复触发。
+//   - 60s wall-clock 去抖：相同 (agentID, trigger, detail) 在窗口内不重复触发。
+//   - replan 按 1 游戏小时去抖（agent 全局，见 execute()）：避免 wall-clock
+//     窗口在高倍率仿真下被放大到数十游戏小时，使整日仿真中合法 replan 被
+//     第一次触发拦截。
 //   - 静默降级：Ollama 不可达 / 解析失败 → 视为 continue，不打断战术层。
 //
 // 触发入口（WS message handler）：
@@ -187,11 +190,16 @@ func (r *reactiveRunner) buildInput(agentID string, ac *agentContext, trigger Re
 		plan = plan[:400] + "…"
 	}
 
-	// 从 KB 查 agent 显示名，供 prompt 中角色称呼使用（避免硬编码"老陈"）。
+	// 从 KB 查 agent 显示名 + 完整角色段，供 prompt 中角色称呼与性格注入使用。
+	// agentName 用于 prompt 开头的 "你是 NPC %s" 称呼；agentRole 用于【你的角色】
+	// 段（由 buildAgentRoleContext 生成，含名字/职业/背景/性格/说话风格），
+	// 让反应层决策也参考角色性格（如"沉稳"→偏向 continue，"急躁"→偏向 replan）。
 	agentName := ""
+	agentRole := ""
 	if r.kb != nil {
 		if agent := r.kb.GetAgent(agentID); agent != nil {
 			agentName = agent.DisplayName
+			agentRole = buildAgentRoleContext(r.kb, agentID)
 		}
 	}
 
@@ -207,6 +215,7 @@ func (r *reactiveRunner) buildInput(agentID string, ac *agentContext, trigger Re
 	return ReactiveInput{
 		AgentID:           agentID,
 		AgentName:         agentName,
+		AgentRole:         agentRole,
 		TimeOfDay:         tod,
 		Zone:              zone,
 		Energy:            energy,
@@ -267,18 +276,28 @@ func (r *reactiveRunner) execute(agentID string, ac *agentContext, dec ReactiveD
 
 	case ReactionReplan:
 		// replan：先规划后打断，防止角色无 action。
-		// 1. 30 wall-clock 分钟去抖（agent 全局，不按 trigger/detail）
+		// 1. 游戏时间去抖（agent 全局，不按 trigger/detail）：1 游戏小时内至多 1 次。
+		//    用游戏时间而非 wall-clock 是因为仿真倍率最高 600x，wall-clock 窗口会
+		//    在游戏时间轴上放大到数十小时，使整日仿真中合法 replan 被第一次拦截。
 		ac.mu.Lock()
 		if ac.stopped {
 			ac.mu.Unlock()
 			return
 		}
-		lastReplan := ac.lastReplanAt
+		lastReplanGT := ac.lastReplanGameTime
+		curGT := ac.latestTimeOfDayLocked()
 		ac.mu.Unlock()
-		if !lastReplan.IsZero() && time.Since(lastReplan) < replanDedupeWindow {
-			r.logger.Info("[反应层] replan 去抖跳过（30 分钟内已 replan）",
-				"agent_id", agentID, "last_replan_at", lastReplan, "window", replanDedupeWindow)
-			return
+		if lastReplanGT != "" && curGT != "" {
+			delta := gameTimeDeltaMinutes(lastReplanGT, curGT)
+			if delta < replanDedupeGameMinutes {
+				r.logger.Info("[反应层] replan 去抖跳过（1 游戏小时内已 replan）",
+					"agent_id", agentID,
+					"last_replan_game_time", lastReplanGT,
+					"current_game_time", curGT,
+					"delta_min", delta,
+					"window_min", replanDedupeGameMinutes)
+				return
+			}
 		}
 
 		// 2. 防重入：规划进行中跳过
@@ -315,8 +334,9 @@ func (r *reactiveRunner) execute(agentID string, ac *agentContext, dec ReactiveD
 			return
 		}
 
-		// 4. 规划成功：更新去抖时间戳
+		// 4. 规划成功：更新去抖游戏时间戳（同时记录 wall-clock 仅用于日志）
 		ac.mu.Lock()
+		ac.lastReplanGameTime = ac.latestTimeOfDayLocked()
 		ac.lastReplanAt = time.Now()
 		actionID := ac.currentActionID
 		ac.mu.Unlock()
@@ -361,7 +381,8 @@ func (r *reactiveRunner) fallbackStopAndRefill(agentID string, ac *agentContext,
 	ac.currentActionSrc = ""
 	ac.replanInProgress = false
 	ac.replanHint = reason
-	ac.lastReplanAt = time.Now() // 防止 30 分钟内反复 replan 失败
+	ac.lastReplanAt = time.Now()                          // wall-clock，仅日志
+	ac.lastReplanGameTime = ac.latestTimeOfDayLocked()    // 游戏时间去抖，防止 1 游戏小时内反复 replan 失败
 	if actionID != "" {
 		if timer, ok := ac.pendingActionTimeouts[actionID]; ok {
 			timer.Stop()

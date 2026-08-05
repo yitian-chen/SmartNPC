@@ -639,12 +639,16 @@ COMPOSITE_DEFAULT_SEC = 1800.0  # 30 min
 # RepairTarget) keeps the work-like drain. Keyed by cmd constant so the
 # removal of busy_composite_name (post-14-cmd migration) still lets
 # _evolve_physical pick the right rate from busy_cmd alone.
+# Fatigue rates tuned for single-day sim (06:00-22:00, ~16 game-hours):
+# at default rate +0.10/min × ~9 work-hours ≈ 54 fatigue by 17:00, leaving
+# headroom for the raised alert threshold (80) to trigger mid-afternoon
+# rather than at 11:00 as the old +0.20/min rate did.
 PHYS_RATES = {
     CMD_CHARGE_AT_STATION: {"energy": +0.10, "fatigue": -0.15, "joint_wear": 0.0},
-    "_default":            {"energy": -0.05, "fatigue": +0.20, "joint_wear": +0.05},
+    "_default":            {"energy": -0.05, "fatigue": +0.10, "joint_wear": +0.05},
 }
 # Passive (non-busy) drain — applied when no composite action is running.
-PHYS_RATES_PASSIVE = {"energy": -0.02, "fatigue": +0.05, "joint_wear": 0.0}
+PHYS_RATES_PASSIVE = {"energy": -0.02, "fatigue": +0.03, "joint_wear": 0.0}
 
 # Composite cmds — the 6 long-running composite actions. Used by
 # _estimate_duration (all busy) and _evolve_physical (PHYS_RATES lookup).

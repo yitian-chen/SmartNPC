@@ -29,7 +29,7 @@ type ndjsonLine struct {
 type actionSource string
 
 const (
-	sourceHermes   actionSource = "hermes"
+	sourceTool     actionSource = "mcp_tool"
 	sourceTactical actionSource = "tactical"
 )
 
@@ -220,9 +220,11 @@ func paramPlaceholder(p protocol.CapabilityParam) string {
 
 // tacticalPromptBody 是 prompt 的固定骨架，%s 占位符依次为：
 // goal / zone / timeOfDay / energy / fatigue / joint_wear / health /
-// hintLine / slotDurationHint / kbContext / toolCount / toolList / exampleBlock。
-// exampleBlock 由 buildTacticalExample 动态从 KB 取合法 id 生成，避免示例
-// 本身编造 KB 外 id（旧版示例写死 main_workshop / workbench_01 诱导 LLM 跟随编造）。
+// roleLine / hintLine / slotDurationHint / kbContext / toolCount / toolList / exampleBlock。
+// roleLine 由 buildAgentRoleContext(kb, agentID) 生成（含【你的角色】标题），
+// kb==nil 或 agent 不存在时为空串。exampleBlock 由 buildTacticalExample
+// 动态从 KB 取合法 id 生成，避免示例本身编造 KB 外 id（旧版示例写死
+// main_workshop / workbench_01 诱导 LLM 跟随编造）。
 //
 // 复合优先策略（2026-08）：工具分复合/原子两类，prompt 引导 LLM 优先使用
 // 复合动作——若目标语义匹配某复合动作（如"装配"→work_at_workbench、"充电"
@@ -233,7 +235,7 @@ func paramPlaceholder(p protocol.CapabilityParam) string {
 const tacticalPromptBody = `[战术层/任务分解] 当前时段目标：%s
 你目前在：%s，游戏时间 %s。
 物理状态：能量 %.0f、疲劳 %.0f、关节磨损 %.0f、健康 %.0f。
-
+%s
 请把这个目标分解为一个或多个 action，按顺序执行。
 %s
 %s
@@ -257,16 +259,30 @@ const tacticalPromptBody = `[战术层/任务分解] 当前时段目标：%s
 示例（id 来自上方可用列表，不可照抄示例中的 id）：
 %s`
 
-// buildTacticalExample 根据当前 KB 动态构造示例，确保示例中出现的
-// zone id / object id 都在 KB 中合法存在，且示例工具与 object category
-// 语义匹配（workbench→work_at_workbench，charging_station→charge_at_station，
+// buildTacticalExample 根据当前 KB 和 goal 动态构造示例，确保示例中出现的
+// zone id / object id 都在 KB 中合法存在，且示例工具与 goal 语义匹配。
+//
+// goal 关键词优先匹配（按优先级）：
+//   - 巡视/巡检/巡逻      → patrol_zone 示例
+//   - 充电/补能/休息/恢复  → charge_at_station 示例（找 charging_station object）
+//   - 装配/工作/作业/打磨  → work_at_workbench 示例（找 workbench object）
+//   - 聊天/社交/对话       → chat_with 示例（需 KB 有 ≥2 个 agent）
+//   - 检查/自检/inspect    → interact inspect 示例
+//
+// 关键词未命中或对应工具/object 不存在时，降级到旧逻辑：按首个 object 的
+// category 选示例（workbench→work_at_workbench，charging_station→charge_at_station，
 // 其他→interact）。KB 为空时返回不引用任何具体 id 的通用示例。
 //
 // 关键约束：示例中的 move_to_location target 必须与示例 object 的 ZoneID
 // 一致——否则示例本身就违反 prompt 中"interact 必须在 object 所在 zone 调用"
 // 的约束 #5，LLM 会模仿错误模式（先 move 到任意 zone，再调用任意 object）。
 // 因此有 object 时 exZone 取 obj.ZoneID 而非 ListZones()[0]。
-func buildTacticalExample(kb *worldkb.KB) string {
+//
+// 动机（P0-2 修复）：旧版 buildTacticalExample(kb) 总是用首个 object（当前
+// KB 首个是 charging_station_01），导致无论 goal 是"自检关节"还是"装配作业"，
+// 示例都是"去充电"，LLM 模仿后把 goal 和示例机械拼接（如"巡视车间并记录日志，
+// 最后去充电"）。
+func buildTacticalExample(kb *worldkb.KB, goal string) string {
 	const genericExample = `{"inner_thought":"先去目标区域再开始作业"}
 {"action":"move_to_location","params":{"target":"<上方可前往区域的 id>"}}
 {"action":"interact","params":{"target_object_id":"<上方可交互物体的 id>","interaction":"<可用 interaction>"}}`
@@ -278,7 +294,13 @@ func buildTacticalExample(kb *worldkb.KB) string {
 	if len(zones) == 0 && len(objs) == 0 {
 		return genericExample
 	}
-	// 无 object 时用第一个 zone（或占位符）作示例 target。
+
+	// goal 关键词匹配（按优先级）。命中后若所需 object/agent 不存在则继续往下尝试。
+	if ex := exampleForGoal(kb, goal, zones, objs); ex != "" {
+		return ex
+	}
+
+	// 默认降级：无 object 时用第一个 zone（或占位符）作示例 target。
 	if len(objs) == 0 {
 		exZone := "<上方可前往区域的 id>"
 		if len(zones) > 0 {
@@ -318,8 +340,113 @@ func buildTacticalExample(kb *worldkb.KB) string {
 	}
 }
 
+// exampleForGoal 按 goal 关键词匹配返回对应示例；未命中或所需资源不存在返回空串，
+// 由调用方降级到默认示例。zones/objs 参数避免重复 KB 查询。
+func exampleForGoal(kb *worldkb.KB, goal string, zones []worldkb.ZoneInfo, objs []worldkb.ObjectInfo) string {
+	if kb == nil || goal == "" {
+		return ""
+	}
+	gl := strings.ToLower(goal)
+
+	// 1. 巡视/巡检/巡逻 → patrol_zone（用第一个 zone）
+	if containsAny(gl, "巡视", "巡检", "巡逻", "patrol") {
+		exZone := "<上方可前往区域的 id>"
+		if len(zones) > 0 {
+			exZone = zones[0].ID
+		}
+		return fmt.Sprintf(`{"inner_thought":"先去目标区域巡视一圈"}
+{"action":"move_to_location","params":{"target":"%s"}}
+{"action":"patrol_zone","params":{"target_zone":"%s","duration_sec":1800}}`, exZone, exZone)
+	}
+
+	// 2. 充电/补能/休息/恢复/疲劳 → charge_at_station（找 charging_station object）
+	if containsAny(gl, "充电", "补能", "休息", "恢复", "疲劳", "charge", "rest") {
+		if obj := findObjectByCategory(objs, "charging_station"); obj != nil {
+			exZone := obj.ZoneID
+			if exZone == "" {
+				exZone = "<上方可前往区域的 id>"
+			}
+			return fmt.Sprintf(`{"inner_thought":"先去目标区域补充能量"}
+{"action":"move_to_location","params":{"target":"%s"}}
+{"action":"charge_at_station","params":{"target_object_id":"%s"}}`, exZone, obj.ID)
+		}
+	}
+
+	// 3. 装配/工作/作业/打磨/加工 → work_at_workbench（找 workbench object）
+	if containsAny(gl, "装配", "工作", "作业", "打磨", "加工", "assemble", "craft") {
+		if obj := findObjectByCategory(objs, "workbench"); obj != nil {
+			exZone := obj.ZoneID
+			if exZone == "" {
+				exZone = "<上方可前往区域的 id>"
+			}
+			return fmt.Sprintf(`{"inner_thought":"先去目标区域再开始作业"}
+{"action":"move_to_location","params":{"target":"%s"}}
+{"action":"work_at_workbench","params":{"target_object_id":"%s","duration_sec":3600}}`, exZone, obj.ID)
+		}
+	}
+
+	// 4. 聊天/社交/对话 → chat_with（需 KB 有 ≥2 个 agent，排除 self）
+	//    当前 KB 仅 1 个 agent，此分支不会命中，降级到默认示例。
+	if containsAny(gl, "聊天", "社交", "对话", "chat", "social") && len(kb.Agents) >= 2 {
+		other := kb.Agents[1].ID // 简化：取第二个 agent（首个常是 self）
+		return fmt.Sprintf(`{"inner_thought":"去找同事聊两句"}
+{"action":"move_to_agent","params":{"target_agent_id":"%s","speed":"walk"}}
+{"action":"chat_with","params":{"target_agent_id":"%s","topic":"工作"}}`, other, other)
+	}
+
+	// 5. 检查/自检/inspect → interact inspect（找有 inspect interaction 的 object）
+	if containsAny(gl, "检查", "自检", "inspect", "examine") {
+		for i := range objs {
+			for _, v := range objs[i].AvailableInteractions {
+				if v == "inspect" {
+					exZone := objs[i].ZoneID
+					if exZone == "" {
+						exZone = "<上方可前往区域的 id>"
+					}
+					return fmt.Sprintf(`{"inner_thought":"先去目标区域检查设备"}
+{"action":"move_to_location","params":{"target":"%s"}}
+{"action":"interact","params":{"target_object_id":"%s","interaction":"inspect"}}`, exZone, objs[i].ID)
+				}
+			}
+		}
+	}
+
+	return ""
+}
+
+// containsAny 检查 s 是否包含 subs 中任一子串（大小写不敏感由调用方保证）。
+func containsAny(s string, subs ...string) bool {
+	for _, sub := range subs {
+		if sub != "" && strings.Contains(s, sub) {
+			return true
+		}
+	}
+	return false
+}
+
+// findObjectByCategory 在 ObjectInfo 列表中查找首个指定 category 的对象。
+// 返回指针便于调用方判空；找不到返回 nil。
+func findObjectByCategory(objs []worldkb.ObjectInfo, category string) *worldkb.ObjectInfo {
+	for i := range objs {
+		if objs[i].Category == category {
+			o := objs[i] // 拷贝避免 range 复用
+			return &o
+		}
+	}
+	return nil
+}
+
 // buildTacticalPrompt 填充战术层 prompt 模板。kb 用于注入可用 zone/location/object
 // 列表，避免 LLM 编造不存在的 ID（如 workbench_02、archives）。
+// slot 形如 "HH:MM-HH:MM"，用于在 prompt 里提示当前时段时长，引导 LLM
+// 给出总时长接近 slot 时长的步骤，减少队列提前耗尽导致的重分解。
+// slot 为空或解析失败时该提示行降级为空，保持旧行为。
+//
+// registry 非 nil 时，工具列表段按 registry 对 agentID 的有效能力集动态
+// 生成（per-agent 覆盖全局默认）；nil 时降级为全量内置工具（向后兼容）。
+// buildTacticalPrompt 填充战术层 prompt 模板。kb 用于注入可用 zone/location/object
+// 列表与 NPC 角色设定（buildAgentRoleContext），避免 LLM 编造不存在的 ID（如
+// workbench_02、archives）并让分解体现角色性格（如"沉稳"→先检查再开工）。
 // slot 形如 "HH:MM-HH:MM"，用于在 prompt 里提示当前时段时长，引导 LLM
 // 给出总时长接近 slot 时长的步骤，减少队列提前耗尽导致的重分解。
 // slot 为空或解析失败时该提示行降级为空，保持旧行为。
@@ -330,6 +457,12 @@ func buildTacticalPrompt(goal, zone, timeOfDay, slot string, physical *protocol.
 	e, f, j, h := 0.0, 0.0, 0.0, 0.0
 	if physical != nil {
 		e, f, j, h = physical.Energy, physical.Fatigue, physical.JointWear, physical.Health
+	}
+	// 【你的角色】段：从 kb 注入 NPC 性格画像，让战术层分解体现角色风格。
+	// kb==nil 或 agent 不存在时 roleLine 为空串，prompt 中该位置仅留空行。
+	roleLine := ""
+	if role := buildAgentRoleContext(kb, agentID); role != "" {
+		roleLine = "【你的角色】\n" + role
 	}
 	hintLine := ""
 	if hint != "" {
@@ -348,8 +481,9 @@ func buildTacticalPrompt(goal, zone, timeOfDay, slot string, physical *protocol.
 	}
 	toolList, toolCount := buildTacticalToolList(agentID, registry)
 	return fmt.Sprintf(tacticalPromptBody, goal, zone, timeOfDay, e, f, j, h,
+		roleLine,
 		hintLine, buildSlotDurationHint(slot, timeOfDay), buildKBContext(kb), toolCount, toolList,
-		buildTacticalExample(kb))
+		buildTacticalExample(kb, goal))
 }
 
 // buildSlotDurationHint 根据 slot "HH:MM-HH:MM" 和当前 game_time 构造一行提示文本。
@@ -474,8 +608,8 @@ func buildKBContext(kb *worldkb.KB) string {
 
 // generateTacticalPlan 调战术层 LLM 分解当前时段 goal（非流式路径）。
 // 返回分解出的 action 列表 + inner_thought（作为整个时段独白）。
-// 任一步失败返回 err，调用方决定回退到 Hermes。
-// 复用 strategicCaller 接口（hermes.Client 已满足）。
+// 任一步失败返回 err，调用方决定回退兜底。
+// 复用 strategicCaller 接口（venus.Client 已满足）。
 func generateTacticalPlan(
 	ctx context.Context,
 	tc strategicCaller,
@@ -488,7 +622,7 @@ func generateTacticalPlan(
 	registry *CapabilityRegistry,
 ) ([]plannedAction, string, error) {
 	prompt := buildTacticalPrompt(goal, zone, timeOfDay, slot, physical, kb, hint, registry, agentID)
-	logger.Info("[MCP→Hermes/TACTICAL-PROMPT]",
+	logger.Info("[MCP→LLM/TACTICAL-PROMPT]",
 		"agent_id", agentID, "goal", goal, "game_time", timeOfDay, "text", prompt,
 		"replan_hint", hint)
 
@@ -499,7 +633,7 @@ func generateTacticalPlan(
 	tc.ResetSession() // 战术调用一次性，立即清链（与战略层一致）
 
 	raw := resp.ExtractText()
-	logger.Info("[Hermes→MCP/TACTICAL-RESPONSE]",
+	logger.Info("[LLM→MCP/TACTICAL-RESPONSE]",
 		"agent_id", agentID, "tokens", resp.Usage.TotalTokens, "raw_len", len(raw), "raw", raw)
 
 	actions, thought, err := parseTacticalNDJSON(raw, registry, agentID)
@@ -521,8 +655,7 @@ func generateTacticalPlan(
 // action 即调 onAction 回调，使调用方能在首 action 到达时立即下发，
 // 将首动作体感延迟从 ~14s 降至 ~2-3s。
 //
-// 走 llmClient 接口（hermes.Client 和 venus.Client 均实现），由 main.go
-// 的 --llm-backend 决定具体后端。
+// 走 llmClient 接口（venus.Client 实现）。
 func generateTacticalPlanStreaming(
 	ctx context.Context,
 	tc llmClient,
@@ -535,7 +668,7 @@ func generateTacticalPlanStreaming(
 	onAction func(plannedAction),
 ) ([]plannedAction, string, error) {
 	prompt := buildTacticalPrompt(goal, zone, timeOfDay, slot, physical, kb, hint, registry, agentID)
-	logger.Info("[MCP→Hermes/TACTICAL-PROMPT]",
+	logger.Info("[MCP→LLM/TACTICAL-PROMPT]",
 		"agent_id", agentID, "goal", goal, "game_time", timeOfDay, "text", prompt,
 		"streaming", true, "replan_hint", hint)
 
@@ -555,7 +688,7 @@ func generateTacticalPlanStreaming(
 		acc.feed(delta)
 	})
 	if err != nil {
-		logger.Warn("[Hermes→MCP/TACTICAL-STREAM] stream error, keeping actions already parsed",
+		logger.Warn("[LLM→MCP/TACTICAL-STREAM] stream error, keeping actions already parsed",
 			"agent_id", agentID, "parsed_actions", len(actions), "err", err)
 		return actions, acc.thought, fmt.Errorf("tactical llm stream: %w", err)
 	}
@@ -563,7 +696,7 @@ func generateTacticalPlanStreaming(
 	tc.ResetSession()
 
 	raw := resp.ExtractText()
-	logger.Info("[Hermes→MCP/TACTICAL-RESPONSE]",
+	logger.Info("[LLM→MCP/TACTICAL-RESPONSE]",
 		"agent_id", agentID, "tokens", resp.Usage.TotalTokens, "raw_len", len(raw), "raw", raw, "streaming", true)
 
 	if len(actions) == 0 {

@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/AgentTown/agenttown-mcp/pkg/hermes"
+	"github.com/AgentTown/agenttown-mcp/pkg/llmtypes"
 )
 
 func newTestClient(t *testing.T, url string) *Client {
@@ -28,7 +28,7 @@ func newTestClient(t *testing.T, url string) *Client {
 }
 
 // TestSendWithSummary_NonStreaming verifies a non-streaming OpenAI Chat
-// Completions call is parsed and converted to *hermes.Response correctly.
+// Completions call is parsed and converted to *llmtypes.Response correctly.
 func TestSendWithSummary_NonStreaming(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/chat/completions" {
@@ -346,7 +346,7 @@ func TestOpenaiResponse_ToHermes(t *testing.T) {
 		},
 		Usage: openaiUsage{PromptTokens: 3, CompletionTokens: 4, TotalTokens: 7},
 	}
-	hr := or.toHermes("fallback-model")
+	hr := or.toLlmTypes("fallback-model")
 	if hr.ID != "chat_x" {
 		t.Errorf("ID = %q", hr.ID)
 	}
@@ -364,12 +364,12 @@ func TestOpenaiResponse_ToHermes(t *testing.T) {
 	}
 }
 
-// TestVenusClient_MatchesHermesSignatures is a compile-time check that
+// TestVenusClient_MatchesLLMClientSignatures is a compile-time check that
 // *venus.Client satisfies the llmClient interface expected by main.go.
-func TestVenusClient_MatchesHermesSignatures(t *testing.T) {
+func TestVenusClient_MatchesLLMClientSignatures(t *testing.T) {
 	var _ interface {
-		SendWithSummary(ctx context.Context, input, summary string) (*hermes.Response, error)
-		SendStreaming(ctx context.Context, input string, onDelta func(string)) (*hermes.Response, error)
+		SendWithSummary(ctx context.Context, input, summary string) (*llmtypes.Response, error)
+		SendStreaming(ctx context.Context, input string, onDelta func(string)) (*llmtypes.Response, error)
 		ResetSession()
 	} = (*Client)(nil)
 }

@@ -1,13 +1,14 @@
-// Command agenttown-mcp is the MCP server bridging Mock UE to Hermes Gateway
-// for the AgentTown_v3 project.
+// Command agenttown-mcp is the MCP server bridging Mock UE to the Venus
+// LLM backend for the AgentTown_v3 project.
 //
 // Three roles in one process:
 //
-//  1. MCP Server (Streamable HTTP at :8760/mcp) — Hermes connects here as
-//     a standard MCP client, discovers the game tools, and calls them.
+//  1. MCP Server (Streamable HTTP at :8760/mcp) — exposes the game tools
+//     to MCP clients (currently used for debug; Hermes Gateway path removed).
 //  2. WebSocket Server (:9090/ws) — Mock UE (simulating UE) connects here,
 //     pushes protocol messages (perception_update / state_report / ...).
-//  3. Hermes HTTP Client — owns the per-game-day session.
+//  3. Venus LLM Client — strategic/tactical layer backend (OpenAI Chat
+//     Completions API). Each call is independent (no session chain).
 //
 // Messages follow the 7-field envelope in pkg/protocol. The action
 // lifecycle is command → action_started(ACK) → action_completed; tools
@@ -35,7 +36,7 @@ import (
 
 	"github.com/AgentTown/agenttown-mcp/adapters/agenttown/tools"
 	"github.com/AgentTown/agenttown-mcp/internal/log"
-	"github.com/AgentTown/agenttown-mcp/pkg/hermes"
+	"github.com/AgentTown/agenttown-mcp/pkg/llmtypes"
 	"github.com/AgentTown/agenttown-mcp/pkg/ollama"
 	"github.com/AgentTown/agenttown-mcp/pkg/protocol"
 	"github.com/AgentTown/agenttown-mcp/pkg/transport"
@@ -47,7 +48,7 @@ import (
 var version = "0.1.0-dev"
 
 // agentContext holds per-agent state accumulated between decision turns.
-// Delivery uses a latest-wins queue: at most one Hermes request is in flight
+// Delivery uses a latest-wins queue: at most one LLM request is in flight
 // per agent, pending trigger reasons merge, and only the newest perception is
 // retained while that request runs.
 type agentContext struct {
@@ -81,9 +82,10 @@ type agentContext struct {
 	cancel         context.CancelFunc
 	stopped        bool
 	// replan 状态（mu 保护）
-	lastReplanAt     time.Time // wall-clock，30 min 去抖（replanDedupeWindow）
-	replanInProgress bool      // replan 规划进行中，阻止 worker 抢先 pop/refill
-	replanHint       string    // 传入战术层 prompt 的"上次中断原因"（replan reason）
+	lastReplanAt        time.Time // wall-clock，仅用于日志/调试
+	lastReplanGameTime  string    // 上次 replan 时的游戏时间 "HH:MM"，用于游戏时间去抖（replanDedupeGameMinutes）
+	replanInProgress    bool      // replan 规划进行中，阻止 worker 抢先 pop/refill
+	replanHint          string    // 传入战术层 prompt 的"上次中断原因"（replan reason）
 }
 
 func newAgentContext(parent context.Context, epochs ...int64) (*agentContext, context.Context) {
@@ -407,7 +409,7 @@ func (g *guardedExecutor) SendAction(ctx context.Context, agentID string, decisi
 	}
 	ack, err := g.ws.SendAction(ctx, agentID, cmd, params)
 	if err == nil && ack != nil {
-		ac.recordActionStarted(ack.ActionID, cmd, params, decisionEpoch, sourceHermes)
+		ac.recordActionStarted(ack.ActionID, cmd, params, decisionEpoch, sourceTool)
 		// 注册 action_completed 超时 timer（约定 §5.2：estimated_duration × 1.5）
 		ac.armActionTimeout(ack.ActionID, ack.EstimatedDurationSec, g.ws, agentID, g.lookup)
 	}
@@ -641,7 +643,7 @@ func (a *agentContext) sendIdleWait(ctx context.Context, agentID string, ws *wss
 }
 
 // popAndSendQueueAction 从队列 pop 一个 action，映射后直发 ws.SendAction。
-// 不经过 Hermes / MCP 工具 / guardedExecutor（无活跃 decision_epoch）。
+// 不经过 MCP 工具 / guardedExecutor（无活跃 decision_epoch）。
 // 手动 recordActionStarted + armActionTimeout，source=tactical。
 func (a *agentContext) popAndSendQueueAction(ctx context.Context, agentID string,
 	ws *wsserver.Server, kb *worldkb.KB, logger *slog.Logger) {
@@ -708,25 +710,21 @@ var tacticalStreamingEnabled bool
 
 // tacticalCallTimeout 是单次战术层 LLM 调用（流式或非流式）的硬超时。
 // 由 --tactical-timeout flag 配置，默认 60s。
-// 之前直接用进程 ctx，导致 Hermes 后端 DeepSeek 排队时单次调用最长卡 120s，
+// 之前直接用进程 ctx，导致 Venus 后端排队时单次调用最长卡 120s，
 // 整个游戏时段空转。超时后由调用方发 idle wait，下一个感知周期重新尝试，
 // 比死等更划算。
 var tacticalCallTimeout = 60 * time.Second
 
 // llmClient 是战略层/战术层 LLM 客户端的统一接口。
-// *hermes.Client（Hermes Gateway，OpenAI Responses 协议，默认）和 *venus.Client
-// （Venus 代理，OpenAI Chat Completions 协议）均实现此接口，通过 --llm-backend 切换。
+// *venus.Client（Venus 代理，OpenAI Chat Completions 协议）实现此接口。
 type llmClient interface {
-	SendWithSummary(ctx context.Context, input, summary string) (*hermes.Response, error)
-	SendStreaming(ctx context.Context, input string, onDelta func(string)) (*hermes.Response, error)
+	SendWithSummary(ctx context.Context, input, summary string) (*llmtypes.Response, error)
+	SendStreaming(ctx context.Context, input string, onDelta func(string)) (*llmtypes.Response, error)
 	ResetSession()
 }
 
-// 编译期断言：两个 backend 都满足 llmClient 接口。
-var (
-	_ llmClient = (*hermes.Client)(nil)
-	_ llmClient = (*venus.Client)(nil)
-)
+// 编译期断言：venus.Client 满足 llmClient 接口。
+var _ llmClient = (*venus.Client)(nil)
 
 // reactiveRunnerRef 是进程级反应层执行器（package-level 便于 WS handler 调用）。
 // nil 表示反应层未启用（--ollama-url="" 或客户端初始化失败）。
@@ -742,6 +740,52 @@ var capabilityRegistryRef *CapabilityRegistry
 // worldKBSwap 成功后同步更新；runHTTP 的 /debug/kb handler 读 kbRef 而不是
 // 闭包捕获的 kb 参数，确保 UE 推送新 KB 后 /debug/kb 返回最新数据。
 var kbRef *worldkb.KB
+
+// ueErrorEntries 是 UE 上报 error 消息的环形缓冲（package-level 供
+// /debug/ue-errors handler 引用）。仅保留最近 maxUEErrorEntries 条，
+// 供 debug 控制台查看 UE 侧报错（main.go 的 TypeError 分支写入）。
+const maxUEErrorEntries = 50
+
+var (
+	ueErrorMu      sync.Mutex
+	ueErrorEntries []ueErrorEntry
+)
+
+// ueErrorEntry 是一条 UE 上报错误记录，供 /debug/ue-errors 端点返回。
+type ueErrorEntry struct {
+	ReceivedAt time.Time      `json:"received_at"` // wall-clock 收到时间
+	AgentID    string         `json:"agent_id"`
+	ErrorCode  string         `json:"error_code"`
+	Message    string         `json:"message"`
+	ActionID   string         `json:"action_id,omitempty"`
+	Context    map[string]any `json:"context,omitempty"`
+}
+
+// recordUEError 把一条 UE error 消息追加进环形缓冲，超过上限丢弃最旧条目。
+func recordUEError(agentID string, ep protocol.ErrorPayload) {
+	ueErrorMu.Lock()
+	defer ueErrorMu.Unlock()
+	ueErrorEntries = append(ueErrorEntries, ueErrorEntry{
+		ReceivedAt: time.Now(),
+		AgentID:    agentID,
+		ErrorCode:  ep.ErrorCode,
+		Message:    ep.Message,
+		ActionID:   ep.ActionID,
+		Context:    ep.Context,
+	})
+	if len(ueErrorEntries) > maxUEErrorEntries {
+		ueErrorEntries = ueErrorEntries[len(ueErrorEntries)-maxUEErrorEntries:]
+	}
+}
+
+// snapshotUEErrors 返回当前环形缓冲的拷贝（可安全 JSON 编码）。
+func snapshotUEErrors() []ueErrorEntry {
+	ueErrorMu.Lock()
+	defer ueErrorMu.Unlock()
+	out := make([]ueErrorEntry, len(ueErrorEntries))
+	copy(out, ueErrorEntries)
+	return out
+}
 
 // tacticalRefill 调战术层 LLM 流式分解当前时段 goal，边接收边入队，
 // 首 action 在流式期间即提前下发以降低体感延迟。成功返回 true。
@@ -794,7 +838,7 @@ func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
 	var actions []plannedAction
 	var err error
 
-	// 战术层 LLM 调用统一 30s 硬超时：避免 Hermes 后端排队时单次调用卡 120s
+	// 战术层 LLM 调用统一 30s 硬超时：避免 Venus 后端排队时单次调用卡 120s
 	// 拖死整个游戏时段。超时后调用方发 idle wait，下一感知周期重试。
 	tacticalCtx, tacticalCancel := context.WithTimeout(ctx, tacticalCallTimeout)
 	defer tacticalCancel()
@@ -972,9 +1016,6 @@ func main() {
 		logLevel           = flag.String("log-level", "info", "log level: debug|info|warn|error")
 		httpAddr           = flag.String("http", ":8760", "MCP Streamable HTTP addr (empty = stdio)")
 		wsAddr             = flag.String("ws", ":9090", "WebSocket server addr for Mock UE")
-		hermesURL          = flag.String("hermes-url", "http://localhost:8642", "Hermes Gateway base URL")
-		hermesAPIKey       = flag.String("hermes-api-key", "agenttown-test-key", "Hermes Gateway bearer token")
-		hermesModel        = flag.String("hermes-model", "deepseek-v4-pro", "Hermes model name")
 		mcpAPIKey          = flag.String("mcp-api-key", "", "if set, require this Bearer token on /mcp")
 		httpAllowAnyOrigin = flag.Bool("http-allow-any-origin", true,
 			"disable origin / localhost restrictions so cross-host clients can connect")
@@ -991,11 +1032,8 @@ func main() {
 		"CPU threads for Ollama inference (0=use default 16, -1=let Ollama decide). "+
 			"CPU inference on high-core-count machines often regresses past ~16 threads; "+
 			"benchmark to find the optimum for your host.")
-	// ─── 战略层/战术层 LLM backend 切换 ───────────────────────────
-	// 默认走 hermes：MCP → Hermes Gateway → 后端模型（由 Hermes config.yaml
-	// 决定，当前为 Venus qwen3.6-35b-a3b）。需要直连 Venus 绕过 Hermes 时切 venus。
-	llmBackend = flag.String("llm-backend", "hermes",
-		"LLM backend for strategic/tactical layers: hermes|venus")
+	// ─── 战略层/战术层 LLM backend ───────────────────────────────
+	// Venus 直连（OpenAI Chat Completions API），是唯一的战略/战术层后端。
 	venusURL = flag.String("venus-url", "http://v2.open.venus.oa.com/llmproxy",
 		"Venus LLM proxy base URL (OpenAI Chat Completions API compatible)")
 	venusAPIKey = flag.String("venus-api-key", "",
@@ -1021,8 +1059,6 @@ func main() {
 		"version", version,
 		"http", *httpAddr,
 		"ws", *wsAddr,
-		"llm_backend", *llmBackend,
-		"hermes_url", *hermesURL,
 		"venus_url", *venusURL,
 		"venus_model", *venusModel,
 		"tactical_stream", tacticalStreamingEnabled,
@@ -1123,53 +1159,26 @@ func main() {
 		firstAgentRegistered = true
 		nextAgentEpoch++
 		ac, workerCtx := newAgentContext(ctx, nextAgentEpoch)
-		// 战略层/战术层各用一个独立 LLM client 实例（独立 session 链）。
-		// backend 由 --llm-backend 选择：hermes（默认，MCP → Hermes → 后端模型）
-		// 或 venus（直连 Venus OpenAI Chat Completions API，绕过 Hermes）。
-		switch *llmBackend {
-		case "venus":
-			venusAPIKeyValue := *venusAPIKey
-			if venusAPIKeyValue == "" {
-				venusAPIKeyValue = os.Getenv("VENUS_API_KEY")
-			}
-			ac.strategicHc = venus.New(venus.Config{
-				BaseURL: *venusURL,
-				APIKey:  venusAPIKeyValue,
-				Model:   *venusModel,
-				Logger:  logger,
-				Timeout: *venusTimeout,
-			})
-			ac.tacticalHc = venus.New(venus.Config{
-				BaseURL: *venusURL,
-				APIKey:  venusAPIKeyValue,
-				Model:   *venusModel,
-				Logger:  logger,
-				Timeout: *venusTimeout,
-			})
-		case "hermes":
-			ac.strategicHc = hermes.New(hermes.Config{
-				URL:              *hermesURL,
-				APIKey:           *hermesAPIKey,
-				Model:            *hermesModel,
-				Logger:           logger,
-				SkipSystemPrompt: true, // 战略层后端调用，不需要 RPG persona/skills/memory 注入
-			})
-			ac.tacticalHc = hermes.New(hermes.Config{
-				URL:              *hermesURL,
-				APIKey:           *hermesAPIKey,
-				Model:            *hermesModel,
-				Logger:           logger,
-				SkipSystemPrompt: true, // 战术层后端调用，不需要 RPG persona/skills/memory 注入
-			})
-		default:
-			// flag 校验已在 parse 后完成，此处不应到达；防御性日志。
-			logger.Error("unknown llm-backend, falling back to venus", "backend", *llmBackend)
-			ac.strategicHc = venus.New(venus.Config{
-				BaseURL: *venusURL, APIKey: os.Getenv("VENUS_API_KEY"),
-				Model: *venusModel, Logger: logger, Timeout: *venusTimeout,
-			})
-			ac.tacticalHc = ac.strategicHc
+		// 战略层/战术层各用一个独立 LLM client 实例。
+		// Venus 直连（OpenAI Chat Completions API），是唯一的战略/战术层后端。
+		venusAPIKeyValue := *venusAPIKey
+		if venusAPIKeyValue == "" {
+			venusAPIKeyValue = os.Getenv("VENUS_API_KEY")
 		}
+		ac.strategicHc = venus.New(venus.Config{
+			BaseURL: *venusURL,
+			APIKey:  venusAPIKeyValue,
+			Model:   *venusModel,
+			Logger:  logger,
+			Timeout: *venusTimeout,
+		})
+		ac.tacticalHc = venus.New(venus.Config{
+			BaseURL: *venusURL,
+			APIKey:  venusAPIKeyValue,
+			Model:   *venusModel,
+			Logger:  logger,
+			Timeout: *venusTimeout,
+		})
 		agents[id] = ac
 		go runPerceptionWorker(workerCtx, id, ac, ws, kb, logger)
 		return ac, true
@@ -1329,7 +1338,17 @@ func main() {
 			}
 
 		case protocol.TypeError:
-			logger.Warn("error from mock ue", "agent_id", agentID, "payload", string(payload))
+			var ep protocol.ErrorPayload
+			if err := json.Unmarshal(payload, &ep); err != nil {
+				logger.Warn("error from mock ue (payload parse failed)",
+					"agent_id", agentID, "raw", string(payload), "err", err)
+			} else {
+				logger.Warn("error from mock ue",
+					"agent_id", agentID,
+					"error_code", ep.ErrorCode, "message", ep.Message,
+					"action_id", ep.ActionID)
+				recordUEError(agentID, ep)
+			}
 
 		case protocol.TypePerceptionUpdate:
 			ac := lookupAgent(agentID)
@@ -1403,6 +1422,11 @@ func runHTTP(ctx context.Context, logger *slog.Logger, server *mcp.Server, addr 
 		// /debug/cap — 返回 capability_registry 状态供 e2e 黑盒验证
 		if r.URL.Path == "/debug/cap" {
 			handleDebugCap(w, r, capabilityRegistryRef, logger)
+			return
+		}
+		// /debug/ue-errors — 返回最近 UE 上报的 error 消息（环形缓冲，最多 50 条）
+		if r.URL.Path == "/debug/ue-errors" {
+			handleDebugUEErrors(w, r, logger)
 			return
 		}
 		http.NotFound(w, r)

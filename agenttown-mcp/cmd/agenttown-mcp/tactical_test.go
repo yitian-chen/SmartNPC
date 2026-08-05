@@ -513,6 +513,46 @@ func TestBuildTacticalPrompt_NilKB(t *testing.T) {
 	}
 }
 
+// TestBuildTacticalPrompt_InjectsAgentRole 验证战术层 prompt 注入
+// 【你的角色】段：传 kb + agentID="H-01" 后，prompt 应包含从
+// buildAgentRoleContext 派生的角色画像（名字/职业/性格特质等）。
+// 这是 C4 的核心——战术层分解动作时应体现 NPC 角色（如"老陈"的
+// "沉稳"性格影响 action 选择与节奏），而非机械分解。
+func TestBuildTacticalPrompt_InjectsAgentRole(t *testing.T) {
+	kb := loadTestKB(t)
+	prompt := buildTacticalPrompt("装配", "main_workshop", "09:00", "09:00-12:00",
+		&protocol.PhysicalState{Energy: 75, Fatigue: 30, JointWear: 5, Health: 90},
+		kb, "", nil, "H-01")
+	if !strings.Contains(prompt, "【你的角色】") {
+		t.Errorf("prompt missing '【你的角色】' section header, got: %s", prompt)
+	}
+	for _, want := range []string{"老陈", "车间主管", "沉稳"} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("prompt missing role field %q, got: %s", want, prompt)
+		}
+	}
+}
+
+// TestBuildTacticalPrompt_NilKBNoRole 验证 kb==nil 时 prompt 不含
+// 【你的角色】段（roleLine 降级为空串，prompt 中仅留空行）。
+func TestBuildTacticalPrompt_NilKBNoRole(t *testing.T) {
+	prompt := buildTacticalPrompt("装配", "main_workshop", "09:00", "", nil, nil, "", nil, "")
+	if strings.Contains(prompt, "【你的角色】") {
+		t.Errorf("prompt should not contain '【你的角色】' when KB is nil, got: %s", prompt)
+	}
+}
+
+// TestBuildTacticalPrompt_AgentNotFoundNoRole 验证 KB 存在但 agentID
+// 不在 KB 中时也降级跳过【你的角色】段（buildAgentRoleContext 返回空串）。
+func TestBuildTacticalPrompt_AgentNotFoundNoRole(t *testing.T) {
+	kb := loadTestKB(t)
+	prompt := buildTacticalPrompt("装配", "main_workshop", "09:00", "",
+		nil, kb, "", nil, "NONEXISTENT-99")
+	if strings.Contains(prompt, "【你的角色】") {
+		t.Errorf("prompt should not include '【你的角色】' for unknown agent, got: %s", prompt)
+	}
+}
+
 func TestBuildTacticalPrompt_WithHint(t *testing.T) {
 	prompt := buildTacticalPrompt("装配", "main_workshop", "09:00", "09:00-12:00",
 		&protocol.PhysicalState{Energy: 75, Fatigue: 30, JointWear: 5, Health: 90}, nil,
@@ -836,7 +876,7 @@ func TestBuildTacticalExample_ChargingStationFirst(t *testing.T) {
 	// 回归测试：当前 KB 第一个 object 是 charging_station_01（category=charging_station），
 	// 示例必须用 charge_at_station，不能用 work_at_workbench 配 charging_station。
 	kb := loadTestKB(t)
-	got := buildTacticalExample(kb)
+	got := buildTacticalExample(kb, "")
 	if !strings.Contains(got, "charge_at_station") {
 		t.Errorf("example should use charge_at_station for charging_station category: %q", got)
 	}
@@ -860,7 +900,7 @@ func TestBuildTacticalExample_WorkbenchOnly(t *testing.T) {
 			AvailableInteractions: []string{"assemble", "inspect"},
 		}},
 	}
-	got := buildTacticalExample(kb)
+	got := buildTacticalExample(kb, "")
 	if !strings.Contains(got, "work_at_workbench") {
 		t.Errorf("example should use work_at_workbench for workbench category: %q", got)
 	}
@@ -881,7 +921,7 @@ func TestBuildTacticalExample_RestBenchOnly(t *testing.T) {
 			AvailableInteractions: []string{"rest"},
 		}},
 	}
-	got := buildTacticalExample(kb)
+	got := buildTacticalExample(kb, "")
 	if !strings.Contains(got, `"action":"interact"`) {
 		t.Errorf("example should use interact for rest_bench category: %q", got)
 	}
@@ -895,7 +935,7 @@ func TestBuildTacticalExample_RestBenchOnly(t *testing.T) {
 
 func TestBuildTacticalExample_NilKB(t *testing.T) {
 	// nil KB 返回通用占位示例，不引用任何具体 id。
-	got := buildTacticalExample(nil)
+	got := buildTacticalExample(nil, "")
 	if !strings.Contains(got, "inner_thought") {
 		t.Errorf("nil KB example should still contain inner_thought: %q", got)
 	}
@@ -919,7 +959,7 @@ func TestBuildTacticalExample_ZoneObjectPairing(t *testing.T) {
 	if wantZone == "" {
 		t.Skip("first object has no ZoneID, cannot verify pairing")
 	}
-	got := buildTacticalExample(kb)
+	got := buildTacticalExample(kb, "")
 	// 示例应包含 move_to_location 到 wantZone，且引用 firstObj.ID。
 	moveLine := fmt.Sprintf(`{"action":"move_to_location","params":{"target":"%s"}}`, wantZone)
 	if !strings.Contains(got, moveLine) {
@@ -936,6 +976,89 @@ func TestBuildTacticalExample_ZoneObjectPairing(t *testing.T) {
 			t.Errorf("example must NOT move_to_location(%s) — object %s is in %s, got: %q",
 				firstZone.ID, firstObj.ID, wantZone, got)
 		}
+	}
+}
+
+// ─── buildTacticalExample (goal-aware, P0-2) ──────────────────
+
+func TestBuildTacticalExample_GoalAssembly(t *testing.T) {
+	// goal 含"装配"应选 work_at_workbench 示例，即使 KB 首个 object 是 charging_station。
+	// P0-2 修复前：示例固定按首个 object（charging_station_01）显示"去充电"，
+	// 与"装配作业"goal 错配，LLM 模仿后会把 goal 和示例机械拼接。
+	kb := loadTestKB(t)
+	got := buildTacticalExample(kb, "前往主生产车间进行装配作业，严控工艺")
+	if !strings.Contains(got, "work_at_workbench") {
+		t.Errorf("goal=装配 should pick work_at_workbench example: %q", got)
+	}
+	if !strings.Contains(got, "workbench_01") {
+		t.Errorf("example should reference workbench_01: %q", got)
+	}
+	if strings.Contains(got, "charge_at_station") {
+		t.Errorf("assembly goal must NOT fall back to charge example: %q", got)
+	}
+}
+
+func TestBuildTacticalExample_GoalCharge(t *testing.T) {
+	// goal 含"充电"应选 charge_at_station 示例。
+	kb := loadTestKB(t)
+	got := buildTacticalExample(kb, "午间停工，前往充电站补电休息")
+	if !strings.Contains(got, "charge_at_station") {
+		t.Errorf("goal=充电 should pick charge_at_station example: %q", got)
+	}
+	if !strings.Contains(got, "charging_station_01") {
+		t.Errorf("example should reference charging_station_01: %q", got)
+	}
+}
+
+func TestBuildTacticalExample_GoalPatrol(t *testing.T) {
+	// goal 含"巡视"应选 patrol_zone 示例，不引用任何 object。
+	kb := loadTestKB(t)
+	got := buildTacticalExample(kb, "巡视主生产车间，记录设备运行日志")
+	if !strings.Contains(got, "patrol_zone") {
+		t.Errorf("goal=巡视 should pick patrol_zone example: %q", got)
+	}
+	if strings.Contains(got, "work_at_workbench") || strings.Contains(got, "charge_at_station") {
+		t.Errorf("patrol goal must NOT fall back to object examples: %q", got)
+	}
+}
+
+func TestBuildTacticalExample_GoalInspect(t *testing.T) {
+	// goal 含"检查"应选 interact inspect 示例。
+	kb := loadTestKB(t)
+	got := buildTacticalExample(kb, "启动自检，检查关节磨损情况")
+	if !strings.Contains(got, `"action":"interact"`) {
+		t.Errorf("goal=检查 should pick interact example: %q", got)
+	}
+	if !strings.Contains(got, `"interaction":"inspect"`) {
+		t.Errorf("inspect goal should use interaction=inspect: %q", got)
+	}
+}
+
+func TestBuildTacticalExample_GoalFallbackOnMissingObject(t *testing.T) {
+	// goal=装配 但 KB 无 workbench object → 降级到默认示例（首个 object 的 category）
+	kb := &worldkb.KB{
+		Zones: []worldkb.Zone{{ID: "charging_station", DisplayName: "充电站"}},
+		Objects: []worldkb.Object{{
+			ID:                    "cs_01",
+			DisplayName:           "充电桩",
+			Category:              "charging_station",
+			ZoneID:                "charging_station",
+			AvailableInteractions: []string{"charge", "inspect"},
+		}},
+	}
+	got := buildTacticalExample(kb, "上午装配作业")
+	// 应降级到 charge_at_station（首个 object 的 category）
+	if !strings.Contains(got, "charge_at_station") {
+		t.Errorf("assembly goal with no workbench should fall back to charge example: %q", got)
+	}
+}
+
+func TestBuildTacticalExample_GoalEmptyFallback(t *testing.T) {
+	// 空 goal 应降级到默认示例（首个 object 的 category）
+	kb := loadTestKB(t)
+	got := buildTacticalExample(kb, "")
+	if !strings.Contains(got, "charge_at_station") {
+		t.Errorf("empty goal should fall back to first-object example: %q", got)
 	}
 }
 
@@ -967,12 +1090,12 @@ func TestPhysicalAlertOverrideGoal_NilPhysical(t *testing.T) {
 func TestPhysicalAlertOverrideGoal_FatigueAlert(t *testing.T) {
 	origGoal := "车间装配作业"
 	got, ok := physicalAlertOverrideGoal(
-		"物理状态告警自动升级(疲劳=62超过60)；原决策=observe/...",
+		"物理状态告警自动升级(疲劳=82超过80)；原决策=observe/...",
 		origGoal,
-		&protocol.PhysicalState{Fatigue: 62, Energy: 80, Health: 100},
+		&protocol.PhysicalState{Fatigue: 82, Energy: 80, Health: 100},
 	)
 	if !ok {
-		t.Errorf("fatigue>60 should trigger override")
+		t.Errorf("fatigue>80 should trigger override")
 	}
 	if !strings.Contains(got, "充电站") || !strings.Contains(got, "疲劳") {
 		t.Errorf("override goal should mention 充电站 and 疲劳, got=%q", got)
@@ -1014,7 +1137,7 @@ func TestPhysicalAlertOverrideGoal_FatigueTakesPrecedence(t *testing.T) {
 	got, ok := physicalAlertOverrideGoal(
 		"物理状态告警",
 		"工作",
-		&protocol.PhysicalState{Fatigue: 70, Energy: 30, Health: 100},
+		&protocol.PhysicalState{Fatigue: 85, Energy: 30, Health: 100},
 	)
 	if !ok {
 		t.Errorf("should trigger override")
@@ -1028,9 +1151,9 @@ func TestPhysicalAlertOverrideGoal_FatigueTakesPrecedence(t *testing.T) {
 
 func TestBuildTacticalPrompt_PhysicalAlertConstraint(t *testing.T) {
 	kb := loadTestKB(t)
-	hint := "物理状态告警自动升级(疲劳=62超过60)；原决策=observe/..."
+	hint := "物理状态告警自动升级(疲劳=82超过80)；原决策=observe/..."
 	prompt := buildTacticalPrompt("前往充电站休息", "main_workshop", "13:15", "13:00-17:00",
-		&protocol.PhysicalState{Energy: 88, Fatigue: 62, JointWear: 0, Health: 100},
+		&protocol.PhysicalState{Energy: 88, Fatigue: 82, JointWear: 0, Health: 100},
 		kb, hint, nil, "H-01")
 
 	if !strings.Contains(prompt, "【物理告警强制约束】") {

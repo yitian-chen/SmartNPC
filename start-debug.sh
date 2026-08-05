@@ -8,20 +8,17 @@
 #
 # 启动组件：
 #   1. agenttown-mcp.exe (Windows, WS :9090 + HTTP :8760)  ← UE 连这个
-#   2. CodeBuddy Adapter (Windows, :8761, localhost only)
-#   3. Hermes Gateway (Docker/WSL, :8642, localhost only)
+#
+# LLM 后端：MCP 直连 Venus（OpenAI Chat Completions 协议），
+# 凭据 VENUS_API_KEY 从 .env 读取，启动时透传给 MCP 进程。
 #
 # 用法：
-#   bash start-debug.sh                # 默认全启
-#   bash start-debug.sh --no-rebuild   # 跳过 Hermes 镜像重建（快速重启）
-#   bash start-debug.sh --no-hermes    # 跳过 Hermes（已手动启动时用）
-#   bash start-debug.sh --no-adapter   # 跳过 Adapter（已手动启动时用）
+#   bash start-debug.sh                # 启动
+#   bash start-debug.sh --stop         # 仅停止所有服务
 #
 # 前置：
 #   - Go 编译器可访问（PATH 中有 go，或设置 GO_BIN）
-#   - Docker Desktop 运行中（Hermes 跑在 Docker）
-#   - CodeBuddy CLI 已登录（适配层复用其 OAuth）
-#   - d:/SmartNPC_v3/.env 存在且配置了 HERMES_AGENT_API_KEY
+#   - d:/SmartNPC_v3/.env 存在且配置了 VENUS_API_KEY
 
 set -uo pipefail
 
@@ -47,31 +44,20 @@ MCP_DIR="$PROJECT_DIR/agenttown-mcp"
 # 避免两实例共用同一 exe 导致 stable 运行时 dev 无法重新编译覆盖
 MCP_EXE_NAME="${MCP_EXE_NAME:-agenttown-mcp.exe}"
 MCP_EXE="$MCP_DIR/$MCP_EXE_NAME"
-DOCKER_COMPOSE="${DOCKER_COMPOSE:-$PROJECT_DIR/docker/docker-compose.yml}"
 ENV_FILE="$PROJECT_DIR/.env"
-ADAPTER_SCRIPT="$PROJECT_DIR/src/agenttown/codebuddy_adapter.py"
-ADAPTER_PORT="${ADAPTER_PORT:-8761}"
 WS_PORT="${WS_PORT:-9090}"
 HTTP_PORT="${HTTP_PORT:-8760}"
-HERMES_PORT="${HERMES_PORT:-8642}"
-CLI_PORT="${CLI_PORT:-52001}"
-HERMES_CONTAINER="${HERMES_CONTAINER:-agenttown-h01}"
-# Hermes profile 名：stable 用 h01，dev 用 h01-dev（由各自 start-dev.sh 设置）
-HERMES_PROFILE="${HERMES_PROFILE:-h01}"
 
 LOG_DATE=$(date +%Y-%m-%d)
 LOG_SUBDIR_BASE="$PROJECT_DIR/logs/$LOG_DATE"
 LOG_SUBDIR="${LOG_SUBDIR:-$LOG_SUBDIR_BASE}"
 MCP_LOG="$LOG_SUBDIR/debug-mcp.log"
-ADAPTER_LOG="$LOG_SUBDIR/debug-adapter.log"
 
 # ─── 加载 .env 到 shell 环境 ──────────────────────────────────
 # MCP 是 Windows exe，通过 .bat 启动；bash export 不会自动传给 cmd.exe，
 # 因此需要在生成 .bat 时显式 set 环境变量。这里先把 .env 的变量 source
 # 到当前 shell，后续 generate .bat 时再注入。
-# 默认架构是 MCP → Hermes → Venus：MCP 走 hermes backend，Venus 凭据由
-# Hermes 容器通过 docker-compose env_file 直接读取，不经过 MCP。
-# 这里仍加载 VENUS_ 前缀变量，便于临时切回 --llm-backend venus 直连调试。
+# 架构是 MCP 直连 Venus：MCP 进程需要 VENUS_API_KEY 才能调用 LLM。
 if [ -f "$ENV_FILE" ]; then
     while IFS='=' read -r key value || [ -n "$key" ]; do
         # 跳过空行和注释
@@ -86,25 +72,17 @@ if [ -f "$ENV_FILE" ]; then
 fi
 
 # Venus URL/model 默认值（与 Go flag 默认值一致）。
-# 仅在临时切回 --llm-backend venus 直连调试时使用；默认走 Hermes 时不读取。
 VENUS_URL="${VENUS_URL:-http://v2.open.venus.oa.com/llmproxy}"
 VENUS_MODEL="${VENUS_MODEL:-qwen3.6-35b-a3b}"
 
 # ─── 参数 ──────────────────────────────────────────────────────
-REBUILD_HERMES=true
-START_HERMES=true
-# Adapter 已弃用（h01/h01-dev profile 直连 Venus，不再需要 CodeBuddy Adapter）。
-# 默认 false；如需临时调试 adapter，显式传 --with-adapter 启用。
-START_ADAPTER=false
 STOP_ONLY=false
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --no-rebuild)  REBUILD_HERMES=false; shift ;;
-        --no-hermes)   START_HERMES=false; shift ;;
-        --no-adapter)  START_ADAPTER=false; shift ;;   # 向后兼容（已是默认值）
-        --with-adapter) START_ADAPTER=true; shift ;;    # 临时调试 adapter
         --stop)        STOP_ONLY=true; shift ;;
+        # 向后兼容：旧版有 Adapter/Hermes 相关 flag，现均已废弃，识别后忽略
+        --no-adapter|--with-adapter|--no-hermes|--no-rebuild) warn "$1 已废弃（Hermes/Adapter 已移除），忽略"; shift ;;
         -h|--help)
             echo "Usage: bash start-debug.sh [OPTIONS]"
             echo ""
@@ -112,9 +90,6 @@ while [[ $# -gt 0 ]]; do
             echo ""
             echo "Options:"
             echo "  --stop          仅停止所有服务，不重启"
-            echo "  --no-rebuild    跳过 Hermes 镜像重建（快速重启）"
-            echo "  --no-hermes     跳过 Hermes 启动（已手动启动时用）"
-            echo "  --with-adapter  启动已弃用的 CodeBuddy Adapter（默认不启动，h01 直连 Venus）"
             echo ""
             echo "UE 端连接地址：ws://<本机局域网IP>:$WS_PORT/ws"
             exit 0 ;;
@@ -126,7 +101,7 @@ done
 # 脚本可能在三种环境运行：
 #   - Git Bash (Windows): localhost = Windows localhost，用 wsl 调 WSL 命令、cygpath 转路径
 #   - WSL bash: localhost = WSL VM localhost，访问 Windows 服务需用宿主 IP（wslpath 转路径）
-#   - 纯 Linux (AnyDev/远程): 无 Windows 工具，无需路径转换，docker compose 直接可用
+#   - 纯 Linux (AnyDev/远程): 无 Windows 工具，无需路径转换
 # 检测方法：WSL 里 /proc/version 含 "microsoft"；纯 Linux 无 cmd.exe；其余视为 Git Bash。
 IN_WSL=false
 IN_LINUX=false
@@ -163,12 +138,8 @@ fi
 
 # ─── 健康检查 ──────────────────────────────────────────────────
 # MCP 跑在 Windows（本脚本的核心设计），WSL 里访问要用 WIN_HOST。
-# Hermes 跑在 Docker（WSL2），localhost 即可达（WSL2 localhost forwarding）。
-# Adapter 跑在 Windows，WSL 里访问要用 WIN_HOST。
 check_mcp_http() { curl -sf http://$WIN_HOST:$HTTP_PORT/healthz >/dev/null 2>&1; }
 check_mcp_ws()   { curl -sf http://$WIN_HOST:$WS_PORT/healthz >/dev/null 2>&1; }
-check_hermes()   { curl -sf http://localhost:$HERMES_PORT/health >/dev/null 2>&1; }
-check_adapter()  { curl -sf http://$WIN_HOST:$ADAPTER_PORT/health >/dev/null 2>&1; }
 
 wait_for() {
     local name="$1" check_fn="$2" max_wait="${3:-30}" elapsed=0
@@ -270,38 +241,6 @@ stop_all() {
         kill_port_listeners "$port" "MCP"
     done
 
-    # Adapter
-    if $START_ADAPTER; then
-        info "Stopping existing Adapter..."
-        kill_port_listeners "$ADAPTER_PORT" "Adapter"
-    fi
-
-    # CodeBuddy CLI 子进程
-    kill_port_listeners "$CLI_PORT" "CLI subprocess"
-
-    # Hermes（可选停止）
-    if $START_HERMES; then
-        info "Stopping Hermes..."
-        if $IN_LINUX; then
-            # 裸金属：pkill hermes gateway 进程 + 兜底杀端口
-            # 关键：pkill 必须带 -p $HERMES_PROFILE 限定，否则会误杀另一实例
-            # （stable 和 dev 共用同机裸金属环境，pkill "hermes.*gateway run"
-            #   会匹配两实例全部进程，导致后启动的脚本杀死先启动的 Hermes）
-            pkill -f "hermes -p $HERMES_PROFILE gateway run" 2>/dev/null && ok "  Hermes process stopped (profile=$HERMES_PROFILE)" || warn "  Hermes process not running"
-            kill_port_listeners "$HERMES_PORT" "Hermes"
-        else
-            local compose_path
-            if $IN_WSL; then
-                compose_path="$DOCKER_COMPOSE"
-            else
-                compose_path=$(MSYS_NO_PATHCONV=1 $WSL_CMD wslpath -u "$DOCKER_COMPOSE" 2>/dev/null || echo "/mnt/d/SmartNPC_v3/docker/docker-compose.yml")
-            fi
-            $WSL_CMD docker compose -f "$compose_path" stop 2>/dev/null \
-                && ok "  Hermes stopped" \
-                || warn "  Hermes not running"
-        fi
-    fi
-
     sleep 2
     echo ""
 }
@@ -360,205 +299,27 @@ build_mcp() {
     echo ""
 }
 
-# ─── Step 2: 启动 Adapter ─────────────────────────────────────
-start_adapter() {
-    info "=== Step 2: Start CodeBuddy Adapter (localhost:$ADAPTER_PORT) ==="
-
-    if [ ! -f "$ADAPTER_SCRIPT" ]; then
-        fail "Adapter script not found: $ADAPTER_SCRIPT"
-    fi
-
-    # 定位 Python（adapter 需要 httpx, pyyaml, fastapi, uvicorn）
-    # 优先用 Hermes venv（依赖齐全），其次 PATH 里的 python/python3/py
-    # Windows venv 里的可执行文件是 python.exe（无后缀的 python 不存在），
-    # 所以显式加 .exe 后缀检测。
-    local py_cmd=""
-    local hermes_venv_py="/c/Users/yitianchen/AppData/Local/hermes/hermes-agent/venv/Scripts/python.exe"
-    if [ -x "$hermes_venv_py" ]; then
-        if "$hermes_venv_py" -c "import httpx, yaml, fastapi, uvicorn" 2>/dev/null; then
-            py_cmd="$hermes_venv_py"
-            ok "  Using Hermes venv Python: $py_cmd"
-        fi
-    fi
-    if [ -z "$py_cmd" ]; then
-        for cmd in python python.exe python3 py; do
-            # command -v 返回路径后，再验证不是 Windows Store 的 stub
-            # （Store stub 执行会重定向到商店，import 必失败）
-            local resolved
-            resolved=$(command -v "$cmd" 2>/dev/null) || continue
-            case "$resolved" in
-                *WindowsApps*) continue ;;  # 跳过 Store stub
-            esac
-            if "$resolved" -c "import httpx, yaml, fastapi, uvicorn" 2>/dev/null; then
-                py_cmd="$resolved"
-                ok "  Using Python: $py_cmd"
-                break
-            fi
-        done
-    fi
-    if [ -z "$py_cmd" ]; then
-        fail "Python with deps (httpx, pyyaml, fastapi, uvicorn) not found.
-  Options:
-    1. Ensure Hermes venv exists: $hermes_venv_py
-    2. pip install httpx pyyaml fastapi uvicorn into your Python
-    3. Set PATH to include a Python that has these deps"
-    fi
-
-    mkdir -p "$LOG_SUBDIR"
-    : > "$ADAPTER_LOG"
-
-    # 路径转换：脚本可能在 Git Bash（用 cygpath）或 WSL（用 wslpath）运行。
-    # Windows Python 不认 /d/... 或 /mnt/d/... 风格路径，必须转成 D:\... 风格。
-    # cygpath 不理解 /mnt/d/ 挂载约定，会错误转成 D:\mnt\d\...；wslpath 才对。
-    local script_arg="$ADAPTER_SCRIPT"
-    if command -v wslpath &>/dev/null; then
-        # WSL 环境
-        script_arg=$(wslpath -w "$ADAPTER_SCRIPT" 2>/dev/null) || script_arg="$ADAPTER_SCRIPT"
-    elif command -v cygpath &>/dev/null; then
-        # Git Bash (MSYS) 环境
-        script_arg="$(cygpath -w "$ADAPTER_SCRIPT")"
-    fi
-
-    info "Starting adapter (log: logs/$LOG_DATE/debug-adapter.log)..."
-    info "  Python: $py_cmd"
-    info "  Script: $script_arg"
-    nohup "$py_cmd" "$script_arg" --port "$ADAPTER_PORT" --cli-port "$CLI_PORT" > "$ADAPTER_LOG" 2>&1 &
-    disown
-
-    info "Waiting for Adapter (max 20s)..."
-    local elapsed=0
-    while [ $elapsed -lt 20 ]; do
-        if check_adapter; then
-            ok "Adapter is up (localhost:$ADAPTER_PORT)"
-            local health
-            health=$(curl -sS http://localhost:$ADAPTER_PORT/health 2>/dev/null)
-            if echo "$health" | grep -q '"status":"ok"'; then
-                ok "  Adapter connected to CLI"
-            else
-                warn "  Adapter up but CLI not reachable: $health"
-                warn "  Start CodeBuddy CLI in a separate terminal: codebuddy"
-            fi
-            return 0
-        fi
-        sleep 2; elapsed=$((elapsed + 2)); printf "."
-    done
-    echo ""
-    warn "  Adapter failed. Last 15 lines:"
-    tail -15 "$ADAPTER_LOG" 2>/dev/null | sed 's/^/    /'
-    fail "  Adapter failed to start."
-}
-
-# ─── Step 3: 启动 Hermes ──────────────────────────────────────
-start_hermes() {
-    info "=== Step 3: Start Hermes Gateway (localhost:$HERMES_PORT) ==="
-
-    if [ ! -f "$ENV_FILE" ]; then
-        fail ".env file not found at $ENV_FILE"
-    fi
-
-    # 加载 .env 中的 VENUS_API_KEY（h01/h01-dev 直连 Venus 必需）
-    local venus_key=""
-    if grep -q "^VENUS_API_KEY=" "$ENV_FILE" 2>/dev/null; then
-        venus_key=$(grep "^VENUS_API_KEY=" "$ENV_FILE" | cut -d= -f2-)
-    fi
-
-    if $IN_LINUX; then
-        # 裸金属：直接在本机跑 hermes 命令，不走 Docker
-        # 依赖：pip install -e /data/workspace/hermes-agent + pip install aiohttp
-        # profile 路径通过 HERMES_HOME 指向 $PROJECT_DIR/hermes，
-        # Hermes 自动解析到 $HERMES_HOME/profiles/$HERMES_PROFILE
-        if ! command -v hermes >/dev/null 2>&1; then
-            fail "hermes command not found. Install dependencies:
-  cd /data/workspace/hermes-agent && pip3 install -e . && pip3 install aiohttp"
-        fi
-
-        # 裸金属下 host.docker.internal 不存在（那是 Docker 容器内才能解析的宿主别名）。
-        # h01/h01-dev config.yaml 里 MCP URL 写的是 http://host.docker.internal:<port>/mcp，
-        # 这里在 /etc/hosts 加一行让该域名解析到 127.0.0.1，MCP 和 Hermes 同机运行。
-        if ! getent hosts host.docker.internal >/dev/null 2>&1; then
-            echo "127.0.0.1 host.docker.internal" | sudo tee -a /etc/hosts >/dev/null 2>&1 \
-                && ok "  Added host.docker.internal → 127.0.0.1 to /etc/hosts" \
-                || warn "  Failed to add host.docker.internal to /etc/hosts (MCP connection may fail)"
-        fi
-
-        local hermes_log="$LOG_SUBDIR/debug-hermes.log"
-        mkdir -p "$LOG_SUBDIR"
-        : > "$hermes_log"
-
-        info "Starting Hermes (bare-metal, profile=$HERMES_PROFILE, log: $LOG_SUBDIR/debug-hermes.log)..."
-        HERMES_HOME="$PROJECT_DIR/hermes" \
-        TERMINAL_CWD="$PROJECT_DIR/hermes" \
-        VENUS_API_KEY="$venus_key" \
-        GATEWAY_ALLOW_ALL_USERS=true \
-        nohup hermes -p "$HERMES_PROFILE" gateway run --accept-hooks >> "$hermes_log" 2>&1 &
-        disown
-
-        wait_for "Hermes Gateway (:$HERMES_PORT)" check_hermes 40
-        ok "Hermes is up (bare-metal)"
-        echo ""
-        return
-    fi
-
-    # Windows/WSL：走 Docker compose
-    if $REBUILD_HERMES; then
-        info "Rebuilding Hermes Docker image..."
-        HERMES_BUILD_SCRIPT="$PROJECT_DIR/docker/build-hermes.sh"
-        if [ ! -f "$HERMES_BUILD_SCRIPT" ]; then
-            fail "Hermes build script not found: $HERMES_BUILD_SCRIPT"
-        fi
-        # 转成 WSL 路径（/mnt/d/... 风格），build-hermes.sh 在 WSL/Docker 里跑
-        # WSL 直接用原路径；仅 Git Bash 需要 wslpath 转换
-        local script_wsl
-        if $IN_WSL; then
-            script_wsl="$HERMES_BUILD_SCRIPT"
-        else
-            case "$HERMES_BUILD_SCRIPT" in
-                /mnt/*) script_wsl="$HERMES_BUILD_SCRIPT" ;;
-                /?/*)   script_wsl="/mnt${HERMES_BUILD_SCRIPT}" ;;
-                *)      script_wsl=$(MSYS_NO_PATHCONV=1 $WSL_CMD wslpath -u "$HERMES_BUILD_SCRIPT" 2>/dev/null \
-                            || echo "/mnt/d/SmartNPC_v3/docker/build-hermes.sh") ;;
-            esac
-        fi
-        MSYS_NO_PATHCONV=1 $WSL_CMD bash -c "bash '$script_wsl'" \
-            || fail "Hermes Docker image build failed"
-    else
-        info "Skipping Hermes image rebuild (--no-rebuild)"
-    fi
-
-    info "Starting Hermes via docker compose..."
-    local compose_wsl env_wsl
-    if $IN_WSL; then
-        compose_wsl="$DOCKER_COMPOSE"
-        env_wsl="$ENV_FILE"
-    else
-        compose_wsl=$(MSYS_NO_PATHCONV=1 $WSL_CMD wslpath -u "$DOCKER_COMPOSE" 2>/dev/null || echo "/mnt/d/SmartNPC_v3/docker/docker-compose.yml")
-        env_wsl=$(MSYS_NO_PATHCONV=1 $WSL_CMD wslpath -u "$ENV_FILE" 2>/dev/null || echo "/mnt/d/SmartNPC_v3/.env")
-    fi
-    MSYS_NO_PATHCONV=1 $WSL_CMD docker compose -f "$compose_wsl" --env-file "$env_wsl" up -d --force-recreate \
-        || fail "docker compose up failed"
-
-    wait_for "Hermes Gateway (:$HERMES_PORT)" check_hermes 40
-
-    # 等 Hermes 连接 MCP（MCP 还没起，这里只等 Hermes 自身健康）
-    ok "Hermes is up"
-    echo ""
-}
-
-# ─── Step 4: 启动 MCP（监听 0.0.0.0，局域网可达）────────────
+# ─── Step 2: 启动 MCP（监听 0.0.0.0，局域网可达）────────────
 start_mcp() {
-    info "=== Step 4: Start agenttown-mcp (0.0.0.0:$WS_PORT + :$HTTP_PORT) ==="
+    info "=== Step 2: Start agenttown-mcp (0.0.0.0:$WS_PORT + :$HTTP_PORT) ==="
 
     if [ ! -f "$MCP_EXE" ]; then
         fail "MCP binary not found: $MCP_EXE. Run build step first."
     fi
 
+    # 从 .env 读取 VENUS_API_KEY（MCP 直连 Venus 必需）
+    local venus_key=""
+    if [ -f "$ENV_FILE" ]; then
+        if grep -q "^VENUS_API_KEY=" "$ENV_FILE" 2>/dev/null; then
+            venus_key=$(grep "^VENUS_API_KEY=" "$ENV_FILE" | cut -d= -f2-)
+        fi
+    fi
+    if [ -z "$venus_key" ]; then
+        fail "VENUS_API_KEY not found in $ENV_FILE. MCP 直连 Venus 必需此凭据。"
+    fi
+
     mkdir -p "$LOG_SUBDIR"
     : > "$MCP_LOG"
-
-    # 在启动前确认 Hermes 可达，否则 MCP 连不上会一直重试
-    if ! check_hermes; then
-        warn "Hermes not reachable on :$HERMES_PORT — MCP may fail to discover tools"
-    fi
 
     # MCP 是 Windows exe，传给它的路径必须是 Windows 风格（D:\...）。
     # WSL 里用 wslpath -w 转换；Git Bash 里用 cygpath -w。
@@ -585,18 +346,12 @@ start_mcp() {
     info "Starting MCP (log: logs/$LOG_DATE/debug-mcp.log)..."
     # --ws :9090 在 Windows 上监听 0.0.0.0:9090，局域网可达
     # --http :8760 同理
-    # --llm-backend hermes 走 MCP → Hermes → Venus 架构：MCP 把战略/战术层
-    #   LLM 调用发给 Hermes Gateway，由 Hermes 配置 (hermes/profiles/$HERMES_PROFILE/
-    #   config.yaml) 决定后端模型（当前为 Venus qwen3.6-35b-a3b）。
-    #   Venus client 仍保留在代码中，需要时切回 --llm-backend venus 直连即可。
+    # MCP 直连 Venus（OpenAI Chat Completions 协议），--venus-api-key 透传凭据。
     # --world-kb 用绝对路径，避免 cwd 不对找不到 assets/world_kb.yaml
-    #
-    # 注意：MCP 走 Hermes 时不需要 VENUS_API_KEY，Venus 凭据由 Hermes 容器
-    # 通过 docker-compose 的 env_file: ../.env 读取，不透传到 MCP 进程。
     if $IN_LINUX; then
         # 纯 Linux：直接 nohup 启动 Linux 二进制，无需 .bat/cmd.exe
         nohup "$MCP_EXE" --http ":$HTTP_PORT" --ws ":$WS_PORT" \
-            --llm-backend hermes --hermes-url "http://localhost:$HERMES_PORT" \
+            --venus-api-key "$venus_key" \
             --world-kb "$PROJECT_DIR/assets/world_kb.yaml" \
             --log-level debug >> "$MCP_LOG" 2>&1 &
         disown
@@ -608,7 +363,7 @@ start_mcp() {
         cat > "$bat_file" << EOF
 @echo off
 pushd "$cwd_win"
-"$mcp_exe_win" --http ":$HTTP_PORT" --ws ":$WS_PORT" --llm-backend hermes --hermes-url "http://localhost:$HERMES_PORT" --world-kb "$world_kb_win" --log-level debug >> "$mcp_log_win" 2>&1
+"$mcp_exe_win" --http ":$HTTP_PORT" --ws ":$WS_PORT" --venus-api-key "$venus_key" --world-kb "$world_kb_win" --log-level debug >> "$mcp_log_win" 2>&1
 EOF
         if $IN_WSL; then
             local bat_win
@@ -626,9 +381,9 @@ EOF
     echo ""
 }
 
-# ─── Step 5: 打印联调信息 ─────────────────────────────────────
+# ─── Step 3: 打印联调信息 ─────────────────────────────────────
 print_summary() {
-    info "=== Step 5: Summary ==="
+    info "=== Step 3: Summary ==="
 
     local lan_ip
     lan_ip=$(detect_lan_ip)
@@ -644,20 +399,11 @@ print_summary() {
     echo ""
     echo -e "  ${BOLD}本机服务${NC}"
     echo -e "    MCP:        0.0.0.0:$WS_PORT (WS) + :$HTTP_PORT (HTTP)"
-    echo -e "    Hermes:     localhost:$HERMES_PORT"
-    echo -e "    Adapter:    localhost:$ADAPTER_PORT"
+    echo -e "    LLM 后端:   Venus 直连（$VENUS_URL, model=$VENUS_MODEL）"
     echo ""
     echo -e "  ${BOLD}日志${NC}"
     local log_rel="${LOG_SUBDIR#$PROJECT_DIR/}"
     echo -e "    MCP:     $log_rel/debug-mcp.log"
-    if $START_ADAPTER; then
-        echo -e "    Adapter: $log_rel/debug-adapter.log"
-    fi
-    if $IN_LINUX; then
-        echo -e "    Hermes:  $log_rel/debug-hermes.log"
-    else
-        echo -e "    Hermes:  wsl docker logs -f $HERMES_CONTAINER"
-    fi
     echo ""
     echo -e "  ${BOLD}协议文档${NC}"
     echo -e "    docs/AgentTown_CommProtocol_Values.md"
@@ -680,8 +426,6 @@ print_summary() {
 }
 
 # ─── --stop 选项 ──────────────────────────────────────────────
-# stop_all 内部用 START_HERMES / START_ADAPTER 控制 是否停该组件，
-# 因此 --stop 默认停全部；--stop --no-hermes 则只跳过 Hermes，以此类推。
 if $STOP_ONLY; then
     stop_all
     ok "All services stopped."
@@ -703,7 +447,5 @@ mkdir -p "$LOG_SUBDIR"
 
 stop_all
 build_mcp
-$START_ADAPTER && start_adapter
-$START_HERMES  && start_hermes
 start_mcp
 print_summary

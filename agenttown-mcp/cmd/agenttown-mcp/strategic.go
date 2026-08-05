@@ -8,7 +8,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/AgentTown/agenttown-mcp/pkg/hermes"
+	"github.com/AgentTown/agenttown-mcp/pkg/llmtypes"
 	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
 )
 
@@ -25,9 +25,9 @@ type dailyPlanItem struct {
 	Goal string `json:"goal"`
 }
 
-// strategicCaller 是 hermes.Client 的窄接口，便于单测 mock。
+// strategicCaller 是 LLM 客户端的窄接口，便于单测 mock。
 type strategicCaller interface {
-	SendWithSummary(ctx context.Context, input, summary string) (*hermes.Response, error)
+	SendWithSummary(ctx context.Context, input, summary string) (*llmtypes.Response, error)
 	ResetSession()
 }
 
@@ -113,7 +113,7 @@ func generateDailyPlan(ctx context.Context, sc strategicCaller, agentID string, 
 	prompt := fmt.Sprintf(strategicPromptTemplate,
 		buildStrategicContext(kb, agentID),
 		"昨日总结："+yesterdaySummaryForFirstDay)
-	logger.Info("[MCP→Hermes/STRATEGIC-PROMPT]", "agent_id", agentID, "text", prompt)
+	logger.Info("[MCP→LLM/STRATEGIC-PROMPT]", "agent_id", agentID, "text", prompt)
 
 	resp, err := sc.SendWithSummary(ctx, prompt, "")
 	if err != nil {
@@ -125,7 +125,7 @@ func generateDailyPlan(ctx context.Context, sc strategicCaller, agentID string, 
 	sc.ResetSession() // 战略调用一次性使用，立即清链
 
 	raw := resp.ExtractText()
-	logger.Info("[Hermes→MCP/STRATEGIC-RESPONSE]",
+	logger.Info("[LLM→MCP/STRATEGIC-RESPONSE]",
 		"agent_id", agentID, "tokens", resp.Usage.TotalTokens, "raw_len", len(raw), "raw", raw)
 
 	items, err := parseDailyPlan(raw)
@@ -145,9 +145,40 @@ func generateDailyPlan(ctx context.Context, sc strategicCaller, agentID string, 
 	return plan
 }
 
+// buildAgentRoleContext 构造【你的角色】段，从 kb.GetAgent(agentID) 取
+// DisplayName/Profession/Description/Personality.Traits/Personality.SpeechStyle。
+// 三层决策（战略/战术/反应）共用此 helper，保证角色画像一致。
+// kb == nil 或 agent 不存在时返回空串（降级，不阻断 prompt 构造）。
+func buildAgentRoleContext(kb *worldkb.KB, agentID string) string {
+	if kb == nil {
+		return ""
+	}
+	a := kb.GetAgent(agentID)
+	if a == nil {
+		return ""
+	}
+	var sb strings.Builder
+	if a.DisplayName != "" {
+		sb.WriteString("名字：" + a.DisplayName + "\n")
+	}
+	if a.Profession != "" {
+		sb.WriteString("职业：" + a.Profession + "\n")
+	}
+	if a.Description != "" {
+		sb.WriteString("背景：" + a.Description + "\n")
+	}
+	if len(a.Personality.Traits) > 0 {
+		sb.WriteString("性格特质：" + strings.Join(a.Personality.Traits, "、") + "\n")
+	}
+	if a.Personality.SpeechStyle != "" {
+		sb.WriteString("说话风格：" + a.Personality.SpeechStyle + "\n")
+	}
+	return sb.String()
+}
+
 // buildStrategicContext 构造战略层 prompt 的 KB 上下文段，包含三段：
-//   - 【你的角色】：从 kb.GetAgent(agentID) 取 DisplayName/Profession/
-//     Description/Personality.Traits/Personality.SpeechStyle 拼成角色描述。
+//   - 【你的角色】：复用 buildAgentRoleContext(kb, agentID)，从 kb.GetAgent
+//     取 DisplayName/Profession/Description/Personality.Traits/SpeechStyle。
 //   - 【世界知识】：复用 buildKBContext(kb)（与战术层同源），列出 KB 内
 //     所有 zone/object id + 显示名，让 LLM 知道哪些地点/设施可写进计划。
 //   - 【区域设施映射】：按 zone 列出每个区域下有哪些可交互物体（以及哪些
@@ -162,23 +193,9 @@ func buildStrategicContext(kb *worldkb.KB, agentID string) string {
 		return ""
 	}
 	var sb strings.Builder
-	if a := kb.GetAgent(agentID); a != nil {
+	if role := buildAgentRoleContext(kb, agentID); role != "" {
 		sb.WriteString("【你的角色】\n")
-		if a.DisplayName != "" {
-			sb.WriteString("名字：" + a.DisplayName + "\n")
-		}
-		if a.Profession != "" {
-			sb.WriteString("职业：" + a.Profession + "\n")
-		}
-		if a.Description != "" {
-			sb.WriteString("背景：" + a.Description + "\n")
-		}
-		if len(a.Personality.Traits) > 0 {
-			sb.WriteString("性格特质：" + strings.Join(a.Personality.Traits, "、") + "\n")
-		}
-		if a.Personality.SpeechStyle != "" {
-			sb.WriteString("说话风格：" + a.Personality.SpeechStyle + "\n")
-		}
+		sb.WriteString(role)
 	}
 	if kbCtx := buildKBContext(kb); kbCtx != "" {
 		sb.WriteString("【世界知识】\n")

@@ -44,13 +44,13 @@ const (
 	TriggerPeriodic      ReactiveTrigger = "periodic"        // 周期性触发：每 N 次感知强制评估
 )
 
-// 物理警戒带阈值。原 P0 设 energy<20 / health<30 / fatigue>80，但单日仿真
-// energy 最低只到约 80、fatigue 最高约 48，警戒带从未触发。放宽到预警级别，
-// 让 1-2 小时仿真就能自然触发物理类反应。
+// 物理警戒带阈值。fatigue 阈值从 60 提升到 80（配合 mock_ue 疲劳速率
+// 下调），让疲劳告警在下午中段（~14:00）自然触发而非上午 11:00 就打断
+// 工作。energy/health 阈值保留预警级别，让 1-2 小时仿真也能自然触发。
 const (
 	energyAlertThreshold  = 40.0 // energy 跌破此值触发"低电量预警"
 	healthAlertThreshold  = 50.0 // health 跌破此值触发"健康预警"
-	fatigueAlertThreshold = 60.0 // fatigue 突破此值触发"疲劳预警"
+	fatigueAlertThreshold = 80.0 // fatigue 突破此值触发"疲劳预警"
 )
 
 // periodicTriggerInterval 是周期性触发的感知次数间隔。
@@ -64,6 +64,7 @@ const periodicTriggerInterval = 4
 type ReactiveInput struct {
 	AgentID           string
 	AgentName         string // agent 显示名（如"老陈"），用于 prompt 中角色称呼；空则降级为 AgentID
+	AgentRole         string // 【你的角色】段（名字/职业/背景/性格/说话风格），由 buildAgentRoleContext 生成；空串=kb 不可用或 agent 不存在，prompt 中跳过此段
 	TimeOfDay         string // "HH:MM" 游戏时间
 	Zone              string // 当前区域 id
 	Energy            float64
@@ -71,7 +72,7 @@ type ReactiveInput struct {
 	Health            float64
 	CurrentAction     string // 当前在途 action 的可读描述（如 "WorkAtWorkbench(target_object_id=workbench_01)"），空=无在途
 	ElapsedSec        int    // 当前 action 已执行秒数
-	ActionSrc         string // 在途 action 来源：tactical / hermes / 空
+	ActionSrc         string // 在途 action 来源：tactical / mcp_tool / 空
 	CurrentSlot       string // 当前战术时段 "HH:MM-HH:MM"，空=未分解
 	DailyPlan         string // 战略层每日计划摘要（格式化字符串），空=未生成
 	Trigger           ReactiveTrigger
@@ -82,7 +83,12 @@ type ReactiveInput struct {
 // 中文 prompt（qwen2.5 中文表现好），严格约束 JSON 输出。
 // agentName 由调用方注入，避免在此处硬编码"老陈"等具体角色名——
 // 反应层应服务于任意 agent，而非特定 NPC。
+// agentRole 由调用方从 kb 注入（buildAgentRoleContext），空串时该段降级为
+// "（无角色信息）"——保留段落占位让 LLM 知道该字段存在但当前不可用。
 const reactivePromptTemplate = `你是 NPC %s 的反应决策模块。当前情况需要你判断是否打断当前行动。
+
+【你的角色】
+%s
 
 【当前状态】
 游戏时间：%s
@@ -108,8 +114,8 @@ const reactivePromptTemplate = `你是 NPC %s 的反应决策模块。当前情�
 
 判断要点：
 - 战术层规划的动作通常是合理的，除非有明确理由，否则 continue
-- 物理状态告警时（体力<40、疲劳>60、健康<50）必须输出 replan 让 NPC 休息/充电，禁止输出 continue/observe
-- replan 是"重大"决策：当你认为整个 action 队列都应作废、重新规划时使用。30 分钟内至多触发 1 次 replan，请慎重
+- 物理状态告警时（体力<40、疲劳>80、健康<50）必须输出 replan 让 NPC 休息/充电，禁止输出 continue/observe
+- replan 是"重大"决策：当你认为整个 action 队列都应作废、重新规划时使用。1 游戏小时内至多触发 1 次 replan，请慎重
 
 请输出 JSON，格式严格如下，不要输出 JSON 以外的任何内容：
 {"reaction": "continue|observe|replan", "reason": "简短理由"}
@@ -146,8 +152,13 @@ func buildReactivePrompt(in ReactiveInput) string {
 	if agentName == "" {
 		agentName = in.AgentID
 	}
+	agentRole := in.AgentRole
+	if agentRole == "" {
+		agentRole = "（无角色信息）"
+	}
 	return fmt.Sprintf(reactivePromptTemplate,
 		agentName,
+		agentRole,
 		in.TimeOfDay, in.Zone,
 		in.Energy, in.Fatigue, in.Health,
 		currentAction,
@@ -312,18 +323,19 @@ const reactiveDedupeWindow = 60 * time.Second
 // 但要有一定去抖，避免感知频率高（如 behavior 模式 15s 一次）时过度调用。
 const reactivePeriodicDedupeWindow = 45 * time.Second
 
-// replanDedupeWindow 限制 reaction=replan 的触发频率：wall-clock 30 分钟内至多 1 次。
-// 不做倍率换算——"至多一次"约束的是反应层决策频率（wall-clock 时间轴上的 Ollama
-// 调用、goroutine 调度），与游戏时间倍率无关。150x 下 30 wall-clock 分钟 ≈ 75 游戏小时，
-// 远超单日仿真（16 游戏小时 ≈ 6.4 wall-clock 分钟），确保 replan 是罕见重大事件。
-// 该去抖在 execute() 的 replan 分支内检查（不在 trigger() 第一层），按 agent 全局，
-// 不按 trigger/detail——replan 是 agent 级决策，不是单个触发的事件。
-const replanDedupeWindow = 30 * time.Minute
+// replanDedupeGameMinutes 限制 reaction=replan 的触发频率：1 游戏小时内至多 1 次。
+// 按游戏时间去抖（而非 wall-clock），因为仿真倍率最高 600x，wall-clock 窗口会
+// 在游戏时间轴上被放大到数十小时，导致整日仿真中合法 replan 全被第一次触发
+// 拦截（实测 150x 下 30 wall-clock 分钟 ≈ 75 游戏小时，远超 16 游戏小时的
+// 单日仿真）。1 游戏小时窗口确保物理告警在不同游戏时段都能触发有效 replan。
+// 该去抖在 execute() 的 replan 分支内检查（不在 trigger() 第一层），按 agent
+// 全局，不按 trigger/detail——replan 是 agent 级决策，不是单个触发的事件。
+const replanDedupeGameMinutes = 60
 
-// upgradeIfPhysicalAlert 是代码层兜底：当物理状态告警（fatigue>60 / energy<40 /
+// upgradeIfPhysicalAlert 是代码层兜底：当物理状态告警（fatigue>80 / energy<40 /
 // health<50）而 LLM 仍输出 continue/observe 时，强制升级为 replan。
 //
-// 动机：实测 qwen2.5:7b 在 fatigue=80+ 时仍输出 observe（"物理状态尚可"），
+// 动机：实测 qwen2.5:7b 在 fatigue 突破阈值时仍输出 observe（"物理状态尚可"），
 // 仅靠 prompt 约束不可靠。代码层强制保证物理告警时 agent 真正停下来重规划。
 // 升级后的 replan 会调战术层重新分解当前时段 goal（见 execute），引导 LLM
 // 规划休息/充电。
@@ -350,4 +362,21 @@ func upgradeIfPhysicalAlert(input ReactiveInput, dec ReactiveDecision) ReactiveD
 	dec.Reaction = ReactionReplan
 	dec.Reason = "物理状态告警自动升级(" + alert + ")；原决策=" + string(origReaction) + "/" + origReason
 	return dec
+}
+
+// gameTimeDeltaMinutes 计算 "HH:MM" 形式的游戏时间差（cur - prev），单位分钟。
+// 用于 replan 去抖窗口判断（按游戏时间而非 wall-clock）。
+// 任一参数为空或解析失败返回 0（视为"无去抖信息，允许触发"）。
+// 处理跨日：cur < prev 时加 24h（1440 分钟）——单日仿真（06:00-22:00）一般不会命中。
+func gameTimeDeltaMinutes(prev, cur string) int {
+	p := parsePlanMinute(prev)
+	c := parsePlanMinute(cur)
+	if p < 0 || c < 0 {
+		return 0
+	}
+	delta := c - p
+	if delta < 0 {
+		delta += 1440 // 跨日 wrap
+	}
+	return delta
 }

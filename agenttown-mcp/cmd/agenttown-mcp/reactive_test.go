@@ -178,11 +178,60 @@ func TestBuildReactivePrompt_ReplanOption(t *testing.T) {
 	if !strings.Contains(prompt, "replan") {
 		t.Errorf("prompt should mention 'replan' option, got: %s", prompt)
 	}
-	if !strings.Contains(prompt, "30 分钟内至多触发 1 次") {
+	if !strings.Contains(prompt, "1 游戏小时内至多触发 1 次") {
 		t.Errorf("prompt should mention replan frequency limit, got: %s", prompt)
 	}
 	if !strings.Contains(prompt, "continue|observe|replan") {
 		t.Errorf("prompt JSON schema should include replan, got: %s", prompt)
+	}
+}
+
+// TestBuildReactivePrompt_InjectsAgentRole 验证反应层 prompt 注入
+// 【你的角色】段：传 AgentRole 后，prompt 应包含该角色画像字段。
+// 这是 C4 的核心——反应层决策（continue/observe/replan）应受 NPC
+// 性格影响（如"沉稳"性格更倾向 observe 而非频繁 replan）。
+func TestBuildReactivePrompt_InjectsAgentRole(t *testing.T) {
+	role := "名字：老陈\n职业：车间主管\n性格特质：沉稳、念旧、重视工艺\n说话风格：简洁，偶尔念叨老物件\n"
+	in := ReactiveInput{
+		AgentID:       "H-01",
+		AgentName:     "老陈",
+		AgentRole:     role,
+		TimeOfDay:     "14:30",
+		Zone:          "main_workshop",
+		Energy:        45, Fatigue: 30, Health: 90,
+		CurrentAction: "WorkAtWorkbench(target_object_id=workbench_01)",
+		ActionSrc:     "tactical",
+		CurrentSlot:   "14:00-18:00",
+		DailyPlan:     "14:00-18:00 工作组装",
+		Trigger:       TriggerPeriodic,
+	}
+	prompt := buildReactivePrompt(in)
+	if !strings.Contains(prompt, "【你的角色】") {
+		t.Errorf("prompt missing '【你的角色】' section header, got: %s", prompt)
+	}
+	for _, want := range []string{"老陈", "车间主管", "沉稳"} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("prompt missing role field %q, got: %s", want, prompt)
+		}
+	}
+}
+
+// TestBuildReactivePrompt_EmptyAgentRole 验证 AgentRole 为空串时
+// prompt 中该段降级为"（无角色信息）"——保留段落占位让 LLM 知道
+// 该字段存在但当前不可用，不让 prompt 结构破碎。
+func TestBuildReactivePrompt_EmptyAgentRole(t *testing.T) {
+	in := ReactiveInput{
+		AgentID:   "H-01",
+		TimeOfDay: "14:30",
+		Zone:      "main_workshop",
+		Trigger:   TriggerPeriodic,
+	}
+	prompt := buildReactivePrompt(in)
+	if !strings.Contains(prompt, "【你的角色】") {
+		t.Errorf("prompt should still contain '【你的角色】' header when role empty, got: %s", prompt)
+	}
+	if !strings.Contains(prompt, "（无角色信息）") {
+		t.Errorf("prompt should fallback to '（无角色信息）' for empty AgentRole, got: %s", prompt)
 	}
 }
 
@@ -308,14 +357,14 @@ func TestShouldTriggerReactive_HealthAlert(t *testing.T) {
 
 // TestShouldTriggerReactive_FatigueAlert verifies fatigue threshold crossing.
 func TestShouldTriggerReactive_FatigueAlert(t *testing.T) {
-	prev := &protocol.PhysicalState{Energy: 50, Health: 90, Fatigue: 55}
-	cur := &protocol.PhysicalState{Energy: 50, Health: 90, Fatigue: 62}
+	prev := &protocol.PhysicalState{Energy: 50, Health: 90, Fatigue: 75}
+	cur := &protocol.PhysicalState{Energy: 50, Health: 90, Fatigue: 82}
 	trig, detail := shouldTriggerReactive("z", "z", nil, nil, prev, cur)
 	if trig != TriggerPhysicalAlert {
 		t.Errorf("trigger: got %q, want physical_alert", trig)
 	}
-	if !strings.Contains(detail, "fatigue") || !strings.Contains(detail, "60") {
-		t.Errorf("detail should mention fatigue + 60: %q", detail)
+	if !strings.Contains(detail, "fatigue") || !strings.Contains(detail, "80") {
+		t.Errorf("detail should mention fatigue + 80: %q", detail)
 	}
 }
 
@@ -598,3 +647,55 @@ func parseTodToSec(t *testing.T, tod string) float64 {
 // 反应层现已移除 act/interrupt，仅保留 continue/observe/replan。
 // isValidReactionCmd / buildReactiveCmdList / mapReactionAction 及相关测试
 // 已随之移除。
+
+// ─── gameTimeDeltaMinutes（replan 游戏时间去抖） ───────────────
+
+func TestGameTimeDeltaMinutes_Normal(t *testing.T) {
+	got := gameTimeDeltaMinutes("06:00", "07:30")
+	if got != 90 {
+		t.Errorf("delta 06:00→07:30 = %d, want 90", got)
+	}
+}
+
+func TestGameTimeDeltaMinutes_SameTime(t *testing.T) {
+	got := gameTimeDeltaMinutes("11:00", "11:00")
+	if got != 0 {
+		t.Errorf("delta same time = %d, want 0", got)
+	}
+}
+
+func TestGameTimeDeltaMinutes_BelowWindow(t *testing.T) {
+	// 30 分钟差，应返回 30（< 60 分钟去抖窗口）
+	got := gameTimeDeltaMinutes("11:00", "11:30")
+	if got != 30 {
+		t.Errorf("delta 11:00→11:30 = %d, want 30", got)
+	}
+}
+
+func TestGameTimeDeltaMinutes_DayWrap(t *testing.T) {
+	// 跨日：23:30 → 00:30 应为 60 分钟，不是 -1380
+	got := gameTimeDeltaMinutes("23:30", "00:30")
+	if got != 60 {
+		t.Errorf("delta 23:30→00:30 = %d, want 60 (day wrap)", got)
+	}
+}
+
+func TestGameTimeDeltaMinutes_EmptyArgs(t *testing.T) {
+	// 任一为空返回 0（无去抖信息，允许触发）
+	if got := gameTimeDeltaMinutes("", "12:00"); got != 0 {
+		t.Errorf("delta empty prev = %d, want 0", got)
+	}
+	if got := gameTimeDeltaMinutes("12:00", ""); got != 0 {
+		t.Errorf("delta empty cur = %d, want 0", got)
+	}
+}
+
+func TestGameTimeDeltaMinutes_InvalidArgs(t *testing.T) {
+	// 解析失败返回 0
+	if got := gameTimeDeltaMinutes("abc", "12:00"); got != 0 {
+		t.Errorf("delta invalid prev = %d, want 0", got)
+	}
+	if got := gameTimeDeltaMinutes("12:00", "xyz"); got != 0 {
+		t.Errorf("delta invalid cur = %d, want 0", got)
+	}
+}
