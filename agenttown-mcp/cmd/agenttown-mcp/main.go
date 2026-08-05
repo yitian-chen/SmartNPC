@@ -741,6 +741,52 @@ var capabilityRegistryRef *CapabilityRegistry
 // 闭包捕获的 kb 参数，确保 UE 推送新 KB 后 /debug/kb 返回最新数据。
 var kbRef *worldkb.KB
 
+// ueErrorEntries 是 UE 上报 error 消息的环形缓冲（package-level 供
+// /debug/ue-errors handler 引用）。仅保留最近 maxUEErrorEntries 条，
+// 供 debug 控制台查看 UE 侧报错（main.go 的 TypeError 分支写入）。
+const maxUEErrorEntries = 50
+
+var (
+	ueErrorMu      sync.Mutex
+	ueErrorEntries []ueErrorEntry
+)
+
+// ueErrorEntry 是一条 UE 上报错误记录，供 /debug/ue-errors 端点返回。
+type ueErrorEntry struct {
+	ReceivedAt time.Time      `json:"received_at"` // wall-clock 收到时间
+	AgentID    string         `json:"agent_id"`
+	ErrorCode  string         `json:"error_code"`
+	Message    string         `json:"message"`
+	ActionID   string         `json:"action_id,omitempty"`
+	Context    map[string]any `json:"context,omitempty"`
+}
+
+// recordUEError 把一条 UE error 消息追加进环形缓冲，超过上限丢弃最旧条目。
+func recordUEError(agentID string, ep protocol.ErrorPayload) {
+	ueErrorMu.Lock()
+	defer ueErrorMu.Unlock()
+	ueErrorEntries = append(ueErrorEntries, ueErrorEntry{
+		ReceivedAt: time.Now(),
+		AgentID:    agentID,
+		ErrorCode:  ep.ErrorCode,
+		Message:    ep.Message,
+		ActionID:   ep.ActionID,
+		Context:    ep.Context,
+	})
+	if len(ueErrorEntries) > maxUEErrorEntries {
+		ueErrorEntries = ueErrorEntries[len(ueErrorEntries)-maxUEErrorEntries:]
+	}
+}
+
+// snapshotUEErrors 返回当前环形缓冲的拷贝（可安全 JSON 编码）。
+func snapshotUEErrors() []ueErrorEntry {
+	ueErrorMu.Lock()
+	defer ueErrorMu.Unlock()
+	out := make([]ueErrorEntry, len(ueErrorEntries))
+	copy(out, ueErrorEntries)
+	return out
+}
+
 // tacticalRefill 调战术层 LLM 流式分解当前时段 goal，边接收边入队，
 // 首 action 在流式期间即提前下发以降低体感延迟。成功返回 true。
 func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
@@ -1292,7 +1338,17 @@ func main() {
 			}
 
 		case protocol.TypeError:
-			logger.Warn("error from mock ue", "agent_id", agentID, "payload", string(payload))
+			var ep protocol.ErrorPayload
+			if err := json.Unmarshal(payload, &ep); err != nil {
+				logger.Warn("error from mock ue (payload parse failed)",
+					"agent_id", agentID, "raw", string(payload), "err", err)
+			} else {
+				logger.Warn("error from mock ue",
+					"agent_id", agentID,
+					"error_code", ep.ErrorCode, "message", ep.Message,
+					"action_id", ep.ActionID)
+				recordUEError(agentID, ep)
+			}
 
 		case protocol.TypePerceptionUpdate:
 			ac := lookupAgent(agentID)
@@ -1366,6 +1422,11 @@ func runHTTP(ctx context.Context, logger *slog.Logger, server *mcp.Server, addr 
 		// /debug/cap — 返回 capability_registry 状态供 e2e 黑盒验证
 		if r.URL.Path == "/debug/cap" {
 			handleDebugCap(w, r, capabilityRegistryRef, logger)
+			return
+		}
+		// /debug/ue-errors — 返回最近 UE 上报的 error 消息（环形缓冲，最多 50 条）
+		if r.URL.Path == "/debug/ue-errors" {
+			handleDebugUEErrors(w, r, logger)
 			return
 		}
 		http.NotFound(w, r)

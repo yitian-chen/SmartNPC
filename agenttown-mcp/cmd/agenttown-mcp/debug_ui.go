@@ -170,3 +170,18 @@ type debugCapAction struct {
 type debugCapResponse struct {
 	Agents map[string][]debugCapAction `json:"agents"`
 }
+
+// handleDebugUEErrors 返回最近 UE 上报的 error 消息列表（环形缓冲，最多
+// maxUEErrorEntries 条），供 debug 控制台展示 UE 侧报错（区别于 MCP 自身日志）。
+// 响应始终是 JSON 数组（无错误时为 []），前端按 received_at 倒序渲染。
+func handleDebugUEErrors(w http.ResponseWriter, r *http.Request, logger *slog.Logger) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+	entries := snapshotUEErrors()
+	if entries == nil {
+		entries = []ueErrorEntry{}
+	}
+	if err := json.NewEncoder(w).Encode(entries); err != nil {
+		logger.Warn("[debug/ue-errors] encode failed", "err", err)
+	}
+}

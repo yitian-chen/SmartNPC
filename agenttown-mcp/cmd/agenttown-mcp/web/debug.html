@@ -200,6 +200,58 @@
     padding: 20px;
     text-align: center;
   }
+  .ue-error-entry {
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--err);
+    border-radius: 4px;
+    padding: 10px 12px;
+    margin-bottom: 8px;
+    background: var(--panel-2);
+    font-size: 13px;
+  }
+  .ue-error-entry .err-header {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    margin-bottom: 4px;
+    flex-wrap: wrap;
+  }
+  .ue-error-code {
+    background: var(--err);
+    color: #fff;
+    padding: 2px 8px;
+    border-radius: 3px;
+    font-size: 12px;
+    font-family: "Consolas", "Monaco", monospace;
+  }
+  .ue-error-time, .ue-error-agent {
+    color: var(--text-muted);
+    font-size: 12px;
+    font-family: "Consolas", "Monaco", monospace;
+  }
+  .ue-error-msg { color: var(--text); margin: 4px 0; word-break: break-word; }
+  .ue-error-context {
+    background: var(--code-bg);
+    border-radius: 3px;
+    padding: 6px 8px;
+    margin-top: 6px;
+    font-family: "Consolas", "Monaco", monospace;
+    font-size: 12px;
+    color: var(--text-muted);
+    white-space: pre-wrap;
+    word-break: break-all;
+  }
+  .count-badge {
+    display: inline-block;
+    background: var(--err);
+    color: #fff;
+    padding: 1px 8px;
+    border-radius: 10px;
+    font-size: 11px;
+    font-weight: 600;
+    margin-left: 6px;
+    vertical-align: middle;
+  }
   .curl-preview {
     margin-top: 12px;
     padding-top: 12px;
@@ -333,6 +385,18 @@
       <div class="empty-state">无历史记录</div>
     </div>
   </section>
+
+  <!-- 全宽：UE 上报错误 -->
+  <section class="panel" style="grid-column: 1 / -1;">
+    <h2>UE 上报错误 <span id="ue-error-count" class="count-badge" style="display:none;">0</span></h2>
+    <div class="hint" style="margin-bottom:10px;">
+      来自 Mock UE 的 <code>error</code> 消息（环形缓冲，最近 50 条，每 5s 刷新）。
+      与 MCP 自身日志区分：这些是 UE 侧在执行动作 / 处理消息时上报的错误。
+    </div>
+    <div id="ue-error-list">
+      <div class="empty-state">暂无 UE 上报错误</div>
+    </div>
+  </section>
 </main>
 
 <script>
@@ -344,12 +408,13 @@ let history = []; // 最近 20 条
 
 // ─── 初始化 ──────────────────────────────────────────────
 async function init() {
-  await Promise.all([loadStatus(), loadKB(), loadCap()]);
+  await Promise.all([loadStatus(), loadKB(), loadCap(), loadUEErrors()]);
   onCmdChange();
   updateSchedCurlPreview();
-  // 定时刷新状态徽章 + capability（每 5s）
+  // 定时刷新状态徽章 + capability + UE 错误（每 5s）
   setInterval(loadStatus, 5000);
   setInterval(loadCap, 5000);
+  setInterval(loadUEErrors, 5000);
 }
 
 async function loadStatus() {
@@ -395,6 +460,50 @@ async function loadCap() {
   } catch (e) {
     console.warn('loadCap failed:', e);
   }
+}
+
+// ─── UE 上报错误加载和渲染 ─────────────────────────────
+async function loadUEErrors() {
+  try {
+    const r = await fetch('/debug/ue-errors');
+    if (!r.ok) return;
+    const j = await r.json();
+    renderUEErrors(Array.isArray(j) ? j : []);
+  } catch (e) {
+    console.warn('loadUEErrors failed:', e);
+  }
+}
+
+function renderUEErrors(entries) {
+  const list = document.getElementById('ue-error-list');
+  const badge = document.getElementById('ue-error-count');
+  if (!entries.length) {
+    list.innerHTML = '<div class="empty-state">暂无 UE 上报错误</div>';
+    badge.style.display = 'none';
+    return;
+  }
+  badge.style.display = '';
+  badge.textContent = entries.length;
+  // 后端按时间正序返回，前端倒序展示（最新在最上）
+  list.innerHTML = entries.slice().reverse().map(e => {
+    const ts = e.received_at ? new Date(e.received_at).toLocaleTimeString('zh-CN', { hour12: false }) : '';
+    const action = e.action_id
+      ? `<span class="ue-error-agent">action: ${escapeHtml(e.action_id)}</span>`
+      : '';
+    const ctx = e.context
+      ? `<div class="ue-error-context">${escapeHtml(JSON.stringify(e.context, null, 2))}</div>`
+      : '';
+    return `<div class="ue-error-entry">
+      <div class="err-header">
+        <span class="ue-error-code">${escapeHtml(e.error_code || 'UNKNOWN')}</span>
+        <span class="ue-error-time">${escapeHtml(ts)}</span>
+        <span class="ue-error-agent">agent: ${escapeHtml(e.agent_id || '')}</span>
+        ${action}
+      </div>
+      <div class="ue-error-msg">${escapeHtml(e.message || '')}</div>
+      ${ctx}
+    </div>`;
+  }).join('');
 }
 
 // computeCapVersion 用 system agent 的 cmd 列表排序拼接做版本号。
