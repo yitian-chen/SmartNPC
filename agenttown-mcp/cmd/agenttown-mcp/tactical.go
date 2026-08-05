@@ -259,16 +259,30 @@ const tacticalPromptBody = `[战术层/任务分解] 当前时段目标：%s
 示例（id 来自上方可用列表，不可照抄示例中的 id）：
 %s`
 
-// buildTacticalExample 根据当前 KB 动态构造示例，确保示例中出现的
-// zone id / object id 都在 KB 中合法存在，且示例工具与 object category
-// 语义匹配（workbench→work_at_workbench，charging_station→charge_at_station，
+// buildTacticalExample 根据当前 KB 和 goal 动态构造示例，确保示例中出现的
+// zone id / object id 都在 KB 中合法存在，且示例工具与 goal 语义匹配。
+//
+// goal 关键词优先匹配（按优先级）：
+//   - 巡视/巡检/巡逻      → patrol_zone 示例
+//   - 充电/补能/休息/恢复  → charge_at_station 示例（找 charging_station object）
+//   - 装配/工作/作业/打磨  → work_at_workbench 示例（找 workbench object）
+//   - 聊天/社交/对话       → chat_with 示例（需 KB 有 ≥2 个 agent）
+//   - 检查/自检/inspect    → interact inspect 示例
+//
+// 关键词未命中或对应工具/object 不存在时，降级到旧逻辑：按首个 object 的
+// category 选示例（workbench→work_at_workbench，charging_station→charge_at_station，
 // 其他→interact）。KB 为空时返回不引用任何具体 id 的通用示例。
 //
 // 关键约束：示例中的 move_to_location target 必须与示例 object 的 ZoneID
 // 一致——否则示例本身就违反 prompt 中"interact 必须在 object 所在 zone 调用"
 // 的约束 #5，LLM 会模仿错误模式（先 move 到任意 zone，再调用任意 object）。
 // 因此有 object 时 exZone 取 obj.ZoneID 而非 ListZones()[0]。
-func buildTacticalExample(kb *worldkb.KB) string {
+//
+// 动机（P0-2 修复）：旧版 buildTacticalExample(kb) 总是用首个 object（当前
+// KB 首个是 charging_station_01），导致无论 goal 是"自检关节"还是"装配作业"，
+// 示例都是"去充电"，LLM 模仿后把 goal 和示例机械拼接（如"巡视车间并记录日志，
+// 最后去充电"）。
+func buildTacticalExample(kb *worldkb.KB, goal string) string {
 	const genericExample = `{"inner_thought":"先去目标区域再开始作业"}
 {"action":"move_to_location","params":{"target":"<上方可前往区域的 id>"}}
 {"action":"interact","params":{"target_object_id":"<上方可交互物体的 id>","interaction":"<可用 interaction>"}}`
@@ -280,7 +294,13 @@ func buildTacticalExample(kb *worldkb.KB) string {
 	if len(zones) == 0 && len(objs) == 0 {
 		return genericExample
 	}
-	// 无 object 时用第一个 zone（或占位符）作示例 target。
+
+	// goal 关键词匹配（按优先级）。命中后若所需 object/agent 不存在则继续往下尝试。
+	if ex := exampleForGoal(kb, goal, zones, objs); ex != "" {
+		return ex
+	}
+
+	// 默认降级：无 object 时用第一个 zone（或占位符）作示例 target。
 	if len(objs) == 0 {
 		exZone := "<上方可前往区域的 id>"
 		if len(zones) > 0 {
@@ -318,6 +338,102 @@ func buildTacticalExample(kb *worldkb.KB) string {
 {"action":"move_to_location","params":{"target":"%s"}}
 {"action":"interact","params":{"target_object_id":"%s","interaction":"%s"}}`, exZone, exObj, verb)
 	}
+}
+
+// exampleForGoal 按 goal 关键词匹配返回对应示例；未命中或所需资源不存在返回空串，
+// 由调用方降级到默认示例。zones/objs 参数避免重复 KB 查询。
+func exampleForGoal(kb *worldkb.KB, goal string, zones []worldkb.ZoneInfo, objs []worldkb.ObjectInfo) string {
+	if kb == nil || goal == "" {
+		return ""
+	}
+	gl := strings.ToLower(goal)
+
+	// 1. 巡视/巡检/巡逻 → patrol_zone（用第一个 zone）
+	if containsAny(gl, "巡视", "巡检", "巡逻", "patrol") {
+		exZone := "<上方可前往区域的 id>"
+		if len(zones) > 0 {
+			exZone = zones[0].ID
+		}
+		return fmt.Sprintf(`{"inner_thought":"先去目标区域巡视一圈"}
+{"action":"move_to_location","params":{"target":"%s"}}
+{"action":"patrol_zone","params":{"target_zone":"%s","duration_sec":1800}}`, exZone, exZone)
+	}
+
+	// 2. 充电/补能/休息/恢复/疲劳 → charge_at_station（找 charging_station object）
+	if containsAny(gl, "充电", "补能", "休息", "恢复", "疲劳", "charge", "rest") {
+		if obj := findObjectByCategory(objs, "charging_station"); obj != nil {
+			exZone := obj.ZoneID
+			if exZone == "" {
+				exZone = "<上方可前往区域的 id>"
+			}
+			return fmt.Sprintf(`{"inner_thought":"先去目标区域补充能量"}
+{"action":"move_to_location","params":{"target":"%s"}}
+{"action":"charge_at_station","params":{"target_object_id":"%s"}}`, exZone, obj.ID)
+		}
+	}
+
+	// 3. 装配/工作/作业/打磨/加工 → work_at_workbench（找 workbench object）
+	if containsAny(gl, "装配", "工作", "作业", "打磨", "加工", "assemble", "craft") {
+		if obj := findObjectByCategory(objs, "workbench"); obj != nil {
+			exZone := obj.ZoneID
+			if exZone == "" {
+				exZone = "<上方可前往区域的 id>"
+			}
+			return fmt.Sprintf(`{"inner_thought":"先去目标区域再开始作业"}
+{"action":"move_to_location","params":{"target":"%s"}}
+{"action":"work_at_workbench","params":{"target_object_id":"%s","duration_sec":3600}}`, exZone, obj.ID)
+		}
+	}
+
+	// 4. 聊天/社交/对话 → chat_with（需 KB 有 ≥2 个 agent，排除 self）
+	//    当前 KB 仅 1 个 agent，此分支不会命中，降级到默认示例。
+	if containsAny(gl, "聊天", "社交", "对话", "chat", "social") && len(kb.Agents) >= 2 {
+		other := kb.Agents[1].ID // 简化：取第二个 agent（首个常是 self）
+		return fmt.Sprintf(`{"inner_thought":"去找同事聊两句"}
+{"action":"move_to_agent","params":{"target_agent_id":"%s","speed":"walk"}}
+{"action":"chat_with","params":{"target_agent_id":"%s","topic":"工作"}}`, other, other)
+	}
+
+	// 5. 检查/自检/inspect → interact inspect（找有 inspect interaction 的 object）
+	if containsAny(gl, "检查", "自检", "inspect", "examine") {
+		for i := range objs {
+			for _, v := range objs[i].AvailableInteractions {
+				if v == "inspect" {
+					exZone := objs[i].ZoneID
+					if exZone == "" {
+						exZone = "<上方可前往区域的 id>"
+					}
+					return fmt.Sprintf(`{"inner_thought":"先去目标区域检查设备"}
+{"action":"move_to_location","params":{"target":"%s"}}
+{"action":"interact","params":{"target_object_id":"%s","interaction":"inspect"}}`, exZone, objs[i].ID)
+				}
+			}
+		}
+	}
+
+	return ""
+}
+
+// containsAny 检查 s 是否包含 subs 中任一子串（大小写不敏感由调用方保证）。
+func containsAny(s string, subs ...string) bool {
+	for _, sub := range subs {
+		if sub != "" && strings.Contains(s, sub) {
+			return true
+		}
+	}
+	return false
+}
+
+// findObjectByCategory 在 ObjectInfo 列表中查找首个指定 category 的对象。
+// 返回指针便于调用方判空；找不到返回 nil。
+func findObjectByCategory(objs []worldkb.ObjectInfo, category string) *worldkb.ObjectInfo {
+	for i := range objs {
+		if objs[i].Category == category {
+			o := objs[i] // 拷贝避免 range 复用
+			return &o
+		}
+	}
+	return nil
 }
 
 // buildTacticalPrompt 填充战术层 prompt 模板。kb 用于注入可用 zone/location/object
@@ -367,7 +483,7 @@ func buildTacticalPrompt(goal, zone, timeOfDay, slot string, physical *protocol.
 	return fmt.Sprintf(tacticalPromptBody, goal, zone, timeOfDay, e, f, j, h,
 		roleLine,
 		hintLine, buildSlotDurationHint(slot, timeOfDay), buildKBContext(kb), toolCount, toolList,
-		buildTacticalExample(kb))
+		buildTacticalExample(kb, goal))
 }
 
 // buildSlotDurationHint 根据 slot "HH:MM-HH:MM" 和当前 game_time 构造一行提示文本。
