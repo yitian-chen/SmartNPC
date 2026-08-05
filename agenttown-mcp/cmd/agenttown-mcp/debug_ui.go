@@ -21,6 +21,7 @@ import (
 	"net/http"
 
 	"github.com/AgentTown/agenttown-mcp/adapters/agenttown/tools"
+	"github.com/AgentTown/agenttown-mcp/internal/log"
 	"github.com/AgentTown/agenttown-mcp/pkg/protocol"
 	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
 )
@@ -183,5 +184,21 @@ func handleDebugUEErrors(w http.ResponseWriter, r *http.Request, logger *slog.Lo
 	}
 	if err := json.NewEncoder(w).Encode(entries); err != nil {
 		logger.Warn("[debug/ue-errors] encode failed", "err", err)
+	}
+}
+
+// handleDebugLogs 返回最近 MCP 日志条目（环形缓冲，最多 500 条），供 debug
+// 控制台展示 MCP 侧全量日志。前端按 level 筛选（ALL/DEBUG/INFO/WARN/ERROR）。
+// 响应始终是 JSON 数组（无日志时为 []），按时间正序返回，前端倒序渲染（最新在最上）。
+// 大型 payload 字段值已被截断到 500 字符，避免几条大日志占满缓冲——完整内容去 sim.log。
+func handleDebugLogs(w http.ResponseWriter, r *http.Request, logger *slog.Logger) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+	entries := log.Snapshot()
+	if entries == nil {
+		entries = []log.Entry{}
+	}
+	if err := json.NewEncoder(w).Encode(entries); err != nil {
+		logger.Warn("[debug/logs] encode failed", "err", err)
 	}
 }

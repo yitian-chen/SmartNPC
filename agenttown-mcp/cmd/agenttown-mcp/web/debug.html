@@ -279,6 +279,77 @@
   .history-item .ok { color: var(--ok); }
   .history-item .fail { color: var(--err); }
   #history-list { max-height: 300px; overflow-y: auto; }
+
+  /* ─── MCP 日志面板 ─── */
+  .log-filter-bar {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    margin-bottom: 10px;
+    flex-wrap: wrap;
+  }
+  .log-filter-btn {
+    background: var(--panel-2);
+    color: var(--text-muted);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 4px 12px;
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+    font-family: inherit;
+  }
+  .log-filter-btn:hover:not(.active) { color: var(--text); border-color: var(--accent); }
+  .log-filter-btn.active {
+    background: var(--accent);
+    color: #fff;
+    border-color: var(--accent);
+  }
+  .log-filter-hint { color: var(--text-muted); font-size: 12px; margin-left: 6px; }
+  #log-list {
+    max-height: 500px;
+    overflow-y: auto;
+    font-family: "Consolas", "Monaco", monospace;
+    font-size: 12px;
+  }
+  .log-entry {
+    display: flex;
+    gap: 8px;
+    padding: 4px 8px;
+    border-bottom: 1px solid var(--border);
+    align-items: baseline;
+    word-break: break-word;
+  }
+  .log-entry:hover { background: var(--panel-2); }
+  .log-entry:last-child { border-bottom: none; }
+  .log-level {
+    display: inline-block;
+    min-width: 48px;
+    text-align: center;
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-size: 11px;
+    font-weight: 600;
+    color: #fff;
+    flex-shrink: 0;
+  }
+  .log-level-debug { background: #6c757d; }
+  .log-level-info  { background: var(--accent); }
+  .log-level-warn  { background: var(--warn); }
+  .log-level-error { background: var(--err); }
+  .log-time {
+    color: var(--text-muted);
+    flex-shrink: 0;
+  }
+  .log-msg {
+    color: var(--text);
+    flex-shrink: 0;
+  }
+  .log-attrs {
+    color: var(--text-muted);
+    font-size: 11px;
+    min-width: 0;
+  }
 </style>
 </head>
 <body>
@@ -396,6 +467,22 @@
       <div class="empty-state">暂无 UE 上报错误</div>
     </div>
   </section>
+
+  <!-- 全宽：MCP 日志 -->
+  <section class="panel" style="grid-column: 1 / -1;">
+    <h2>MCP 日志 <span id="log-count" class="count-badge" style="display:none; background: var(--accent);">0</span></h2>
+    <div class="log-filter-bar">
+      <button class="log-filter-btn active" data-level="ALL" onclick="setLogFilter('ALL')">全部</button>
+      <button class="log-filter-btn" data-level="DEBUG" onclick="setLogFilter('DEBUG')">DEBUG</button>
+      <button class="log-filter-btn" data-level="INFO" onclick="setLogFilter('INFO')">INFO</button>
+      <button class="log-filter-btn" data-level="WARN" onclick="setLogFilter('WARN')">WARN</button>
+      <button class="log-filter-btn" data-level="ERROR" onclick="setLogFilter('ERROR')">ERROR</button>
+      <span class="log-filter-hint">环形缓冲最近 500 条，长字段值已截断；完整日志见 sim.log</span>
+    </div>
+    <div id="log-list">
+      <div class="empty-state">暂无日志</div>
+    </div>
+  </section>
 </main>
 
 <script>
@@ -404,16 +491,19 @@ let kbData = { zones: [], objects: [] };
 let capData = { agents: {} }; // capability_registry 快照（来自 /debug/cap）
 let capVersion = ''; // capability 版本号（cmd 列表 hash），用于变化检测
 let history = []; // 最近 20 条
+let logEntries = []; // MCP 日志条目（来自 /debug/logs）
+let logFilter = 'ALL'; // 当前日志筛选级别
 
 // ─── 初始化 ──────────────────────────────────────────────
 async function init() {
-  await Promise.all([loadStatus(), loadKB(), loadCap(), loadUEErrors()]);
+  await Promise.all([loadStatus(), loadKB(), loadCap(), loadUEErrors(), loadLogs()]);
   onCmdChange();
   updateSchedCurlPreview();
-  // 定时刷新状态徽章 + capability + UE 错误（每 5s）
+  // 定时刷新状态徽章 + capability + UE 错误 + MCP 日志（每 5s）
   setInterval(loadStatus, 5000);
   setInterval(loadCap, 5000);
   setInterval(loadUEErrors, 5000);
+  setInterval(loadLogs, 5000);
 }
 
 async function loadStatus() {
@@ -503,6 +593,70 @@ function renderUEErrors(entries) {
       ${ctx}
     </div>`;
   }).join('');
+}
+
+// ─── MCP 日志加载和渲染 ─────────────────────────────────
+async function loadLogs() {
+  try {
+    const r = await fetch('/debug/logs');
+    if (!r.ok) return;
+    const j = await r.json();
+    logEntries = Array.isArray(j) ? j : [];
+    renderLogs();
+  } catch (e) {
+    console.warn('loadLogs failed:', e);
+  }
+}
+
+function setLogFilter(level) {
+  logFilter = level;
+  document.querySelectorAll('.log-filter-btn').forEach(b => {
+    b.classList.toggle('active', b.dataset.level === level);
+  });
+  renderLogs();
+}
+
+function renderLogs() {
+  const list = document.getElementById('log-list');
+  const badge = document.getElementById('log-count');
+  const filtered = logFilter === 'ALL'
+    ? logEntries
+    : logEntries.filter(e => e.level === logFilter);
+  if (!filtered.length) {
+    list.innerHTML = '<div class="empty-state">暂无' + (logFilter !== 'ALL' ? ' ' + logFilter : '') + ' 日志</div>';
+    badge.style.display = 'none';
+    return;
+  }
+  badge.style.display = '';
+  badge.textContent = filtered.length;
+  // 后端按时间正序返回，前端倒序展示（最新在最上）
+  const sorted = filtered.slice().reverse();
+  list.innerHTML = sorted.map(e => renderLogEntry(e)).join('');
+}
+
+function renderLogEntry(e) {
+  const ts = e.time ? new Date(e.time).toLocaleTimeString('zh-CN', { hour12: false }) : '';
+  const lvl = (e.level || 'INFO').toUpperCase();
+  const levelCls = 'log-level-' + lvl.toLowerCase();
+  const attrs = e.attrs ? Object.entries(e.attrs)
+    .map(([k, v]) => `${escapeHtml(k)}=${escapeHtml(formatLogAttrVal(v))}`)
+    .join(' ') : '';
+  return `<div class="log-entry">
+    <span class="log-level ${levelCls}">${escapeHtml(lvl)}</span>
+    <span class="log-time">${escapeHtml(ts)}</span>
+    <span class="log-msg">${escapeHtml(e.msg || '')}</span>
+    ${attrs ? `<span class="log-attrs">${attrs}</span>` : ''}
+  </div>`;
+}
+
+function formatLogAttrVal(v) {
+  if (v == null) return String(v);
+  if (typeof v === 'string') return v.length > 100 ? v.slice(0, 100) + '…' : v;
+  if (typeof v === 'object') {
+    const s = JSON.stringify(v);
+    return s.length > 100 ? s.slice(0, 100) + '…' : s;
+  }
+  return String(v);
 }
 
 // computeCapVersion 用 system agent 的 cmd 列表排序拼接做版本号。

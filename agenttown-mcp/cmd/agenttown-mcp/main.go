@@ -1433,6 +1433,11 @@ func runHTTP(ctx context.Context, logger *slog.Logger, server *mcp.Server, addr 
 			handleDebugUEErrors(w, r, logger)
 			return
 		}
+		// /debug/logs — 返回最近 MCP 日志条目（环形缓冲，最多 500 条）
+		if r.URL.Path == "/debug/logs" {
+			handleDebugLogs(w, r, logger)
+			return
+		}
 		http.NotFound(w, r)
 	})
 
