@@ -1043,7 +1043,7 @@ func TestWorldKBSwap_AcceptedBeforeAgentRegistered(t *testing.T) {
 	manifestPath := dir + "/world_kb.manifest.json"
 	payload := buildWorldKBPayload(t)
 
-	newKB, err := worldKBSwap(false, payload, outPath, manifestPath)
+	newKB, _, err := worldKBSwap(false, payload, outPath, manifestPath)
 	if err != nil {
 		t.Fatalf("worldKBSwap: %v", err)
 	}
@@ -1077,7 +1077,7 @@ func TestWorldKBSwap_RejectedAfterAgentRegistered(t *testing.T) {
 	outPath := dir + "/world_kb.yaml"
 	payload := buildWorldKBPayload(t)
 
-	_, err := worldKBSwap(true, payload, outPath, "")
+	_, _, err := worldKBSwap(true, payload, outPath, "")
 	if !errors.Is(err, errAgentWindowClosed) {
 		t.Fatalf("expected errAgentWindowClosed, got: %v", err)
 	}
@@ -1093,7 +1093,7 @@ func TestWorldKBSwap_BadPayloadPreservesOldKB(t *testing.T) {
 	dir := t.TempDir()
 	outPath := dir + "/world_kb.yaml"
 
-	_, err := worldKBSwap(false, json.RawMessage("{not json"), outPath, "")
+	_, _, err := worldKBSwap(false, json.RawMessage("{not json"), outPath, "")
 	if err == nil {
 		t.Fatal("expected parse error for malformed payload")
 	}
@@ -1126,7 +1126,7 @@ func TestWorldKBSwap_MergeErrorPreservesOldKB(t *testing.T) {
 	}
 	payload, _ := json.Marshal(p)
 
-	_, err := worldKBSwap(false, payload, outPath, "")
+	_, _, err := worldKBSwap(false, payload, outPath, "")
 	if err == nil {
 		t.Fatal("expected merge error for schema mismatch")
 	}

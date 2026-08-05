@@ -1223,7 +1223,7 @@ func main() {
 			// race. Handler holds agentsMu for the full duration so a
 			// concurrent agent_registered cannot start workers mid-swap.
 			agentsMu.Lock()
-			newKB, err := worldKBSwap(firstAgentRegistered, payload, *worldKBPath, *worldKBManifest)
+			newKB, normalizeChanges, err := worldKBSwap(firstAgentRegistered, payload, *worldKBPath, *worldKBManifest)
 			if err != nil {
 				agentsMu.Unlock()
 				if errors.Is(err, errAgentWindowClosed) {
@@ -1234,6 +1234,10 @@ func main() {
 						"err", err, "path", *worldKBPath)
 				}
 				return
+			}
+			if len(normalizeChanges) > 0 {
+				logger.Info("world_kb entity ids normalized to lowercase",
+					"changes", normalizeChanges)
 			}
 			kb = newKB
 		kbRef = newKB // sync /debug/kb handler
@@ -2028,17 +2032,17 @@ var errAgentWindowClosed = errors.New("world_kb rejected: startup window closed 
 // The caller is responsible for the kb pointer swap, tools.RegisterAll
 // re-registration, and reactiveRunnerRef.kb assignment — these side
 // effects require main()-local state that this pure function does not see.
-func worldKBSwap(firstAgentRegistered bool, payload json.RawMessage, kbPath, manifestPath string) (*worldkb.KB, error) {
+func worldKBSwap(firstAgentRegistered bool, payload json.RawMessage, kbPath, manifestPath string) (*worldkb.KB, []string, error) {
 	if firstAgentRegistered {
-		return nil, errAgentWindowClosed
+		return nil, nil, errAgentWindowClosed
 	}
 	var wkb protocol.WorldKBPayload
 	if err := json.Unmarshal(payload, &wkb); err != nil {
-		return nil, fmt.Errorf("parse world_kb payload: %w", err)
+		return nil, nil, fmt.Errorf("parse world_kb payload: %w", err)
 	}
-	newKB, err := worldkb.MergeAndWriteBytes(wkb.Generated, wkb.Authored, kbPath, manifestPath)
+	newKB, changes, err := worldkb.MergeAndWriteBytes(wkb.Generated, wkb.Authored, kbPath, manifestPath)
 	if err != nil {
-		return nil, fmt.Errorf("merge world_kb: %w", err)
+		return nil, nil, fmt.Errorf("merge world_kb: %w", err)
 	}
-	return newKB, nil
+	return newKB, changes, nil
 }
