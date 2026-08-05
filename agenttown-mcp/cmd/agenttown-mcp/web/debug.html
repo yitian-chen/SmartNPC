@@ -731,7 +731,8 @@ function buildFieldSpec(param, cmd) {
     default: param.default_value || '',
   };
   // KB 联动：按参数名启发式判断
-  if (param.name === 'target_object_id') {
+  // 同时兼容 built-in InteractInput.target_object_id 与 UE 推送的 smart_object
+  if (param.name === 'target_object_id' || param.name === 'smart_object') {
     spec.type = 'select-kb-object';
     spec.filterInteractions = inferFilterInteractions(cmd);
   } else if (param.name === 'target_zone') {
@@ -739,8 +740,12 @@ function buildFieldSpec(param, cmd) {
   } else if (param.name === 'target' && param.type === 'string') {
     spec.type = 'select-kb-target';
   } else if (cmd === 'interact' && param.name === 'interaction') {
-    // interact cmd 的 interaction 参数：选项随 target_object_id 的 available_interactions 联动
-    spec.type = 'select-object-interaction';
+    // interact cmd 的 interaction 参数：capability_registry 声明为 string（非 enum），
+    // 渲染为自由输入框 + datalist 建议。当 smart_object 命中 KB object 时，
+    // 把该 object 的 available_interactions 作为建议项填入 datalist。
+    // 用户可输入任意值（capability 外的交互也能下发），也可从建议中选。
+    spec.type = 'text-with-datalist';
+    spec.datalistId = 'datalist-interaction';
   } else if (param.type === 'enum') {
     spec.type = 'select-enum';
     spec.enumValues = param.enum_values || [];
@@ -782,7 +787,7 @@ function onCmdChange() {
   // move_to_location 特殊处理：注入模式选择器 + target/dest 字段按模式切换
   if (cmd === 'move_to_location') {
     renderMoveToLocationFields(container, action);
-    updateObjectInteractionOptions();
+    updateInteractionDatalist();
     updateCurlPreview();
     return;
   }
@@ -792,7 +797,7 @@ function onCmdChange() {
     const spec = buildFieldSpec(p, cmd);
     renderField(container, spec);
   });
-  updateObjectInteractionOptions();
+  updateInteractionDatalist();
   updateCurlPreview();
 }
 
@@ -963,7 +968,7 @@ function renderField(container, field) {
       input = document.createElement('select');
       input.id = `param-${field.name}`;
       input.dataset.fieldName = field.name;
-      input.onchange = () => { updateObjectInteractionOptions(); updateCurlPreview(); };
+      input.onchange = () => { updateInteractionDatalist(); updateCurlPreview(); };
       (kbData.objects || []).forEach(o => {
         if (field.filterInteractions && !field.filterInteractions.some(a => (o.available_interactions || []).includes(a))) return;
         const opt = document.createElement('option');
@@ -972,12 +977,19 @@ function renderField(container, field) {
       });
       break;
 
-    case 'select-object-interaction':
-      input = document.createElement('select');
+    case 'text-with-datalist': {
+      input = document.createElement('input');
+      input.type = 'text';
       input.id = `param-${field.name}`;
+      input.value = field.default != null ? field.default : '';
       input.dataset.fieldName = field.name;
-      // 选项由 updateObjectInteractionOptions 动态填
+      input.setAttribute('list', field.datalistId);
+      input.oninput = updateCurlPreview;
+      const dl = document.createElement('datalist');
+      dl.id = field.datalistId;
+      div.appendChild(dl);
       break;
+    }
 
     case 'number':
       input = document.createElement('input');
@@ -1006,19 +1018,20 @@ function renderField(container, field) {
   container.appendChild(div);
 }
 
-function updateObjectInteractionOptions() {
-  // 找到 target_object_id select，根据其值更新 interaction select 的选项
-  const objSel = document.querySelector('[data-field-name="target_object_id"]');
-  const actSel = document.querySelector('[data-field-name="interaction"]');
-  if (!objSel || !actSel) return;
+function updateInteractionDatalist() {
+  // 找到 smart_object / target_object_id select，根据其值更新 interaction
+  // datalist 的建议项。datalist 不限制 input 的值，用户仍可自由输入。
+  const objSel = document.querySelector('[data-field-name="smart_object"]')
+              || document.querySelector('[data-field-name="target_object_id"]');
+  const dl = document.getElementById('datalist-interaction');
+  if (!objSel || !dl) return;
   const obj = (kbData.objects || []).find(o => o.id === objSel.value);
-  actSel.innerHTML = '';
+  dl.innerHTML = '';
   (obj && obj.available_interactions || []).forEach(a => {
     const o = document.createElement('option');
     o.value = a; o.textContent = a;
-    actSel.appendChild(o);
+    dl.appendChild(o);
   });
-  updateCurlPreview();
 }
 
 // ─── 收集表单 → 请求体 ───────────────────────────────────
@@ -1303,7 +1316,7 @@ function replayHistory(i) {
       else el.value = v;
     }
   });
-  updateObjectInteractionOptions();
+  updateInteractionDatalist();
   Object.entries(h.req.params || {}).forEach(([k, v]) => {
     const el = document.querySelector(`#params-form [data-field-name="${k}"]`);
     if (el) {
