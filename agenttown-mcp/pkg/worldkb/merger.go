@@ -238,7 +238,8 @@ func MergeMaps(genMap, authMap map[string]any) (*KB, []MergeWarning, error) {
 		kb.Version = authVer
 	}
 
-	// Narrative: NEW narrative{setting,theme} or OLD site (shim).
+	// Narrative: NEW narrative{setting,theme}, OLD site string (shim),
+	// or UE5 site object {id, display_name, description} (shim).
 	if narr, ok := authMap["narrative"].(map[string]any); ok {
 		if s, ok := narr["setting"].(string); ok {
 			kb.Narrative.Setting = s
@@ -247,8 +248,16 @@ func MergeMaps(genMap, authMap map[string]any) (*KB, []MergeWarning, error) {
 			kb.Narrative.Theme = th
 		}
 	} else if site, ok := authMap["site"].(string); ok {
-		// OLD schema shim: site → narrative.setting
+		// OLD schema shim: site string → narrative.setting
 		kb.Narrative.Setting = site
+	} else if siteObj, ok := authMap["site"].(map[string]any); ok {
+		// UE5 shim: site{display_name, description} → narrative{setting, theme}
+		if dn, ok := siteObj["display_name"].(string); ok {
+			kb.Narrative.Setting = dn
+		}
+		if desc, ok := siteObj["description"].(string); ok {
+			kb.Narrative.Theme = desc
+		}
 	}
 
 	// ---- Zones ----
