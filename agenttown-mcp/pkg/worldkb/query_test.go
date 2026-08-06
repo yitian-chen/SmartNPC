@@ -49,9 +49,13 @@ func TestGetPosition_Unknown(t *testing.T) {
 
 func TestWhichZone_Hit(t *testing.T) {
 	kb, _ := Load(sampleYAMLPath(t))
-	// main_workshop bounds: center [20000,10000,0], extent [5000,5000,500]
-	// So [20000, 10000, 0] is inside.
-	got := kb.WhichZone([3]float64{20000, 10000, 0})
+	// main_workshop bounds: center [20000,10000,0], extent [5000,5000,5000]
+	// (XY AABB: X∈[15000,25000], Y∈[5000,15000]).
+	// charging_station bounds: center [22500,7500,0], extent [2500,2500,5000]
+	// (X∈[20000,25000], Y∈[5000,10000]) — overlaps main_workshop's XY box,
+	// and sorts earlier alphabetically. Use a point strictly inside
+	// main_workshop but outside charging_station: [17000, 12000, 0].
+	got := kb.WhichZone([3]float64{17000, 12000, 0})
 	if got != "main_workshop" {
 		t.Errorf("WhichZone(main_workshop interior) = %q", got)
 	}

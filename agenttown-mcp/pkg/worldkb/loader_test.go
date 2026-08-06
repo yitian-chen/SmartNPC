@@ -34,11 +34,11 @@ func TestLoad_Sample(t *testing.T) {
 	if kb.Narrative.Setting == "" {
 		t.Errorf("Narrative.Setting is empty")
 	}
-	if len(kb.Zones) != 7 {
-		t.Errorf("len(Zones) = %d, want 7", len(kb.Zones))
+	if len(kb.Zones) != 3 {
+		t.Errorf("len(Zones) = %d, want 3", len(kb.Zones))
 	}
-	if len(kb.Objects) != 3 {
-		t.Errorf("len(Objects) = %d, want 3", len(kb.Objects))
+	if len(kb.Objects) != 2 {
+		t.Errorf("len(Objects) = %d, want 2", len(kb.Objects))
 	}
 	if len(kb.Agents) != 1 {
 		t.Errorf("len(Agents) = %d, want 1", len(kb.Agents))
@@ -51,11 +51,11 @@ func TestLoad_Sample(t *testing.T) {
 	if kb.GetZone("central_plaza") == nil {
 		t.Error("zoneByID missing central_plaza")
 	}
+	if kb.GetZone("charging_station") == nil {
+		t.Error("zoneByID missing charging_station")
+	}
 	if kb.GetObject("workbench_01") == nil {
 		t.Error("objectByID missing workbench_01")
-	}
-	if kb.GetObject("rest_bench_01") == nil {
-		t.Error("objectByID missing rest_bench_01")
 	}
 	if kb.GetObject("charging_station_01") == nil {
 		t.Error("objectByID missing charging_station_01")
@@ -75,7 +75,7 @@ func TestLoad_Sample(t *testing.T) {
 	if o.ZoneID != "main_workshop" {
 		t.Errorf("workbench_01 zone_id = %q, want main_workshop", o.ZoneID)
 	}
-	if o.DisplayName != "一号装配工作台" {
+	if o.DisplayName != "工作台一号" {
 		t.Errorf("workbench_01 display_name = %q", o.DisplayName)
 	}
 
@@ -84,8 +84,8 @@ func TestLoad_Sample(t *testing.T) {
 	if z == nil || z.EntryPoint != [3]float64{16000, 10000, 100} {
 		t.Errorf("main_workshop entry_point = %v, want [16000 10000 100]", z)
 	}
-	if z.Bounds.Extent != [3]float64{5000, 5000, 500} {
-		t.Errorf("main_workshop bounds.extent = %v, want [5000 5000 500]", z.Bounds.Extent)
+	if z.Bounds.Extent != [3]float64{5000, 5000, 5000} {
+		t.Errorf("main_workshop bounds.extent = %v, want [5000 5000 5000]", z.Bounds.Extent)
 	}
 }
 
