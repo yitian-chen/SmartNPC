@@ -248,11 +248,17 @@ func TestBuildAgentRoleContext_WithKB(t *testing.T) {
 	}
 }
 
-// TestBuildAgentRoleContext_NilKB 验证 nil KB 降级返回空串不 panic。
+// TestBuildAgentRoleContext_NilKB 验证 nil KB 降级到硬编码兜底（H-01），
+// 返回老陈的简短角色画像，不 panic。三层决策 prompt 仍能注入角色风格。
 func TestBuildAgentRoleContext_NilKB(t *testing.T) {
 	got := buildAgentRoleContext(nil, "H-01")
-	if got != "" {
-		t.Errorf("got %q, want empty for nil KB", got)
+	if got == "" {
+		t.Fatal("got empty role for H-01 with nil KB, want fallback content")
+	}
+	for _, want := range []string{"名字：老陈", "职业：车间主管", "沉稳、念旧、重视工艺"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("fallback role missing %q, got: %q", want, got)
+		}
 	}
 }
 
