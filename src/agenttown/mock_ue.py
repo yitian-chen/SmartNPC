@@ -1200,6 +1200,16 @@ class MockUE:
         await self._send_action_started(action_id, accepted=True, estimated_sec=est_sec)
 
         if is_busy:
+            # 复合动作自动寻路：真实 UE 复合动作内置 path-find 阶段，会把 NPC
+            # 带到目标 object/zone 后再开始长动作。Mock UE 用 teleport 模拟，
+            # 防止复合动作在错误 zone 执行（如 WorkAtWorkbench 时人在
+            # charging_station，详见 2026-08-06 仿真日志分析）。
+            auto = self._resolve_composite_destination(cmd, params)
+            if auto is not None:
+                dest, target_id, kind = auto
+                if not self._already_at_target(target_id, kind):
+                    logger.info(f"[COMPOSITE/AUTO-MOVE] {cmd} -> {target_id} {dest}")
+                    self._move_to(dest, target=target_id, kind=kind)
             # Set busy state; completion happens when game time advances past
             # busy_until_min (checked in the perception loop).
             game_min = est_sec / 60.0 * self.time.speed / 60.0  # est_sec is real→game
@@ -1435,6 +1445,65 @@ class MockUE:
     def _resolve_zone(self, pos: List[float]) -> str:
         """Deprecated wrapper kept for backward compat — delegates to KB."""
         return self.kb.which_zone(pos) or self.npc.current_zone
+
+    def _resolve_composite_destination(self, cmd: str, params: Dict[str, Any]
+                                       ) -> Optional[Tuple[List[float], str, str]]:
+        """Resolve the auto-move target coordinate for a composite action.
+
+        Real UE composites (WorkAtWorkbench / ChargeAtStation / PatrolZone / ...)
+        include an internal path-find phase that brings the NPC to the target
+        object/zone before the long action begins. Mock UE simulates this by
+        teleporting the NPC to the resolved coordinate before setting busy
+        state. Prevents semantic violations where composites execute in wrong
+        zones (e.g., WorkAtWorkbench while in charging_station).
+
+        Pure function: only reads cmd + params + KB, does NOT read NPC state.
+        Caller decides whether to actually move based on _already_at_target.
+
+        Returns (coord, target_id, kind) where kind is "object" or "zone",
+        or None when no auto-move target is resolvable.
+        """
+        if cmd == CMD_WORK_AT_WORKBENCH:
+            oid = params.get("target_object_id", "")
+            if oid:
+                pos = self.kb.object_point(oid)
+                if pos:
+                    return pos, oid, "object"
+        elif cmd == CMD_CHARGE_AT_STATION:
+            sid = params.get("target_object_id", "")
+            if not sid:
+                # Auto-pick first charging_station-category object (real UE
+                # picks nearest; single-agent mock has only one).
+                for oid, obj in self.kb.objects.items():
+                    if getattr(obj, "category", "") == "charging_station":
+                        sid = oid
+                        break
+            if sid:
+                pos = self.kb.object_point(sid)
+                if pos:
+                    return pos, sid, "object"
+        elif cmd == CMD_PATROL_ZONE:
+            zid = params.get("target_zone", "")
+            if zid:
+                pos = self.kb.zone_entry(zid)
+                if pos:
+                    return pos, zid, "zone"
+        # WorkAtWorkshop (no target param), ChatWith / RepairTarget (multi-agent):
+        # no unique coordinate resolvable in single-agent mock → skip auto-move.
+        return None
+
+    def _already_at_target(self, target_id: str, kind: str) -> bool:
+        """Check if NPC is already at the auto-move target.
+
+        Uses KB reverse-lookup (interaction_radius for objects, AABB for
+        zones) so the check matches Mock UE's spatial model rather than a
+        hardcoded distance threshold.
+        """
+        if kind == "object":
+            return self.kb.which_object(self.npc.position) == target_id
+        if kind == "zone":
+            return self.kb.which_zone(self.npc.position) == target_id
+        return False
 
     def _clear_busy(self):
         self.npc.busy_action_id = None
