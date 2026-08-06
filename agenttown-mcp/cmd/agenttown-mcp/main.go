@@ -616,6 +616,18 @@ func (a *agentContext) queueLen() int {
 	return len(a.actionQueue)
 }
 
+// snapshotSchedule 返回当日计划的快照（mu 保护），供 /debug/plan 端点
+// 展示当日 schedule。plan 是格式化多行字符串，slot 是当前时段
+// "HH:MM-HH:MM"（或 "__debug__" 前缀），idx 是当前执行到第几个 item（-1=未命中）。
+func (a *agentContext) snapshotSchedule() (plan string, slot string, idx int) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	plan = a.dailyPlan
+	slot = a.currentSlot
+	idx = a.currentPlanIndex
+	return
+}
+
 // latestTimeOfDay 从 latestPerception 提取 "HH:MM" 游戏时间（mu 保护读取 perception）。
 func (a *agentContext) latestTimeOfDay() string {
 	a.mu.Lock()
@@ -1473,6 +1485,12 @@ func runHTTP(ctx context.Context, logger *slog.Logger, server *mcp.Server, addr 
 		// /debug/logs — 返回最近 MCP 日志条目（环形缓冲，最多 500 条）
 		if r.URL.Path == "/debug/logs" {
 			handleDebugLogs(w, r, logger)
+			return
+		}
+		// /debug/plan — 返回当日 dailyPlan（战略层生成的 7 时段 goal），
+		// 供 debug 控制台右侧 schedule 面板展示。读 per-agent agentContext。
+		if r.URL.Path == "/debug/plan" {
+			handleDebugPlan(w, r, lookupAgent, logger)
 			return
 		}
 		http.NotFound(w, r)
