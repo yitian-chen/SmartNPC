@@ -194,14 +194,15 @@ func (r *reactiveRunner) buildInput(agentID string, ac *agentContext, trigger Re
 	// agentName 用于 prompt 开头的 "你是 NPC %s" 称呼；agentRole 用于【你的角色】
 	// 段（由 buildAgentRoleContext 生成，含名字/职业/背景/性格/说话风格），
 	// 让反应层决策也参考角色性格（如"沉稳"→偏向 continue，"急躁"→偏向 replan）。
+	// kb==nil 或 agent 不存在时 buildAgentRoleContext 降级到 fallbackAgentRole
+	// （H-01 硬编码兜底），agentName 降级为 agentID。
 	agentName := ""
-	agentRole := ""
 	if r.kb != nil {
 		if agent := r.kb.GetAgent(agentID); agent != nil {
 			agentName = agent.DisplayName
-			agentRole = buildAgentRoleContext(r.kb, agentID)
 		}
 	}
+	agentRole := buildAgentRoleContext(r.kb, agentID)
 
 	// 实时从 dailyPlan 计算 slot，避免长动作在途时 currentSlot stale。
 	// __debug__ 前缀的 slot 是 /debug/schedule 注入的临时覆盖，保留原值。
@@ -221,6 +222,7 @@ func (r *reactiveRunner) buildInput(agentID string, ac *agentContext, trigger Re
 		Energy:            energy,
 		Fatigue:           fatigue,
 		Health:            health,
+		PhysicalAvailable: ac.latestPhysical != nil && !ac.latestPhysical.IsZero(),
 		CurrentAction:     currentAction,
 		ElapsedSec:        elapsedSec,
 		ActionSrc:         actionSrc,

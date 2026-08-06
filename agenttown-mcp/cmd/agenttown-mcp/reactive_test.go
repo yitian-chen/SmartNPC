@@ -14,19 +14,20 @@ import (
 // placeholders and contains the expected Chinese keywords.
 func TestBuildReactivePrompt_Defaults(t *testing.T) {
 	in := ReactiveInput{
-		AgentID:       "H-01",
-		TimeOfDay:     "14:30",
-		Zone:          "main_workshop",
-		Energy:        45,
-		Fatigue:       30,
-		Health:        90,
-		CurrentAction: "WorkAtWorkbench(target_object_id=workbench_01, duration_sec=3600)",
-		ElapsedSec:    120,
-		ActionSrc:     "tactical",
-		CurrentSlot:   "14:00-18:00",
-		DailyPlan:     "14:00-18:00 工作组装",
-		Trigger:       TriggerZoneChange,
-		TriggerDetail: "zone rest_area→main_workshop",
+		AgentID:           "H-01",
+		TimeOfDay:         "14:30",
+		Zone:              "main_workshop",
+		Energy:            45,
+		Fatigue:           30,
+		Health:            90,
+		PhysicalAvailable: true,
+		CurrentAction:     "WorkAtWorkbench(target_object_id=workbench_01, duration_sec=3600)",
+		ElapsedSec:        120,
+		ActionSrc:         "tactical",
+		CurrentSlot:       "14:00-18:00",
+		DailyPlan:         "14:00-18:00 工作组装",
+		Trigger:           TriggerZoneChange,
+		TriggerDetail:     "zone rest_area→main_workshop",
 	}
 	prompt := buildReactivePrompt(in)
 	for _, want := range []string{

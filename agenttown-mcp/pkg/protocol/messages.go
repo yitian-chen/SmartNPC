@@ -137,6 +137,15 @@ type PhysicalState struct {
 	Health    float64 `json:"health"`
 }
 
+// IsZero reports whether all four physical values are zero.
+// 用于检测 UE 端尚未实现物理状态上报（state_report 里 energy/fatigue/
+// joint_wear/health 全为 0）的场景，三层决策据此跳过物理注入与物理告警触发，
+// 避免 LLM 看到"体力=0/疲劳=0"误判为警戒带触发不合理 replan。
+// UE 后续实现物理状态后自然返回非零值，此函数返回 false，三层决策自动恢复物理注入。
+func (p PhysicalState) IsZero() bool {
+	return p.Energy == 0 && p.Fatigue == 0 && p.JointWear == 0 && p.Health == 0
+}
+
 // CurrentTaskProgress reports the running action's progress.
 type CurrentTaskProgress struct {
 	ActionID string  `json:"action_id"`

@@ -105,13 +105,13 @@ func TestUpgradeIfPhysicalAlert_ReasonContainsOrigReaction(t *testing.T) {
 	}{
 		{
 			name:         "observe upgraded, reason should contain observe",
-			input:        ReactiveInput{Fatigue: 82, Energy: 70, Health: 100},
+			input:        ReactiveInput{Fatigue: 82, Energy: 70, Health: 100, PhysicalAvailable: true},
 			dec:          ReactiveDecision{Reaction: ReactionObserve, Reason: "状态尚可"},
 			wantOrigKind: "observe",
 		},
 		{
 			name:         "continue upgraded, reason should contain continue",
-			input:        ReactiveInput{Fatigue: 82, Energy: 50, Health: 100},
+			input:        ReactiveInput{Fatigue: 82, Energy: 50, Health: 100, PhysicalAvailable: true},
 			dec:          ReactiveDecision{Reaction: ReactionContinue, Reason: "继续行动"},
 			wantOrigKind: "continue",
 		},
@@ -220,47 +220,53 @@ func TestUpgradeIfPhysicalAlert(t *testing.T) {
 	}{
 		{
 			name:     "fatigue alert upgrades observe to replan",
-			input:    ReactiveInput{Fatigue: 82, Energy: 70, Health: 100},
+			input:    ReactiveInput{Fatigue: 82, Energy: 70, Health: 100, PhysicalAvailable: true},
 			dec:      ReactiveDecision{Reaction: ReactionObserve, Reason: "状态尚可"},
 			wantKind: ReactionReplan,
 			wantSub:  "物理状态告警自动升级",
 		},
 		{
 			name:     "energy alert upgrades continue to replan",
-			input:    ReactiveInput{Fatigue: 30, Energy: 25, Health: 100},
+			input:    ReactiveInput{Fatigue: 30, Energy: 25, Health: 100, PhysicalAvailable: true},
 			dec:      ReactiveDecision{Reaction: ReactionContinue, Reason: "继续行动"},
 			wantKind: ReactionReplan,
 			wantSub:  "物理状态告警自动升级",
 		},
 		{
 			name:     "health alert upgrades observe to replan",
-			input:    ReactiveInput{Fatigue: 30, Energy: 70, Health: 40},
+			input:    ReactiveInput{Fatigue: 30, Energy: 70, Health: 40, PhysicalAvailable: true},
 			dec:      ReactiveDecision{Reaction: ReactionObserve, Reason: "状态尚可"},
 			wantKind: ReactionReplan,
 			wantSub:  "物理状态告警自动升级",
 		},
 		{
 			name:     "no alert preserves observe",
-			input:    ReactiveInput{Fatigue: 50, Energy: 70, Health: 100},
+			input:    ReactiveInput{Fatigue: 50, Energy: 70, Health: 100, PhysicalAvailable: true},
 			dec:      ReactiveDecision{Reaction: ReactionObserve, Reason: "状态尚可"},
 			wantKind: ReactionObserve,
 		},
 		{
 			name:     "no alert preserves continue",
-			input:    ReactiveInput{Fatigue: 50, Energy: 70, Health: 100},
+			input:    ReactiveInput{Fatigue: 50, Energy: 70, Health: 100, PhysicalAvailable: true},
 			dec:      ReactiveDecision{Reaction: ReactionContinue, Reason: "继续"},
 			wantKind: ReactionContinue,
 		},
 		{
 			name:     "replan preserved even under alert",
-			input:    ReactiveInput{Fatigue: 82, Energy: 70, Health: 100},
+			input:    ReactiveInput{Fatigue: 82, Energy: 70, Health: 100, PhysicalAvailable: true},
 			dec:      ReactiveDecision{Reaction: ReactionReplan, Reason: "整体重新规划"},
 			wantKind: ReactionReplan,
 		},
 		{
 			name:     "boundary: fatigue exactly at threshold not upgraded",
-			input:    ReactiveInput{Fatigue: 80, Energy: 70, Health: 100},
+			input:    ReactiveInput{Fatigue: 80, Energy: 70, Health: 100, PhysicalAvailable: true},
 			dec:      ReactiveDecision{Reaction: ReactionObserve, Reason: "ok"},
+			wantKind: ReactionObserve,
+		},
+		{
+			name:     "physical unavailable skips upgrade even if values alert",
+			input:    ReactiveInput{Fatigue: 82, Energy: 25, Health: 40, PhysicalAvailable: false},
+			dec:      ReactiveDecision{Reaction: ReactionObserve, Reason: "状态尚可"},
 			wantKind: ReactionObserve,
 		},
 	}

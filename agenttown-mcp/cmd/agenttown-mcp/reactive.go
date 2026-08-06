@@ -70,6 +70,7 @@ type ReactiveInput struct {
 	Energy        float64
 	Fatigue       float64
 	Health        float64
+	PhysicalAvailable bool // 物理状态是否可用（UE 未实现时 state_report 全 0，置 false 跳过物理段注入与告警升级）
 	CurrentAction string // 当前在途 action 的可读描述（如 "WorkAtWorkbench(target_object_id=workbench_01)"），空=无在途
 	ElapsedSec    int    // 当前 action 已执行秒数
 	ActionSrc     string // 在途 action 来源：tactical / mcp_tool / 空
@@ -85,6 +86,9 @@ type ReactiveInput struct {
 // 反应层应服务于任意 agent，而非特定 NPC。
 // agentRole 由调用方从 kb 注入（buildAgentRoleContext），空串时该段降级为
 // "（无角色信息）"——保留段落占位让 LLM 知道该字段存在但当前不可用。
+// physicalLine 由调用方注入：UE 未实现物理状态时为空串，prompt 不含物理段；
+// 非空时形如"物理：体力=X/100, 疲劳=Y/100, 健康=Z/100"。
+// physicalRuleLine 由调用方注入：物理可用时为物理告警判断要点，空串时跳过。
 const reactivePromptTemplate = `你是 NPC %s 的反应决策模块。当前情况需要你判断是否打断当前行动进行重规划。
 
 【你的角色】
@@ -93,8 +97,7 @@ const reactivePromptTemplate = `你是 NPC %s 的反应决策模块。当前情�
 【当前状态】
 游戏时间：%s
 位置：%s
-物理：体力=%.0f/100, 疲劳=%.0f/100, 健康=%.0f/100
-
+%s
 【在途动作】
 %s
 来源：%s（战术层规划的动作为深思熟虑的结果，非必要不打断）
@@ -114,8 +117,7 @@ const reactivePromptTemplate = `你是 NPC %s 的反应决策模块。当前情�
 
 判断要点：
 - 战术层规划的动作通常是合理的，除非有明确理由，否则 continue
-- 物理状态告警时（体力<40、疲劳>80、健康<50）原则上需要输出 replan 让 NPC 休息/充电、不可输出 continue/observe
-- replan 是"重大"决策：当你认为整个 action 队列都应作废、重新规划时使用。
+%s- replan 是"重大"决策：当你认为整个 action 队列都应作废、重新规划时使用。
 
 请输出 JSON，格式严格如下，不要输出 JSON 以外的任何内容：
 {"reaction": "continue|observe|replan", "reason": "简短理由"}
@@ -156,16 +158,25 @@ func buildReactivePrompt(in ReactiveInput) string {
 	if agentRole == "" {
 		agentRole = "（无角色信息）"
 	}
+	// 物理状态段：UE 未实现时 PhysicalAvailable=false，prompt 不含物理段，
+	// 也不给"物理告警时 replan"的判断要点（避免 LLM 看到空物理段误判）。
+	physicalLine := ""
+	physicalRuleLine := ""
+	if in.PhysicalAvailable {
+		physicalLine = fmt.Sprintf("物理：体力=%.0f/100, 疲劳=%.0f/100, 健康=%.0f/100\n", in.Energy, in.Fatigue, in.Health)
+		physicalRuleLine = "- 物理状态告警时（体力<40、疲劳>80、健康<50）原则上需要输出 replan 让 NPC 休息/充电、不可输出 continue/observe\n"
+	}
 	return fmt.Sprintf(reactivePromptTemplate,
 		agentName,
 		agentRole,
 		in.TimeOfDay, in.Zone,
-		in.Energy, in.Fatigue, in.Health,
+		physicalLine,
 		currentAction,
 		actionSrc,
 		slot,
 		plan,
 		detail,
+		physicalRuleLine,
 	)
 }
 
@@ -240,7 +251,9 @@ func shouldTriggerReactive(
 		return TriggerNewObject, fmt.Sprintf("new objects: %s", strings.Join(newObjs, ","))
 	}
 	// 3. 物理状态突破警戒带（从正常跨入警戒带的那一刻）
-	if prevPhysical != nil && curPhysical != nil {
+	//    UE 未实现物理状态时 prev/cur 全 0，IsZero 守卫跳过避免误触发。
+	if prevPhysical != nil && curPhysical != nil &&
+		!prevPhysical.IsZero() && !curPhysical.IsZero() {
 		if !belowThreshold(prevPhysical.Energy, energyAlertThreshold) && belowThreshold(curPhysical.Energy, energyAlertThreshold) {
 			return TriggerPhysicalAlert, fmt.Sprintf("energy %.0f→%.0f 跌破警戒带 %.0f", prevPhysical.Energy, curPhysical.Energy, energyAlertThreshold)
 		}
@@ -345,6 +358,10 @@ const replanDedupeGameMinutes = 60
 // periodic/zone_change 触发时物理状态已告警但 LLM 忽视的情况。
 func upgradeIfPhysicalAlert(input ReactiveInput, dec ReactiveDecision) ReactiveDecision {
 	if dec.Reaction != ReactionContinue && dec.Reaction != ReactionObserve {
+		return dec
+	}
+	// UE 未实现物理状态时 PhysicalAvailable=false，跳过升级避免误判全 0 为告警。
+	if !input.PhysicalAvailable {
 		return dec
 	}
 	alert := ""
