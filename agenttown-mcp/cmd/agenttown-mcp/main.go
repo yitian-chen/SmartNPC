@@ -1376,10 +1376,10 @@ func main() {
 		case protocol.TypeError:
 			var ep protocol.ErrorPayload
 			if err := json.Unmarshal(payload, &ep); err != nil {
-				logger.Warn("error from mock ue (payload parse failed)",
+				logger.Warn("error from ue (payload parse failed)",
 					"agent_id", agentID, "raw", string(payload), "err", err)
 			} else {
-				logger.Warn("error from mock ue",
+				logger.Warn("error from ue",
 					"agent_id", agentID,
 					"error_code", ep.ErrorCode, "message", ep.Message,
 					"action_id", ep.ActionID)
@@ -1732,7 +1732,7 @@ func handleDebugAction(ctx context.Context, logger *slog.Logger, ws *wsserver.Se
 	if req.Cmd == "stop" || req.Cmd == "Stop" {
 		if !ws.IsConnected() {
 			w.WriteHeader(http.StatusServiceUnavailable)
-			_ = json.NewEncoder(w).Encode(debugActionResponse{Error: "no mock ue connected"})
+			_ = json.NewEncoder(w).Encode(debugActionResponse{Error: "no ue connected"})
 			return
 		}
 		if err := ws.SendStopAction(req.AgentID, ""); err != nil {
@@ -1756,7 +1756,7 @@ func handleDebugAction(ctx context.Context, logger *slog.Logger, ws *wsserver.Se
 
 	if !ws.IsConnected() {
 		w.WriteHeader(http.StatusServiceUnavailable)
-		_ = json.NewEncoder(w).Encode(debugActionResponse{Error: "no mock ue connected"})
+		_ = json.NewEncoder(w).Encode(debugActionResponse{Error: "no ue connected"})
 		return
 	}
 
@@ -1914,7 +1914,7 @@ func handleDebugSchedule(ctx context.Context, logger *slog.Logger, ws *wsserver.
 
 	if !ws.IsConnected() {
 		w.WriteHeader(http.StatusServiceUnavailable)
-		_ = json.NewEncoder(w).Encode(debugScheduleResponse{Error: "no mock ue connected"})
+		_ = json.NewEncoder(w).Encode(debugScheduleResponse{Error: "no ue connected"})
 		return
 	}
 

@@ -87,10 +87,10 @@ type Server struct {
 	// 诊断：若是 0，说明 UE 从未发心跳；若是 N>0 后停发，说明中途断流。
 	heartbeatsReceived int64
 
-	mu      sync.RWMutex
-	conn    *websocket.Conn
-	lastHeartbeatAt time.Time // 最近收到 UE 心跳的时间（mu 保护），用于 15s 超时检测
-	pending map[string]*pendingCall // keyed by action_id (msg correlation)
+	mu              sync.RWMutex
+	conn            *websocket.Conn
+	lastHeartbeatAt time.Time               // 最近收到 UE 心跳的时间（mu 保护），用于 15s 超时检测
+	pending         map[string]*pendingCall // keyed by action_id (msg correlation)
 
 	writeMu sync.Mutex // 串行化 conn.Write，防止流式叙事推送与动作分发并发写坏帧
 
@@ -192,7 +192,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	s.conn = c
 	s.mu.Unlock()
 
-	s.log.Info("mock ue connected", "remote", r.RemoteAddr)
+	s.log.Info("ue connected", "remote", r.RemoteAddr)
 
 	// 初始化心跳时间戳，启出站心跳 ticker（约定 §5.2：双向每 5s + 15s 超时）
 	s.mu.Lock()
@@ -220,7 +220,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		}
 		s.mu.Unlock()
 		_ = c.CloseNow()
-		s.log.Info("mock ue disconnected", "remote", r.RemoteAddr)
+		s.log.Info("ue disconnected", "remote", r.RemoteAddr)
 	}()
 
 	s.readLoop(readCtx, c)
@@ -416,7 +416,7 @@ func (s *Server) writeFrame(frame []byte) error {
 	conn := s.conn
 	s.mu.RUnlock()
 	if conn == nil {
-		return errors.New("no mock ue connected")
+		return errors.New("no ue connected")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), defaultWriteWait)
 	defer cancel()
@@ -511,7 +511,7 @@ func (s *Server) Call(ctx context.Context, agentID, cmd string, params map[strin
 	conn := s.conn
 	s.mu.RUnlock()
 	if conn == nil {
-		return nil, errors.New("no mock ue connected")
+		return nil, errors.New("no ue connected")
 	}
 
 	actionID := "act_" + uuid.NewString()[:12]

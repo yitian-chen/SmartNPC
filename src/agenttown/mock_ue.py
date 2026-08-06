@@ -1520,7 +1520,7 @@ class MockUE:
 
         logger.info(f"=== Day {self.time.day} start ===")
         print(f"\n{'='*60}")
-        print(f"  Mock UE — Day {self.time.day} ({start_hour:02d}:00 - {end_hour:02d}:00)")
+        print(f"  UE — Day {self.time.day} ({start_hour:02d}:00 - {end_hour:02d}:00)")
         print(f"  NPC: {self.npc.name} ({self.npc.agent_id})")
         print(f"  MCP WS: {self.mcp_ws_url}")
         print(f"  Mode: {self.mode}")
