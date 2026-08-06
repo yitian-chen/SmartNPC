@@ -232,8 +232,8 @@ stop_all() {
     info "=== Step 0: Stop existing processes ==="
 
     # Mock UE（联调不应跑，但兜底杀）
-    info "Stopping Mock UE..."
-    pkill -f "run_day.py" 2>/dev/null && ok "  Mock UE stopped" || warn "  Mock UE not running"
+    info "Stopping UE..."
+    pkill -f "run_day.py" 2>/dev/null && ok "  UE stopped" || warn "  UE not running"
 
     # MCP（Windows exe）— 杀掉端口上所有监听者（含 WSL wslrelay 幽灵）
     info "Stopping existing MCP..."
@@ -416,12 +416,12 @@ print_summary() {
     if $IN_LINUX; then
         echo -e "    1. 确保防火墙放行 :$WS_PORT 端口："
         echo -e "       sudo ufw allow $WS_PORT/tcp  (或 firewalld: sudo firewall-cmd --add-port=$WS_PORT/tcp --permanent)"
-        echo -e "    2. 本脚本未启动 Mock UE，UE 同事自己连 WS 发感知即可"
+        echo -e "    2. 本脚本未启动 UE，UE 同事自己连 WS 发感知即可"
         echo -e "    3. 停止服务：bash start-dev.sh --stop 或 kill 占用端口的进程"
     else
         echo -e "    1. 确保 Windows 防火墙放行 :$WS_PORT 端口（管理员 PowerShell）："
         echo -e "       New-NetFirewallRule -DisplayName \"AgentTown WS\" -Direction Inbound -LocalPort $WS_PORT -Protocol TCP -Action Allow"
-        echo -e "    2. 本脚本未启动 Mock UE，UE 同事自己连 WS 发感知即可"
+        echo -e "    2. 本脚本未启动 UE，UE 同事自己连 WS 发感知即可"
         echo -e "    3. 停止服务：bash start-debug.sh --stop 或手动 taskkill"
     fi
     echo -e ""

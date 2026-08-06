@@ -412,7 +412,7 @@ async def push_world_kb(ws_url: str, kb_yaml_path: str | None):
     print("Next steps:")
     print("  1. Check MCP log for 'world_kb merged and persisted'")
     print("  2. GET http://localhost:8770/debug/kb to verify the new KB")
-    print("  3. Start Mock UE (must use same KB or skip its world_kb push)")
+    print("  3. Start UE (must use same KB or skip its world_kb push)")
 
 
 def main():

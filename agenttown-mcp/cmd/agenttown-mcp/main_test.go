@@ -899,8 +899,8 @@ func TestHandleDebugSchedule_UENotConnected(t *testing.T) {
 	}
 	var resp debugScheduleResponse
 	json.Unmarshal(rec.Body.Bytes(), &resp)
-	if !strings.Contains(resp.Error, "no mock ue") {
-		t.Errorf("error=%q, want contain 'no mock ue'", resp.Error)
+	if !strings.Contains(resp.Error, "no ue") {
+		t.Errorf("error=%q, want contain 'no ue'", resp.Error)
 	}
 }
 

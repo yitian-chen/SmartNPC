@@ -63,7 +63,7 @@ def _clear_mcp_logs(log_dir: str) -> None:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="AgentTown Mock UE — Run a game day")
+    parser = argparse.ArgumentParser(description="AgentTown UE — Run a game day")
     parser.add_argument("--mcp-ws", default="ws://localhost:9091/ws",
                         help="agenttown-mcp WebSocket URL")
     parser.add_argument("--mode", choices=("normal", "behavior", "quick-smoke"), default="normal",
@@ -79,7 +79,7 @@ def main():
     parser.add_argument("--interval", type=int, default=15,
                         help="Perception push interval (game-minutes)")
     parser.add_argument("--log-dir", default="logs",
-                        help="Directory for Mock UE day logs "
+                        help="Directory for UE day logs "
                              "(start.sh passes logs/YYYY-MM-DD)")
     parser.add_argument("--no-clear-log", action="store_true",
                         help="不清空 MCP 日志文件（WSL stable 场景用："
