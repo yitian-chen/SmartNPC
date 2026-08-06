@@ -64,9 +64,10 @@ if [ -f "$ENV_FILE" ]; then
         case "$key" in
             ''|\#*) continue ;;
         esac
-        # 只 export VENUS_ 前缀变量
+        # 只 export VENUS_ / AGENTTOWN_MCP_ 前缀变量
         case "$key" in
             VENUS_*) export "$key=$value" ;;
+            AGENTTOWN_MCP_*) export "$key=$value" ;;
         esac
     done < "$ENV_FILE"
 fi
@@ -350,9 +351,11 @@ start_mcp() {
     # --world-kb 用绝对路径，避免 cwd 不对找不到 assets/world_kb.yaml
     if $IN_LINUX; then
         # 纯 Linux：直接 nohup 启动 Linux 二进制，无需 .bat/cmd.exe
+        # --auto-plan 从 .env 的 AGENTTOWN_MCP_AUTO_PLAN 读取（默认 true）
         nohup "$MCP_EXE" --http ":$HTTP_PORT" --ws ":$WS_PORT" \
             --venus-api-key "$venus_key" \
             --world-kb "$PROJECT_DIR/assets/world_kb.yaml" \
+            --auto-plan "${AGENTTOWN_MCP_AUTO_PLAN:-true}" \
             --log-level debug >> "$MCP_LOG" 2>&1 &
         disown
     else
@@ -363,7 +366,7 @@ start_mcp() {
         cat > "$bat_file" << EOF
 @echo off
 pushd "$cwd_win"
-"$mcp_exe_win" --http ":$HTTP_PORT" --ws ":$WS_PORT" --venus-api-key "$venus_key" --world-kb "$world_kb_win" --log-level debug >> "$mcp_log_win" 2>&1
+"$mcp_exe_win" --http ":$HTTP_PORT" --ws ":$WS_PORT" --venus-api-key "$venus_key" --world-kb "$world_kb_win" --auto-plan "${AGENTTOWN_MCP_AUTO_PLAN:-true}" --log-level debug >> "$mcp_log_win" 2>&1
 EOF
         if $IN_WSL; then
             local bat_win
