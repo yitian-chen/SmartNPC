@@ -329,12 +329,14 @@ func buildTacticalExample(kb *worldkb.KB, goal string) string {
 		exZone = "<上方可前往区域的 id>"
 	}
 	// 按 category 选示例工具，避免 work_at_workbench 配 charging_station 的错配。
+	// 兼容新旧 KB schema：UE5 新 schema 用 "charging"/"work"，旧 schema 用
+	// "charging_station"/"workbench"。
 	switch obj.Category {
-	case "workbench":
+	case "workbench", "work":
 		return fmt.Sprintf(`{"inner_thought":"先去目标区域再开始作业"}
 {"action":"move_to_location","params":{"target":"%s"}}
 {"action":"work_at_workbench","params":{"target_object_id":"%s","duration_sec":3600}}`, exZone, exObj)
-	case "charging_station":
+	case "charging_station", "charging":
 		return fmt.Sprintf(`{"inner_thought":"先去目标区域补充能量"}
 {"action":"move_to_location","params":{"target":"%s"}}
 {"action":"charge_at_station","params":{"target_object_id":"%s"}}`, exZone, exObj)
@@ -369,9 +371,9 @@ func exampleForGoal(kb *worldkb.KB, goal string, zones []worldkb.ZoneInfo, objs 
 {"action":"patrol_zone","params":{"target_zone":"%s","duration_sec":1800}}`, exZone, exZone)
 	}
 
-	// 2. 充电/补能/休息/恢复/疲劳 → charge_at_station（找 charging_station object）
+	// 2. 充电/补能/休息/恢复/疲劳 → charge_at_station（找 charging object）
 	if containsAny(gl, "充电", "补能", "休息", "恢复", "疲劳", "charge", "rest") {
-		if obj := findObjectByCategory(objs, "charging_station"); obj != nil {
+		if obj := findObjectByCategory(objs, "charging_station", "charging"); obj != nil {
 			exZone := obj.ZoneID
 			if exZone == "" {
 				exZone = "<上方可前往区域的 id>"
@@ -384,7 +386,7 @@ func exampleForGoal(kb *worldkb.KB, goal string, zones []worldkb.ZoneInfo, objs 
 
 	// 3. 装配/工作/作业/打磨/加工 → work_at_workbench（找 workbench object）
 	if containsAny(gl, "装配", "工作", "作业", "打磨", "加工", "assemble", "craft") {
-		if obj := findObjectByCategory(objs, "workbench"); obj != nil {
+		if obj := findObjectByCategory(objs, "workbench", "work"); obj != nil {
 			exZone := obj.ZoneID
 			if exZone == "" {
 				exZone = "<上方可前往区域的 id>"
@@ -434,11 +436,20 @@ func containsAny(s string, subs ...string) bool {
 	return false
 }
 
-// findObjectByCategory 在 ObjectInfo 列表中查找首个指定 category 的对象。
-// 返回指针便于调用方判空；找不到返回 nil。
-func findObjectByCategory(objs []worldkb.ObjectInfo, category string) *worldkb.ObjectInfo {
+// findObjectByCategory 在 ObjectInfo 列表中查找首个匹配任一 category 别名的对象。
+// 支持多变参以兼容新旧 KB schema：UE5 新 schema 用 "charging"/"work"/"rest"，
+// 旧 schema 用 "charging_station"/"workbench"/"rest_bench"。返回指针便于调用方判空；
+// 找不到返回 nil。
+func findObjectByCategory(objs []worldkb.ObjectInfo, categories ...string) *worldkb.ObjectInfo {
+	if len(categories) == 0 {
+		return nil
+	}
+	wanted := make(map[string]struct{}, len(categories))
+	for _, c := range categories {
+		wanted[c] = struct{}{}
+	}
 	for i := range objs {
-		if objs[i].Category == category {
+		if _, ok := wanted[objs[i].Category]; ok {
 			o := objs[i] // 拷贝避免 range 复用
 			return &o
 		}
