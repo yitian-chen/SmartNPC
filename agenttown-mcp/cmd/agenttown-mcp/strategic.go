@@ -101,7 +101,7 @@ func buildDefaultDailyPlan(kb *worldkb.KB) string {
 // 元素时（如最小化测试 KB 或换地图运行），LLM 会被诱导在战略计划里
 // 编造这些 KB 外概念。改为中性表述：只描述抽象活动模式（装配/休息/
 // 充电），不点名任何人物或具体设施，由 LLM 根据 KB 自行具象化。
-const yesterdaySummaryForFirstDay = "昨天按计划完成了车间装配，下午体力下降明显，晚上进入低功耗休息状态，关节略有磨损"
+const yesterdaySummaryForFirstDay = "昨天按计划完成了车间装配。"
 
 // generateDailyPlan 调 LLM 生成当日计划，返回格式化字符串（每行 "时段: 目标"）。
 // 任一步失败均回退到 buildDefaultDailyPlan(kb)，保证战术层有目标可分解、
