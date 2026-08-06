@@ -655,5 +655,96 @@ class PhysicalEvolutionTests(unittest.TestCase):
         self.assertIsNone(ue.npc.busy_action_id)
 
 
+class CompositeAutoMoveTests(unittest.IsolatedAsyncioTestCase):
+    """Tests for composite-action auto-move to target object/zone.
+
+    Regression guard: real UE composites include a path-find phase that
+    brings the NPC to the target before the long action begins. Mock UE
+    simulates this by teleporting. Before the fix, composites executed
+    in wrong zones (e.g., WorkAtWorkbench while in charging_station) —
+    UE accepted the action and set current_animation=work, but the NPC
+    never moved, producing semantic violations visible in the 2026-08-06
+    sim log.
+    """
+
+    def make_ue(self):
+        return MockUE(log_dir="logs")
+
+    async def _run_composite(self, ue, cmd, params, action_id="act_test"):
+        """Drive a composite action through _handle_envelope and return."""
+        await ue._handle_envelope({
+            "type": "action_command",
+            "agent_id": ue.npc.agent_id,
+            "seq": 1,
+            "payload": {"action_id": action_id, "cmd": cmd, "params": params},
+        })
+
+    async def test_work_at_workbench_auto_moves_to_workbench(self):
+        ue = self.make_ue()
+        # Start NPC in charging_station (not main_workshop where workbench_01 lives).
+        ue.npc.position = [21500, 8500, 100]
+        ue.npc.current_zone = "charging_station"
+        ue.npc.current_location = None
+
+        await self._run_composite(ue, CMD_WORK_AT_WORKBENCH,
+                                  {"target_object_id": "workbench_01", "duration_sec": 600})
+
+        # NPC should have teleported to workbench_01's interaction_point.
+        self.assertEqual(ue.npc.current_zone, "main_workshop",
+                         "WorkAtWorkbench must auto-move NPC to main_workshop")
+        self.assertEqual(ue.npc.current_location, "workbench_01",
+                         "WorkAtWorkbench must auto-move NPC to workbench_01")
+        # Position matches workbench_01.interaction_point from world_kb.yaml.
+        self.assertAlmostEqual(ue.npc.position[0], 19500, delta=1)
+        self.assertAlmostEqual(ue.npc.position[1], 10500, delta=1)
+
+    async def test_patrol_zone_auto_moves_to_zone(self):
+        ue = self.make_ue()
+        # Start NPC in main_workshop; PatrolZone targets central_plaza.
+        ue.npc.position = [20000, 10000, 100]
+        ue.npc.current_zone = "main_workshop"
+
+        await self._run_composite(ue, CMD_PATROL_ZONE,
+                                  {"target_zone": "central_plaza", "duration_sec": 1800})
+
+        self.assertEqual(ue.npc.current_zone, "central_plaza",
+                         "PatrolZone must auto-move NPC to target zone")
+        # Position matches central_plaza.entry_point from world_kb.yaml.
+        self.assertAlmostEqual(ue.npc.position[0], 10000, delta=1)
+        self.assertAlmostEqual(ue.npc.position[1], 10000, delta=1)
+
+    async def test_charge_at_station_auto_moves_to_station(self):
+        ue = self.make_ue()
+        # Start NPC in main_workshop; ChargeAtStation targets charging_station_01.
+        ue.npc.position = [20000, 10000, 100]
+        ue.npc.current_zone = "main_workshop"
+
+        await self._run_composite(ue, CMD_CHARGE_AT_STATION,
+                                  {"target_object_id": "charging_station_01",
+                                   "duration_sec": 1800})
+
+        self.assertEqual(ue.npc.current_zone, "charging_station",
+                         "ChargeAtStation must auto-move NPC to charging_station")
+        self.assertEqual(ue.npc.current_location, "charging_station_01",
+                         "ChargeAtStation must auto-move NPC to charging_station_01")
+        self.assertAlmostEqual(ue.npc.position[0], 21500, delta=1)
+        self.assertAlmostEqual(ue.npc.position[1], 8500, delta=1)
+
+    async def test_auto_move_skipped_when_already_at_target(self):
+        ue = self.make_ue()
+        # Place NPC exactly at workbench_01's interaction_point.
+        ue.npc.position = [19500, 10500, 100]
+        ue.npc.current_zone = "main_workshop"
+        ue.npc.current_location = "workbench_01"
+        pos_before = list(ue.npc.position)
+
+        await self._run_composite(ue, CMD_WORK_AT_WORKBENCH,
+                                  {"target_object_id": "workbench_01", "duration_sec": 600})
+
+        self.assertEqual(ue.npc.position, pos_before,
+                         "Auto-move must be skipped when NPC already at target object")
+        self.assertEqual(ue.npc.current_zone, "main_workshop")
+
+
 if __name__ == "__main__":
     unittest.main()
