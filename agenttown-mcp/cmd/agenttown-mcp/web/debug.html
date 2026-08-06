@@ -71,7 +71,15 @@
     max-width: 1400px;
     margin: 0 auto;
   }
-  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+  .panel-request   { grid-row: 1 / span 2; grid-column: 1; }
+  .panel-schedule  { grid-row: 1; grid-column: 2; }
+  .panel-response  { grid-row: 2; grid-column: 2; }
+  .panel-ue-errors { grid-column: 1 / -1; }
+  .panel-logs      { grid-column: 1 / -1; }
+  @media (max-width: 900px) {
+    main { grid-template-columns: 1fr; }
+    .panel-request, .panel-schedule, .panel-response { grid-row: auto; grid-column: 1; }
+  }
   .panel {
     background: var(--panel);
     border: 1px solid var(--border);
@@ -87,6 +95,22 @@
     letter-spacing: 0.5px;
   }
   .field { margin-bottom: 14px; }
+  .plan-item {
+    display: flex;
+    gap: 12px;
+    padding: 8px 12px;
+    border-left: 3px solid transparent;
+    border-radius: 4px;
+    align-items: baseline;
+  }
+  .plan-item.current {
+    border-left-color: var(--accent);
+    background: rgba(255,255,255,0.05);
+  }
+  .plan-item.past { color: var(--text-muted); opacity: 0.6; }
+  .plan-time { font-family: monospace; color: var(--text-muted); min-width: 130px; font-size: 13px; }
+  .plan-item.current .plan-time { color: var(--accent); font-weight: 600; }
+  .plan-goal { flex: 1; word-break: break-word; }
   .field label {
     display: block;
     font-size: 13px;
@@ -361,7 +385,7 @@
 
 <main>
   <!-- 左侧：表单 -->
-  <section class="panel">
+  <section class="panel panel-request">
     <h2>请求</h2>
 
     <div class="tabs">
@@ -444,8 +468,22 @@
     </div><!-- /tab-schedule -->
   </section>
 
-  <!-- 右侧：响应 + 历史 -->
-  <section class="panel">
+  <!-- 右侧上：当日 schedule -->
+  <section class="panel panel-schedule">
+    <h2>当日 schedule <span id="plan-game-time" class="count-badge" style="display:none;background:var(--accent);">--:--</span></h2>
+    <div class="field" style="margin-bottom:10px;">
+      <label for="plan-agent">agent</label>
+      <select id="plan-agent" onchange="onPlanAgentChange()" style="width:auto;min-width:120px;">
+        <option value="H-01">H-01</option>
+      </select>
+    </div>
+    <div id="plan-list">
+      <div class="empty-state">等待战略层生成当日计划（06:00 触发）</div>
+    </div>
+  </section>
+
+  <!-- 右侧下：响应 + 历史 -->
+  <section class="panel panel-response">
     <h2>响应</h2>
     <div id="response-area">
       <div class="empty-state">尚未发送请求</div>
@@ -458,7 +496,7 @@
   </section>
 
   <!-- 全宽：UE 上报错误 -->
-  <section class="panel" style="grid-column: 1 / -1;">
+  <section class="panel panel-ue-errors" style="grid-column: 1 / -1;">
     <h2>UE 上报错误 <span id="ue-error-count" class="count-badge" style="display:none;">0</span></h2>
     <div class="hint" style="margin-bottom:10px;">
       来自 UE 的 error 消息
@@ -469,7 +507,7 @@
   </section>
 
   <!-- 全宽：MCP 日志 -->
-  <section class="panel" style="grid-column: 1 / -1;">
+  <section class="panel panel-logs" style="grid-column: 1 / -1;">
     <h2>MCP 日志 <span id="log-count" class="count-badge" style="display:none; background: var(--accent);">0</span></h2>
     <div class="log-filter-bar">
       <button class="log-filter-btn active" data-level="ALL" onclick="setLogFilter('ALL')">全部</button>
@@ -493,17 +531,21 @@ let capVersion = ''; // capability 版本号（cmd 列表 hash），用于变化
 let history = []; // 最近 20 条
 let logEntries = []; // MCP 日志条目（来自 /debug/logs）
 let logFilter = 'ALL'; // 当前日志筛选级别
+let planData = { items: [], current_idx: -1, auto_plan: true, game_time: '' };
+let planAgentID = 'H-01';
 
 // ─── 初始化 ──────────────────────────────────────────────
 async function init() {
-  await Promise.all([loadStatus(), loadKB(), loadCap(), loadUEErrors(), loadLogs()]);
+  await Promise.all([loadStatus(), loadKB(), loadCap(), loadUEErrors(), loadLogs(), loadPlan()]);
   onCmdChange();
   updateSchedCurlPreview();
-  // 定时刷新状态徽章 + capability + UE 错误 + MCP 日志（每 5s）
+  rebuildPlanAgentDropdown();
+  // 定时刷新状态徽章 + capability + UE 错误 + MCP 日志 + schedule（每 5s）
   setInterval(loadStatus, 5000);
   setInterval(loadCap, 5000);
   setInterval(loadUEErrors, 5000);
   setInterval(loadLogs, 5000);
+  setInterval(loadPlan, 5000);
 }
 
 async function loadStatus() {
@@ -545,6 +587,7 @@ async function loadCap() {
       capVersion = newVersion;
       capData = j || { agents: {} };
       rebuildCmdDropdown();
+      rebuildPlanAgentDropdown();
     }
   } catch (e) {
     console.warn('loadCap failed:', e);
@@ -591,6 +634,74 @@ function renderUEErrors(entries) {
       </div>
       <div class="ue-error-msg">${escapeHtml(e.message || '')}</div>
       ${ctx}
+    </div>`;
+  }).join('');
+}
+
+// ─── 当日 schedule 加载和渲染 ───────────────────────────
+async function loadPlan() {
+  try {
+    const r = await fetch('/debug/plan?agent_id=' + encodeURIComponent(planAgentID));
+    if (!r.ok) return;
+    planData = await r.json();
+    renderPlan();
+  } catch (e) {
+    console.warn('loadPlan failed:', e);
+  }
+}
+
+function rebuildPlanAgentDropdown() {
+  const sel = document.getElementById('plan-agent');
+  if (!sel) return;
+  // 复用 /debug/cap 的 agents map（过滤 "system" 全局默认），为多 NPC 扩展预留
+  const agents = Object.keys(capData.agents || {}).filter(k => k !== 'system').sort();
+  if (!agents.length) agents.push('H-01');
+  const cur = agents.includes(planAgentID) ? planAgentID : agents[0];
+  sel.innerHTML = agents.map(a => `<option value="${a}" ${a === cur ? 'selected' : ''}>${a}</option>`).join('');
+  if (cur !== planAgentID) {
+    planAgentID = cur;
+    loadPlan();
+  }
+}
+
+function onPlanAgentChange() {
+  const sel = document.getElementById('plan-agent');
+  if (!sel) return;
+  planAgentID = sel.value;
+  loadPlan();
+}
+
+function renderPlan() {
+  const list = document.getElementById('plan-list');
+  const timeBadge = document.getElementById('plan-game-time');
+  if (!list) return;
+
+  // 游戏时间徽章
+  if (timeBadge) {
+    if (planData.game_time) {
+      timeBadge.textContent = planData.game_time;
+      timeBadge.style.display = '';
+    } else {
+      timeBadge.style.display = 'none';
+    }
+  }
+
+  if (!planData.auto_plan) {
+    list.innerHTML = '<div class="empty-state">手动模式（--auto-plan=false），未生成每日计划</div>';
+    return;
+  }
+  if (!planData.items || !planData.items.length) {
+    list.innerHTML = '<div class="empty-state">等待战略层生成当日计划（06:00 触发）</div>';
+    return;
+  }
+  const curIdx = planData.current_idx;
+  list.innerHTML = planData.items.map((it, i) => {
+    const isCurrent = i === curIdx;
+    const isPast = curIdx >= 0 && i < curIdx;
+    const cls = isCurrent ? 'plan-item current' : (isPast ? 'plan-item past' : 'plan-item');
+    return `<div class="${cls}">
+      <span class="plan-time">${escapeHtml(it.time)}</span>
+      <span class="plan-goal">${escapeHtml(it.goal)}</span>
     </div>`;
   }).join('');
 }

@@ -19,6 +19,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"strings"
 
 	"github.com/AgentTown/agenttown-mcp/adapters/agenttown/tools"
 	"github.com/AgentTown/agenttown-mcp/internal/log"
@@ -200,5 +201,74 @@ func handleDebugLogs(w http.ResponseWriter, r *http.Request, logger *slog.Logger
 	}
 	if err := json.NewEncoder(w).Encode(entries); err != nil {
 		logger.Warn("[debug/logs] encode failed", "err", err)
+	}
+}
+
+// debugPlanResponse 是 /debug/plan 的响应体，返回当日 dailyPlan 的结构化快照
+// 供 debug 控制台右侧 schedule 面板展示。
+type debugPlanResponse struct {
+	OK          bool            `json:"ok"`
+	AgentID     string          `json:"agent_id"`
+	Items       []dailyPlanItem `json:"items"`        // 7 时段 goal（解析自 dailyPlan 字符串）
+	CurrentSlot string          `json:"current_slot"` // "HH:MM-HH:MM" 或 "__debug__..." 或 ""
+	CurrentIdx  int             `json:"current_idx"`  // 当前时段在 items 中的下标，-1=未命中或注入模式
+	GameTime    string          `json:"game_time"`    // "HH:MM"（来自最新 perception）
+	AutoPlan    bool            `json:"auto_plan"`    // 是否处于自动规划模式
+}
+
+// handleDebugPlan 返回指定 agent 当日 dailyPlan 快照，供 debug 控制台 schedule 面板展示。
+// 请求参数：?agent_id=H-01（默认 H-01）。
+//
+// 响应的 CurrentIdx 在以下情况返回 -1：dailyPlan 为空、当前时段未命中任何 item、
+// 或 currentSlot 为 "__debug__" 前缀（/debug/schedule 注入的临时 slot，不在 dailyPlan 内）。
+func handleDebugPlan(w http.ResponseWriter, r *http.Request, lookupAgent func(string) *agentContext, logger *slog.Logger) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+
+	agentID := r.URL.Query().Get("agent_id")
+	if agentID == "" {
+		agentID = "H-01"
+	}
+
+	ac := lookupAgent(agentID)
+	if ac == nil {
+		w.WriteHeader(http.StatusNotFound)
+		_ = json.NewEncoder(w).Encode(debugPlanResponse{
+			OK:      false,
+			AgentID: agentID,
+			Items:   []dailyPlanItem{},
+			CurrentIdx: -1,
+			AutoPlan: autoPlanEnabled,
+		})
+		return
+	}
+
+	plan, slot, idx := ac.snapshotSchedule()
+	items := parseFormattedPlan(plan)
+	gameTime := ac.latestTimeOfDay()
+
+	// /debug/schedule 注入的 slot 带 "__debug__" 前缀，不属于 dailyPlan，
+	// 此时 currentPlanIndex 指向的是注入前的旧值，不能用来高亮 items。
+	if strings.HasPrefix(slot, "__debug__") {
+		idx = -1
+	}
+	if idx < 0 {
+		idx = -1
+	}
+
+	resp := debugPlanResponse{
+		OK:          true,
+		AgentID:     agentID,
+		Items:       items,
+		CurrentSlot: slot,
+		CurrentIdx:  idx,
+		GameTime:    gameTime,
+		AutoPlan:    autoPlanEnabled,
+	}
+	if resp.Items == nil {
+		resp.Items = []dailyPlanItem{}
+	}
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		logger.Warn("[debug/plan] encode failed", "err", err)
 	}
 }
