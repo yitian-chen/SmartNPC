@@ -491,7 +491,8 @@ func (g *guardedExecutor) SendAction(ctx context.Context, agentID string, decisi
 		ac.recordActionStarted(ack.ActionID, cmd, params, decisionEpoch, sourceTool)
 		// 长复合动作不设超时：它们持续执行直到下一 schedule 时段切换
 		// （advanceSlotIfNeeded 主动 stop + 重规划），自己不会超时。
-		if !protocol.IsCompositeCmd(cmd) {
+		// 用动态判断兜底 UE5 新推送的复合 cmd（如 WorkShift/SelfMaintenance）。
+		if !isCompositeCmdDynamic(cmd, g.caps) {
 			ac.armActionTimeout(ack.ActionID, ack.EstimatedDurationSec, g.ws, agentID, g.lookup)
 		}
 	}
@@ -666,6 +667,30 @@ func (a *agentContext) latestZoneLocked() string {
 // advanceSlotIfNeeded 打断，短动作队列空时由 tacticalRefill 重新分解
 // （内部注入"未安排长动作"hint），不再发 idle wait。
 
+// isCompositeCmdDynamic 判断 cmd 是否为长复合动作（不设 action_completed 超时，
+// 持续执行到下一 schedule 时段切换由 advanceSlotIfNeeded 主动打断）。
+//
+// 先查 protocol.IsCompositeCmd 硬编码的 6 个内置复合 cmd（向后兼容），
+// 再查 capability_registry 的 Kind 字段兜底——UE5 通过 capability_registry
+// 新推送的复合 cmd（如 WorkShift/SelfMaintenance/RestAtResidence/SurfInternet）
+// 不在硬编码列表里，但 Kind=="composite"，此处兜底识别。
+//
+// registry == nil 时退化为仅查硬编码列表（向后兼容旧测试）。
+func isCompositeCmdDynamic(cmd string, registry *CapabilityRegistry) bool {
+	if protocol.IsCompositeCmd(cmd) {
+		return true
+	}
+	if registry == nil {
+		return false
+	}
+	for _, act := range registry.EffectiveActions("") {
+		if act.Cmd == cmd && act.Kind == "composite" {
+			return true
+		}
+	}
+	return false
+}
+
 // popAndSendQueueAction 从队列 pop 一个 action，映射后直发 ws.SendAction。
 // 不经过 MCP 工具 / guardedExecutor（无活跃 decision_epoch）。
 // 手动 recordActionStarted + armActionTimeout，source=tactical。
@@ -721,7 +746,8 @@ func (a *agentContext) popAndSendQueueAction(ctx context.Context, agentID string
 		a.recordActionStarted(ack.ActionID, cmd, params, 0 /*无 decision_epoch*/, sourceTactical)
 		// 长复合动作不设超时：持续执行到下一 schedule 时段切换由
 		// advanceSlotIfNeeded 主动打断，自己不会超时。
-		if !protocol.IsCompositeCmd(cmd) {
+		// 用动态判断兜底 UE5 新推送的复合 cmd（如 WorkShift/SelfMaintenance）。
+		if !isCompositeCmdDynamic(cmd, capabilityRegistryRef) {
 			// lookup 返回 a 自身——超时回滚只需清当前 agent 状态
 			a.armActionTimeout(ack.ActionID, ack.EstimatedDurationSec, ws, agentID, func(string) *agentContext { return a })
 		}
@@ -858,8 +884,11 @@ func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
 		}
 		// 同时段重分解（队列已空在重分解）：注入"未安排长动作"hint 引导 LLM
 		// 这次把长复合动作放队列末尾，让 NPC 持续工作到时段切换。
-		if a.redecomposeCount >= 1 && a.replanHint == "" {
-			a.replanHint = "上次队列提前耗尽，未安排长动作收尾——本次请确保最后一个 action 是长复合动作（如 work_at_workbench/charge_at_station/patrol_zone/repair_target/chat_with/work_at_workshop），让 NPC 持续工作到下一时段"
+		// 注意：进入此分支即说明上次队列已提前耗尽（无论 redecomposeCount 是 0
+		// 还是更大），都应注入 hint——redecomposeCount==0 表示这是本时段第一次
+		// 重分解（上次分解的队列已空），同样需要 hint 引导。
+		if a.replanHint == "" {
+			a.replanHint = "上次队列提前耗尽，未安排长动作收尾——本次请确保最后一个 action 是标记为 [复合] 的长复合动作（见上方可用工具列表），让 NPC 持续工作到下一时段"
 		}
 	}
 	zone := a.latestZoneLocked()

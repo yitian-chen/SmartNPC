@@ -269,3 +269,44 @@ func TestCapabilityRegistry_NormalizesAgentID(t *testing.T) {
 		t.Errorf("HasCmd(H-01, MoveTo) = false; want true (agentID ' system ' should normalize to global default)")
 	}
 }
+
+// TestIsCompositeCmdDynamic 验证动态复合 cmd 判断：
+//   - 硬编码的 6 个内置复合 cmd 始终识别（向后兼容）
+//   - registry 兜底识别 UE5 新推送的复合 cmd（如 WorkShift）
+//   - registry==nil 退化为仅查硬编码列表
+//   - atomic cmd 不被误判为复合
+func TestIsCompositeCmdDynamic(t *testing.T) {
+	// 内置硬编码复合 cmd（无需 registry）
+	if !isCompositeCmdDynamic(protocol.CmdWorkAtWorkbench, nil) {
+		t.Errorf("isCompositeCmdDynamic(WorkAtWorkbench, nil) = false; want true (builtin composite)")
+	}
+	if !isCompositeCmdDynamic(protocol.CmdChargeAtStation, nil) {
+		t.Errorf("isCompositeCmdDynamic(ChargeAtStation, nil) = false; want true (builtin composite)")
+	}
+	// 原子 cmd 不应是复合
+	if isCompositeCmdDynamic(protocol.CmdMoveToLocation, nil) {
+		t.Errorf("isCompositeCmdDynamic(MoveToLocation, nil) = true; want false (atomic)")
+	}
+
+	// registry 兜底：UE5 新推送的复合 cmd（不在硬编码列表里）
+	r := NewCapabilityRegistry(nil)
+	r.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
+		{Cmd: "WorkShift", Kind: "composite"},
+		{Cmd: "SelfMaintenance", Kind: "composite"},
+		{Cmd: "MoveTo", Kind: "atomic"},
+	})
+	if !isCompositeCmdDynamic("WorkShift", r) {
+		t.Errorf("isCompositeCmdDynamic(WorkShift, registry) = false; want true (registry kind=composite)")
+	}
+	if !isCompositeCmdDynamic("SelfMaintenance", r) {
+		t.Errorf("isCompositeCmdDynamic(SelfMaintenance, registry) = false; want true (registry kind=composite)")
+	}
+	// registry 里标记为 atomic 的 cmd 不应是复合
+	if isCompositeCmdDynamic("MoveTo", r) {
+		t.Errorf("isCompositeCmdDynamic(MoveTo, registry) = true; want false (registry kind=atomic)")
+	}
+	// 不在 registry 也不在硬编码列表的 cmd
+	if isCompositeCmdDynamic("UnknownCmd", r) {
+		t.Errorf("isCompositeCmdDynamic(UnknownCmd, registry) = true; want false")
+	}
+}
