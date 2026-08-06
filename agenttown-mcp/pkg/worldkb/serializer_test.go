@@ -8,7 +8,7 @@ import (
 )
 
 func TestWriteYAML_RoundTrip(t *testing.T) {
-	kb, _, err := Merge(minimalGenerated(), minimalAuthored())
+	kb, _, err := MergeMaps(minimalGenerated(), minimalAuthored())
 	if err != nil {
 		t.Fatalf("merge: %v", err)
 	}
@@ -44,11 +44,11 @@ func TestWriteYAML_RoundTrip(t *testing.T) {
 
 func TestWriteYAML_Deterministic(t *testing.T) {
 	// Two merges of identical input must produce byte-identical output.
-	kb1, _, err := Merge(minimalGenerated(), minimalAuthored())
+	kb1, _, err := MergeMaps(minimalGenerated(), minimalAuthored())
 	if err != nil {
 		t.Fatalf("merge1: %v", err)
 	}
-	kb2, _, err := Merge(minimalGenerated(), minimalAuthored())
+	kb2, _, err := MergeMaps(minimalGenerated(), minimalAuthored())
 	if err != nil {
 		t.Fatalf("merge2: %v", err)
 	}
@@ -83,7 +83,7 @@ func TestWriteYAML_AtomicReplace(t *testing.T) {
 		t.Fatalf("prefill: %v", err)
 	}
 
-	kb, _, err := Merge(minimalGenerated(), minimalAuthored())
+	kb, _, err := MergeMaps(minimalGenerated(), minimalAuthored())
 	if err != nil {
 		t.Fatalf("merge: %v", err)
 	}

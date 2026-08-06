@@ -3,7 +3,7 @@ package worldkb
 import "testing"
 
 func TestValidate_HappyPath(t *testing.T) {
-	kb, _, err := Merge(minimalGenerated(), minimalAuthored())
+	kb, _, err := MergeMaps(minimalGenerated(), minimalAuthored())
 	if err != nil {
 		t.Fatalf("merge: %v", err)
 	}
@@ -15,11 +15,10 @@ func TestValidate_HappyPath(t *testing.T) {
 
 func TestValidate_InvalidZoneIDFormat(t *testing.T) {
 	gen := minimalGenerated()
-	gen.Zones[0].ID = "Bad-ID" // uppercase + hyphen not allowed for zone
+	gen["zones"].([]any)[0].(map[string]any)["id"] = "Bad-ID" // uppercase + hyphen not allowed for zone
 	auth := minimalAuthored()
-	auth.Zones = map[string]AuthoredZone{"Bad-ID": {}}
-	delete(auth.Zones, "main_workshop")
-	kb, _, err := Merge(gen, auth)
+	auth["zones"] = map[string]any{"Bad-ID": map[string]any{}}
+	kb, _, err := MergeMaps(gen, auth)
 	if err != nil {
 		t.Fatalf("merge: %v", err)
 	}
@@ -36,7 +35,7 @@ func TestValidate_InvalidAgentID_AllowsHyphen(t *testing.T) {
 	// H-01 is valid for agent (allows hyphen + uppercase).
 	gen := minimalGenerated()
 	auth := minimalAuthored()
-	kb, _, err := Merge(gen, auth)
+	kb, _, err := MergeMaps(gen, auth)
 	if err != nil {
 		t.Fatalf("merge: %v", err)
 	}
@@ -50,9 +49,9 @@ func TestValidate_InvalidAgentID_AllowsHyphen(t *testing.T) {
 
 func TestValidate_ObjectZoneRefInvalid(t *testing.T) {
 	gen := minimalGenerated()
-	gen.Objects[0].ZoneID = "nonexistent_zone"
+	gen["objects"].([]any)[0].(map[string]any)["zone_id"] = "nonexistent_zone"
 	auth := minimalAuthored()
-	kb, _, err := Merge(gen, auth)
+	kb, _, err := MergeMaps(gen, auth)
 	if err != nil {
 		t.Fatalf("merge: %v", err)
 	}
@@ -64,9 +63,9 @@ func TestValidate_ObjectZoneRefInvalid(t *testing.T) {
 
 func TestValidate_AgentInitialZoneRefInvalid(t *testing.T) {
 	gen := minimalGenerated()
-	gen.Agents[0].InitialZone = "nonexistent_zone"
+	gen["agents"].([]any)[0].(map[string]any)["initial_zone"] = "nonexistent_zone"
 	auth := minimalAuthored()
-	kb, _, err := Merge(gen, auth)
+	kb, _, err := MergeMaps(gen, auth)
 	if err != nil {
 		t.Fatalf("merge: %v", err)
 	}
@@ -79,11 +78,13 @@ func TestValidate_AgentInitialZoneRefInvalid(t *testing.T) {
 func TestValidate_ZoneConnectionRefInvalid(t *testing.T) {
 	gen := minimalGenerated()
 	auth := minimalAuthored()
-	auth.Zones["main_workshop"] = AuthoredZone{
-		DisplayName: "x",
-		Connections: []AuthoredConnection{{To: "nonexistent_zone", Type: "road"}},
+	auth["zones"].(map[string]any)["main_workshop"] = map[string]any{
+		"display_name": "x",
+		"connections": []any{
+			map[string]any{"to": "nonexistent_zone", "type": "road"},
+		},
 	}
-	kb, _, err := Merge(gen, auth)
+	kb, _, err := MergeMaps(gen, auth)
 	if err != nil {
 		t.Fatalf("merge: %v", err)
 	}
@@ -95,9 +96,9 @@ func TestValidate_ZoneConnectionRefInvalid(t *testing.T) {
 
 func TestValidate_EmptyObjectCategory_Warning(t *testing.T) {
 	gen := minimalGenerated()
-	gen.Objects[0].Category = ""
+	gen["objects"].([]any)[0].(map[string]any)["category"] = ""
 	auth := minimalAuthored()
-	kb, _, err := Merge(gen, auth)
+	kb, _, err := MergeMaps(gen, auth)
 	if err != nil {
 		t.Fatalf("merge: %v", err)
 	}
@@ -115,13 +116,4 @@ func TestValidate_NilKB(t *testing.T) {
 	if !set.HasErrors() {
 		t.Errorf("expected NIL_KB error")
 	}
-}
-
-func containsCode(issues []Issue, code string) bool {
-	for _, i := range issues {
-		if i.Code == code {
-			return true
-		}
-	}
-	return false
 }
