@@ -1157,63 +1157,9 @@ func TestWorldKBSwap_MergeErrorPreservesOldKB(t *testing.T) {
 	}
 }
 
-// ─── idleWaitSeconds ─────────────────────────────────────────
-
-func TestIdleWaitSeconds_Default60(t *testing.T) {
-	// redecomposeCount < 1 → 60
-	if got := idleWaitSeconds("13:00-17:00", "13:15", 0); got != 60 {
-		t.Errorf("redecomposeCount=0 should return 60, got %d", got)
-	}
-	// slot 空 → 60
-	if got := idleWaitSeconds("", "13:15", 3); got != 60 {
-		t.Errorf("empty slot should return 60, got %d", got)
-	}
-	// tod 空 → 60
-	if got := idleWaitSeconds("13:00-17:00", "", 3); got != 60 {
-		t.Errorf("empty tod should return 60, got %d", got)
-	}
-}
-
-func TestIdleWaitSeconds_SlotRemainingShort(t *testing.T) {
-	// slot 剩余 ≤ 60 分钟 → 60
-	if got := idleWaitSeconds("13:00-14:00", "13:30", 3); got != 60 {
-		t.Errorf("remaining=30min should return 60, got %d", got)
-	}
-}
-
-func TestIdleWaitSeconds_LongWaitClamped(t *testing.T) {
-	// slot 剩余 > 60 分钟 → 长_wait_sec = remaining * 60，clamp 3600
-	// 13:15 in 13:00-17:00 → remaining = 245 min → 245*60=14700 → clamp 3600
-	if got := idleWaitSeconds("13:00-17:00", "13:15", 3); got != 3600 {
-		t.Errorf("remaining=245min should clamp to 3600, got %d", got)
-	}
-	// 13:00 in 13:00-14:05 → remaining = 65 min → 65*60=3900 → clamp 3600
-	if got := idleWaitSeconds("13:00-14:05", "13:00", 3); got != 3600 {
-		t.Errorf("remaining=65min should clamp to 3600, got %d", got)
-	}
-}
-
-func TestIdleWaitSeconds_LongWaitExact(t *testing.T) {
-	// remaining = 60 min → 60*60=3600（刚好上限）→ 但 remaining > 60 才走长 wait 分支
-	// remaining = 61 min → 61*60=3660 → clamp 3600
-	if got := idleWaitSeconds("13:00-14:01", "13:00", 3); got != 3600 {
-		t.Errorf("remaining=61min should clamp to 3600, got %d", got)
-	}
-}
-
-func TestIdleWaitSeconds_PastSlotEnd(t *testing.T) {
-	// tod 已过 slot end → 60（降级，等下一 slot）
-	if got := idleWaitSeconds("13:00-14:00", "14:30", 3); got != 60 {
-		t.Errorf("tod past slot end should return 60, got %d", got)
-	}
-}
-
-func TestIdleWaitSeconds_InvalidSlot(t *testing.T) {
-	// slot 解析失败 → 60
-	if got := idleWaitSeconds("invalid", "13:15", 3); got != 60 {
-		t.Errorf("invalid slot should return 60, got %d", got)
-	}
-}
+// ─── idleWaitSeconds 测试已移除：函数本身已删除（长复合动作持续到时段切换
+//     由 advanceSlotIfNeeded 打断，短动作队列空时由 tacticalRefill 重新分解，
+//     不再发 idle wait）。
 
 // TestFormatTodSec 验证 time_of_day_sec → "HH:MM" 转换（约定 19）。
 func TestFormatTodSec(t *testing.T) {

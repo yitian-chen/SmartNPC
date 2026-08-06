@@ -64,7 +64,7 @@ func TestParseTacticalNDJSON_WithFence(t *testing.T) {
 
 func TestParseTacticalNDJSON_BlankLines(t *testing.T) {
 	raw := `{"inner_thought":"开始"}` + "\n\n" +
-		`{"action":"wait","params":{"duration_sec":30}}` + "\n" +
+		`{"action":"move_to_location","params":{"target":"main_workshop"}}` + "\n" +
 		"\n"
 	actions, thought, err := parseTacticalNDJSON(raw, nil, "")
 	if err != nil {
@@ -73,7 +73,7 @@ func TestParseTacticalNDJSON_BlankLines(t *testing.T) {
 	if thought != "开始" {
 		t.Errorf("thought=%q", thought)
 	}
-	if len(actions) != 1 || actions[0].Action != "wait" {
+	if len(actions) != 1 || actions[0].Action != "move_to_location" {
 		t.Errorf("actions=%+v", actions)
 	}
 }
@@ -82,13 +82,13 @@ func TestParseTacticalNDJSON_MalformedLine(t *testing.T) {
 	// 单行 parse 失败应跳过，不影响其他行
 	raw := `{"inner_thought":"计划"}` + "\n" +
 		`这不是JSON` + "\n" +
-		`{"action":"wait","params":{"duration_sec":30}}`
+		`{"action":"move_to_location","params":{"target":"main_workshop"}}`
 	actions, _, err := parseTacticalNDJSON(raw, nil, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(actions) != 1 || actions[0].Action != "wait" {
-		t.Errorf("actions=%+v, want 1 wait", actions)
+	if len(actions) != 1 || actions[0].Action != "move_to_location" {
+		t.Errorf("actions=%+v, want 1 move_to_location", actions)
 	}
 }
 
@@ -181,7 +181,7 @@ func TestStreamAccumulator_Feed(t *testing.T) {
 	}
 
 	// 第三行不完整（无 \n），不应触发 onComplete
-	acc.feed(`{"action":"wait","params":{"duration_sec":30}}`)
+	acc.feed(`{"action":"interact","params":{"target_object_id":"workbench_01","interaction":"assemble"}}`)
 	if len(collected) != 1 {
 		t.Errorf("incomplete line should not trigger: collected=%d, want 1", len(collected))
 	}
@@ -191,7 +191,7 @@ func TestStreamAccumulator_Feed(t *testing.T) {
 	if len(collected) != 2 {
 		t.Fatalf("after flush: collected=%d, want 2", len(collected))
 	}
-	if collected[1].Action != "wait" {
+	if collected[1].Action != "interact" {
 		t.Errorf("collected[1]=%q, want wait", collected[1].Action)
 	}
 }
@@ -593,8 +593,10 @@ func TestBuildTacticalPrompt_ZoneObjectDependency(t *testing.T) {
 // ─── registry-aware tactical prompt / filtering ─────────────
 
 func TestBuildTacticalPrompt_RegistryFiltersTools(t *testing.T) {
-	// Registry with only CmdMoveToLocation + CmdWait available — composite tools
-	// (which depend on composite cmds like CmdWorkAtWorkbench) should be filtered out.
+	// Registry with only CmdMoveToLocation + CmdWait available. CmdWait is now
+	// filtered from the tactical tool list (long composites run until slot
+	// transition, queue empty triggers tacticalRefill, no idle wait), so only
+	// move_to_location should appear in the prompt.
 	reg := NewCapabilityRegistry(nil)
 	reg.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
 		{Cmd: protocol.CmdMoveToLocation, Kind: "atomic"},
@@ -602,9 +604,13 @@ func TestBuildTacticalPrompt_RegistryFiltersTools(t *testing.T) {
 	})
 	prompt := buildTacticalPrompt("装配", "main_workshop", "09:00", "09:00-12:00",
 		&protocol.PhysicalState{Energy: 75, Fatigue: 30, JointWear: 5, Health: 90}, nil, "", reg, "H-01")
-	// Tool bullet list should contain move_to_location and wait.
-	if !strings.Contains(prompt, "- move_to_location [原子]:") || !strings.Contains(prompt, "- wait [原子]:") {
-		t.Errorf("prompt should list move_to_location and wait as [原子] bullets, got: %s", prompt)
+	// Tool bullet list should contain move_to_location.
+	if !strings.Contains(prompt, "- move_to_location [原子]:") {
+		t.Errorf("prompt should list move_to_location as [原子] bullet, got: %s", prompt)
+	}
+	// wait should NOT appear as a tool bullet (filtered from tactical prompt).
+	if strings.Contains(prompt, "- wait [") {
+		t.Errorf("prompt should NOT list wait as a bullet (filtered from tactical prompt), got: %s", prompt)
 	}
 	// Tool bullet list should NOT contain composite tools (composite cmds unavailable).
 	// Check the bullet prefix specifically — the hardcoded example section
@@ -612,9 +618,9 @@ func TestBuildTacticalPrompt_RegistryFiltersTools(t *testing.T) {
 	if strings.Contains(prompt, "- work_at_workbench [复合]:") || strings.Contains(prompt, "- charge_at_station [复合]:") {
 		t.Errorf("prompt should NOT list composite tools as [复合] bullets (composite cmds unavailable), got: %s", prompt)
 	}
-	// Count in header should match available tools (2).
-	if !strings.Contains(prompt, "仅限以下 2 个") {
-		t.Errorf("prompt header should say '仅限以下 2 个', got: %s", prompt)
+	// Count in header should match available tools (1 — only move_to_location, wait filtered).
+	if !strings.Contains(prompt, "仅限以下 1 个") {
+		t.Errorf("prompt header should say '仅限以下 1 个', got: %s", prompt)
 	}
 }
 
@@ -844,23 +850,23 @@ func TestMapTacticalAction_NewCmdNilRegistryErrors(t *testing.T) {
 }
 
 // TestBuildTacticalToolEntries_NilRegistryBuiltinFullSet verifies the nil
-// registry fallback returns all 14 built-in tools (minus scan_area/stop).
+// registry fallback returns all 13 built-in tools (minus scan_area/stop/wait).
 func TestBuildTacticalToolEntries_NilRegistryBuiltinFullSet(t *testing.T) {
 	entries := buildTacticalToolEntries("", nil)
-	// 16 built-in specs - scan_area - stop = 14
-	if len(entries) != 14 {
-		t.Fatalf("nil registry entry count=%d, want 14 (all built-in minus scan_area/stop)", len(entries))
+	// 16 built-in specs - scan_area - stop - wait = 13
+	if len(entries) != 13 {
+		t.Fatalf("nil registry entry count=%d, want 13 (all built-in minus scan_area/stop/wait)", len(entries))
 	}
 	seen := make(map[string]bool)
 	for _, e := range entries {
 		seen[e.Name] = true
 	}
-	if seen["scan_area"] || seen["stop"] {
-		t.Errorf("scan_area/stop should not appear in tactical tool list")
+	if seen["scan_area"] || seen["stop"] || seen["wait"] {
+		t.Errorf("scan_area/stop/wait should not appear in tactical tool list")
 	}
 	for _, name := range []string{
 		"move_to_location", "move_to_agent", "turn_to", "play_montage",
-		"speak", "emote", "interact", "wait",
+		"speak", "emote", "interact",
 		"work_at_workbench", "work_at_workshop", "chat_with", "repair_target",
 		"charge_at_station", "patrol_zone",
 	} {

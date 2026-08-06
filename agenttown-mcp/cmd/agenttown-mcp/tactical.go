@@ -64,7 +64,9 @@ var tacticalToolOverride = map[string]struct {
 	"speak":             {"说话", `{"content":"...","target_agent_id":"目标agent_id（可空）"}`},
 	"emote":             {"表达情绪", `{"emotion":"happy|sad|...","mode":"oneshot|sustained"}`},
 	"interact":          {"与智能物体交互", `{"target_object_id":"...","interaction":"动词"}`},
-	"wait":              {"原地等待", `{"duration_sec":秒数}`},
+	// wait 故意不在 override 中且不在 prompt 工具列表展示：长复合动作应持续到
+	// 时段切换由 advanceSlotIfNeeded 打断，短动作队列空时由 tacticalRefill
+	// 重新分解。wait 工具 struct 保留以兼容反应层等其他调用点。
 	"work_at_workbench": {"在工作台装配", `{"target_object_id":"工作台id","duration_sec":秒数}`},
 	"work_at_workshop":  {"车间例行工作", `{}`},
 	"chat_with":         {"与其他agent聊天", `{"target_agent_id":"...","topic":"话题（可选）"}`},
@@ -78,7 +80,12 @@ var tacticalToolOverride = map[string]struct {
 // 内置战术工具（向后兼容测试与未启用 capability 的场景）。
 //
 // scan_area / stop 不属于战术层排队工具，无论 registry 是否 nil 都返回 false。
+// wait 同样返回 false：长复合动作应持续到时段切换由 advanceSlotIfNeeded
+// 打断，队列空时由 tacticalRefill 重新分解，不应输出 wait。
 func tacticalActionAvailable(action, agentID string, registry *CapabilityRegistry) bool {
+	if action == "wait" {
+		return false
+	}
 	if registry == nil {
 		for _, spec := range tools.BuiltinToolSpecs() {
 			if spec.Name == action && spec.Name != "scan_area" && spec.Name != "stop" {
@@ -143,7 +150,7 @@ func buildTacticalToolEntries(agentID string, registry *CapabilityRegistry) []ta
 		specs := tools.BuiltinToolSpecs()
 		out := make([]tacticalToolEntry, 0, len(specs))
 		for _, spec := range specs {
-			if spec.Name == "scan_area" || spec.Name == "stop" {
+			if spec.Name == "scan_area" || spec.Name == "stop" || spec.Name == "wait" {
 				continue
 			}
 			entry := tacticalToolEntry{Name: spec.Name, RequiredCmd: spec.RequiredCmd, Kind: builtinToolKind(spec.Name)}
@@ -161,7 +168,7 @@ func buildTacticalToolEntries(agentID string, registry *CapabilityRegistry) []ta
 	out := make([]tacticalToolEntry, 0, len(actions))
 	for _, act := range actions {
 		name := tools.CmdToToolName(act.Cmd)
-		if name == "scan_area" || name == "stop" {
+		if name == "scan_area" || name == "stop" || name == "wait" {
 			continue
 		}
 		// act.Kind 通常由 capability_registry 显式给出；空值默认 "atomic"，
@@ -248,12 +255,12 @@ const tacticalPromptBody = `[战术层/任务分解] 当前时段目标：%s
 要求：
 1. 第一行输出 {"inner_thought":"一句话内心独白"}
 2. 后续每行输出一个 {"action":"工具名","params":{...}}，按执行顺序排列
-3. 优先使用复合动作：若存在与目标语义匹配的复合动作，输出 1-2 步即可（通常复合动作会自动移动到对应的区域，无需额外的move_to）
-4. 仅当没有匹配的复合动作时，才用 2-5 个原子动作组合实现目标
-5. move_to 的 target、interact 的 target_object_id、work_at_workbench 的 target_object_id、patrol_zone 的 target_zone 必须严格使用上面"可前往区域"和"可交互物体"中给出的 id，禁止编造、禁止拼接 zone/interaction 信息
-6. 每行一个 JSON 对象，不要输出 JSON 数组，不要输出 markdown 围栏，不要输出任何其他文字
-7. 必须以字符 {"inner_thought 开头，不要输出步骤说明、不要解释、不要编号列表、不要 markdown 加粗
-8. 步骤总时长应接近当前 slot 时长，避免过短导致队列提前耗尽触发重分解；复合动作通常会一直做（如work_shift会一直在工作位置工作，直到下一个action命令打断）
+3. 队列必须以长复合动作（标记 [复合]）结尾——长复合动作会持续执行直到时段切换，让 NPC 一直工作到下一 schedule 节点被 worker 主动打断
+4. 禁止输出 wait 动作；若无需移动/转身等前置步骤，可直接输出单个长复合动作
+5. 仅当目标确实没有匹配的长复合动作时（极少见），才用 2-5 个原子动作组合实现目标，但仍禁止以 wait 结尾
+6. move_to 的 target、interact 的 target_object_id、work_at_workbench 的 target_object_id、patrol_zone 的 target_zone 必须严格使用上面"可前往区域"和"可交互物体"中给出的 id，禁止编造、禁止拼接 zone/interaction 信息
+7. 每行一个 JSON 对象，不要输出 JSON 数组，不要输出 markdown 围栏，不要输出任何其他文字
+8. 必须以字符 {"inner_thought 开头，不要输出步骤说明、不要解释、不要编号列表、不要 markdown 加粗
 
 示例（id 来自上方可用列表，不可照抄示例中的 id）：
 %s`
@@ -522,6 +529,22 @@ func slotRangeMinute(slot string) (int, int) {
 		return -1, -1
 	}
 	return start, end
+}
+
+// slotExpired 检查当前游戏时间 tod 是否已到达或超出 currentSlot 的结束时间。
+// currentSlot 为空或解析失败返回 false（无 slot 概念，不触发切换）。
+// 用于 worker wake 时检测"时间到达下一次 schedule 节点"，触发打断长复合动作
+// + 重新下发新 action_queue。
+func slotExpired(currentSlot, tod string) bool {
+	if currentSlot == "" || tod == "" {
+		return false
+	}
+	_, endMin := slotRangeMinute(currentSlot)
+	curMin := parsePlanMinute(tod)
+	if endMin <= 0 || curMin < 0 {
+		return false
+	}
+	return curMin >= endMin
 }
 
 // slotDurationMinute 解析 "HH:MM-HH:MM" 形如的 slot，返回 (end - start) 的分钟数。
