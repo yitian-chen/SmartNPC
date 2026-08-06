@@ -771,6 +771,9 @@ func parseTacticalNDJSON(raw string, registry *CapabilityRegistry, agentID strin
 		}
 	}
 	actions = filterValidActions(actions, registry, agentID)
+	// inner_thought 转为队列首部的 speak 动作（2026-08 需求）。
+	// actions 为空时不注入，保留"无动作即报错"契约。
+	actions = prependThoughtAsSpeak(actions, thought, agentID, registry)
 	return actions, thought, nil
 }
 
@@ -800,11 +803,12 @@ func parseTacticalNDJSONLine(line string) (pa plannedAction, thought string, isA
 // 最后一行（可能不完整）保留在 buffer 等下次 feed 补全。
 // flush() 在流结束后调用，处理 buffer 中的残余内容。
 type streamAccumulator struct {
-	buf        strings.Builder
-	onComplete func(plannedAction) // 每完整解析出一个合法 action 调一次
-	thought    string
-	registry   *CapabilityRegistry // 用于过滤依赖 cmd 不可用的工具；nil = 不过滤
-	agentID    string              // 配合 registry 做 per-agent 过滤
+	buf           strings.Builder
+	onComplete    func(plannedAction) // 每完整解析出一个合法 action 调一次
+	thought       string
+	registry      *CapabilityRegistry // 用于过滤依赖 cmd 不可用的工具；nil = 不过滤
+	agentID       string              // 配合 registry 做 per-agent 过滤
+	actionStarted bool                // 是否已发出过任意 action；一旦 true，迟到的 thought 不再转 speak
 }
 
 // feed 追加一段 delta 文本并处理所有已完成的行（以 \n 结尾）。
@@ -841,6 +845,18 @@ func (a *streamAccumulator) processLine(line string) {
 		if !tacticalActionAvailable(pa.Action, a.agentID, a.registry) {
 			return // 过滤非法工具或依赖 cmd 不可用的工具（与 parseTacticalNDJSON 一致）
 		}
+		// 在首个 action 之前把 inner_thought 转为 speak 注入队列首部
+		// （2026-08 需求：inner_thought → 队列开头的 speak 动作）。
+		// 与非流式 parseTacticalNDJSON 的 prependThoughtAsSpeak 语义一致：
+		// 若队列最终无 action，speak 也不注入（保留"无动作即报错"契约）。
+		// 若 thought 迟到（LLM 违反"第一行 inner_thought"约定），跳过 speak
+		// 注入，避免把独白插到队列中段。
+		if !a.actionStarted && a.onComplete != nil {
+			if speak := thoughtAsSpeak(a.thought, a.agentID, a.registry); speak != nil {
+				a.onComplete(*speak)
+			}
+		}
+		a.actionStarted = true
 		if a.onComplete != nil {
 			a.onComplete(pa)
 		}
@@ -859,6 +875,39 @@ func filterValidActions(actions []plannedAction, registry *CapabilityRegistry, a
 		}
 	}
 	return out
+}
+
+// thoughtAsSpeak 把 inner_thought 包装为 speak plannedAction，让 NPC 把
+// "内心独白"实际说出来（2026-08 需求：inner_thought 转为队列首部的 speak 调用）。
+// 返回 nil 表示不注入：thought 为空，或 speak 工具对 agentID 不可用
+// （registry 未授权 CmdSpeak）。
+func thoughtAsSpeak(thought, agentID string, registry *CapabilityRegistry) *plannedAction {
+	if thought == "" {
+		return nil
+	}
+	if !tacticalActionAvailable("speak", agentID, registry) {
+		return nil
+	}
+	return &plannedAction{
+		Action: "speak",
+		Params: map[string]any{"content": thought},
+	}
+}
+
+// prependThoughtAsSpeak 在 actions 队列开头插入一个 speak 动作，内容为
+// inner_thought。跳过注入的情况：
+//   - thought 为空（LLM 未输出 inner_thought）
+//   - actions 为空（保留"无动作即报错"契约，避免只输出独白导致空转）
+//   - speak 工具对 agentID 不可用
+func prependThoughtAsSpeak(actions []plannedAction, thought, agentID string, registry *CapabilityRegistry) []plannedAction {
+	if len(actions) == 0 {
+		return actions
+	}
+	speak := thoughtAsSpeak(thought, agentID, registry)
+	if speak == nil {
+		return actions
+	}
+	return append([]plannedAction{*speak}, actions...)
 }
 
 // mapTacticalAction 把战术层 plannedAction 映射到 ws.SendAction 的 (cmd, params)。
