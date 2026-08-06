@@ -229,8 +229,9 @@ func paramPlaceholder(p protocol.CapabilityParam) string {
 }
 
 // tacticalPromptBody 是 prompt 的固定骨架，%s 占位符依次为：
-// goal / zone / timeOfDay / energy / fatigue / joint_wear / health /
-// roleLine / hintLine / slotDurationHint / kbContext / toolCount / toolList / exampleBlock。
+// goal / zone / timeOfDay /
+// physicalLine（物理状态行，全 0 时为空串）/ roleLine / hintLine /
+// slotDurationHint / kbContext / toolCount / toolList / exampleBlock。
 // roleLine 由 buildAgentRoleContext(kb, agentID) 生成（含【你的角色】标题），
 // kb==nil 或 agent 不存在时为空串。exampleBlock 由 buildTacticalExample
 // 动态从 KB 取合法 id 生成，避免示例本身编造 KB 外 id（旧版示例写死
@@ -244,7 +245,7 @@ func paramPlaceholder(p protocol.CapabilityParam) string {
 // 也让队列总时长更接近 slot 时长（复合动作本身即覆盖整段工作时间）。
 const tacticalPromptBody = `[战术层/任务分解] 当前时段目标：%s
 你目前在：%s，游戏时间 %s。
-物理状态：能量 %.0f、疲劳 %.0f、关节磨损 %.0f、健康 %.0f。
+%s
 %s
 请把这个目标分解为一个或多个 action，按顺序执行。
 %s
@@ -463,9 +464,11 @@ func findObjectByCategory(objs []worldkb.ObjectInfo, category string) *worldkb.O
 // registry 非 nil 时，工具列表段按 registry 对 agentID 的有效能力集动态
 // 生成（per-agent 覆盖全局默认）；nil 时降级为全量内置工具（向后兼容）。
 func buildTacticalPrompt(goal, zone, timeOfDay, slot string, physical *protocol.PhysicalState, kb *worldkb.KB, hint string, registry *CapabilityRegistry, agentID string) string {
-	e, f, j, h := 0.0, 0.0, 0.0, 0.0
-	if physical != nil {
-		e, f, j, h = physical.Energy, physical.Fatigue, physical.JointWear, physical.Health
+	// 物理状态行：UE 未实现物理状态时 state_report 全 0，跳过注入避免 LLM
+	// 误判"体力=0"触发不合理规划。UE 实现后自然恢复。
+	physicalLine := ""
+	if physical != nil && !physical.IsZero() {
+		physicalLine = fmt.Sprintf("物理状态：能量 %.0f、疲劳 %.0f、关节磨损 %.0f、健康 %.0f。", physical.Energy, physical.Fatigue, physical.JointWear, physical.Health)
 	}
 	// 【你的角色】段：从 kb 注入 NPC 性格画像，让战术层分解体现角色风格。
 	// kb==nil 或 agent 不存在时 roleLine 为空串，prompt 中该位置仅留空行。
@@ -489,7 +492,8 @@ func buildTacticalPrompt(goal, zone, timeOfDay, slot string, physical *protocol.
 			"- 禁止规划 move_to 到非充电站区域（除非当前已在充电站）"
 	}
 	toolList, toolCount := buildTacticalToolList(agentID, registry)
-	return fmt.Sprintf(tacticalPromptBody, goal, zone, timeOfDay, e, f, j, h,
+	return fmt.Sprintf(tacticalPromptBody, goal, zone, timeOfDay,
+		physicalLine,
 		roleLine,
 		hintLine, buildSlotDurationHint(slot, timeOfDay), buildKBContext(kb), toolCount, toolList,
 		buildTacticalExample(kb, goal))
@@ -571,7 +575,7 @@ func slotDurationMinute(slot string) int {
 // 返回 (overrideGoal, true) 当 hint 含"物理状态告警"且 physical 确有告警；
 // 否则返回 (origGoal, false)。
 func physicalAlertOverrideGoal(hint, origGoal string, physical *protocol.PhysicalState) (string, bool) {
-	if !strings.Contains(hint, "物理状态告警") || physical == nil {
+	if !strings.Contains(hint, "物理状态告警") || physical == nil || physical.IsZero() {
 		return origGoal, false
 	}
 	switch {

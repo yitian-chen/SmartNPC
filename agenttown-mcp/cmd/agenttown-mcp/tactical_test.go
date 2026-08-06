@@ -438,13 +438,23 @@ func TestBuildTacticalPrompt_NilPhysical(t *testing.T) {
 	if prompt == "" {
 		t.Fatal("prompt should not be empty")
 	}
-	// nil physical 时各值应为 0
-	if !strings.Contains(prompt, "能量 0") {
-		t.Errorf("prompt should contain '能量 0' for nil physical, got: %s", prompt)
+	// nil physical 时跳过物理状态行（UE 未实现物理状态，不传 0 值避免 LLM 误判）
+	if strings.Contains(prompt, "物理状态") {
+		t.Errorf("prompt should not contain '物理状态' for nil physical, got: %s", prompt)
 	}
 	// slot 为空时不应有时长提示行
 	if strings.Contains(prompt, "请让步骤总时长接近此时长") {
 		t.Errorf("prompt should not contain slot duration hint when slot is empty, got: %s", prompt)
+	}
+}
+
+// TestBuildTacticalPrompt_ZeroPhysical 验证全 0 物理状态（UE 已上报但值全 0）
+// 也跳过物理状态行注入，与 nil physical 同等处理。
+func TestBuildTacticalPrompt_ZeroPhysical(t *testing.T) {
+	prompt := buildTacticalPrompt("装配", "main_workshop", "09:00", "09:00-12:00",
+		&protocol.PhysicalState{}, nil, "", nil, "")
+	if strings.Contains(prompt, "物理状态") {
+		t.Errorf("prompt should not contain '物理状态' for all-zero physical, got: %s", prompt)
 	}
 }
 
