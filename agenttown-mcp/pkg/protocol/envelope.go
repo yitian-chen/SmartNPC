@@ -95,6 +95,19 @@ const (
 	CmdPatrolZone       = "PatrolZone"
 )
 
+// IsCompositeCmd reports whether the given cmd is one of the 6 long
+// composite cmds (ExecuteComposite family). Used by main.go to skip
+// armActionTimeout for long composites — they run until the next
+// schedule slot transition, not until a self timeout.
+func IsCompositeCmd(cmd string) bool {
+	switch cmd {
+	case CmdWorkAtWorkbench, CmdWorkAtWorkshop, CmdChatWith,
+		CmdRepairTarget, CmdChargeAtStation, CmdPatrolZone:
+		return true
+	}
+	return false
+}
+
 // action_completed result constants (§2.3).
 const (
 	ResultSuccess     = "success"

@@ -149,7 +149,7 @@ go test ./adapters/agenttown/perception/ -v -count=1        # 感知格式化测
 
 ### 日志检查
 
-**统一日志文件**：`logs/YYYY-MM-DD/sim.log`（MCP 进程独占写入，JSON Lines 格式，含 UE + MCP + LLM 三层全链路；`YYYY-MM-DD` 为仿真启动日期）
+**统一日志文件**：`logs/YYYY-MM-DD/debug-mcp.log`（MCP 进程独占写入，JSON Lines 格式，含 UE + MCP + LLM 三层全链路；`YYYY-MM-DD` 为仿真启动日期）
 
 **推荐：用 `scripts/pretty_log.py` 可读化查看**（每条 JSON 渲染为多行，方向标记着色，长字段按行展开）：
 
@@ -162,7 +162,7 @@ python scripts/pretty_log.py --html -o report.html        # 指定输出路径
 python scripts/pretty_log.py --html --no-open             # 生成但不自动打开
 
 # 终端渲染
-python scripts/pretty_log.py                              # 查看今天的 sim.log
+python scripts/pretty_log.py                              # 查看今天的 debug-mcp.log
 python scripts/pretty_log.py -f PERCEPTION -n 5           # 最近 5 条 MCP→LLM 感知原文
 python scripts/pretty_log.py -f RESPONSE -n 5             # 最近 5 条 LLM 响应
 python scripts/pretty_log.py --raw                        # 原始 JSON（grep/awk 友好）
@@ -182,25 +182,25 @@ python scripts/pretty_log.py --raw                        # 原始 JSON（grep/a
 **原始 grep（不渲染，单行 JSON）**：
 
 ```bash
-grep '\[UE→MCP\]' logs/YYYY-MM-DD/sim.log           # Mock UE → MCP（感知/状态/动作完成）
-grep '\[MCP→UE\]' logs/YYYY-MM-DD/sim.log           # MCP → Mock UE（动作命令/叙事）
-grep '\[MCP→LLM/PERCEPTION\]' logs/YYYY-MM-DD/sim.log    # MCP → LLM（感知文本）
-grep '\[LLM→MCP/RESPONSE\]' logs/YYYY-MM-DD/sim.log      # LLM → MCP（LLM 响应 + narrative）
-grep '\[MCP→LLM/STRATEGIC-PROMPT\]' logs/YYYY-MM-DD/sim.log   # 战略层 prompt（每日规划输入）
-grep '\[LLM→MCP/STRATEGIC-RESPONSE\]' logs/YYYY-MM-DD/sim.log # 战略层 LLM 响应（每日计划 JSON）
-grep '\[MCP→LLM/TACTICAL-PROMPT\]' logs/YYYY-MM-DD/sim.log    # 战术层 prompt（任务分解输入）
-grep '\[LLM→MCP/TACTICAL-RESPONSE\]' logs/YYYY-MM-DD/sim.log  # 战术层 LLM 响应（actions JSON）
-grep '队列已填充' logs/YYYY-MM-DD/sim.log           # 战术层任务队列形成（含完整 actions）
-grep 'perception decision triggered' logs/YYYY-MM-DD/sim.log  # LLM 决策触发点
-grep 'state_report' logs/YYYY-MM-DD/sim.log         # 状态报告摘要
+grep '\[UE→MCP\]' logs/YYYY-MM-DD/debug-mcp.log           # Mock UE → MCP（感知/状态/动作完成）
+grep '\[MCP→UE\]' logs/YYYY-MM-DD/debug-mcp.log           # MCP → Mock UE（动作命令/叙事）
+grep '\[MCP→LLM/PERCEPTION\]' logs/YYYY-MM-DD/debug-mcp.log    # MCP → LLM（感知文本）
+grep '\[LLM→MCP/RESPONSE\]' logs/YYYY-MM-DD/debug-mcp.log      # LLM → MCP（LLM 响应 + narrative）
+grep '\[MCP→LLM/STRATEGIC-PROMPT\]' logs/YYYY-MM-DD/debug-mcp.log   # 战略层 prompt（每日规划输入）
+grep '\[LLM→MCP/STRATEGIC-RESPONSE\]' logs/YYYY-MM-DD/debug-mcp.log # 战略层 LLM 响应（每日计划 JSON）
+grep '\[MCP→LLM/TACTICAL-PROMPT\]' logs/YYYY-MM-DD/debug-mcp.log    # 战术层 prompt（任务分解输入）
+grep '\[LLM→MCP/TACTICAL-RESPONSE\]' logs/YYYY-MM-DD/debug-mcp.log  # 战术层 LLM 响应（actions JSON）
+grep '队列已填充' logs/YYYY-MM-DD/debug-mcp.log           # 战术层任务队列形成（含完整 actions）
+grep 'perception decision triggered' logs/YYYY-MM-DD/debug-mcp.log  # LLM 决策触发点
+grep 'state_report' logs/YYYY-MM-DD/debug-mcp.log         # 状态报告摘要
 
 # 按决策轮次关联：PERCEPTION / TOOL / RESPONSE 共享 agent_id + decision_epoch
 # 例如查看 decision_epoch=1 的完整链路：
-grep '"decision_epoch":1' logs/YYYY-MM-DD/sim.log   # 同一轮次的 PERCEPTION/TOOL/RESPONSE
+grep '"decision_epoch":1' logs/YYYY-MM-DD/debug-mcp.log   # 同一轮次的 PERCEPTION/TOOL/RESPONSE
 
 # 战术规划链路：TACTICAL-PROMPT → TACTICAL-RESPONSE → 队列已填充 → 下发 action
 # 例如查看某次战术分解的完整链路：
-grep -E 'TACTICAL-PROMPT|TACTICAL-RESPONSE|队列已填充|\[战术层\] 下发 action' logs/YYYY-MM-DD/sim.log
+grep -E 'TACTICAL-PROMPT|TACTICAL-RESPONSE|队列已填充|\[战术层\] 下发 action' logs/YYYY-MM-DD/debug-mcp.log
 ```
 
 **轮次关联**：`[MCP→LLM/PERCEPTION]`、`[LLM→MCP/TOOL]`、`[LLM→MCP/RESPONSE]` 三种日志都带结构化字段 `agent_id` 和 `decision_epoch`，匹配这两个字段即可关联同一次决策回合的输入 prompt、工具调用、LLM 响应。同一 `decision_epoch` 的 TOOL 可能出现在 RESPONSE 之前（工具调用在 LLM 流式输出时实时回调，而 RESPONSE 日志在 HTTP 响应完成后才写）。
@@ -394,7 +394,7 @@ MCP 是唯一的 LLM 调用入口，启动后即可接收感知事件、调用 V
 2. 编译+部署 MCP 二进制到 WSL `~/agenttown-mcp`
 3. 启动 MCP → 等 `:8760` + `:9090` 就绪
 4. 启动 Mock UE → 预检查通过后运行
-5. 仿真日志统一写入 `logs/YYYY-MM-DD/sim.log`（MCP 独占，无需合并）
+5. 仿真日志统一写入 `logs/YYYY-MM-DD/debug-mcp.log`（MCP 独占，无需合并）
 
 **UE 连接消息序列**（硬约束）：UE 连接 MCP 后按以下顺序首发系统消息：
 1. `world_kb`（`agent_id="system"`）— 推送完整世界 KB（generated + authored JSON），MCP 合并+落盘+swap 内存 KB。**必须在首个 `agent_registered` 之前**，确保 worker 启动时捕获新 KB
@@ -556,7 +556,7 @@ cp .env.example .env  # 填入 VENUS_API_KEY
 # 3. 启动 MCP（直连 Venus）
 ./mcp --http :8760 --ws :9090 \
   --venus-api-key "$VENUS_API_KEY" \
-  --log-level debug 2>&1 | tee logs/$(date +%Y-%m-%d)/sim.log
+  --log-level debug 2>&1 | tee logs/$(date +%Y-%m-%d)/debug-mcp.log
 
 # 4. 另开终端启动 Mock UE
 pip install websockets pyyaml
@@ -621,7 +621,7 @@ cd /data/workspace/dev
 python3 src/run_day.py   # 默认连 :9091
 ```
 
-**端口隔离原则**：stable 用 `8760/9090`，dev 用 `8770/9091`，互不干扰，可同时运行各自独立的仿真。日志分别写入 `/data/workspace/{stable,dev}/logs/YYYY-MM-DD/sim.log`。
+**端口隔离原则**：stable 用 `8760/9090`，dev 用 `8770/9091`，互不干扰，可同时运行各自独立的仿真。日志分别写入 `/data/workspace/{stable,dev}/logs/YYYY-MM-DD/debug-mcp.log`。
 
 **本地 Windows 对比**：本地用 `D:\SmartNPC_v3`（dev worktree，`dev-working` 分支）和 `D:\SmartNPC_v3-stable`（stable worktree，`master` 分支）两个 worktree 实现同样的分离，端口约定一致。
 

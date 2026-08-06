@@ -207,6 +207,61 @@ func (a *agentContext) recordActionCompletion(completion protocol.ActionComplete
 	return true, TriggerActionDone, detail
 }
 
+// advanceSlotIfNeeded 检查当前 game_time 是否已超出 currentSlot 结束时间，
+// 若是则打断当前在途长复合动作 + 清队列 + 清 currentSlot，让 worker 下一轮
+// 走 tacticalRefill 自然选新 slot 分解新队列。
+//
+// 这是"长复合动作唯一打断路径"：长复合动作不设超时（IsCompositeCmd 跳过
+// armActionTimeout），持续执行到时段切换由本方法主动 stop。
+//
+// 不在此处调 LLM——只打扫战场，新队列由 worker 下一轮 tacticalRefill 生成。
+// 反应层 replan 进行中（replanInProgress=true）时本方法仍可执行：schedule
+// 切换优先级高于反应层 replan，清掉的 in-flight 状态不会干扰 replan
+// （replan 自己会重新规划，且 replanInProgress 由 replan 路径自己清除）。
+func (a *agentContext) advanceSlotIfNeeded(ws *wsserver.Server, agentID string, logger *slog.Logger) {
+	a.mu.Lock()
+	slot := a.currentSlot
+	tod := a.latestTimeOfDayLocked()
+	if !slotExpired(slot, tod) {
+		a.mu.Unlock()
+		return
+	}
+	// 收集在途 action 信息（持锁内）
+	actionID := a.currentActionID
+	queueLen := len(a.actionQueue)
+	// 清队列 + 清在途追踪 + 清 slot 标记
+	a.actionQueue = nil
+	a.currentActionID = ""
+	a.currentActionCmd = ""
+	a.currentActionParams = nil
+	a.currentActionStart = time.Time{}
+	a.currentActionSrc = ""
+	a.currentSlot = ""
+	a.redecomposeCount = 0
+	// 取消旧 action 的超时 timer（若有）
+	if actionID != "" {
+		if timer, ok := a.pendingActionTimeouts[actionID]; ok {
+			timer.Stop()
+			delete(a.pendingActionTimeouts, actionID)
+		}
+	}
+	a.mu.Unlock()
+
+	logger.Info("[战术层] schedule 时段切换，打断当前动作并清队列",
+		"agent_id", agentID, "expired_slot", slot, "game_time", tod,
+		"action_id", actionID, "queue_len", queueLen)
+
+	// 发 stop_action 打断 UE 侧执行（若有在途）
+	if actionID != "" {
+		if err := ws.SendStopAction(agentID, actionID); err != nil {
+			logger.Warn("[战术层] 时段切换 stop_action 发送失败",
+				"agent_id", agentID, "action_id", actionID, "err", err)
+		}
+	}
+	// signal worker 下一轮走 tacticalRefill 选新 slot
+	a.signal()
+}
+
 // recordEventNotification 处理环境事件通知。反应层：返回 trigger 信息供
 // message handler 异步触发 reactiveRunner。环境事件不打断战术队列——
 // reactiveRunner 决策若为 replan 才会发 stop_action。
@@ -287,7 +342,8 @@ func cloneTask(task *protocol.CurrentTaskProgress) *protocol.CurrentTaskProgress
 }
 
 // runPerceptionWorker 是战术层队列驱动的状态机：wake → UE 连接检查 →
-// pop 队列下一个 action；队列空则 tacticalRefill，无 goal/失败则发短 wait。
+// 时段切换检测 → pop 队列下一个 action；队列空则 tacticalRefill。
+// 长复合动作不设超时，持续执行到时段切换由 advanceSlotIfNeeded 打断。
 // 反应层仅 continue/observe/replan：replan 通过 tacticalRefillForReplan
 // 重规划并打断在途 action，不打断 worker 正常的 pop/refill 循环。
 func runPerceptionWorker(
@@ -328,6 +384,11 @@ func runPerceptionWorker(
 			continue
 		}
 
+		// 时段切换检测：game_time 已超出 currentSlot 结束时间 → 打断长复合动作
+		// + 清队列 + 清 slot，让本轮后续走 tacticalRefill 选新 slot 重新分解。
+		// 这是长复合动作的唯一打断路径（它们不设超时）。
+		ac.advanceSlotIfNeeded(ws, agentID, logger)
+
 		// replan 规划进行中：跳过 pop/refill，等 tacticalRefillForReplan 完成后
 		// signal 唤醒。避免规划期间 worker 抢先 pop 旧队列剩余 action 或 refill
 		// 覆盖正在生成的新队列。
@@ -346,7 +407,7 @@ func runPerceptionWorker(
 		}
 
 		// debug 手动 action 期间暂停 dispatch：debug 端点刚发了 stop_action 清 UE
-		// busy，若此刻 worker 被唤醒会立刻补一个 idle wait 重新占用，导致手动
+		// busy，若此刻 worker 被唤醒会立刻补一个新 action 重新占用，导致手动
 		// action 被 busy 拒。debugOverride 由 handleDebugAction 设置/清除。
 		ac.mu.Lock()
 		override := ac.debugOverride
@@ -355,18 +416,20 @@ func runPerceptionWorker(
 			continue
 		}
 
-		if ac.hasQueueNext() {
-			// 队列还有下一个：pop 并直发。
-			// 手动模式下 /debug/schedule 注入的 action 进队列后由 ac.signal() 唤醒
-			// worker 走这条路径下发，所以 popAndSendQueueAction 不受 autoPlanEnabled 限制。
-			ac.popAndSendQueueAction(ctx, agentID, ws, kb, logger)
-		} else if autoPlanEnabled {
-			// 队列空 + 自动规划开启：尝试战术 refill；无 goal 或失败则发短 wait 避免忙循环
-			if !ac.tacticalRefill(ctx, agentID, ws, kb, logger) {
-				ac.sendIdleWait(ctx, agentID, ws, logger)
-			}
-		}
-		// 队列空 + 自动规划关闭：不主动下发，阻塞在 wake 等手动注入 signal。
+	if ac.hasQueueNext() {
+		// 队列还有下一个：pop 并直发。
+		// 手动模式下 /debug/schedule 注入的 action 进队列后由 ac.signal() 唤醒
+		// worker 走这条路径下发，所以 popAndSendQueueAction 不受 autoPlanEnabled 限制。
+		ac.popAndSendQueueAction(ctx, agentID, ws, kb, logger)
+	} else if autoPlanEnabled {
+		// 队列空 + 自动规划开启：尝试战术 refill。refill 返回 false（无 goal /
+		// redecomposeCount 达上限）时不主动发任何指令，阻塞等下一次感知唤醒——
+		// 感知推进 game_time 后会进入新 slot，redecomposeCount 重置即可重新分解。
+		// 不再发 idle wait：长复合动作应持续到时段切换，短动作队列空时让
+		// 战术层重新分解（tacticalRefill 内部会在重分解时注入"未安排长动作"hint）。
+		ac.tacticalRefill(ctx, agentID, ws, kb, logger)
+	}
+	// 队列空 + 自动规划关闭：不主动下发，阻塞在 wake 等手动注入 signal。
 	}
 }
 
@@ -426,8 +489,11 @@ func (g *guardedExecutor) SendAction(ctx context.Context, agentID string, decisi
 	ack, err := g.ws.SendAction(ctx, agentID, cmd, params)
 	if err == nil && ack != nil {
 		ac.recordActionStarted(ack.ActionID, cmd, params, decisionEpoch, sourceTool)
-		// 注册 action_completed 超时 timer（约定 §5.2：estimated_duration × 1.5）
-		ac.armActionTimeout(ack.ActionID, ack.EstimatedDurationSec, g.ws, agentID, g.lookup)
+		// 长复合动作不设超时：它们持续执行直到下一 schedule 时段切换
+		// （advanceSlotIfNeeded 主动 stop + 重规划），自己不会超时。
+		if !protocol.IsCompositeCmd(cmd) {
+			ac.armActionTimeout(ack.ActionID, ack.EstimatedDurationSec, g.ws, agentID, g.lookup)
+		}
 	}
 	return ack, err
 }
@@ -584,79 +650,9 @@ func (a *agentContext) latestZoneLocked() string {
 	return ""
 }
 
-// idleWaitSeconds 计算 sendIdleWait 应该发送的 Wait 秒数。
-//
-// 当 redecomposeCount 达上限（无法重分解）且 slot 剩余时间 > 60s 时，
-// 返回覆盖到 slot 末尾的长 Wait（clamp 上限 3600s），让 NPC 一次性 wait 到
-// 下一时段——redecomposeCount 在新时段重置后可重新分解，避免反复发
-// 60s Wait 形成死循环直到 game_time 跨入新时段。
-//
-// 其他情况（slot 解析失败/剩余 ≤ 60s/redecomposeCount 未达上限）返回 60。
-func idleWaitSeconds(slot, tod string, redecomposeCount int) int {
-	if redecomposeCount < 1 || slot == "" || tod == "" {
-		return 60
-	}
-	_, endMin := slotRangeMinute(slot)
-	curMin := parsePlanMinute(tod)
-	if endMin <= 0 || curMin < 0 || endMin <= curMin {
-		return 60
-	}
-	remaining := endMin - curMin
-	if remaining <= 60 {
-		return 60
-	}
-	waitSec := remaining * 60
-	if waitSec > 3600 {
-		waitSec = 3600
-	}
-	return waitSec
-}
-
-// sendIdleWait 发一个 wait 避免队列空且无 goal 时忙循环。
-//
-// 当 redecomposeCount 达上限（无法重分解）且 slot 剩余时间 > 60s 时，
-// 发覆盖到 slot 末尾的长 Wait（clamp 上限 3600s），让 NPC 一次性 wait 到
-// 下一时段——redecomposeCount 在新时段重置后可重新分解，避免反复发
-// 60s Wait 形成死循环直到 game_time 跨入新时段。
-//
-// 其他情况（slot 解析失败/剩余 ≤ 60s/redecomposeCount 未达上限）保持
-// 原行为：发 60s Wait。
-func (a *agentContext) sendIdleWait(ctx context.Context, agentID string, ws *wsserver.Server, logger *slog.Logger) {
-	if !ws.IsConnected() {
-		return
-	}
-	// 有在途 action 时跳过：UE 正在执行 composite，wait 会被 busy 拒。
-	// 等 action_completed 自然唤醒 worker（completion 路径会 signal）。
-	a.mu.Lock()
-	inFlight := a.currentActionID != ""
-	if inFlight {
-		a.mu.Unlock()
-		return
-	}
-	slot := a.currentSlot
-	redecomposeCount := a.redecomposeCount
-	tod := a.latestTimeOfDayLocked()
-	a.mu.Unlock()
-
-	waitSec := idleWaitSeconds(slot, tod, redecomposeCount)
-	if waitSec > 60 {
-		logger.Info("[战术层] queue 耗尽且 redecompose 达上限，发长 Wait 覆盖 slot 剩余",
-			"agent_id", agentID, "slot", slot, "tod", tod, "wait_sec", waitSec)
-	}
-
-	ack, err := ws.SendAction(ctx, agentID, protocol.CmdWait, map[string]any{"duration_sec": waitSec})
-	if err != nil {
-		logger.Debug("[战术层] idle wait 发送失败", "agent_id", agentID, "err", err)
-		return
-	}
-	if ack != nil {
-		// 与 popAndSendQueueAction 一致：记录在途 action + 注册超时 timer，
-		// 否则 currentActionID 为空，hasInFlightAction() 永远 false，
-		// completion 的 signal 会立即唤醒 worker 重入 sendIdleWait 形成忙循环。
-		a.recordActionStarted(ack.ActionID, protocol.CmdWait, nil, 0, sourceTactical)
-		a.armActionTimeout(ack.ActionID, ack.EstimatedDurationSec, ws, agentID, func(string) *agentContext { return a })
-	}
-}
+// idleWaitSeconds 与 sendIdleWait 已移除：长复合动作持续到时段切换由
+// advanceSlotIfNeeded 打断，短动作队列空时由 tacticalRefill 重新分解
+// （内部注入"未安排长动作"hint），不再发 idle wait。
 
 // popAndSendQueueAction 从队列 pop 一个 action，映射后直发 ws.SendAction。
 // 不经过 MCP 工具 / guardedExecutor（无活跃 decision_epoch）。
@@ -711,8 +707,12 @@ func (a *agentContext) popAndSendQueueAction(ctx context.Context, agentID string
 	if ack != nil {
 		// 复用现有记账 + 超时机制；source=tactical 让 completion 走队列路径
 		a.recordActionStarted(ack.ActionID, cmd, params, 0 /*无 decision_epoch*/, sourceTactical)
-		// lookup 返回 a 自身——超时回滚只需清当前 agent 状态
-		a.armActionTimeout(ack.ActionID, ack.EstimatedDurationSec, ws, agentID, func(string) *agentContext { return a })
+		// 长复合动作不设超时：持续执行到下一 schedule 时段切换由
+		// advanceSlotIfNeeded 主动打断，自己不会超时。
+		if !protocol.IsCompositeCmd(cmd) {
+			// lookup 返回 a 自身——超时回滚只需清当前 agent 状态
+			a.armActionTimeout(ack.ActionID, ack.EstimatedDurationSec, ws, agentID, func(string) *agentContext { return a })
+		}
 	}
 }
 
@@ -832,9 +832,9 @@ func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
 		return false
 	}
 	// 同时段重复分解守卫：队列还有 action 时不 redecompose（继续执行剩余 action）；
-	// 队列空且已 redecompose ≥3 次才放弃，调用方发长 idle wait 覆盖 slot 剩余。
-	// 阈值 3：给 LLM 多次调整机会（每次重分解会通过 replanHint 提示"上次时长不够"，
-	// LLM 可据此延长 plan），第 3 次仍不够则用长 Wait 兜底，避免无谓 token 消耗。
+	// 队列空且已 redecompose ≥3 次才放弃，调用方阻塞等下一感知唤醒推进 game_time。
+	// 阈值 3：给 LLM 多次调整机会（每次重分解会通过 hint 提示"未安排长动作收尾"，
+	// LLM 可据此修正），第 3 次仍不够则等下一时段 redecomposeCount 重置。
 	if slot == a.currentSlot {
 		if len(a.actionQueue) > 0 {
 			a.mu.Unlock()
@@ -843,6 +843,11 @@ func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
 		if a.redecomposeCount >= 3 {
 			a.mu.Unlock()
 			return false
+		}
+		// 同时段重分解（队列已空在重分解）：注入"未安排长动作"hint 引导 LLM
+		// 这次把长复合动作放队列末尾，让 NPC 持续工作到时段切换。
+		if a.redecomposeCount >= 1 && a.replanHint == "" {
+			a.replanHint = "上次队列提前耗尽，未安排长动作收尾——本次请确保最后一个 action 是长复合动作（如 work_at_workbench/charge_at_station/patrol_zone/repair_target/chat_with/work_at_workshop），让 NPC 持续工作到下一时段"
 		}
 	}
 	zone := a.latestZoneLocked()
