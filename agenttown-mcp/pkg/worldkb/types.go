@@ -33,6 +33,10 @@ type Zone struct {
 	EntryPoint  [3]float64
 	EntryFacing [3]float64
 	Connections []Connection
+	// Extra carries any additional keys not modeled by the typed struct
+	// (e.g. future UE-generated fields). Populated by the loader and the
+	// map-based merger; persisted by the serializer. Not validated.
+	Extra map[string]any
 }
 
 // Connection is a directional topology edge from one zone to another.
@@ -60,6 +64,9 @@ type Object struct {
 	AvailableInteractions []string
 	DefaultState         string
 	Tags                 []string
+	// Extra carries any additional keys not modeled by the typed struct.
+	// See Zone.Extra for semantics.
+	Extra map[string]any
 }
 
 // Agent is an NPC definition.
@@ -75,6 +82,9 @@ type Agent struct {
 	ActorClass       string
 	ActionTable      string
 	MainBehaviorTree string
+	// Extra carries any additional keys not modeled by the typed struct.
+	// See Zone.Extra for semantics.
+	Extra map[string]any
 }
 
 // Personality is the per-agent personality overlay (NEW schema: struct, not []string).
