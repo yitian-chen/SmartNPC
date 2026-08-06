@@ -299,10 +299,20 @@ func runPerceptionWorker(
 	logger *slog.Logger,
 ) {
 	// 战略层：进入感知循环前生成当日计划。
-	plan := generateDailyPlan(ctx, ac.strategicHc, agentID, kb, logger)
-	ac.mu.Lock()
-	ac.dailyPlan = plan
-	ac.mu.Unlock()
+	// 自动规划关闭（--auto-plan=false）时跳过，dailyPlan 保持空，战术层 refill
+	// 也不会被调，UE 端不会收到任何自动 action_command。手动模式仅响应
+	// /debug/schedule 注入和 /debug/action 下发。
+	if autoPlanEnabled {
+		plan := generateDailyPlan(ctx, ac.strategicHc, agentID, kb, logger)
+		ac.mu.Lock()
+		ac.dailyPlan = plan
+		ac.mu.Unlock()
+	} else {
+		logger.Info("[自动规划已禁用] 跳过战略层每日计划生成", "agent_id", agentID)
+		ac.mu.Lock()
+		ac.dailyPlan = ""
+		ac.mu.Unlock()
+	}
 
 	for {
 		select {
@@ -346,14 +356,17 @@ func runPerceptionWorker(
 		}
 
 		if ac.hasQueueNext() {
-			// 队列还有下一个：pop 并直发
+			// 队列还有下一个：pop 并直发。
+			// 手动模式下 /debug/schedule 注入的 action 进队列后由 ac.signal() 唤醒
+			// worker 走这条路径下发，所以 popAndSendQueueAction 不受 autoPlanEnabled 限制。
 			ac.popAndSendQueueAction(ctx, agentID, ws, kb, logger)
-		} else {
-			// 队列空：尝试战术 refill；无 goal 或失败则发短 wait 避免忙循环
+		} else if autoPlanEnabled {
+			// 队列空 + 自动规划开启：尝试战术 refill；无 goal 或失败则发短 wait 避免忙循环
 			if !ac.tacticalRefill(ctx, agentID, ws, kb, logger) {
 				ac.sendIdleWait(ctx, agentID, ws, logger)
 			}
 		}
+		// 队列空 + 自动规划关闭：不主动下发，阻塞在 wake 等手动注入 signal。
 	}
 }
 
@@ -711,6 +724,12 @@ func (a *agentContext) popAndSendQueueAction(ctx context.Context, agentID string
 // latency benefit.
 var tacticalStreamingEnabled bool
 
+// autoPlanEnabled 是自动规划总开关，由 --auto-plan flag 解引用设置。
+// false 时 worker 跳过战略层 generateDailyPlan / 战术层 tacticalRefill / sendIdleWait，
+// WS handler 跳过反应层 trigger 调用。仅 /debug/schedule 和 /debug/action 驱动 action。
+// 默认 true 保持现有行为。
+var autoPlanEnabled bool
+
 // tacticalCallTimeout 是单次战术层 LLM 调用（流式或非流式）的硬超时。
 // 由 --tactical-timeout flag 配置，默认 60s。
 // 之前直接用进程 ctx，导致 Venus 后端排队时单次调用最长卡 120s，
@@ -1047,6 +1066,13 @@ func main() {
 		"Venus HTTP timeout per call")
 	tacticalTimeout = flag.Duration("tactical-timeout", 60*time.Second,
 		"hard timeout for a single tactical-layer LLM call (streaming or not)")
+	// autoPlanFlag 是自动规划总开关。关闭（false）时 MCP 进入手动模式：
+	// 不调战略层 generateDailyPlan、不调战术层 tacticalRefill、不主动发 idle wait、
+	// 不触发反应层 Ollama 决策。仅 /debug/schedule 注入和 /debug/action 手动下发
+	// 才会驱动 action。适合联调时隔离 UE 端、单独验证 MCP 行为。
+	// 解引用后赋给 package-level autoPlanEnabled（worker / WS handler 读此变量）。
+	autoPlanFlag = flag.Bool("auto-plan", true,
+		"enable auto planning (strategic + tactical + reactive). false = manual mode, only /debug/schedule and /debug/action drive actions")
 	)
 	flag.Parse()
 	if *showVersion {
@@ -1058,6 +1084,7 @@ func main() {
 	slog.SetDefault(logger)
 	tacticalStreamingEnabled = *tacticalStream
 	tacticalCallTimeout = *tacticalTimeout
+	autoPlanEnabled = *autoPlanFlag
 	logger.Info("starting agenttown-mcp",
 		"version", version,
 		"http", *httpAddr,
@@ -1068,6 +1095,7 @@ func main() {
 		"tactical_timeout", tacticalCallTimeout,
 		"ollama_url", *ollamaURL,
 		"ollama_model", *ollamaModel,
+		"auto_plan", autoPlanEnabled,
 	)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -1302,7 +1330,7 @@ func main() {
 			logger.Info("state_report", "agent_id", agentID,
 				"energy", sr.PhysicalState.Energy, "fatigue", sr.PhysicalState.Fatigue,
 				"joint_wear", sr.PhysicalState.JointWear, "health", sr.PhysicalState.Health)
-			if trigger != "" {
+			if trigger != "" && autoPlanEnabled {
 				go reactiveRunnerRef.trigger(agentID, ac, trigger, detail)
 			}
 
@@ -1322,7 +1350,7 @@ func main() {
 			"action_id", completed.ActionID, "result", completed.Result,
 			"reason", completed.Reason, "progress", completed.Progress,
 			"decision_queued", queued)
-			if trigger != "" {
+			if trigger != "" && autoPlanEnabled {
 				go reactiveRunnerRef.trigger(agentID, ac, trigger, detail)
 			}
 
@@ -1341,7 +1369,7 @@ func main() {
 			logger.Info("event_notification", "agent_id", agentID,
 				"event_id", event.EventID, "perception_level", event.PerceptionLevel,
 				"trigger", trigger)
-			if trigger != "" {
+			if trigger != "" && autoPlanEnabled {
 				go reactiveRunnerRef.trigger(agentID, ac, trigger, detail)
 			}
 
@@ -1369,7 +1397,7 @@ func main() {
 				logger.Warn("perception_update parse failed", "agent_id", agentID, "err", err)
 				return
 			}
-			if trigger != "" {
+			if trigger != "" && autoPlanEnabled {
 				go reactiveRunnerRef.trigger(agentID, ac, trigger, detail)
 			}
 
