@@ -8,15 +8,17 @@ import (
 	"testing"
 )
 
-// realUE5GeneratedPath / realUE5AuthoredPath point at fixtures captured
+// realUE5GeneratedPath / realUE5AuthoredPath point at the project's
+// fallback KB fixtures (assets/world.{generated,authored}.json), captured
 // from a real UE5 push (stable log 2026-08-06). The generated half carries
 // display_name/description and available_interactions as [{name,description}];
 // the authored half uses OLD schema (site/connected_to/role/personality[]/
 // home_zone/top-level relationships). This is the production payload that
-// broke the pre-refactor typed merger.
+// broke the pre-refactor typed merger. Reading from assets/ avoids
+// duplicating the fixtures in testdata/.
 func realUE5GeneratedPath(t *testing.T) string {
 	t.Helper()
-	p, err := filepath.Abs(filepath.Join("testdata", "world.generated.json"))
+	p, err := filepath.Abs(filepath.Join("..", "..", "..", "assets", "world.generated.json"))
 	if err != nil {
 		t.Fatalf("resolve generated fixture: %v", err)
 	}
@@ -28,7 +30,7 @@ func realUE5GeneratedPath(t *testing.T) string {
 
 func realUE5AuthoredPath(t *testing.T) string {
 	t.Helper()
-	p, err := filepath.Abs(filepath.Join("testdata", "world.authored.json"))
+	p, err := filepath.Abs(filepath.Join("..", "..", "..", "assets", "world.authored.json"))
 	if err != nil {
 		t.Fatalf("resolve authored fixture: %v", err)
 	}

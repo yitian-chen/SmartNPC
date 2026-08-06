@@ -307,7 +307,7 @@ func TestMapDebugCmd_RegistryDerived(t *testing.T) {
 
 func TestResolveDebugMoveToLocation_Valid(t *testing.T) {
 	kb := loadTestKB(t)
-	params := map[string]any{"target": "workbench_01"}
+	params := map[string]any{"target": "workbench"}
 	out, err := resolveDebugMoveToLocation(params, kb)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)

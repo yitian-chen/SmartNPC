@@ -181,8 +181,9 @@ func TestBuildStrategicContext_WithKB(t *testing.T) {
 	if !strings.Contains(got, "老陈") {
 		t.Errorf("context missing agent display name '老陈': %q", got)
 	}
-	if !strings.Contains(got, "车间主管") {
-		t.Errorf("context missing agent profession '车间主管': %q", got)
+	// 新 UE5 authored 用 role:[supervisor,worker,maintainer]，shim 后 profession 为 joined 串
+	if !strings.Contains(got, "supervisor、worker、maintainer") {
+		t.Errorf("context missing agent profession 'supervisor、worker、maintainer': %q", got)
 	}
 	if !strings.Contains(got, "【你的角色】") {
 		t.Errorf("context missing '【你的角色】' header: %q", got)
@@ -191,8 +192,8 @@ func TestBuildStrategicContext_WithKB(t *testing.T) {
 	if !strings.Contains(got, "main_workshop") {
 		t.Errorf("context missing zone id 'main_workshop': %q", got)
 	}
-	if !strings.Contains(got, "workbench_01") {
-		t.Errorf("context missing object id 'workbench_01': %q", got)
+	if !strings.Contains(got, "workbench") {
+		t.Errorf("context missing object id 'workbench': %q", got)
 	}
 	if !strings.Contains(got, "【世界知识】") {
 		t.Errorf("context missing '【世界知识】' header: %q", got)
@@ -222,9 +223,11 @@ func TestBuildStrategicContext_AgentNotFound(t *testing.T) {
 // ─── buildAgentRoleContext ────────────────────────────────────
 
 // TestBuildAgentRoleContext_WithKB 验证从真实 KB 取 H-01 的角色画像：
-// 名字/职业/背景/性格特质/说话风格五项应齐全，且不带【你的角色】标题
-// （标题由调用方决定——战略层 buildStrategicContext 加标题、战术层
-// buildTacticalPrompt 加标题，helper 本身只输出裸字段）。
+// 新 UE5 authored 提供 display_name/role[shim→profession]/personality.traits，
+// 但未提供 description 和 personality.speech_style，故输出仅含名字/职业/性格特质
+// 三项（helper 跳过空字段）。helper 不带【你的角色】标题——标题由调用方决定
+// （战略层 buildStrategicContext 加标题、战术层 buildTacticalPrompt 加标题，
+// helper 本身只输出裸字段）。
 func TestBuildAgentRoleContext_WithKB(t *testing.T) {
 	kb := loadTestKB(t)
 	got := buildAgentRoleContext(kb, "H-01")
@@ -233,13 +236,17 @@ func TestBuildAgentRoleContext_WithKB(t *testing.T) {
 	}
 	for _, want := range []string{
 		"名字：老陈",
-		"职业：车间主管",
-		"背景：车间主管机器人",
-		"性格特质：沉稳、念旧、重视工艺",
-		"说话风格：简洁，偶尔念叨老物件",
+		"职业：supervisor、worker、maintainer",
+		"性格特质：沉稳、念旧、重视工艺、务实",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("role missing %q, got: %q", want, got)
+		}
+	}
+	// UE5 authored 未提供 description / speech_style，helper 应跳过这些字段。
+	for _, notWant := range []string{"背景：", "说话风格："} {
+		if strings.Contains(got, notWant) {
+			t.Errorf("role should not contain %q (UE5 authored does not provide it): %q", notWant, got)
 		}
 	}
 	// helper 不应包含段落标题——标题由调用方添加
@@ -316,12 +323,12 @@ func TestBuildDefaultDailyPlan_WithKB(t *testing.T) {
 	// 有 KB 时：兜底计划应包含第一个 zone 显示名 + 第一个 object 显示名。
 	kb := loadTestKB(t)
 	got := buildDefaultDailyPlan(kb)
-	// 第一个 zone 是 archive_station（显示名"档案馆与广播站"）
+	// 第一个 zone（按 ID 排序）是 archive_station（显示名"档案馆与广播站"）
 	if !strings.Contains(got, "档案馆与广播站") {
 		t.Errorf("KB-derived plan should contain first zone display name: %q", got)
 	}
-	// 第一个 object 是 charging_station_01（显示名"综合充能站一号"）
-	if !strings.Contains(got, "综合充能站一号") {
+	// 第一个 object（按 ID 排序）是 charge（显示名"充电桩"）
+	if !strings.Contains(got, "充电桩") {
 		t.Errorf("KB-derived plan should contain first object display name: %q", got)
 	}
 	// 时段格式可被 parseFormattedPlan 解析
@@ -538,23 +545,23 @@ func TestSelectPlanInjection_OvernightSlotEarlyMorning(t *testing.T) {
 // ─── buildStrategicZoneObjectMap ─────────────────────────────
 
 func TestBuildStrategicZoneObjectMap_RealKB(t *testing.T) {
-	// 真实 KB：7 个 zone，3 个 object（分别在 central_plaza/residential_quarters/
-	// main_workshop）。映射应列出全部 7 个 zone，有 object 的标注 object，
-	// 无 object 的显式标注"无可交互物体"。
+	// 真实 KB：7 个 zone，4 个 object（分别在 central_plaza/repair_bay/
+	// residential_quarters/main_workshop）。映射应列出全部 7 个 zone，有 object
+	// 的标注 object，无 object 的显式标注"无可交互物体"。
 	kb := loadTestKB(t)
 	got := buildStrategicZoneObjectMap(kb)
 	if got == "" {
 		t.Fatal("got empty map for valid KB")
 	}
 	// 有 object 的 zone 应出现其 object id。
-	if !strings.Contains(got, "charging_station_01") {
-		t.Errorf("map should list charging_station_01 under central_plaza: %q", got)
+	if !strings.Contains(got, "charge") {
+		t.Errorf("map should list charge under central_plaza: %q", got)
 	}
-	if !strings.Contains(got, "workbench_01") {
-		t.Errorf("map should list workbench_01 under main_workshop: %q", got)
+	if !strings.Contains(got, "workbench") {
+		t.Errorf("map should list workbench under main_workshop: %q", got)
 	}
-	if !strings.Contains(got, "rest_bench_01") {
-		t.Errorf("map should list rest_bench_01 under residential_quarters: %q", got)
+	if !strings.Contains(got, "sleeppod") {
+		t.Errorf("map should list sleeppod under residential_quarters: %q", got)
 	}
 	// 无 object 的 zone 应显式标注（让战略层 LLM 知道这些 zone 不能做 interact）。
 	if !strings.Contains(got, "无可交互物体") {
