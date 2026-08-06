@@ -57,13 +57,13 @@ var tacticalToolOverride = map[string]struct {
 	Desc   string
 	Params string
 }{
-	"move_to_location":  {"移动到目标位置", `{"target":"区域或位置id"}`},
-	"move_to_agent":     {"跟随目标agent", `{"target_agent_id":"...","speed":"walk|run"}`},
-	"turn_to":           {"转向目标", `{"target_agent_id":"实体id"} 或 {"direction":[dx,dy,dz]}`},
-	"play_montage":      {"播放蒙太奇", `{"montage_id":"...","wait_finish":true}`},
-	"speak":             {"说话", `{"content":"...","target_agent_id":"目标agent_id（可空）"}`},
-	"emote":             {"表达情绪", `{"emotion":"happy|sad|...","mode":"oneshot|sustained"}`},
-	"interact":          {"与智能物体交互", `{"target_object_id":"...","interaction":"动词"}`},
+	"move_to_location": {"移动到目标位置", `{"target":"区域或位置id"}`},
+	"move_to_agent":    {"跟随目标agent", `{"target_agent_id":"...","speed":"walk|run"}`},
+	"turn_to":          {"转向目标", `{"target_agent_id":"实体id"} 或 {"direction":[dx,dy,dz]}`},
+	"play_montage":     {"播放蒙太奇", `{"montage_id":"...","wait_finish":true}`},
+	"speak":            {"说话", `{"content":"...","target_agent_id":"目标agent_id（可空）"}`},
+	"emote":            {"表达情绪", `{"emotion":"happy|sad|...","mode":"oneshot|sustained"}`},
+	"interact":         {"与智能物体交互", `{"target_object_id":"...","interaction":"动词"}`},
 	// wait 故意不在 override 中且不在 prompt 工具列表展示：长复合动作应持续到
 	// 时段切换由 advanceSlotIfNeeded 打断，短动作队列空时由 tacticalRefill
 	// 重新分解。wait 工具 struct 保留以兼容反应层等其他调用点。
@@ -75,7 +75,7 @@ var tacticalToolOverride = map[string]struct {
 	// 与真实 UE5（smart_object + interaction）之间分歧，让 buildTacticalToolEntries
 	// 走 buildToolParamHint(act.Params) 按 capability_registry 动态派生，避免
 	// 硬编码某一侧 schema 导致另一侧参数名不匹配。
-	"patrol_zone":       {"巡逻区域", `{"target_zone":"区域id","duration_sec":秒数}`},
+	"patrol_zone": {"巡逻区域", `{"target_zone":"区域id","duration_sec":秒数}`},
 }
 
 // tacticalActionAvailable 判断 action 是否为战术层可用工具，且其依赖的
@@ -252,7 +252,7 @@ const tacticalPromptBody = `[战术层/任务分解] 当前时段目标：%s
 %s
 %s
 可用工具（仅限以下 %d 个）。工具分两类：
-- 复合动作（标记 [复合]）：长耗时、单步即可完成一段工作（如装配、充电、巡逻、聊天）。若目标语义与某复合动作匹配，应优先使用复合动作。
+- 复合动作（标记 [复合]）：长耗时、单步即可完成一段工作（如装配、充电、巡逻、聊天），会自动移动到对应位置，无需自己调用 move_to。若目标语义与某复合动作匹配，应优先使用复合动作。
 - 原子动作（标记 [原子]）：短耗时、作为基本 building block（如移动、说话、等待、交互）。仅当复合动作无法覆盖 schedule 要求时，才用 2-5 个原子动作组合实现。
 %s
 
@@ -260,7 +260,7 @@ const tacticalPromptBody = `[战术层/任务分解] 当前时段目标：%s
 1. 第一行输出 {"inner_thought":"一句话内心独白"}
 2. 后续每行输出一个 {"action":"工具名","params":{...}}，按执行顺序排列
 3. 队列必须以长复合动作（标记 [复合]）结尾——长复合动作会持续执行直到时段切换，让 NPC 一直工作到下一 schedule 节点被 worker 主动打断
-4. 禁止输出 wait 动作；若无需移动/转身等前置步骤，可直接输出单个长复合动作
+4. 禁止输出 wait 动作；若无需移动/转身等前置步骤，可直接输出单个长复合动作，长复合动作包含移动到对应位置的逻辑
 5. 仅当目标确实没有匹配的长复合动作时（极少见），才用 2-5 个原子动作组合实现目标，但仍禁止以 wait 结尾
 6. move_to 的 target、interact 的 target_object_id、work_at_workbench 的 target_object_id、patrol_zone 的 target_zone 必须严格使用上面"可前往区域"和"可交互物体"中给出的 id，禁止编造、禁止拼接 zone/interaction 信息
 7. 每行一个 JSON 对象，不要输出 JSON 数组，不要输出 markdown 围栏，不要输出任何其他文字
