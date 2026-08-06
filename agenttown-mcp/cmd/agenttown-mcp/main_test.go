@@ -1124,20 +1124,29 @@ func TestWorldKBSwap_BadPayloadPreservesOldKB(t *testing.T) {
 	}
 }
 
-// TestWorldKBSwap_MergeErrorPreservesOldKB 验证 merge 失败（schema 不匹配）
-// 时返回错误且不写盘。
+// TestWorldKBSwap_MergeErrorPreservesOldKB 验证 merge 失败（dangling
+// authored id — authored 引用 generated 不存在的实体）时返回错误且不写盘。
+// 历史上用 schema_version 9.9 vs 1.0 触发 fatal，但重构后版本不一致降级为
+// warning（不再 fatal），故改用 dangling authored 触发真正的 merge error。
 func TestWorldKBSwap_MergeErrorPreservesOldKB(t *testing.T) {
 	dir := t.TempDir()
 	outPath := dir + "/world_kb.yaml"
 
-	// schema_version=9.9 vs authored version=1.0 → merge error.
+	// generated 含 zone1；authored 引用不存在的 ghost_zone → dangling fatal。
 	gen := map[string]any{
-		"schema_version": "9.9",
-		"zones":          []map[string]any{}, "objects": []map[string]any{}, "agents": []map[string]any{},
+		"schema_version": "1.0",
+		"zones": []map[string]any{
+			{"id": "zone1", "bounds": map[string]any{"center": []int{0, 0, 0}, "extent": []int{1, 1, 1}},
+				"entry_point": []int{0, 0, 0}, "entry_facing": []int{1, 0, 0}},
+		},
+		"objects": []map[string]any{}, "agents": []map[string]any{},
 	}
 	auth := map[string]any{
 		"version": "1.0", "narrative": map[string]any{"setting": "x"},
-		"zones": map[string]any{}, "objects": map[string]any{}, "agents": map[string]any{},
+		"zones": map[string]any{
+			"ghost_zone": map[string]any{"display_name": "Ghost"},
+		},
+		"objects": map[string]any{}, "agents": map[string]any{},
 	}
 	p := protocol.WorldKBPayload{
 		Generated: mustJSON(t, gen),
@@ -1147,7 +1156,7 @@ func TestWorldKBSwap_MergeErrorPreservesOldKB(t *testing.T) {
 
 	_, _, err := worldKBSwap(false, payload, outPath, "")
 	if err == nil {
-		t.Fatal("expected merge error for schema mismatch")
+		t.Fatal("expected merge error for dangling authored id")
 	}
 	if errors.Is(err, errAgentWindowClosed) {
 		t.Fatal("merge error should not be masked as window-closed")
