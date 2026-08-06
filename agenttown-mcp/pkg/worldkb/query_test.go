@@ -14,8 +14,8 @@ func TestGetPosition_Zone(t *testing.T) {
 	if kind != "zone" {
 		t.Errorf("kind = %q, want zone", kind)
 	}
-	// main_workshop entry_point = [16000, 10000, 100]
-	want := [3]float64{16000, 10000, 100}
+	// main_workshop entry_point = [6210, 5780, -21200]
+	want := [3]float64{6210, 5780, -21200}
 	if coord != want {
 		t.Errorf("coord = %v, want %v", coord, want)
 	}
@@ -26,14 +26,14 @@ func TestGetPosition_Object(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	coord, kind, err := kb.GetPosition("workbench_01")
+	coord, kind, err := kb.GetPosition("workbench")
 	if err != nil {
 		t.Fatalf("GetPosition: %v", err)
 	}
 	if kind != "object" {
 		t.Errorf("kind = %q, want object", kind)
 	}
-	want := [3]float64{19500, 10500, 100}
+	want := [3]float64{7330, 7100, -21140}
 	if coord != want {
 		t.Errorf("coord = %v, want %v", coord, want)
 	}
@@ -49,9 +49,10 @@ func TestGetPosition_Unknown(t *testing.T) {
 
 func TestWhichZone_Hit(t *testing.T) {
 	kb, _ := Load(sampleYAMLPath(t))
-	// main_workshop bounds: center [20000,10000,0], extent [5000,5000,500]
-	// So [20000, 10000, 0] is inside.
-	got := kb.WhichZone([3]float64{20000, 10000, 0})
+	// main_workshop bounds: center [6210, 5780, -21200], extent [7500, 7500, 1000]
+	// (XY AABB: X∈[-1290, 13710], Y∈[-1720, 13280]).
+	// Use a point strictly inside main_workshop interior.
+	got := kb.WhichZone([3]float64{6210, 5780, -21200})
 	if got != "main_workshop" {
 		t.Errorf("WhichZone(main_workshop interior) = %q", got)
 	}
@@ -67,11 +68,11 @@ func TestWhichZone_Miss(t *testing.T) {
 
 func TestWhichObject_Hit(t *testing.T) {
 	kb, _ := Load(sampleYAMLPath(t))
-	// workbench_01 actor_position [20000,10000,100], radius 1500cm
+	// workbench actor_position [7330, 7100, -21140], radius 1500cm
 	// A point 500cm away should hit.
-	got := kb.WhichObject([3]float64{20500, 10000, 100})
-	if got != "workbench_01" {
-		t.Errorf("WhichObject(near workbench_01) = %q, want workbench_01", got)
+	got := kb.WhichObject([3]float64{7830, 7100, -21140})
+	if got != "workbench" {
+		t.Errorf("WhichObject(near workbench) = %q, want workbench", got)
 	}
 }
 
@@ -92,8 +93,8 @@ func TestResolveTarget(t *testing.T) {
 		wantKind string
 	}{
 		{"main_workshop", "main_workshop", "zone"},
-		{"workbench_01", "workbench_01", "object"},
-		{"charging_station_01", "charging_station_01", "object"},
+		{"workbench", "workbench", "object"},
+		{"charge", "charge", "object"},
 		{"H-01", "H-01", "agent"},
 	}
 	for _, c := range cases {
@@ -145,22 +146,22 @@ func TestListObjects(t *testing.T) {
 	if len(objs) == 0 {
 		t.Fatal("ListObjects returned empty for non-empty KB")
 	}
-	// Should contain workbench_01 with native DisplayName and
+	// Should contain workbench with native DisplayName and
 	// AvailableInteractions including "assemble".
 	found := false
 	for _, o := range objs {
-		if o.ID == "workbench_01" {
+		if o.ID == "workbench" {
 			if o.DisplayName == "" {
-				t.Errorf("workbench_01 has empty DisplayName")
+				t.Errorf("workbench has empty DisplayName")
 			}
-			if o.Category != "workbench" {
-				t.Errorf("workbench_01 Category = %q, want \"workbench\"", o.Category)
+			if o.Category != "work" {
+				t.Errorf("workbench Category = %q, want \"work\"", o.Category)
 			}
 			if o.ZoneID != "main_workshop" {
-				t.Errorf("workbench_01 ZoneID = %q, want main_workshop", o.ZoneID)
+				t.Errorf("workbench ZoneID = %q, want main_workshop", o.ZoneID)
 			}
 			if len(o.AvailableInteractions) == 0 {
-				t.Errorf("workbench_01 has empty AvailableInteractions")
+				t.Errorf("workbench has empty AvailableInteractions")
 			}
 			hasAssemble := false
 			for _, a := range o.AvailableInteractions {
@@ -170,25 +171,22 @@ func TestListObjects(t *testing.T) {
 				}
 			}
 			if !hasAssemble {
-				t.Errorf("workbench_01 AvailableInteractions missing 'assemble', got %v", o.AvailableInteractions)
+				t.Errorf("workbench AvailableInteractions missing 'assemble', got %v", o.AvailableInteractions)
 			}
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Errorf("ListObjects missing workbench_01; got %v", objs)
+		t.Errorf("ListObjects missing workbench; got %v", objs)
 	}
 }
 
 func TestGetAvailableInteractions(t *testing.T) {
 	kb, _ := Load(sampleYAMLPath(t))
-	acts := kb.GetAvailableInteractions("workbench_01")
-	if len(acts) != 2 {
-		t.Fatalf("len(interactions) = %d, want 2", len(acts))
-	}
-	// Should contain assemble and inspect
-	want := map[string]bool{"assemble": false, "inspect": false}
+	acts := kb.GetAvailableInteractions("workbench")
+	// workbench has one interaction: assemble
+	want := map[string]bool{"assemble": false}
 	for _, a := range acts {
 		if _, ok := want[a]; ok {
 			want[a] = true

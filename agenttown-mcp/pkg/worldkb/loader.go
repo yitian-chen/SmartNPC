@@ -3,12 +3,16 @@ package worldkb
 import (
 	"fmt"
 	"os"
+	"reflect"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
 
 // rawKB mirrors world_kb.yaml structure for the first-pass unmarshal.
 // Field names use the YAML snake_case keys directly via struct tags.
+// Each entity also carries an Extra bag for unknown keys (preserved on
+// round-trip so UE-pushed fields not modeled by the typed structs survive).
 type rawKB struct {
 	Version       string      `yaml:"version"`
 	Narrative     rawNarrative `yaml:"narrative"`
@@ -32,6 +36,7 @@ type rawZone struct {
 	EntryPoint  []float64      `yaml:"entry_point"`
 	EntryFacing []float64      `yaml:"entry_facing"`
 	Connections []rawConnection `yaml:"connections"`
+	Extra       map[string]any `yaml:"-"`
 }
 
 type rawConnection struct {
@@ -41,19 +46,20 @@ type rawConnection struct {
 }
 
 type rawObject struct {
-	ID                    string    `yaml:"id"`
-	DisplayName           string    `yaml:"display_name"`
-	Description           string    `yaml:"description"`
-	Category              string    `yaml:"category"`
-	ZoneID                string    `yaml:"zone_id"`
-	ActorClass            string    `yaml:"actor_class"`
-	ActorPosition         []float64 `yaml:"actor_position"`
-	InteractionPoint      []float64 `yaml:"interaction_point"`
-	InteractionFacing     []float64 `yaml:"interaction_facing"`
-	InteractionRadius     float64   `yaml:"interaction_radius"`
-	AvailableInteractions []string  `yaml:"available_interactions"`
-	DefaultState          string    `yaml:"default_state"`
-	Tags                  []string  `yaml:"tags"`
+	ID                    string         `yaml:"id"`
+	DisplayName           string         `yaml:"display_name"`
+	Description           string         `yaml:"description"`
+	Category              string         `yaml:"category"`
+	ZoneID                string         `yaml:"zone_id"`
+	ActorClass            string         `yaml:"actor_class"`
+	ActorPosition         []float64      `yaml:"actor_position"`
+	InteractionPoint      []float64      `yaml:"interaction_point"`
+	InteractionFacing     []float64      `yaml:"interaction_facing"`
+	InteractionRadius     float64        `yaml:"interaction_radius"`
+	AvailableInteractions []string       `yaml:"available_interactions"`
+	DefaultState          string         `yaml:"default_state"`
+	Tags                  []string       `yaml:"tags"`
+	Extra                 map[string]any `yaml:"-"`
 }
 
 type rawAgent struct {
@@ -68,6 +74,7 @@ type rawAgent struct {
 	ActorClass       string         `yaml:"actor_class"`
 	ActionTable      string         `yaml:"action_table"`
 	MainBehaviorTree string         `yaml:"main_behavior_tree"`
+	Extra            map[string]any `yaml:"-"`
 }
 
 type rawPersonality struct {
@@ -89,6 +96,77 @@ type rawBounds struct {
 	Rotation []float64 `yaml:"rotation"`
 }
 
+// ---------------------------------------------------------------------------
+// yaml.Node decode with Extra capture
+// ---------------------------------------------------------------------------
+
+// decodeEntityWithExtra decodes a mapping node into the known struct fields
+// (via node.Decode(known)) and captures any mapping keys not claimed by a
+// known yaml tag into *extra. Known yaml tags are derived from the struct's
+// field tags via reflection.
+func decodeEntityWithExtra(node *yaml.Node, known any, extra *map[string]any) error {
+	if node.Kind != yaml.MappingNode {
+		return node.Decode(known)
+	}
+	knownKeys := knownYAMLKeys(known)
+	// First pass: decode known fields normally.
+	if err := node.Decode(known); err != nil {
+		return err
+	}
+	// Second pass: capture unknown keys.
+	for i := 0; i < len(node.Content); i += 2 {
+		keyNode := node.Content[i]
+		if keyNode.Kind != yaml.ScalarNode {
+			continue
+		}
+		if knownKeys[keyNode.Value] {
+			continue
+		}
+		var val any
+		if err := node.Content[i+1].Decode(&val); err != nil {
+			return fmt.Errorf("extra key %q: %w", keyNode.Value, err)
+		}
+		if *extra == nil {
+			*extra = map[string]any{}
+		}
+		(*extra)[keyNode.Value] = val
+	}
+	return nil
+}
+
+// knownYAMLKeys returns the set of yaml tag names declared on a struct's
+// exported fields (e.g. `yaml:"display_name"` → "display_name"). Fields
+// with `yaml:"-"` or no tag are skipped.
+func knownYAMLKeys(structPtr any) map[string]bool {
+	t := reflect.TypeOf(structPtr)
+	if t.Kind() == reflect.Ptr {
+		t = t.Elem()
+	}
+	if t.Kind() != reflect.Struct {
+		return nil
+	}
+	out := make(map[string]bool, t.NumField())
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		tag := f.Tag.Get("yaml")
+		if tag == "" || tag == "-" {
+			continue
+		}
+		name := tag
+		if comma := strings.Index(tag, ","); comma >= 0 {
+			name = tag[:comma]
+		}
+		if name != "" {
+			out[name] = true
+		}
+	}
+	return out
+}
+
+// ---------------------------------------------------------------------------
+// Load
+// ---------------------------------------------------------------------------
+
 // Load reads and parses the world_kb.yaml file at path, validates required
 // fields, and builds the in-memory KB with lookup indexes.
 //
@@ -102,9 +180,23 @@ func Load(path string) (*KB, error) {
 		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
 
-	var raw rawKB
-	if err := yaml.Unmarshal(data, &raw); err != nil {
+	// Decode top-level into a yaml.Node so we can capture Extra on each entity.
+	var doc yaml.Node
+	if err := yaml.Unmarshal(data, &doc); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
+	}
+	var raw rawKB
+	if doc.Kind == 0 {
+		// Empty file — raw stays zero-value.
+	} else if err := doc.Decode(&raw); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", path, err)
+	}
+
+	// Re-walk the top-level mapping to find entity arrays and capture Extra
+	// per entity. We do this by re-decoding each entity as a yaml.Node then
+	// calling decodeEntityWithExtra.
+	if doc.Kind == yaml.DocumentNode && len(doc.Content) > 0 {
+		decodeEntitiesExtra(&doc, &raw)
 	}
 
 	kb := &KB{
@@ -160,6 +252,7 @@ func Load(path string) (*KB, error) {
 				Rotation: rotation,
 			},
 			Connections: convertRawConnections(rz.Connections),
+			Extra:       rz.Extra,
 		}
 		kb.Zones = append(kb.Zones, z)
 		kb.zoneByID[z.ID] = &kb.Zones[len(kb.Zones)-1]
@@ -204,6 +297,7 @@ func Load(path string) (*KB, error) {
 			AvailableInteractions: ro.AvailableInteractions,
 			DefaultState:          ro.DefaultState,
 			Tags:                  ro.Tags,
+			Extra:                 ro.Extra,
 		})
 		kb.objectByID[ro.ID] = &kb.Objects[len(kb.Objects)-1]
 	}
@@ -236,6 +330,7 @@ func Load(path string) (*KB, error) {
 			ActorClass:       ra.ActorClass,
 			ActionTable:      ra.ActionTable,
 			MainBehaviorTree: ra.MainBehaviorTree,
+			Extra:            ra.Extra,
 		})
 		kb.agentByID[ra.ID] = &kb.Agents[len(kb.Agents)-1]
 	}
@@ -256,6 +351,86 @@ func Load(path string) (*KB, error) {
 	}
 
 	return kb, nil
+}
+
+// decodeEntitiesExtra walks the top-level document node to find the zones/
+// objects/agents arrays and re-decodes each entity with Extra capture. This
+// is the second pass that fills the Extra fields on rawZone/rawObject/rawAgent
+// (the first pass via doc.Decode(&raw) left them zero).
+func decodeEntitiesExtra(doc *yaml.Node, raw *rawKB) {
+	if doc.Kind != yaml.DocumentNode || len(doc.Content) == 0 {
+		return
+	}
+	root := doc.Content[0]
+	if root.Kind != yaml.MappingNode {
+		return
+	}
+	for i := 0; i < len(root.Content); i += 2 {
+		key := root.Content[i].Value
+		val := root.Content[i+1]
+		switch key {
+		case "zones":
+			decodeEntityArrayExtra(val, &raw.Zones, func(i int) any { return &raw.Zones[i] })
+		case "objects":
+			decodeEntityArrayExtra(val, &raw.Objects, func(i int) any { return &raw.Objects[i] })
+		case "agents":
+			decodeEntityArrayExtra(val, &raw.Agents, func(i int) any { return &raw.Agents[i] })
+		}
+	}
+}
+
+// decodeEntityArrayExtra iterates a sequence node and decodes each entry
+// into the corresponding raw entity (with Extra capture). ptrAt returns a
+// pointer to the i-th element so we can decode in-place.
+func decodeEntityArrayExtra(seqNode *yaml.Node, sliceAddr any, ptrAt func(int) any) {
+	if seqNode == nil || seqNode.Kind != yaml.SequenceNode {
+		return
+	}
+	n := len(seqNode.Content)
+	for i := 0; i < n; i++ {
+		// Grow the slice if needed (shouldn't be needed since first-pass
+		// Decode already sized it, but defensive).
+		growEntitySlice(sliceAddr, i+1)
+		ptr := ptrAt(i)
+		// Clear the Extra slot so decodeEntityWithExtra can re-fill cleanly.
+		// (The first-pass Decode left Extra as nil since it has yaml:"-".)
+		var extra map[string]any
+		if err := decodeEntityWithExtra(seqNode.Content[i], ptr, &extra); err != nil {
+			// Best-effort: if extra capture fails, the first-pass decode
+			// already populated known fields — keep them and skip extra.
+			continue
+		}
+		// Stash Extra back into the struct via reflection (since yaml:"-" means
+		// Decode didn't touch it).
+		setExtraField(ptr, extra)
+	}
+}
+
+// growEntitySlice ensures the slice backing sliceAddr has length >= n.
+// sliceAddr must be a pointer to a slice.
+func growEntitySlice(sliceAddr any, n int) {
+	v := reflect.ValueOf(sliceAddr).Elem()
+	if v.Len() >= n {
+		return
+	}
+	if v.Cap() < n {
+		newSlice := reflect.MakeSlice(v.Type(), n, n)
+		reflect.Copy(newSlice, v)
+		v.Set(newSlice)
+		return
+	}
+	v.SetLen(n)
+}
+
+// setExtraField sets the Extra field (which has yaml:"-") on a raw entity
+// pointer via reflection.
+func setExtraField(structPtr any, extra map[string]any) {
+	v := reflect.ValueOf(structPtr).Elem()
+	field := v.FieldByName("Extra")
+	if !field.IsValid() || !field.CanSet() {
+		return
+	}
+	field.Set(reflect.ValueOf(extra))
 }
 
 // buildIndex populates the zoneByID/objectByID/agentByID lookup maps from

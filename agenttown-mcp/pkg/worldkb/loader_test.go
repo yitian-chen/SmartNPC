@@ -37,8 +37,8 @@ func TestLoad_Sample(t *testing.T) {
 	if len(kb.Zones) != 7 {
 		t.Errorf("len(Zones) = %d, want 7", len(kb.Zones))
 	}
-	if len(kb.Objects) != 3 {
-		t.Errorf("len(Objects) = %d, want 3", len(kb.Objects))
+	if len(kb.Objects) != 4 {
+		t.Errorf("len(Objects) = %d, want 4", len(kb.Objects))
 	}
 	if len(kb.Agents) != 1 {
 		t.Errorf("len(Agents) = %d, want 1", len(kb.Agents))
@@ -51,41 +51,41 @@ func TestLoad_Sample(t *testing.T) {
 	if kb.GetZone("central_plaza") == nil {
 		t.Error("zoneByID missing central_plaza")
 	}
-	if kb.GetObject("workbench_01") == nil {
-		t.Error("objectByID missing workbench_01")
+	if kb.GetZone("repair_bay") == nil {
+		t.Error("zoneByID missing repair_bay")
 	}
-	if kb.GetObject("rest_bench_01") == nil {
-		t.Error("objectByID missing rest_bench_01")
+	if kb.GetObject("workbench") == nil {
+		t.Error("objectByID missing workbench")
 	}
-	if kb.GetObject("charging_station_01") == nil {
-		t.Error("objectByID missing charging_station_01")
+	if kb.GetObject("charge") == nil {
+		t.Error("objectByID missing charge")
 	}
 	if kb.GetAgent("H-01") == nil {
 		t.Error("agentByID missing H-01")
 	}
 
-	// Coordinates: workbench_01 interaction_point = [19500, 10500, 100]
-	o := kb.GetObject("workbench_01")
-	if o.InteractionPoint != [3]float64{19500, 10500, 100} {
-		t.Errorf("workbench_01 interaction_point = %v, want [19500 10500 100]", o.InteractionPoint)
+	// Coordinates: workbench interaction_point = [7330, 7100, -21140]
+	o := kb.GetObject("workbench")
+	if o.InteractionPoint != [3]float64{7330, 7100, -21140} {
+		t.Errorf("workbench interaction_point = %v, want [7330 7100 -21140]", o.InteractionPoint)
 	}
 	if o.InteractionRadius != 1500 {
-		t.Errorf("workbench_01 interaction_radius = %v, want 1500", o.InteractionRadius)
+		t.Errorf("workbench interaction_radius = %v, want 1500", o.InteractionRadius)
 	}
 	if o.ZoneID != "main_workshop" {
-		t.Errorf("workbench_01 zone_id = %q, want main_workshop", o.ZoneID)
+		t.Errorf("workbench zone_id = %q, want main_workshop", o.ZoneID)
 	}
-	if o.DisplayName != "一号装配工作台" {
-		t.Errorf("workbench_01 display_name = %q", o.DisplayName)
+	if o.DisplayName != "工作台" {
+		t.Errorf("workbench display_name = %q", o.DisplayName)
 	}
 
 	// main_workshop zone entry_point resolves to a coordinate.
 	z := kb.GetZone("main_workshop")
-	if z == nil || z.EntryPoint != [3]float64{16000, 10000, 100} {
-		t.Errorf("main_workshop entry_point = %v, want [16000 10000 100]", z)
+	if z == nil || z.EntryPoint != [3]float64{6210, 5780, -21200} {
+		t.Errorf("main_workshop entry_point = %v, want [6210 5780 -21200]", z)
 	}
-	if z.Bounds.Extent != [3]float64{5000, 5000, 500} {
-		t.Errorf("main_workshop bounds.extent = %v, want [5000 5000 500]", z.Bounds.Extent)
+	if z.Bounds.Extent != [3]float64{7500, 7500, 1000} {
+		t.Errorf("main_workshop bounds.extent = %v, want [7500 7500 1000]", z.Bounds.Extent)
 	}
 }
 

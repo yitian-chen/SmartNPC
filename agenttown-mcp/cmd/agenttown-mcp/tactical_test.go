@@ -603,8 +603,8 @@ func TestBuildTacticalPrompt_InjectsKBContext(t *testing.T) {
 			t.Errorf("prompt should list zone %q, got: %s", zID, prompt)
 		}
 	}
-	// 应包含所有 object
-	for _, oID := range []string{"workbench_01", "charging_station_01", "rest_bench_01"} {
+	// 应包含所有 object（新 UE5 KB: charge/repairtable/sleeppod/workbench）
+	for _, oID := range []string{"workbench", "charge", "sleeppod", "repairtable"} {
 		if !strings.Contains(prompt, oID) {
 			t.Errorf("prompt should list object %q, got: %s", oID, prompt)
 		}
@@ -613,17 +613,17 @@ func TestBuildTacticalPrompt_InjectsKBContext(t *testing.T) {
 	if !strings.Contains(prompt, "可交互物体") {
 		t.Errorf("prompt should contain '可交互物体' section, got: %s", prompt)
 	}
-	if !strings.Contains(prompt, "assemble") || !strings.Contains(prompt, "charge") || !strings.Contains(prompt, "rest") {
+	if !strings.Contains(prompt, "assemble") || !strings.Contains(prompt, "charge") || !strings.Contains(prompt, "sleep") {
 		t.Errorf("prompt should list available interactions on objects, got: %s", prompt)
 	}
 	// 验证新格式：每个 object 单独一行，明确分离 id/zone/interaction
 	// 不应再出现旧的 "id|zone[interactions]" 拼接格式
-	if strings.Contains(prompt, "workbench_01|main_workshop[") {
+	if strings.Contains(prompt, "workbench|main_workshop[") {
 		t.Errorf("prompt should not contain legacy 'id|zone[interactions]' format, got: %s", prompt)
 	}
 	// 应包含明确的 id/zone/interaction 标注
-	if !strings.Contains(prompt, "id=workbench_01") {
-		t.Errorf("prompt should contain 'id=workbench_01' label, got: %s", prompt)
+	if !strings.Contains(prompt, "id=workbench") {
+		t.Errorf("prompt should contain 'id=workbench' label, got: %s", prompt)
 	}
 	if !strings.Contains(prompt, "位于 zone=main_workshop") {
 		t.Errorf("prompt should contain '位于 zone=main_workshop', got: %s", prompt)
@@ -657,7 +657,7 @@ func TestBuildTacticalPrompt_InjectsAgentRole(t *testing.T) {
 	if !strings.Contains(prompt, "【你的角色】") {
 		t.Errorf("prompt missing '【你的角色】' section header, got: %s", prompt)
 	}
-	for _, want := range []string{"老陈", "车间主管", "沉稳"} {
+	for _, want := range []string{"老陈", "supervisor、worker、maintainer", "沉稳"} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("prompt missing role field %q, got: %s", want, prompt)
 		}
@@ -1010,18 +1010,18 @@ func TestBuildTacticalToolEntries_NilRegistryBuiltinFullSet(t *testing.T) {
 // ─── buildTacticalExample (category-aware) ──────────────────
 
 func TestBuildTacticalExample_ChargingStationFirst(t *testing.T) {
-	// 回归测试：当前 KB 第一个 object 是 charging_station_01（category=charging_station），
-	// 示例必须用 charge_at_station，不能用 work_at_workbench 配 charging_station。
+	// 回归测试：当前 KB 第一个 object（按 ID 排序）是 charge（category=charging），
+	// 示例必须用 charge_at_station，不能用 work_at_workbench 配 charging object。
 	kb := loadTestKB(t)
 	got := buildTacticalExample(kb, "")
 	if !strings.Contains(got, "charge_at_station") {
-		t.Errorf("example should use charge_at_station for charging_station category: %q", got)
+		t.Errorf("example should use charge_at_station for charging category: %q", got)
 	}
-	if !strings.Contains(got, "charging_station_01") {
-		t.Errorf("example should reference charging_station_01: %q", got)
+	if !strings.Contains(got, "charge") {
+		t.Errorf("example should reference charge: %q", got)
 	}
 	if strings.Contains(got, "work_at_workbench") {
-		t.Errorf("example must NOT use work_at_workbench for charging station: %q", got)
+		t.Errorf("example must NOT use work_at_workbench for charging object: %q", got)
 	}
 }
 
@@ -1081,11 +1081,11 @@ func TestBuildTacticalExample_NilKB(t *testing.T) {
 	}
 }
 
+// TestBuildTacticalExample_ZoneObjectPairing 回归测试：示例中 move_to_location
+// 的 target 必须与示例 object 的 ZoneID 一致。旧版取 ListZones()[0] 作示例 zone，
+// 但 ListZones()[0]=archive_station 与 ListObjects()[0]=charge（在 central_plaza）
+// 不在同一 zone，示例本身错配，LLM 模仿后产生 zone-object 错配。
 func TestBuildTacticalExample_ZoneObjectPairing(t *testing.T) {
-	// 回归测试：示例中 move_to_location 的 target 必须与示例 object 的 ZoneID
-	// 一致。旧版取 ListZones()[0] 作示例 zone，但 ListZones()[0]=archive_station
-	// 与 ListObjects()[0]=charging_station_01（在 central_plaza）不在同一 zone，
-	// 示例本身错配，LLM 模仿后产生 zone-object 错配。
 	kb := loadTestKB(t)
 	objs := kb.ListObjects()
 	if len(objs) == 0 {
@@ -1119,16 +1119,16 @@ func TestBuildTacticalExample_ZoneObjectPairing(t *testing.T) {
 // ─── buildTacticalExample (goal-aware, P0-2) ──────────────────
 
 func TestBuildTacticalExample_GoalAssembly(t *testing.T) {
-	// goal 含"装配"应选 work_at_workbench 示例，即使 KB 首个 object 是 charging_station。
-	// P0-2 修复前：示例固定按首个 object（charging_station_01）显示"去充电"，
+	// goal 含"装配"应选 work_at_workbench 示例，即使 KB 首个 object 是 charge。
+	// P0-2 修复前：示例固定按首个 object（charge）显示"去充电"，
 	// 与"装配作业"goal 错配，LLM 模仿后会把 goal 和示例机械拼接。
 	kb := loadTestKB(t)
 	got := buildTacticalExample(kb, "前往主生产车间进行装配作业，严控工艺")
 	if !strings.Contains(got, "work_at_workbench") {
 		t.Errorf("goal=装配 should pick work_at_workbench example: %q", got)
 	}
-	if !strings.Contains(got, "workbench_01") {
-		t.Errorf("example should reference workbench_01: %q", got)
+	if !strings.Contains(got, "workbench") {
+		t.Errorf("example should reference workbench: %q", got)
 	}
 	if strings.Contains(got, "charge_at_station") {
 		t.Errorf("assembly goal must NOT fall back to charge example: %q", got)
@@ -1142,8 +1142,8 @@ func TestBuildTacticalExample_GoalCharge(t *testing.T) {
 	if !strings.Contains(got, "charge_at_station") {
 		t.Errorf("goal=充电 should pick charge_at_station example: %q", got)
 	}
-	if !strings.Contains(got, "charging_station_01") {
-		t.Errorf("example should reference charging_station_01: %q", got)
+	if !strings.Contains(got, "charge") {
+		t.Errorf("example should reference charge: %q", got)
 	}
 }
 
@@ -1161,7 +1161,17 @@ func TestBuildTacticalExample_GoalPatrol(t *testing.T) {
 
 func TestBuildTacticalExample_GoalInspect(t *testing.T) {
 	// goal 含"检查"应选 interact inspect 示例。
-	kb := loadTestKB(t)
+	// 真 KB 物体没有 inspect interaction，用 inline KB 验证此分支。
+	kb := &worldkb.KB{
+		Zones: []worldkb.Zone{{ID: "main_workshop", DisplayName: "车间"}},
+		Objects: []worldkb.Object{{
+			ID:                    "wb_01",
+			DisplayName:           "工作台",
+			Category:              "workbench",
+			ZoneID:                "main_workshop",
+			AvailableInteractions: []string{"assemble", "inspect"},
+		}},
+	}
 	got := buildTacticalExample(kb, "启动自检，检查关节磨损情况")
 	if !strings.Contains(got, `"action":"interact"`) {
 		t.Errorf("goal=检查 should pick interact example: %q", got)

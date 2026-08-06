@@ -1,0 +1,416 @@
+{
+  "$schema": "agenttown-world-generated/v1",
+  "schema_version": "1.0",
+  "generated_at": "2026-08-06T09:22:19.907Z",
+  "generator":
+  {
+    "name": "AgentTownBridgeEditor",
+    "version": "0.1.0"
+  },
+  "source":
+  {
+    "map_package": "/AgentTownBridge/Map/AgentTown",
+    "map_name": "AgentTown"
+  },
+  "coordinate_system":
+  {
+    "space": "UE5_world",
+    "distance_unit": "centimeter",
+    "rotation_unit": "degree",
+    "rotation_order": "pitch_yaw_roll"
+  },
+  "zones": [
+    {
+      "id": "archive_station",
+      "editor_label": "BP_AT_ArchiveStation",
+      "actor_path": "/AgentTownBridge/Map/AgentTown.AgentTown:PersistentLevel.BP_AT_ArchiveStation_C_UAID_ACF46673A2EA24F302_1534280443",
+      "display_name": "档案馆与广播站",
+      "description": "保存园区历史、技术资料和个人记忆的文化中心，也负责公共广播。机器人居民可以来这里查阅资料、录入档案，是文化与生活交汇的区域。",
+      "bounds":
+      {
+        "center": [
+          -3970,
+          -2900,
+          -21890
+        ],
+        "extent": [
+          2000,
+          2000,
+          1000
+        ],
+        "rotation": [
+          0,
+          50.00,
+          0
+        ]
+      },
+      "entry_point": [
+        -3970,
+        -2900,
+        -21890
+      ],
+      "entry_facing": [
+        0.64,
+        0.77,
+        0
+      ]
+    },
+    {
+      "id": "central_plaza",
+      "editor_label": "BP_AT_CentralPlaza",
+      "actor_path": "/AgentTownBridge/Map/AgentTown.AgentTown:PersistentLevel.BP_AT_CentralPlaza_C_UAID_ACF46673A2EA25F302_1660144623",
+      "display_name": "中央广场",
+      "description": "小镇的公共交通、社交和充能中心，也是机器人居民闲暇时聚集、交流的公共空间。充电站位于此处，是补充能量的主要场所。",
+      "bounds":
+      {
+        "center": [
+          -9310,
+          16060,
+          -21780
+        ],
+        "extent": [
+          5000,
+          5000,
+          1000
+        ],
+        "rotation": [
+          0,
+          0,
+          0
+        ]
+      },
+      "entry_point": [
+        -9310,
+        16060,
+        -21780
+      ],
+      "entry_facing": [
+        1,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "logistics_hub",
+      "editor_label": "BP_AT_LogisticsHub",
+      "actor_path": "/AgentTownBridge/Map/AgentTown.AgentTown:PersistentLevel.BP_AT_LogisticsHub_C_UAID_ACF46673A2EA25F302_1323014622",
+      "display_name": "物流转运站",
+      "description": "负责原料、半成品和成品的仓储与分拣中心，承担小镇的生产物资流转任务。需要搬运或分拣物资的工作大多在这里进行。",
+      "bounds":
+      {
+        "center": [
+          -8423.90,
+          -8360.21,
+          -22802.58
+        ],
+        "extent": [
+          1500,
+          7000,
+          2000
+        ],
+        "rotation": [
+          0,
+          41,
+          0
+        ]
+      },
+      "entry_point": [
+        -8423.90,
+        -8360.21,
+        -22802.58
+      ],
+      "entry_facing": [
+        0.75,
+        0.66,
+        0
+      ]
+    },
+    {
+      "id": "main_workshop",
+      "editor_label": "BP_AT_MainWorkShop",
+      "actor_path": "/AgentTownBridge/Map/AgentTown.AgentTown:PersistentLevel.BP_AT_MainWorkShop_C_UAID_ACF46673A2EA22F302_1440335089",
+      "display_name": "主生产车间",
+      "description": "小镇的生产核心，机器人居民在这里完成装配、质检和设备调试。NPC的日常生产任务大多出自这个车间。",
+      "bounds":
+      {
+        "center": [
+          6210,
+          5780,
+          -21200
+        ],
+        "extent": [
+          7500,
+          7500,
+          1000
+        ],
+        "rotation": [
+          0,
+          0,
+          0
+        ]
+      },
+      "entry_point": [
+        6210,
+        5780,
+        -21200
+      ],
+      "entry_facing": [
+        1,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "recycling_yard",
+      "editor_label": "BP_AT_RecyclingYard",
+      "actor_path": "/AgentTownBridge/Map/AgentTown.AgentTown:PersistentLevel.BP_AT_RecyclingYard_C_UAID_ACF46673A2EA24F302_1940350444",
+      "display_name": "废料回收与再制造场",
+      "description": "负责废料分类、零件拆解和再制造处理，也处理永久报废。承载小镇的资源循环与叙事记忆，是工作与故事交汇的区域。",
+      "bounds":
+      {
+        "center": [
+          7760,
+          -9010,
+          -22900
+        ],
+        "extent": [
+          1250,
+          1250,
+          400
+        ],
+        "rotation": [
+          0,
+          20.00,
+          0
+        ]
+      },
+      "entry_point": [
+        7760,
+        -9010,
+        -22900
+      ],
+      "entry_facing": [
+        0.94,
+        0.34,
+        0
+      ]
+    },
+    {
+      "id": "repair_bay",
+      "editor_label": "BP_AT_RepairBay",
+      "actor_path": "/AgentTownBridge/Map/AgentTown.AgentTown:PersistentLevel.BP_AT_RepairBay_C_UAID_ACF46673A2EA25F302_1150220621",
+      "display_name": "机械维修厂",
+      "description": "机器人居民进行自检、换件和维修的场所，也是紧急救援中心。磨损或故障的机器人会来这里检修，是工作与生活交汇的区域。",
+      "bounds":
+      {
+        "center": [
+          -10980,
+          2040,
+          -22320
+        ],
+        "extent": [
+          3000,
+          3000,
+          600
+        ],
+        "rotation": [
+          0,
+          0,
+          0
+        ]
+      },
+      "entry_point": [
+        -10980,
+        2040,
+        -22320
+      ],
+      "entry_facing": [
+        1,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "residential_quarters",
+      "editor_label": "BP_AT_ResidentialQuarters",
+      "actor_path": "/AgentTownBridge/Map/AgentTown.AgentTown:PersistentLevel.BP_AT_ResidentialQuarters_C_UAID_ACF46673A2EA25F302_1756472624",
+      "display_name": "休眠舱居住区",
+      "description": "机器人居民休眠、独处和存放私人物品的生活区。居民的休眠舱就在这里，是休息和私人空间的主要场所。",
+      "bounds":
+      {
+        "center": [
+          -7980,
+          -13590,
+          -22800
+        ],
+        "extent": [
+          2000,
+          2500,
+          600
+        ],
+        "rotation": [
+          0,
+          45,
+          0
+        ]
+      },
+      "entry_point": [
+        -7980,
+        -13590,
+        -22800
+      ],
+      "entry_facing": [
+        0.71,
+        0.71,
+        0
+      ]
+    }
+  ],
+  "objects": [
+    {
+      "id": "Charge",
+      "category": "charging",
+      "zone_id": "central_plaza",
+      "editor_label": "BP_Charging_Station",
+      "actor_class": "/AgentTownBridge/WorldKB/SmartObject/Charge/BP_Charging_Station.BP_Charging_Station_C",
+      "display_name": "充电桩",
+      "description": "用于给机器人充能的装置",
+      "actor_position": [
+        -12830,
+        12730,
+        -21750
+      ],
+      "interaction_point": [
+        -12830,
+        12730,
+        -21750
+      ],
+      "interaction_facing": [
+        1,
+        0,
+        0
+      ],
+      "available_interactions": [
+        {
+          "name": "charge",
+          "description": "连接到充电桩补充能量。能量低时前往，可恢复能量值。"
+        }
+      ],
+      "default_state": "idle"
+    },
+    {
+      "id": "RepairTable",
+      "category": "maintainance",
+      "zone_id": "repair_bay",
+      "editor_label": "BP_AT_RepairTable",
+      "actor_class": "/AgentTownBridge/WorldKB/SmartObject/RepairTable/BP_AT_RepairTable.BP_AT_RepairTable_C",
+      "display_name": "修理台",
+      "description": "用于机器人居民的日常维修和保养",
+      "actor_position": [
+        -11570,
+        3020,
+        -22670
+      ],
+      "interaction_point": [
+        -11570,
+        3020,
+        -22670
+      ],
+      "interaction_facing": [
+        1,
+        0,
+        0
+      ],
+      "available_interactions": [
+        {
+          "name": "repair",
+          "description": "在维修台进行自检和维修，修复磨损、更换零件。磨损高时前往，可降低磨损并恢复健康。"
+        }
+      ],
+      "default_state": "idle"
+    },
+    {
+      "id": "SleepPod",
+      "category": "rest",
+      "zone_id": "residential_quarters",
+      "editor_label": "BP_AT_SleepPod",
+      "actor_class": "/AgentTownBridge/WorldKB/SmartObject/SleepPod/BP_AT_SleepPod.BP_AT_SleepPod_C",
+      "display_name": "睡眠舱",
+      "description": "用于休息和睡觉",
+      "actor_position": [
+        -9220,
+        -12680,
+        -22720
+      ],
+      "interaction_point": [
+        -9220,
+        -12680,
+        -22720
+      ],
+      "interaction_facing": [
+        0.77,
+        0.64,
+        0
+      ],
+      "available_interactions": [
+        {
+          "name": "sleep",
+          "description": "进入休眠舱休息，恢复精力和状态。夜间或疲劳高时使用。"
+        }
+      ],
+      "default_state": "idle"
+    },
+    {
+      "id": "WorkBench",
+      "category": "work",
+      "zone_id": "main_workshop",
+      "editor_label": "BP_AT_WorkBench",
+      "actor_class": "/AgentTownBridge/WorldKB/SmartObject/WorkBench/BP_AT_WorkBench.BP_AT_WorkBench_C",
+      "display_name": "工作台",
+      "description": "装配工作台",
+      "actor_position": [
+        7330,
+        7100,
+        -21140
+      ],
+      "interaction_point": [
+        7330,
+        7100,
+        -21140
+      ],
+      "interaction_facing": [
+        1,
+        0,
+        0
+      ],
+      "available_interactions": [
+        {
+          "name": "assemble",
+          "description": "在工作台上进行零件装配，产出成品。机器人居民最常做的工作。"
+        }
+      ],
+      "default_state": "idle"
+    }
+  ],
+  "agents": [
+    {
+      "id": "H-01",
+      "type": "Human",
+      "initial_zone": "residential_quarters",
+      "editor_label": "BP_AT_Agent_LaoChen",
+      "actor_class": "/Game/AI/AgentTown/AgentBP/Human/BP_AT_Agent_LaoChen.BP_AT_Agent_LaoChen_C",
+      "display_name": "老陈",
+      "initial_position": [
+        -8680,
+        -11560,
+        -22712
+      ],
+      "main_behavior_tree": "/Game/AI/AgentTown/AgentBT/BT_AT_LaoChen.BT_AT_LaoChen"
+    }
+  ],
+  "validation_summary":
+  {
+    "errors": 0,
+    "warnings": 0
+  }
+}

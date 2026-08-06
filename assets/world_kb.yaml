@@ -1,158 +1,327 @@
-version: "1.0"
-narrative:
-    setting: 工业机器人园区
-    theme: 一座由机器人维持生产的封闭工业园区。
-zones:
-    - id: central_plaza
-      display_name: 中央广场
-      description: 园区中央的开放广场，机器人休息社交的场所。
-      aliases:
-        - 广场
-      bounds:
-        center:
-            - 11500
-            - 11500
-            - 0
-        extent:
-            - 3500
-            - 3500
-            - 5000
-      entry_point:
-        - 10000
-        - 10000
-        - 100
-      entry_facing:
-        - 0
-        - -1
-        - 0
-      connections:
-        - to: main_workshop
-          type: road
-          bidirectional: true
-        - to: charging_station
-          type: road
-          bidirectional: true
-    - id: charging_station
-      display_name: 充电站
-      description: 园区充电设施所在区域。
-      aliases:
-        - 充电区
-      bounds:
-        center:
-            - 22500
-            - 7500
-            - 0
-        extent:
-            - 2500
-            - 2500
-            - 5000
-      entry_point:
-        - 21500
-        - 8500
-        - 100
-      entry_facing:
-        - -1
-        - 0
-        - 0
-      connections:
-        - to: central_plaza
-          type: road
-          bidirectional: true
-    - id: main_workshop
-      display_name: 主生产车间
-      description: 机器人们的主要工作场所。
-      aliases:
-        - 车间
-      bounds:
-        center:
-            - 20000
-            - 10000
-            - 0
-        extent:
-            - 5000
-            - 5000
-            - 5000
-      entry_point:
-        - 16000
-        - 10000
-        - 100
-      entry_facing:
-        - 1
-        - 0
-        - 0
-      connections:
-        - to: central_plaza
-          type: road
-          bidirectional: true
-objects:
-    - id: charging_station_01
-      display_name: 充电桩一号
-      description: 园区主充电桩，支持充电和检查。
-      category: charging_station
-      zone_id: charging_station
-      actor_class: /Game/AgentTown/Objects/BP_ChargingStation.BP_ChargingStation_C
-      actor_position:
-        - 21500
-        - 8500
-        - 100
-      interaction_point:
-        - 21500
-        - 8500
-        - 100
-      interaction_facing:
-        - 1
-        - 0
-        - 0
-      interaction_radius: 1500
-      available_interactions:
-        - charge
-        - inspect
-      default_state: idle
-      tags:
-        - charging
-    - id: workbench_01
-      display_name: 工作台一号
-      description: 装配工作台，支持组装和检查。
-      category: workbench
-      zone_id: main_workshop
-      actor_class: /Game/AgentTown/Objects/BP_Workbench.BP_Workbench_C
-      actor_position:
-        - 20000
-        - 10000
-        - 100
-      interaction_point:
-        - 19500
-        - 10500
-        - 100
-      interaction_facing:
-        - 1
-        - 0
-        - 0
-      interaction_radius: 1500
-      available_interactions:
-        - assemble
-        - inspect
-      default_state: idle
-      tags:
-        - crafting
-        - assembly
 agents:
-    - id: H-01
+    - action_table: ""
+      actor_class: /Game/AI/AgentTown/AgentBP/Human/BP_AT_Agent_LaoChen.BP_AT_Agent_LaoChen_C
+      core_memories: []
+      description: ""
       display_name: 老陈
-      description: 车间主管机器人，沉稳念旧，重视工艺。
-      type: humanoid
-      profession: 车间主管
+      editor_label: BP_AT_Agent_LaoChen
+      id: H-01
+      initial_position:
+        - -8680
+        - -11560
+        - -22712
+      initial_zone: residential_quarters
+      main_behavior_tree: /Game/AI/AgentTown/AgentBT/BT_AT_LaoChen.BT_AT_LaoChen
       personality:
         traits:
             - 沉稳
             - 念旧
             - 重视工艺
-        speech_style: 简洁，偶尔念叨老物件
-      initial_zone: main_workshop
-      initial_position:
-        - 20000
-        - 10000
-        - 100
-      actor_class: /Game/AgentTown/Agents/BP_LaoChen.BP_LaoChen_C
-      action_table: /Game/AgentTown/AI/DT_ActionBTMap.DT_ActionBTMap
-      main_behavior_tree: /Game/AgentTown/AI/BT_AgentTownMain.BT_AgentTownMain
+            - 务实
+      profession: supervisor、worker、maintainer
+      type: Human
+      work_preference: main_workshop
+narrative:
+    setting: 工业机器人小镇
+    theme: 一座由机器人居民维持生产和日常生活的封闭工业园区。居民在车间、物流站、维修厂等工作，在广场社交、在居住区休息，构成了自给自足的工业生活共同体。
+objects:
+    - actor_class: /AgentTownBridge/WorldKB/SmartObject/Charge/BP_Charging_Station.BP_Charging_Station_C
+      actor_position:
+        - -12830
+        - 12730
+        - -21750
+      available_interactions:
+        - charge
+      capacity: 1
+      category: charging
+      default_state: idle
+      description: 用于给机器人充能的装置
+      display_name: 充电桩
+      editor_label: BP_Charging_Station
+      id: charge
+      interaction_facing:
+        - 1
+        - 0
+        - 0
+      interaction_point:
+        - -12830
+        - 12730
+        - -21750
+      interaction_radius: 1500
+      required_roles: []
+      zone_id: central_plaza
+    - actor_class: /AgentTownBridge/WorldKB/SmartObject/RepairTable/BP_AT_RepairTable.BP_AT_RepairTable_C
+      actor_position:
+        - -11570
+        - 3020
+        - -22670
+      available_interactions:
+        - repair
+      capacity: 1
+      category: maintainance
+      default_state: idle
+      description: 用于机器人居民的日常维修和保养
+      display_name: 修理台
+      editor_label: BP_AT_RepairTable
+      id: repairtable
+      interaction_facing:
+        - 1
+        - 0
+        - 0
+      interaction_point:
+        - -11570
+        - 3020
+        - -22670
+      interaction_radius: 1500
+      required_roles:
+        - maintainer
+      zone_id: repair_bay
+    - actor_class: /AgentTownBridge/WorldKB/SmartObject/SleepPod/BP_AT_SleepPod.BP_AT_SleepPod_C
+      actor_position:
+        - -9220
+        - -12680
+        - -22720
+      available_interactions:
+        - sleep
+      capacity: 1
+      category: rest
+      default_state: idle
+      description: 用于休息和睡觉
+      display_name: 睡眠舱
+      editor_label: BP_AT_SleepPod
+      id: sleeppod
+      interaction_facing:
+        - 0.77
+        - 0.64
+        - 0
+      interaction_point:
+        - -9220
+        - -12680
+        - -22720
+      interaction_radius: 1500
+      required_roles: []
+      zone_id: residential_quarters
+    - actor_class: /AgentTownBridge/WorldKB/SmartObject/WorkBench/BP_AT_WorkBench.BP_AT_WorkBench_C
+      actor_position:
+        - 7330
+        - 7100
+        - -21140
+      available_interactions:
+        - assemble
+      capacity: 1
+      category: work
+      default_state: idle
+      description: 装配工作台
+      display_name: 工作台
+      editor_label: BP_AT_WorkBench
+      id: workbench
+      interaction_facing:
+        - 1
+        - 0
+        - 0
+      interaction_point:
+        - 7330
+        - 7100
+        - -21140
+      interaction_radius: 1500
+      required_roles:
+        - worker
+      zone_id: main_workshop
+version: "1.0"
+zones:
+    - actor_path: /AgentTownBridge/Map/AgentTown.AgentTown:PersistentLevel.BP_AT_ArchiveStation_C_UAID_ACF46673A2EA24F302_1534280443
+      bounds:
+        center:
+            - -3970
+            - -2900
+            - -21890
+        extent:
+            - 2000
+            - 2000
+            - 1000
+        rotation:
+            - 0
+            - 50
+            - 0
+      connections:
+        - to: central_plaza
+        - to: residential_quarters
+      description: 保存园区历史、技术资料和个人记忆的文化中心，也负责公共广播。机器人居民可以来这里查阅资料、录入档案，是文化与生活交汇的区域。
+      display_name: 档案馆与广播站
+      editor_label: BP_AT_ArchiveStation
+      entry_facing:
+        - 0.64
+        - 0.77
+        - 0
+      entry_point:
+        - -3970
+        - -2900
+        - -21890
+      id: archive_station
+    - actor_path: /AgentTownBridge/Map/AgentTown.AgentTown:PersistentLevel.BP_AT_CentralPlaza_C_UAID_ACF46673A2EA25F302_1660144623
+      bounds:
+        center:
+            - -9310
+            - 16060
+            - -21780
+        extent:
+            - 5000
+            - 5000
+            - 1000
+        rotation: []
+      connections:
+        - to: main_workshop
+        - to: residential_quarters
+        - to: archive_station
+      description: 小镇的公共交通、社交和充能中心，也是机器人居民闲暇时聚集、交流的公共空间。充电站位于此处，是补充能量的主要场所。
+      display_name: 中央广场
+      editor_label: BP_AT_CentralPlaza
+      entry_facing:
+        - 1
+        - 0
+        - 0
+      entry_point:
+        - -9310
+        - 16060
+        - -21780
+      id: central_plaza
+    - actor_path: /AgentTownBridge/Map/AgentTown.AgentTown:PersistentLevel.BP_AT_LogisticsHub_C_UAID_ACF46673A2EA25F302_1323014622
+      bounds:
+        center:
+            - -8423.9
+            - -8360.21
+            - -22802.58
+        extent:
+            - 1500
+            - 7000
+            - 2000
+        rotation:
+            - 0
+            - 41
+            - 0
+      connections:
+        - to: main_workshop
+        - to: recycling_yard
+      description: 负责原料、半成品和成品的仓储与分拣中心，承担小镇的生产物资流转任务。需要搬运或分拣物资的工作大多在这里进行。
+      display_name: 物流转运站
+      editor_label: BP_AT_LogisticsHub
+      entry_facing:
+        - 0.75
+        - 0.66
+        - 0
+      entry_point:
+        - -8423.9
+        - -8360.21
+        - -22802.58
+      id: logistics_hub
+    - actor_path: /AgentTownBridge/Map/AgentTown.AgentTown:PersistentLevel.BP_AT_MainWorkShop_C_UAID_ACF46673A2EA22F302_1440335089
+      bounds:
+        center:
+            - 6210
+            - 5780
+            - -21200
+        extent:
+            - 7500
+            - 7500
+            - 1000
+        rotation: []
+      connections:
+        - to: central_plaza
+        - to: logistics_hub
+        - to: repair_bay
+      description: 小镇的生产核心，机器人居民在这里完成装配、质检和设备调试。NPC的日常生产任务大多出自这个车间。
+      display_name: 主生产车间
+      editor_label: BP_AT_MainWorkShop
+      entry_facing:
+        - 1
+        - 0
+        - 0
+      entry_point:
+        - 6210
+        - 5780
+        - -21200
+      id: main_workshop
+    - actor_path: /AgentTownBridge/Map/AgentTown.AgentTown:PersistentLevel.BP_AT_RecyclingYard_C_UAID_ACF46673A2EA24F302_1940350444
+      bounds:
+        center:
+            - 7760
+            - -9010
+            - -22900
+        extent:
+            - 1250
+            - 1250
+            - 400
+        rotation:
+            - 0
+            - 20
+            - 0
+      connections:
+        - to: logistics_hub
+        - to: repair_bay
+      description: 负责废料分类、零件拆解和再制造处理，也处理永久报废。承载小镇的资源循环与叙事记忆，是工作与故事交汇的区域。
+      display_name: 废料回收与再制造场
+      editor_label: BP_AT_RecyclingYard
+      entry_facing:
+        - 0.94
+        - 0.34
+        - 0
+      entry_point:
+        - 7760
+        - -9010
+        - -22900
+      id: recycling_yard
+    - actor_path: /AgentTownBridge/Map/AgentTown.AgentTown:PersistentLevel.BP_AT_RepairBay_C_UAID_ACF46673A2EA25F302_1150220621
+      bounds:
+        center:
+            - -10980
+            - 2040
+            - -22320
+        extent:
+            - 3000
+            - 3000
+            - 600
+        rotation: []
+      connections:
+        - to: main_workshop
+        - to: recycling_yard
+      description: 机器人居民进行自检、换件和维修的场所，也是紧急救援中心。磨损或故障的机器人会来这里检修，是工作与生活交汇的区域。
+      display_name: 机械维修厂
+      editor_label: BP_AT_RepairBay
+      entry_facing:
+        - 1
+        - 0
+        - 0
+      entry_point:
+        - -10980
+        - 2040
+        - -22320
+      id: repair_bay
+    - actor_path: /AgentTownBridge/Map/AgentTown.AgentTown:PersistentLevel.BP_AT_ResidentialQuarters_C_UAID_ACF46673A2EA25F302_1756472624
+      bounds:
+        center:
+            - -7980
+            - -13590
+            - -22800
+        extent:
+            - 2000
+            - 2500
+            - 600
+        rotation:
+            - 0
+            - 45
+            - 0
+      connections:
+        - to: central_plaza
+        - to: archive_station
+      description: 机器人居民休眠、独处和存放私人物品的生活区。居民的休眠舱就在这里，是休息和私人空间的主要场所。
+      display_name: 休眠舱居住区
+      editor_label: BP_AT_ResidentialQuarters
+      entry_facing:
+        - 0.71
+        - 0.71
+        - 0
+      entry_point:
+        - -7980
+        - -13590
+        - -22800
+      id: residential_quarters
