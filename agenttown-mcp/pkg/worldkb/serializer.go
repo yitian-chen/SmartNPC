@@ -24,8 +24,9 @@ import (
 
 // toYAMLMap converts a KB to a map[string]any tree ready for yaml.Marshal.
 // Known fields are emitted with snake_case keys; each entity's Extra bag
-// is merged in alongside the known fields (Extra wins on key conflicts,
-// though conflicts should not occur since projection keeps them disjoint).
+// is merged in alongside the known fields. Known fields win on key
+// conflicts (see mergeExtraIntoMap); Extra only fills gaps for fields the
+// typed projection does not model.
 func toYAMLMap(kb *KB) map[string]any {
 	zones := make([]any, 0, len(kb.Zones))
 	for _, z := range kb.Zones {
@@ -162,13 +163,21 @@ func relationshipToMap(r *Relationship) map[string]any {
 	return m
 }
 
-// mergeExtraIntoMap copies keys from extra into m. If a key already exists
-// in m (shouldn't happen since projection keeps known/extra disjoint), extra
-// wins — this matches the "authored overlay" semantics for any future field
-// that the projection logic decides to stash in Extra rather than promote
-// to a typed slot.
+// mergeExtraIntoMap copies keys from extra into m, but does NOT override
+// keys already present in m. Known/typed fields (written by zoneToMap /
+// objectToMap / agentToMap before calling this) win; Extra only fills gaps
+// for genuinely unknown fields.
+//
+// This matters for available_interactions: projectObject stashes the raw
+// UE5 object form [{name, description}] into Extra while also extracting
+// names into the typed []string slot. The typed slot is the canonical YAML
+// representation (loader only parses []string); letting Extra overwrite it
+// would produce YAML the loader cannot read back.
 func mergeExtraIntoMap(m map[string]any, extra map[string]any) {
 	for k, v := range extra {
+		if _, exists := m[k]; exists {
+			continue
+		}
 		m[k] = v
 	}
 }
