@@ -49,7 +49,7 @@ const strategicPromptTemplate = `[战略层/每日规划] 现在是仿真时间 
 7. goal 中提到的地点、人物、设备必须是【你的角色】和【世界知识】中存在的，不得编造未提及的人物或设施
 8. 若 goal 涉及"使用/操作/检查/交互"某设施，该设施必须位于【区域设施映射】中标注为有物体的 zone——映射中标注"无可交互物体"的 zone 不能作为 interact 类活动的目的地（只能用于移动/巡逻/路过/休息）
 
-示例：[{"time":"06:00-07:00","goal":"起床晨检，慢速活动关节"},{"time":"07:00-12:00","goal":"上午车间装配作业，盯紧关键工序"},{"time":"12:00-13:00","goal":"午间停工，检查公差记录并短暂补电休息"}]`
+示例：[{"time":"06:00-08:00","goal":"起床检查车间设备，然后去中央广场散步"},{"time":"08:00-12:00","goal":"上午车间装配作业"},{"time":"12:00-14:00","goal":"午间停工，前往充电区域短暂补电休息"}]`
 
 // defaultDailyPlan 是 kb == nil 时的兜底计划（无 KB 上下文降级路径）。
 // buildDefaultDailyPlan(nil) 返回此常量。
@@ -60,9 +60,9 @@ const strategicPromptTemplate = `[战略层/每日规划] 现在是仿真时间 
 // 表述中性：不引用任何 KB 专属词（"车间"/"装配"/"充电"等），避免换 KB 后
 // 兜底计划仍诱导战术层编造 KB 外概念。
 const defaultDailyPlan = "06:00-12:00: 上午主要工作\n" +
-	"12:00-13:00: 午间停工与短暂休息\n" +
-	"13:00-18:00: 下午继续工作\n" +
-	"18:00-22:00: 保养与写工作日志"
+	"12:00-14:00: 午间停工与短暂休息\n" +
+	"14:00-18:00: 下午继续工作\n" +
+	"18:00-22:00: 前往中央广场休息"
 
 // buildDefaultDailyPlan 根据 KB 派生兜底每日计划。
 // kb == nil 时返回 defaultDailyPlan（中性表述，不引用任何 KB id）。
@@ -92,7 +92,7 @@ func buildDefaultDailyPlan(kb *worldkb.KB) string {
 	return fmt.Sprintf("06:00-12:00: 上午在%s进行%s作业\n", zoneName, workName) +
 		"12:00-13:00: 午间停工与短暂休息\n" +
 		fmt.Sprintf("13:00-18:00: 下午继续%s作业\n", workName) +
-		"18:00-22:00: 保养与写工作日志"
+		"18:00-22:00: 保养休息"
 }
 
 // yesterdaySummaryForFirstDay 是首日启动时注入的"昨日总结"。
@@ -101,7 +101,7 @@ func buildDefaultDailyPlan(kb *worldkb.KB) string {
 // 元素时（如最小化测试 KB 或换地图运行），LLM 会被诱导在战略计划里
 // 编造这些 KB 外概念。改为中性表述：只描述抽象活动模式（装配/休息/
 // 充电），不点名任何人物或具体设施，由 LLM 根据 KB 自行具象化。
-const yesterdaySummaryForFirstDay = "昨天按计划完成了车间装配和设备巡检，下午体力下降明显，晚上进入低功耗休息状态，关节略有磨损"
+const yesterdaySummaryForFirstDay = "昨天按计划完成了车间装配，下午体力下降明显，晚上进入低功耗休息状态，关节略有磨损"
 
 // generateDailyPlan 调 LLM 生成当日计划，返回格式化字符串（每行 "时段: 目标"）。
 // 任一步失败均回退到 buildDefaultDailyPlan(kb)，保证战术层有目标可分解、
@@ -370,7 +370,7 @@ func formatDailyPlan(items []dailyPlanItem) string {
 // 格式为 "HH:MM-HH:MM: goal"，timeOfDay 为 "HH:MM"。
 //
 // 返回注入文本（含 [今日计划] 或 [当前时段] 头）和当前时段标识
-//（"HH:MM-HH:MM"）。无法解析时回退到全量注入。
+// （"HH:MM-HH:MM"）。无法解析时回退到全量注入。
 func selectPlanInjection(fullPlan, timeOfDay, lastSlot string) (string, string) {
 	if fullPlan == "" {
 		return "", ""

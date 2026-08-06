@@ -36,12 +36,12 @@ type ReactiveDecision struct {
 type ReactiveTrigger string
 
 const (
-	TriggerZoneChange    ReactiveTrigger = "zone_change"     // NPC 进入新区域
-	TriggerNewObject     ReactiveTrigger = "new_object"      // nearby_objects 出现新物体
-	TriggerEventNotify   ReactiveTrigger = "event_notify"    // 收到 event_notification
-	TriggerPhysicalAlert ReactiveTrigger = "physical_alert"  // 物理状态突破警戒带
-	TriggerActionDone    ReactiveTrigger = "action_done"     // action_completed，自然评估点
-	TriggerPeriodic      ReactiveTrigger = "periodic"        // 周期性触发：每 N 次感知强制评估
+	TriggerZoneChange    ReactiveTrigger = "zone_change"    // NPC 进入新区域
+	TriggerNewObject     ReactiveTrigger = "new_object"     // nearby_objects 出现新物体
+	TriggerEventNotify   ReactiveTrigger = "event_notify"   // 收到 event_notification
+	TriggerPhysicalAlert ReactiveTrigger = "physical_alert" // 物理状态突破警戒带
+	TriggerActionDone    ReactiveTrigger = "action_done"    // action_completed，自然评估点
+	TriggerPeriodic      ReactiveTrigger = "periodic"       // 周期性触发：每 N 次感知强制评估
 )
 
 // 物理警戒带阈值。fatigue 阈值从 60 提升到 80（配合 mock_ue 疲劳速率
@@ -62,21 +62,21 @@ const periodicTriggerInterval = 4
 // ReactiveInput 聚合反应层决策所需的输入状态。由 main.go 从 agentContext
 // 提取后传入，避免 reactive.go 直接依赖 agentContext（便于单元测试）。
 type ReactiveInput struct {
-	AgentID           string
-	AgentName         string // agent 显示名（如"老陈"），用于 prompt 中角色称呼；空则降级为 AgentID
-	AgentRole         string // 【你的角色】段（名字/职业/背景/性格/说话风格），由 buildAgentRoleContext 生成；空串=kb 不可用或 agent 不存在，prompt 中跳过此段
-	TimeOfDay         string // "HH:MM" 游戏时间
-	Zone              string // 当前区域 id
-	Energy            float64
-	Fatigue           float64
-	Health            float64
-	CurrentAction     string // 当前在途 action 的可读描述（如 "WorkAtWorkbench(target_object_id=workbench_01)"），空=无在途
-	ElapsedSec        int    // 当前 action 已执行秒数
-	ActionSrc         string // 在途 action 来源：tactical / mcp_tool / 空
-	CurrentSlot       string // 当前战术时段 "HH:MM-HH:MM"，空=未分解
-	DailyPlan         string // 战略层每日计划摘要（格式化字符串），空=未生成
-	Trigger           ReactiveTrigger
-	TriggerDetail     string // 触发原因详情
+	AgentID       string
+	AgentName     string // agent 显示名（如"老陈"），用于 prompt 中角色称呼；空则降级为 AgentID
+	AgentRole     string // 【你的角色】段（名字/职业/背景/性格/说话风格），由 buildAgentRoleContext 生成；空串=kb 不可用或 agent 不存在，prompt 中跳过此段
+	TimeOfDay     string // "HH:MM" 游戏时间
+	Zone          string // 当前区域 id
+	Energy        float64
+	Fatigue       float64
+	Health        float64
+	CurrentAction string // 当前在途 action 的可读描述（如 "WorkAtWorkbench(target_object_id=workbench_01)"），空=无在途
+	ElapsedSec    int    // 当前 action 已执行秒数
+	ActionSrc     string // 在途 action 来源：tactical / mcp_tool / 空
+	CurrentSlot   string // 当前战术时段 "HH:MM-HH:MM"，空=未分解
+	DailyPlan     string // 战略层每日计划摘要（格式化字符串），空=未生成
+	Trigger       ReactiveTrigger
+	TriggerDetail string // 触发原因详情
 }
 
 // reactivePromptTemplate 是反应层 prompt 模板。用 fmt.Sprintf 填充。
@@ -85,7 +85,7 @@ type ReactiveInput struct {
 // 反应层应服务于任意 agent，而非特定 NPC。
 // agentRole 由调用方从 kb 注入（buildAgentRoleContext），空串时该段降级为
 // "（无角色信息）"——保留段落占位让 LLM 知道该字段存在但当前不可用。
-const reactivePromptTemplate = `你是 NPC %s 的反应决策模块。当前情况需要你判断是否打断当前行动。
+const reactivePromptTemplate = `你是 NPC %s 的反应决策模块。当前情况需要你判断是否打断当前行动进行重规划。
 
 【你的角色】
 %s
@@ -110,12 +110,12 @@ const reactivePromptTemplate = `你是 NPC %s 的反应决策模块。当前情�
 【可选反应】
 - continue：不打断，让当前行动继续
 - observe：不打断，记录这个事件供后续参考
-- replan：当前时段的整个战术规划已不合理（如时段目标与实际冲突、物理状态无法支撑剩余 action），请求战术层基于当前状态重新分解本时段 goal
+- replan：当前时段的整个战术规划已不合理（如物理状态无法支撑剩余 action、感知到新的 object / agent 希望改变原来的计划转而与之互动），请求战术层基于当前状态重新分解本时段 goal
 
 判断要点：
 - 战术层规划的动作通常是合理的，除非有明确理由，否则 continue
-- 物理状态告警时（体力<40、疲劳>80、健康<50）必须输出 replan 让 NPC 休息/充电，禁止输出 continue/observe
-- replan 是"重大"决策：当你认为整个 action 队列都应作废、重新规划时使用。1 游戏小时内至多触发 1 次 replan，请慎重
+- 物理状态告警时（体力<40、疲劳>80、健康<50）原则上需要输出 replan 让 NPC 休息/充电、不可输出 continue/observe
+- replan 是"重大"决策：当你认为整个 action 队列都应作废、重新规划时使用。
 
 请输出 JSON，格式严格如下，不要输出 JSON 以外的任何内容：
 {"reaction": "continue|observe|replan", "reason": "简短理由"}

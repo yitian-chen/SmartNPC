@@ -240,7 +240,7 @@ const tacticalPromptBody = `[战术层/任务分解] 当前时段目标：%s
 %s
 %s
 %s
-可用工具（仅限以下 %d 个，禁止使用 scan_area / stop）。工具分两类：
+可用工具（仅限以下 %d 个）。工具分两类：
 - 复合动作（标记 [复合]）：长耗时、单步即可完成一段工作（如装配、充电、巡逻、聊天）。若目标语义与某复合动作匹配，应优先使用复合动作。
 - 原子动作（标记 [原子]）：短耗时、作为基本 building block（如移动、说话、等待、交互）。仅当复合动作无法覆盖 schedule 要求时，才用 2-5 个原子动作组合实现。
 %s
@@ -248,13 +248,12 @@ const tacticalPromptBody = `[战术层/任务分解] 当前时段目标：%s
 要求：
 1. 第一行输出 {"inner_thought":"一句话内心独白"}
 2. 后续每行输出一个 {"action":"工具名","params":{...}}，按执行顺序排列
-3. 优先使用复合动作：若存在与目标语义匹配的复合动作，输出 1-2 步即可（通常是 move_to_location 到目标区域 + 1 个复合动作；若当前 zone 已与复合动作所需 zone 一致，可直接输出 1 个复合动作）
+3. 优先使用复合动作：若存在与目标语义匹配的复合动作，输出 1-2 步即可（通常复合动作会自动移动到对应的区域，无需额外的move_to）
 4. 仅当没有匹配的复合动作时，才用 2-5 个原子动作组合实现目标
-5. move_to_location 的 target、interact 的 target_object_id、work_at_workbench 的 target_object_id、patrol_zone 的 target_zone 必须严格使用上面"可前往区域"和"可交互物体"中给出的 id，禁止编造、禁止拼接 zone/interaction 信息
-6. interact / work_at_workbench / charge_at_station 必须在 object 所在 zone 调用——若当前 zone（上方"你目前在"给出的 zone）与 object 所在 zone（上方"可交互物体"每行"位于 zone=xxx"给出的）不同，必须先 move_to_location 到该 zone；例如 object 位于 zone=main_workshop 时，必须先 move_to_location(main_workshop) 再 interact/work_at_workbench
-7. 每行一个 JSON 对象，不要输出 JSON 数组，不要输出 markdown 围栏，不要输出任何其他文字
-8. 必须以字符 {"inner_thought 开头，不要输出步骤说明、不要解释、不要编号列表、不要 markdown 加粗
-9. 步骤总时长应接近当前 slot 时长，避免过短导致队列提前耗尽触发重分解；复合动作通常自带较长 duration，1 个复合动作往往即可覆盖整个 slot
+5. move_to 的 target、interact 的 target_object_id、work_at_workbench 的 target_object_id、patrol_zone 的 target_zone 必须严格使用上面"可前往区域"和"可交互物体"中给出的 id，禁止编造、禁止拼接 zone/interaction 信息
+6. 每行一个 JSON 对象，不要输出 JSON 数组，不要输出 markdown 围栏，不要输出任何其他文字
+7. 必须以字符 {"inner_thought 开头，不要输出步骤说明、不要解释、不要编号列表、不要 markdown 加粗
+8. 步骤总时长应接近当前 slot 时长，避免过短导致队列提前耗尽触发重分解；复合动作通常会一直做（如work_shift会一直在工作位置工作，直到下一个action命令打断）
 
 示例（id 来自上方可用列表，不可照抄示例中的 id）：
 %s`
