@@ -404,6 +404,17 @@ MCP 是唯一的 LLM 调用入口，启动后即可接收感知事件、调用 V
 
 `world_kb` 仅在启动窗口内（首个 `agent_registered` 之前）接受；之后到达的 `world_kb` 被拒绝并告警（worker goroutine 已持 kb 指针，热替换会竞态）。合并失败保留旧 KB + 不写盘。
 
+### 手动模式（`--auto-plan=false`）
+
+默认 `--auto-plan=true` 保持自动决策行为。设为 `false` 时 MCP 进入手动模式：
+
+- **战略层**：worker 启动时跳过 `generateDailyPlan`，`dailyPlan` 保持空
+- **战术层**：worker 循环跳过 `tacticalRefill` 和 `sendIdleWait`，不主动填队列、不主动发 wait
+- **反应层**：WS handler 4 处 `reactiveRunnerRef.trigger` 调用全部跳过，Ollama 不被调用
+- **保留**：`popAndSendQueueAction`（`/debug/schedule` 注入的 action 进队列后由 `ac.signal()` 唤醒 worker 走此路径下发）、`/debug/action`（直接 `ws.Call` 下发，不经 worker）
+
+手动模式适合联调时隔离 UE 端、单独验证 MCP 工具链/协议层/特定 schedule 分解效果。关闭后断连不再触发战略层重新规划（因为根本不调），间接缓解断连风暴导致的计划漂移。
+
 ### world_kb 自动适配
 
 UE 推送新 `world_kb` 后，MCP 重启即自动适配全链路，无需改任何代码：
@@ -523,6 +534,7 @@ cp .env.example .env
 | `--venus-timeout` | `60s` | Venus 调用超时 |
 | `--tactical-timeout` | `60s` | 战术层 LLM 调用超时 |
 | `--tactical-stream` | `false` | 战术层流式输出（实验性，默认关） |
+| `--auto-plan` | `true` | 自动规划总开关（false=手动模式，跳过战略/战术/反应层自动决策，仅响应 /debug/schedule 注入和 /debug/action 手动下发） |
 | `--ollama-url` | `http://localhost:11434` | Ollama URL（空串=禁用反应层） |
 | `--ollama-model` | `qwen2.5:7b-instruct-q4_K_M` | 反应层模型 |
 | `--ollama-num-thread` | `16` | Ollama CPU 推理线程数（0=默认 16，-1=让 Ollama 自决）。高核数 CPU 上默认用满所有核反而劣化，实测 96 vCPU EPYC 限制到 16 线程可获得 3x 加速 |
