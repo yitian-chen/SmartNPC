@@ -12,6 +12,10 @@
 # LLM 后端：MCP 直连 Venus（OpenAI Chat Completions 协议），
 # VENUS_API_KEY 从 .env 读取，由 start-debug.sh 透传给 MCP 进程。
 #
+# .env 还可配置 AGENTTOWN_MCP_AUTO_PLAN（true/false，默认 true），
+# false 时 MCP 进入手动模式（不自动规划/不主动下发 action），
+# 由 start-debug.sh 读取并透传 --auto-plan flag 给 MCP 进程。
+#
 # 用法：
 #   bash start-dev.sh                # 启动开发实例全套
 #   bash start-dev.sh --stop         # 停开发实例
