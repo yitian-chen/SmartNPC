@@ -71,7 +71,10 @@ var tacticalToolOverride = map[string]struct {
 	"work_at_workshop":  {"车间例行工作", `{}`},
 	"chat_with":         {"与其他agent聊天", `{"target_agent_id":"...","topic":"话题（可选）"}`},
 	"repair_target":     {"修理其他agent", `{"target_agent_id":"...","tool_id":"工具id（可选）"}`},
-	"charge_at_station": {"充电", `{"target_object_id":"充电站id（可空）"}`},
+	// charge_at_station 故意不在 override 中：其 schema 在 mock UE（target_object_id）
+	// 与真实 UE5（smart_object + interaction）之间分歧，让 buildTacticalToolEntries
+	// 走 buildToolParamHint(act.Params) 按 capability_registry 动态派生，避免
+	// 硬编码某一侧 schema 导致另一侧参数名不匹配。
 	"patrol_zone":       {"巡逻区域", `{"target_zone":"区域id","duration_sec":秒数}`},
 }
 
@@ -893,9 +896,11 @@ func mapTacticalAction(pa plannedAction, agentID string, kb *worldkb.KB, registr
 		}
 		return protocol.CmdRepairTarget, params, nil
 	case "charge_at_station":
-		params := map[string]any{}
-		if s, ok := pa.Params["target_object_id"].(string); ok && s != "" {
-			params["target_object_id"] = s
+		// 全量透传 params：真实 UE5 声明 smart_object + interaction，
+		// mock UE 声明 target_object_id + duration_sec。不挑字段避免丢参数。
+		params := make(map[string]any, len(pa.Params))
+		for k, v := range pa.Params {
+			params[k] = v
 		}
 		return protocol.CmdChargeAtStation, params, nil
 	case "patrol_zone":

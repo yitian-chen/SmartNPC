@@ -46,10 +46,14 @@ type RepairTargetInput struct {
 }
 
 // ChargeAtStationInput — composite: charge at a station.
+// 兼容两种 UE schema：mock UE 用 target_object_id；真实 UE5 用 smart_object + interaction。
+// 三字段均 omitempty，handler 按非空值透传，UE 侧按自己声明的 schema 取用。
 type ChargeAtStationInput struct {
 	AgentID        string `json:"agent_id" jsonschema:"the NPC's id"`
 	DecisionEpoch  int64  `json:"decision_epoch" jsonschema:"required epoch from the current decision_context"`
-	TargetObjectID string `json:"target_object_id,omitempty" jsonschema:"charging station id (optional; auto-pick if empty)"`
+	TargetObjectID string `json:"target_object_id,omitempty" jsonschema:"charging station id (mock UE; auto-pick if empty)"`
+	SmartObject    string `json:"smart_object,omitempty" jsonschema:"charging station id (real UE5 schema)"`
+	Interaction    string `json:"interaction,omitempty" jsonschema:"interaction verb, e.g. charge (real UE5 schema)"`
 }
 
 // PatrolZoneInput — composite: patrol a zone.
@@ -147,15 +151,22 @@ func registerComposite(s *mcp.Server, ex Executor, logger *slog.Logger) {
 	// charge_at_station
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "charge_at_station",
-		Description: "Charge at a charging station. Composite behavior — restores battery. Auto-picks a station if target_object_id is empty.",
+		Description: "Charge at a charging station. Composite behavior — restores battery. Auto-picks a station if target id is empty.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in ChargeAtStationInput) (*mcp.CallToolResult, ackResult, error) {
 		if in.AgentID == "" {
 			return nil, ackResult{}, fmt.Errorf("agent_id is required")
 		}
 		logToolCall("charge_at_station", in.AgentID, in.DecisionEpoch, in)
+		// 全量透传非空字段：mock UE 取 target_object_id，真实 UE5 取 smart_object + interaction。
 		params := map[string]any{}
 		if in.TargetObjectID != "" {
 			params["target_object_id"] = in.TargetObjectID
+		}
+		if in.SmartObject != "" {
+			params["smart_object"] = in.SmartObject
+		}
+		if in.Interaction != "" {
+			params["interaction"] = in.Interaction
 		}
 		ack, err := ex.SendAction(ctx, in.AgentID, in.DecisionEpoch, protocol.CmdChargeAtStation, params)
 		if err != nil {
