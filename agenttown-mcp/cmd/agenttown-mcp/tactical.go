@@ -262,7 +262,7 @@ const tacticalPromptBody = `[战术层/任务分解] 当前时段目标：%s
 3. 队列必须以长复合动作（标记 [复合]）结尾——长复合动作会持续执行直到时段切换，让 NPC 一直工作到下一 schedule 节点被 worker 主动打断
 4. 禁止输出 wait 动作；若无需移动/转身等前置步骤，可直接输出单个长复合动作，长复合动作包含移动到对应位置的逻辑
 5. 仅当目标确实没有匹配的长复合动作时（极少见），才用 2-5 个原子动作组合实现目标，但仍禁止以 wait 结尾
-6. move_to 的 target、interact 的 target_object_id、work_at_workbench 的 target_object_id、patrol_zone 的 target_zone 必须严格使用上面"可前往区域"和"可交互物体"中给出的 id，禁止编造、禁止拼接 zone/interaction 信息
+6. move_to 的 target、interact 的 target_object_id、以及复合动作中引用的 object/zone id 必须严格使用上面"可前往区域"和"可交互物体"中给出的 id，禁止编造、禁止拼接 zone/interaction 信息
 7. 每行一个 JSON 对象，不要输出 JSON 数组，不要输出 markdown 围栏，不要输出任何其他文字
 8. 必须以字符 {"inner_thought 开头，不要输出步骤说明、不要解释、不要编号列表、不要 markdown 加粗
 
