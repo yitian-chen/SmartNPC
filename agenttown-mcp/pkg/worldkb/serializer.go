@@ -3,8 +3,12 @@ package worldkb
 // serializer.go writes a KB to world_kb.yaml (deterministic, sorted by ID)
 // and a world_kb.manifest.json with SHA256 hashes.
 //
-// YAML output uses snake_case keys. Atomic file replacement (temp file +
-// rename) prevents half-written output on failure.
+// YAML output uses snake_case keys. Each entity is serialized as a
+// map[string]any (known fields + merged Extra) so unknown fields round-trip.
+// yaml.v3 emits map keys alphabetically — this is accepted (deterministic;
+// field order differs from the pre-refactor struct-ordered output but is
+// stable across runs). Atomic file replacement (temp file + rename)
+// prevents half-written output on failure.
 
 import (
 	"crypto/sha256"
@@ -18,174 +22,155 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// yamlKB mirrors the YAML output structure with explicit snake_case tags.
-// Vector fields use []float64 so yaml.v3 emits flow-style [1, 2, 3].
-type yamlKB struct {
-	Version       string             `yaml:"version"`
-	Narrative     yamlNarrative      `yaml:"narrative"`
-	Zones         []yamlZone         `yaml:"zones"`
-	Objects       []yamlObject       `yaml:"objects"`
-	Agents        []yamlAgent        `yaml:"agents"`
-	Relationships []yamlRelationship `yaml:"relationships,omitempty"`
-}
-
-type yamlNarrative struct {
-	Setting string `yaml:"setting,omitempty"`
-	Theme   string `yaml:"theme,omitempty"`
-}
-
-type yamlZone struct {
-	ID          string          `yaml:"id"`
-	DisplayName string          `yaml:"display_name,omitempty"`
-	Description string          `yaml:"description,omitempty"`
-	Aliases     []string        `yaml:"aliases,omitempty"`
-	Bounds      yamlBounds      `yaml:"bounds"`
-	EntryPoint  []float64       `yaml:"entry_point"`
-	EntryFacing []float64       `yaml:"entry_facing,omitempty"`
-	Connections []yamlConnection `yaml:"connections,omitempty"`
-}
-
-type yamlConnection struct {
-	To            string `yaml:"to"`
-	Type          string `yaml:"type,omitempty"`
-	Bidirectional bool   `yaml:"bidirectional,omitempty"`
-}
-
-type yamlBounds struct {
-	Center   []float64 `yaml:"center"`
-	Extent   []float64 `yaml:"extent"`
-	Rotation []float64 `yaml:"rotation,omitempty"`
-}
-
-type yamlObject struct {
-	ID                    string    `yaml:"id"`
-	DisplayName           string    `yaml:"display_name,omitempty"`
-	Description           string    `yaml:"description,omitempty"`
-	Category              string    `yaml:"category,omitempty"`
-	ZoneID                string    `yaml:"zone_id,omitempty"`
-	ActorClass            string    `yaml:"actor_class,omitempty"`
-	ActorPosition         []float64 `yaml:"actor_position,omitempty"`
-	InteractionPoint      []float64 `yaml:"interaction_point"`
-	InteractionFacing     []float64 `yaml:"interaction_facing,omitempty"`
-	InteractionRadius     float64   `yaml:"interaction_radius,omitempty"`
-	AvailableInteractions []string  `yaml:"available_interactions,omitempty"`
-	DefaultState          string    `yaml:"default_state,omitempty"`
-	Tags                  []string  `yaml:"tags,omitempty"`
-}
-
-type yamlAgent struct {
-	ID               string         `yaml:"id"`
-	DisplayName      string         `yaml:"display_name,omitempty"`
-	Description      string         `yaml:"description,omitempty"`
-	Type             string         `yaml:"type,omitempty"`
-	Profession       string         `yaml:"profession,omitempty"`
-	Personality      yamlPersonality `yaml:"personality,omitempty"`
-	InitialZone      string         `yaml:"initial_zone,omitempty"`
-	InitialPosition  []float64      `yaml:"initial_position,omitempty"`
-	ActorClass       string         `yaml:"actor_class,omitempty"`
-	ActionTable      string         `yaml:"action_table,omitempty"`
-	MainBehaviorTree string         `yaml:"main_behavior_tree,omitempty"`
-}
-
-type yamlPersonality struct {
-	Traits      []string `yaml:"traits,omitempty"`
-	SpeechStyle string   `yaml:"speech_style,omitempty"`
-}
-
-type yamlRelationship struct {
-	From        string `yaml:"from"`
-	To          string `yaml:"to"`
-	Familiarity int    `yaml:"familiarity,omitempty"`
-	Affection   int    `yaml:"affection,omitempty"`
-	Type        string `yaml:"type,omitempty"`
-}
-
-// toYAML converts a KB to its YAML representation struct.
-func toYAML(kb *KB) yamlKB {
-	out := yamlKB{
-		Version: kb.Version,
-		Narrative: yamlNarrative{
-			Setting: kb.Narrative.Setting,
-			Theme:   kb.Narrative.Theme,
-		},
-		Zones:         make([]yamlZone, 0, len(kb.Zones)),
-		Objects:       make([]yamlObject, 0, len(kb.Objects)),
-		Agents:        make([]yamlAgent, 0, len(kb.Agents)),
-		Relationships: make([]yamlRelationship, 0, len(kb.Relationships)),
-	}
-
+// toYAMLMap converts a KB to a map[string]any tree ready for yaml.Marshal.
+// Known fields are emitted with snake_case keys; each entity's Extra bag
+// is merged in alongside the known fields (Extra wins on key conflicts,
+// though conflicts should not occur since projection keeps them disjoint).
+func toYAMLMap(kb *KB) map[string]any {
+	zones := make([]any, 0, len(kb.Zones))
 	for _, z := range kb.Zones {
-		zone := yamlZone{
-			ID:          z.ID,
-			DisplayName: z.DisplayName,
-			Description: z.Description,
-			Aliases:     z.Aliases,
-			Bounds: yamlBounds{
-				Center:   vec3ToSlice(z.Bounds.Center),
-				Extent:   vec3ToSlice(z.Bounds.Extent),
-				Rotation: vec3ToSliceOptional(z.Bounds.Rotation),
-			},
-			EntryPoint:  vec3ToSlice(z.EntryPoint),
-			EntryFacing: vec3ToSlice(z.EntryFacing),
-		}
-		for _, c := range z.Connections {
-			zone.Connections = append(zone.Connections, yamlConnection{
-				To:            c.To,
-				Type:          c.Type,
-				Bidirectional: c.Bidirectional,
-			})
-		}
-		out.Zones = append(out.Zones, zone)
+		zones = append(zones, zoneToMap(&z))
 	}
-
+	objects := make([]any, 0, len(kb.Objects))
 	for _, o := range kb.Objects {
-		out.Objects = append(out.Objects, yamlObject{
-			ID:                    o.ID,
-			DisplayName:           o.DisplayName,
-			Description:           o.Description,
-			Category:              o.Category,
-			ZoneID:                o.ZoneID,
-			ActorClass:            o.ActorClass,
-			ActorPosition:         vec3ToSlice(o.ActorPosition),
-			InteractionPoint:      vec3ToSlice(o.InteractionPoint),
-			InteractionFacing:     vec3ToSlice(o.InteractionFacing),
-			InteractionRadius:     o.InteractionRadius,
-			AvailableInteractions: o.AvailableInteractions,
-			DefaultState:          o.DefaultState,
-			Tags:                  o.Tags,
-		})
+		objects = append(objects, objectToMap(&o))
 	}
-
+	agents := make([]any, 0, len(kb.Agents))
 	for _, a := range kb.Agents {
-		out.Agents = append(out.Agents, yamlAgent{
-			ID:               a.ID,
-			DisplayName:      a.DisplayName,
-			Description:      a.Description,
-			Type:             a.Type,
-			Profession:       a.Profession,
-			Personality: yamlPersonality{
-				Traits:      a.Personality.Traits,
-				SpeechStyle: a.Personality.SpeechStyle,
-			},
-			InitialZone:      a.InitialZone,
-			InitialPosition:  vec3ToSlice(a.InitialPosition),
-			ActorClass:       a.ActorClass,
-			ActionTable:      a.ActionTable,
-			MainBehaviorTree: a.MainBehaviorTree,
-		})
+		agents = append(agents, agentToMap(&a))
 	}
 
-	for _, r := range kb.Relationships {
-		out.Relationships = append(out.Relationships, yamlRelationship{
-			From:        r.From,
-			To:          r.To,
-			Familiarity: r.Familiarity,
-			Affection:   r.Affection,
-			Type:        r.Type,
-		})
+	out := map[string]any{
+		"version": kb.Version,
+		"narrative": map[string]any{
+			"setting": kb.Narrative.Setting,
+			"theme":   kb.Narrative.Theme,
+		},
+		"zones":   zones,
+		"objects": objects,
+		"agents":  agents,
 	}
-
+	if len(kb.Relationships) > 0 {
+		rels := make([]any, 0, len(kb.Relationships))
+		for _, r := range kb.Relationships {
+			rels = append(rels, relationshipToMap(&r))
+		}
+		out["relationships"] = rels
+	}
 	return out
+}
+
+func zoneToMap(z *Zone) map[string]any {
+	m := map[string]any{
+		"id":          z.ID,
+		"display_name": z.DisplayName,
+		"description":  z.Description,
+		"bounds": map[string]any{
+			"center":   vec3ToSlice(z.Bounds.Center),
+			"extent":   vec3ToSlice(z.Bounds.Extent),
+			"rotation": vec3ToSliceOptional(z.Bounds.Rotation),
+		},
+		"entry_point":  vec3ToSlice(z.EntryPoint),
+		"entry_facing": vec3ToSlice(z.EntryFacing),
+	}
+	if len(z.Aliases) > 0 {
+		m["aliases"] = z.Aliases
+	}
+	if len(z.Connections) > 0 {
+		conns := make([]any, 0, len(z.Connections))
+		for _, c := range z.Connections {
+			cm := map[string]any{"to": c.To}
+			if c.Type != "" {
+				cm["type"] = c.Type
+			}
+			if c.Bidirectional {
+				cm["bidirectional"] = c.Bidirectional
+			}
+			conns = append(conns, cm)
+		}
+		m["connections"] = conns
+	}
+	mergeExtraIntoMap(m, z.Extra)
+	return m
+}
+
+func objectToMap(o *Object) map[string]any {
+	m := map[string]any{
+		"id":                  o.ID,
+		"display_name":        o.DisplayName,
+		"description":         o.Description,
+		"category":            o.Category,
+		"zone_id":             o.ZoneID,
+		"actor_class":         o.ActorClass,
+		"actor_position":      vec3ToSlice(o.ActorPosition),
+		"interaction_point":   vec3ToSlice(o.InteractionPoint),
+		"interaction_facing":  vec3ToSlice(o.InteractionFacing),
+		"interaction_radius":  o.InteractionRadius,
+		"default_state":       o.DefaultState,
+	}
+	if len(o.AvailableInteractions) > 0 {
+		m["available_interactions"] = o.AvailableInteractions
+	}
+	if len(o.Tags) > 0 {
+		m["tags"] = o.Tags
+	}
+	mergeExtraIntoMap(m, o.Extra)
+	return m
+}
+
+func agentToMap(a *Agent) map[string]any {
+	m := map[string]any{
+		"id":                 a.ID,
+		"display_name":       a.DisplayName,
+		"description":        a.Description,
+		"type":               a.Type,
+		"profession":         a.Profession,
+		"initial_zone":       a.InitialZone,
+		"initial_position":   vec3ToSlice(a.InitialPosition),
+		"actor_class":        a.ActorClass,
+		"action_table":       a.ActionTable,
+		"main_behavior_tree": a.MainBehaviorTree,
+	}
+	if len(a.Personality.Traits) > 0 || a.Personality.SpeechStyle != "" {
+		pm := map[string]any{}
+		if len(a.Personality.Traits) > 0 {
+			pm["traits"] = a.Personality.Traits
+		}
+		if a.Personality.SpeechStyle != "" {
+			pm["speech_style"] = a.Personality.SpeechStyle
+		}
+		m["personality"] = pm
+	}
+	mergeExtraIntoMap(m, a.Extra)
+	return m
+}
+
+func relationshipToMap(r *Relationship) map[string]any {
+	m := map[string]any{
+		"from": r.From,
+		"to":   r.To,
+	}
+	if r.Familiarity != 0 {
+		m["familiarity"] = r.Familiarity
+	}
+	if r.Affection != 0 {
+		m["affection"] = r.Affection
+	}
+	if r.Type != "" {
+		m["type"] = r.Type
+	}
+	return m
+}
+
+// mergeExtraIntoMap copies keys from extra into m. If a key already exists
+// in m (shouldn't happen since projection keeps known/extra disjoint), extra
+// wins — this matches the "authored overlay" semantics for any future field
+// that the projection logic decides to stash in Extra rather than promote
+// to a typed slot.
+func mergeExtraIntoMap(m map[string]any, extra map[string]any) {
+	for k, v := range extra {
+		m[k] = v
+	}
 }
 
 func vec3ToSlice(v [3]float64) []float64 {
@@ -209,7 +194,7 @@ func WriteYAML(kb *KB, path string) ([]byte, error) {
 		return nil, fmt.Errorf("kb is nil")
 	}
 
-	doc := toYAML(kb)
+	doc := toYAMLMap(kb)
 	data, err := yaml.Marshal(doc)
 	if err != nil {
 		return nil, fmt.Errorf("yaml marshal: %w", err)
