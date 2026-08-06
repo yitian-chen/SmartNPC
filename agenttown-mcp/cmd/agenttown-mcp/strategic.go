@@ -148,14 +148,16 @@ func generateDailyPlan(ctx context.Context, sc strategicCaller, agentID string, 
 // buildAgentRoleContext 构造【你的角色】段，从 kb.GetAgent(agentID) 取
 // DisplayName/Profession/Description/Personality.Traits/Personality.SpeechStyle。
 // 三层决策（战略/战术/反应）共用此 helper，保证角色画像一致。
-// kb == nil 或 agent 不存在时返回空串（降级，不阻断 prompt 构造）。
+// kb == nil 或 agent 不存在时降级到 fallbackAgentRole（硬编码兜底），
+// 确保即使 UE 暂未推送 authored 部分（agent 字段缺失），三层 prompt
+// 仍能注入角色风格，避免角色段空白导致 LLM 行为漂移。
 func buildAgentRoleContext(kb *worldkb.KB, agentID string) string {
 	if kb == nil {
-		return ""
+		return fallbackAgentRole(agentID)
 	}
 	a := kb.GetAgent(agentID)
 	if a == nil {
-		return ""
+		return fallbackAgentRole(agentID)
 	}
 	var sb strings.Builder
 	if a.DisplayName != "" {
@@ -174,6 +176,22 @@ func buildAgentRoleContext(kb *worldkb.KB, agentID string) string {
 		sb.WriteString("说话风格：" + a.Personality.SpeechStyle + "\n")
 	}
 	return sb.String()
+}
+
+// fallbackAgentRole 是 KB authored 部分缺失时的硬编码兜底角色画像。
+// 当前仅覆盖 H-01（一期唯一 agent），其他 agentID 返回空串。
+// 内容参考 docs/AgentTown 人物设定，字段格式与 buildAgentRoleContext
+// 保持一致（名字/职业/性格特质/说话风格），省略"背景"保持简短。
+// 后续 UE 推送 authored 部分后，KB 路径自然接管，兜底不再触发。
+func fallbackAgentRole(agentID string) string {
+	switch agentID {
+	case "H-01":
+		return "名字：老陈\n" +
+			"职业：车间主管\n" +
+			"性格特质：沉稳、念旧、重视工艺\n" +
+			"说话风格：简洁，偶尔念叨老物件\n"
+	}
+	return ""
 }
 
 // buildStrategicContext 构造战略层 prompt 的 KB 上下文段，包含三段：
