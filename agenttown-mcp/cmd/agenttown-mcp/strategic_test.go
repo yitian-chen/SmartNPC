@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/AgentTown/agenttown-mcp/pkg/llmtypes"
+	"github.com/AgentTown/agenttown-mcp/pkg/protocol"
 	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
 )
 
@@ -133,7 +134,7 @@ func TestFormatDailyPlan_MultipleItems(t *testing.T) {
 
 func TestGenerateDailyPlan_HTTPError(t *testing.T) {
 	sc := &fakeStrategicCaller{err: errors.New("network down")}
-	plan := generateDailyPlan(context.Background(), sc, "H-01", nil, slog.Default())
+	plan := generateDailyPlan(context.Background(), sc, "H-01", nil, nil, slog.Default())
 	// HTTP 错误现在回退到 defaultDailyPlan 而不是空字符串，
 	// 保证战术层有目标可分解、仿真不瘫痪。
 	if plan != defaultDailyPlan {
@@ -147,7 +148,7 @@ func TestGenerateDailyPlan_HTTPError(t *testing.T) {
 func TestGenerateDailyPlan_ValidResponse(t *testing.T) {
 	raw := `[{"time":"06:00-07:00","goal":"起床晨检"},{"time":"07:00-12:00","goal":"车间装配"}]`
 	sc := &fakeStrategicCaller{resp: makeStrategicResponse(raw)}
-	plan := generateDailyPlan(context.Background(), sc, "H-01", nil, slog.Default())
+	plan := generateDailyPlan(context.Background(), sc, "H-01", nil, nil, slog.Default())
 	if plan == "" {
 		t.Fatal("got empty plan, want non-empty")
 	}
@@ -161,7 +162,7 @@ func TestGenerateDailyPlan_ValidResponse(t *testing.T) {
 
 func TestGenerateDailyPlan_ParseFail(t *testing.T) {
 	sc := &fakeStrategicCaller{resp: makeStrategicResponse("今天天气不错，我打算去车间转转。")}
-	plan := generateDailyPlan(context.Background(), sc, "H-01", nil, slog.Default())
+	plan := generateDailyPlan(context.Background(), sc, "H-01", nil, nil, slog.Default())
 	// 解析失败现在回退到 defaultDailyPlan 而不是空字符串，
 	// 避免整天 Wait(60s) 瘫痪。
 	if plan != defaultDailyPlan {
@@ -173,7 +174,7 @@ func TestGenerateDailyPlan_ParseFail(t *testing.T) {
 
 func TestBuildStrategicContext_WithKB(t *testing.T) {
 	kb := loadTestKB(t)
-	got := buildStrategicContext(kb, "H-01")
+	got := buildStrategicContext(kb, "H-01", nil)
 	if got == "" {
 		t.Fatal("got empty context, want non-empty for valid KB")
 	}
@@ -201,22 +202,140 @@ func TestBuildStrategicContext_WithKB(t *testing.T) {
 }
 
 func TestBuildStrategicContext_NilKB(t *testing.T) {
-	// kb == nil 时降级返回空串，不 panic、不阻断 prompt 构造。
-	got := buildStrategicContext(nil, "H-01")
-	if got != "" {
-		t.Errorf("got %q, want empty string for nil KB", got)
+	// kb == nil 且 registry == nil：【可用能力】段降级为内置 6 个复合工具，
+	// 让 AI 即使无 KB 上下文也知能力边界（不规划无对应动作的活动）。
+	got := buildStrategicContext(nil, "H-01", nil)
+	if !strings.Contains(got, "【可用能力】") {
+		t.Errorf("nil KB should still include builtin composite capability section: %q", got)
+	}
+	if !strings.Contains(got, "work_at_workbench") {
+		t.Errorf("nil KB should list builtin composite tool 'work_at_workbench': %q", got)
 	}
 }
 
 func TestBuildStrategicContext_AgentNotFound(t *testing.T) {
 	// KB 存在但 agentID 不在 KB 中：跳过角色段，仍注入世界知识段。
 	kb := loadTestKB(t)
-	got := buildStrategicContext(kb, "NONEXISTENT-99")
+	got := buildStrategicContext(kb, "NONEXISTENT-99", nil)
 	if strings.Contains(got, "【你的角色】") {
 		t.Errorf("should not include persona section for unknown agent: %q", got)
 	}
 	if !strings.Contains(got, "【世界知识】") {
 		t.Errorf("should still include world KB section even if agent unknown: %q", got)
+	}
+}
+
+// ─── buildStrategicCapabilitySummary ─────────────────────────
+
+func TestBuildStrategicCapabilitySummary_NilRegistry(t *testing.T) {
+	// registry == nil 降级为内置 6 个复合工具，与战术层降级一致。
+	got := buildStrategicCapabilitySummary("H-01", nil)
+	if got == "" {
+		t.Fatal("got empty summary for nil registry, want builtin composite tools")
+	}
+	// 内置复合工具应在列表中
+	for _, name := range []string{"work_at_workbench", "work_at_workshop", "chat_with", "repair_target", "charge_at_station", "patrol_zone"} {
+		if !strings.Contains(got, name) {
+			t.Errorf("summary missing builtin composite tool %q: %q", name, got)
+		}
+	}
+	// 不应包含原子动作
+	if strings.Contains(got, "move_to_location") {
+		t.Errorf("summary should not include atomic tools: %q", got)
+	}
+}
+
+func TestBuildStrategicCapabilitySummary_WithRegistry(t *testing.T) {
+	// 注册 2 个复合 + 1 个原子，验证只列出复合动作。
+	// 内置工具（work_at_workbench/charge_at_station）的 desc 来自 tacticalToolOverride
+	// 覆盖表（"在工作台装配"），registry 的 Description 字段仅对非内置 cmd 生效。
+	r := NewCapabilityRegistry(nil)
+	r.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
+		{Cmd: protocol.CmdWorkAtWorkbench, Kind: "composite", Description: "装配工作"},
+		{Cmd: protocol.CmdChargeAtStation, Kind: "composite", Description: "充电"},
+		{Cmd: protocol.CmdMoveToLocation, Kind: "atomic", Description: "移动"},
+	})
+	got := buildStrategicCapabilitySummary("H-01", r)
+	// work_at_workbench 走 override desc "在工作台装配"
+	if !strings.Contains(got, "在工作台装配") {
+		t.Errorf("summary missing override desc '在工作台装配': %q", got)
+	}
+	// charge_at_station 无 override，走 registry Description "充电"
+	if !strings.Contains(got, "充电") {
+		t.Errorf("summary missing registry desc '充电': %q", got)
+	}
+	if !strings.Contains(got, "work_at_workbench") {
+		t.Errorf("summary missing tool name 'work_at_workbench': %q", got)
+	}
+	if strings.Contains(got, "移动") {
+		t.Errorf("summary should not include atomic action '移动': %q", got)
+	}
+}
+
+func TestBuildStrategicCapabilitySummary_NoComposite(t *testing.T) {
+	// 只注册原子动作时，返回空串（无复合动作可列）。
+	r := NewCapabilityRegistry(nil)
+	r.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
+		{Cmd: protocol.CmdMoveToLocation, Kind: "atomic", Description: "移动"},
+		{Cmd: protocol.CmdSpeak, Kind: "atomic", Description: "说话"},
+	})
+	got := buildStrategicCapabilitySummary("H-01", r)
+	if got != "" {
+		t.Errorf("got %q, want empty string when no composite actions", got)
+	}
+}
+
+func TestBuildStrategicCapabilitySummary_NewCompositeFromUE(t *testing.T) {
+	// 同事新增的复合动作（UE 通过 capability_registry 推送，Kind="composite"）
+	// 应自动出现在能力列表中，无需改 MCP 代码。
+	r := NewCapabilityRegistry(nil)
+	r.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
+		{Cmd: "GroomSelf", Kind: "composite", Description: "整理仪容"},
+		{Cmd: protocol.CmdWorkAtWorkbench, Kind: "composite", Description: "装配"},
+	})
+	got := buildStrategicCapabilitySummary("H-01", r)
+	if !strings.Contains(got, "整理仪容") {
+		t.Errorf("summary should include UE-pushed new composite '整理仪容': %q", got)
+	}
+	// tool_name 从 Cmd 派生（CmdToToolName），GroomSelf → groom_self
+	if !strings.Contains(got, "groom_self") {
+		t.Errorf("summary should include derived tool name 'groom_self': %q", got)
+	}
+}
+
+// ─── buildStrategicContext capability injection ──────────────
+
+func TestBuildStrategicContext_IncludesCapabilitySection(t *testing.T) {
+	// 有 KB + registry 时，【可用能力】段应出现在 context 中。
+	kb := loadTestKB(t)
+	r := NewCapabilityRegistry(nil)
+	r.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
+		{Cmd: protocol.CmdWorkAtWorkbench, Kind: "composite", Description: "装配"},
+	})
+	got := buildStrategicContext(kb, "H-01", r)
+	if !strings.Contains(got, "【可用能力】") {
+		t.Errorf("context missing '【可用能力】' header: %q", got)
+	}
+	if !strings.Contains(got, "装配") {
+		t.Errorf("context missing composite action desc '装配': %q", got)
+	}
+	if !strings.Contains(got, "基础动作") {
+		t.Errorf("context missing atomic action note '基础动作': %q", got)
+	}
+}
+
+func TestBuildStrategicContext_NilKBWithRegistry(t *testing.T) {
+	// kb == nil 但 registry != nil：【可用能力】段仍注入（不依赖 KB）。
+	r := NewCapabilityRegistry(nil)
+	r.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
+		{Cmd: protocol.CmdWorkAtWorkbench, Kind: "composite", Description: "装配"},
+	})
+	got := buildStrategicContext(nil, "H-01", r)
+	if !strings.Contains(got, "【可用能力】") {
+		t.Errorf("context should include capability section even with nil KB: %q", got)
+	}
+	if !strings.Contains(got, "装配") {
+		t.Errorf("context missing composite action desc: %q", got)
 	}
 }
 
@@ -287,7 +406,7 @@ func TestGenerateDailyPlan_KBInjectedIntoPrompt(t *testing.T) {
 	kb := loadTestKB(t)
 	raw := `[{"time":"06:00-07:00","goal":"起床晨检"}]`
 	sc := &fakeStrategicCaller{resp: makeStrategicResponse(raw)}
-	_ = generateDailyPlan(context.Background(), sc, "H-01", kb, slog.Default())
+	_ = generateDailyPlan(context.Background(), sc, "H-01", kb, nil, slog.Default())
 	prompt := sc.capturedInput
 	if prompt == "" {
 		t.Fatal("captured prompt is empty")
@@ -600,7 +719,7 @@ func TestBuildStrategicZoneObjectMap_EmptyZones(t *testing.T) {
 func TestBuildStrategicContext_ContainsZoneObjectMap(t *testing.T) {
 	// buildStrategicContext 应包含【区域设施映射】段，让战略层 LLM 看到映射。
 	kb := loadTestKB(t)
-	got := buildStrategicContext(kb, "H-01")
+	got := buildStrategicContext(kb, "H-01", nil)
 	if !strings.Contains(got, "【区域设施映射】") {
 		t.Errorf("context missing '【区域设施映射】' header: %q", got)
 	}

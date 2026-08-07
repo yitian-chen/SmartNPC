@@ -52,6 +52,7 @@ const strategicPromptTemplate = `[战略层/每日规划] 现在是仿真时间 
 7. goal 中提到的地点、人物、设备必须是【你的角色】和【世界知识】中存在的，不得编造未提及的人物或设施
 8. 若 goal 涉及"使用/操作/检查/交互"某设施，该设施必须位于【区域设施映射】中标注为有物体的 zone——映射中标注"无可交互物体"的 zone 不能作为 interact 类活动的目的地（只能用于移动/巡逻/路过/休息）
 9. 末段若跨午夜（如 "22:00-06:00"），结束时间表示次日该时刻，调度器会自动识别跨午夜时段
+10. goal 的主要活动应能用【可用能力】中列出的复合动作实现（如装配→work_at_workbench、充电→charge_at_station）。不得规划【可用能力】未列出且无法用基础动作（移动/说话/表达情绪/交互物体/等待）组合实现的活动——如"整理仪容""冥想"等无对应能力的活动会被战术层拒绝。若需安排休息/待机，写"休息"或"待机"即可，战术层会用基础动作组合实现
 
 示例：[{"time":"07:00-09:00","goal":"起床，然后去中央广场晨间补电"},{"time":"09:00-12:00","goal":"上午车间装配作业"},{"time":"12:00-14:00","goal":"午间停工，前往充电区域短暂补电休息"},{"time":"14:00-18:00","goal":"下午继续在车间装配"},{"time":"18:00-22:00","goal":"傍晚去维修台维护修理"},{"time":"22:00-06:00","goal":"夜间在休眠舱休息"}]`
 
@@ -112,12 +113,13 @@ const yesterdaySummaryForFirstDay = "昨天按计划完成了车间装配。"
 // generateDailyPlan 调 LLM 生成当日计划，返回格式化字符串（每行 "时段: 目标"）。
 // 任一步失败均回退到 buildDefaultDailyPlan(kb)，保证战术层有目标可分解、
 // 仿真不瘫痪。返回 "" 仅表示连兜底计划都没用上（理论上不会发生）。
-// kb 用于注入【你的角色】+【世界知识】段，让 LLM 看到 KB 内合法的
+// kb 用于注入【你的角色】+【世界知识】+【区域设施映射】段，让 LLM 看到 KB 内合法的
 // zone/object/agent 名，避免编造 KB 外概念（如换 KB 后仍写"车间"）。
-// kb == nil 时降级为无 KB 上下文的纯角色 prompt（向后兼容）。
-func generateDailyPlan(ctx context.Context, sc strategicCaller, agentID string, kb *worldkb.KB, logger *slog.Logger) string {
+// registry 用于注入【可用能力】段，让 LLM 知道可用复合动作，避免规划无对应
+// 动作的 goal（如"整理仪容"）。kb/registry == nil 时降级为对应段缺失（向后兼容）。
+func generateDailyPlan(ctx context.Context, sc strategicCaller, agentID string, kb *worldkb.KB, registry *CapabilityRegistry, logger *slog.Logger) string {
 	prompt := fmt.Sprintf(strategicPromptTemplate,
-		buildStrategicContext(kb, agentID),
+		buildStrategicContext(kb, agentID, registry),
 		"昨日总结："+yesterdaySummaryForFirstDay)
 	logger.Info("[MCP→LLM/STRATEGIC-PROMPT]", "agent_id", agentID, "text", prompt)
 
@@ -200,7 +202,7 @@ func fallbackAgentRole(agentID string) string {
 	return ""
 }
 
-// buildStrategicContext 构造战略层 prompt 的 KB 上下文段，包含三段：
+// buildStrategicContext 构造战略层 prompt 的 KB 上下文段，包含四段：
 //   - 【你的角色】：复用 buildAgentRoleContext(kb, agentID)，从 kb.GetAgent
 //     取 DisplayName/Profession/Description/Personality.Traits/SpeechStyle。
 //   - 【世界知识】：复用 buildKBContext(kb)（与战术层同源），列出 KB 内
@@ -209,25 +211,54 @@ func fallbackAgentRole(agentID string) string {
 //     zone 无可交互物体）。战略层 LLM 据此避免生成"去无 object 的 zone 做
 //     interact"的 goal——此类 goal 会让战术层 LLM 陷入"想 interact 但
 //     当前 zone 没有 object"的死角，诱发 zone-object 错配。
+//   - 【可用能力】：列出当前 agent 可用的复合动作（从 registry 派生，
+//     与战术层同源）。战略层 LLM 据此知道能力边界，避免规划无对应动作
+//     的活动（如"整理仪容""冥想"等），此类 goal 会让战术层陷入死角。
 //
-// kb == nil 时返回空串（降级路径，不阻断 prompt 构造）。
-// agent 在 KB 中不存在时跳过【你的角色】段，仅注入【世界知识】+【区域设施映射】。
-func buildStrategicContext(kb *worldkb.KB, agentID string) string {
-	if kb == nil {
-		return ""
-	}
+// kb == nil 时跳过 KB 相关段，但【可用能力】仍注入（registry 不依赖 KB）。
+// registry == nil 时【可用能力】降级为内置 6 个复合工具（与战术层一致）。
+func buildStrategicContext(kb *worldkb.KB, agentID string, registry *CapabilityRegistry) string {
 	var sb strings.Builder
-	if role := buildAgentRoleContext(kb, agentID); role != "" {
-		sb.WriteString("【你的角色】\n")
-		sb.WriteString(role)
+	if kb != nil {
+		if role := buildAgentRoleContext(kb, agentID); role != "" {
+			sb.WriteString("【你的角色】\n")
+			sb.WriteString(role)
+		}
+		if kbCtx := buildKBContext(kb); kbCtx != "" {
+			sb.WriteString("【世界知识】\n")
+			sb.WriteString(kbCtx)
+		}
+		if zom := buildStrategicZoneObjectMap(kb); zom != "" {
+			sb.WriteString("【区域设施映射】\n")
+			sb.WriteString(zom)
+		}
 	}
-	if kbCtx := buildKBContext(kb); kbCtx != "" {
-		sb.WriteString("【世界知识】\n")
-		sb.WriteString(kbCtx)
+	if cap := buildStrategicCapabilitySummary(agentID, registry); cap != "" {
+		sb.WriteString("【可用能力】\n")
+		sb.WriteString("长时段活动用以下复合动作（自动移动到对应位置，覆盖整段工作时间）：\n")
+		sb.WriteString(cap)
+		sb.WriteString("此外始终可用基础动作：移动、说话、表达情绪、与物体交互、等待（用于短耗时或衔接）。\n")
 	}
-	if zom := buildStrategicZoneObjectMap(kb); zom != "" {
-		sb.WriteString("【区域设施映射】\n")
-		sb.WriteString(zom)
+	return sb.String()
+}
+
+// buildStrategicCapabilitySummary 构造【可用能力】段的复合动作 bullet 列表。
+//
+// 复用 buildTacticalToolEntries 派生逻辑（同源，保证战略/战术层能力视图一致），
+// 仅保留 Kind=="composite" 的条目，格式为 "- 描述（tool_name）"。
+// registry == nil 时降级为内置 6 个复合工具（与战术层降级一致）。
+//
+// 战略层 LLM 据此知道自己的能力边界：dailyPlan 的 goal 主要活动应能用这些
+// 复合动作实现，避免规划"在居民区整理仪容"等无对应复合动作的活动——此类
+// goal 会让战术层陷入"想实现但无可用工具"的死角。
+func buildStrategicCapabilitySummary(agentID string, registry *CapabilityRegistry) string {
+	entries := buildTacticalToolEntries(agentID, registry)
+	var sb strings.Builder
+	for _, e := range entries {
+		if e.Kind != "composite" {
+			continue
+		}
+		fmt.Fprintf(&sb, "- %s（%s）\n", e.Desc, e.Name)
 	}
 	return sb.String()
 }

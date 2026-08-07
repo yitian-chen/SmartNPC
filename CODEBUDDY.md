@@ -419,7 +419,7 @@ MCP 是唯一的 LLM 调用入口，启动后即可接收感知事件、调用 V
 
 UE 推送新 `world_kb` 后，MCP 重启即自动适配全链路，无需改任何代码：
 
-- **战略层 prompt 注入 KB + 角色**：`generateDailyPlan` 接收 `kb`，`buildStrategicContext(kb, agentID)` 构造【你的角色】+【世界知识】两段——角色段复用 `buildAgentRoleContext(kb, agentID)`（三层决策共用 helper），从 `kb.GetAgent(agentID)` 取 `DisplayName`/`Profession`/`Description`/`Personality`；世界知识段复用 `buildKBContext(kb)`（与战术层同源）列出全部 zone/object id。LLM 据此规划当日计划，不会编造 KB 外概念。
+- **战略层 prompt 注入 KB + 角色 + 能力边界**：`generateDailyPlan` 接收 `kb` 和 `registry`，`buildStrategicContext(kb, agentID, registry)` 构造【你的角色】+【世界知识】+【区域设施映射】+【可用能力】四段——角色段复用 `buildAgentRoleContext(kb, agentID)`（三层决策共用 helper），从 `kb.GetAgent(agentID)` 取 `DisplayName`/`Profession`/`Description`/`Personality`；世界知识段复用 `buildKBContext(kb)`（与战术层同源）列出全部 zone/object id；可用能力段复用 `buildTacticalToolEntries`（与战术层同源）列出 `Kind=="composite"` 的复合动作，告知 AI 能力边界，避免规划无对应动作的 goal（如"整理仪容"）。LLM 据此规划当日计划，不会编造 KB 外概念，也不会规划无法由现有动作实现的活动。
 - **战术层 prompt 注入 KB + 角色**：`buildTacticalPrompt` 接收 `kb` 和 `agentID`，注入【你的角色】段（同样复用 `buildAgentRoleContext`）+【世界知识】段。战术层分解动作时体现 NPC 角色风格。
 - **反应层 prompt 注入角色**：`ReactiveInput.AgentRole` 由 `reactiveRunner.buildInput` 从 kb 取，注入反应层 prompt 开头。反应决策（continue/observe/replan）受 NPC 性格影响。
 - **工具列表动态派生**：`capability_registry` 驱动 `ReconcileTools` 增删工具；`buildTacticalToolEntries` 按 registry 对 agent 的有效能力集生成 prompt 工具列表；`buildTacticalExample(kb)` 从 KB 取首个 zone/object 作示例。新 cmd 由 `registerGenericActionTool` 自动注册通用工具。
@@ -477,7 +477,7 @@ sequenceDiagram
 ### LLM 调用
 
 MCP 直连 Venus（OpenAI Chat Completions 协议），无会话链——每次调用全量 prompt，不复用历史。战略/战术/反应三层各自构造完整 prompt：
-- **战略层**：每日 06:00 一次调用，输入 = `buildStrategicContext(kb, agentID)` + 7 时段模板，输出 = 当日 plan JSON
+- **战略层**：每日 06:00 一次调用，输入 = `buildStrategicContext(kb, agentID, registry)` + 7 时段模板，输出 = 当日 plan JSON
 - **战术层**：每个时段开始时调用，输入 = `buildTacticalPrompt(...)`（含角色/世界知识/物理状态/工具列表/示例），输出 = NDJSON actions
 - **反应层**：触发时调本地 Ollama（5-8s 超时），输入 = `buildReactivePrompt(in)`（含角色/状态/在途动作/触发原因），输出 = `{"reaction": "...", "reason": "..."}`
 
