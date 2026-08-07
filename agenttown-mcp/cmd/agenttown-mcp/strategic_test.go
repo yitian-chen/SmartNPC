@@ -331,10 +331,11 @@ func TestBuildDefaultDailyPlan_WithKB(t *testing.T) {
 	if !strings.Contains(got, "充电桩") {
 		t.Errorf("KB-derived plan should contain first object display name: %q", got)
 	}
-	// 时段格式可被 parseFormattedPlan 解析
+	// 跨日仿真：兜底计划含 5 个时段（07:00-12:00 / 12:00-14:00 / 14:00-18:00 /
+	// 18:00-22:00 / 22:00-06:00 跨午夜夜间段）。
 	items := parseFormattedPlan(got)
-	if len(items) != 4 {
-		t.Errorf("got %d plan items, want 4", len(items))
+	if len(items) != 5 {
+		t.Errorf("got %d plan items, want 5", len(items))
 	}
 }
 
@@ -369,8 +370,9 @@ func TestNormalizeDailyPlan_FillsGap(t *testing.T) {
 	if got[0].Time != "06:00-14:00" {
 		t.Errorf("first slot should be extended to fill gap: got %q, want 06:00-14:00", got[0].Time)
 	}
-	if got[1].Time != "14:00-22:00" {
-		t.Errorf("second slot unchanged: got %q", got[1].Time)
+	// 末段 14:00-22:00，end=22:00 < dayEndMinute（次日 06:00），后延到次日 06:00。
+	if got[1].Time != "14:00-06:00" {
+		t.Errorf("second slot extended to next-day 06:00: got %q, want 14:00-06:00", got[1].Time)
 	}
 }
 
@@ -408,15 +410,17 @@ func TestNormalizeDailyPlan_AllDropped(t *testing.T) {
 }
 
 func TestNormalizeDailyPlan_AlreadyValid(t *testing.T) {
+	// 跨日仿真：计划覆盖 06:00 到次日 06:00，末段为跨午夜夜间 slot。
 	items := []dailyPlanItem{
 		{Time: "06:00-12:00", Goal: "上午"},
 		{Time: "12:00-22:00", Goal: "下午"},
+		{Time: "22:00-06:00", Goal: "夜间休息"},
 	}
 	got := normalizeDailyPlan(items)
-	if len(got) != 2 {
-		t.Fatalf("got %d items, want 2", len(got))
+	if len(got) != 3 {
+		t.Fatalf("got %d items, want 3", len(got))
 	}
-	if got[0].Time != "06:00-12:00" || got[1].Time != "12:00-22:00" {
+	if got[0].Time != "06:00-12:00" || got[1].Time != "12:00-22:00" || got[2].Time != "22:00-06:00" {
 		t.Errorf("already-valid plan should be unchanged: got %+v", got)
 	}
 }
@@ -430,6 +434,10 @@ func TestFmtMinute(t *testing.T) {
 		{360, "06:00"},
 		{1320, "22:00"},
 		{901, "15:01"},
+		// 跨午夜归一化（m >= 1440 取模）
+		{1440, "00:00"},
+		{1800, "06:00"}, // 次日 06:00 = 1440+360
+		{1500, "01:00"}, // 次日 01:00 = 1440+60
 	}
 	for _, c := range cases {
 		if got := fmtMinute(c.min); got != c.want {
