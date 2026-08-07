@@ -676,7 +676,7 @@ python3 src/run_day.py   # 默认连 :9091
 - scope：`protocol` / `mcp` / `mock-ue` / `venus` / `config` / `start-script` / `logging` / `llmtypes`
 - **提交信息（subject 和 body）使用中文**
 
-用户没明说"commit"时不要主动 commit。
+完成一项工作之后就主动commit。
 
 ## 里程碑
 
