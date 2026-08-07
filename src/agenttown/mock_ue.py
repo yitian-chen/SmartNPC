@@ -69,6 +69,13 @@ CMD_CHAT_WITH = "ChatWith"
 CMD_REPAIR_TARGET = "RepairTarget"
 CMD_CHARGE_AT_STATION = "ChargeAtStation"
 CMD_PATROL_ZONE = "PatrolZone"
+# Generic fallback cmd — mirrors the MCP-side registerGenericActionTool
+# mechanism. Used to simulate activities that have no dedicated cmd (e.g.
+# GroomSelf/Meditate/Stretch) so the tactical layer can decompose goals
+# the builtin 14 cmds cannot cover. Registered as kind="composite" so the
+# MCP registers a `generic_act` tool and the strategic-layer 【可用能力】
+# section lists it, giving the LLM a capability boundary escape hatch.
+CMD_GENERIC_ACT = "GenericAct"
 
 # Default capability actions advertised to MCP on connect. Each entry
 # mirrors the MCP-side CapabilityAction struct (pkg/protocol/messages.go):
@@ -268,6 +275,21 @@ DEFAULT_CAPABILITY_ACTIONS: List[Dict[str, Any]] = [
              "description": "巡逻区域 ID", "required": True},
             {"name": "duration_sec", "type": "number",
              "description": "巡逻秒数（可选）", "required": False},
+        ],
+    },
+    {
+        "cmd": CMD_GENERIC_ACT,
+        "kind": "composite",
+        "description": "通用兜底动作，模拟没有专用 cmd 的行为（如整理仪容、冥想、拉伸）",
+        "usage_hint": "action_name 必填描述动作语义；duration_sec 可选（默认 1800）",
+        "estimated_duration_sec": 1800,
+        "params": [
+            {"name": "action_name", "type": "string",
+             "description": "动作名称（如 GroomSelf/Meditate/Stretch）", "required": True},
+            {"name": "description", "type": "string",
+             "description": "动作描述（可选，用于日志）", "required": False},
+            {"name": "duration_sec", "type": "number",
+             "description": "持续秒数（可选，默认 1800）", "required": False},
         ],
     },
 ]
@@ -650,12 +672,15 @@ PHYS_RATES = {
 # Passive (non-busy) drain — applied when no composite action is running.
 PHYS_RATES_PASSIVE = {"energy": -0.02, "fatigue": +0.03, "joint_wear": 0.0}
 
-# Composite cmds — the 6 long-running composite actions. Used by
+# Composite cmds — the long-running composite actions. Used by
 # _estimate_duration (all busy) and _evolve_physical (PHYS_RATES lookup).
 # Atomic busy cmds (e.g. Wait) use PASSIVE rate, not the work-like default.
+# GenericAct is included so its duration follows COMPOSITE_DEFAULT_SEC and
+# its physical drain falls back to the work-like _default rate.
 COMPOSITE_CMDS = frozenset({
     CMD_WORK_AT_WORKBENCH, CMD_WORK_AT_WORKSHOP, CMD_CHAT_WITH,
     CMD_REPAIR_TARGET, CMD_CHARGE_AT_STATION, CMD_PATROL_ZONE,
+    CMD_GENERIC_ACT,
 })
 
 # Physical-state delta thresholds (约定5)
@@ -1199,6 +1224,7 @@ class MockUE:
             CMD_MOVE_TO_LOCATION, CMD_MOVE_TO_AGENT, CMD_TURN_TO, CMD_INTERACT, CMD_WAIT,
             CMD_WORK_AT_WORKBENCH, CMD_WORK_AT_WORKSHOP, CMD_CHAT_WITH,
             CMD_REPAIR_TARGET, CMD_CHARGE_AT_STATION, CMD_PATROL_ZONE,
+            CMD_GENERIC_ACT,
         }
         if self.npc.busy_action_id is not None and cmd in DISRUPTIVE:
             remaining = max(0, (self.npc.busy_until_min or 0) - self.time.absolute_minutes)
@@ -1369,6 +1395,12 @@ class MockUE:
         elif cmd == CMD_CHARGE_AT_STATION:
             # 充电：能量在 _evolve_physical 循环中恢复（PHYS_RATES 已按 cmd 区分）。
             pass
+        elif cmd == CMD_GENERIC_ACT:
+            # 通用兜底动作：物理消耗按 _default rate 在 _evolve_physical 累积，
+            # 这里仅记录意图，不产生 details（和其它 composite 一致）。
+            action_name = params.get("action_name", "")
+            desc = params.get("description", "")
+            logger.info(f"[GENERIC_ACT] {action_name} {desc[:80]}")
         elif cmd == CMD_INTERACT:
             # inspect 是只读查询：根据 target_object_id 生成设备检查报告，通过
             # action_completed.details 返回，流经 MCP "动作完成" 行进入下一轮
