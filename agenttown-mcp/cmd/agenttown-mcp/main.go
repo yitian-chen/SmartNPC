@@ -65,6 +65,7 @@ type agentContext struct {
 	pendingActionTimeouts map[string]*time.Timer // action_id → 超时 timer（mu 保护），约定 §5.2 action_completed 1.5× 估值超时
 	completedBeforeArm    map[string]struct{}   // action_id → 已完成但 timer 尚未 arm（mu 保护），防止 ACK/completion 竞态导致 timer 泄漏
 	dailyPlan             string                 // mu 保护，战略层生成的每日计划（格式化字符串），空=未生成或失败
+	currentDay            int                    // mu 保护，当前已规划的 day_count（来自 perception.environment.day_count）；-1=未规划（worker 启动时 perception 未到）
 	strategicHc           llmClient              // mu 保护，战略层专用 LLM client（hermes 或 venus，独立 session）
 	tacticalHc            llmClient              // mu 保护，战术层专用 LLM client（hermes 或 venus，独立 session）
 	actionQueue           []plannedAction        // mu 保护，战术层分解出的待执行 action（FIFO）
@@ -112,6 +113,7 @@ func newAgentContext(parent context.Context, epochs ...int64) (*agentContext, co
 		pendingActionTimeouts: make(map[string]*time.Timer),
 		completedBeforeArm:    make(map[string]struct{}),
 		lastReactiveAt:        make(map[string]time.Time),
+		currentDay:            -1, // 未规划；worker 启动调 generateDailyPlan 后由首条 perception 同步
 	}, ctx
 }
 
@@ -402,6 +404,9 @@ func runPerceptionWorker(
 		plan := generateDailyPlan(ctx, ac.strategicHc, agentID, kb, capabilityRegistryRef, logger)
 		ac.mu.Lock()
 		ac.dailyPlan = plan
+		// 同步 currentDay：若首条 perception 已到则用其 day_count，否则保持 -1
+		// （由 detectDayRollover 在首条 perception 到达时同步）。
+		ac.currentDay = ac.latestDayCountLocked()
 		ac.mu.Unlock()
 	} else {
 		logger.Info("[自动规划已禁用] 跳过战略层每日计划生成", "agent_id", agentID)
@@ -428,6 +433,25 @@ func runPerceptionWorker(
 		// + 清队列 + 清 slot，让本轮后续走 tacticalRefill 选新 slot 重新分解。
 		// 这是长复合动作的唯一打断路径（它们不设超时）。
 		ac.advanceSlotIfNeeded(ws, agentID, logger)
+
+		// 多日循环：检测 day_count 递增（跨日），重新调用战略层生成新一天的 dailyPlan。
+		// 通常在 06:00-07:00 规划窗口内触发（selectCurrentGoal 已屏蔽战术层分解，
+		// NPC 仍在执行夜间睡眠 composite）。仅替换 dailyPlan，不打断在途睡眠——
+		// 让 NPC 自然睡到 07:00，由 advanceSlotIfNeeded 打断后走 tacticalRefill
+		// 选新计划 slot。手动模式（autoPlanEnabled=false）跳过。
+		if autoPlanEnabled {
+			if rollover, prevDay, newDay := ac.detectDayRollover(); rollover {
+				logger.Info("[战略层] 检测到跨日，重新生成当日计划",
+					"agent_id", agentID, "prev_day", prevDay, "new_day", newDay)
+				plan := generateDailyPlan(ctx, ac.strategicHc, agentID, kb, capabilityRegistryRef, logger)
+				ac.mu.Lock()
+				ac.dailyPlan = plan
+				// 不清 currentSlot/actionQueue/currentActionID：让 NPC 自然睡眠到 07:00，
+				// 由 advanceSlotIfNeeded 打断后走 tacticalRefill 选新计划 slot。
+				// currentDay 已由 detectDayRollover 更新。
+				ac.mu.Unlock()
+			}
+		}
 
 		// replan 规划进行中：跳过 pop/refill，等 tacticalRefillForReplan 完成后
 		// signal 唤醒。避免规划期间 worker 抢先 pop 旧队列剩余 action 或 refill
@@ -679,6 +703,51 @@ func (a *agentContext) latestTimeOfDay() string {
 // latestTimeOfDayLocked 同 latestTimeOfDay 但假定调用方已持锁。
 func (a *agentContext) latestTimeOfDayLocked() string {
 	return extractTimeOfDay(a.latestPerception)
+}
+
+// latestDayCountLocked 从 latestPerception 提取 day_count（第几天，从 0 开始；
+// 来自 perception.environment.day_count，由 UE 权威上报）。假定调用方已持锁。
+// 失败或 perception 未到返回 -1。
+func (a *agentContext) latestDayCountLocked() int {
+	if len(a.latestPerception) == 0 {
+		return -1
+	}
+	var p protocol.PerceptionPayload
+	if err := json.Unmarshal(a.latestPerception, &p); err != nil {
+		return -1
+	}
+	return p.Environment.DayCount
+}
+
+// detectDayRollover 检测 day_count 递增（跨日），更新 currentDay 并返回是否
+// 需要重新调用战略层 generateDailyPlan。
+//
+// 返回 (rollover, prevDay, newDay)：
+//   - rollover=false：同一天（day == prev）或 prev<0 时的首次同步（仅更新
+//     currentDay，不触发重新规划——worker 启动时已规划过当天）。
+//   - rollover=true：真正的跨日（prev>=0 且 day>prev），调用方应重新调用
+//     generateDailyPlan 并替换 dailyPlan。
+//
+// 重新规划时机选在 06:00-07:00 规划窗口内（selectCurrentGoal 已屏蔽战术层
+// 分解），此时 NPC 通常在执行夜间睡眠 composite。detectDayRollover 仅替换
+// dailyPlan，**不打断**在途睡眠——让 NPC 自然睡到 07:00，由 advanceSlotIfNeeded
+// 打断后走 tacticalRefill 选新计划 slot。这样避免了"06:00 强制打断睡眠后
+// NPC 空等 1 小时"的尴尬。
+func (a *agentContext) detectDayRollover() (rollover bool, prevDay, newDay int) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	day := a.latestDayCountLocked()
+	prev := a.currentDay
+	if day <= prev {
+		return false, prev, day
+	}
+	a.currentDay = day
+	if prev < 0 {
+		// 首次同步 day_count（worker 启动时 perception 未到）。不重新规划——
+		// worker 启动时已调过 generateDailyPlan 规划当天。
+		return false, prev, day
+	}
+	return true, prev, day
 }
 
 // latestZone 从 latestPerception 提取当前区域 id（mu 保护读取 perception）。

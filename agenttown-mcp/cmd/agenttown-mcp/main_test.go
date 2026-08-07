@@ -1389,3 +1389,93 @@ func TestExtractTimeOfDay_LegacyEmptyEnv(t *testing.T) {
 		t.Errorf("extractTimeOfDay on empty env = %q, want 00:00 (zero value)", got)
 	}
 }
+
+// setPerceptionForDayTest 在 ac.latestPerception 注入同时含 time_of_day_sec 和
+// day_count 的 perception payload，用于跨日检测测试。
+func setPerceptionForDayTest(t *testing.T, ac *agentContext, hhmm string, dayCount int) {
+	t.Helper()
+	var h, m int
+	if n, err := fmt.Sscanf(hhmm, "%d:%d", &h, &m); err != nil || n != 2 {
+		t.Fatalf("invalid hhmm %q: %v", hhmm, err)
+	}
+	totalSec := h*3600 + m*60
+	raw := []byte(fmt.Sprintf(
+		`{"environment":{"game_time_sec":%d,"time_of_day_sec":%d,"day_count":%d,"time_scale":60}}`,
+		dayCount*86400+totalSec, totalSec, dayCount))
+	ac.mu.Lock()
+	ac.latestPerception = raw
+	ac.mu.Unlock()
+}
+
+// TestDetectDayRollover_FirstSyncNoRollover 验证首条 perception 到达时
+// （currentDay 从 -1 同步到实际 day_count）不触发重新规划——worker 启动时
+// 已调过 generateDailyPlan 规划当天。
+func TestDetectDayRollover_FirstSyncNoRollover(t *testing.T) {
+	ac, _ := newAgentContext(context.Background())
+	if ac.currentDay != -1 {
+		t.Fatalf("initial currentDay = %d, want -1", ac.currentDay)
+	}
+	setPerceptionForDayTest(t, ac, "06:30", 0)
+	rollover, prev, newDay := ac.detectDayRollover()
+	if rollover {
+		t.Errorf("first sync should not trigger rollover; got rollover=true prev=%d newDay=%d", prev, newDay)
+	}
+	if prev != -1 {
+		t.Errorf("prevDay = %d, want -1", prev)
+	}
+	if newDay != 0 {
+		t.Errorf("newDay = %d, want 0", newDay)
+	}
+	if ac.currentDay != 0 {
+		t.Errorf("after first sync currentDay = %d, want 0", ac.currentDay)
+	}
+}
+
+// TestDetectDayRollover_SameDayNoRollover 验证同一天内多次 perception 不触发。
+func TestDetectDayRollover_SameDayNoRollover(t *testing.T) {
+	ac, _ := newAgentContext(context.Background())
+	ac.currentDay = 0
+	setPerceptionForDayTest(t, ac, "10:00", 0)
+	rollover, _, _ := ac.detectDayRollover()
+	if rollover {
+		t.Errorf("same day should not trigger rollover")
+	}
+	if ac.currentDay != 0 {
+		t.Errorf("currentDay = %d, want 0", ac.currentDay)
+	}
+}
+
+// TestDetectDayRollover_DayIncrementTriggersRollover 验证 day_count 递增
+// （跨日）触发 rollover=true 并更新 currentDay。
+func TestDetectDayRollover_DayIncrementTriggersRollover(t *testing.T) {
+	ac, _ := newAgentContext(context.Background())
+	ac.currentDay = 0 // 首日已规划
+	setPerceptionForDayTest(t, ac, "06:00", 1) // 第二天 06:00
+	rollover, prev, newDay := ac.detectDayRollover()
+	if !rollover {
+		t.Errorf("day_count 0→1 should trigger rollover; got false prev=%d newDay=%d", prev, newDay)
+	}
+	if prev != 0 {
+		t.Errorf("prevDay = %d, want 0", prev)
+	}
+	if newDay != 1 {
+		t.Errorf("newDay = %d, want 1", newDay)
+	}
+	if ac.currentDay != 1 {
+		t.Errorf("after rollover currentDay = %d, want 1", ac.currentDay)
+	}
+}
+
+// TestDetectDayRollover_NoPerceptionNoRollover 验证 latestPerception 为空时
+// 不触发（day_count 解析失败返回 -1，-1 <= prev 恒真）。
+func TestDetectDayRollover_NoPerceptionNoRollover(t *testing.T) {
+	ac, _ := newAgentContext(context.Background())
+	ac.currentDay = 0
+	rollover, _, _ := ac.detectDayRollover()
+	if rollover {
+		t.Errorf("empty perception should not trigger rollover")
+	}
+	if ac.currentDay != 0 {
+		t.Errorf("currentDay = %d, want 0 (unchanged)", ac.currentDay)
+	}
+}
