@@ -378,18 +378,18 @@ func TestNormalizeDailyPlan_FillsGap(t *testing.T) {
 
 func TestNormalizeDailyPlan_ExtendsFirstSlot(t *testing.T) {
 	items := []dailyPlanItem{
-		{Time: "07:00-12:00", Goal: "上午"}, // 06:00-07:00 空白
+		{Time: "08:00-12:00", Goal: "上午"}, // 07:00-08:00 空白（06:00-07:00 是规划时间不覆盖）
 		{Time: "12:00-22:00", Goal: "下午"},
 	}
 	got := normalizeDailyPlan(items)
-	if got[0].Time != "06:00-12:00" {
-		t.Errorf("first slot should start at 06:00: got %q, want 06:00-12:00", got[0].Time)
+	if got[0].Time != "07:00-12:00" {
+		t.Errorf("first slot should start at 07:00: got %q, want 07:00-12:00", got[0].Time)
 	}
 }
 
 func TestNormalizeDailyPlan_ExtendsLastSlot(t *testing.T) {
 	items := []dailyPlanItem{
-		{Time: "06:00-12:00", Goal: "上午"},
+		{Time: "07:00-12:00", Goal: "上午"},
 		{Time: "12:00-18:00", Goal: "下午"}, // 18:00-22:00 空白
 	}
 	got := normalizeDailyPlan(items)
