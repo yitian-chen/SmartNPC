@@ -34,7 +34,7 @@ type strategicCaller interface {
 	ResetSession()
 }
 
-const strategicPromptTemplate = `[战略层/每日规划] 现在是仿真时间 07:00，新的一天开始了。
+const strategicPromptTemplate = `[战略层/每日规划] 现在是仿真时间 07:00，新的一天开始了，你从休眠舱醒来。
 
 %s
 
