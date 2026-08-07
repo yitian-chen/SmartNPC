@@ -399,7 +399,7 @@ func runPerceptionWorker(
 	// 也不会被调，UE 端不会收到任何自动 action_command。手动模式仅响应
 	// /debug/schedule 注入和 /debug/action 下发。
 	if autoPlanEnabled {
-		plan := generateDailyPlan(ctx, ac.strategicHc, agentID, kb, logger)
+		plan := generateDailyPlan(ctx, ac.strategicHc, agentID, kb, capabilityRegistryRef, logger)
 		ac.mu.Lock()
 		ac.dailyPlan = plan
 		ac.mu.Unlock()
