@@ -716,14 +716,13 @@ func TestBuildStrategicZoneObjectMap_EmptyZones(t *testing.T) {
 	}
 }
 
-func TestBuildStrategicContext_ContainsZoneObjectMap(t *testing.T) {
-	// buildStrategicContext 应包含【区域设施映射】段，让战略层 LLM 看到映射。
+func TestBuildStrategicContext_ZoneObjectMapRemoved(t *testing.T) {
+	// 【区域设施映射】段暂时移除以降低 prompt token 数。
+	// buildStrategicContext 不应再包含该段；日后若 LLM 又出现 zone-object
+	// 错配可重新启用并恢复此断言。
 	kb := loadTestKB(t)
 	got := buildStrategicContext(kb, "H-01", nil)
-	if !strings.Contains(got, "【区域设施映射】") {
-		t.Errorf("context missing '【区域设施映射】' header: %q", got)
-	}
-	if !strings.Contains(got, "无可交互物体") {
-		t.Errorf("context should mark empty zones in map: %q", got)
+	if strings.Contains(got, "【区域设施映射】") {
+		t.Errorf("context should NOT include '【区域设施映射】' section (temporarily removed): %q", got)
 	}
 }
