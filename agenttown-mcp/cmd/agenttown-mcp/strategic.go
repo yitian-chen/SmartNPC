@@ -13,9 +13,11 @@ import (
 )
 
 // 日程校验常量。MCP 无 day-range flag，与 defaultDailyPlan 保持一致。
+// 跨日仿真：一天从 06:00 到次日 06:00，dayEndMinute = 1440 + 360 = 1800
+// （归一化到次日坐标系，供 normalizeDailyPlan 末段后延使用）。
 const (
 	dayStartMinute = 6 * 60  // 06:00
-	dayEndMinute   = 22 * 60 // 22:00
+	dayEndMinute   = 30 * 60 // 次日 06:00（= 1440 + 360，归一化坐标）
 	minSlotMinutes = 60      // 时段最短时长，短于此会被丢弃
 )
 
@@ -31,13 +33,13 @@ type strategicCaller interface {
 	ResetSession()
 }
 
-const strategicPromptTemplate = `[战略层/每日规划] 现在是仿真时间 06:00，新的一天开始了。
+const strategicPromptTemplate = `[战略层/每日规划] 现在是仿真时间 07:00，新的一天开始了。
 
 %s
 
 %s
 
-请基于你的角色身份和性格，规划今天一天的活动安排。
+请基于你的角色身份和性格，规划今天一天的活动安排。一天从 06:00 到次日 06:00，06:00-07:00 是规划时间（不安排任务），你从 07:00 开始活动，夜间活动可持续到次日清晨。
 
 要求：
 1. 输出一个 JSON 数组，5-7 条
@@ -48,21 +50,23 @@ const strategicPromptTemplate = `[战略层/每日规划] 现在是仿真时间 
 6. 必须以字符 [ 开头，以字符 ] 结尾，不要输出设计思路、不要解释、不要 markdown 围栏
 7. goal 中提到的地点、人物、设备必须是【你的角色】和【世界知识】中存在的，不得编造未提及的人物或设施
 8. 若 goal 涉及"使用/操作/检查/交互"某设施，该设施必须位于【区域设施映射】中标注为有物体的 zone——映射中标注"无可交互物体"的 zone 不能作为 interact 类活动的目的地（只能用于移动/巡逻/路过/休息）
+9. 末段若跨午夜（如 "22:00-06:00"），结束时间表示次日该时刻，调度器会自动识别跨午夜时段
 
-示例：[{"time":"06:00-08:00","goal":"起床，然后去中央广场晨间补电"},{"time":"08:00-12:00","goal":"上午车间装配作业"},{"time":"12:00-14:00","goal":"午间停工，前往充电区域短暂补电休息"},{"time":"14:00-18:00","goal":"下午继续在车间装配"},{"time":"18:00-20:00","goal":"傍晚去维修台维护修理"},{"time":"20:00-22:00","goal":"晚间去休眠舱休息"}]`
+示例：[{"time":"07:00-09:00","goal":"起床，然后去中央广场晨间补电"},{"time":"09:00-12:00","goal":"上午车间装配作业"},{"time":"12:00-14:00","goal":"午间停工，前往充电区域短暂补电休息"},{"time":"14:00-18:00","goal":"下午继续在车间装配"},{"time":"18:00-22:00","goal":"傍晚去维修台维护修理"},{"time":"22:00-06:00","goal":"夜间在休眠舱休息"}]`
 
 // defaultDailyPlan 是 kb == nil 时的兜底计划（无 KB 上下文降级路径）。
 // buildDefaultDailyPlan(nil) 返回此常量。
 //
 // 不返回空字符串是为了避免整天 Wait(60s) 瘫痪——兜底计划虽然无个性，
 // 但能驱动战术层正常工作，让仿真继续运行而非停滞。
-// 时段覆盖 06-22，每段 ≥60min，符合调度器采样约束。
+// 时段覆盖 07:00-次日 06:00（跨午夜），每段 ≥60min，符合调度器采样约束。
 // 表述中性：不引用任何 KB 专属词（"车间"/"装配"/"充电"等），避免换 KB 后
 // 兜底计划仍诱导战术层编造 KB 外概念。
-const defaultDailyPlan = "06:00-12:00: 上午主要工作\n" +
+const defaultDailyPlan = "07:00-12:00: 上午主要工作\n" +
 	"12:00-14:00: 午间停工与短暂休息\n" +
 	"14:00-18:00: 下午继续工作\n" +
-	"18:00-22:00: 前往中央广场休息"
+	"18:00-22:00: 前往中央广场休息\n" +
+	"22:00-06:00: 夜间休眠"
 
 // buildDefaultDailyPlan 根据 KB 派生兜底每日计划。
 // kb == nil 时返回 defaultDailyPlan（中性表述，不引用任何 KB id）。
@@ -89,10 +93,11 @@ func buildDefaultDailyPlan(kb *worldkb.KB) string {
 			workName = os[0].ID
 		}
 	}
-	return fmt.Sprintf("06:00-12:00: 上午在%s进行%s作业\n", zoneName, workName) +
+	return fmt.Sprintf("07:00-12:00: 上午在%s进行%s作业\n", zoneName, workName) +
 		"12:00-13:00: 午间停工与短暂休息\n" +
 		fmt.Sprintf("13:00-18:00: 下午继续%s作业\n", workName) +
-		"18:00-22:00: 保养休息"
+		"18:00-22:00: 保养休息\n" +
+		"22:00-06:00: 夜间休眠"
 }
 
 // yesterdaySummaryForFirstDay 是首日启动时注入的"昨日总结"。
@@ -319,15 +324,24 @@ func parseDailyPlan(raw string) ([]dailyPlanItem, error) {
 //  2. 按起始时间排序
 //  3. 首段前伸到 06:00（若 LLM 从 07:00 开始，06:00-07:00 会成空白）
 //  4. 填补中间空白：前段 end < 后段 start 时延长前段
-//  5. 末段后延到 22:00（若 LLM 只规划到 18:00，18:00-22:00 会触发 idle wait 瘫痪）
+//  5. 末段后延到次日 06:00（若 LLM 只规划到 18:00，18:00-22:00 会触发 idle wait 瘫痪）
 //
+// 支持跨午夜 slot（如 "22:00-06:00"）：跨午夜时段时长按 end+1440-start 计算，
+// 末段若已跨午夜则不后延。
 // 全部被丢弃时返回 nil，调用方走 buildDefaultDailyPlan(kb) 兜底。
 func normalizeDailyPlan(items []dailyPlanItem) []dailyPlanItem {
-	// 1. 过滤短时段。
+	// 1. 过滤短时段。跨午夜 slot（end <= start）时长按 end+1440-start 计算。
 	valid := make([]dailyPlanItem, 0, len(items))
 	for _, it := range items {
 		start, end, ok := splitPlanRange(it.Time)
-		if !ok || end-start < minSlotMinutes {
+		if !ok {
+			continue
+		}
+		dur := end - start
+		if end <= start {
+			dur = end + 1440 - start // 跨午夜
+		}
+		if dur < minSlotMinutes {
 			continue
 		}
 		valid = append(valid, it)
@@ -345,24 +359,43 @@ func normalizeDailyPlan(items []dailyPlanItem) []dailyPlanItem {
 	if s, e, ok := splitPlanRange(valid[0].Time); ok && s > dayStartMinute {
 		valid[0].Time = fmtMinute(dayStartMinute) + "-" + fmtMinute(e)
 	}
-	// 4. 填补中间空白。
+	// 4. 填补中间空白（仅在非跨午夜段间）。
 	for i := 0; i < len(valid)-1; i++ {
 		_, ei, _ := splitPlanRange(valid[i].Time)
 		sj, _, _ := splitPlanRange(valid[i+1].Time)
-		if ei < sj {
+		// 跨午夜段（ei <= si）不参与中间空白填补——它已经是当天最后一段。
+		if ei > 0 && ei < sj {
 			si, _, _ := splitPlanRange(valid[i].Time)
 			valid[i].Time = fmtMinute(si) + "-" + fmtMinute(sj)
 		}
 	}
-	// 5. 末段后延到 dayEnd。
-	if s, e, ok := splitPlanRange(valid[len(valid)-1].Time); ok && e < dayEndMinute {
-		valid[len(valid)-1].Time = fmtMinute(s) + "-" + fmtMinute(dayEndMinute)
+	// 5. 末段后延到 dayEnd（次日 06:00）。
+	// 跨午夜末段（end <= start）已覆盖到次日，不后延。
+	// 非跨午夜末段：若 end < 22:00，后延到 22:00（夜间开始，避免日间 goal
+	// 被拉到次日清晨）；若 22:00 <= end < 06:00（次日），后延到 06:00。
+	// 这样无论 LLM 规划到几点都不会出现尾部空白瘫痪。
+	last := valid[len(valid)-1]
+	s, e, ok := splitPlanRange(last.Time)
+	if ok && e > s {
+		nightStart := 22 * 60
+		if e < nightStart {
+			// 日间时段：后延到夜间开始 22:00。
+			valid[len(valid)-1].Time = fmtMinute(s) + "-" + fmtMinute(nightStart)
+		} else if e < dayEndMinute {
+			// 夜间时段未覆盖到次日 06:00：后延到 06:00（次日）。
+			valid[len(valid)-1].Time = fmtMinute(s) + "-" + fmtMinute(dayEndMinute)
+		}
 	}
 	return valid
 }
 
 // fmtMinute 把从午夜起的分钟数格式化为 "HH:MM"。
+// m >= 1440 时自动取模（跨午夜归一化，如 1800 → "06:00"）。
 func fmtMinute(m int) string {
+	m = m % 1440
+	if m < 0 {
+		m += 1440
+	}
 	return fmt.Sprintf("%02d:%02d", m/60, m%60)
 }
 

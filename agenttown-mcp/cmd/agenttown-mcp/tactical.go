@@ -513,6 +513,7 @@ func buildTacticalPrompt(goal, zone, timeOfDay, slot string, physical *protocol.
 // buildSlotDurationHint 根据 slot "HH:MM-HH:MM" 和当前 game_time 构造一行提示文本。
 // 提示 LLM 按剩余时长（slot_end - timeOfDay）规划，避免长动作 overshoot 跨越到下个 slot。
 // timeOfDay 为空或解析失败时降级为完整 slot 时长（旧行为）。
+// 支持跨午夜 slot：tod 在次日（tod < start）时归一化 +1440 后再算剩余时长。
 func buildSlotDurationHint(slot, timeOfDay string) string {
 	start, end := slotRangeMinute(slot)
 	if start < 0 {
@@ -523,6 +524,7 @@ func buildSlotDurationHint(slot, timeOfDay string) string {
 	if curMin < 0 {
 		return fmt.Sprintf("当前时段 %s，约 %d 分钟；请让步骤总时长接近此时长，避免过短导致队列提前耗尽触发重分解。\n", slot, total)
 	}
+	curMin = normalizeTodToSlot(curMin, start, end)
 	remaining := end - curMin
 	if remaining <= 0 {
 		return fmt.Sprintf("当前时段 %s 已过期（game_time=%s 已超出时段末尾），请仅规划 1-2 个短动作（≤10 分钟），避免 overshoot。\n", slot, timeOfDay)
@@ -535,7 +537,8 @@ func buildSlotDurationHint(slot, timeOfDay string) string {
 }
 
 // slotRangeMinute 解析 "HH:MM-HH:MM" 返回 (start, end) 分钟数。
-// 解析失败或 end ≤ start 返回 (-1, -1)。
+// 跨午夜 slot（如 "22:00-06:00"，end <= start）自动把 end += 1440 归一化到次日
+// （返回 1320, 1800）。解析失败返回 (-1, -1)。
 func slotRangeMinute(slot string) (int, int) {
 	parts := strings.SplitN(slot, "-", 2)
 	if len(parts) != 2 {
@@ -543,30 +546,72 @@ func slotRangeMinute(slot string) (int, int) {
 	}
 	start := parsePlanMinute(parts[0])
 	end := parsePlanMinute(parts[1])
-	if start < 0 || end < 0 || end <= start {
+	if start < 0 || end < 0 {
 		return -1, -1
 	}
+	if end <= start {
+		if end == start {
+			return -1, -1 // 零时长，非法
+		}
+		// 跨午夜：end 归一化到次日（+1440），让下游比较可用线性数学。
+		end += 1440
+	}
 	return start, end
+}
+
+// normalizeTodToSlot 把当前 tod（"HH:MM"）的分钟数归一化到 slot 的坐标系。
+// slot 跨午夜时（start >= 0，end > 1440），slot 时间窗为 [start, 1440) ∪ [1440, end)：
+//   - Part 1（curMin >= start）：今日上半段，返回 curMin
+//   - Part 2（curMin < end-1440）：次日下半段，返回 curMin + 1440
+//   - Gap [end-1440, start)：slot 已结束但今晚尚未开始，无 day 信息无法精确判定。
+//     用 gap 中点作启发式边界：靠近 end（curMin < midpoint）视为已过期，返回 end
+//     触发下游"expired"；靠近 start（curMin >= midpoint）视为今晚即将开始，返回
+//     curMin（< start，下游 remaining > total → "full duration"）。
+//
+// slot 非跨午夜或入参非法时原样返回 curMin。
+func normalizeTodToSlot(curMin, start, end int) int {
+	if curMin < 0 || start < 0 || end < 0 {
+		return curMin
+	}
+	if end > 1440 {
+		gapStart := end - 1440
+		if curMin >= start {
+			return curMin // Part 1: 今日上半段
+		}
+		if curMin < gapStart {
+			return curMin + 1440 // Part 2: 次日下半段
+		}
+		// Gap [gapStart, start)：用中点启发式区分"刚过期"与"即将开始"
+		midpoint := (gapStart + start) / 2
+		if curMin < midpoint {
+			return end // 靠近 end，视为已过期
+		}
+		return curMin // 靠近 start，视为今晚即将开始
+	}
+	return curMin
 }
 
 // slotExpired 检查当前游戏时间 tod 是否已到达或超出 currentSlot 的结束时间。
 // currentSlot 为空或解析失败返回 false（无 slot 概念，不触发切换）。
 // 用于 worker wake 时检测"时间到达下一次 schedule 节点"，触发打断长复合动作
 // + 重新下发新 action_queue。
+// 支持跨午夜 slot：若 slot 跨午夜且 tod 在次日（tod < start），tod 归一化 +1440
+// 后再比较 end。
 func slotExpired(currentSlot, tod string) bool {
 	if currentSlot == "" || tod == "" {
 		return false
 	}
-	_, endMin := slotRangeMinute(currentSlot)
+	start, end := slotRangeMinute(currentSlot)
 	curMin := parsePlanMinute(tod)
-	if endMin <= 0 || curMin < 0 {
+	if end <= 0 || curMin < 0 {
 		return false
 	}
-	return curMin >= endMin
+	curMin = normalizeTodToSlot(curMin, start, end)
+	return curMin >= end
 }
 
 // slotDurationMinute 解析 "HH:MM-HH:MM" 形如的 slot，返回 (end - start) 的分钟数。
-// 解析失败或 end ≤ start 返回 -1。
+// 跨午夜 slot 返回归一化后的时长（如 "22:00-06:00" 返回 480）。解析失败返回 -1。
 func slotDurationMinute(slot string) int {
 	s, e := slotRangeMinute(slot)
 	if s < 0 {

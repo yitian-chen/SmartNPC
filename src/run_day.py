@@ -71,9 +71,9 @@ def main():
     parser.add_argument("--speed", type=float, default=60.0,
                         help="Time acceleration (1 real-sec = N game-sec)")
     parser.add_argument("--start", type=int, default=6,
-                        help="Start hour (0-23)")
-    parser.add_argument("--end", type=int, default=22,
-                        help="End hour (0-23)")
+                        help="Start hour (0-23, game time of day)")
+    parser.add_argument("--end", type=int, default=30,
+                        help="End hour in cumulative game hours (e.g. 30 = next-day 06:00)")
     parser.add_argument("--scenario", default=None,
                         help="YAML file with preset events (scenario injection)")
     parser.add_argument("--interval", type=int, default=15,

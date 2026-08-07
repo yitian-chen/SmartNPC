@@ -809,11 +809,14 @@ func TestSlotDurationMinute(t *testing.T) {
 		{"13:00-17:00", 240},
 		{"18:00-22:00", 240},
 		{"12:00-13:00", 60},
+		// 跨午夜 slot：end <= start 时归一化到次日
+		{"22:00-06:00", 480},  // 8 小时
+		{"23:30-06:00", 390},  // 6.5 小时
+		{"20:00-00:30", 270},  // 4.5 小时
 		// 解析失败 / 非法
 		{"", -1},
 		{"09:00", -1},
-		{"09:00-09:00", -1}, // end == start
-		{"09:00-08:00", -1}, // end < start
+		{"09:00-09:00", -1}, // end == start（零时长，非法）
 		{"abc-xyz", -1},
 	}
 	for _, c := range cases {
@@ -821,6 +824,57 @@ func TestSlotDurationMinute(t *testing.T) {
 		if got != c.want {
 			t.Errorf("slotDurationMinute(%q) = %d, want %d", c.slot, got, c.want)
 		}
+	}
+}
+
+// TestSlotRangeMinute_CrossMidnight 验证跨午夜 slot 的起止解析。
+func TestSlotRangeMinute_CrossMidnight(t *testing.T) {
+	cases := []struct {
+		slot      string
+		wantStart int
+		wantEnd   int
+	}{
+		{"22:00-06:00", 1320, 1800}, // end=360+1440=1800
+		{"23:30-06:00", 1410, 1800},
+		{"20:00-00:30", 1200, 1470}, // end=30+1440=1470
+		// 非跨午夜不变
+		{"09:00-12:00", 540, 720},
+	}
+	for _, c := range cases {
+		s, e := slotRangeMinute(c.slot)
+		if s != c.wantStart || e != c.wantEnd {
+			t.Errorf("slotRangeMinute(%q) = (%d, %d), want (%d, %d)", c.slot, s, e, c.wantStart, c.wantEnd)
+		}
+	}
+}
+
+// TestSlotExpired_CrossMidnight 验证跨午夜 slot 的过期判断。
+func TestSlotExpired_CrossMidnight(t *testing.T) {
+	cases := []struct {
+		name string
+		slot string
+		tod  string
+		want bool
+	}{
+		{"cross-midnight in slot (before midnight)", "22:00-06:00", "23:30", false},
+		{"cross-midnight in slot (after midnight)", "22:00-06:00", "01:00", false},
+		{"cross-midnight in slot (near end)", "22:00-06:00", "05:59", false},
+		{"cross-midnight expired (at end)", "22:00-06:00", "06:00", true},
+		{"cross-midnight expired (after end)", "22:00-06:00", "06:30", true},
+		{"cross-midnight before slot start", "22:00-06:00", "20:00", false}, // 20:00 < start 22:00，未进入
+		// 非跨午夜
+		{"normal in slot", "09:00-12:00", "10:00", false},
+		{"normal expired", "09:00-12:00", "12:30", true},
+		// 边界
+		{"empty slot", "", "10:00", false},
+		{"empty tod", "09:00-12:00", "", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := slotExpired(c.slot, c.tod); got != c.want {
+				t.Errorf("slotExpired(%q, %q) = %v, want %v", c.slot, c.tod, got, c.want)
+			}
+		})
 	}
 }
 
@@ -880,6 +934,28 @@ func TestBuildSlotDurationHint_Remaining(t *testing.T) {
 			timeOfDay: "10:00",
 			wantSub:   "",
 			notWant:   "当前时段",
+		},
+		// 跨午夜 slot
+		{
+			name:      "cross-midnight slot mid-night remaining",
+			slot:      "22:00-06:00",
+			timeOfDay: "23:30", // 仍在上半夜
+			wantSub:   "剩余约 390 分钟",
+			notWant:   "约 480 分钟",
+		},
+		{
+			name:      "cross-midnight slot after-midnight remaining",
+			slot:      "22:00-06:00",
+			timeOfDay: "01:00", // 已进入次日
+			wantSub:   "剩余约 300 分钟",
+			notWant:   "约 480 分钟",
+		},
+		{
+			name:      "cross-midnight slot full duration before start",
+			slot:      "22:00-06:00",
+			timeOfDay: "20:00", // 在 slot 开始前
+			wantSub:   "约 480 分钟",
+			notWant:   "剩余约",
 		},
 	}
 	for _, c := range cases {
