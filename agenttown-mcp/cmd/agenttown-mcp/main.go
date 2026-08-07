@@ -1237,7 +1237,10 @@ func main() {
 	venusAPIKey = flag.String("venus-api-key", "",
 		"Venus API key (overrides VENUS_API_KEY env var)")
 	venusModel = flag.String("venus-model", "qwen3.6-35b-a3b",
-		"Venus model name")
+		"Venus model name (used for tactical layer)")
+	venusStrategicModel = flag.String("venus-strategic-model", "glm-5.2",
+		"Venus model name for strategic layer (daily plan generation). "+
+			"Set to empty to fall back to --venus-model.")
 	venusTimeout = flag.Duration("venus-timeout", 60*time.Second,
 		"Venus HTTP timeout per call")
 	tacticalTimeout = flag.Duration("tactical-timeout", 60*time.Second,
@@ -1267,6 +1270,7 @@ func main() {
 		"ws", *wsAddr,
 		"venus_url", *venusURL,
 		"venus_model", *venusModel,
+		"venus_strategic_model", *venusStrategicModel,
 		"tactical_stream", tacticalStreamingEnabled,
 		"tactical_timeout", tacticalCallTimeout,
 		"ollama_url", *ollamaURL,
@@ -1372,10 +1376,15 @@ func main() {
 		if venusAPIKeyValue == "" {
 			venusAPIKeyValue = os.Getenv("VENUS_API_KEY")
 		}
+		// 战略层 model：优先 --venus-strategic-model，空值回退到 --venus-model。
+		strategicModel := *venusStrategicModel
+		if strategicModel == "" {
+			strategicModel = *venusModel
+		}
 		ac.strategicHc = venus.New(venus.Config{
 			BaseURL: *venusURL,
 			APIKey:  venusAPIKeyValue,
-			Model:   *venusModel,
+			Model:   strategicModel,
 			Logger:  logger,
 			Timeout: *venusTimeout,
 		})

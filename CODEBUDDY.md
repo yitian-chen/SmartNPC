@@ -530,7 +530,8 @@ cp .env.example .env
 | `--ws` | `:9090` | WebSocket 监听（Mock UE 连接） |
 | `--venus-url` | `http://v2.open.venus.oa.com/llmproxy` | Venus 后端 URL |
 | `--venus-api-key` | `""` | Venus API key（**必填**，否则 401） |
-| `--venus-model` | `qwen3.6-35b-a3b` | Venus 模型 ID |
+| `--venus-model` | `qwen3.6-35b-a3b` | Venus 模型 ID（战术层） |
+| `--venus-strategic-model` | `glm-5.2` | 战略层模型 ID（空值回退到 `--venus-model`） |
 | `--venus-timeout` | `60s` | Venus 调用超时 |
 | `--tactical-timeout` | `60s` | 战术层 LLM 调用超时 |
 | `--tactical-stream` | `false` | 战术层流式输出（实验性，默认关） |
