@@ -737,7 +737,13 @@ class GameTime:
 
     @property
     def total_minutes(self) -> int:
+        """当天分钟数 0-1439（不包含 day，跨日归零）。用于场景事件等当天内逻辑。"""
         return self.hour * 60 + self.minute
+
+    @property
+    def absolute_minutes(self) -> int:
+        """累计游戏分钟数（含 day），跨日不归零。用于 busy_until_min 等绝对时间比较。"""
+        return self.day_count * 1440 + self.hour * 60 + self.minute
 
     @property
     def display(self) -> str:
@@ -769,11 +775,20 @@ class GameTime:
         return self.speed
 
     def advance(self, game_minutes: float):
-        total = int(self.total_minutes + game_minutes)
-        self.hour = (total // 60) % 24
-        self.minute = total % 60
-        if self.hour == 0 and self.minute == 0 and total > 0:
-            self.day += 1
+        # 用绝对分钟数推进，正确处理跨午夜（即使跳过精确 00:00 也能递增 day）。
+        # absolute_minutes = day_count*1440 + hour*60 + minute。
+        prev_day = self.day_count
+        abs_min = self.absolute_minutes + int(game_minutes)
+        # day_count 从 abs_min 推导：abs_min // 1440。
+        # hour/minute 从当天剩余分钟（abs_min % 1440）推导。
+        new_day_count = abs_min // 1440
+        within_day = abs_min % 1440
+        self.hour = within_day // 60
+        self.minute = within_day % 60
+        # day 内部从 1 开始（day_count = day - 1）。
+        self.day = new_day_count + 1
+        if new_day_count > prev_day:
+            logger.info(f"[GameTime] day advanced: day_count {prev_day} -> {new_day_count}")
 
 
 class MockUE:
@@ -1108,7 +1123,7 @@ class MockUE:
             return 0.0
         # Progress by game-time elapsed toward completion.
         # Approximate: 1 - remaining/total is hard without total; use time.
-        remaining = max(0, self.npc.busy_until_min - self.time.total_minutes)
+        remaining = max(0, self.npc.busy_until_min - self.time.absolute_minutes)
         return 0.0 if remaining > 0 else 1.0
 
     # ─── Inbound message handling ─────────────────────────────
@@ -1186,7 +1201,7 @@ class MockUE:
             CMD_REPAIR_TARGET, CMD_CHARGE_AT_STATION, CMD_PATROL_ZONE,
         }
         if self.npc.busy_action_id is not None and cmd in DISRUPTIVE:
-            remaining = max(0, (self.npc.busy_until_min or 0) - self.time.total_minutes)
+            remaining = max(0, (self.npc.busy_until_min or 0) - self.time.absolute_minutes)
             await self._send_action_started(
                 action_id, accepted=False, estimated_sec=None,
                 reject_reason=f"busy with {self.npc.busy_cmd} ({remaining} game-min remaining)",
@@ -1220,7 +1235,7 @@ class MockUE:
             # After the 14-cmd migration, busy_cmd alone distinguishes all
             # composite actions (ChargeAtStation / WorkAtWorkbench / ...),
             # so the old busy_composite_name field is no longer needed.
-            self.npc.busy_until_min = self.time.total_minutes + busy_game_min
+            self.npc.busy_until_min = self.time.absolute_minutes + busy_game_min
             self.npc.busy_started_ms = int(_time.time() * 1000)
             self.npc.current_animation = "work"
             self._apply_command_effects(cmd, params, starting=True)
@@ -1583,13 +1598,21 @@ class MockUE:
 
     # ─── Main loop ─────────────────────────────────────────────
 
-    async def run_day(self, start_hour: int = 6, end_hour: int = 22):
+    async def run_day(self, start_hour: int = 6, end_hour: int = 30):
+        """Run simulation from start_hour to end_hour (累计游戏小时数)。
+
+        跨日仿真：end_hour 可 > 24，如 end_hour=30 表示次日 06:00。
+        start_hour=6, end_hour=30 即 06:00→次日 06:00 共 24 游戏小时。
+        """
         self.time.hour = start_hour
         self.time.minute = 0
 
+        # 累计游戏小时数 = day_count*24 + hour，用于跨日结束判断。
+        start_total_hour = self.time.day_count * 24 + self.time.hour
+
         logger.info(f"=== Day {self.time.day} start ===")
         print(f"\n{'='*60}")
-        print(f"  UE — Day {self.time.day} ({start_hour:02d}:00 - {end_hour:02d}:00)")
+        print(f"  UE — Day {self.time.day} ({start_hour:02d}:00 - {end_hour:02d}:00 累计)")
         print(f"  NPC: {self.npc.name} ({self.npc.agent_id})")
         print(f"  MCP WS: {self.mcp_ws_url}")
         print(f"  Mode: {self.mode}")
@@ -1601,7 +1624,7 @@ class MockUE:
         conn_task = asyncio.create_task(self._connection_manager())
         hb_task = asyncio.create_task(self._heartbeat_loop())
         try:
-            await self._perception_loop(end_hour)
+            await self._perception_loop(end_hour, start_total_hour)
         finally:
             self._stop = True
             # Graceful unregister if currently connected.
@@ -1690,7 +1713,7 @@ class MockUE:
                 return
             backoff = min(backoff * 2, RECONNECT_MAX_SEC)
 
-    async def _perception_loop(self, end_hour: int):
+    async def _perception_loop(self, end_total_hour: int, start_total_hour: int):
         last_state_report = _time.monotonic()
 
         # Wait for first WS connection so the initial 06:00 perception (sent
@@ -1712,7 +1735,9 @@ class MockUE:
         interval_real_sec = self.perception_interval / max(self.time.speed, 1) * 60
         next_tick = _time.monotonic() + interval_real_sec
 
-        while self.time.hour < end_hour:
+        # 跨日结束条件：累计游戏小时数 = day_count*24 + hour。
+        # end_total_hour=30 表示次日 06:00（day_count=1, hour=6 → 24+6=30）。
+        while self.time.day_count * 24 + self.time.hour < end_total_hour:
             # Sleep 到下一个固定时间点，确保节奏均匀。
             now = _time.monotonic()
             delay = max(0, next_tick - now)
@@ -1733,7 +1758,7 @@ class MockUE:
             self._evolve_physical()
 
             # Busy completion check.
-            if self.npc.busy_action_id is not None and self.time.total_minutes >= (self.npc.busy_until_min or 0):
+            if self.npc.busy_action_id is not None and self.time.absolute_minutes >= (self.npc.busy_until_min or 0):
                 action_id = self.npc.busy_action_id
                 started = self.npc.busy_started_ms or int(_time.time() * 1000)
                 self._clear_busy()
