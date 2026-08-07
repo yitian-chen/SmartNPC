@@ -72,6 +72,18 @@ type agentContext struct {
 	currentPlanIndex      int                    // mu 保护，当前执行到 daily_plan 第几个 item（记账用）
 	currentSlot           string                 // mu 保护，当前分解的时段 "HH:MM-HH:MM"（防同时段重复分解）
 	redecomposeCount      int                    // mu 保护，当前时段已重复分解次数（防死循环）
+	// slot 切换延迟 stop 状态（mu 保护）
+	// advanceSlotIfNeeded 检测到 slot 过期时，不立即发 stop_action（会让 NPC 在
+	// 战术层 LLM 调用期间愣住），而是清 currentActionID 让 tacticalRefill 守卫通过，
+	// 把旧复合 actionID 记到 pendingStopActionID。等 tacticalRefill 分解完成、
+	// popAndSendQueueAction 下发新 action 前再补发 stop，让 NPC 在 LLM 期间继续
+	// 旧动作。若旧 action 在 LLM 期间自然完成，recordActionCompletion 清除此字段
+	// （避免对已完成的 action 发 stop 触发 STOP_ID_MISMATCH）。
+	pendingStopActionID string
+	// selfStopInProgress 标记已主动 stop、等待 action_completed(interrupted) 到达
+	// 的 actionID。recordActionCompletion 见到此 id 时清除并抑制反应层触发——
+	// slot 切换的 stop 是计划内的，不应让 reactive 误判为异常完成而 replan 干扰新 action。
+	selfStopInProgress string
 	// 反应层状态（mu 保护）
 	prevZone         string               // 上次感知的 zone id（用于检测 zone 变化触发反应层）
 	prevObjectIDs    []string             // 上次感知的 nearby_objects id 列表（用于检测新物体出现）
@@ -182,14 +194,28 @@ func (a *agentContext) recordActionCompletion(completion protocol.ActionComplete
 		a.currentActionParams = nil
 		a.currentActionStart = time.Time{}
 	}
+	// slot 切换延迟 stop 状态处理：
+	// 1) pendingStopActionID 匹配 → 旧 action 在 LLM 期间自然完成，清除待 stop
+	//    标记，popAndSendQueueAction 不再补发 stop（避免 STOP_ID_MISMATCH）。
+	// 2) selfStopInProgress 匹配 → 这是 slot 切换主动 stop 引发的 interrupted
+	//    完成，清除标记并抑制反应层触发（计划内打断不应 replan 干扰新 action）。
+	if a.pendingStopActionID == completion.ActionID {
+		a.pendingStopActionID = ""
+	}
+	isSelfStop := a.selfStopInProgress == completion.ActionID
+	if isSelfStop {
+		a.selfStopInProgress = ""
+	}
 	// 取消 action_completed 超时 timer（约定 §5.2）。
 	// 竞态处理：ACK 和 action_completed 可能同一批到达（read loop 顺序处理），
 	// completion handler 可能在 SendAction 调用方 armActionTimeout 之前执行。
 	// 此时 timer 尚未注册，记录到 completedBeforeArm，让 armActionTimeout 跳过 arm。
+	// self-stop 的 action timer 已在 advanceSlotIfNeeded 取消，无需记到
+	// completedBeforeArm（否则永不消费，内存泄漏）。
 	if timer, ok := a.pendingActionTimeouts[completion.ActionID]; ok {
 		timer.Stop()
 		delete(a.pendingActionTimeouts, completion.ActionID)
-	} else {
+	} else if !isSelfStop {
 		a.completedBeforeArm[completion.ActionID] = struct{}{}
 	}
 	a.currentActionSrc = ""
@@ -200,6 +226,11 @@ func (a *agentContext) recordActionCompletion(completion protocol.ActionComplete
 	if completion.Result == protocol.ResultSuccess {
 		return true, "", ""
 	}
+	// self-stop 引发的 interrupted 完成（slot 切换主动 stop）不触发反应层——
+	// 这是计划内的打断，replan 会干扰刚下发的新 action。
+	if isSelfStop {
+		return true, "", ""
+	}
 	// 异常完成：detail 注入 reaction 层 TriggerDetail，含 UE 给出的 reason
 	// （如"寻路不可达"），让 Ollama 看到 UE 侧的具体失败原因再决策。
 	detail := fmt.Sprintf("result=%s reason=%s progress=%.2f",
@@ -208,11 +239,17 @@ func (a *agentContext) recordActionCompletion(completion protocol.ActionComplete
 }
 
 // advanceSlotIfNeeded 检查当前 game_time 是否已超出 currentSlot 结束时间，
-// 若是则打断当前在途长复合动作 + 清队列 + 清 currentSlot，让 worker 下一轮
-// 走 tacticalRefill 自然选新 slot 分解新队列。
+// 若是则清队列 + 清 currentSlot + 清在途追踪，让 worker 下一轮走 tacticalRefill
+// 自然选新 slot 分解新队列。
+//
+// 延迟 stop 策略：本方法**不立即发 stop_action**。若旧 action 是长复合动作，
+// 把 actionID 记到 pendingStopActionID，由 popAndSendQueueAction 在下发新 action
+// 前补发。这样 NPC 在战术层 LLM 调用期间继续旧动作（仍在车间装配/充电），
+// 不会愣住。若旧 action 在 LLM 期间自然完成，recordActionCompletion 清除
+// pendingStopActionID，popAndSendQueueAction 跳过 stop。
 //
 // 这是"长复合动作唯一打断路径"：长复合动作不设超时（IsCompositeCmd 跳过
-// armActionTimeout），持续执行到时段切换由本方法主动 stop。
+// armActionTimeout），持续执行到时段切换由本方法记录待 stop。
 //
 // 不在此处调 LLM——只打扫战场，新队列由 worker 下一轮 tacticalRefill 生成。
 // 反应层 replan 进行中（replanInProgress=true）时本方法仍可执行：schedule
@@ -228,6 +265,7 @@ func (a *agentContext) advanceSlotIfNeeded(ws *wsserver.Server, agentID string, 
 	}
 	// 收集在途 action 信息（持锁内）
 	actionID := a.currentActionID
+	actionCmd := a.currentActionCmd
 	queueLen := len(a.actionQueue)
 	// 清队列 + 清在途追踪 + 清 slot 标记
 	a.actionQueue = nil
@@ -238,6 +276,12 @@ func (a *agentContext) advanceSlotIfNeeded(ws *wsserver.Server, agentID string, 
 	a.currentActionSrc = ""
 	a.currentSlot = ""
 	a.redecomposeCount = 0
+	// 只对长复合动作记录 pendingStop：短动作 ~100ms 自然完成，会在 LLM 期间
+	// 被 recordActionCompletion 清除；若 LLM 极快返回仍发 stop 会触发
+	// STOP_ID_MISMATCH（UE 侧短动作不设 busy_action_id）。
+	if actionID != "" && isCompositeCmdDynamic(actionCmd, capabilityRegistryRef) {
+		a.pendingStopActionID = actionID
+	}
 	// 取消旧 action 的超时 timer（若有）
 	if actionID != "" {
 		if timer, ok := a.pendingActionTimeouts[actionID]; ok {
@@ -247,17 +291,13 @@ func (a *agentContext) advanceSlotIfNeeded(ws *wsserver.Server, agentID string, 
 	}
 	a.mu.Unlock()
 
-	logger.Info("[战术层] schedule 时段切换，打断当前动作并清队列",
+	logger.Info("[战术层] schedule 时段切换，清队列（stop 延迟到分解完成后）",
 		"agent_id", agentID, "expired_slot", slot, "game_time", tod,
-		"action_id", actionID, "queue_len", queueLen)
+		"action_id", actionID, "pending_stop", actionID != "" && isCompositeCmdDynamic(actionCmd, capabilityRegistryRef),
+		"queue_len", queueLen)
 
-	// 发 stop_action 打断 UE 侧执行（若有在途）
-	if actionID != "" {
-		if err := ws.SendStopAction(agentID, actionID); err != nil {
-			logger.Warn("[战术层] 时段切换 stop_action 发送失败",
-				"agent_id", agentID, "action_id", actionID, "err", err)
-		}
-	}
+	// 不在此处发 stop_action —— 等 tacticalRefill 分解完成后，
+	// 由 popAndSendQueueAction 在下发新 action 前补发 stop。
 	// signal worker 下一轮走 tacticalRefill 选新 slot
 	a.signal()
 }
@@ -710,7 +750,28 @@ func (a *agentContext) popAndSendQueueAction(ctx context.Context, agentID string
 	}
 	pa := a.actionQueue[0]
 	a.actionQueue = a.actionQueue[1:]
+	// 取出 pendingStopActionID（slot 切换时由 advanceSlotIfNeeded 设置）：
+	// 在下发新 action 前先发 stop 停掉旧复合动作，让 NPC 在 LLM 期间继续
+	// 旧动作而非愣住。取出后清零，避免重复 stop。
+	pendingStop := a.pendingStopActionID
+	a.pendingStopActionID = ""
 	a.mu.Unlock()
+
+	// slot 切换后首次下发：先发 stop 停掉旧复合动作（UE 仍 busy），
+	// 再发新 action_command。WS 顺序保证 UE 先处理 stop 清 busy 再处理新 action。
+	// 标记 selfStopInProgress：等 stop 引发的 action_completed(interrupted) 到达时
+	// 由 recordActionCompletion 抑制反应层触发（slot 切换是计划内，不应 replan）。
+	if pendingStop != "" {
+		logger.Info("[战术层] slot 切换后补发 stop 再下发新 action",
+			"agent_id", agentID, "stop_action_id", pendingStop, "new_action", pa.Action)
+		if err := ws.SendStopAction(agentID, pendingStop); err != nil {
+			logger.Warn("[战术层] 补发 stop_action 失败",
+				"agent_id", agentID, "action_id", pendingStop, "err", err)
+		}
+		a.mu.Lock()
+		a.selfStopInProgress = pendingStop
+		a.mu.Unlock()
+	}
 
 	cmd, params, err := mapTacticalAction(pa, agentID, kb, capabilityRegistryRef)
 	if err != nil {
