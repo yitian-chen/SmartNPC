@@ -1136,6 +1136,15 @@ func selectCurrentGoal(dailyPlan, timeOfDay string) (goal, slot string, index in
 	if dailyPlan == "" {
 		return "", "", -1
 	}
+	// 06:00-07:00 是战略规划时间（dayStartMinute=07:00），屏蔽战术层分解。
+	// 避免 LLM 生成的夜间 slot（如 "22:00-07:00"）在 06:00-07:00 仍被
+	// matchPlanSlot 的跨午夜分支命中（cur < end），导致战术层反复分解
+	// 夜间睡眠任务。活动从 07:00 开始，此窗口内 NPC 保持空闲——若在途
+	// composite 仍执行，由 advanceSlotIfNeeded 在 slot 过期时打断。
+	cur := parsePlanMinute(timeOfDay)
+	if cur >= 0 && cur >= dayStartMinute-60 && cur < dayStartMinute {
+		return "", "", -1
+	}
 	items := parseFormattedPlan(dailyPlan)
 	if len(items) == 0 {
 		return "", "", -1

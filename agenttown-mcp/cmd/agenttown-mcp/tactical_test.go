@@ -484,6 +484,37 @@ func TestSelectCurrentGoal_OvernightSlotEarlyMorning(t *testing.T) {
 	}
 }
 
+// TestSelectCurrentGoal_PlanningWindowBlocked 验证 06:00-07:00 战略规划窗口
+// 屏蔽战术层分解。即使 LLM 生成的夜间 slot 结束时间延到 07:00 之后
+// （如 "22:00-07:00"），在该窗口内 selectCurrentGoal 也应返回空，防止
+// 战术层反复分解夜间睡眠任务。
+func TestSelectCurrentGoal_PlanningWindowBlocked(t *testing.T) {
+	// 夜间 slot 故意写到 07:00（LLM 常见偏移），06:00-07:00 应被屏蔽
+	plan := "07:00-12:00: 上午装配\n12:00-18:00: 下午工作\n22:00-07:00: 夜间休眠"
+	for _, tod := range []string{"06:00", "06:30", "06:59"} {
+		goal, slot, idx := selectCurrentGoal(plan, tod)
+		if goal != "" || slot != "" || idx != -1 {
+			t.Errorf("tod=%s: got goal=%q slot=%q idx=%d, want empty/-1 (planning window)", tod, goal, slot, idx)
+		}
+	}
+}
+
+// TestSelectCurrentGoal_PlanningWindowBoundary 验证屏蔽窗口的边界：
+// 05:59（窗口前）夜间 slot 正常匹配，07:00（窗口后）首个活动 slot 正常匹配。
+func TestSelectCurrentGoal_PlanningWindowBoundary(t *testing.T) {
+	plan := "07:00-12:00: 上午装配\n22:00-06:00: 夜间休眠"
+	// 05:59 在夜间 slot [22:00,06:00) 内，未被屏蔽
+	goal, _, _ := selectCurrentGoal(plan, "05:59")
+	if goal != "夜间休眠" {
+		t.Errorf("tod=05:59: goal=%q, want 夜间休眠 (before planning window)", goal)
+	}
+	// 07:00 进入首个活动 slot，未被屏蔽
+	goal, _, _ = selectCurrentGoal(plan, "07:00")
+	if goal != "上午装配" {
+		t.Errorf("tod=07:00: goal=%q, want 上午装配 (after planning window)", goal)
+	}
+}
+
 // ─── generateTacticalPlan ────────────────────────────────────
 
 func TestGenerateTacticalPlan_HTTPError(t *testing.T) {
