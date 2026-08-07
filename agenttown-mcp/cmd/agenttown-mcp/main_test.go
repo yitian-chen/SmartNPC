@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -236,6 +237,185 @@ func TestRecordActionStarted_SetsSource(t *testing.T) {
 	}
 	if id != "act_2" {
 		t.Fatalf("currentActionID=%q, want act_2", id)
+	}
+}
+
+// ─── slot 切换延迟 stop ──────────────────────────────────────────
+
+// setGameTimeForTest 在测试中直接设置 latestPerception，让 latestTimeOfDayLocked
+// 返回指定 "HH:MM"。perception_update 的 environment.time_of_day_sec 字段是当天秒数。
+func setGameTimeForTest(t *testing.T, ac *agentContext, hhmm string) {
+	t.Helper()
+	var h, m int
+	if n, err := fmt.Sscanf(hhmm, "%d:%d", &h, &m); err != nil || n != 2 {
+		t.Fatalf("invalid hhmm %q: %v", hhmm, err)
+	}
+	totalSec := h*3600 + m*60
+	raw := []byte(fmt.Sprintf(`{"environment":{"time_of_day_sec":%d}}`, totalSec))
+	ac.mu.Lock()
+	ac.latestPerception = raw
+	ac.mu.Unlock()
+}
+
+// TestAdvanceSlotIfNeeded_DelayedStopForComposite 验证 slot 切换时对长复合动作
+// 不立即发 stop，而是记录 pendingStopActionID 让 popAndSendQueueAction 延迟补发。
+// 这样 NPC 在战术层 LLM 调用期间继续旧动作，避免愣住。
+func TestAdvanceSlotIfNeeded_DelayedStopForComposite(t *testing.T) {
+	ac, _ := newAgentContext(context.Background())
+	ws := wsserver.New(wsserver.Options{}) // 未连接；本测试不验证 stop 发送
+	logger := slog.Default()
+
+	ac.mu.Lock()
+	ac.currentSlot = "08:00-10:00"
+	ac.currentActionID = "act_composite_1"
+	ac.currentActionCmd = "WorkAtWorkbench" // 内置硬编码复合 cmd
+	ac.actionQueue = []plannedAction{{Action: "wait", Params: map[string]any{"duration_sec": 30}}}
+	ac.mu.Unlock()
+	setGameTimeForTest(t, ac, "10:05") // 已过 slot 结束 10:00
+
+	ac.advanceSlotIfNeeded(ws, "H-01", logger)
+
+	ac.mu.Lock()
+	pendingStop := ac.pendingStopActionID
+	currentActionID := ac.currentActionID
+	queueLen := len(ac.actionQueue)
+	slot := ac.currentSlot
+	ac.mu.Unlock()
+
+	if pendingStop != "act_composite_1" {
+		t.Errorf("pendingStopActionID=%q, want act_composite_1 (composite 应延迟 stop)", pendingStop)
+	}
+	if currentActionID != "" {
+		t.Errorf("currentActionID=%q, want empty (cleared so tacticalRefill guard passes)", currentActionID)
+	}
+	if queueLen != 0 {
+		t.Errorf("queue=%d, want 0 (cleared on slot switch)", queueLen)
+	}
+	if slot != "" {
+		t.Errorf("currentSlot=%q, want empty (cleared on slot switch)", slot)
+	}
+}
+
+// TestAdvanceSlotIfNeeded_NoPendingStopForAtomicAction 验证 slot 切换时对短动作
+// 不设置 pendingStopActionID——短动作 100ms 内自然完成，发 stop 会触发 STOP_ID_MISMATCH
+// （UE 侧短动作不设 busy_action_id）。
+func TestAdvanceSlotIfNeeded_NoPendingStopForAtomicAction(t *testing.T) {
+	ac, _ := newAgentContext(context.Background())
+	ws := wsserver.New(wsserver.Options{})
+	logger := slog.Default()
+
+	ac.mu.Lock()
+	ac.currentSlot = "08:00-10:00"
+	ac.currentActionID = "act_speak_1"
+	ac.currentActionCmd = "Speak" // 原子动作
+	ac.mu.Unlock()
+	setGameTimeForTest(t, ac, "10:05")
+
+	ac.advanceSlotIfNeeded(ws, "H-01", logger)
+
+	ac.mu.Lock()
+	pendingStop := ac.pendingStopActionID
+	ac.mu.Unlock()
+
+	if pendingStop != "" {
+		t.Errorf("pendingStopActionID=%q, want empty (atomic action should not delay-stop)", pendingStop)
+	}
+}
+
+// TestAdvanceSlotIfNeeded_NoActionNoPendingStop 验证 slot 切换时若没有在途 action，
+// 不设置 pendingStopActionID。
+func TestAdvanceSlotIfNeeded_NoActionNoPendingStop(t *testing.T) {
+	ac, _ := newAgentContext(context.Background())
+	ws := wsserver.New(wsserver.Options{})
+	logger := slog.Default()
+
+	ac.mu.Lock()
+	ac.currentSlot = "08:00-10:00"
+	ac.currentActionID = "" // 无在途
+	ac.mu.Unlock()
+	setGameTimeForTest(t, ac, "10:05")
+
+	ac.advanceSlotIfNeeded(ws, "H-01", logger)
+
+	ac.mu.Lock()
+	pendingStop := ac.pendingStopActionID
+	ac.mu.Unlock()
+
+	if pendingStop != "" {
+		t.Errorf("pendingStopActionID=%q, want empty (no in-flight action)", pendingStop)
+	}
+}
+
+// TestRecordActionCompletion_ClearsPendingStop 验证旧 action 在 LLM 调用期间
+// 自然完成时，recordActionCompletion 清除 pendingStopActionID——避免 popAndSendQueueAction
+// 对已完成的 action 补发 stop 触发 STOP_ID_MISMATCH。
+func TestRecordActionCompletion_ClearsPendingStop(t *testing.T) {
+	ac, _ := newAgentContext(context.Background())
+
+	ac.mu.Lock()
+	ac.pendingStopActionID = "act_old_composite"
+	ac.mu.Unlock()
+
+	ac.recordActionCompletion(protocol.ActionCompletedPayload{
+		ActionID: "act_old_composite", Result: protocol.ResultSuccess, Progress: 1.0,
+	})
+
+	ac.mu.Lock()
+	pendingStop := ac.pendingStopActionID
+	ac.mu.Unlock()
+
+	if pendingStop != "" {
+		t.Errorf("pendingStopActionID=%q, want empty (cleared when old action completes naturally)", pendingStop)
+	}
+}
+
+// TestRecordActionCompletion_SelfStopSuppressesReactive 验证 slot 切换主动 stop
+// 引发的 interrupted 完成不触发反应层——计划内打断不应 replan 干扰新 action。
+func TestRecordActionCompletion_SelfStopSuppressesReactive(t *testing.T) {
+	ac, _ := newAgentContext(context.Background())
+
+	ac.mu.Lock()
+	ac.selfStopInProgress = "act_stopped_by_slot_switch"
+	ac.mu.Unlock()
+
+	queued, trigger, _ := ac.recordActionCompletion(protocol.ActionCompletedPayload{
+		ActionID: "act_stopped_by_slot_switch",
+		Result:   protocol.ResultInterrupted, // stop 引发的完成
+		Progress: 0.5,
+	})
+
+	if !queued {
+		t.Error("queued should be true (worker signaled)")
+	}
+	if trigger != "" {
+		t.Errorf("trigger=%q, want empty (self-stop should not trigger reactive)", trigger)
+	}
+
+	ac.mu.Lock()
+	selfStop := ac.selfStopInProgress
+	ac.mu.Unlock()
+	if selfStop != "" {
+		t.Errorf("selfStopInProgress=%q, want empty (cleared after completion)", selfStop)
+	}
+}
+
+// TestRecordActionCompletion_OtherFailureStillTriggers 验证非 self-stop 的异常
+// 完成仍然触发反应层（延迟 stop 改动不应影响原有失败触发逻辑）。
+func TestRecordActionCompletion_OtherFailureStillTriggers(t *testing.T) {
+	ac, _ := newAgentContext(context.Background())
+
+	// 模拟一个普通的 failed completion（非 self-stop）
+	queued, trigger, _ := ac.recordActionCompletion(protocol.ActionCompletedPayload{
+		ActionID: "act_unexpected_fail",
+		Result:   protocol.ResultFailed,
+		Progress: 0.3,
+	})
+
+	if !queued {
+		t.Error("queued should be true")
+	}
+	if trigger != TriggerActionDone {
+		t.Errorf("trigger=%q, want %q (non-self-stop failure should still trigger reactive)", trigger, TriggerActionDone)
 	}
 }
 
