@@ -343,6 +343,25 @@ func (a *AgentState) RecordActionCompletion(actionID string) CompletionResult {
 	}
 }
 
+// ClearInFlightAction clears in-flight tracking for the given actionID if it
+// matches the current action. Used by recordActionStarted's TOCTOU recovery:
+// when a completion arrives in the microsecond window between the
+// completedBeforeArm check and RecordActionStarted setting currentActionID,
+// the completion runs with wasInFlight=false (currentActionID was still empty)
+// and never clears the field. This method clears the stale currentActionID
+// so the worker's hasInFlightAction() gate doesn't block forever.
+func (a *AgentState) ClearInFlightAction(actionID string) {
+	a.mu.Lock()
+	if a.currentActionID == actionID {
+		a.currentActionID = ""
+		a.currentActionCmd = ""
+		a.currentActionParams = nil
+		a.currentActionStart = time.Time{}
+		a.currentActionSrc = ""
+	}
+	a.mu.Unlock()
+}
+
 // SetPendingStopActionID records a long-composite action ID that should be
 // stopped after the next tactical refill (slot switch deferred-stop strategy).
 func (a *AgentState) SetPendingStopActionID(id string) {

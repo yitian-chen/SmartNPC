@@ -373,6 +373,35 @@ func TestRecordActionCompletion_NoStashMatch(t *testing.T) {
 	}
 }
 
+// TestClearInFlightAction verifies the TOCTOU recovery primitive: it clears
+// currentActionID/Cmd/Params/Start/Src when the actionID matches, and is a
+// no-op when it doesn't. Used by recordActionStarted when a completion arrives
+// in the microsecond window between the completedBeforeArm check and
+// RecordActionStarted.
+func TestClearInFlightAction(t *testing.T) {
+	a := New()
+	a.RecordActionStarted("act-1", "Speak", map[string]any{"content": "hi"}, SourceTactical)
+	if !a.HasInFlightAction() {
+		t.Fatal("precondition: should have in-flight action")
+	}
+
+	// Non-matching ID → no-op
+	a.ClearInFlightAction("act-other")
+	if !a.HasInFlightAction() {
+		t.Error("HasInFlightAction=false after non-matching ClearInFlightAction, want still true")
+	}
+
+	// Matching ID → clears
+	a.ClearInFlightAction("act-1")
+	if a.HasInFlightAction() {
+		t.Error("HasInFlightAction=true after ClearInFlightAction, want false")
+	}
+	snap := a.Snapshot()
+	if snap.CurrentActionID != "" || snap.CurrentActionCmd != "" || snap.CurrentActionSrc != "" {
+		t.Errorf("snapshot after clear = %+v, want all empty", snap)
+	}
+}
+
 func TestStop_ClearsTransient(t *testing.T) {
 	a := New()
 	a.SetOnline(true)

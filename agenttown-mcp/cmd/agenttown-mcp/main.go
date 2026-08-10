@@ -462,7 +462,39 @@ func (a *agentContext) stop() {
 
 func (a *agentContext) recordActionStarted(actionID, cmd string, params map[string]any, decisionEpoch int64, src actionSource) {
 	_ = decisionEpoch // 反应层移除后不再记录到 recentActions，保留参数兼容调用方
+	// 竞态处理：超短动作（如 Speak, 4ms）的 ACK 和 action_completed 可能在
+	// 同一批 WS 消息中到达。read loop 按顺序处理，completion 在本函数之前
+	// 执行（SendAction 返回 ACK 后调用方才调本函数）。completion handler
+	// 把 actionID 存入 completedBeforeArm，且 RecordActionCompletion 看到
+	// currentActionID="" → wasInFlight=false → 不清 currentActionID（本来就是空）。
+	// 若此处仍 RecordActionStarted 设置 currentActionID，它将永远不会被清——
+	// completion 已经过去了，worker 的 hasInFlightAction() 永远为 true，
+	// 队列里后续 action（如长复合动作 work_shift）永远不会被 pop，NPC 卡死。
+	//
+	// 修复：若 completedBeforeArm 已有此 actionID，动作已完成。跳过
+	// RecordActionStarted（不设 currentActionID），signal worker 继续下一个。
+	// 保留 completedBeforeArm 条目让 armActionTimeout 消费（它会跳过 arm）。
+	a.coordMu.Lock()
+	if _, alreadyDone := a.completedBeforeArm[actionID]; alreadyDone {
+		a.coordMu.Unlock()
+		a.signal()
+		return
+	}
+	a.coordMu.Unlock()
+
 	a.as.RecordActionStarted(actionID, cmd, params, src)
+
+	// TOCTOU 兜底：completion 可能在上面检查和 RecordActionStarted 之间到达。
+	// 此时 currentActionID 刚被设置但 completion 已以 wasInFlight=false 跑过。
+	// 清掉陈旧的 currentActionID，留 completedBeforeArm 条目给 armActionTimeout。
+	a.coordMu.Lock()
+	if _, alreadyDone := a.completedBeforeArm[actionID]; alreadyDone {
+		a.coordMu.Unlock()
+		a.as.ClearInFlightAction(actionID)
+		a.signal()
+		return
+	}
+	a.coordMu.Unlock()
 }
 
 func cloneRawMessage(payload json.RawMessage) json.RawMessage {
