@@ -83,6 +83,12 @@ type agentContext struct {
 	strategicHc llmClient
 	tacticalHc  llmClient
 
+	// ollama is the local Ollama client for relationship-update judgments
+	// (Stage 5). nil when --ollama-url="" (reactive layer disabled), in
+	// which case maybeUpdateRelationship short-circuits. Immutable after
+	// construction.
+	ollama *ollama.Client
+
 	// Lifecycle (no lock needed — single writer: worker goroutine for cancel,
 	// stop() for stopped flag under coordMu)
 	wake   chan struct{}
@@ -195,8 +201,10 @@ func (a *agentContext) recordActionCompletion(completion protocol.ActionComplete
 	// Stage 4: best-effort action_history recording — only for tracked in-flight
 	// actions (debug /debug/action path doesn't call recordActionStarted, so its
 	// completions have WasInFlight=false and aren't recorded).
+	// Stage 5: 异步触发关系更新判断（Ollama 5s 超时，不阻塞主路径）。
 	if res.WasInFlight {
 		a.recordActionHistory(completion, res)
+		go a.maybeUpdateRelationship(completion, res)
 	}
 	isSelfStop := res.WasSelfStop
 
@@ -287,6 +295,71 @@ func (a *agentContext) loadTacticalMemories(ctx context.Context, agentID string)
 		fmt.Fprintf(&sb, "- %s（%s）\n", m.Content, m.MemoryType)
 	}
 	return strings.TrimSuffix(sb.String(), "\n")
+}
+
+// maybeUpdateRelationship judges whether a completed action warrants a
+// relationship bump and, if so, updates both directional rows (A→B and B→A).
+// Called asynchronously from recordActionCompletion so the 5s Ollama call
+// never blocks the main completion path. Best-effort: any error (nil client,
+// nil store, Ollama timeout, save failure) logs a warning and gives up.
+//
+// Stage 5 design: Ollama judges whether the cmd+params constitute a direct
+// social interaction with the target agent (yes/no). On "yes", familiarity
+// is bumped by 1 in both directions (A→B and B→A); affection is unchanged
+// in the initial rule. Self-targeting (target == agentID) is skipped.
+func (a *agentContext) maybeUpdateRelationship(completion protocol.ActionCompletedPayload, res agentstate.CompletionResult) {
+	if a.ollama == nil {
+		return // reactive layer disabled (--ollama-url="")
+	}
+	store := a.as.Store()
+	if store == nil {
+		return // in-memory mode
+	}
+	target, _ := res.Params["target_agent_id"].(string)
+	if target == "" {
+		return // not an agent-directed action
+	}
+	agentID := a.as.AgentID()
+	if target == agentID {
+		return // self-targeting guard
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), relationshipJudgeTimeout)
+	defer cancel()
+	if !shouldUpdateRelationship(ctx, a.ollama, res.Cmd, res.Params, target) {
+		return
+	}
+	// 双向更新：A→B + B→A 各一行，各自独立 upsert。affection 初期不动（delta=0）。
+	if err := store.SaveRelationship(ctx, agentID, target, 1, 0); err != nil {
+		slog.Default().Warn("[关系层] save A→B failed",
+			"agent_id", agentID, "target", target, "err", err)
+	}
+	if err := store.SaveRelationship(ctx, target, agentID, 1, 0); err != nil {
+		slog.Default().Warn("[关系层] save B→A failed",
+			"agent_id", target, "target", agentID, "err", err)
+	}
+}
+
+// loadRelationships fetches the agent's relationship rows and formats them
+// for the tactical prompt【人际关系】段. Returns "" when store is nil, no
+// relationships exist, or the KB has only one agent (single-NPC scenario
+// doesn't benefit from a relationship segment). Called once per tactical
+// refill; indexed query, no caching needed.
+func (a *agentContext) loadRelationships(ctx context.Context, agentID string, kb *worldkb.KB) string {
+	store := a.as.Store()
+	if store == nil {
+		return ""
+	}
+	// Single-NPC guard: skip when KB has ≤1 agent (no possible relationships).
+	if kb == nil || len(kb.Agents) <= 1 {
+		return ""
+	}
+	rels, err := store.LoadRelationships(ctx, agentID, 10)
+	if err != nil {
+		slog.Default().Warn("[关系层] 加载关系列表失败",
+			"agent_id", agentID, "err", err)
+		return ""
+	}
+	return formatRelationshipsForPrompt(rels, agentID)
 }
 
 // advanceSlotIfNeeded 检查当前 game_time 是否已超出 currentSlot 结束时间，
@@ -1222,8 +1295,11 @@ func main() {
 	// ─── 反应层 Ollama 客户端 ────────────────────────────────────
 	// --ollama-url="" 显式禁用反应层；否则初始化客户端（即使 Ollama 进程
 	// 不在跑也不报错——Chat 调用失败时反应层静默降级为 continue）。
+	// ollamaClient 提升到外层作用域，供 registerAgent 闭包捕获注入
+	// agentContext.ollama（Stage 5 关系层判断用）。nil 表示禁用。
+	var ollamaClient *ollama.Client
 	if *ollamaURL != "" {
-		ollamaClient := ollama.New(ollama.Options{
+		ollamaClient = ollama.New(ollama.Options{
 			BaseURL: *ollamaURL,
 			Model:   *ollamaModel,
 			// HTTP client timeout 作为 backstop，必须 > reactiveCallTimeout，
@@ -1278,6 +1354,13 @@ func main() {
 			logger.Warn("[main] load persistent state failed, continuing with cold start",
 				"agent_id", id, "err", err)
 		}
+		// Stage 5: 从 KB 种子导入关系到 DB（冷启动，INSERT IGNORE 不覆盖
+		// 既有交互累积）。重连走 else 分支（:1344）提前 return，不会重复导入。
+		if store != nil {
+			if err := seedRelationshipsFromKB(ctx, kb, store, id, logger); err != nil {
+				logger.Warn("[关系层] KB 种子导入失败", "agent_id", id, "err", err)
+			}
+		}
 		// 战略层/战术层各用一个独立 LLM client 实例。
 		// Venus 直连（OpenAI Chat Completions API），是唯一的战略/战术层后端。
 		venusAPIKeyValue := *venusAPIKey
@@ -1296,14 +1379,17 @@ func main() {
 			Logger:  logger,
 			Timeout: *venusTimeout,
 		})
-		ac.tacticalHc = venus.New(venus.Config{
-			BaseURL: *venusURL,
-			APIKey:  venusAPIKeyValue,
-			Model:   *venusModel,
-			Logger:  logger,
-			Timeout: *venusTimeout,
-		})
-		agents[id] = ac
+	ac.tacticalHc = venus.New(venus.Config{
+		BaseURL: *venusURL,
+		APIKey:  venusAPIKeyValue,
+		Model:   *venusModel,
+		Logger:  logger,
+		Timeout: *venusTimeout,
+	})
+	// Stage 5: 注入 Ollama 客户端供关系层判断。nil 表示 --ollama-url=""
+	// 禁用反应层时，maybeUpdateRelationship 会早返回不调用 Ollama。
+	ac.ollama = ollamaClient
+	agents[id] = ac
 		go runPerceptionWorker(workerCtx, id, ac, ws, kb, logger)
 		return ac, true
 	}
