@@ -192,6 +192,12 @@ func (a *agentContext) updateState(report protocol.StateReportPayload) (Reactive
 // 异常完成才是真正需要反应层介入的时机。
 func (a *agentContext) recordActionCompletion(completion protocol.ActionCompletedPayload) (bool, ReactiveTrigger, string) {
 	res := a.as.RecordActionCompletion(completion.ActionID)
+	// Stage 4: best-effort action_history recording — only for tracked in-flight
+	// actions (debug /debug/action path doesn't call recordActionStarted, so its
+	// completions have WasInFlight=false and aren't recorded).
+	if res.WasInFlight {
+		a.recordActionHistory(completion, res)
+	}
 	isSelfStop := res.WasSelfStop
 
 	// 取消 action_completed 超时 timer（约定 §5.2）。
@@ -225,6 +231,62 @@ func (a *agentContext) recordActionCompletion(completion protocol.ActionComplete
 	detail := fmt.Sprintf("result=%s reason=%s progress=%.2f",
 		completion.Result, completion.Reason, completion.Progress)
 	return true, TriggerActionDone, detail
+}
+
+// recordActionHistory saves a single action_history row at action completion.
+// Best-effort: 5s timeout, logs warn on error, never blocks the decision
+// pipeline. Uses slog.Default() (agentContext doesn't hold a logger) matching
+// the persistSchedule pattern in pkg/agentstate. Skipped in in-memory mode
+// (store == nil).
+func (a *agentContext) recordActionHistory(completion protocol.ActionCompletedPayload, res agentstate.CompletionResult) {
+	store := a.as.Store()
+	if store == nil {
+		return // in-memory mode
+	}
+	agentID := a.as.AgentID()
+	rec := storage.ActionRecord{
+		AgentID:     agentID,
+		ActionID:    completion.ActionID,
+		Cmd:         res.Cmd,
+		Params:      res.Params,
+		Source:      string(res.Src),
+		StartedAt:   res.Start,
+		CompletedAt: time.Now(),
+		Result:      completion.Result,
+		DurationMs:  int(completion.DurationMs),
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := store.SaveActionRecord(ctx, agentID, rec); err != nil {
+		slog.Default().Warn("[action_history] save failed",
+			"agent_id", agentID, "action_id", completion.ActionID, "err", err)
+	}
+}
+
+// loadTacticalMemories fetches top-3 recent memories from the store and
+// formats them as a bullet list for the tactical prompt 【过往经验】段.
+// Returns "" when store is nil (in-memory mode) or no memories exist.
+// Called once per tactical refill (~7 times/game day); indexed query, no
+// caching needed.
+func (a *agentContext) loadTacticalMemories(ctx context.Context, agentID string) string {
+	store := a.as.Store()
+	if store == nil {
+		return ""
+	}
+	memories, err := store.LoadRecentMemories(ctx, agentID, 3)
+	if err != nil {
+		slog.Default().Warn("[记忆层] 加载近期记忆失败",
+			"agent_id", agentID, "err", err)
+		return ""
+	}
+	if len(memories) == 0 {
+		return ""
+	}
+	var sb strings.Builder
+	for _, m := range memories {
+		fmt.Fprintf(&sb, "- %s（%s）\n", m.Content, m.MemoryType)
+	}
+	return strings.TrimSuffix(sb.String(), "\n")
 }
 
 // advanceSlotIfNeeded 检查当前 game_time 是否已超出 currentSlot 结束时间，
@@ -405,7 +467,11 @@ func runPerceptionWorker(
 			if rollover, prevDay, newDay := ac.detectDayRollover(); rollover {
 				logger.Info("[战略层] 检测到跨日，重新生成当日计划",
 					"agent_id", agentID, "prev_day", prevDay, "new_day", newDay)
-				plan := generateDailyPlan(ctx, ac.strategicHc, agentID, kb, capabilityRegistryRef, logger, "")
+				// Stage 4: 日终记忆生成——从昨日 action_history 总结出
+				// narrative（注入战略层 prompt）+ 结构化 memories（存 DB）。
+				// 失败/冷启动返回 ""，generateDailyPlan 内部回退到常量。
+				narrative := generateDailyMemories(ctx, ac.strategicHc, ac.as.Store(), agentID, kb, logger)
+				plan := generateDailyPlan(ctx, ac.strategicHc, agentID, kb, capabilityRegistryRef, logger, narrative)
 				// 不清 currentSlot/actionQueue/currentActionID：让 NPC 自然睡眠到 07:00，
 				// 由 advanceSlotIfNeeded 打断后走 tacticalRefill 选新计划 slot。
 				// currentDay 已由 detectDayRollover 更新为 newDay。
@@ -873,6 +939,9 @@ func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
 	var actions []plannedAction
 	var err error
 
+	// Stage 4: 加载近期记忆注入战术层 prompt（top-3 by created_at DESC）。
+	memories := a.loadTacticalMemories(ctx, agentID)
+
 	// 战术层 LLM 调用统一 30s 硬超时：避免 Venus 后端排队时单次调用卡 120s
 	// 拖死整个游戏时段。超时后调用方发 idle wait，下一感知周期重试。
 	tacticalCtx, tacticalCancel := context.WithTimeout(ctx, tacticalCallTimeout)
@@ -880,7 +949,7 @@ func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
 
 	if tacticalStreamingEnabled {
 		// 流式路径：onAction 回调逐个入队 + 首 action 提前下发。
-		_, _, err = generateTacticalPlanStreaming(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, logger, hint, "", capabilityRegistryRef,
+		_, _, err = generateTacticalPlanStreaming(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, logger, hint, memories, capabilityRegistryRef,
 			func(pa plannedAction) {
 				a.as.AppendQueueAction(pa)
 				if a.as.ShouldDispatchFirst() {
@@ -891,7 +960,7 @@ func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
 		)
 	} else {
 		// 非流式路径（默认）：等完整响应后一次性填充队列。
-		actions, _, err = generateTacticalPlan(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, logger, hint, "", capabilityRegistryRef)
+		actions, _, err = generateTacticalPlan(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, logger, hint, memories, capabilityRegistryRef)
 		if err == nil {
 			a.as.ReplaceQueue(actions)
 		}
@@ -971,6 +1040,9 @@ func (a *agentContext) tacticalRefillForReplan(
 	tacticalCtx, tacticalCancel := context.WithTimeout(ctx, tacticalCallTimeout)
 	defer tacticalCancel()
 
+	// Stage 4: 加载近期记忆注入战术层 prompt（top-3 by created_at DESC）。
+	memories := a.loadTacticalMemories(ctx, agentID)
+
 	var actions []plannedAction
 	var err error
 
@@ -978,7 +1050,7 @@ func (a *agentContext) tacticalRefillForReplan(
 		// 流式路径：回调收集到 local slice（不直接修改 a.actionQueue），
 		// 成功后才覆盖旧队列。失败则旧队列不受影响。
 		var collected []plannedAction
-		_, _, err = generateTacticalPlanStreaming(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, logger, hint, "", capabilityRegistryRef,
+		_, _, err = generateTacticalPlanStreaming(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, logger, hint, memories, capabilityRegistryRef,
 			func(pa plannedAction) {
 				collected = append(collected, pa)
 			},
@@ -987,7 +1059,7 @@ func (a *agentContext) tacticalRefillForReplan(
 			actions = collected
 		}
 	} else {
-		actions, _, err = generateTacticalPlan(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, logger, hint, "", capabilityRegistryRef)
+		actions, _, err = generateTacticalPlan(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, logger, hint, memories, capabilityRegistryRef)
 	}
 
 	// 3. 失败处理：保留旧队列（不清空），调用方保持原 action
