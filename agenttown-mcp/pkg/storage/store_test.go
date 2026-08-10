@@ -81,6 +81,34 @@ func TestNoopStore_LoadActionHistoryIsNoOp(t *testing.T) {
 	}
 }
 
+// TestNoopStore_SaveRelationshipIsNoOp verifies SaveRelationship returns nil without panic.
+func TestNoopStore_SaveRelationshipIsNoOp(t *testing.T) {
+	st := NoopStore{}
+	if err := st.SaveRelationship(context.Background(), "H-01", "H-02", 1, 0); err != nil {
+		t.Errorf("SaveRelationship: got err=%v, want nil", err)
+	}
+}
+
+// TestNoopStore_LoadRelationshipsIsNoOp verifies LoadRelationships returns nil,nil.
+func TestNoopStore_LoadRelationshipsIsNoOp(t *testing.T) {
+	st := NoopStore{}
+	got, err := st.LoadRelationships(context.Background(), "H-01", 10)
+	if err != nil {
+		t.Errorf("LoadRelationships: got err=%v, want nil", err)
+	}
+	if got != nil {
+		t.Errorf("LoadRelationships: got %v, want nil", got)
+	}
+}
+
+// TestNoopStore_SeedRelationshipIsNoOp verifies SeedRelationship returns nil without panic.
+func TestNoopStore_SeedRelationshipIsNoOp(t *testing.T) {
+	st := NoopStore{}
+	if err := st.SeedRelationship(context.Background(), "H-01", "H-02", 5, 0); err != nil {
+		t.Errorf("SeedRelationship: got err=%v, want nil", err)
+	}
+}
+
 // ─── migration file embedding sanity ───
 
 // TestEmbeddedMigrations_Listed verifies the embed directive picked up

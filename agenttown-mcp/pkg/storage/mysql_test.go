@@ -289,3 +289,103 @@ func TestMySQLStore_SaveActionRecordEmptyNullableFields(t *testing.T) {
 		t.Errorf("cmd: got %q, want Wait", r.Cmd)
 	}
 }
+
+// ─── Stage 5: agent_relationships ───
+
+// TestMySQLStore_SaveRelationshipUpsert verifies SaveRelationship inserts on
+// first call and increments on subsequent calls (ON DUPLICATE KEY UPDATE).
+func TestMySQLStore_SaveRelationshipUpsert(t *testing.T) {
+	store, _ := skipIfNoMySQL(t)
+	defer store.Close()
+	ctx := context.Background()
+	agentA, agentB := "test-rel-a", "test-rel-b"
+
+	// First save → INSERT (familiarity=1, interaction_count=1).
+	if err := store.SaveRelationship(ctx, agentA, agentB, 1, 0); err != nil {
+		t.Fatalf("SaveRelationship #1: %v", err)
+	}
+	rels, err := store.LoadRelationships(ctx, agentA, 10)
+	if err != nil {
+		t.Fatalf("LoadRelationships #1: %v", err)
+	}
+	if len(rels) != 1 {
+		t.Fatalf("got %d rows, want 1", len(rels))
+	}
+	if rels[0].Familiarity != 1 || rels[0].InteractionCount != 1 {
+		t.Errorf("after first save: got fam=%d count=%d, want fam=1 count=1",
+			rels[0].Familiarity, rels[0].InteractionCount)
+	}
+
+	// Second save → ON DUPLICATE KEY UPDATE (familiarity=2, interaction_count=2).
+	if err := store.SaveRelationship(ctx, agentA, agentB, 1, 0); err != nil {
+		t.Fatalf("SaveRelationship #2: %v", err)
+	}
+	rels, err = store.LoadRelationships(ctx, agentA, 10)
+	if err != nil {
+		t.Fatalf("LoadRelationships #2: %v", err)
+	}
+	if len(rels) != 1 {
+		t.Fatalf("got %d rows, want 1 (upsert)", len(rels))
+	}
+	if rels[0].Familiarity != 2 || rels[0].InteractionCount != 2 {
+		t.Errorf("after second save: got fam=%d count=%d, want fam=2 count=2",
+			rels[0].Familiarity, rels[0].InteractionCount)
+	}
+}
+
+// TestMySQLStore_LoadRelationshipsBothSides verifies LoadRelationships returns
+// rows where agentID is either agent_a or agent_b.
+func TestMySQLStore_LoadRelationshipsBothSides(t *testing.T) {
+	store, _ := skipIfNoMySQL(t)
+	defer store.Close()
+	ctx := context.Background()
+	// A→B and A→C; querying B should find the A→B row (B is agent_b side).
+	if err := store.SaveRelationship(ctx, "test-side-a", "test-side-b", 1, 0); err != nil {
+		t.Fatalf("SaveRelationship A→B: %v", err)
+	}
+	if err := store.SaveRelationship(ctx, "test-side-a", "test-side-c", 1, 0); err != nil {
+		t.Fatalf("SaveRelationship A→C: %v", err)
+	}
+	rels, err := store.LoadRelationships(ctx, "test-side-b", 10)
+	if err != nil {
+		t.Fatalf("LoadRelationships B: %v", err)
+	}
+	if len(rels) != 1 {
+		t.Fatalf("querying B: got %d rows, want 1", len(rels))
+	}
+	if rels[0].AgentA != "test-side-a" || rels[0].AgentB != "test-side-b" {
+		t.Errorf("got %s→%s, want test-side-a→test-side-b", rels[0].AgentA, rels[0].AgentB)
+	}
+}
+
+// TestMySQLStore_SeedRelationshipInsertIgnore verifies SeedRelationship does
+// not overwrite an existing row (INSERT IGNORE semantics).
+func TestMySQLStore_SeedRelationshipInsertIgnore(t *testing.T) {
+	store, _ := skipIfNoMySQL(t)
+	defer store.Close()
+	ctx := context.Background()
+	agentA, agentB := "test-seed-a", "test-seed-b"
+
+	// First seed → inserts row with familiarity=5.
+	if err := store.SeedRelationship(ctx, agentA, agentB, 5, 0); err != nil {
+		t.Fatalf("SeedRelationship #1: %v", err)
+	}
+	// Live interaction bumps familiarity to 6 via SaveRelationship.
+	if err := store.SaveRelationship(ctx, agentA, agentB, 1, 0); err != nil {
+		t.Fatalf("SaveRelationship: %v", err)
+	}
+	// Second seed → INSERT IGNORE should NOT reset familiarity back to 5.
+	if err := store.SeedRelationship(ctx, agentA, agentB, 5, 0); err != nil {
+		t.Fatalf("SeedRelationship #2: %v", err)
+	}
+	rels, err := store.LoadRelationships(ctx, agentA, 10)
+	if err != nil {
+		t.Fatalf("LoadRelationships: %v", err)
+	}
+	if len(rels) != 1 {
+		t.Fatalf("got %d rows, want 1", len(rels))
+	}
+	if rels[0].Familiarity != 6 {
+		t.Errorf("after seed-ignore: got fam=%d, want 6 (seed should not overwrite)", rels[0].Familiarity)
+	}
+}

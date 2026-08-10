@@ -495,6 +495,21 @@ func (f *fakeStore) LoadActionHistory(_ context.Context, _ string, _ int) ([]sto
 	return nil, nil
 }
 
+// Stage 5 stubs — relationship methods are no-ops; relationship-specific
+// behavior is tested in pkg/storage and cmd/agenttown-mcp/relationship_test.go.
+
+func (f *fakeStore) SaveRelationship(_ context.Context, _ string, _ string, _ int, _ int) error {
+	return nil
+}
+
+func (f *fakeStore) LoadRelationships(_ context.Context, _ string, _ int) ([]storage.Relationship, error) {
+	return nil, nil
+}
+
+func (f *fakeStore) SeedRelationship(_ context.Context, _ string, _ string, _ int, _ int) error {
+	return nil
+}
+
 func (f *fakeStore) Close() error { return nil }
 
 func (f *fakeStore) snapshot(agentID string) (storage.ScheduleState, bool) {

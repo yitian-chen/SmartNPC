@@ -230,4 +230,13 @@ func (m *memoryFakeStore) SaveActionRecord(_ context.Context, _ string, _ storag
 func (m *memoryFakeStore) LoadActionHistory(_ context.Context, _ string, _ int) ([]storage.ActionRecord, error) {
 	return m.actions, nil
 }
+func (m *memoryFakeStore) SaveRelationship(_ context.Context, _ string, _ string, _ int, _ int) error {
+	return nil
+}
+func (m *memoryFakeStore) LoadRelationships(_ context.Context, _ string, _ int) ([]storage.Relationship, error) {
+	return nil, nil
+}
+func (m *memoryFakeStore) SeedRelationship(_ context.Context, _ string, _ string, _ int, _ int) error {
+	return nil
+}
 func (m *memoryFakeStore) Close() error { return nil }

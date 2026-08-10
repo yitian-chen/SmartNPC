@@ -199,3 +199,71 @@ func (s *MySQLStore) LoadActionHistory(ctx context.Context, agentID string, limi
 	}
 	return out, rows.Err()
 }
+
+// SaveRelationship upserts one directional row (agentA→agentB). On duplicate
+// key (the row already exists from a prior interaction), familiarity and
+// affection are incremented by the supplied deltas, interaction_count is
+// bumped by 1, and last_interaction_at is refreshed. Callers update both
+// directions by invoking this twice with swapped arguments.
+func (s *MySQLStore) SaveRelationship(ctx context.Context, agentA, agentB string, familiarityDelta, affectionDelta int) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO agent_relationships
+		   (agent_a, agent_b, familiarity, affection, interaction_count, last_interaction_at)
+		 VALUES (?, ?, ?, ?, 1, NOW())
+		 ON DUPLICATE KEY UPDATE
+		   familiarity = familiarity + VALUES(familiarity),
+		   affection   = affection   + VALUES(affection),
+		   interaction_count = interaction_count + 1,
+		   last_interaction_at = NOW()`,
+		agentA, agentB, familiarityDelta, affectionDelta,
+	)
+	if err != nil {
+		return fmt.Errorf("save relationship %s→%s: %w", agentA, agentB, err)
+	}
+	return nil
+}
+
+// LoadRelationships returns rows where agentID is either side (agent_a OR
+// agent_b), ordered by most recently updated first. Used to inject the
+// 【人际关系】段 in the tactical prompt. last_interaction_at may be NULL
+// (seed rows that have never been interacted through SaveRelationship);
+// COALESCE coerces to the zero time.
+func (s *MySQLStore) LoadRelationships(ctx context.Context, agentID string, limit int) ([]Relationship, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT agent_a, agent_b, familiarity, affection, interaction_count,
+		        COALESCE(last_interaction_at, '0000-00-00 00:00:00')
+		 FROM agent_relationships
+		 WHERE agent_a = ? OR agent_b = ?
+		 ORDER BY updated_at DESC LIMIT ?`, agentID, agentID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("load relationships for %s: %w", agentID, err)
+	}
+	defer rows.Close()
+	var out []Relationship
+	for rows.Next() {
+		var r Relationship
+		if err := rows.Scan(&r.AgentA, &r.AgentB, &r.Familiarity, &r.Affection,
+			&r.InteractionCount, &r.LastInteractionAt); err != nil {
+			return nil, fmt.Errorf("scan relationship for %s: %w", agentID, err)
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// SeedRelationship inserts a row only if no row yet exists for the pair
+// (INSERT IGNORE). Used at cold start to import KB seed values without
+// overwriting interaction counts accumulated in a previous run. Has no
+// last_interaction_at (stays NULL) — the first live interaction fills it in.
+func (s *MySQLStore) SeedRelationship(ctx context.Context, agentA, agentB string, familiarity, affection int) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT IGNORE INTO agent_relationships
+		   (agent_a, agent_b, familiarity, affection, interaction_count)
+		 VALUES (?, ?, ?, ?, 0)`,
+		agentA, agentB, familiarity, affection,
+	)
+	if err != nil {
+		return fmt.Errorf("seed relationship %s→%s: %w", agentA, agentB, err)
+	}
+	return nil
+}
