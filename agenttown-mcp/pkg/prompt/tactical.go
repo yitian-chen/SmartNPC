@@ -35,10 +35,11 @@ var toolOverride = map[string]struct {
 
 // tacticalPromptBody is the prompt's fixed skeleton. %s placeholders are:
 // goal / zone / timeOfDay /
-// physicalLine (physical state line, empty when all-0) / roleLine / hintLine /
-// slotDurationHint / kbContext / toolCount / toolList / exampleBlock.
+// physicalLine (physical state line, empty when all-0) / roleLine / memoriesLine /
+// hintLine / slotDurationHint / kbContext / toolCount / toolList / exampleBlock.
 const tacticalPromptBody = `[战术层/任务分解] 当前时段目标：%s
 你目前在：%s，游戏时间 %s。
+%s
 %s
 %s
 请把这个目标分解为一个或多个 action，按顺序执行。
@@ -78,6 +79,10 @@ func BuildTactical(in TacticalInput) string {
 	if role := AgentRole(in.KB, in.AgentID); role != "" {
 		roleLine = "【你的角色】\n" + role
 	}
+	memoriesLine := ""
+	if in.Memories != "" {
+		memoriesLine = "【过往经验】\n" + in.Memories
+	}
 	hintLine := ""
 	if in.Hint != "" {
 		hintLine = "【上次中断原因】" + in.Hint + "（请据此调整本轮规划）"
@@ -97,6 +102,7 @@ func BuildTactical(in TacticalInput) string {
 	return fmt.Sprintf(tacticalPromptBody, in.Goal, in.Zone, in.TimeOfDay,
 		physicalLine,
 		roleLine,
+		memoriesLine,
 		hintLine, SlotDurationHint(in.Slot, in.TimeOfDay), KBContext(in.KB), toolCount, toolList,
 		TacticalExample(in.KB, in.Goal))
 }

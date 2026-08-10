@@ -26,6 +26,7 @@ type TacticalInput struct {
 	Physical  *protocol.PhysicalState
 	KB        *worldkb.KB
 	Hint      string
+	Memories  string // Stage 4: formatted bullet list of recent memories; empty = skip segment
 	Actions   []protocol.CapabilityAction // from registry.EffectiveActions(agentID); nil → builtin fallback
 	AgentID   string
 }
