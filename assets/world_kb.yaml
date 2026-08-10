@@ -7,9 +7,9 @@ agents:
       editor_label: BP_AT_Agent_LaoChen
       id: H-01
       initial_position:
-        - -8680
-        - -11560
-        - -22712
+        - -7300
+        - -2170
+        - -22520
       initial_zone: residential_quarters
       main_behavior_tree: /Game/AI/AgentTown/AgentBT/BT_AT_LaoChen.BT_AT_LaoChen
       personality:
@@ -21,6 +21,52 @@ agents:
       profession: supervisor、worker、maintainer
       type: Human
       work_preference: main_workshop
+    - action_table: ""
+      actor_class: /Game/AI/AgentTown/AgentBP/Human/BP_AT_Agent_XiaoLin.BP_AT_Agent_XiaoLin_C
+      core_memories: []
+      description: 维修技术员，专注精密装配与设备维护
+      display_name: 小林
+      editor_label: BP_AT_Agent_XiaoLin
+      id: H-02
+      initial_position:
+        - -10980
+        - 2040
+        - -22320
+      initial_zone: repair_bay
+      main_behavior_tree: /Game/AI/AgentTown/AgentBT/BT_AT_XiaoLin.BT_AT_XiaoLin
+      personality:
+        speech_style: 精确，技术术语多
+        traits:
+            - 细致
+            - 严谨
+            - 专注技术
+            - 话少
+      profession: maintainer、technician
+      type: Human
+      work_preference: repair_bay
+    - action_table: ""
+      actor_class: /Game/AI/AgentTown/AgentBP/Human/BP_AT_Agent_XiaoZhao.BP_AT_Agent_XiaoZhao_C
+      core_memories: []
+      description: 物流巡检员，负责物资流转与区域巡检
+      display_name: 小赵
+      editor_label: BP_AT_Agent_XiaoZhao
+      id: H-03
+      initial_position:
+        - -8423
+        - -8360
+        - -22802
+      initial_zone: logistics_hub
+      main_behavior_tree: /Game/AI/AgentTown/AgentBT/BT_AT_XiaoZhao.BT_AT_XiaoZhao
+      personality:
+        speech_style: 热情，爱闲聊
+        traits:
+            - 活泼
+            - 勤快
+            - 话多
+            - 责任感强
+      profession: logistics、patrol、worker
+      type: Human
+      work_preference: logistics_hub
 narrative:
     setting: 工业机器人小镇
     theme: 一座由机器人居民维持生产和日常生活的封闭工业园区。居民在车间、物流站、维修厂等工作，在广场社交、在居住区休息，构成了自给自足的工业生活共同体。
@@ -50,6 +96,29 @@ objects:
       interaction_radius: 1500
       required_roles: []
       zone_id: central_plaza
+    - actor_class: /AgentTownBridge/WorldKB/SmartObject/Computer/BP_AT_Computer.BP_AT_Computer_C
+      actor_position:
+        - -4700
+        - -2640
+        - -21860
+      available_interactions:
+        - surf_internet
+      category: Net
+      default_state: idle
+      description: 放置在档案馆的公共上网终端，机器人居民可以在这里联网查询资料、浏览信息、收发信息，也能用来学习和娱乐。
+      display_name: 电脑
+      editor_label: BP_AT_Computer
+      id: computer
+      interaction_facing:
+        - -0.77
+        - 0.64
+        - 0
+      interaction_point:
+        - -4700
+        - -2640
+        - -21860
+      interaction_radius: 1500
+      zone_id: archive_station
     - actor_class: /AgentTownBridge/WorldKB/SmartObject/RepairTable/BP_AT_RepairTable.BP_AT_RepairTable_C
       actor_position:
         - -11570
@@ -78,8 +147,8 @@ objects:
       zone_id: repair_bay
     - actor_class: /AgentTownBridge/WorldKB/SmartObject/SleepPod/BP_AT_SleepPod.BP_AT_SleepPod_C
       actor_position:
-        - -9220
-        - -12680
+        - -9040
+        - -12400
         - -22720
       available_interactions:
         - sleep
@@ -95,16 +164,39 @@ objects:
         - 0.64
         - 0
       interaction_point:
-        - -9220
-        - -12680
+        - -9040
+        - -12400
         - -22720
       interaction_radius: 1500
       required_roles: []
       zone_id: residential_quarters
+    - actor_class: /AgentTownBridge/WorldKB/SmartObject/SortingConveyor/BP_AT_SortingConveyor.BP_AT_SortingConveyor_C
+      actor_position:
+        - -6130
+        - -10910
+        - -22780
+      available_interactions:
+        - sort_cargo
+      category: work
+      default_state: idle
+      description: 物流中转站的分拣传送带，负责对原料、半成品和成品进行分拣与流转输送。机器人居民在这里搬运、分类和配送物资，是物资进出的关键设施。
+      display_name: 分拣传送带
+      editor_label: BP_AT_SortingConveyor
+      id: sortingconveyor
+      interaction_facing:
+        - 1
+        - 0
+        - 0
+      interaction_point:
+        - -6130
+        - -10910
+        - -22780
+      interaction_radius: 1500
+      zone_id: logistics_hub
     - actor_class: /AgentTownBridge/WorldKB/SmartObject/WorkBench/BP_AT_WorkBench.BP_AT_WorkBench_C
       actor_position:
-        - 7330
-        - 7100
+        - 6290
+        - 6760
         - -21140
       available_interactions:
         - assemble
@@ -120,14 +212,45 @@ objects:
         - 0
         - 0
       interaction_point:
-        - 7330
-        - 7100
+        - 6290
+        - 6760
         - -21140
       interaction_radius: 1500
       required_roles:
         - worker
       zone_id: main_workshop
 version: "1.0"
+relationships:
+    - affection: 50
+      familiarity: 60
+      from: H-01
+      to: H-02
+      type: colleague
+    - affection: 50
+      familiarity: 60
+      from: H-02
+      to: H-01
+      type: colleague
+    - affection: 45
+      familiarity: 55
+      from: H-01
+      to: H-03
+      type: colleague
+    - affection: 45
+      familiarity: 55
+      from: H-03
+      to: H-01
+      type: colleague
+    - affection: 35
+      familiarity: 30
+      from: H-02
+      to: H-03
+      type: acquaintance
+    - affection: 35
+      familiarity: 30
+      from: H-03
+      to: H-02
+      type: acquaintance
 zones:
     - actor_path: /AgentTownBridge/Map/AgentTown.AgentTown:PersistentLevel.BP_AT_ArchiveStation_C_UAID_ACF46673A2EA24F302_1534280443
       bounds:
@@ -146,8 +269,8 @@ zones:
       connections:
         - to: central_plaza
         - to: residential_quarters
-      description: 保存园区历史、技术资料和个人记忆的文化中心，也负责公共广播。机器人居民可以来这里查阅资料、录入档案，是文化与生活交汇的区域。
-      display_name: 档案馆与广播站
+      description: 保存园区历史、技术资料和个人记忆的文化中心，也负责公共广播。同时设有图书馆和网络机房，机器人居民可以来这里查阅资料、录入档案、读书上网，是文化与娱乐交汇的区域。
+      display_name: 档案馆·图书馆与网络中心
       editor_label: BP_AT_ArchiveStation
       entry_facing:
         - 0.64

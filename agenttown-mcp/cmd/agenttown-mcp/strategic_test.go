@@ -444,8 +444,8 @@ func TestBuildDefaultDailyPlan_WithKB(t *testing.T) {
 	// 有 KB 时：兜底计划应包含第一个 zone 显示名 + 第一个 object 显示名。
 	kb := loadTestKB(t)
 	got := prompt.DefaultDailyPlan(kb)
-	// 第一个 zone（按 ID 排序）是 archive_station（显示名"档案馆与广播站"）
-	if !strings.Contains(got, "档案馆与广播站") {
+	// 第一个 zone（按 ID 排序）是 archive_station（显示名"档案馆·图书馆与网络中心"）
+	if !strings.Contains(got, "档案馆·图书馆与网络中心") {
 		t.Errorf("KB-derived plan should contain first zone display name: %q", got)
 	}
 	// 第一个 object（按 ID 排序）是 charge（显示名"充电桩"）

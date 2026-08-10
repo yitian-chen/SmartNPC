@@ -33,7 +33,7 @@ func TestGetPosition_Object(t *testing.T) {
 	if kind != "object" {
 		t.Errorf("kind = %q, want object", kind)
 	}
-	want := [3]float64{7330, 7100, -21140}
+	want := [3]float64{6290, 6760, -21140}
 	if coord != want {
 		t.Errorf("coord = %v, want %v", coord, want)
 	}
@@ -68,9 +68,9 @@ func TestWhichZone_Miss(t *testing.T) {
 
 func TestWhichObject_Hit(t *testing.T) {
 	kb, _ := Load(sampleYAMLPath(t))
-	// workbench actor_position [7330, 7100, -21140], radius 1500cm
+	// workbench actor_position [6290, 6760, -21140], radius 1500cm
 	// A point 500cm away should hit.
-	got := kb.WhichObject([3]float64{7830, 7100, -21140})
+	got := kb.WhichObject([3]float64{6790, 6760, -21140})
 	if got != "workbench" {
 		t.Errorf("WhichObject(near workbench) = %q, want workbench", got)
 	}
