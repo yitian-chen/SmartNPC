@@ -52,10 +52,13 @@ HTTP_PORT="${HTTP_PORT:-8760}"
 # 数据目录 /data/mysql-data 挂在宿主机持久化盘，跨 MCP 重启/容器重建不丢。
 # 环境变量 SKIP_MYSQL=1 可跳过自动启动（MCP 降级为内存模式 NoopStore）。
 # 环境变量 MYSQL_DSN 可覆盖默认 DSN。
+# 环境变量 MYSQL_DB 选择数据库实例名：dev wrapper 设 agenttown_dev，
+# stable 直接跑本脚本默认 agenttown_stable，防止两实例共享同一数据库串台。
 MYSQL_SOCKET="/data/mysql-run/mysql.sock"
 MYSQL_DATA_DIR="/data/mysql-data"
 MYSQL_RUN_DIR="/data/mysql-run"
-MYSQL_DSN_DEFAULT="root@tcp(127.0.0.1:3306)/agenttown?parseTime=true&charset=utf8mb4"
+MYSQL_DB="${MYSQL_DB:-agenttown_stable}"
+MYSQL_DSN_DEFAULT="root@tcp(127.0.0.1:3306)/${MYSQL_DB}?parseTime=true&charset=utf8mb4"
 
 LOG_DATE=$(date +%Y-%m-%d)
 LOG_SUBDIR_BASE="$PROJECT_DIR/logs/$LOG_DATE"
@@ -266,9 +269,10 @@ ensure_mysql() {
         warn "SKIP_MYSQL=1, 跳过 MySQL 启动（MCP 将使用内存模式 NoopStore）"
         return 0
     fi
-    # 已运行则跳过
+    # 已运行则跳过 mysqld 启动，但仍需确保 ${MYSQL_DB} 库存在（防 dev/stable 串台）
     if mysql --socket="$MYSQL_SOCKET" -uroot -e "SELECT 1" >/dev/null 2>&1; then
         ok "MySQL already running (socket=$MYSQL_SOCKET)"
+        ensure_mysql_db
         return 0
     fi
     info "=== Step 0.5: Start MySQL (Linux cloud env) ==="
@@ -308,17 +312,22 @@ ensure_mysql() {
     info "Waiting for MySQL to be ready..."
     while [ $elapsed -lt 20 ]; do
         if mysql --socket="$MYSQL_SOCKET" -uroot -e "SELECT 1" >/dev/null 2>&1; then
-            # 确保 agenttown 库存在
-            mysql --socket="$MYSQL_SOCKET" -uroot -e \
-                "CREATE DATABASE IF NOT EXISTS agenttown CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci" \
-                >/dev/null 2>&1 || fail "CREATE DATABASE agenttown failed"
-            ok "MySQL is up (socket=$MYSQL_SOCKET, datadir=$MYSQL_DATA_DIR)"
+            ensure_mysql_db
+            ok "MySQL is up (socket=$MYSQL_SOCKET, datadir=$MYSQL_DATA_DIR, db=$MYSQL_DB)"
             return 0
         fi
         sleep 1; elapsed=$((elapsed + 1)); printf "."
     done
     echo ""
     fail "MySQL did not come up within 20s (see $MYSQL_RUN_DIR/mysqld.log)"
+}
+
+# ensure_mysql_db 确保 ${MYSQL_DB} 库存在——无论 mysqld 是刚启动还是已运行都要跑，
+# 这样 dev/stable 实例共享同一 mysqld 但各自独立数据库，不会串台。
+ensure_mysql_db() {
+    mysql --socket="$MYSQL_SOCKET" -uroot -e \
+        "CREATE DATABASE IF NOT EXISTS \`$MYSQL_DB\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci" \
+        >/dev/null 2>&1 || fail "CREATE DATABASE $MYSQL_DB failed"
 }
 
 # ─── Step 1: 编译 MCP Windows exe ──────────────────────────────
@@ -487,7 +496,7 @@ print_summary() {
     echo -e "    MCP:        0.0.0.0:$WS_PORT (WS) + :$HTTP_PORT (HTTP)"
     echo -e "    LLM 后端:   Venus 直连（$VENUS_URL, model=$VENUS_MODEL）"
     if $IN_LINUX && [ "${SKIP_MYSQL:-0}" != "1" ]; then
-        echo -e "    MySQL:      127.0.0.1:3306 (socket=$MYSQL_SOCKET, db=agenttown)"
+        echo -e "    MySQL:      127.0.0.1:3306 (socket=$MYSQL_SOCKET, db=$MYSQL_DB)"
         echo -e "                DSN: ${MYSQL_DSN:-$MYSQL_DSN_DEFAULT}"
     fi
     echo ""
