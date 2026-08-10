@@ -36,9 +36,11 @@ var toolOverride = map[string]struct {
 // tacticalPromptBody is the prompt's fixed skeleton. %s placeholders are:
 // goal / zone / timeOfDay /
 // physicalLine (physical state line, empty when all-0) / roleLine / memoriesLine /
+// relationshipsLine /
 // hintLine / slotDurationHint / kbContext / toolCount / toolList / exampleBlock.
 const tacticalPromptBody = `[战术层/任务分解] 当前时段目标：%s
 你目前在：%s，游戏时间 %s。
+%s
 %s
 %s
 %s
@@ -83,6 +85,10 @@ func BuildTactical(in TacticalInput) string {
 	if in.Memories != "" {
 		memoriesLine = "【过往经验】\n" + in.Memories
 	}
+	relationshipsLine := ""
+	if in.Relationships != "" {
+		relationshipsLine = "【人际关系】\n" + in.Relationships
+	}
 	hintLine := ""
 	if in.Hint != "" {
 		hintLine = "【上次中断原因】" + in.Hint + "（请据此调整本轮规划）"
@@ -103,6 +109,7 @@ func BuildTactical(in TacticalInput) string {
 		physicalLine,
 		roleLine,
 		memoriesLine,
+		relationshipsLine,
 		hintLine, SlotDurationHint(in.Slot, in.TimeOfDay), KBContext(in.KB), toolCount, toolList,
 		TacticalExample(in.KB, in.Goal))
 }

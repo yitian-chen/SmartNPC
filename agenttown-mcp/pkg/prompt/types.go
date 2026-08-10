@@ -27,6 +27,7 @@ type TacticalInput struct {
 	KB        *worldkb.KB
 	Hint      string
 	Memories  string // Stage 4: formatted bullet list of recent memories; empty = skip segment
+	Relationships string // Stage 5: formatted relationship list for 【人际关系】段; empty = skip segment (single-NPC scenario)
 	Actions   []protocol.CapabilityAction // from registry.EffectiveActions(agentID); nil → builtin fallback
 	AgentID   string
 }
