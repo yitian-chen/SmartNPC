@@ -305,6 +305,74 @@ func TestClearForSlotSwitch(t *testing.T) {
 	}
 }
 
+// TestClearForSlotSwitch_thenCompletionRestoresStash verifies the
+// long-composite-action interrupt path: ClearForSlotSwitch drops in-flight
+// tracking (because popAndSendQueueAction will issue a deferred stop_action),
+// then the delayed action_completed(interrupted) arrives. RecordActionCompletion
+// must consume the clearedAction stash and report WasInFlight=true with the
+// original Cmd/Params/Start restored — otherwise recordActionHistory skips
+// the row and the long action is lost from action_history.
+func TestClearForSlotSwitch_thenCompletionRestoresStash(t *testing.T) {
+	a := New()
+	params := map[string]any{"target": "workbench_01", "duration_sec": 1800}
+	a.RecordActionStarted("act-long", "ExecuteComposite", params, SourceTactical)
+
+	info := a.ClearForSlotSwitch()
+	if info.ActionID != "act-long" || info.ActionCmd != "ExecuteComposite" {
+		t.Fatalf("info = %+v, want act-long/ExecuteComposite", info)
+	}
+	if a.HasInFlightAction() {
+		t.Error("HasInFlightAction = true after ClearForSlotSwitch")
+	}
+
+	// popAndSendQueueAction would now dispatch a new action; simulate that
+	// writing a fresh currentActionID before the old completion arrives.
+	a.RecordActionStarted("act-new", "MoveTo", nil, SourceTactical)
+
+	// Delayed stop completion for the old long action arrives.
+	res := a.RecordActionCompletion("act-long")
+	if !res.WasInFlight {
+		t.Error("WasInFlight = false, want true (restored from clearedAction stash)")
+	}
+	if res.Cmd != "ExecuteComposite" {
+		t.Errorf("Cmd = %q, want ExecuteComposite", res.Cmd)
+	}
+	if res.Params == nil || res.Params["target"] != "workbench_01" {
+		t.Errorf("Params = %+v, want stashed params", res.Params)
+	}
+	if res.Src != SourceTactical {
+		t.Errorf("Src = %q, want tactical", res.Src)
+	}
+	if res.Start.IsZero() {
+		t.Error("Start = zero, want stashed non-zero")
+	}
+
+	// Stash is one-shot — a second completion for the same ID must not
+	// restore WasInFlight again.
+	res2 := a.RecordActionCompletion("act-long")
+	if res2.WasInFlight {
+		t.Error("second completion: WasInFlight = true, want false (stash already consumed)")
+	}
+}
+
+// TestRecordActionCompletion_NoStashMatch verifies the stash is only
+// consumed on exact actionID match — a completion for an unrelated action
+// (e.g. an unknown action_id from a stale resync replay) must not pick up
+// the stashed fields.
+func TestRecordActionCompletion_NoStashMatch(t *testing.T) {
+	a := New()
+	a.RecordActionStarted("act-long", "ExecuteComposite", map[string]any{"k": "v"}, SourceTactical)
+	a.ClearForSlotSwitch()
+
+	res := a.RecordActionCompletion("act-other")
+	if res.WasInFlight {
+		t.Error("WasInFlight = true for unrelated actionID, want false")
+	}
+	if res.Cmd != "" {
+		t.Errorf("Cmd = %q, want empty (no stash match)", res.Cmd)
+	}
+}
+
 func TestStop_ClearsTransient(t *testing.T) {
 	a := New()
 	a.SetOnline(true)

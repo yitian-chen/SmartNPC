@@ -48,13 +48,32 @@ type AgentState struct {
 	redecomposeCount    int
 	pendingStopActionID string
 	selfStopInProgress  string
-	prevZone            string
-	prevObjectIDs       []string
+	// clearedAction stashes the most recently cleared in-flight action
+	// (cmd/params/start/src) when ClearForSlotSwitch / ClearForReplan
+	// drops in-flight tracking before the delayed stop_action's
+	// action_completed(interrupted) arrives. RecordActionCompletion
+	// consumes the stash on actionID match and restores WasInFlight=true,
+	// so callers (recordActionHistory) still record the full action row
+	// for long-composite actions interrupted by slot switch or replan
+	// fallback. One-shot: matched → cleared. Overwritten by next clear.
+	clearedAction *clearedActionInfo
+	prevZone      string
+	prevObjectIDs []string
 	lastReactiveAt      map[string]time.Time
 	perceptionCount     int
 	replanHint          string
 	lastReplanAt        time.Time
 	lastReplanGameTime  string
+}
+
+// clearedActionInfo is the stash dropped by ClearForSlotSwitch/ClearForReplan
+// and consumed by RecordActionCompletion when a delayed stop completion arrives.
+type clearedActionInfo struct {
+	ActionID string
+	Cmd      string
+	Params   map[string]any
+	Start    time.Time
+	Src      ActionSource
 }
 
 // New creates an AgentState with default zero values. currentDay starts
@@ -277,14 +296,28 @@ func (a *AgentState) RecordActionCompletion(actionID string) CompletionResult {
 	var cmd string
 	var params map[string]any
 	var start time.Time
+	var src ActionSource
 	if wasInFlight {
 		cmd = a.currentActionCmd
 		params = a.currentActionParams
 		start = a.currentActionStart
+		src = a.currentActionSrc
 		a.currentActionID = ""
 		a.currentActionCmd = ""
 		a.currentActionParams = nil
 		a.currentActionStart = time.Time{}
+	} else if a.clearedAction != nil && a.clearedAction.ActionID == actionID {
+		// Delayed stop completion for a long-composite action whose
+		// in-flight tracking was already dropped by ClearForSlotSwitch /
+		// ClearForReplan (slot switch or replan fallback). Restore the
+		// stashed fields so the caller records a full action_history
+		// row. One-shot consume.
+		cmd = a.clearedAction.Cmd
+		params = a.clearedAction.Params
+		start = a.clearedAction.Start
+		src = a.clearedAction.Src
+		wasInFlight = true
+		a.clearedAction = nil
 	}
 	wasPendingStop := a.pendingStopActionID == actionID
 	if wasPendingStop {
@@ -294,8 +327,9 @@ func (a *AgentState) RecordActionCompletion(actionID string) CompletionResult {
 	if wasSelfStop {
 		a.selfStopInProgress = ""
 	}
-	src := a.currentActionSrc
-	a.currentActionSrc = ""
+	if wasInFlight {
+		a.currentActionSrc = ""
+	}
 	a.mu.Unlock()
 
 	return CompletionResult{
@@ -372,6 +406,21 @@ func (a *AgentState) ClearForSlotSwitch() InFlightInfo {
 		ActionCmd: a.currentActionCmd,
 		QueueLen:  len(a.actionQueue),
 	}
+	// Stash the in-flight action so its delayed stop completion
+	// (action_completed with reason=interrupted, arriving after the
+	// stop_action issued by popAndSendQueueAction) can still be
+	// recorded as a full action_history row. Without this stash,
+	// RecordActionCompletion sees currentActionID="" and skips
+	// recording — losing the long-composite action entirely.
+	if a.currentActionID != "" {
+		a.clearedAction = &clearedActionInfo{
+			ActionID: a.currentActionID,
+			Cmd:      a.currentActionCmd,
+			Params:   a.currentActionParams,
+			Start:    a.currentActionStart,
+			Src:      a.currentActionSrc,
+		}
+	}
 	a.actionQueue = nil
 	a.currentActionID = ""
 	a.currentActionCmd = ""
@@ -407,6 +456,7 @@ func (a *AgentState) Stop() {
 	a.actionQueue = nil
 	a.currentSlot = ""
 	a.redecomposeCount = 0
+	a.clearedAction = nil // drop stash — offline agent has no pending completion
 	snap := a.snapshotPersistentLocked()
 	a.mu.Unlock()
 	a.persistSchedule(snap)
