@@ -101,6 +101,7 @@ func generateTacticalPlan(
 	kb *worldkb.KB,
 	logger *slog.Logger,
 	hint string,
+	memories string,
 	registry *CapabilityRegistry,
 ) ([]plannedAction, string, error) {
 	var capActions []protocol.CapabilityAction
@@ -115,6 +116,7 @@ func generateTacticalPlan(
 		Physical:  physical,
 		KB:        kb,
 		Hint:      hint,
+		Memories:  memories,
 		Actions:   capActions,
 		AgentID:   agentID,
 	})
@@ -160,6 +162,7 @@ func generateTacticalPlanStreaming(
 	kb *worldkb.KB,
 	logger *slog.Logger,
 	hint string,
+	memories string,
 	registry *CapabilityRegistry,
 	onAction func(plannedAction),
 ) ([]plannedAction, string, error) {
@@ -175,6 +178,7 @@ func generateTacticalPlanStreaming(
 		Physical:  physical,
 		KB:        kb,
 		Hint:      hint,
+		Memories:  memories,
 		Actions:   capActions,
 		AgentID:   agentID,
 	})

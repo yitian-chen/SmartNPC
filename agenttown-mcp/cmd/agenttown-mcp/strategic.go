@@ -51,14 +51,17 @@ const yesterdaySummaryForFirstDay = "昨天按计划完成了车间装配。"
 // zone/object/agent 名，避免编造 KB 外概念（如换 KB 后仍写"车间"）。
 // registry 用于注入【可用能力】段，让 LLM 知道可用复合动作，避免规划无对应
 // 动作的 goal（如"整理仪容"）。kb/registry == nil 时降级为对应段缺失（向后兼容）。
-func generateDailyPlan(ctx context.Context, sc strategicCaller, agentID string, kb *worldkb.KB, registry *CapabilityRegistry, logger *slog.Logger) string {
+func generateDailyPlan(ctx context.Context, sc strategicCaller, agentID string, kb *worldkb.KB, registry *CapabilityRegistry, logger *slog.Logger, yesterdaySummary string) string {
 	var actions []protocol.CapabilityAction
 	if registry != nil {
 		actions = registry.EffectiveActions(agentID)
 	}
+	if yesterdaySummary == "" {
+		yesterdaySummary = yesterdaySummaryForFirstDay
+	}
 	promptText := fmt.Sprintf(prompt.StrategicPromptTemplate,
 		prompt.BuildStrategic(kb, agentID, actions),
-		"昨日总结："+yesterdaySummaryForFirstDay)
+		"昨日总结："+yesterdaySummary)
 	logger.Info("[MCP→LLM/STRATEGIC-PROMPT]", "agent_id", agentID, "text", promptText)
 
 	resp, err := sc.SendWithSummary(ctx, promptText, "")

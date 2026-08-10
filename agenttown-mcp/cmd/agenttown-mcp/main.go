@@ -368,7 +368,7 @@ func runPerceptionWorker(
 	// 也不会被调，UE 端不会收到任何自动 action_command。手动模式仅响应
 	// /debug/schedule 注入和 /debug/action 下发。
 	if autoPlanEnabled {
-		plan := generateDailyPlan(ctx, ac.strategicHc, agentID, kb, capabilityRegistryRef, logger)
+		plan := generateDailyPlan(ctx, ac.strategicHc, agentID, kb, capabilityRegistryRef, logger, "")
 		// 同步 currentDay：若首条 perception 已到则用其 day_count，否则保持 -1
 		// （由 detectDayRollover 在首条 perception 到达时同步）。
 		ac.as.SetDailyPlan(plan, ac.as.LatestDayCount())
@@ -405,7 +405,7 @@ func runPerceptionWorker(
 			if rollover, prevDay, newDay := ac.detectDayRollover(); rollover {
 				logger.Info("[战略层] 检测到跨日，重新生成当日计划",
 					"agent_id", agentID, "prev_day", prevDay, "new_day", newDay)
-				plan := generateDailyPlan(ctx, ac.strategicHc, agentID, kb, capabilityRegistryRef, logger)
+				plan := generateDailyPlan(ctx, ac.strategicHc, agentID, kb, capabilityRegistryRef, logger, "")
 				// 不清 currentSlot/actionQueue/currentActionID：让 NPC 自然睡眠到 07:00，
 				// 由 advanceSlotIfNeeded 打断后走 tacticalRefill 选新计划 slot。
 				// currentDay 已由 detectDayRollover 更新为 newDay。
@@ -880,7 +880,7 @@ func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
 
 	if tacticalStreamingEnabled {
 		// 流式路径：onAction 回调逐个入队 + 首 action 提前下发。
-		_, _, err = generateTacticalPlanStreaming(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, logger, hint, capabilityRegistryRef,
+		_, _, err = generateTacticalPlanStreaming(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, logger, hint, "", capabilityRegistryRef,
 			func(pa plannedAction) {
 				a.as.AppendQueueAction(pa)
 				if a.as.ShouldDispatchFirst() {
@@ -891,7 +891,7 @@ func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
 		)
 	} else {
 		// 非流式路径（默认）：等完整响应后一次性填充队列。
-		actions, _, err = generateTacticalPlan(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, logger, hint, capabilityRegistryRef)
+		actions, _, err = generateTacticalPlan(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, logger, hint, "", capabilityRegistryRef)
 		if err == nil {
 			a.as.ReplaceQueue(actions)
 		}
@@ -978,7 +978,7 @@ func (a *agentContext) tacticalRefillForReplan(
 		// 流式路径：回调收集到 local slice（不直接修改 a.actionQueue），
 		// 成功后才覆盖旧队列。失败则旧队列不受影响。
 		var collected []plannedAction
-		_, _, err = generateTacticalPlanStreaming(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, logger, hint, capabilityRegistryRef,
+		_, _, err = generateTacticalPlanStreaming(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, logger, hint, "", capabilityRegistryRef,
 			func(pa plannedAction) {
 				collected = append(collected, pa)
 			},
@@ -987,7 +987,7 @@ func (a *agentContext) tacticalRefillForReplan(
 			actions = collected
 		}
 	} else {
-		actions, _, err = generateTacticalPlan(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, logger, hint, capabilityRegistryRef)
+		actions, _, err = generateTacticalPlan(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, logger, hint, "", capabilityRegistryRef)
 	}
 
 	// 3. 失败处理：保留旧队列（不清空），调用方保持原 action
@@ -2025,7 +2025,7 @@ func handleDebugSchedule(ctx context.Context, logger *slog.Logger, ws *wsserver.
 
 	actions, thought, err := generateTacticalPlan(
 		tacticalCtx, tacticalHc, req.AgentID,
-		goal, zone, timeOfDay, slot, physical, kb, logger, "", capabilityRegistryRef,
+		goal, zone, timeOfDay, slot, physical, kb, logger, "", "", capabilityRegistryRef,
 	)
 	if err != nil {
 		logger.Warn("[debug/schedule] decompose failed",
