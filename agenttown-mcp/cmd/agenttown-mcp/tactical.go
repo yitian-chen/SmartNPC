@@ -8,15 +8,15 @@ import (
 	"strings"
 
 	"github.com/AgentTown/agenttown-mcp/adapters/agenttown/tools"
+	"github.com/AgentTown/agenttown-mcp/pkg/agentstate"
 	"github.com/AgentTown/agenttown-mcp/pkg/protocol"
 	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
 )
 
 // plannedAction 是战术层分解出的单步 action，对应一个 MCP 工具调用。
-type plannedAction struct {
-	Action string         `json:"action"` // 工具名：work_at_workbench / move_to_location / ...
-	Params map[string]any `json:"params"` // 工具参数（LLM 原样输出，duration_sec 等未换算）
-}
+// 类型定义已迁移到 pkg/agentstate（导出名 PlannedAction），此处保留
+// alias 供 main 包过渡期使用，避免一次性重命名几十处引用。
+type plannedAction = agentstate.PlannedAction
 
 // ndjsonLine 是战术层 NDJSON 输出的单行判别联合体：要么是 inner_thought，要么是一个 action。
 type ndjsonLine struct {
@@ -26,11 +26,12 @@ type ndjsonLine struct {
 }
 
 // actionSource 标识一个在途 action 由哪一层下发，决定 completion 后的路由。
-type actionSource string
+// 类型定义已迁移到 pkg/agentstate（导出名 ActionSource），此处保留 alias。
+type actionSource = agentstate.ActionSource
 
 const (
-	sourceTool     actionSource = "mcp_tool"
-	sourceTactical actionSource = "tactical"
+	sourceTool     actionSource = agentstate.SourceTool
+	sourceTactical actionSource = agentstate.SourceTactical
 )
 
 // tacticalToolEntry 是战术层 prompt 工具列表段的单条目，由 buildTacticalToolEntries
