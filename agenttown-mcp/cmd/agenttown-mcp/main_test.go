@@ -219,6 +219,99 @@ func TestRecordActionStarted_SetsSource(t *testing.T) {
 	}
 }
 
+// TestRecordActionStarted_CompletionAlreadyArrived verifies the ultra-short-
+// action race fix: when action_completed lands in the same WS read batch as
+// the ACK (e.g. Speak, 4ms), the read loop processes the completion BEFORE
+// recordActionStarted is called. The completion handler stashes the actionID
+// in completedBeforeArm and RecordActionCompletion sees currentActionID="" →
+// wasInFlight=false. Without the fix, recordActionStarted would set
+// currentActionID anyway, and it would NEVER be cleared (completion is gone)
+// — the worker's hasInFlightAction() gate blocks forever, NPC stuck.
+//
+// With the fix: recordActionStarted detects the completedBeforeArm entry,
+// skips RecordActionStarted, and signals the worker to proceed.
+func TestRecordActionStarted_CompletionAlreadyArrived(t *testing.T) {
+	ac, _ := newAgentContext(context.Background())
+
+	// Simulate: completion arrives before recordActionStarted.
+	// recordActionCompletion stashes in completedBeforeArm (currentActionID=""
+	// so wasInFlight=false, timer not armed so it goes to completedBeforeArm).
+	ac.recordActionCompletion(protocol.ActionCompletedPayload{
+		ActionID: "act_short", Result: protocol.ResultSuccess, Progress: 1,
+	})
+
+	// Drain wake from the completion's signal().
+	select {
+	case <-ac.wake:
+	default:
+	}
+
+	// Now recordActionStarted is called (ACK was delivered, caller proceeds).
+	// This must NOT set currentActionID — the action already completed.
+	ac.recordActionStarted("act_short", "Speak", map[string]any{"content": "hi"}, 1, sourceTactical)
+
+	snap := ac.as.Snapshot()
+	if snap.CurrentActionID != "" {
+		t.Fatalf("currentActionID=%q, want empty (completion already arrived, must not set in-flight)", snap.CurrentActionID)
+	}
+	if snap.CurrentActionSrc != "" {
+		t.Fatalf("currentActionSrc=%q, want empty", snap.CurrentActionSrc)
+	}
+
+	// Worker should be signaled to proceed to the next queued action.
+	select {
+	case <-ac.wake:
+		// good — worker can pop the next action
+	default:
+		t.Fatal("recordActionStarted should signal worker when completion already arrived")
+	}
+
+	// completedBeforeArm entry should remain for armActionTimeout to consume
+	// (it skips arming when it finds the entry). Verify it's still there.
+	ac.coordMu.Lock()
+	_, present := ac.completedBeforeArm["act_short"]
+	ac.coordMu.Unlock()
+	if !present {
+		t.Fatal("completedBeforeArm entry consumed prematurely — armActionTimeout needs it to skip arming")
+	}
+}
+
+// TestRecordActionStarted_TOCTOU_Recovery verifies the microsecond-window
+// TOCTOU: completion arrives BETWEEN the completedBeforeArm check and
+// RecordActionStarted setting currentActionID. The second check catches it
+// and clears the stale currentActionID via ClearInFlightAction.
+func TestRecordActionStarted_TOCTOU_Recovery(t *testing.T) {
+	ac, _ := newAgentContext(context.Background())
+
+	// Pre-check: completedBeforeArm is empty, so recordActionStarted proceeds
+	// to RecordActionStarted. We simulate the completion arriving DURING
+	// RecordActionStarted by pre-arming completedBeforeArm AFTER the first
+	// check would have passed. Since we can't easily inject into the middle
+	// of recordActionStarted, we test ClearInFlightAction directly — the
+	// TOCTOU recovery primitive that recordActionStarted calls.
+	ac.as.RecordActionStarted("act_race", "Speak", map[string]any{"content": "x"}, agentstate.SourceTactical)
+	if !ac.as.HasInFlightAction() {
+		t.Fatal("precondition: should have in-flight action")
+	}
+
+	// Simulate: completion arrives and stashes in completedBeforeArm
+	// (currentActionID matches but the completion ran in a parallel goroutine
+	// before RecordActionStarted set the field — wasInFlight was false).
+	ac.coordMu.Lock()
+	ac.completedBeforeArm["act_race"] = struct{}{}
+	ac.coordMu.Unlock()
+
+	// TOCTOU recovery: ClearInFlightAction clears the stale currentActionID.
+	ac.as.ClearInFlightAction("act_race")
+	if ac.as.HasInFlightAction() {
+		t.Fatal("HasInFlightAction=true after ClearInFlightAction, want false (stale currentActionID cleared)")
+	}
+	snap := ac.as.Snapshot()
+	if snap.CurrentActionID != "" {
+		t.Fatalf("currentActionID=%q, want empty after TOCTOU recovery", snap.CurrentActionID)
+	}
+}
+
 // ─── slot 切换延迟 stop ──────────────────────────────────────────
 
 // setGameTimeForTest 在测试中直接设置 latestPerception，让 LatestTimeOfDay
