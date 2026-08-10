@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/AgentTown/agenttown-mcp/pkg/agentstate"
+	"github.com/AgentTown/agenttown-mcp/pkg/prompt"
 	"github.com/AgentTown/agenttown-mcp/pkg/wsserver"
 )
 
@@ -120,7 +121,7 @@ func TestUpgradeIfPhysicalAlert_ReasonContainsOrigReaction(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := upgradeIfPhysicalAlert(c.input, c.dec)
+			got := prompt.UpgradeIfPhysicalAlert(c.input, c.dec)
 			wantSub := "原决策=" + c.wantOrigKind + "/"
 			if !strings.Contains(got.Reason, wantSub) {
 				t.Errorf("Reason = %q, want substring %q", got.Reason, wantSub)
@@ -268,7 +269,7 @@ func TestUpgradeIfPhysicalAlert(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := upgradeIfPhysicalAlert(c.input, c.dec)
+			got := prompt.UpgradeIfPhysicalAlert(c.input, c.dec)
 			if got.Reaction != c.wantKind {
 				t.Errorf("Reaction = %q, want %q", got.Reaction, c.wantKind)
 			}

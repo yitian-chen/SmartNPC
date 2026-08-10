@@ -39,6 +39,7 @@ import (
 	"github.com/AgentTown/agenttown-mcp/pkg/agentstate"
 	"github.com/AgentTown/agenttown-mcp/pkg/llmtypes"
 	"github.com/AgentTown/agenttown-mcp/pkg/ollama"
+	"github.com/AgentTown/agenttown-mcp/pkg/prompt"
 	"github.com/AgentTown/agenttown-mcp/pkg/protocol"
 	"github.com/AgentTown/agenttown-mcp/pkg/transport"
 	"github.com/AgentTown/agenttown-mcp/pkg/venus"
@@ -125,10 +126,10 @@ func (a *agentContext) observePerception(payload json.RawMessage) (ReactiveTrigg
 	// 检测显著变化（zone/新物体）。物理警戒带由 updateState 检测，
 	// 这里 prev/cur physical 都用 latestPhysical（即上次 state_report），
 	// 不重复检测物理触发。
-	trigger, detail := shouldTriggerReactive(upd.PrevZone, upd.CurZone, upd.PrevObjectIDs, upd.CurObjectIDs, upd.PrevPhysical, upd.PrevPhysical)
+	trigger, detail := prompt.ShouldTriggerReactive(upd.PrevZone, upd.CurZone, upd.PrevObjectIDs, upd.CurObjectIDs, upd.PrevPhysical, upd.PrevPhysical)
 	// 事件类触发优先；无事件时检查周期性触发
 	if trigger == "" {
-		trigger, detail = shouldTriggerPeriodic(pCount)
+		trigger, detail = prompt.ShouldTriggerPeriodic(pCount)
 	}
 
 	// 感知是 worker 的主驱动源：每次感知到达都唤醒它检查战术队列
@@ -151,7 +152,7 @@ func (a *agentContext) updateState(report protocol.StateReportPayload) (Reactive
 	prevPhysical := a.as.SetPhysicalState(&physical, cloneTask(report.CurrentTaskProgress))
 
 	// 检测物理警戒带突破（zone/objects 不在此检测，由 observePerception 负责）
-	return shouldTriggerReactive("", "", nil, nil, prevPhysical, &physical)
+	return prompt.ShouldTriggerReactive("", "", nil, nil, prevPhysical, &physical)
 }
 
 // recordActionCompletion 处理 action_completed。所有来源的 completion 都清
@@ -217,7 +218,7 @@ func (a *agentContext) advanceSlotIfNeeded(ws *wsserver.Server, agentID string, 
 	// 检查 slot 是否过期（AgentState 内部持锁判断）
 	_, slot, _ := a.as.SnapshotSchedule()
 	tod := a.as.LatestTimeOfDay()
-	if !slotExpired(slot, tod) {
+	if !prompt.SlotExpired(slot, tod) {
 		return
 	}
 	info := a.as.ClearForSlotSwitch()

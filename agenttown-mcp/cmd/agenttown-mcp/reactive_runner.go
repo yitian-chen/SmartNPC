@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/AgentTown/agenttown-mcp/pkg/ollama"
+	"github.com/AgentTown/agenttown-mcp/pkg/prompt"
 	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
 	"github.com/AgentTown/agenttown-mcp/pkg/wsserver"
 )
@@ -89,7 +90,7 @@ func (r *reactiveRunner) trigger(agentID string, ac *agentContext, trigger React
 	}
 
 	// 1. 去抖检查（与文档决策 3 一致：事件类 60s，周期性 45s）
-	key := dedupeKey(agentID, trigger, detail)
+	key := prompt.DedupeKey(agentID, trigger, detail)
 	dedupeWindow := reactiveDedupeWindow
 	if trigger == TriggerPeriodic {
 		dedupeWindow = reactivePeriodicDedupeWindow
@@ -115,7 +116,7 @@ func (r *reactiveRunner) trigger(agentID string, ac *agentContext, trigger React
 
 	// 3. 构造 prompt 输入
 	input := r.buildInput(agentID, ac, trigger, detail)
-	prompt := buildReactivePrompt(input)
+	promptText := prompt.BuildReactive(input)
 	r.logger.Info("[反应层/触发]",
 		"agent_id", agentID, "trigger", trigger, "detail", detail,
 		"zone", input.Zone, "time_of_day", input.TimeOfDay,
@@ -124,12 +125,12 @@ func (r *reactiveRunner) trigger(agentID string, ac *agentContext, trigger React
 		"action_src", input.ActionSrc, "current_slot", input.CurrentSlot)
 	r.logger.Info("[反应层/PROMPT]",
 		"agent_id", agentID, "trigger", trigger, "model", r.ollama.Model(),
-		"text", prompt)
+		"text", promptText)
 
 	// 4. 调用 Ollama（8s 超时）
 	ctx, cancel := context.WithTimeout(context.Background(), reactiveCallTimeout)
 	defer cancel()
-	raw, err := r.ollama.Chat(ctx, prompt)
+	raw, err := r.ollama.Chat(ctx, promptText)
 	if err != nil {
 		r.logger.Warn("[反应层/失败]",
 			"agent_id", agentID, "trigger", trigger, "err", err)
@@ -139,10 +140,10 @@ func (r *reactiveRunner) trigger(agentID string, ac *agentContext, trigger React
 		"agent_id", agentID, "trigger", trigger, "raw", raw)
 
 	// 5. 解析决策（容错：失败默认 continue）
-	dec := parseReactiveDecision(raw)
+	dec := prompt.ParseReactiveDecision(raw)
 	// 代码层兜底：物理状态告警时强制升级 continue/observe 为 interrupt。
 	// LLM 在 fatigue=80+ 时仍可能输出 observe，仅靠 prompt 约束不可靠。
-	dec = upgradeIfPhysicalAlert(input, dec)
+	dec = prompt.UpgradeIfPhysicalAlert(input, dec)
 	r.logger.Info("[反应层/决策]",
 		"agent_id", agentID, "reaction", dec.Reaction, "reason", dec.Reason,
 		"trigger", trigger,
@@ -201,7 +202,7 @@ func (r *reactiveRunner) buildInput(agentID string, ac *agentContext, trigger Re
 			agentName = agent.DisplayName
 		}
 	}
-	agentRole := buildAgentRoleContext(r.kb, agentID)
+	agentRole := prompt.AgentRole(r.kb, agentID)
 
 	// 实时从 dailyPlan 计算 slot，避免长动作在途时 currentSlot stale。
 	// __debug__ 前缀的 slot 是 /debug/schedule 注入的临时覆盖，保留原值。
@@ -291,7 +292,7 @@ func (r *reactiveRunner) execute(agentID string, ac *agentContext, dec ReactiveD
 			lastReplanGT := snap.LastReplanGameTime
 			curGT := snap.LatestTimeOfDay()
 			if lastReplanGT != "" && curGT != "" {
-				delta := gameTimeDeltaMinutes(lastReplanGT, curGT)
+				delta := prompt.GameTimeDeltaMinutes(lastReplanGT, curGT)
 				if delta < replanDedupeGameMinutes {
 					r.logger.Info("[反应层] replan 去抖跳过（1 游戏小时内已 replan）",
 						"agent_id", agentID,

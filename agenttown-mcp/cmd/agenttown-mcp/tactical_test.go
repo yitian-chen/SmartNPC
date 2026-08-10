@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/AgentTown/agenttown-mcp/pkg/prompt"
 	"github.com/AgentTown/agenttown-mcp/pkg/protocol"
 	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
 )
@@ -586,92 +587,90 @@ func TestGenerateTacticalPlan_ResetSessionCalled(t *testing.T) {
 // ─── buildTacticalPrompt ─────────────────────────────────────
 
 func TestBuildTacticalPrompt_NilPhysical(t *testing.T) {
-	prompt := buildTacticalPrompt("装配", "main_workshop", "09:00", "", nil, nil, "", nil, "")
-	if prompt == "" {
-		t.Fatal("prompt should not be empty")
+	promptText := prompt.BuildTactical(prompt.TacticalInput{Goal: "装配", Zone: "main_workshop", TimeOfDay: "09:00", Slot: "", Physical: nil, KB: nil, Hint: "", Actions: nil, AgentID: ""})
+	if promptText == "" {
+		t.Fatal("promptText should not be empty")
 	}
 	// nil physical 时跳过物理状态行（UE 未实现物理状态，不传 0 值避免 LLM 误判）
-	if strings.Contains(prompt, "物理状态") {
-		t.Errorf("prompt should not contain '物理状态' for nil physical, got: %s", prompt)
+	if strings.Contains(promptText, "物理状态") {
+		t.Errorf("prompt should not contain '物理状态' for nil physical, got: %s", promptText)
 	}
 	// slot 为空时不应有时长提示行
-	if strings.Contains(prompt, "请让步骤总时长接近此时长") {
-		t.Errorf("prompt should not contain slot duration hint when slot is empty, got: %s", prompt)
+	if strings.Contains(promptText, "请让步骤总时长接近此时长") {
+		t.Errorf("prompt should not contain slot duration hint when slot is empty, got: %s", promptText)
 	}
 }
 
 // TestBuildTacticalPrompt_ZeroPhysical 验证全 0 物理状态（UE 已上报但值全 0）
 // 也跳过物理状态行注入，与 nil physical 同等处理。
 func TestBuildTacticalPrompt_ZeroPhysical(t *testing.T) {
-	prompt := buildTacticalPrompt("装配", "main_workshop", "09:00", "09:00-12:00",
-		&protocol.PhysicalState{}, nil, "", nil, "")
-	if strings.Contains(prompt, "物理状态") {
-		t.Errorf("prompt should not contain '物理状态' for all-zero physical, got: %s", prompt)
+	promptText := prompt.BuildTactical(prompt.TacticalInput{Goal: "装配", Zone: "main_workshop", TimeOfDay: "09:00", Slot: "09:00-12:00", Physical: &protocol.PhysicalState{}, KB: nil, Hint: "", Actions: nil, AgentID: ""})
+	if strings.Contains(promptText, "物理状态") {
+		t.Errorf("prompt should not contain '物理状态' for all-zero physical, got: %s", promptText)
 	}
 }
 
 func TestBuildTacticalPrompt_WithPhysical(t *testing.T) {
-	prompt := buildTacticalPrompt("装配", "main_workshop", "09:00", "09:00-12:00", &protocol.PhysicalState{Energy: 75, Fatigue: 30, JointWear: 5, Health: 90}, nil, "", nil, "")
-	if !strings.Contains(prompt, "能量 75") {
-		t.Errorf("prompt should contain '能量 75', got: %s", prompt)
+	promptText := prompt.BuildTactical(prompt.TacticalInput{Goal: "装配", Zone: "main_workshop", TimeOfDay: "09:00", Slot: "09:00-12:00", Physical: &protocol.PhysicalState{Energy: 75, Fatigue: 30, JointWear: 5, Health: 90}, KB: nil, Hint: "", Actions: nil, AgentID: ""})
+	if !strings.Contains(promptText, "能量 75") {
+		t.Errorf("prompt should contain '能量 75', got: %s", promptText)
 	}
-	if !strings.Contains(prompt, "疲劳 30") {
+	if !strings.Contains(promptText, "疲劳 30") {
 		t.Errorf("prompt should contain '疲劳 30'")
 	}
 	// slot 有效时应包含时长提示
-	if !strings.Contains(prompt, "当前时段 09:00-12:00，约 180 分钟") {
-		t.Errorf("prompt should contain slot duration hint, got: %s", prompt)
+	if !strings.Contains(promptText, "当前时段 09:00-12:00，约 180 分钟") {
+		t.Errorf("prompt should contain slot duration hint, got: %s", promptText)
 	}
 }
 
 func TestBuildTacticalPrompt_InjectsKBContext(t *testing.T) {
 	kb := loadTestKB(t)
-	prompt := buildTacticalPrompt("装配", "main_workshop", "09:00", "09:00-12:00",
-		&protocol.PhysicalState{Energy: 75, Fatigue: 30, JointWear: 5, Health: 90}, kb, "", nil, "")
+	promptText := prompt.BuildTactical(prompt.TacticalInput{Goal: "装配", Zone: "main_workshop", TimeOfDay: "09:00", Slot: "09:00-12:00", Physical: &protocol.PhysicalState{Energy: 75, Fatigue: 30, JointWear: 5, Health: 90}, KB: kb, Hint: "", Actions: nil, AgentID: ""})
 	// 应包含 KB 中所有 zone（assets/world_kb.yaml 当前是 7-zone 工业园区）
 	for _, zID := range []string{"main_workshop", "central_plaza", "logistics_hub", "repair_bay", "residential_quarters", "archive_station", "recycling_yard"} {
-		if !strings.Contains(prompt, zID) {
-			t.Errorf("prompt should list zone %q, got: %s", zID, prompt)
+		if !strings.Contains(promptText, zID) {
+			t.Errorf("prompt should list zone %q, got: %s", zID, promptText)
 		}
 	}
 	// 应包含所有 object（新 UE5 KB: charge/repairtable/sleeppod/workbench）
 	for _, oID := range []string{"workbench", "charge", "sleeppod", "repairtable"} {
-		if !strings.Contains(prompt, oID) {
-			t.Errorf("prompt should list object %q, got: %s", oID, prompt)
+		if !strings.Contains(promptText, oID) {
+			t.Errorf("prompt should list object %q, got: %s", oID, promptText)
 		}
 	}
 	// 应包含"可交互物体"段落标题及交互动词
-	if !strings.Contains(prompt, "可交互物体") {
-		t.Errorf("prompt should contain '可交互物体' section, got: %s", prompt)
+	if !strings.Contains(promptText, "可交互物体") {
+		t.Errorf("prompt should contain '可交互物体' section, got: %s", promptText)
 	}
-	if !strings.Contains(prompt, "assemble") || !strings.Contains(prompt, "charge") || !strings.Contains(prompt, "sleep") {
-		t.Errorf("prompt should list available interactions on objects, got: %s", prompt)
+	if !strings.Contains(promptText, "assemble") || !strings.Contains(promptText, "charge") || !strings.Contains(promptText, "sleep") {
+		t.Errorf("prompt should list available interactions on objects, got: %s", promptText)
 	}
 	// 验证新格式：每个 object 单独一行，明确分离 id/zone/interaction
 	// 不应再出现旧的 "id|zone[interactions]" 拼接格式
-	if strings.Contains(prompt, "workbench|main_workshop[") {
-		t.Errorf("prompt should not contain legacy 'id|zone[interactions]' format, got: %s", prompt)
+	if strings.Contains(promptText, "workbench|main_workshop[") {
+		t.Errorf("prompt should not contain legacy 'id|zone[interactions]' format, got: %s", promptText)
 	}
 	// 应包含明确的 id/zone/interaction 标注
-	if !strings.Contains(prompt, "id=workbench") {
-		t.Errorf("prompt should contain 'id=workbench' label, got: %s", prompt)
+	if !strings.Contains(promptText, "id=workbench") {
+		t.Errorf("prompt should contain 'id=workbench' label, got: %s", promptText)
 	}
-	if !strings.Contains(prompt, "位于 zone=main_workshop") {
-		t.Errorf("prompt should contain '位于 zone=main_workshop', got: %s", prompt)
+	if !strings.Contains(promptText, "位于 zone=main_workshop") {
+		t.Errorf("prompt should contain '位于 zone=main_workshop', got: %s", promptText)
 	}
 }
 
 func TestBuildTacticalPrompt_NilKB(t *testing.T) {
 	// nil KB 时不应崩溃，也不应包含 KB 上下文段落
-	prompt := buildTacticalPrompt("装配", "main_workshop", "09:00", "", nil, nil, "", nil, "")
+	promptText := prompt.BuildTactical(prompt.TacticalInput{Goal: "装配", Zone: "main_workshop", TimeOfDay: "09:00", Slot: "", Physical: nil, KB: nil, Hint: "", Actions: nil, AgentID: ""})
 	// 不应出现 KB 段落标题（"可前往区域（..."、"可交互物体（..."）
 	// 注意：示例 fallback 文本里会提到"上方可前往区域的 id"作为占位提示，
 	// 这是引导文字而非 KB 内容，不应被此断言拦截——所以用更精确的段落标题匹配。
-	if strings.Contains(prompt, "可前往区域（move_to_location") {
-		t.Errorf("prompt should not contain '可前往区域' section when KB is nil, got: %s", prompt)
+	if strings.Contains(promptText, "可前往区域（move_to_location") {
+		t.Errorf("prompt should not contain '可前往区域' section when KB is nil, got: %s", promptText)
 	}
-	if strings.Contains(prompt, "可交互物体（interact") {
-		t.Errorf("prompt should not contain '可交互物体' section when KB is nil, got: %s", prompt)
+	if strings.Contains(promptText, "可交互物体（interact") {
+		t.Errorf("prompt should not contain '可交互物体' section when KB is nil, got: %s", promptText)
 	}
 }
 
@@ -682,15 +681,13 @@ func TestBuildTacticalPrompt_NilKB(t *testing.T) {
 // "沉稳"性格影响 action 选择与节奏），而非机械分解。
 func TestBuildTacticalPrompt_InjectsAgentRole(t *testing.T) {
 	kb := loadTestKB(t)
-	prompt := buildTacticalPrompt("装配", "main_workshop", "09:00", "09:00-12:00",
-		&protocol.PhysicalState{Energy: 75, Fatigue: 30, JointWear: 5, Health: 90},
-		kb, "", nil, "H-01")
-	if !strings.Contains(prompt, "【你的角色】") {
-		t.Errorf("prompt missing '【你的角色】' section header, got: %s", prompt)
+	promptText := prompt.BuildTactical(prompt.TacticalInput{Goal: "装配", Zone: "main_workshop", TimeOfDay: "09:00", Slot: "09:00-12:00", Physical: &protocol.PhysicalState{Energy: 75, Fatigue: 30, JointWear: 5, Health: 90}, KB: kb, Hint: "", Actions: nil, AgentID: "H-01"})
+	if !strings.Contains(promptText, "【你的角色】") {
+		t.Errorf("prompt missing '【你的角色】' section header, got: %s", promptText)
 	}
 	for _, want := range []string{"老陈", "supervisor、worker、maintainer", "沉稳"} {
-		if !strings.Contains(prompt, want) {
-			t.Errorf("prompt missing role field %q, got: %s", want, prompt)
+		if !strings.Contains(promptText, want) {
+			t.Errorf("prompt missing role field %q, got: %s", want, promptText)
 		}
 	}
 }
@@ -698,9 +695,9 @@ func TestBuildTacticalPrompt_InjectsAgentRole(t *testing.T) {
 // TestBuildTacticalPrompt_NilKBNoRole 验证 kb==nil 时 prompt 不含
 // 【你的角色】段（roleLine 降级为空串，prompt 中仅留空行）。
 func TestBuildTacticalPrompt_NilKBNoRole(t *testing.T) {
-	prompt := buildTacticalPrompt("装配", "main_workshop", "09:00", "", nil, nil, "", nil, "")
-	if strings.Contains(prompt, "【你的角色】") {
-		t.Errorf("prompt should not contain '【你的角色】' when KB is nil, got: %s", prompt)
+	promptText := prompt.BuildTactical(prompt.TacticalInput{Goal: "装配", Zone: "main_workshop", TimeOfDay: "09:00", Slot: "", Physical: nil, KB: nil, Hint: "", Actions: nil, AgentID: ""})
+	if strings.Contains(promptText, "【你的角色】") {
+		t.Errorf("prompt should not contain '【你的角色】' when KB is nil, got: %s", promptText)
 	}
 }
 
@@ -708,33 +705,29 @@ func TestBuildTacticalPrompt_NilKBNoRole(t *testing.T) {
 // 不在 KB 中时也降级跳过【你的角色】段（buildAgentRoleContext 返回空串）。
 func TestBuildTacticalPrompt_AgentNotFoundNoRole(t *testing.T) {
 	kb := loadTestKB(t)
-	prompt := buildTacticalPrompt("装配", "main_workshop", "09:00", "",
-		nil, kb, "", nil, "NONEXISTENT-99")
-	if strings.Contains(prompt, "【你的角色】") {
-		t.Errorf("prompt should not include '【你的角色】' for unknown agent, got: %s", prompt)
+	promptText := prompt.BuildTactical(prompt.TacticalInput{Goal: "装配", Zone: "main_workshop", TimeOfDay: "09:00", Slot: "", Physical: nil, KB: kb, Hint: "", Actions: nil, AgentID: "NONEXISTENT-99"})
+	if strings.Contains(promptText, "【你的角色】") {
+		t.Errorf("prompt should not include '【你的角色】' for unknown agent, got: %s", promptText)
 	}
 }
 
 func TestBuildTacticalPrompt_WithHint(t *testing.T) {
-	prompt := buildTacticalPrompt("装配", "main_workshop", "09:00", "09:00-12:00",
-		&protocol.PhysicalState{Energy: 75, Fatigue: 30, JointWear: 5, Health: 90}, nil,
-		"fatigue=72 已突破警戒带，当前装配任务不合理", nil, "")
-	if !strings.Contains(prompt, "【上次中断原因】") {
-		t.Errorf("prompt should contain '【上次中断原因】' when hint is non-empty, got: %s", prompt)
+	promptText := prompt.BuildTactical(prompt.TacticalInput{Goal: "装配", Zone: "main_workshop", TimeOfDay: "09:00", Slot: "09:00-12:00", Physical: &protocol.PhysicalState{Energy: 75, Fatigue: 30, JointWear: 5, Health: 90}, KB: nil, Hint: "fatigue=72 已突破警戒带，当前装配任务不合理", Actions: nil, AgentID: ""})
+	if !strings.Contains(promptText, "【上次中断原因】") {
+		t.Errorf("prompt should contain '【上次中断原因】' when hint is non-empty, got: %s", promptText)
 	}
-	if !strings.Contains(prompt, "fatigue=72 已突破警戒带") {
-		t.Errorf("prompt should contain the hint text, got: %s", prompt)
+	if !strings.Contains(promptText, "fatigue=72 已突破警戒带") {
+		t.Errorf("prompt should contain the hint text, got: %s", promptText)
 	}
-	if !strings.Contains(prompt, "请据此调整本轮规划") {
-		t.Errorf("prompt should contain adjustment guidance, got: %s", prompt)
+	if !strings.Contains(promptText, "请据此调整本轮规划") {
+		t.Errorf("prompt should contain adjustment guidance, got: %s", promptText)
 	}
 }
 
 func TestBuildTacticalPrompt_NoHint(t *testing.T) {
-	prompt := buildTacticalPrompt("装配", "main_workshop", "09:00", "09:00-12:00",
-		&protocol.PhysicalState{Energy: 75, Fatigue: 30, JointWear: 5, Health: 90}, nil, "", nil, "")
-	if strings.Contains(prompt, "【上次中断原因】") {
-		t.Errorf("prompt should not contain '【上次中断原因】' when hint is empty, got: %s", prompt)
+	promptText := prompt.BuildTactical(prompt.TacticalInput{Goal: "装配", Zone: "main_workshop", TimeOfDay: "09:00", Slot: "09:00-12:00", Physical: &protocol.PhysicalState{Energy: 75, Fatigue: 30, JointWear: 5, Health: 90}, KB: nil, Hint: "", Actions: nil, AgentID: ""})
+	if strings.Contains(promptText, "【上次中断原因】") {
+		t.Errorf("prompt should not contain '【上次中断原因】' when hint is empty, got: %s", promptText)
 	}
 }
 
@@ -742,13 +735,12 @@ func TestBuildTacticalPrompt_NoHint(t *testing.T) {
 // zone-object 依赖约束，引导 LLM 在调用 interact/work_at_workbench/charge_at_station
 // 前先 move_to_location 到 object 所在 zone（Fix A）。
 func TestBuildTacticalPrompt_ZoneObjectDependency(t *testing.T) {
-	prompt := buildTacticalPrompt("装配", "main_workshop", "09:00", "09:00-12:00",
-		&protocol.PhysicalState{Energy: 75, Fatigue: 30, JointWear: 5, Health: 90}, nil, "", nil, "")
-	if !strings.Contains(prompt, "interact / work_at_workbench / charge_at_station 必须在 object 所在 zone 调用") {
-		t.Errorf("prompt should contain zone-object dependency rule, got: %s", prompt)
+	promptText := prompt.BuildTactical(prompt.TacticalInput{Goal: "装配", Zone: "main_workshop", TimeOfDay: "09:00", Slot: "09:00-12:00", Physical: &protocol.PhysicalState{Energy: 75, Fatigue: 30, JointWear: 5, Health: 90}, KB: nil, Hint: "", Actions: nil, AgentID: ""})
+	if !strings.Contains(promptText, "interact / work_at_workbench / charge_at_station 必须在 object 所在 zone 调用") {
+		t.Errorf("prompt should contain zone-object dependency rule, got: %s", promptText)
 	}
-	if !strings.Contains(prompt, "必须先 move_to_location 到该 zone") {
-		t.Errorf("prompt should instruct to move_to_location first, got: %s", prompt)
+	if !strings.Contains(promptText, "必须先 move_to_location 到该 zone") {
+		t.Errorf("prompt should instruct to move_to_location first, got: %s", promptText)
 	}
 }
 
@@ -764,25 +756,24 @@ func TestBuildTacticalPrompt_RegistryFiltersTools(t *testing.T) {
 		{Cmd: protocol.CmdMoveToLocation, Kind: "atomic"},
 		{Cmd: protocol.CmdWait, Kind: "atomic"},
 	})
-	prompt := buildTacticalPrompt("装配", "main_workshop", "09:00", "09:00-12:00",
-		&protocol.PhysicalState{Energy: 75, Fatigue: 30, JointWear: 5, Health: 90}, nil, "", reg, "H-01")
+	promptText := prompt.BuildTactical(prompt.TacticalInput{Goal: "装配", Zone: "main_workshop", TimeOfDay: "09:00", Slot: "09:00-12:00", Physical: &protocol.PhysicalState{Energy: 75, Fatigue: 30, JointWear: 5, Health: 90}, KB: nil, Hint: "", Actions: reg.EffectiveActions("H-01"), AgentID: "H-01"})
 	// Tool bullet list should contain move_to_location.
-	if !strings.Contains(prompt, "- move_to_location [原子]:") {
-		t.Errorf("prompt should list move_to_location as [原子] bullet, got: %s", prompt)
+	if !strings.Contains(promptText, "- move_to_location [原子]:") {
+		t.Errorf("prompt should list move_to_location as [原子] bullet, got: %s", promptText)
 	}
 	// wait should NOT appear as a tool bullet (filtered from tactical prompt).
-	if strings.Contains(prompt, "- wait [") {
-		t.Errorf("prompt should NOT list wait as a bullet (filtered from tactical prompt), got: %s", prompt)
+	if strings.Contains(promptText, "- wait [") {
+		t.Errorf("prompt should NOT list wait as a bullet (filtered from tactical prompt), got: %s", promptText)
 	}
 	// Tool bullet list should NOT contain composite tools (composite cmds unavailable).
 	// Check the bullet prefix specifically — the hardcoded example section
 	// mentions work_at_workbench regardless, which is a separate prompt-quality concern.
-	if strings.Contains(prompt, "- work_at_workbench [复合]:") || strings.Contains(prompt, "- charge_at_station [复合]:") {
-		t.Errorf("prompt should NOT list composite tools as [复合] bullets (composite cmds unavailable), got: %s", prompt)
+	if strings.Contains(promptText, "- work_at_workbench [复合]:") || strings.Contains(promptText, "- charge_at_station [复合]:") {
+		t.Errorf("prompt should NOT list composite tools as [复合] bullets (composite cmds unavailable), got: %s", promptText)
 	}
 	// Count in header should match available tools (1 — only move_to_location, wait filtered).
-	if !strings.Contains(prompt, "仅限以下 1 个") {
-		t.Errorf("prompt header should say '仅限以下 1 个', got: %s", prompt)
+	if !strings.Contains(promptText, "仅限以下 1 个") {
+		t.Errorf("prompt header should say '仅限以下 1 个', got: %s", promptText)
 	}
 }
 
@@ -797,10 +788,8 @@ func TestBuildTacticalPrompt_PerAgentOverride(t *testing.T) {
 	reg.Register("H-02", []protocol.CapabilityAction{
 		{Cmd: protocol.CmdMoveToLocation, Kind: "atomic"},
 	})
-	promptH01 := buildTacticalPrompt("装配", "main_workshop", "09:00", "09:00-12:00",
-		&protocol.PhysicalState{Energy: 75}, nil, "", reg, "H-01")
-	promptH02 := buildTacticalPrompt("装配", "main_workshop", "09:00", "09:00-12:00",
-		&protocol.PhysicalState{Energy: 75}, nil, "", reg, "H-02")
+	promptH01 := prompt.BuildTactical(prompt.TacticalInput{Goal: "装配", Zone: "main_workshop", TimeOfDay: "09:00", Slot: "09:00-12:00", Physical: &protocol.PhysicalState{Energy: 75}, KB: nil, Hint: "", Actions: reg.EffectiveActions("H-01"), AgentID: "H-01"})
+	promptH02 := prompt.BuildTactical(prompt.TacticalInput{Goal: "装配", Zone: "main_workshop", TimeOfDay: "09:00", Slot: "09:00-12:00", Physical: &protocol.PhysicalState{Energy: 75}, KB: nil, Hint: "", Actions: reg.EffectiveActions("H-02"), AgentID: "H-02"})
 	// Check bullet prefix — example section is hardcoded and not registry-aware.
 	if !strings.Contains(promptH01, "- work_at_workbench [复合]:") {
 		t.Errorf("H-01 prompt should list composite tools as [复合] bullets (global default), got: %s", promptH01)
@@ -851,9 +840,9 @@ func TestSlotDurationMinute(t *testing.T) {
 		{"abc-xyz", -1},
 	}
 	for _, c := range cases {
-		got := slotDurationMinute(c.slot)
+		got := prompt.SlotDurationMinute(c.slot)
 		if got != c.want {
-			t.Errorf("slotDurationMinute(%q) = %d, want %d", c.slot, got, c.want)
+			t.Errorf("prompt.SlotDurationMinute(%q) = %d, want %d", c.slot, got, c.want)
 		}
 	}
 }
@@ -872,9 +861,9 @@ func TestSlotRangeMinute_CrossMidnight(t *testing.T) {
 		{"09:00-12:00", 540, 720},
 	}
 	for _, c := range cases {
-		s, e := slotRangeMinute(c.slot)
+		s, e := prompt.SlotRangeMinute(c.slot)
 		if s != c.wantStart || e != c.wantEnd {
-			t.Errorf("slotRangeMinute(%q) = (%d, %d), want (%d, %d)", c.slot, s, e, c.wantStart, c.wantEnd)
+			t.Errorf("prompt.SlotRangeMinute(%q) = (%d, %d), want (%d, %d)", c.slot, s, e, c.wantStart, c.wantEnd)
 		}
 	}
 }
@@ -902,8 +891,8 @@ func TestSlotExpired_CrossMidnight(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := slotExpired(c.slot, c.tod); got != c.want {
-				t.Errorf("slotExpired(%q, %q) = %v, want %v", c.slot, c.tod, got, c.want)
+			if got := prompt.SlotExpired(c.slot, c.tod); got != c.want {
+				t.Errorf("prompt.SlotExpired(%q, %q) = %v, want %v", c.slot, c.tod, got, c.want)
 			}
 		})
 	}
@@ -991,18 +980,18 @@ func TestBuildSlotDurationHint_Remaining(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := buildSlotDurationHint(c.slot, c.timeOfDay)
+			got := prompt.SlotDurationHint(c.slot, c.timeOfDay)
 			if c.wantSub == "" {
 				if got != "" {
-					t.Errorf("buildSlotDurationHint(%q, %q) = %q, want empty", c.slot, c.timeOfDay, got)
+					t.Errorf("prompt.SlotDurationHint(%q, %q) = %q, want empty", c.slot, c.timeOfDay, got)
 				}
 				return
 			}
 			if !strings.Contains(got, c.wantSub) {
-				t.Errorf("buildSlotDurationHint(%q, %q) = %q, want substring %q", c.slot, c.timeOfDay, got, c.wantSub)
+				t.Errorf("prompt.SlotDurationHint(%q, %q) = %q, want substring %q", c.slot, c.timeOfDay, got, c.wantSub)
 			}
 			if c.notWant != "" && strings.Contains(got, c.notWant) {
-				t.Errorf("buildSlotDurationHint(%q, %q) = %q, should NOT contain %q", c.slot, c.timeOfDay, got, c.notWant)
+				t.Errorf("prompt.SlotDurationHint(%q, %q) = %q, should NOT contain %q", c.slot, c.timeOfDay, got, c.notWant)
 			}
 		})
 	}
@@ -1027,7 +1016,7 @@ func TestBuildTacticalToolList_NewCmdDerived(t *testing.T) {
 			},
 		},
 	})
-	list, count := buildTacticalToolList("H-01", reg)
+	list, count := prompt.BuildTacticalToolList(reg.EffectiveActions("H-01"))
 	if count != 2 {
 		t.Fatalf("tool count=%d, want 2 (move_to_location + wave_hand)", count)
 	}
@@ -1090,7 +1079,7 @@ func TestMapTacticalAction_NewCmdNilRegistryErrors(t *testing.T) {
 // TestBuildTacticalToolEntries_NilRegistryBuiltinFullSet verifies the nil
 // registry fallback returns all 13 built-in tools (minus scan_area/stop/wait).
 func TestBuildTacticalToolEntries_NilRegistryBuiltinFullSet(t *testing.T) {
-	entries := buildTacticalToolEntries("", nil)
+	entries := prompt.ToolEntries(nil)
 	// 16 built-in specs - scan_area - stop - wait = 13
 	if len(entries) != 13 {
 		t.Fatalf("nil registry entry count=%d, want 13 (all built-in minus scan_area/stop/wait)", len(entries))
@@ -1120,7 +1109,7 @@ func TestBuildTacticalExample_ChargingStationFirst(t *testing.T) {
 	// 回归测试：当前 KB 第一个 object（按 ID 排序）是 charge（category=charging），
 	// 示例必须用 charge_at_station，不能用 work_at_workbench 配 charging object。
 	kb := loadTestKB(t)
-	got := buildTacticalExample(kb, "")
+	got := prompt.TacticalExample(kb, "")
 	if !strings.Contains(got, "charge_at_station") {
 		t.Errorf("example should use charge_at_station for charging category: %q", got)
 	}
@@ -1144,7 +1133,7 @@ func TestBuildTacticalExample_WorkbenchOnly(t *testing.T) {
 			AvailableInteractions: []string{"assemble", "inspect"},
 		}},
 	}
-	got := buildTacticalExample(kb, "")
+	got := prompt.TacticalExample(kb, "")
 	if !strings.Contains(got, "work_at_workbench") {
 		t.Errorf("example should use work_at_workbench for workbench category: %q", got)
 	}
@@ -1165,7 +1154,7 @@ func TestBuildTacticalExample_RestBenchOnly(t *testing.T) {
 			AvailableInteractions: []string{"rest"},
 		}},
 	}
-	got := buildTacticalExample(kb, "")
+	got := prompt.TacticalExample(kb, "")
 	if !strings.Contains(got, `"action":"interact"`) {
 		t.Errorf("example should use interact for rest_bench category: %q", got)
 	}
@@ -1179,7 +1168,7 @@ func TestBuildTacticalExample_RestBenchOnly(t *testing.T) {
 
 func TestBuildTacticalExample_NilKB(t *testing.T) {
 	// nil KB 返回通用占位示例，不引用任何具体 id。
-	got := buildTacticalExample(nil, "")
+	got := prompt.TacticalExample(nil, "")
 	if !strings.Contains(got, "inner_thought") {
 		t.Errorf("nil KB example should still contain inner_thought: %q", got)
 	}
@@ -1203,7 +1192,7 @@ func TestBuildTacticalExample_ZoneObjectPairing(t *testing.T) {
 	if wantZone == "" {
 		t.Skip("first object has no ZoneID, cannot verify pairing")
 	}
-	got := buildTacticalExample(kb, "")
+	got := prompt.TacticalExample(kb, "")
 	// 示例应包含 move_to_location 到 wantZone，且引用 firstObj.ID。
 	moveLine := fmt.Sprintf(`{"action":"move_to_location","params":{"target":"%s"}}`, wantZone)
 	if !strings.Contains(got, moveLine) {
@@ -1230,7 +1219,7 @@ func TestBuildTacticalExample_GoalAssembly(t *testing.T) {
 	// P0-2 修复前：示例固定按首个 object（charge）显示"去充电"，
 	// 与"装配作业"goal 错配，LLM 模仿后会把 goal 和示例机械拼接。
 	kb := loadTestKB(t)
-	got := buildTacticalExample(kb, "前往主生产车间进行装配作业，严控工艺")
+	got := prompt.TacticalExample(kb, "前往主生产车间进行装配作业，严控工艺")
 	if !strings.Contains(got, "work_at_workbench") {
 		t.Errorf("goal=装配 should pick work_at_workbench example: %q", got)
 	}
@@ -1245,7 +1234,7 @@ func TestBuildTacticalExample_GoalAssembly(t *testing.T) {
 func TestBuildTacticalExample_GoalCharge(t *testing.T) {
 	// goal 含"充电"应选 charge_at_station 示例。
 	kb := loadTestKB(t)
-	got := buildTacticalExample(kb, "午间停工，前往充电站补电休息")
+	got := prompt.TacticalExample(kb, "午间停工，前往充电站补电休息")
 	if !strings.Contains(got, "charge_at_station") {
 		t.Errorf("goal=充电 should pick charge_at_station example: %q", got)
 	}
@@ -1257,7 +1246,7 @@ func TestBuildTacticalExample_GoalCharge(t *testing.T) {
 func TestBuildTacticalExample_GoalPatrol(t *testing.T) {
 	// goal 含"巡视"应选 patrol_zone 示例，不引用任何 object。
 	kb := loadTestKB(t)
-	got := buildTacticalExample(kb, "巡视主生产车间，记录设备运行日志")
+	got := prompt.TacticalExample(kb, "巡视主生产车间，记录设备运行日志")
 	if !strings.Contains(got, "patrol_zone") {
 		t.Errorf("goal=巡视 should pick patrol_zone example: %q", got)
 	}
@@ -1279,7 +1268,7 @@ func TestBuildTacticalExample_GoalInspect(t *testing.T) {
 			AvailableInteractions: []string{"assemble", "inspect"},
 		}},
 	}
-	got := buildTacticalExample(kb, "启动自检，检查关节磨损情况")
+	got := prompt.TacticalExample(kb, "启动自检，检查关节磨损情况")
 	if !strings.Contains(got, `"action":"interact"`) {
 		t.Errorf("goal=检查 should pick interact example: %q", got)
 	}
@@ -1300,7 +1289,7 @@ func TestBuildTacticalExample_GoalFallbackOnMissingObject(t *testing.T) {
 			AvailableInteractions: []string{"charge", "inspect"},
 		}},
 	}
-	got := buildTacticalExample(kb, "上午装配作业")
+	got := prompt.TacticalExample(kb, "上午装配作业")
 	// 应降级到 charge_at_station（首个 object 的 category）
 	if !strings.Contains(got, "charge_at_station") {
 		t.Errorf("assembly goal with no workbench should fall back to charge example: %q", got)
@@ -1310,7 +1299,7 @@ func TestBuildTacticalExample_GoalFallbackOnMissingObject(t *testing.T) {
 func TestBuildTacticalExample_GoalEmptyFallback(t *testing.T) {
 	// 空 goal 应降级到默认示例（首个 object 的 category）
 	kb := loadTestKB(t)
-	got := buildTacticalExample(kb, "")
+	got := prompt.TacticalExample(kb, "")
 	if !strings.Contains(got, "charge_at_station") {
 		t.Errorf("empty goal should fall back to first-object example: %q", got)
 	}
@@ -1406,29 +1395,25 @@ func TestPhysicalAlertOverrideGoal_FatigueTakesPrecedence(t *testing.T) {
 func TestBuildTacticalPrompt_PhysicalAlertConstraint(t *testing.T) {
 	kb := loadTestKB(t)
 	hint := "物理状态告警自动升级(疲劳=82超过80)；原决策=observe/..."
-	prompt := buildTacticalPrompt("前往充电站休息", "main_workshop", "13:15", "13:00-17:00",
-		&protocol.PhysicalState{Energy: 88, Fatigue: 82, JointWear: 0, Health: 100},
-		kb, hint, nil, "H-01")
+	promptText := prompt.BuildTactical(prompt.TacticalInput{Goal: "前往充电站休息", Zone: "main_workshop", TimeOfDay: "13:15", Slot: "13:00-17:00", Physical: &protocol.PhysicalState{Energy: 88, Fatigue: 82, JointWear: 0, Health: 100}, KB: kb, Hint: hint, Actions: nil, AgentID: "H-01"})
 
-	if !strings.Contains(prompt, "【物理告警强制约束】") {
-		t.Errorf("prompt should contain physical alert constraint section, got: %s", prompt)
+	if !strings.Contains(promptText, "【物理告警强制约束】") {
+		t.Errorf("prompt should contain physical alert constraint section, got: %s", promptText)
 	}
-	if !strings.Contains(prompt, "禁止规划 work_at_workbench") {
-		t.Errorf("prompt should forbid work_at_workbench, got: %s", prompt)
+	if !strings.Contains(promptText, "禁止规划 work_at_workbench") {
+		t.Errorf("prompt should forbid work_at_workbench, got: %s", promptText)
 	}
-	if !strings.Contains(prompt, "优先 charge_at_station") {
-		t.Errorf("prompt should prioritize charge_at_station, got: %s", prompt)
+	if !strings.Contains(promptText, "优先 charge_at_station") {
+		t.Errorf("prompt should prioritize charge_at_station, got: %s", promptText)
 	}
 }
 
 func TestBuildTacticalPrompt_NoPhysicalAlertConstraint(t *testing.T) {
 	kb := loadTestKB(t)
 	// 普通 hint（无"物理状态告警"标记）不应插入强约束段
-	prompt := buildTacticalPrompt("车间装配", "main_workshop", "09:00", "09:00-12:00",
-		&protocol.PhysicalState{Energy: 90, Fatigue: 20, JointWear: 0, Health: 100},
-		kb, "上次中断原因：zone 变化", nil, "H-01")
+	promptText := prompt.BuildTactical(prompt.TacticalInput{Goal: "车间装配", Zone: "main_workshop", TimeOfDay: "09:00", Slot: "09:00-12:00", Physical: &protocol.PhysicalState{Energy: 90, Fatigue: 20, JointWear: 0, Health: 100}, KB: kb, Hint: "上次中断原因：zone 变化", Actions: nil, AgentID: "H-01"})
 
-	if strings.Contains(prompt, "【物理告警强制约束】") {
-		t.Errorf("non-physical-alert hint should NOT contain constraint section, got: %s", prompt)
+	if strings.Contains(promptText, "【物理告警强制约束】") {
+		t.Errorf("non-physical-alert hint should NOT contain constraint section, got: %s", promptText)
 	}
 }
