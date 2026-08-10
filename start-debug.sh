@@ -48,6 +48,15 @@ ENV_FILE="$PROJECT_DIR/.env"
 WS_PORT="${WS_PORT:-9090}"
 HTTP_PORT="${HTTP_PORT:-8760}"
 
+# ─── MySQL 配置（仅 Linux 云环境默认启用）──────────────────
+# 数据目录 /data/mysql-data 挂在宿主机持久化盘，跨 MCP 重启/容器重建不丢。
+# 环境变量 SKIP_MYSQL=1 可跳过自动启动（MCP 降级为内存模式 NoopStore）。
+# 环境变量 MYSQL_DSN 可覆盖默认 DSN。
+MYSQL_SOCKET="/data/mysql-run/mysql.sock"
+MYSQL_DATA_DIR="/data/mysql-data"
+MYSQL_RUN_DIR="/data/mysql-run"
+MYSQL_DSN_DEFAULT="root@tcp(127.0.0.1:3306)/agenttown?parseTime=true&charset=utf8mb4"
+
 LOG_DATE=$(date +%Y-%m-%d)
 LOG_SUBDIR_BASE="$PROJECT_DIR/logs/$LOG_DATE"
 LOG_SUBDIR="${LOG_SUBDIR:-$LOG_SUBDIR_BASE}"
@@ -246,6 +255,72 @@ stop_all() {
     echo ""
 }
 
+# ─── Step 0.5: 启动 MySQL（仅 Linux 云环境默认启用）──────────
+# stop_all 不停 MySQL——MySQL 是基础设施，启动慢，跨 MCP 重启复用。
+# 幂等：已运行则跳过；数据目录未初始化则自动 --initialize-insecure。
+ensure_mysql() {
+    if ! $IN_LINUX; then
+        return 0  # 仅 Linux 云环境启用
+    fi
+    if [ "${SKIP_MYSQL:-0}" = "1" ]; then
+        warn "SKIP_MYSQL=1, 跳过 MySQL 启动（MCP 将使用内存模式 NoopStore）"
+        return 0
+    fi
+    # 已运行则跳过
+    if mysql --socket="$MYSQL_SOCKET" -uroot -e "SELECT 1" >/dev/null 2>&1; then
+        ok "MySQL already running (socket=$MYSQL_SOCKET)"
+        return 0
+    fi
+    info "=== Step 0.5: Start MySQL (Linux cloud env) ==="
+
+    if ! command -v mysqld >/dev/null 2>&1; then
+        fail "mysqld not installed. Install with: dnf install -y mysql-server"
+    fi
+
+    # 数据目录未初始化则初始化（empty 判断避免覆盖已有数据）
+    if [ ! -d "$MYSQL_DATA_DIR" ] || [ -z "$(ls -A "$MYSQL_DATA_DIR" 2>/dev/null)" ]; then
+        info "Initializing MySQL data dir at $MYSQL_DATA_DIR..."
+        mkdir -p "$MYSQL_DATA_DIR"
+        chown -R mysql:mysql "$MYSQL_DATA_DIR" 2>/dev/null
+        if ! mysqld --initialize-insecure --datadir="$MYSQL_DATA_DIR" --user=mysql >/dev/null 2>&1; then
+            fail "mysqld --initialize-insecure failed (see /tmp/mysqld-init.log)"
+        fi
+    fi
+
+    mkdir -p "$MYSQL_RUN_DIR"
+    chown mysql:mysql "$MYSQL_RUN_DIR" 2>/dev/null
+
+    # nohup + disown 让 mysqld 脱离 shell（容器内无 systemd 可用）
+    nohup mysqld \
+        --datadir="$MYSQL_DATA_DIR" \
+        --socket="$MYSQL_SOCKET" \
+        --pid-file="$MYSQL_RUN_DIR/mysqld.pid" \
+        --user=mysql \
+        --bind-address=127.0.0.1 \
+        --port=3306 \
+        --character-set-server=utf8mb4 \
+        --collation-server=utf8mb4_unicode_ci \
+        > "$MYSQL_RUN_DIR/mysqld.log" 2>&1 &
+    disown
+
+    # 等 ping 通（最多 20s）
+    local elapsed=0
+    info "Waiting for MySQL to be ready..."
+    while [ $elapsed -lt 20 ]; do
+        if mysql --socket="$MYSQL_SOCKET" -uroot -e "SELECT 1" >/dev/null 2>&1; then
+            # 确保 agenttown 库存在
+            mysql --socket="$MYSQL_SOCKET" -uroot -e \
+                "CREATE DATABASE IF NOT EXISTS agenttown CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci" \
+                >/dev/null 2>&1 || fail "CREATE DATABASE agenttown failed"
+            ok "MySQL is up (socket=$MYSQL_SOCKET, datadir=$MYSQL_DATA_DIR)"
+            return 0
+        fi
+        sleep 1; elapsed=$((elapsed + 1)); printf "."
+    done
+    echo ""
+    fail "MySQL did not come up within 20s (see $MYSQL_RUN_DIR/mysqld.log)"
+}
+
 # ─── Step 1: 编译 MCP Windows exe ──────────────────────────────
 build_mcp() {
     info "=== Step 1: Build agenttown-mcp.exe (Windows) ==="
@@ -352,10 +427,18 @@ start_mcp() {
     if $IN_LINUX; then
         # 纯 Linux：直接 nohup 启动 Linux 二进制，无需 .bat/cmd.exe
         # --auto-plan 从 .env 的 AGENTTOWN_MCP_AUTO_PLAN 读取（默认 true）
+        # --mysql-dsn 从 ensure_mysql 准备的实例拿（SKIP_MYSQL=1 时降级内存模式）
+        local mysql_args=()
+        if [ "${SKIP_MYSQL:-0}" != "1" ]; then
+            mysql_args=(--mysql-dsn "${MYSQL_DSN:-$MYSQL_DSN_DEFAULT}")
+        fi
+        # Go flag 包对 bool flag 特殊：--auto-plan true 里的 true 被当 positional arg，
+        # 导致 flag 解析停止，后续 --mysql-dsn 等不被解析。必须用 --auto-plan=value 形式。
         nohup "$MCP_EXE" --http ":$HTTP_PORT" --ws ":$WS_PORT" \
             --venus-api-key "$venus_key" \
             --world-kb "$PROJECT_DIR/assets/world_kb.yaml" \
-            --auto-plan "${AGENTTOWN_MCP_AUTO_PLAN:-true}" \
+            --auto-plan="${AGENTTOWN_MCP_AUTO_PLAN:-true}" \
+            "${mysql_args[@]}" \
             --log-level debug >> "$MCP_LOG" 2>&1 &
         disown
     else
@@ -366,7 +449,7 @@ start_mcp() {
         cat > "$bat_file" << EOF
 @echo off
 pushd "$cwd_win"
-"$mcp_exe_win" --http ":$HTTP_PORT" --ws ":$WS_PORT" --venus-api-key "$venus_key" --world-kb "$world_kb_win" --auto-plan "${AGENTTOWN_MCP_AUTO_PLAN:-true}" --log-level debug >> "$mcp_log_win" 2>&1
+"$mcp_exe_win" --http ":$HTTP_PORT" --ws ":$WS_PORT" --venus-api-key "$venus_key" --world-kb "$world_kb_win" --auto-plan="${AGENTTOWN_MCP_AUTO_PLAN:-true}" --log-level debug >> "$mcp_log_win" 2>&1
 EOF
         if $IN_WSL; then
             local bat_win
@@ -403,6 +486,10 @@ print_summary() {
     echo -e "  ${BOLD}本机服务${NC}"
     echo -e "    MCP:        0.0.0.0:$WS_PORT (WS) + :$HTTP_PORT (HTTP)"
     echo -e "    LLM 后端:   Venus 直连（$VENUS_URL, model=$VENUS_MODEL）"
+    if $IN_LINUX && [ "${SKIP_MYSQL:-0}" != "1" ]; then
+        echo -e "    MySQL:      127.0.0.1:3306 (socket=$MYSQL_SOCKET, db=agenttown)"
+        echo -e "                DSN: ${MYSQL_DSN:-$MYSQL_DSN_DEFAULT}"
+    fi
     echo ""
     echo -e "  ${BOLD}日志${NC}"
     local log_rel="${LOG_SUBDIR#$PROJECT_DIR/}"
@@ -449,6 +536,7 @@ echo ""
 mkdir -p "$LOG_SUBDIR"
 
 stop_all
+ensure_mysql
 build_mcp
 start_mcp
 print_summary
