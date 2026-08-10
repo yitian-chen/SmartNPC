@@ -36,9 +36,12 @@ import (
 
 	"github.com/AgentTown/agenttown-mcp/adapters/agenttown/tools"
 	"github.com/AgentTown/agenttown-mcp/internal/log"
+	"github.com/AgentTown/agenttown-mcp/pkg/agentstate"
 	"github.com/AgentTown/agenttown-mcp/pkg/llmtypes"
 	"github.com/AgentTown/agenttown-mcp/pkg/ollama"
+	"github.com/AgentTown/agenttown-mcp/pkg/prompt"
 	"github.com/AgentTown/agenttown-mcp/pkg/protocol"
+	"github.com/AgentTown/agenttown-mcp/pkg/storage"
 	"github.com/AgentTown/agenttown-mcp/pkg/transport"
 	"github.com/AgentTown/agenttown-mcp/pkg/venus"
 	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
@@ -47,58 +50,49 @@ import (
 
 var version = "0.1.0-dev"
 
-// agentContext holds per-agent state accumulated between decision turns.
-// Delivery uses a latest-wins queue: at most one LLM request is in flight
-// per agent, pending trigger reasons merge, and only the newest perception is
-// retained while that request runs.
+// agentContext holds per-agent coordination state (lifecycle, concurrency,
+// timers) and embeds an *agentstate.AgentState for business state.
+//
+// Lock discipline (double lock, never nested):
+//   - coordMu protects coordination fields: stopped, debugOverride,
+//     replanInProgress, pendingActionTimeouts, completedBeforeArm,
+//     lastReactiveAt, agentEpoch, online (coordination aspect).
+//   - AgentState has its own internal mu protecting business fields.
+//   - Callers MUST NOT hold coordMu while calling AgentState methods.
+//     Pattern: coord check under coordMu → release → call a.as.Method().
+//
+// LLM clients (strategicHc/tacticalHc) are process-level shared, not
+// per-agent business state, but kept here for worker access. They are
+// immutable after construction (no lock needed).
 type agentContext struct {
-	mu                    sync.Mutex
-	online                bool
+	// as holds all business state (persistent + transient). Access via
+	// methods on *agentstate.AgentState, never direct field access.
+	as *agentstate.AgentState
+
+	// coordMu protects coordination fields below.
+	coordMu               sync.Mutex
+	stopped               bool
+	debugOverride         bool
+	replanInProgress      bool
+	pendingActionTimeouts map[string]*time.Timer // action_id → timeout timer
+	completedBeforeArm    map[string]struct{}    // action_id completed before timer armed
 	agentEpoch            int64
-	latestPhysical        *protocol.PhysicalState
-	latestPerception      json.RawMessage
-	currentTask           *protocol.CurrentTaskProgress
-	currentActionID       string                 // 当前执行中的 action_id（mu 保护），空表示无执行中动作
-	currentActionCmd      string                 // mu 保护，当前在途 action 的 cmd（如 MoveToLocation / WorkAtWorkbench），用于反应层 prompt
-	currentActionParams   map[string]any         // mu 保护，当前在途 action 的 params，用于反应层 prompt
-	currentActionStart    time.Time              // mu 保护，当前在途 action 的开始时间，用于反应层计算 elapsed
-	pendingActionTimeouts map[string]*time.Timer // action_id → 超时 timer（mu 保护），约定 §5.2 action_completed 1.5× 估值超时
-	completedBeforeArm    map[string]struct{}   // action_id → 已完成但 timer 尚未 arm（mu 保护），防止 ACK/completion 竞态导致 timer 泄漏
-	dailyPlan             string                 // mu 保护，战略层生成的每日计划（格式化字符串），空=未生成或失败
-	currentDay            int                    // mu 保护，当前已规划的 day_count（来自 perception.environment.day_count）；-1=未规划（worker 启动时 perception 未到）
-	strategicHc           llmClient              // mu 保护，战略层专用 LLM client（hermes 或 venus，独立 session）
-	tacticalHc            llmClient              // mu 保护，战术层专用 LLM client（hermes 或 venus，独立 session）
-	actionQueue           []plannedAction        // mu 保护，战术层分解出的待执行 action（FIFO）
-	currentActionSrc      actionSource           // mu 保护，当前在途 action 的来源（hermes/tactical/空）
-	currentPlanIndex      int                    // mu 保护，当前执行到 daily_plan 第几个 item（记账用）
-	currentSlot           string                 // mu 保护，当前分解的时段 "HH:MM-HH:MM"（防同时段重复分解）
-	redecomposeCount      int                    // mu 保护，当前时段已重复分解次数（防死循环）
-	// slot 切换延迟 stop 状态（mu 保护）
-	// advanceSlotIfNeeded 检测到 slot 过期时，不立即发 stop_action（会让 NPC 在
-	// 战术层 LLM 调用期间愣住），而是清 currentActionID 让 tacticalRefill 守卫通过，
-	// 把旧复合 actionID 记到 pendingStopActionID。等 tacticalRefill 分解完成、
-	// popAndSendQueueAction 下发新 action 前再补发 stop，让 NPC 在 LLM 期间继续
-	// 旧动作。若旧 action 在 LLM 期间自然完成，recordActionCompletion 清除此字段
-	// （避免对已完成的 action 发 stop 触发 STOP_ID_MISMATCH）。
-	pendingStopActionID string
-	// selfStopInProgress 标记已主动 stop、等待 action_completed(interrupted) 到达
-	// 的 actionID。recordActionCompletion 见到此 id 时清除并抑制反应层触发——
-	// slot 切换的 stop 是计划内的，不应让 reactive 误判为异常完成而 replan 干扰新 action。
-	selfStopInProgress string
-	// 反应层状态（mu 保护）
-	prevZone         string               // 上次感知的 zone id（用于检测 zone 变化触发反应层）
-	prevObjectIDs    []string             // 上次感知的 nearby_objects id 列表（用于检测新物体出现）
-	lastReactiveAt   map[string]time.Time // 去抖：trigger dedupe key → 上次触发时间
-	perceptionCount  int                  // 累计感知次数（用于周期性触发反应层）
-	debugOverride    bool                 // mu 保护，debug 手动 action 期间暂停 worker dispatch（避免 stop→idle wait 竞态）
-	wake           chan struct{}
-	cancel         context.CancelFunc
-	stopped        bool
-	// replan 状态（mu 保护）
-	lastReplanAt        time.Time // wall-clock，仅用于日志/调试
-	lastReplanGameTime  string    // 上次 replan 时的游戏时间 "HH:MM"，用于游戏时间去抖（replanDedupeGameMinutes）
-	replanInProgress    bool      // replan 规划进行中，阻止 worker 抢先 pop/refill
-	replanHint          string    // 传入战术层 prompt 的"上次中断原因"（replan reason）
+	online                bool // coordination aspect (business online flag is in AgentState)
+
+	// LLM clients (immutable after construction, no lock needed)
+	strategicHc llmClient
+	tacticalHc  llmClient
+
+	// ollama is the local Ollama client for relationship-update judgments
+	// (Stage 5). nil when --ollama-url="" (reactive layer disabled), in
+	// which case maybeUpdateRelationship short-circuits. Immutable after
+	// construction.
+	ollama *ollama.Client
+
+	// Lifecycle (no lock needed — single writer: worker goroutine for cancel,
+	// stop() for stopped flag under coordMu)
+	wake   chan struct{}
+	cancel context.CancelFunc
 }
 
 func newAgentContext(parent context.Context, epochs ...int64) (*agentContext, context.Context) {
@@ -108,52 +102,70 @@ func newAgentContext(parent context.Context, epochs ...int64) (*agentContext, co
 		agentEpoch = epochs[0]
 	}
 	return &agentContext{
-		online: true, agentEpoch: agentEpoch,
-		wake: make(chan struct{}, 1), cancel: cancel,
+		as:                    agentstate.New(),
+		online:                true,
+		agentEpoch:            agentEpoch,
+		wake:                  make(chan struct{}, 1),
+		cancel:                cancel,
 		pendingActionTimeouts: make(map[string]*time.Timer),
 		completedBeforeArm:    make(map[string]struct{}),
-		lastReactiveAt:        make(map[string]time.Time),
-		currentDay:            -1, // 未规划；worker 启动调 generateDailyPlan 后由首条 perception 同步
 	}, ctx
+}
+
+// buildStore 构造持久化 Store。空 dsn 返回 NoopStore（内存模式，当前行为，
+// 测试和 quick-smoke 无需 MySQL）；非空 dsn 建 MySQLStore（含 schema 迁移）。
+// 失败时返回错误，main 调用方据此 os.Exit(1)——MySQL 不可用但用户期望持久化时
+// 不应静默降级为内存模式（会导致重启后状态丢失）。
+func buildStore(ctx context.Context, dsn string, logger *slog.Logger) (storage.Store, error) {
+	if dsn == "" {
+		logger.Info("mysql persistence disabled (in-memory mode)")
+		return storage.NoopStore{}, nil
+	}
+	logger.Info("mysql persistence enabled", "dsn_redacted", redactDSN(dsn))
+	ms, err := storage.NewMySQLStore(ctx, dsn)
+	if err != nil {
+		return nil, fmt.Errorf("init mysql store: %w", err)
+	}
+	return ms, nil
+}
+
+// redactDSN 隐藏 DSN 中的密码字段，日志中只保留 host/db。
+func redactDSN(dsn string) string {
+	// DSN 格式: user:pass@tcp(host:port)/db?params
+	// 简单遮蔽：把第一个 ':' 到 '@' 之间的内容替换为 ***。
+	at := strings.IndexByte(dsn, '@')
+	colon := strings.IndexByte(dsn, ':')
+	if at > 0 && colon >= 0 && colon < at {
+		return dsn[:colon+1] + "***" + dsn[at:]
+	}
+	return dsn
 }
 
 // observePerception 存储最新感知payload，供战术层 refill 时读取当前世界状态。
 // 反应层：检测 zone 变化 / 新物体出现 / 周期性触发，若显著变化则返回 trigger 信息供
 // message handler 异步触发 reactiveRunner.trigger。
 func (a *agentContext) observePerception(payload json.RawMessage) (ReactiveTrigger, string, error) {
-	var p protocol.PerceptionPayload
-	if err := json.Unmarshal(payload, &p); err != nil {
-		return "", "", fmt.Errorf("parse perception: %w", err)
-	}
-	a.mu.Lock()
+	// coord check under coordMu (release before calling AgentState)
+	a.coordMu.Lock()
 	if a.stopped {
-		a.mu.Unlock()
+		a.coordMu.Unlock()
 		return "", "", nil
 	}
-	// 提取当前 zone + object ids，对比 prev 检测显著变化
-	curZone := ""
-	if p.Location.CurrentZone != nil {
-		curZone = *p.Location.CurrentZone
+	a.coordMu.Unlock()
+
+	upd, err := a.as.SetPerception(payload)
+	if err != nil {
+		return "", "", err
 	}
-	curObjectIDs := extractObjectIDs(p)
-	prevZone := a.prevZone
-	prevObjectIDs := a.prevObjectIDs
-	prevPhysical := a.latestPhysical
-	// 更新感知状态
-	a.latestPerception = cloneRawMessage(payload)
-	a.prevZone = curZone
-	a.prevObjectIDs = curObjectIDs
-	a.perceptionCount++
-	pCount := a.perceptionCount
-	a.mu.Unlock()
+	pCount := upd.PerceptionCount
 
 	// 检测显著变化（zone/新物体）。物理警戒带由 updateState 检测，
 	// 这里 prev/cur physical 都用 latestPhysical（即上次 state_report），
 	// 不重复检测物理触发。
-	trigger, detail := shouldTriggerReactive(prevZone, curZone, prevObjectIDs, curObjectIDs, prevPhysical, prevPhysical)
+	trigger, detail := prompt.ShouldTriggerReactive(upd.PrevZone, upd.CurZone, upd.PrevObjectIDs, upd.CurObjectIDs, upd.PrevPhysical, upd.PrevPhysical)
 	// 事件类触发优先；无事件时检查周期性触发
 	if trigger == "" {
-		trigger, detail = shouldTriggerPeriodic(pCount)
+		trigger, detail = prompt.ShouldTriggerPeriodic(pCount)
 	}
 
 	// 感知是 worker 的主驱动源：每次感知到达都唤醒它检查战术队列
@@ -165,19 +177,18 @@ func (a *agentContext) observePerception(payload json.RawMessage) (ReactiveTrigg
 // updateState 存储权威的物理/任务状态。反应层：检测物理状态突破警戒带，
 // 返回 trigger 信息供 message handler 触发 reactiveRunner。
 func (a *agentContext) updateState(report protocol.StateReportPayload) (ReactiveTrigger, string) {
-	a.mu.Lock()
+	a.coordMu.Lock()
 	if a.stopped {
-		a.mu.Unlock()
+		a.coordMu.Unlock()
 		return "", ""
 	}
-	prevPhysical := a.latestPhysical
+	a.coordMu.Unlock()
+
 	physical := report.PhysicalState
-	a.latestPhysical = &physical
-	a.currentTask = cloneTask(report.CurrentTaskProgress)
-	a.mu.Unlock()
+	prevPhysical := a.as.SetPhysicalState(&physical, cloneTask(report.CurrentTaskProgress))
 
 	// 检测物理警戒带突破（zone/objects 不在此检测，由 observePerception 负责）
-	return shouldTriggerReactive("", "", nil, nil, prevPhysical, &physical)
+	return prompt.ShouldTriggerReactive("", "", nil, nil, prevPhysical, &physical)
 }
 
 // recordActionCompletion 处理 action_completed。所有来源的 completion 都清
@@ -186,42 +197,32 @@ func (a *agentContext) updateState(report protocol.StateReportPayload) (Reactive
 // "要不要打断"意义不大（模型看不到战术层整体规划，只能基于贫乏信息答 continue）。
 // 异常完成才是真正需要反应层介入的时机。
 func (a *agentContext) recordActionCompletion(completion protocol.ActionCompletedPayload) (bool, ReactiveTrigger, string) {
-	a.mu.Lock()
-	if a.currentTask != nil && a.currentTask.ActionID == completion.ActionID {
-		a.currentTask = nil
+	res := a.as.RecordActionCompletion(completion.ActionID)
+	// Stage 4: best-effort action_history recording — only for tracked in-flight
+	// actions (debug /debug/action path doesn't call recordActionStarted, so its
+	// completions have WasInFlight=false and aren't recorded).
+	// Stage 5: 异步触发关系更新判断（Ollama 5s 超时，不阻塞主路径）。
+	if res.WasInFlight {
+		a.recordActionHistory(completion, res)
+		go a.maybeUpdateRelationship(completion, res)
 	}
-	if a.currentActionID == completion.ActionID {
-		a.currentActionID = ""
-		a.currentActionCmd = ""
-		a.currentActionParams = nil
-		a.currentActionStart = time.Time{}
-	}
-	// slot 切换延迟 stop 状态处理：
-	// 1) pendingStopActionID 匹配 → 旧 action 在 LLM 期间自然完成，清除待 stop
-	//    标记，popAndSendQueueAction 不再补发 stop（避免 STOP_ID_MISMATCH）。
-	// 2) selfStopInProgress 匹配 → 这是 slot 切换主动 stop 引发的 interrupted
-	//    完成，清除标记并抑制反应层触发（计划内打断不应 replan 干扰新 action）。
-	if a.pendingStopActionID == completion.ActionID {
-		a.pendingStopActionID = ""
-	}
-	isSelfStop := a.selfStopInProgress == completion.ActionID
-	if isSelfStop {
-		a.selfStopInProgress = ""
-	}
+	isSelfStop := res.WasSelfStop
+
 	// 取消 action_completed 超时 timer（约定 §5.2）。
 	// 竞态处理：ACK 和 action_completed 可能同一批到达（read loop 顺序处理），
 	// completion handler 可能在 SendAction 调用方 armActionTimeout 之前执行。
 	// 此时 timer 尚未注册，记录到 completedBeforeArm，让 armActionTimeout 跳过 arm。
 	// self-stop 的 action timer 已在 advanceSlotIfNeeded 取消，无需记到
 	// completedBeforeArm（否则永不消费，内存泄漏）。
+	a.coordMu.Lock()
 	if timer, ok := a.pendingActionTimeouts[completion.ActionID]; ok {
 		timer.Stop()
 		delete(a.pendingActionTimeouts, completion.ActionID)
 	} else if !isSelfStop {
 		a.completedBeforeArm[completion.ActionID] = struct{}{}
 	}
-	a.currentActionSrc = ""
-	a.mu.Unlock()
+	a.coordMu.Unlock()
+
 	a.signal()
 	// 反应层触发：仅异常完成触发。detail 用 result 作为去抖维度（避免每次
 	// action_id 不同导致去抖失效），相同 result 在 60s 内不重复触发。
@@ -238,6 +239,127 @@ func (a *agentContext) recordActionCompletion(completion protocol.ActionComplete
 	detail := fmt.Sprintf("result=%s reason=%s progress=%.2f",
 		completion.Result, completion.Reason, completion.Progress)
 	return true, TriggerActionDone, detail
+}
+
+// recordActionHistory saves a single action_history row at action completion.
+// Best-effort: 5s timeout, logs warn on error, never blocks the decision
+// pipeline. Uses slog.Default() (agentContext doesn't hold a logger) matching
+// the persistSchedule pattern in pkg/agentstate. Skipped in in-memory mode
+// (store == nil).
+func (a *agentContext) recordActionHistory(completion protocol.ActionCompletedPayload, res agentstate.CompletionResult) {
+	store := a.as.Store()
+	if store == nil {
+		return // in-memory mode
+	}
+	agentID := a.as.AgentID()
+	rec := storage.ActionRecord{
+		AgentID:     agentID,
+		ActionID:    completion.ActionID,
+		Cmd:         res.Cmd,
+		Params:      res.Params,
+		Source:      string(res.Src),
+		StartedAt:   res.Start,
+		CompletedAt: time.Now(),
+		Result:      completion.Result,
+		DurationMs:  int(completion.DurationMs),
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := store.SaveActionRecord(ctx, agentID, rec); err != nil {
+		slog.Default().Warn("[action_history] save failed",
+			"agent_id", agentID, "action_id", completion.ActionID, "err", err)
+	}
+}
+
+// loadTacticalMemories fetches top-3 recent memories from the store and
+// formats them as a bullet list for the tactical prompt 【过往经验】段.
+// Returns "" when store is nil (in-memory mode) or no memories exist.
+// Called once per tactical refill (~7 times/game day); indexed query, no
+// caching needed.
+func (a *agentContext) loadTacticalMemories(ctx context.Context, agentID string) string {
+	store := a.as.Store()
+	if store == nil {
+		return ""
+	}
+	memories, err := store.LoadRecentMemories(ctx, agentID, 3)
+	if err != nil {
+		slog.Default().Warn("[记忆层] 加载近期记忆失败",
+			"agent_id", agentID, "err", err)
+		return ""
+	}
+	if len(memories) == 0 {
+		return ""
+	}
+	var sb strings.Builder
+	for _, m := range memories {
+		fmt.Fprintf(&sb, "- %s（%s）\n", m.Content, m.MemoryType)
+	}
+	return strings.TrimSuffix(sb.String(), "\n")
+}
+
+// maybeUpdateRelationship judges whether a completed action warrants a
+// relationship bump and, if so, updates both directional rows (A→B and B→A).
+// Called asynchronously from recordActionCompletion so the 5s Ollama call
+// never blocks the main completion path. Best-effort: any error (nil client,
+// nil store, Ollama timeout, save failure) logs a warning and gives up.
+//
+// Stage 5 design: Ollama judges whether the cmd+params constitute a direct
+// social interaction with the target agent (yes/no). On "yes", familiarity
+// is bumped by 1 in both directions (A→B and B→A); affection is unchanged
+// in the initial rule. Self-targeting (target == agentID) is skipped.
+func (a *agentContext) maybeUpdateRelationship(completion protocol.ActionCompletedPayload, res agentstate.CompletionResult) {
+	if a.ollama == nil {
+		return // reactive layer disabled (--ollama-url="")
+	}
+	store := a.as.Store()
+	if store == nil {
+		return // in-memory mode
+	}
+	target, _ := res.Params["target_agent_id"].(string)
+	if target == "" {
+		return // not an agent-directed action
+	}
+	agentID := a.as.AgentID()
+	if target == agentID {
+		return // self-targeting guard
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), relationshipJudgeTimeout)
+	defer cancel()
+	if !shouldUpdateRelationship(ctx, a.ollama, res.Cmd, res.Params, target) {
+		return
+	}
+	// 双向更新：A→B + B→A 各一行，各自独立 upsert。affection 初期不动（delta=0）。
+	if err := store.SaveRelationship(ctx, agentID, target, 1, 0); err != nil {
+		slog.Default().Warn("[关系层] save A→B failed",
+			"agent_id", agentID, "target", target, "err", err)
+	}
+	if err := store.SaveRelationship(ctx, target, agentID, 1, 0); err != nil {
+		slog.Default().Warn("[关系层] save B→A failed",
+			"agent_id", target, "target", agentID, "err", err)
+	}
+}
+
+// loadRelationships fetches the agent's relationship rows and formats them
+// for the tactical prompt【人际关系】段. Returns "" when store is nil, no
+// relationships exist, or the KB has only one agent (single-NPC scenario
+// doesn't benefit from a relationship segment). Called once per tactical
+// refill; indexed query, no caching needed.
+func (a *agentContext) loadRelationships(ctx context.Context, agentID string, kb *worldkb.KB) string {
+	store := a.as.Store()
+	if store == nil {
+		return ""
+	}
+	// Single-NPC guard: skip when KB has ≤1 agent (no possible relationships).
+	if kb == nil || len(kb.Agents) <= 1 {
+		return ""
+	}
+	rels, err := store.LoadRelationships(ctx, agentID, 10)
+	if err != nil {
+		slog.Default().Warn("[关系层] 加载关系列表失败",
+			"agent_id", agentID, "err", err)
+		return ""
+	}
+	return formatRelationshipsForPrompt(rels, agentID)
 }
 
 // advanceSlotIfNeeded 检查当前 game_time 是否已超出 currentSlot 结束时间，
@@ -258,40 +380,32 @@ func (a *agentContext) recordActionCompletion(completion protocol.ActionComplete
 // 切换优先级高于反应层 replan，清掉的 in-flight 状态不会干扰 replan
 // （replan 自己会重新规划，且 replanInProgress 由 replan 路径自己清除）。
 func (a *agentContext) advanceSlotIfNeeded(ws *wsserver.Server, agentID string, logger *slog.Logger) {
-	a.mu.Lock()
-	slot := a.currentSlot
-	tod := a.latestTimeOfDayLocked()
-	if !slotExpired(slot, tod) {
-		a.mu.Unlock()
+	// 检查 slot 是否过期（AgentState 内部持锁判断）
+	_, slot, _ := a.as.SnapshotSchedule()
+	tod := a.as.LatestTimeOfDay()
+	if !prompt.SlotExpired(slot, tod) {
 		return
 	}
-	// 收集在途 action 信息（持锁内）
-	actionID := a.currentActionID
-	actionCmd := a.currentActionCmd
-	queueLen := len(a.actionQueue)
-	// 清队列 + 清在途追踪 + 清 slot 标记
-	a.actionQueue = nil
-	a.currentActionID = ""
-	a.currentActionCmd = ""
-	a.currentActionParams = nil
-	a.currentActionStart = time.Time{}
-	a.currentActionSrc = ""
-	a.currentSlot = ""
-	a.redecomposeCount = 0
+	info := a.as.ClearForSlotSwitch()
+	actionID := info.ActionID
+	actionCmd := info.ActionCmd
+	queueLen := info.QueueLen
+
 	// 只对长复合动作记录 pendingStop：短动作 ~100ms 自然完成，会在 LLM 期间
 	// 被 recordActionCompletion 清除；若 LLM 极快返回仍发 stop 会触发
 	// STOP_ID_MISMATCH（UE 侧短动作不设 busy_action_id）。
 	if actionID != "" && isCompositeCmdDynamic(actionCmd, capabilityRegistryRef) {
-		a.pendingStopActionID = actionID
+		a.as.SetPendingStopActionID(actionID)
 	}
 	// 取消旧 action 的超时 timer（若有）
 	if actionID != "" {
+		a.coordMu.Lock()
 		if timer, ok := a.pendingActionTimeouts[actionID]; ok {
 			timer.Stop()
 			delete(a.pendingActionTimeouts, actionID)
 		}
+		a.coordMu.Unlock()
 	}
-	a.mu.Unlock()
 
 	logger.Info("[战术层] schedule 时段切换，清队列（stop 延迟到分解完成后）",
 		"agent_id", agentID, "expired_slot", slot, "game_time", tod,
@@ -326,41 +440,29 @@ func (a *agentContext) signal() {
 }
 
 func (a *agentContext) stop() {
-	a.mu.Lock()
+	a.coordMu.Lock()
 	if a.stopped {
-		a.mu.Unlock()
+		a.coordMu.Unlock()
 		return
 	}
 	a.stopped = true
 	a.online = false
-	a.latestPerception = nil
-	a.currentActionID = "" // agent 下线时清空（避免残留）
-	a.currentActionSrc = ""
-	a.currentActionCmd = ""
-	a.currentActionParams = nil
-	a.currentActionStart = time.Time{}
-	a.actionQueue = nil    // 清空战术层队列
-	a.currentSlot = ""     // 重置时段
-	a.redecomposeCount = 0 // 重置重复分解计数
 	// 停止所有 pending action 超时 timer
 	for _, timer := range a.pendingActionTimeouts {
 		timer.Stop()
 	}
 	a.pendingActionTimeouts = make(map[string]*time.Timer)
 	cancel := a.cancel
-	a.mu.Unlock()
+	a.coordMu.Unlock()
+
+	// 清理业务状态（AgentState 内部锁）
+	a.as.Stop()
 	cancel()
 }
 
 func (a *agentContext) recordActionStarted(actionID, cmd string, params map[string]any, decisionEpoch int64, src actionSource) {
 	_ = decisionEpoch // 反应层移除后不再记录到 recentActions，保留参数兼容调用方
-	a.mu.Lock()
-	a.currentActionID = actionID // 追踪当前执行中的 action（约定9 stop_action ID 匹配）
-	a.currentActionSrc = src     // 记录来源：completion 时按来源路由（tactical→signal pop 下一个）
-	a.currentActionCmd = cmd     // 反应层 prompt 用：描述当前在途动作
-	a.currentActionParams = params
-	a.currentActionStart = time.Now()
-	a.mu.Unlock()
+	a.as.RecordActionStarted(actionID, cmd, params, src)
 }
 
 func cloneRawMessage(payload json.RawMessage) json.RawMessage {
@@ -401,18 +503,13 @@ func runPerceptionWorker(
 	// 也不会被调，UE 端不会收到任何自动 action_command。手动模式仅响应
 	// /debug/schedule 注入和 /debug/action 下发。
 	if autoPlanEnabled {
-		plan := generateDailyPlan(ctx, ac.strategicHc, agentID, kb, capabilityRegistryRef, logger)
-		ac.mu.Lock()
-		ac.dailyPlan = plan
+		plan := generateDailyPlan(ctx, ac.strategicHc, agentID, kb, capabilityRegistryRef, logger, "")
 		// 同步 currentDay：若首条 perception 已到则用其 day_count，否则保持 -1
 		// （由 detectDayRollover 在首条 perception 到达时同步）。
-		ac.currentDay = ac.latestDayCountLocked()
-		ac.mu.Unlock()
+		ac.as.SetDailyPlan(plan, ac.as.LatestDayCount())
 	} else {
 		logger.Info("[自动规划已禁用] 跳过战略层每日计划生成", "agent_id", agentID)
-		ac.mu.Lock()
-		ac.dailyPlan = ""
-		ac.mu.Unlock()
+		ac.as.SetDailyPlan("", -1)
 	}
 
 	for {
@@ -443,22 +540,24 @@ func runPerceptionWorker(
 			if rollover, prevDay, newDay := ac.detectDayRollover(); rollover {
 				logger.Info("[战略层] 检测到跨日，重新生成当日计划",
 					"agent_id", agentID, "prev_day", prevDay, "new_day", newDay)
-				plan := generateDailyPlan(ctx, ac.strategicHc, agentID, kb, capabilityRegistryRef, logger)
-				ac.mu.Lock()
-				ac.dailyPlan = plan
+				// Stage 4: 日终记忆生成——从昨日 action_history 总结出
+				// narrative（注入战略层 prompt）+ 结构化 memories（存 DB）。
+				// 失败/冷启动返回 ""，generateDailyPlan 内部回退到常量。
+				narrative := generateDailyMemories(ctx, ac.strategicHc, ac.as.Store(), agentID, kb, logger)
+				plan := generateDailyPlan(ctx, ac.strategicHc, agentID, kb, capabilityRegistryRef, logger, narrative)
 				// 不清 currentSlot/actionQueue/currentActionID：让 NPC 自然睡眠到 07:00，
 				// 由 advanceSlotIfNeeded 打断后走 tacticalRefill 选新计划 slot。
-				// currentDay 已由 detectDayRollover 更新。
-				ac.mu.Unlock()
+				// currentDay 已由 detectDayRollover 更新为 newDay。
+				ac.as.SetDailyPlan(plan, newDay)
 			}
 		}
 
 		// replan 规划进行中：跳过 pop/refill，等 tacticalRefillForReplan 完成后
 		// signal 唤醒。避免规划期间 worker 抢先 pop 旧队列剩余 action 或 refill
 		// 覆盖正在生成的新队列。
-		ac.mu.Lock()
+		ac.coordMu.Lock()
 		replanBusy := ac.replanInProgress
-		ac.mu.Unlock()
+		ac.coordMu.Unlock()
 		if replanBusy {
 			continue
 		}
@@ -473,9 +572,9 @@ func runPerceptionWorker(
 		// debug 手动 action 期间暂停 dispatch：debug 端点刚发了 stop_action 清 UE
 		// busy，若此刻 worker 被唤醒会立刻补一个新 action 重新占用，导致手动
 		// action 被 busy 拒。debugOverride 由 handleDebugAction 设置/清除。
-		ac.mu.Lock()
+		ac.coordMu.Lock()
 		override := ac.debugOverride
-		ac.mu.Unlock()
+		ac.coordMu.Unlock()
 		if override {
 			continue
 		}
@@ -580,9 +679,7 @@ func (g *guardedExecutor) SendStopAction(agentID, actionID string) error {
 		return err
 	}
 	if actionID == "" {
-		ac.mu.Lock()
-		actionID = ac.currentActionID
-		ac.mu.Unlock()
+		actionID = ac.as.CurrentActionID()
 		if actionID == "" {
 			return nil // 无在途 action，no-op
 		}
@@ -620,14 +717,12 @@ func (a *agentContext) armActionTimeout(
 		// 清除本地追踪并触发重新决策
 		ac := lookup(agentID)
 		if ac != nil {
-		ac.mu.Lock()
-		ac.currentActionID = ""
-		ac.currentActionSrc = "" // 清来源，避免 completion 路由错乱
-		ac.currentActionCmd = ""
-		ac.currentActionParams = nil
-		ac.currentActionStart = time.Time{}
-		delete(ac.pendingActionTimeouts, actionID)
-		ac.mu.Unlock()
+			// 业务状态清理走 AgentState
+			ac.as.RecordActionCompletion(actionID)
+			// 协调字段清理走 coordMu
+			ac.coordMu.Lock()
+			delete(ac.pendingActionTimeouts, actionID)
+			ac.coordMu.Unlock()
 			// 触发重新决策（下次 perception 会处理）
 			select {
 			case ac.wake <- struct{}{}:
@@ -636,13 +731,13 @@ func (a *agentContext) armActionTimeout(
 		}
 	})
 
-	a.mu.Lock()
+	a.coordMu.Lock()
 	// 竞态处理：如果 action_completed 已先于 ACK 到达（read loop 同批处理），
 	// recordActionCompletion 会把它记到 completedBeforeArm。此时不应 arm timer，
 	// 否则永不会被取消，180s 后盲触发 stop_action（STOP_ID_MISMATCH）。
 	if _, alreadyDone := a.completedBeforeArm[actionID]; alreadyDone {
 		delete(a.completedBeforeArm, actionID)
-		a.mu.Unlock()
+		a.coordMu.Unlock()
 		// 竞态保护：time.AfterFunc 创建即启动，此时 timer 已在倒计时但永不会被
 		// recordActionCompletion 取消（completion 已处理过），必须显式 stop，
 		// 否则 5s/180s 后盲触发 stop_action（STOP_ID_MISMATCH）。
@@ -654,69 +749,37 @@ func (a *agentContext) armActionTimeout(
 		old.Stop()
 	}
 	a.pendingActionTimeouts[actionID] = timer
-	a.mu.Unlock()
+	a.coordMu.Unlock()
 }
 
 // ─── 战术层队列辅助方法 ────────────────────────────────────────
 
-// hasQueueNext 返回队列是否还有待执行 action（mu 保护）。
+// hasQueueNext 返回队列是否还有待执行 action。
 func (a *agentContext) hasQueueNext() bool {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return len(a.actionQueue) > 0
+	return a.as.HasQueueNext()
 }
 
 // hasInFlightAction 返回是否有在途 action（已下发未 completion）。
 // worker 用它在主循环跳过 pop/refill，避免 UE busy 拒绝循环。
 func (a *agentContext) hasInFlightAction() bool {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return a.currentActionID != ""
+	return a.as.HasInFlightAction()
 }
 
-// queueLen 返回队列长度（mu 保护）。
+// queueLen 返回队列长度。
 func (a *agentContext) queueLen() int {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return len(a.actionQueue)
+	return a.as.QueueLen()
 }
 
-// snapshotSchedule 返回当日计划的快照（mu 保护），供 /debug/plan 端点
-// 展示当日 schedule。plan 是格式化多行字符串，slot 是当前时段
-// "HH:MM-HH:MM"（或 "__debug__" 前缀），idx 是当前执行到第几个 item（-1=未命中）。
+// snapshotSchedule 返回当日计划的快照，供 /debug/plan 端点展示当日 schedule。
+// plan 是格式化多行字符串，slot 是当前时段 "HH:MM-HH:MM"（或 "__debug__" 前缀），
+// idx 是当前执行到第几个 item（-1=未命中）。
 func (a *agentContext) snapshotSchedule() (plan string, slot string, idx int) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	plan = a.dailyPlan
-	slot = a.currentSlot
-	idx = a.currentPlanIndex
-	return
+	return a.as.SnapshotSchedule()
 }
 
-// latestTimeOfDay 从 latestPerception 提取 "HH:MM" 游戏时间（mu 保护读取 perception）。
+// latestTimeOfDay 从 latestPerception 提取 "HH:MM" 游戏时间。
 func (a *agentContext) latestTimeOfDay() string {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return a.latestTimeOfDayLocked()
-}
-
-// latestTimeOfDayLocked 同 latestTimeOfDay 但假定调用方已持锁。
-func (a *agentContext) latestTimeOfDayLocked() string {
-	return extractTimeOfDay(a.latestPerception)
-}
-
-// latestDayCountLocked 从 latestPerception 提取 day_count（第几天，从 0 开始；
-// 来自 perception.environment.day_count，由 UE 权威上报）。假定调用方已持锁。
-// 失败或 perception 未到返回 -1。
-func (a *agentContext) latestDayCountLocked() int {
-	if len(a.latestPerception) == 0 {
-		return -1
-	}
-	var p protocol.PerceptionPayload
-	if err := json.Unmarshal(a.latestPerception, &p); err != nil {
-		return -1
-	}
-	return p.Environment.DayCount
+	return a.as.LatestTimeOfDay()
 }
 
 // detectDayRollover 检测 day_count 递增（跨日），更新 currentDay 并返回是否
@@ -734,42 +797,12 @@ func (a *agentContext) latestDayCountLocked() int {
 // 打断后走 tacticalRefill 选新计划 slot。这样避免了"06:00 强制打断睡眠后
 // NPC 空等 1 小时"的尴尬。
 func (a *agentContext) detectDayRollover() (rollover bool, prevDay, newDay int) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	day := a.latestDayCountLocked()
-	prev := a.currentDay
-	if day <= prev {
-		return false, prev, day
-	}
-	a.currentDay = day
-	if prev < 0 {
-		// 首次同步 day_count（worker 启动时 perception 未到）。不重新规划——
-		// worker 启动时已调过 generateDailyPlan 规划当天。
-		return false, prev, day
-	}
-	return true, prev, day
+	return a.as.DetectDayRollover()
 }
 
-// latestZone 从 latestPerception 提取当前区域 id（mu 保护读取 perception）。
+// latestZone 从 latestPerception 提取当前区域 id。
 func (a *agentContext) latestZone() string {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return a.latestZoneLocked()
-}
-
-// latestZoneLocked 同 latestZone 但假定调用方已持锁。
-func (a *agentContext) latestZoneLocked() string {
-	if len(a.latestPerception) == 0 {
-		return ""
-	}
-	var p protocol.PerceptionPayload
-	if err := json.Unmarshal(a.latestPerception, &p); err != nil {
-		return ""
-	}
-	if p.Location.CurrentZone != nil {
-		return *p.Location.CurrentZone
-	}
-	return ""
+	return a.as.LatestZone()
 }
 
 // idleWaitSeconds 与 sendIdleWait 已移除：长复合动作持续到时段切换由
@@ -806,25 +839,10 @@ func isCompositeCmdDynamic(cmd string, registry *CapabilityRegistry) bool {
 func (a *agentContext) popAndSendQueueAction(ctx context.Context, agentID string,
 	ws *wsserver.Server, kb *worldkb.KB, logger *slog.Logger) {
 
-	a.mu.Lock()
-	if len(a.actionQueue) == 0 {
-		a.mu.Unlock()
+	pa, pendingStop, ok := a.as.PopActionIfIdle()
+	if !ok {
 		return
 	}
-	// 在途 action 时不要 pop：UE 正忙，pop 出的 action 会被 busy 拒。
-	// 等 action_completed 唤醒 worker（清 currentActionID）再 pop。
-	if a.currentActionID != "" {
-		a.mu.Unlock()
-		return
-	}
-	pa := a.actionQueue[0]
-	a.actionQueue = a.actionQueue[1:]
-	// 取出 pendingStopActionID（slot 切换时由 advanceSlotIfNeeded 设置）：
-	// 在下发新 action 前先发 stop 停掉旧复合动作，让 NPC 在 LLM 期间继续
-	// 旧动作而非愣住。取出后清零，避免重复 stop。
-	pendingStop := a.pendingStopActionID
-	a.pendingStopActionID = ""
-	a.mu.Unlock()
 
 	// slot 切换后首次下发：先发 stop 停掉旧复合动作（UE 仍 busy），
 	// 再发新 action_command。WS 顺序保证 UE 先处理 stop 清 busy 再处理新 action。
@@ -837,9 +855,7 @@ func (a *agentContext) popAndSendQueueAction(ctx context.Context, agentID string
 			logger.Warn("[战术层] 补发 stop_action 失败",
 				"agent_id", agentID, "action_id", pendingStop, "err", err)
 		}
-		a.mu.Lock()
-		a.selfStopInProgress = pendingStop
-		a.mu.Unlock()
+		a.as.SetSelfStopInProgress(pendingStop)
 	}
 
 	cmd, params, err := mapTacticalAction(pa, agentID, kb, capabilityRegistryRef)
@@ -857,16 +873,12 @@ func (a *agentContext) popAndSendQueueAction(ctx context.Context, agentID string
 		//   (a) UE 在途 composite 未完成 → 回填队首，等在途 action_completed 唤醒
 		//   (b) UE 断线 / 真错误 → 无在途 action 会触发 completion，signal 让
 		//       worker 下一轮重试 pop / refill
-		a.mu.Lock()
-		hasInFlight := a.currentActionSrc == sourceTactical
-		if hasInFlight {
-			a.actionQueue = append([]plannedAction{pa}, a.actionQueue...)
-			a.mu.Unlock()
+		if a.as.CurrentActionSrc() == sourceTactical {
+			a.as.PrependAction(pa)
 			logger.Warn("[战术层] 下发失败（在途 action 占用），回填队首等待 completion",
 				"agent_id", agentID, "action", pa.Action, "err", err)
 			return
 		}
-		a.mu.Unlock()
 		logger.Warn("[战术层] 下发失败，signal worker 下一轮重试", "agent_id", agentID, "err", err)
 		a.signal()
 		return
@@ -982,59 +994,29 @@ func snapshotUEErrors() []ueErrorEntry {
 func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
 	ws *wsserver.Server, kb *worldkb.KB, logger *slog.Logger) bool {
 
-	// 1. 取当前时段 goal（持锁）
-	a.mu.Lock()
-	if a.tacticalHc == nil {
-		a.mu.Unlock()
-		return false // tacticalHc 未初始化，调用方发 idle wait
-	}
-	// 在途 action 未完成时禁止 refill：UE 此时仍占用，refill 出的队列会被
-	// UE busy 全部拒绝，整队消耗光。等在途 action_completed 自然唤醒 worker 再 refill。
-	if a.currentActionID != "" {
-		a.mu.Unlock()
+	// 1. 取当前时段 goal（先读快照，再原子守卫检查+清队列）
+	plan, _, _ := a.as.SnapshotSchedule()
+	tod := a.as.LatestTimeOfDay()
+	goal, slot, idx := selectCurrentGoal(plan, tod)
+	prep := a.as.BeginTacticalRefill(goal, slot, idx, a.tacticalHc != nil)
+	if prep.ShouldSkip {
 		return false
 	}
-	goal, slot, idx := selectCurrentGoal(a.dailyPlan, a.latestTimeOfDayLocked())
-	if goal == "" {
-		a.mu.Unlock()
-		return false
-	}
-	// 同时段重复分解守卫：队列还有 action 时不 redecompose（继续执行剩余 action）；
-	// 队列空且已 redecompose ≥3 次才放弃，调用方阻塞等下一感知唤醒推进 game_time。
-	// 阈值 3：给 LLM 多次调整机会（每次重分解会通过 hint 提示"未安排长动作收尾"，
-	// LLM 可据此修正），第 3 次仍不够则等下一时段 redecomposeCount 重置。
-	if slot == a.currentSlot {
-		if len(a.actionQueue) > 0 {
-			a.mu.Unlock()
-			return false // 队列有剩余，等它们执行完再考虑 redecompose
-		}
-		if a.redecomposeCount >= 3 {
-			a.mu.Unlock()
-			return false
-		}
-		// 同时段重分解（队列已空在重分解）：注入"未安排长动作"hint 引导 LLM
-		// 这次把长复合动作放队列末尾，让 NPC 持续工作到时段切换。
-		// 注意：进入此分支即说明上次队列已提前耗尽（无论 redecomposeCount 是 0
-		// 还是更大），都应注入 hint——redecomposeCount==0 表示这是本时段第一次
-		// 重分解（上次分解的队列已空），同样需要 hint 引导。
-		if a.replanHint == "" {
-			a.replanHint = "上次队列提前耗尽，未安排长动作收尾——本次请确保最后一个 action 是标记为 [复合] 的长复合动作（见上方可用工具列表），让 NPC 持续工作到下一时段"
-		}
-	}
-	zone := a.latestZoneLocked()
-	physical := clonePhysical(a.latestPhysical)
+	goal, slot, idx = prep.Goal, prep.Slot, prep.Index
+	zone := prep.Zone
+	physical := prep.Physical
+	hint := prep.Hint
 	tacticalHc := a.tacticalHc
 	kbRef := kb
-	// 读取 replanHint（反应层 replan 设置的"上次中断原因"），让战术层
-	// LLM 看到中断理由（如"疲劳>60需要休息"）从而规划休息/充电动作，而非
-	// 继续规划工作动作导致循环 replan。消费后清空，避免下次 refill 误用。
-	hint := a.replanHint
-	a.replanHint = ""
-	a.actionQueue = nil
-	a.mu.Unlock()
 
 	var actions []plannedAction
 	var err error
+
+	// Stage 4: 加载近期记忆注入战术层 prompt（top-3 by created_at DESC）。
+	memories := a.loadTacticalMemories(ctx, agentID)
+	// Stage 5: 加载关系列表注入战术层 prompt【人际关系】段。
+	// 单 agent 场景（kb.Agents ≤ 1）返回空串，不污染 prompt。
+	relationships := a.loadRelationships(ctx, agentID, kbRef)
 
 	// 战术层 LLM 调用统一 30s 硬超时：避免 Venus 后端排队时单次调用卡 120s
 	// 拖死整个游戏时段。超时后调用方发 idle wait，下一感知周期重试。
@@ -1043,15 +1025,10 @@ func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
 
 	if tacticalStreamingEnabled {
 		// 流式路径：onAction 回调逐个入队 + 首 action 提前下发。
-		// 回调在 SendStreaming 的 onDelta 调用栈里同步执行（worker 仍阻塞在 tacticalRefill），
-		// 不跨回调持有 mu。
-		_, _, err = generateTacticalPlanStreaming(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, logger, hint, capabilityRegistryRef,
+		_, _, err = generateTacticalPlanStreaming(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, logger, hint, memories, relationships, capabilityRegistryRef,
 			func(pa plannedAction) {
-				a.mu.Lock()
-				a.actionQueue = append(a.actionQueue, pa)
-				shouldDispatch := a.currentActionID == "" && len(a.actionQueue) == 1
-				a.mu.Unlock()
-				if shouldDispatch {
+				a.as.AppendQueueAction(pa)
+				if a.as.ShouldDispatchFirst() {
 					logger.Info("[战术层] 流式下发首 action", "agent_id", agentID, "action", pa.Action)
 					a.popAndSendQueueAction(ctx, agentID, ws, kb, logger)
 				}
@@ -1059,51 +1036,33 @@ func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
 		)
 	} else {
 		// 非流式路径（默认）：等完整响应后一次性填充队列。
-		actions, _, err = generateTacticalPlan(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, logger, hint, capabilityRegistryRef)
+		actions, _, err = generateTacticalPlan(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, logger, hint, memories, relationships, capabilityRegistryRef)
 		if err == nil {
-			a.mu.Lock()
-			a.actionQueue = actions
-			a.mu.Unlock()
+			a.as.ReplaceQueue(actions)
 		}
 	}
 
 	// 3. LLM 调用结束后的记账（流式/非流式共用）
-	a.mu.Lock()
 	if err != nil {
-		queued := len(a.actionQueue)
-		a.mu.Unlock()
+		queued := a.as.QueueLen()
 		logger.Warn("[战术层] 分解失败，保留已入队 action",
 			"agent_id", agentID, "queued", queued, "err", err)
 		return false
 	}
-	isRedecompose := slot == a.currentSlot
-	if isRedecompose {
-		a.redecomposeCount++
-	} else {
-		a.currentSlot = slot
-		a.currentPlanIndex = idx
-		a.redecomposeCount = 0
-	}
-	queueLen := len(a.actionQueue)
-	redecomposeCount := a.redecomposeCount
-	queuedActions := append([]plannedAction(nil), a.actionQueue...)
-	a.mu.Unlock()
+	a.as.CommitTacticalRefill(slot, idx, prep.IsRedecompose)
+	queueLen := a.as.QueueLen()
+	redecomposeCount := a.as.RedecomposeCountSnapshot()
+	queuedActions := a.as.QueueSnapshot()
 
 	actionsJSON, _ := json.Marshal(queuedActions)
 	logger.Info("[战术层] 队列已填充",
 		"agent_id", agentID, "slot", slot, "queue_len", queueLen,
-		"redecompose", isRedecompose, "redecompose_count", redecomposeCount,
+		"redecompose", prep.IsRedecompose, "redecompose_count", redecomposeCount,
 		"replan_hint", hint, "actions", string(actionsJSON))
-
-	// inner_thought 不再推送 UE（协议未定义 narrative 消息类型）。
-	// thought 仍在 tactical.go 的 [战术层] 分解成功 日志中记录，调试可见性保留。
 
 	// 5. 补发：非流式路径总有首 action 要 pop；流式路径若首 action 已在回调中
 	// 下发则此处 no-op（队列空或在途 action 占用）。
-	a.mu.Lock()
-	needFallback := a.currentActionID == "" && len(a.actionQueue) > 0
-	a.mu.Unlock()
-	if needFallback {
+	if a.as.NeedFallbackDispatch() {
 		a.popAndSendQueueAction(ctx, agentID, ws, kb, logger)
 	}
 	return true
@@ -1123,25 +1082,25 @@ func (a *agentContext) tacticalRefillForReplan(
 	ctx context.Context, agentID string, ws *wsserver.Server,
 	kb *worldkb.KB, logger *slog.Logger, replanHint string,
 ) bool {
-	// 1. 取当前时段 goal（持锁）——不检查 currentActionID
-	a.mu.Lock()
+	// 1. 取当前时段 goal —— 不检查 currentActionID（replan 允许在途规划）
 	if a.tacticalHc == nil {
-		a.mu.Unlock()
 		return false
 	}
-	goal, slot, idx := selectCurrentGoal(a.dailyPlan, a.latestTimeOfDayLocked())
+	plan, _, _ := a.as.SnapshotSchedule()
+	tod := a.as.LatestTimeOfDay()
+	goal, slot, idx := selectCurrentGoal(plan, tod)
 	if goal == "" {
-		a.mu.Unlock()
 		logger.Warn("[战术层/replan] 无当前时段 goal，无法 replan",
 			"agent_id", agentID)
 		return false
 	}
-	zone := a.latestZoneLocked()
-	physical := clonePhysical(a.latestPhysical)
+	prep := a.as.BeginReplan(goal, slot, idx, a.tacticalHc != nil)
+	goal, slot, idx = prep.Goal, prep.Slot, prep.Index
+	zone := prep.Zone
+	physical := prep.Physical
 	tacticalHc := a.tacticalHc
 	kbRef := kb
 	hint := replanHint
-	a.mu.Unlock()
 
 	// 物理告警 goal override：反应层 upgradeIfPhysicalAlert 触发的 replan
 	// 含"物理状态告警"标记，此时原 goal（如"车间装配"）应被替换为恢复类
@@ -1157,6 +1116,12 @@ func (a *agentContext) tacticalRefillForReplan(
 	tacticalCtx, tacticalCancel := context.WithTimeout(ctx, tacticalCallTimeout)
 	defer tacticalCancel()
 
+	// Stage 4: 加载近期记忆注入战术层 prompt（top-3 by created_at DESC）。
+	memories := a.loadTacticalMemories(ctx, agentID)
+	// Stage 5: 加载关系列表注入战术层 prompt【人际关系】段。
+	// 单 agent 场景（kb.Agents ≤ 1）返回空串，不污染 prompt。
+	relationships := a.loadRelationships(ctx, agentID, kbRef)
+
 	var actions []plannedAction
 	var err error
 
@@ -1164,7 +1129,7 @@ func (a *agentContext) tacticalRefillForReplan(
 		// 流式路径：回调收集到 local slice（不直接修改 a.actionQueue），
 		// 成功后才覆盖旧队列。失败则旧队列不受影响。
 		var collected []plannedAction
-		_, _, err = generateTacticalPlanStreaming(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, logger, hint, capabilityRegistryRef,
+		_, _, err = generateTacticalPlanStreaming(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, logger, hint, memories, relationships, capabilityRegistryRef,
 			func(pa plannedAction) {
 				collected = append(collected, pa)
 			},
@@ -1173,28 +1138,21 @@ func (a *agentContext) tacticalRefillForReplan(
 			actions = collected
 		}
 	} else {
-		actions, _, err = generateTacticalPlan(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, logger, hint, capabilityRegistryRef)
+		actions, _, err = generateTacticalPlan(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, logger, hint, memories, relationships, capabilityRegistryRef)
 	}
 
 	// 3. 失败处理：保留旧队列（不清空），调用方保持原 action
-	a.mu.Lock()
 	if err != nil {
-		queued := len(a.actionQueue)
-		a.mu.Unlock()
+		queued := a.as.QueueLen()
 		logger.Warn("[战术层/replan] 规划失败，保留原队列和原 action",
 			"agent_id", agentID, "queued", queued, "err", err)
 		return false
 	}
 
 	// 4. 成功：原子完成——覆盖旧队列、重置计数、清 hint、signal worker
-	a.actionQueue = actions
-	a.redecomposeCount = 0
-	a.currentSlot = slot
-	a.currentPlanIndex = idx
-	a.replanHint = ""
-	queueLen := len(a.actionQueue)
-	queuedActions := append([]plannedAction(nil), a.actionQueue...)
-	a.mu.Unlock()
+	a.as.CommitReplan(actions, slot, idx)
+	queueLen := a.as.QueueLen()
+	queuedActions := a.as.QueueSnapshot()
 
 	actionsJSON, _ := json.Marshal(queuedActions)
 	logger.Info("[战术层/replan] 重规划成功，新队列已就绪",
@@ -1252,6 +1210,12 @@ func main() {
 	// 解引用后赋给 package-level autoPlanEnabled（worker / WS handler 读此变量）。
 	autoPlanFlag = flag.Bool("auto-plan", true,
 		"enable auto planning (strategic + tactical + reactive). false = manual mode, only /debug/schedule and /debug/action drive actions")
+	// mysqlDSN 控制 MySQL 持久化层。空串 = 内存模式（NoopStore，当前行为），
+	// 非空 = 启用 MySQL 持久化（Stage 3：4 个调度字段 write-through 落盘 +
+	// 预埋 Stage 4/5 表骨架）。DSN 需含 parseTime=true 以正确扫描 DATETIME。
+	mysqlDSN = flag.String("mysql-dsn", "",
+		"MySQL DSN for state persistence (empty = in-memory mode, no persistence). "+
+			"Example: user:pass@tcp(127.0.0.1:3306)/agenttown?parseTime=true&charset=utf8mb4")
 	)
 	flag.Parse()
 	if *showVersion {
@@ -1264,6 +1228,20 @@ func main() {
 	tacticalStreamingEnabled = *tacticalStream
 	tacticalCallTimeout = *tacticalTimeout
 	autoPlanEnabled = *autoPlanFlag
+
+	// ─── Persistence store (Stage 3) ──────────────────────────
+	// 空 DSN → NoopStore（内存模式，当前行为）；非空 → MySQLStore（含迁移）。
+	// env MYSQL_DSN 作为 flag 空值时的回退（类比 VENUS_API_KEY 模式）。
+	dsn := *mysqlDSN
+	if dsn == "" {
+		dsn = os.Getenv("MYSQL_DSN")
+	}
+	store, err := buildStore(context.Background(), dsn, logger)
+	if err != nil {
+		logger.Error("init storage failed", "err", err)
+		os.Exit(1)
+	}
+	defer store.Close()
 	logger.Info("starting agenttown-mcp",
 		"version", version,
 		"http", *httpAddr,
@@ -1276,6 +1254,7 @@ func main() {
 		"ollama_url", *ollamaURL,
 		"ollama_model", *ollamaModel,
 		"auto_plan", autoPlanEnabled,
+		"mysql_persistence", dsn != "",
 	)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -1322,8 +1301,11 @@ func main() {
 	// ─── 反应层 Ollama 客户端 ────────────────────────────────────
 	// --ollama-url="" 显式禁用反应层；否则初始化客户端（即使 Ollama 进程
 	// 不在跑也不报错——Chat 调用失败时反应层静默降级为 continue）。
+	// ollamaClient 提升到外层作用域，供 registerAgent 闭包捕获注入
+	// agentContext.ollama（Stage 5 关系层判断用）。nil 表示禁用。
+	var ollamaClient *ollama.Client
 	if *ollamaURL != "" {
-		ollamaClient := ollama.New(ollama.Options{
+		ollamaClient = ollama.New(ollama.Options{
 			BaseURL: *ollamaURL,
 			Model:   *ollamaModel,
 			// HTTP client timeout 作为 backstop，必须 > reactiveCallTimeout，
@@ -1370,6 +1352,21 @@ func main() {
 		firstAgentRegistered = true
 		nextAgentEpoch++
 		ac, workerCtx := newAgentContext(ctx, nextAgentEpoch)
+		// Stage 3: 绑定持久化身份 + 从 DB 恢复 4 个调度字段。
+		// store==nil（内存模式）时 SetIdentity 仍记录 agentID 但持久化调用跳过；
+		// LoadPersistent 在 NoopStore 下返回 ErrNotFound→保持默认值（cold start）。
+		ac.as.SetIdentity(id, store)
+		if err := ac.as.LoadPersistent(ctx); err != nil {
+			logger.Warn("[main] load persistent state failed, continuing with cold start",
+				"agent_id", id, "err", err)
+		}
+		// Stage 5: 从 KB 种子导入关系到 DB（冷启动，INSERT IGNORE 不覆盖
+		// 既有交互累积）。重连走 else 分支（:1344）提前 return，不会重复导入。
+		if store != nil {
+			if err := seedRelationshipsFromKB(ctx, kb, store, id, logger); err != nil {
+				logger.Warn("[关系层] KB 种子导入失败", "agent_id", id, "err", err)
+			}
+		}
 		// 战略层/战术层各用一个独立 LLM client 实例。
 		// Venus 直连（OpenAI Chat Completions API），是唯一的战略/战术层后端。
 		venusAPIKeyValue := *venusAPIKey
@@ -1388,14 +1385,17 @@ func main() {
 			Logger:  logger,
 			Timeout: *venusTimeout,
 		})
-		ac.tacticalHc = venus.New(venus.Config{
-			BaseURL: *venusURL,
-			APIKey:  venusAPIKeyValue,
-			Model:   *venusModel,
-			Logger:  logger,
-			Timeout: *venusTimeout,
-		})
-		agents[id] = ac
+	ac.tacticalHc = venus.New(venus.Config{
+		BaseURL: *venusURL,
+		APIKey:  venusAPIKeyValue,
+		Model:   *venusModel,
+		Logger:  logger,
+		Timeout: *venusTimeout,
+	})
+	// Stage 5: 注入 Ollama 客户端供关系层判断。nil 表示 --ollama-url=""
+	// 禁用反应层时，maybeUpdateRelationship 会早返回不调用 Ollama。
+	ac.ollama = ollamaClient
+	agents[id] = ac
 		go runPerceptionWorker(workerCtx, id, ac, ws, kb, logger)
 		return ac, true
 	}
@@ -1967,14 +1967,14 @@ func handleDebugAction(ctx context.Context, logger *slog.Logger, ws *wsserver.Se
 	var stoppedActionID string
 	if force && lookupAgent != nil {
 		if ac := lookupAgent(req.AgentID); ac != nil {
-			ac.mu.Lock()
+			ac.coordMu.Lock()
 			ac.debugOverride = true
-			curID := ac.currentActionID
-			ac.mu.Unlock()
+			curID := ac.as.CurrentActionID()
+			ac.coordMu.Unlock()
 			defer func() {
-				ac.mu.Lock()
+				ac.coordMu.Lock()
 				ac.debugOverride = false
-				ac.mu.Unlock()
+				ac.coordMu.Unlock()
 				ac.signal() // 唤醒 worker 恢复正常 dispatch
 			}()
 			if curID != "" {
@@ -2131,9 +2131,9 @@ func handleDebugSchedule(ctx context.Context, logger *slog.Logger, ws *wsserver.
 
 	// 互斥：检查 replanInProgress（防 worker 并发 refill 撞 tacticalHc session）；
 	// 检查 tacticalHc 是否就绪。设 replanInProgress=true + debugOverride=true。
-	ac.mu.Lock()
+	ac.coordMu.Lock()
 	if ac.replanInProgress {
-		ac.mu.Unlock()
+		ac.coordMu.Unlock()
 		w.WriteHeader(http.StatusConflict)
 		_ = json.NewEncoder(w).Encode(debugScheduleResponse{
 			Error: "another replan/debug in progress, retry later",
@@ -2141,22 +2141,22 @@ func handleDebugSchedule(ctx context.Context, logger *slog.Logger, ws *wsserver.
 		return
 	}
 	if ac.tacticalHc == nil {
-		ac.mu.Unlock()
+		ac.coordMu.Unlock()
 		w.WriteHeader(http.StatusServiceUnavailable)
 		_ = json.NewEncoder(w).Encode(debugScheduleResponse{Error: "tactical layer not ready"})
 		return
 	}
 	ac.replanInProgress = true
 	ac.debugOverride = true
-	curID := ac.currentActionID
-	ac.mu.Unlock()
+	curID := ac.as.CurrentActionID()
+	ac.coordMu.Unlock()
 
 	// defer：清互斥 + signal 唤醒 worker（处理入队后的 pop）。
 	defer func() {
-		ac.mu.Lock()
+		ac.coordMu.Lock()
 		ac.replanInProgress = false
 		ac.debugOverride = false
-		ac.mu.Unlock()
+		ac.coordMu.Unlock()
 		ac.signal()
 	}()
 
@@ -2174,19 +2174,13 @@ func handleDebugSchedule(ctx context.Context, logger *slog.Logger, ws *wsserver.
 	}
 
 	// 取感知上下文 + 清队列 + 清在途记账（让战术层以为空闲，worker pop 不会被守卫拒）。
-	ac.mu.Lock()
-	zone := ac.latestZoneLocked()
-	timeOfDay := ac.latestTimeOfDayLocked()
-	physical := clonePhysical(ac.latestPhysical)
+	snap := ac.as.Snapshot()
+	zone := snap.LatestZone()
+	timeOfDay := snap.LatestTimeOfDay()
+	physical := snap.LatestPhysical
 	tacticalHc := ac.tacticalHc
-	hasPerception := len(ac.latestPerception) > 0
-	ac.actionQueue = nil
-	ac.currentActionID = ""
-	ac.currentActionSrc = ""
-	ac.currentActionCmd = ""
-	ac.currentActionParams = nil
-	ac.currentActionStart = time.Time{}
-	ac.mu.Unlock()
+	hasPerception := len(snap.LatestPerception) > 0
+	ac.as.ClearForSlotSwitch()
 
 	// 调战术层 LLM 分解（非流式，tacticalCallTimeout 60s 硬超时）。
 	// 复用 generateTacticalPlan：它不读 dailyPlan，goal/slot 由调用方传入。
@@ -2195,7 +2189,7 @@ func handleDebugSchedule(ctx context.Context, logger *slog.Logger, ws *wsserver.
 
 	actions, thought, err := generateTacticalPlan(
 		tacticalCtx, tacticalHc, req.AgentID,
-		goal, zone, timeOfDay, slot, physical, kb, logger, "", capabilityRegistryRef,
+		goal, zone, timeOfDay, slot, physical, kb, logger, "", "", "", capabilityRegistryRef,
 	)
 	if err != nil {
 		logger.Warn("[debug/schedule] decompose failed",
@@ -2208,14 +2202,11 @@ func handleDebugSchedule(ctx context.Context, logger *slog.Logger, ws *wsserver.
 	}
 
 	// 入队 + 记账。currentSlot 加 "__debug__" 前缀避免与 dailyPlan 同时段撞
-	// redecomposeCount >= 1 限制（main.go:696），保证 worker 下次 refill 必走
-	// "新时段"重置路径，注入队列执行完后回到 dailyPlan 正轨。
-	ac.mu.Lock()
-	ac.actionQueue = actions
-	ac.currentSlot = "__debug__" + slot
-	ac.redecomposeCount = 0
+	// redecomposeCount >= 1 限制，保证 worker 下次 refill 必走"新时段"重置路径，
+	// 注入队列执行完后回到 dailyPlan 正轨。
+	ac.as.RefillQueue(actions, "__debug__"+slot)
+	ac.as.ResetRedecomposeCount()
 	queueLen := len(actions)
-	ac.mu.Unlock()
 
 	logger.Info("[debug/schedule] decompose ok",
 		"agent_id", req.AgentID, "slot", slot, "goal", goal,

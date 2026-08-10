@@ -24,6 +24,9 @@
 export WS_PORT=9091
 export HTTP_PORT=8770
 
+# 数据库：dev 实例用 agenttown_dev，与 stable 的 agenttown_stable 隔离，防止串台
+export MYSQL_DB=agenttown_dev
+
 # 二进制名带 -dev 后缀：避免与 stable 实例共用二进制导致编译时文件锁冲突
 # Linux 下不带 .exe 后缀，Windows 下保留
 if grep -qi microsoft /proc/version 2>/dev/null || command -v cmd.exe >/dev/null 2>&1; then

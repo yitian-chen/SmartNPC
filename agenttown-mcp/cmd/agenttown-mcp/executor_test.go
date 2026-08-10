@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/AgentTown/agenttown-mcp/adapters/agenttown/tools"
+	"github.com/AgentTown/agenttown-mcp/pkg/agentstate"
 	"github.com/AgentTown/agenttown-mcp/pkg/wsserver"
 )
 
@@ -75,10 +76,8 @@ func TestSendStopAction_NoInFlightActionIsNoOp(t *testing.T) {
 	// 注意：validate 优先于 currentActionID 查询。UE 未连接时 validate 失败，
 	// 返回 "UE disconnected"。这里验证 validate 优先语义。
 	// 真正的 no-op 路径（agent 已注册 + UE 已连接 + 无在途 action）需要集成测试。
-	ex, ac, _ := newTestExecutor(t)
-	ac.mu.Lock()
-	ac.currentActionID = ""
-	ac.mu.Unlock()
+	ex, _, _ := newTestExecutor(t)
+	// AgentState 默认 currentActionID 为空，无需显式设置。
 	err := ex.SendStopAction("H-01", "")
 	if err == nil {
 		return // ws fire-and-forget 可能返回 nil
@@ -94,9 +93,7 @@ func TestSendStopAction_LooksUpCurrentActionID(t *testing.T) {
 	// 设置 currentActionID，不传 actionID → 应查到 act_test123 并尝试 ws.SendStopAction
 	// ws 未连接会失败，但错误消息应来自 ws 层（不是 "unknown agent"），
 	// 证明它成功查到了 currentActionID 并走到了 ws 调用。
-	ac.mu.Lock()
-	ac.currentActionID = "act_test123"
-	ac.mu.Unlock()
+	ac.as.RecordActionStarted("act_test123", "", nil, agentstate.SourceTactical)
 	err := ex.SendStopAction("H-01", "")
 	if err == nil {
 		// ws.SendStopAction 在未连接时可能返回 nil（fire-and-forget）。
@@ -113,9 +110,7 @@ func TestSendStopAction_LooksUpCurrentActionID(t *testing.T) {
 func TestSendStopAction_ExplicitActionIDUsed(t *testing.T) {
 	ex, ac, _ := newTestExecutor(t)
 	// 显式传 actionID 时不应查 currentActionID（即使 currentActionID 不同也用传入的）
-	ac.mu.Lock()
-	ac.currentActionID = "act_other"
-	ac.mu.Unlock()
+	ac.as.RecordActionStarted("act_other", "", nil, agentstate.SourceTactical)
 	// 未连接 ws 会失败，但验证不 panic
 	err := ex.SendStopAction("H-01", "act_explicit")
 	if err == nil {

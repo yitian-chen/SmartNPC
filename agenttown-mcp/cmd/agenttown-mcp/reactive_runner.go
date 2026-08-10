@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/AgentTown/agenttown-mcp/pkg/ollama"
+	"github.com/AgentTown/agenttown-mcp/pkg/prompt"
 	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
 	"github.com/AgentTown/agenttown-mcp/pkg/wsserver"
 )
@@ -89,26 +90,25 @@ func (r *reactiveRunner) trigger(agentID string, ac *agentContext, trigger React
 	}
 
 	// 1. 去抖检查（与文档决策 3 一致：事件类 60s，周期性 45s）
-	key := dedupeKey(agentID, trigger, detail)
+	key := prompt.DedupeKey(agentID, trigger, detail)
 	dedupeWindow := reactiveDedupeWindow
 	if trigger == TriggerPeriodic {
 		dedupeWindow = reactivePeriodicDedupeWindow
 	}
 	now := time.Now()
-	ac.mu.Lock()
+	// stopped 是协调字段（coordMu），去抖时间戳是业务字段（AgentState.mu）。
+	// 两次加锁不嵌套：先查 stopped，再原子 check-and-set 去抖时间戳。
+	ac.coordMu.Lock()
 	if ac.stopped {
-		ac.mu.Unlock()
+		ac.coordMu.Unlock()
 		return
 	}
-	lastAt, exists := ac.lastReactiveAt[key]
-	if exists && now.Sub(lastAt) < dedupeWindow {
-		ac.mu.Unlock()
+	ac.coordMu.Unlock()
+	if !ac.as.DedupeReactive(key, now, dedupeWindow) {
 		r.logger.Debug("[反应层] 去抖跳过",
 			"agent_id", agentID, "trigger", trigger, "detail", detail)
 		return
 	}
-	ac.lastReactiveAt[key] = now
-	ac.mu.Unlock()
 
 	// 2. 串行化 Ollama 调用
 	r.mu.Lock()
@@ -116,7 +116,7 @@ func (r *reactiveRunner) trigger(agentID string, ac *agentContext, trigger React
 
 	// 3. 构造 prompt 输入
 	input := r.buildInput(agentID, ac, trigger, detail)
-	prompt := buildReactivePrompt(input)
+	promptText := prompt.BuildReactive(input)
 	r.logger.Info("[反应层/触发]",
 		"agent_id", agentID, "trigger", trigger, "detail", detail,
 		"zone", input.Zone, "time_of_day", input.TimeOfDay,
@@ -125,12 +125,12 @@ func (r *reactiveRunner) trigger(agentID string, ac *agentContext, trigger React
 		"action_src", input.ActionSrc, "current_slot", input.CurrentSlot)
 	r.logger.Info("[反应层/PROMPT]",
 		"agent_id", agentID, "trigger", trigger, "model", r.ollama.Model(),
-		"text", prompt)
+		"text", promptText)
 
 	// 4. 调用 Ollama（8s 超时）
 	ctx, cancel := context.WithTimeout(context.Background(), reactiveCallTimeout)
 	defer cancel()
-	raw, err := r.ollama.Chat(ctx, prompt)
+	raw, err := r.ollama.Chat(ctx, promptText)
 	if err != nil {
 		r.logger.Warn("[反应层/失败]",
 			"agent_id", agentID, "trigger", trigger, "err", err)
@@ -140,10 +140,10 @@ func (r *reactiveRunner) trigger(agentID string, ac *agentContext, trigger React
 		"agent_id", agentID, "trigger", trigger, "raw", raw)
 
 	// 5. 解析决策（容错：失败默认 continue）
-	dec := parseReactiveDecision(raw)
+	dec := prompt.ParseReactiveDecision(raw)
 	// 代码层兜底：物理状态告警时强制升级 continue/observe 为 interrupt。
 	// LLM 在 fatigue=80+ 时仍可能输出 observe，仅靠 prompt 约束不可靠。
-	dec = upgradeIfPhysicalAlert(input, dec)
+	dec = prompt.UpgradeIfPhysicalAlert(input, dec)
 	r.logger.Info("[反应层/决策]",
 		"agent_id", agentID, "reaction", dec.Reaction, "reason", dec.Reason,
 		"trigger", trigger,
@@ -157,35 +157,35 @@ func (r *reactiveRunner) trigger(agentID string, ac *agentContext, trigger React
 }
 
 // buildInput 从 agentContext 提取反应层决策所需的状态快照。
-// 持有 ac.mu 期间完成读取，避免与战术层并发写入竞争。
+// 通过 AgentState.Snapshot() 原子读取所有业务字段，无需持有协调锁，
+// 避免与战术层并发写入竞争。
 func (r *reactiveRunner) buildInput(agentID string, ac *agentContext, trigger ReactiveTrigger, detail string) ReactiveInput {
-	ac.mu.Lock()
-	defer ac.mu.Unlock()
+	snap := ac.as.Snapshot()
 
-	zone := ac.latestZoneLocked()
-	tod := ac.latestTimeOfDayLocked()
+	zone := snap.LatestZone()
+	tod := snap.LatestTimeOfDay()
 	// 物理状态默认值：energy/health 满格，fatigue 为 0（保守安全的"正常"状态）。
 	// state_report 尚未到达时用默认值，避免反应层拿到 0 误判为警戒带触发。
 	energy, fatigue, health := 100.0, 0.0, 100.0
-	if ac.latestPhysical != nil {
-		energy = ac.latestPhysical.Energy
-		fatigue = ac.latestPhysical.Fatigue
-		health = ac.latestPhysical.Health
+	if snap.LatestPhysical != nil {
+		energy = snap.LatestPhysical.Energy
+		fatigue = snap.LatestPhysical.Fatigue
+		health = snap.LatestPhysical.Health
 	}
 	// 构造可读的"在途动作"描述：cmd + 关键 params（target/duration_min）
 	currentAction := ""
 	elapsedSec := 0
 	actionSrc := ""
-	if ac.currentActionID != "" {
-		currentAction = describeAction(ac.currentActionCmd, ac.currentActionParams)
-		if !ac.currentActionStart.IsZero() {
-			elapsedSec = int(time.Since(ac.currentActionStart).Seconds())
+	if snap.CurrentActionID != "" {
+		currentAction = describeAction(snap.CurrentActionCmd, snap.CurrentActionParams)
+		if !snap.CurrentActionStart.IsZero() {
+			elapsedSec = int(time.Since(snap.CurrentActionStart).Seconds())
 		}
-		actionSrc = string(ac.currentActionSrc)
+		actionSrc = string(snap.CurrentActionSrc)
 	}
 
 	// 战术层上下文：截断 dailyPlan 避免 prompt 过长（反应层只需摘要）
-	plan := ac.dailyPlan
+	plan := snap.DailyPlan
 	if len(plan) > 400 {
 		plan = plan[:400] + "…"
 	}
@@ -202,13 +202,13 @@ func (r *reactiveRunner) buildInput(agentID string, ac *agentContext, trigger Re
 			agentName = agent.DisplayName
 		}
 	}
-	agentRole := buildAgentRoleContext(r.kb, agentID)
+	agentRole := prompt.AgentRole(r.kb, agentID)
 
 	// 实时从 dailyPlan 计算 slot，避免长动作在途时 currentSlot stale。
 	// __debug__ 前缀的 slot 是 /debug/schedule 注入的临时覆盖，保留原值。
-	liveSlot := ac.currentSlot
-	if !strings.HasPrefix(ac.currentSlot, "__debug__") {
-		if _, s, _ := selectCurrentGoal(ac.dailyPlan, tod); s != "" {
+	liveSlot := snap.CurrentSlot
+	if !strings.HasPrefix(snap.CurrentSlot, "__debug__") {
+		if _, s, _ := selectCurrentGoal(snap.DailyPlan, tod); s != "" {
 			liveSlot = s
 		}
 	}
@@ -222,7 +222,7 @@ func (r *reactiveRunner) buildInput(agentID string, ac *agentContext, trigger Re
 		Energy:            energy,
 		Fatigue:           fatigue,
 		Health:            health,
-		PhysicalAvailable: ac.latestPhysical != nil && !ac.latestPhysical.IsZero(),
+		PhysicalAvailable: snap.LatestPhysical != nil && !snap.LatestPhysical.IsZero(),
 		CurrentAction:     currentAction,
 		ElapsedSec:        elapsedSec,
 		ActionSrc:         actionSrc,
@@ -281,41 +281,44 @@ func (r *reactiveRunner) execute(agentID string, ac *agentContext, dec ReactiveD
 		// 1. 游戏时间去抖（agent 全局，不按 trigger/detail）：1 游戏小时内至多 1 次。
 		//    用游戏时间而非 wall-clock 是因为仿真倍率最高 600x，wall-clock 窗口会
 		//    在游戏时间轴上放大到数十小时，使整日仿真中合法 replan 被第一次拦截。
-		ac.mu.Lock()
+		ac.coordMu.Lock()
 		if ac.stopped {
-			ac.mu.Unlock()
+			ac.coordMu.Unlock()
 			return
 		}
-		lastReplanGT := ac.lastReplanGameTime
-		curGT := ac.latestTimeOfDayLocked()
-		ac.mu.Unlock()
-		if lastReplanGT != "" && curGT != "" {
-			delta := gameTimeDeltaMinutes(lastReplanGT, curGT)
-			if delta < replanDedupeGameMinutes {
-				r.logger.Info("[反应层] replan 去抖跳过（1 游戏小时内已 replan）",
-					"agent_id", agentID,
-					"last_replan_game_time", lastReplanGT,
-					"current_game_time", curGT,
-					"delta_min", delta,
-					"window_min", replanDedupeGameMinutes)
-				return
+		ac.coordMu.Unlock()
+		{
+			snap := ac.as.Snapshot()
+			lastReplanGT := snap.LastReplanGameTime
+			curGT := snap.LatestTimeOfDay()
+			if lastReplanGT != "" && curGT != "" {
+				delta := prompt.GameTimeDeltaMinutes(lastReplanGT, curGT)
+				if delta < replanDedupeGameMinutes {
+					r.logger.Info("[反应层] replan 去抖跳过（1 游戏小时内已 replan）",
+						"agent_id", agentID,
+						"last_replan_game_time", lastReplanGT,
+						"current_game_time", curGT,
+						"delta_min", delta,
+						"window_min", replanDedupeGameMinutes)
+					return
+				}
 			}
 		}
 
-		// 2. 防重入：规划进行中跳过
-		ac.mu.Lock()
+		// 2. 防重入：规划进行中跳过（协调字段，coordMu）
+		ac.coordMu.Lock()
 		if ac.replanInProgress {
-			ac.mu.Unlock()
+			ac.coordMu.Unlock()
 			r.logger.Debug("[反应层] replan 已在进行，跳过", "agent_id", agentID)
 			return
 		}
 		ac.replanInProgress = true
-		ac.replanHint = dec.Reason
-		ac.mu.Unlock()
+		ac.coordMu.Unlock()
+		ac.as.SetReplanHint(dec.Reason)
 		defer func() {
-			ac.mu.Lock()
+			ac.coordMu.Lock()
 			ac.replanInProgress = false
-			ac.mu.Unlock()
+			ac.coordMu.Unlock()
 		}()
 
 		// 3. 调战术层重规划（用 context.Background()，战术层需 30s，
@@ -337,11 +340,8 @@ func (r *reactiveRunner) execute(agentID string, ac *agentContext, dec ReactiveD
 		}
 
 		// 4. 规划成功：更新去抖游戏时间戳（同时记录 wall-clock 仅用于日志）
-		ac.mu.Lock()
-		ac.lastReplanGameTime = ac.latestTimeOfDayLocked()
-		ac.lastReplanAt = time.Now()
-		actionID := ac.currentActionID
-		ac.mu.Unlock()
+		ac.as.SetReplanTimestamps(time.Now(), ac.as.LatestTimeOfDay())
+		actionID := ac.as.CurrentActionID()
 
 		// 5. 打断原在途 action（新队列已就绪，worker 待 signal）
 		if actionID != "" {
@@ -372,26 +372,24 @@ func (r *reactiveRunner) execute(agentID string, ac *agentContext, dec ReactiveD
 // 旧 action 的超时 timer 必须取消，防止 fire 后误清新 currentActionID。
 // 旧 action 的 action_completed 迟到时 currentActionID 已不匹配，自然忽略。
 func (r *reactiveRunner) fallbackStopAndRefill(agentID string, ac *agentContext, reason string) {
-	ac.mu.Lock()
-	actionID := ac.currentActionID
-	queueLen := len(ac.actionQueue)
-	ac.actionQueue = nil
-	ac.currentActionID = ""
-	ac.currentActionCmd = ""
-	ac.currentActionParams = nil
-	ac.currentActionStart = time.Time{}
-	ac.currentActionSrc = ""
+	// 业务字段（queue + 在途追踪 + slot）通过 AgentState 原子清理；
+	// 协调字段（replanInProgress + pending timer）通过 coordMu 清理。
+	// 两次加锁不嵌套。
+	info := ac.as.ClearForReplan()
+	actionID := info.ActionID
+	queueLen := info.QueueLen
+	ac.as.SetReplanHint(reason)
+	ac.as.SetReplanTimestamps(time.Now(), ac.as.LatestTimeOfDay()) // 游戏时间去抖，防止 1 游戏小时内反复 replan 失败
+
+	ac.coordMu.Lock()
 	ac.replanInProgress = false
-	ac.replanHint = reason
-	ac.lastReplanAt = time.Now()                          // wall-clock，仅日志
-	ac.lastReplanGameTime = ac.latestTimeOfDayLocked()    // 游戏时间去抖，防止 1 游戏小时内反复 replan 失败
 	if actionID != "" {
 		if timer, ok := ac.pendingActionTimeouts[actionID]; ok {
 			timer.Stop()
 			delete(ac.pendingActionTimeouts, actionID)
 		}
 	}
-	ac.mu.Unlock()
+	ac.coordMu.Unlock()
 
 	if actionID != "" {
 		if err := r.ws.SendStopAction(agentID, actionID); err != nil {

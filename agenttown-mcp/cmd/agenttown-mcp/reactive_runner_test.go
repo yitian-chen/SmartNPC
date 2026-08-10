@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/AgentTown/agenttown-mcp/pkg/agentstate"
+	"github.com/AgentTown/agenttown-mcp/pkg/prompt"
 	"github.com/AgentTown/agenttown-mcp/pkg/wsserver"
 )
 
@@ -69,10 +71,9 @@ func TestBuildInput_LiveSlot(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			ac, _ := newAgentContext(context.Background())
-			ac.mu.Lock()
-			ac.currentSlot = c.currentSlot
-			ac.dailyPlan = c.dailyPlan
-			// 注入 perception 让 latestTimeOfDayLocked 返回 c.timeOfDay
+			ac.as.RefillQueue(nil, c.currentSlot)
+			ac.as.SetDailyPlan(c.dailyPlan, 0)
+			// 注入 perception 让 LatestTimeOfDay 返回 c.timeOfDay
 			// 按约定 19，environment 用 time_of_day_sec（当天秒数）。
 			parts := strings.Split(c.timeOfDay, ":")
 			if len(parts) != 2 {
@@ -81,8 +82,10 @@ func TestBuildInput_LiveSlot(t *testing.T) {
 			h, _ := strconv.Atoi(parts[0])
 			m, _ := strconv.Atoi(parts[1])
 			todSec := h*3600 + m*60
-			ac.latestPerception = []byte(fmt.Sprintf(`{"environment":{"time_of_day_sec":%d},"location":{}}`, todSec))
-			ac.mu.Unlock()
+			payload := []byte(fmt.Sprintf(`{"environment":{"time_of_day_sec":%d},"location":{}}`, todSec))
+			if _, err := ac.as.SetPerception(payload); err != nil {
+				t.Fatalf("SetPerception: %v", err)
+			}
 
 			r := &reactiveRunner{}
 			input := r.buildInput("H-01", ac, TriggerZoneChange, "test")
@@ -118,7 +121,7 @@ func TestUpgradeIfPhysicalAlert_ReasonContainsOrigReaction(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := upgradeIfPhysicalAlert(c.input, c.dec)
+			got := prompt.UpgradeIfPhysicalAlert(c.input, c.dec)
 			wantSub := "原决策=" + c.wantOrigKind + "/"
 			if !strings.Contains(got.Reason, wantSub) {
 				t.Errorf("Reason = %q, want substring %q", got.Reason, wantSub)
@@ -140,33 +143,31 @@ func TestFallbackStopAndRefill_ClearsQueueAndSignalsWorker(t *testing.T) {
 	r := &reactiveRunner{ws: ws, logger: testLogger()}
 	ac, _ := newAgentContext(context.Background())
 
-	ac.mu.Lock()
-	ac.currentActionID = "act_inflight_456"
-	ac.currentActionCmd = "WorkAtWorkbench"
-	ac.currentActionParams = map[string]any{"target_object_id": "workbench_01"}
-	ac.actionQueue = []plannedAction{
+	ac.as.RecordActionStarted("act_inflight_456", "WorkAtWorkbench", map[string]any{"target_object_id": "workbench_01"}, agentstate.SourceTactical)
+	ac.as.ReplaceQueue([]plannedAction{
 		{Action: "work_at_workbench", Params: map[string]any{"target_object_id": "workbench_01"}},
 		{Action: "wait", Params: map[string]any{"duration_sec": 600}},
-	}
-	ac.mu.Unlock()
+	})
 
 	r.fallbackStopAndRefill("H-01", ac, "疲劳告警 replan 失败")
 
-	ac.mu.Lock()
-	defer ac.mu.Unlock()
-	if len(ac.actionQueue) != 0 {
-		t.Errorf("actionQueue 应被清空，仍剩 %d 个 action", len(ac.actionQueue))
+	snap := ac.as.Snapshot()
+	if ac.as.QueueLen() != 0 {
+		t.Errorf("actionQueue 应被清空，仍剩 %d 个 action", ac.as.QueueLen())
 	}
-	if ac.currentActionID != "" {
-		t.Errorf("currentActionID 应被清空，得到 %q", ac.currentActionID)
+	if snap.CurrentActionID != "" {
+		t.Errorf("currentActionID 应被清空，得到 %q", snap.CurrentActionID)
 	}
-	if ac.currentActionCmd != "" {
-		t.Errorf("currentActionCmd 应被清空，得到 %q", ac.currentActionCmd)
+	if snap.CurrentActionCmd != "" {
+		t.Errorf("currentActionCmd 应被清空，得到 %q", snap.CurrentActionCmd)
 	}
-	if ac.replanHint != "疲劳告警 replan 失败" {
-		t.Errorf("replanHint = %q, want replan 原因", ac.replanHint)
+	if snap.ReplanHint != "疲劳告警 replan 失败" {
+		t.Errorf("replanHint = %q, want replan 原因", snap.ReplanHint)
 	}
-	if ac.replanInProgress {
+	ac.coordMu.Lock()
+	replanInProgress := ac.replanInProgress
+	ac.coordMu.Unlock()
+	if replanInProgress {
 		t.Errorf("replanInProgress 应被清除，让 worker 能 refill")
 	}
 
@@ -186,19 +187,15 @@ func TestFallbackStopAndRefill_NoInFlightAction(t *testing.T) {
 	r := &reactiveRunner{ws: ws, logger: testLogger()}
 	ac, _ := newAgentContext(context.Background())
 
-	ac.mu.Lock()
-	ac.currentActionID = "" // 无在途
-	ac.actionQueue = []plannedAction{
+	// currentActionID 默认为空（无在途）
+	ac.as.ReplaceQueue([]plannedAction{
 		{Action: "wait", Params: map[string]any{"duration_sec": 300}},
-	}
-	ac.mu.Unlock()
+	})
 
 	r.fallbackStopAndRefill("H-01", ac, "replan 失败")
 
-	ac.mu.Lock()
-	defer ac.mu.Unlock()
-	if len(ac.actionQueue) != 0 {
-		t.Errorf("actionQueue 应被清空，仍剩 %d", len(ac.actionQueue))
+	if ac.as.QueueLen() != 0 {
+		t.Errorf("actionQueue 应被清空，仍剩 %d", ac.as.QueueLen())
 	}
 	select {
 	case <-ac.wake:
@@ -272,7 +269,7 @@ func TestUpgradeIfPhysicalAlert(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := upgradeIfPhysicalAlert(c.input, c.dec)
+			got := prompt.UpgradeIfPhysicalAlert(c.input, c.dec)
 			if got.Reaction != c.wantKind {
 				t.Errorf("Reaction = %q, want %q", got.Reaction, c.wantKind)
 			}

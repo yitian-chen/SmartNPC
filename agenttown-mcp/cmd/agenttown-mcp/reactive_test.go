@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/AgentTown/agenttown-mcp/pkg/agentstate"
+	"github.com/AgentTown/agenttown-mcp/pkg/prompt"
 	"github.com/AgentTown/agenttown-mcp/pkg/protocol"
 )
 
@@ -29,15 +31,15 @@ func TestBuildReactivePrompt_Defaults(t *testing.T) {
 		Trigger:           TriggerZoneChange,
 		TriggerDetail:     "zone rest_area→main_workshop",
 	}
-	prompt := buildReactivePrompt(in)
+	promptText := prompt.BuildReactive(in)
 	for _, want := range []string{
 		"14:30", "main_workshop", "45", "30", "90",
 		"WorkAtWorkbench(target_object_id=workbench_01, duration_sec=3600)",
 		"tactical", "14:00-18:00", "14:00-18:00 工作组装",
 		"zone rest_area→main_workshop",
 	} {
-		if !strings.Contains(prompt, want) {
-			t.Errorf("prompt missing %q\nFull prompt:\n%s", want, prompt)
+		if !strings.Contains(promptText, want) {
+			t.Errorf("prompt missing %q\nFull prompt:\n%s", want, promptText)
 		}
 	}
 }
@@ -53,9 +55,9 @@ func TestBuildReactivePrompt_NoCurrentAction(t *testing.T) {
 		CurrentAction: "",
 		Trigger:       TriggerEventNotify,
 	}
-	prompt := buildReactivePrompt(in)
-	if !strings.Contains(prompt, "无在途动作") {
-		t.Errorf("empty CurrentAction should render as 无在途动作, got:\n%s", prompt)
+	promptText := prompt.BuildReactive(in)
+	if !strings.Contains(promptText, "无在途动作") {
+		t.Errorf("empty CurrentAction should render as 无在途动作, got:\n%s", promptText)
 	}
 }
 
@@ -68,10 +70,10 @@ func TestBuildReactivePrompt_EmptyContext(t *testing.T) {
 		Zone:      "main_workshop",
 		Trigger:   TriggerPeriodic,
 	}
-	prompt := buildReactivePrompt(in)
+	promptText := prompt.BuildReactive(in)
 	for _, want := range []string{"无在途动作", "未分解", "（未生成）", "periodic"} {
-		if !strings.Contains(prompt, want) {
-			t.Errorf("empty context should render %q, got:\n%s", want, prompt)
+		if !strings.Contains(promptText, want) {
+			t.Errorf("empty context should render %q, got:\n%s", want, promptText)
 		}
 	}
 }
@@ -86,9 +88,9 @@ func TestBuildReactivePrompt_EmptyTriggerDetail(t *testing.T) {
 		Trigger:       TriggerEventNotify,
 		TriggerDetail: "",
 	}
-	prompt := buildReactivePrompt(in)
-	if !strings.Contains(prompt, "event_notify") {
-		t.Errorf("empty detail should fall back to trigger enum, got:\n%s", prompt)
+	promptText := prompt.BuildReactive(in)
+	if !strings.Contains(promptText, "event_notify") {
+		t.Errorf("empty detail should fall back to trigger enum, got:\n%s", promptText)
 	}
 }
 
@@ -104,19 +106,19 @@ func TestBuildReactivePrompt_PhysicalAlertHardRule(t *testing.T) {
 		Health:    90,
 		Trigger:   TriggerPeriodic,
 	}
-	prompt := buildReactivePrompt(in)
-	if !strings.Contains(prompt, "必须输出 replan") {
-		t.Errorf("prompt should contain hard rule for physical alert, got:\n%s", prompt)
+	promptText := prompt.BuildReactive(in)
+	if !strings.Contains(promptText, "必须输出 replan") {
+		t.Errorf("prompt should contain hard rule for physical alert, got:\n%s", promptText)
 	}
-	if !strings.Contains(prompt, "禁止输出 continue/observe") {
-		t.Errorf("prompt should explicitly forbid continue/observe under alert, got:\n%s", prompt)
+	if !strings.Contains(promptText, "禁止输出 continue/observe") {
+		t.Errorf("prompt should explicitly forbid continue/observe under alert, got:\n%s", promptText)
 	}
 }
 
 // TestParseReactiveDecision_Continue verifies a clean continue decision.
 func TestParseReactiveDecision_Continue(t *testing.T) {
 	raw := `{"reaction":"continue","reason":"无需打断"}`
-	dec := parseReactiveDecision(raw)
+	dec := prompt.ParseReactiveDecision(raw)
 	if dec.Reaction != ReactionContinue {
 		t.Errorf("reaction: got %q, want continue", dec.Reaction)
 	}
@@ -129,7 +131,7 @@ func TestParseReactiveDecision_Continue(t *testing.T) {
 // falls back to continue.
 func TestParseReactiveDecision_MalformedJSON(t *testing.T) {
 	raw := `这不是 JSON`
-	dec := parseReactiveDecision(raw)
+	dec := prompt.ParseReactiveDecision(raw)
 	if dec.Reaction != ReactionContinue {
 		t.Errorf("reaction: got %q, want continue (parse fail fallback)", dec.Reaction)
 	}
@@ -142,7 +144,7 @@ func TestParseReactiveDecision_MalformedJSON(t *testing.T) {
 // outside the enum falls back to continue.
 func TestParseReactiveDecision_UnknownReaction(t *testing.T) {
 	raw := `{"reaction":"dance","reason":"x"}`
-	dec := parseReactiveDecision(raw)
+	dec := prompt.ParseReactiveDecision(raw)
 	if dec.Reaction != ReactionContinue {
 		t.Errorf("reaction: got %q, want continue (unknown enum fallback)", dec.Reaction)
 	}
@@ -153,7 +155,7 @@ func TestParseReactiveDecision_UnknownReaction(t *testing.T) {
 
 func TestParseReactiveDecision_Replan(t *testing.T) {
 	raw := `{"reaction":"replan","reason":"fatigue=75 已突破警戒带，当前装配任务不合理"}`
-	dec := parseReactiveDecision(raw)
+	dec := prompt.ParseReactiveDecision(raw)
 	if dec.Reaction != ReactionReplan {
 		t.Errorf("reaction: got %q, want replan", dec.Reaction)
 	}
@@ -175,15 +177,15 @@ func TestBuildReactivePrompt_ReplanOption(t *testing.T) {
 		Trigger:       TriggerPeriodic,
 		TriggerDetail: "周期性评估",
 	}
-	prompt := buildReactivePrompt(in)
-	if !strings.Contains(prompt, "replan") {
-		t.Errorf("prompt should mention 'replan' option, got: %s", prompt)
+	promptText := prompt.BuildReactive(in)
+	if !strings.Contains(promptText, "replan") {
+		t.Errorf("prompt should mention 'replan' option, got: %s", promptText)
 	}
-	if !strings.Contains(prompt, "1 游戏小时内至多触发 1 次") {
-		t.Errorf("prompt should mention replan frequency limit, got: %s", prompt)
+	if !strings.Contains(promptText, "1 游戏小时内至多触发 1 次") {
+		t.Errorf("prompt should mention replan frequency limit, got: %s", promptText)
 	}
-	if !strings.Contains(prompt, "continue|observe|replan") {
-		t.Errorf("prompt JSON schema should include replan, got: %s", prompt)
+	if !strings.Contains(promptText, "continue|observe|replan") {
+		t.Errorf("prompt JSON schema should include replan, got: %s", promptText)
 	}
 }
 
@@ -206,13 +208,13 @@ func TestBuildReactivePrompt_InjectsAgentRole(t *testing.T) {
 		DailyPlan:     "14:00-18:00 工作组装",
 		Trigger:       TriggerPeriodic,
 	}
-	prompt := buildReactivePrompt(in)
-	if !strings.Contains(prompt, "【你的角色】") {
-		t.Errorf("prompt missing '【你的角色】' section header, got: %s", prompt)
+	promptText := prompt.BuildReactive(in)
+	if !strings.Contains(promptText, "【你的角色】") {
+		t.Errorf("prompt missing '【你的角色】' section header, got: %s", promptText)
 	}
 	for _, want := range []string{"老陈", "车间主管", "沉稳"} {
-		if !strings.Contains(prompt, want) {
-			t.Errorf("prompt missing role field %q, got: %s", want, prompt)
+		if !strings.Contains(promptText, want) {
+			t.Errorf("prompt missing role field %q, got: %s", want, promptText)
 		}
 	}
 }
@@ -227,12 +229,12 @@ func TestBuildReactivePrompt_EmptyAgentRole(t *testing.T) {
 		Zone:      "main_workshop",
 		Trigger:   TriggerPeriodic,
 	}
-	prompt := buildReactivePrompt(in)
-	if !strings.Contains(prompt, "【你的角色】") {
-		t.Errorf("prompt should still contain '【你的角色】' header when role empty, got: %s", prompt)
+	promptText := prompt.BuildReactive(in)
+	if !strings.Contains(promptText, "【你的角色】") {
+		t.Errorf("prompt should still contain '【你的角色】' header when role empty, got: %s", promptText)
 	}
-	if !strings.Contains(prompt, "（无角色信息）") {
-		t.Errorf("prompt should fallback to '（无角色信息）' for empty AgentRole, got: %s", prompt)
+	if !strings.Contains(promptText, "（无角色信息）") {
+		t.Errorf("prompt should fallback to '（无角色信息）' for empty AgentRole, got: %s", promptText)
 	}
 }
 
@@ -240,7 +242,7 @@ func TestBuildReactivePrompt_EmptyAgentRole(t *testing.T) {
 // output is correctly extracted.
 func TestParseReactiveDecision_CodeFence(t *testing.T) {
 	raw := "```json\n{\"reaction\":\"replan\",\"reason\":\"体力过低\"}\n```"
-	dec := parseReactiveDecision(raw)
+	dec := prompt.ParseReactiveDecision(raw)
 	if dec.Reaction != ReactionReplan {
 		t.Errorf("reaction: got %q, want replan", dec.Reaction)
 	}
@@ -260,7 +262,7 @@ func TestParseReactiveDecision_AllEnums(t *testing.T) {
 		{`{"reaction":"replan","reason":"fatigue 过高"}`, ReactionReplan},
 	}
 	for _, c := range cases {
-		dec := parseReactiveDecision(c.raw)
+		dec := prompt.ParseReactiveDecision(c.raw)
 		if dec.Reaction != c.want {
 			t.Errorf("raw %q: reaction got %q, want %q", c.raw, dec.Reaction, c.want)
 		}
@@ -274,7 +276,7 @@ func TestParseReactiveDecision_LegacyEnumsDowngrade(t *testing.T) {
 		`{"reaction":"interrupt","reason":"旧版本输出"}`,
 		`{"reaction":"act","reason":"旧版本输出"}`,
 	} {
-		dec := parseReactiveDecision(raw)
+		dec := prompt.ParseReactiveDecision(raw)
 		if dec.Reaction != ReactionContinue {
 			t.Errorf("legacy enum %q: got %q, want continue (downgrade)", raw, dec.Reaction)
 		}
@@ -286,7 +288,7 @@ func TestParseReactiveDecision_LegacyEnumsDowngrade(t *testing.T) {
 
 // TestShouldTriggerReactive_ZoneChange verifies zone change detection.
 func TestShouldTriggerReactive_ZoneChange(t *testing.T) {
-	trig, detail := shouldTriggerReactive("rest_area", "main_workshop", nil, nil, nil, nil)
+	trig, detail := prompt.ShouldTriggerReactive("rest_area", "main_workshop", nil, nil, nil, nil)
 	if trig != TriggerZoneChange {
 		t.Errorf("trigger: got %q, want zone_change", trig)
 	}
@@ -297,7 +299,7 @@ func TestShouldTriggerReactive_ZoneChange(t *testing.T) {
 
 // TestShouldTriggerReactive_SameZone verifies no trigger when zone unchanged.
 func TestShouldTriggerReactive_SameZone(t *testing.T) {
-	trig, _ := shouldTriggerReactive("main_workshop", "main_workshop", nil, nil, nil, nil)
+	trig, _ := prompt.ShouldTriggerReactive("main_workshop", "main_workshop", nil, nil, nil, nil)
 	if trig != "" {
 		t.Errorf("trigger: got %q, want empty (same zone)", trig)
 	}
@@ -305,7 +307,7 @@ func TestShouldTriggerReactive_SameZone(t *testing.T) {
 
 // TestShouldTriggerReactive_NewObject verifies new object detection.
 func TestShouldTriggerReactive_NewObject(t *testing.T) {
-	trig, detail := shouldTriggerReactive(
+	trig, detail := prompt.ShouldTriggerReactive(
 		"main_workshop", "main_workshop",
 		[]string{"workbench_01"},
 		[]string{"workbench_01", "charging_station_01"},
@@ -323,7 +325,7 @@ func TestShouldTriggerReactive_NewObject(t *testing.T) {
 func TestShouldTriggerReactive_EnergyAlert(t *testing.T) {
 	prev := &protocol.PhysicalState{Energy: 45, Health: 90, Fatigue: 30}
 	cur := &protocol.PhysicalState{Energy: 38, Health: 90, Fatigue: 30}
-	trig, detail := shouldTriggerReactive("z", "z", nil, nil, prev, cur)
+	trig, detail := prompt.ShouldTriggerReactive("z", "z", nil, nil, prev, cur)
 	if trig != TriggerPhysicalAlert {
 		t.Errorf("trigger: got %q, want physical_alert", trig)
 	}
@@ -337,7 +339,7 @@ func TestShouldTriggerReactive_EnergyAlert(t *testing.T) {
 func TestShouldTriggerReactive_EnergyStaysLow(t *testing.T) {
 	prev := &protocol.PhysicalState{Energy: 38, Health: 90, Fatigue: 30}
 	cur := &protocol.PhysicalState{Energy: 35, Health: 90, Fatigue: 30}
-	trig, _ := shouldTriggerReactive("z", "z", nil, nil, prev, cur)
+	trig, _ := prompt.ShouldTriggerReactive("z", "z", nil, nil, prev, cur)
 	if trig != "" {
 		t.Errorf("trigger: got %q, want empty (already in alert)", trig)
 	}
@@ -347,7 +349,7 @@ func TestShouldTriggerReactive_EnergyStaysLow(t *testing.T) {
 func TestShouldTriggerReactive_HealthAlert(t *testing.T) {
 	prev := &protocol.PhysicalState{Energy: 50, Health: 55, Fatigue: 30}
 	cur := &protocol.PhysicalState{Energy: 50, Health: 48, Fatigue: 30}
-	trig, detail := shouldTriggerReactive("z", "z", nil, nil, prev, cur)
+	trig, detail := prompt.ShouldTriggerReactive("z", "z", nil, nil, prev, cur)
 	if trig != TriggerPhysicalAlert {
 		t.Errorf("trigger: got %q, want physical_alert", trig)
 	}
@@ -360,7 +362,7 @@ func TestShouldTriggerReactive_HealthAlert(t *testing.T) {
 func TestShouldTriggerReactive_FatigueAlert(t *testing.T) {
 	prev := &protocol.PhysicalState{Energy: 50, Health: 90, Fatigue: 75}
 	cur := &protocol.PhysicalState{Energy: 50, Health: 90, Fatigue: 82}
-	trig, detail := shouldTriggerReactive("z", "z", nil, nil, prev, cur)
+	trig, detail := prompt.ShouldTriggerReactive("z", "z", nil, nil, prev, cur)
 	if trig != TriggerPhysicalAlert {
 		t.Errorf("trigger: got %q, want physical_alert", trig)
 	}
@@ -372,7 +374,7 @@ func TestShouldTriggerReactive_FatigueAlert(t *testing.T) {
 // TestShouldTriggerReactive_NoPhysical verifies no trigger when physical
 // states are nil.
 func TestShouldTriggerReactive_NoPhysical(t *testing.T) {
-	trig, _ := shouldTriggerReactive("z", "z", nil, nil, nil, nil)
+	trig, _ := prompt.ShouldTriggerReactive("z", "z", nil, nil, nil, nil)
 	if trig != "" {
 		t.Errorf("trigger: got %q, want empty", trig)
 	}
@@ -382,19 +384,19 @@ func TestShouldTriggerReactive_NoPhysical(t *testing.T) {
 // periodicTriggerInterval perceptions.
 func TestShouldTriggerPeriodic(t *testing.T) {
 	// 第 0 次或负数：不触发
-	trig, _ := shouldTriggerPeriodic(0)
+	trig, _ := prompt.ShouldTriggerPeriodic(0)
 	if trig != "" {
 		t.Errorf("count=0: got %q, want empty", trig)
 	}
 	// 第 1/2/3 次：不触发（间隔为 4）
 	for i := 1; i < periodicTriggerInterval; i++ {
-		trig, _ := shouldTriggerPeriodic(i)
+		trig, _ := prompt.ShouldTriggerPeriodic(i)
 		if trig != "" {
 			t.Errorf("count=%d: got %q, want empty", i, trig)
 		}
 	}
 	// 第 4 次：触发
-	trig, detail := shouldTriggerPeriodic(periodicTriggerInterval)
+	trig, detail := prompt.ShouldTriggerPeriodic(periodicTriggerInterval)
 	if trig != TriggerPeriodic {
 		t.Errorf("count=%d: got %q, want %q", periodicTriggerInterval, trig, TriggerPeriodic)
 	}
@@ -402,13 +404,13 @@ func TestShouldTriggerPeriodic(t *testing.T) {
 		t.Errorf("detail should mention 周期性评估: %q", detail)
 	}
 	// 第 8 次：再次触发
-	trig, _ = shouldTriggerPeriodic(periodicTriggerInterval * 2)
+	trig, _ = prompt.ShouldTriggerPeriodic(periodicTriggerInterval * 2)
 	if trig != TriggerPeriodic {
 		t.Errorf("count=%d: got %q, want %q", periodicTriggerInterval*2, trig, TriggerPeriodic)
 	}
 	// 第 5/6/7 次：不触发
 	for i := periodicTriggerInterval + 1; i < periodicTriggerInterval*2; i++ {
-		trig, _ := shouldTriggerPeriodic(i)
+		trig, _ := prompt.ShouldTriggerPeriodic(i)
 		if trig != "" {
 			t.Errorf("count=%d: got %q, want empty", i, trig)
 		}
@@ -442,7 +444,7 @@ func TestDescribeAction(t *testing.T) {
 
 // TestDedupeKey verifies the dedupe key format.
 func TestDedupeKey(t *testing.T) {
-	key := dedupeKey("H-01", TriggerZoneChange, "zone A→B")
+	key := prompt.DedupeKey("H-01", TriggerZoneChange, "zone A→B")
 	want := "H-01|zone_change|zone A→B"
 	if key != want {
 		t.Errorf("dedupeKey: got %q, want %q", key, want)
@@ -451,7 +453,7 @@ func TestDedupeKey(t *testing.T) {
 
 // TestDiffStrings verifies set difference.
 func TestDiffStrings(t *testing.T) {
-	got := diffStrings([]string{"a", "b", "c"}, []string{"a"})
+	got := prompt.DiffStrings([]string{"a", "b", "c"}, []string{"a"})
 	want := []string{"b", "c"}
 	if len(got) != len(want) {
 		t.Fatalf("len: got %d, want %d", len(got), len(want))
@@ -466,7 +468,7 @@ func TestDiffStrings(t *testing.T) {
 // TestStripCodeFence_NoFence verifies plain JSON passes through.
 func TestStripCodeFence_NoFence(t *testing.T) {
 	in := `{"reaction":"continue"}`
-	if out := stripCodeFence(in); out != in {
+	if out := prompt.StripCodeFence(in); out != in {
 		t.Errorf("got %q, want %q", out, in)
 	}
 }
@@ -475,7 +477,7 @@ func TestStripCodeFence_NoFence(t *testing.T) {
 func TestStripCodeFence_WithFence(t *testing.T) {
 	in := "```json\n{\"reaction\":\"continue\"}\n```"
 	want := `{"reaction":"continue"}`
-	if out := stripCodeFence(in); out != want {
+	if out := prompt.StripCodeFence(in); out != want {
 		t.Errorf("got %q, want %q", out, want)
 	}
 }
@@ -516,7 +518,7 @@ func TestExtractObjectIDs(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := extractObjectIDs(c.p)
+			got := prompt.ExtractObjectIDs(c.p)
 			if len(got) != len(c.want) {
 				t.Fatalf("len: got %d, want %d (got=%v)", len(got), len(c.want), got)
 			}
@@ -551,13 +553,11 @@ func TestReactiveRunner_BuildInput(t *testing.T) {
 	r := &reactiveRunner{}
 	ac, _ := newAgentContext(context.Background())
 	zone := "main_workshop"
-	ac.mu.Lock()
-	ac.latestPerception = mustMarshalPerception(t, zone, "14:30")
-	ac.latestPhysical = &protocol.PhysicalState{Energy: 18, Fatigue: 85, Health: 75, JointWear: 20}
-	ac.currentActionID = "act_001"
-	ac.currentActionCmd = protocol.CmdWorkAtWorkbench
-	ac.currentActionParams = map[string]any{"target_object_id": "workbench_01", "duration_sec": 3600}
-	ac.mu.Unlock()
+	if _, err := ac.as.SetPerception(mustMarshalPerception(t, zone, "14:30")); err != nil {
+		t.Fatalf("SetPerception: %v", err)
+	}
+	ac.as.SetPhysicalState(&protocol.PhysicalState{Energy: 18, Fatigue: 85, Health: 75, JointWear: 20}, nil)
+	ac.as.RecordActionStarted("act_001", protocol.CmdWorkAtWorkbench, map[string]any{"target_object_id": "workbench_01", "duration_sec": 3600}, agentstate.SourceTactical)
 
 	in := r.buildInput("H-01", ac, TriggerPhysicalAlert, "energy 22→18")
 	if in.AgentID != "H-01" {
@@ -652,14 +652,14 @@ func parseTodToSec(t *testing.T, tod string) float64 {
 // ─── gameTimeDeltaMinutes（replan 游戏时间去抖） ───────────────
 
 func TestGameTimeDeltaMinutes_Normal(t *testing.T) {
-	got := gameTimeDeltaMinutes("06:00", "07:30")
+	got := prompt.GameTimeDeltaMinutes("06:00", "07:30")
 	if got != 90 {
 		t.Errorf("delta 06:00→07:30 = %d, want 90", got)
 	}
 }
 
 func TestGameTimeDeltaMinutes_SameTime(t *testing.T) {
-	got := gameTimeDeltaMinutes("11:00", "11:00")
+	got := prompt.GameTimeDeltaMinutes("11:00", "11:00")
 	if got != 0 {
 		t.Errorf("delta same time = %d, want 0", got)
 	}
@@ -667,7 +667,7 @@ func TestGameTimeDeltaMinutes_SameTime(t *testing.T) {
 
 func TestGameTimeDeltaMinutes_BelowWindow(t *testing.T) {
 	// 30 分钟差，应返回 30（< 60 分钟去抖窗口）
-	got := gameTimeDeltaMinutes("11:00", "11:30")
+	got := prompt.GameTimeDeltaMinutes("11:00", "11:30")
 	if got != 30 {
 		t.Errorf("delta 11:00→11:30 = %d, want 30", got)
 	}
@@ -675,7 +675,7 @@ func TestGameTimeDeltaMinutes_BelowWindow(t *testing.T) {
 
 func TestGameTimeDeltaMinutes_DayWrap(t *testing.T) {
 	// 跨日：23:30 → 00:30 应为 60 分钟，不是 -1380
-	got := gameTimeDeltaMinutes("23:30", "00:30")
+	got := prompt.GameTimeDeltaMinutes("23:30", "00:30")
 	if got != 60 {
 		t.Errorf("delta 23:30→00:30 = %d, want 60 (day wrap)", got)
 	}
@@ -683,20 +683,20 @@ func TestGameTimeDeltaMinutes_DayWrap(t *testing.T) {
 
 func TestGameTimeDeltaMinutes_EmptyArgs(t *testing.T) {
 	// 任一为空返回 0（无去抖信息，允许触发）
-	if got := gameTimeDeltaMinutes("", "12:00"); got != 0 {
+	if got := prompt.GameTimeDeltaMinutes("", "12:00"); got != 0 {
 		t.Errorf("delta empty prev = %d, want 0", got)
 	}
-	if got := gameTimeDeltaMinutes("12:00", ""); got != 0 {
+	if got := prompt.GameTimeDeltaMinutes("12:00", ""); got != 0 {
 		t.Errorf("delta empty cur = %d, want 0", got)
 	}
 }
 
 func TestGameTimeDeltaMinutes_InvalidArgs(t *testing.T) {
 	// 解析失败返回 0
-	if got := gameTimeDeltaMinutes("abc", "12:00"); got != 0 {
+	if got := prompt.GameTimeDeltaMinutes("abc", "12:00"); got != 0 {
 		t.Errorf("delta invalid prev = %d, want 0", got)
 	}
-	if got := gameTimeDeltaMinutes("12:00", "xyz"); got != 0 {
+	if got := prompt.GameTimeDeltaMinutes("12:00", "xyz"); got != 0 {
 		t.Errorf("delta invalid cur = %d, want 0", got)
 	}
 }

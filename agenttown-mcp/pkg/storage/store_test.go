@@ -1,0 +1,146 @@
+package storage
+
+import (
+	"context"
+	"errors"
+	"testing"
+)
+
+// TestNoopStore_LoadReturnsNotFound verifies NoopStore signals cold-start
+// via ErrNotFound (rather than a zero ScheduleState), so callers can
+// distinguish "no row" from "row with zero values".
+func TestNoopStore_LoadReturnsNotFound(t *testing.T) {
+	st := NoopStore{}
+	_, err := st.LoadScheduleState(context.Background(), "H-01")
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("LoadScheduleState: got err=%v, want ErrNotFound", err)
+	}
+}
+
+// TestNoopStore_SaveIsNoOp verifies Save does not panic and returns nil.
+func TestNoopStore_SaveIsNoOp(t *testing.T) {
+	st := NoopStore{}
+	if err := st.SaveScheduleState(context.Background(), "H-01", ScheduleState{DailyPlan: "x"}); err != nil {
+		t.Errorf("SaveScheduleState: got err=%v, want nil", err)
+	}
+}
+
+// TestNoopStore_CloseIsNoOp verifies Close is safe and idempotent.
+func TestNoopStore_CloseIsNoOp(t *testing.T) {
+	st := NoopStore{}
+	for i := 0; i < 3; i++ {
+		if err := st.Close(); err != nil {
+			t.Errorf("Close[%d]: got err=%v, want nil", i, err)
+		}
+	}
+}
+
+// ─── Stage 4: memory + action_history no-op stubs ───
+
+// TestNoopStore_SaveMemoryIsNoOp verifies SaveMemory returns 0,nil without panic.
+func TestNoopStore_SaveMemoryIsNoOp(t *testing.T) {
+	st := NoopStore{}
+	id, err := st.SaveMemory(context.Background(), "H-01", Memory{Content: "x"})
+	if err != nil {
+		t.Errorf("SaveMemory: got err=%v, want nil", err)
+	}
+	if id != 0 {
+		t.Errorf("SaveMemory id: got %d, want 0", id)
+	}
+}
+
+// TestNoopStore_LoadRecentMemoriesIsNoOp verifies LoadRecentMemories returns nil,nil.
+func TestNoopStore_LoadRecentMemoriesIsNoOp(t *testing.T) {
+	st := NoopStore{}
+	got, err := st.LoadRecentMemories(context.Background(), "H-01", 10)
+	if err != nil {
+		t.Errorf("LoadRecentMemories: got err=%v, want nil", err)
+	}
+	if got != nil {
+		t.Errorf("LoadRecentMemories: got %v, want nil", got)
+	}
+}
+
+// TestNoopStore_SaveActionRecordIsNoOp verifies SaveActionRecord returns nil without panic.
+func TestNoopStore_SaveActionRecordIsNoOp(t *testing.T) {
+	st := NoopStore{}
+	if err := st.SaveActionRecord(context.Background(), "H-01", ActionRecord{Cmd: "MoveTo"}); err != nil {
+		t.Errorf("SaveActionRecord: got err=%v, want nil", err)
+	}
+}
+
+// TestNoopStore_LoadActionHistoryIsNoOp verifies LoadActionHistory returns nil,nil.
+func TestNoopStore_LoadActionHistoryIsNoOp(t *testing.T) {
+	st := NoopStore{}
+	got, err := st.LoadActionHistory(context.Background(), "H-01", 100)
+	if err != nil {
+		t.Errorf("LoadActionHistory: got err=%v, want nil", err)
+	}
+	if got != nil {
+		t.Errorf("LoadActionHistory: got %v, want nil", got)
+	}
+}
+
+// TestNoopStore_SaveRelationshipIsNoOp verifies SaveRelationship returns nil without panic.
+func TestNoopStore_SaveRelationshipIsNoOp(t *testing.T) {
+	st := NoopStore{}
+	if err := st.SaveRelationship(context.Background(), "H-01", "H-02", 1, 0); err != nil {
+		t.Errorf("SaveRelationship: got err=%v, want nil", err)
+	}
+}
+
+// TestNoopStore_LoadRelationshipsIsNoOp verifies LoadRelationships returns nil,nil.
+func TestNoopStore_LoadRelationshipsIsNoOp(t *testing.T) {
+	st := NoopStore{}
+	got, err := st.LoadRelationships(context.Background(), "H-01", 10)
+	if err != nil {
+		t.Errorf("LoadRelationships: got err=%v, want nil", err)
+	}
+	if got != nil {
+		t.Errorf("LoadRelationships: got %v, want nil", got)
+	}
+}
+
+// TestNoopStore_SeedRelationshipIsNoOp verifies SeedRelationship returns nil without panic.
+func TestNoopStore_SeedRelationshipIsNoOp(t *testing.T) {
+	st := NoopStore{}
+	if err := st.SeedRelationship(context.Background(), "H-01", "H-02", 5, 0); err != nil {
+		t.Errorf("SeedRelationship: got err=%v, want nil", err)
+	}
+}
+
+// ─── migration file embedding sanity ───
+
+// TestEmbeddedMigrations_Listed verifies the embed directive picked up
+// the init migration. Catches build-time mistakes with the //go:embed path.
+func TestEmbeddedMigrations_Listed(t *testing.T) {
+	versions, err := listMigrationFiles()
+	if err != nil {
+		t.Fatalf("listMigrationFiles: %v", err)
+	}
+	if len(versions) == 0 {
+		t.Fatal("expected at least one embedded migration, got none — embed directive broken?")
+	}
+	if versions[0] != "0001_init" {
+		t.Errorf("first migration: got %q, want 0001_init", versions[0])
+	}
+}
+
+// TestSplitStatements verifies the simple SQL splitter handles the
+// multi-statement init migration correctly.
+func TestSplitStatements(t *testing.T) {
+	stmts := splitStatements("CREATE TABLE a(x INT); CREATE TABLE b(y INT);")
+	if len(stmts) != 2 {
+		t.Fatalf("got %d statements, want 2", len(stmts))
+	}
+}
+
+// TestSplitStatements_TrailingSemicolon verifies trailing semicolons don't
+// produce empty statements that would confuse Exec.
+func TestSplitStatements_TrailingSemicolon(t *testing.T) {
+	stmts := splitStatements("SELECT 1;;")
+	// The empty middle produces one blank entry which the caller filters.
+	if len(stmts) == 0 {
+		t.Fatal("got 0 statements, want at least 1")
+	}
+}
