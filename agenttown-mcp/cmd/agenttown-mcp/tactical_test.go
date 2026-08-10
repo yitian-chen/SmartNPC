@@ -520,7 +520,7 @@ func TestSelectCurrentGoal_PlanningWindowBoundary(t *testing.T) {
 
 func TestGenerateTacticalPlan_HTTPError(t *testing.T) {
 	tc := &fakeStrategicCaller{err: errors.New("network down")}
-	actions, thought, err := generateTacticalPlan(context.Background(), tc, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", &protocol.PhysicalState{Energy: 80, Fatigue: 20, JointWear: 10, Health: 100}, nil, slog.Default(), "", "", nil)
+	actions, thought, err := generateTacticalPlan(context.Background(), tc, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", &protocol.PhysicalState{Energy: 80, Fatigue: 20, JointWear: 10, Health: 100}, nil, slog.Default(), "", "", "", nil)
 	if err == nil {
 		t.Fatal("expected error on HTTP failure")
 	}
@@ -537,7 +537,7 @@ func TestGenerateTacticalPlan_ValidResponse(t *testing.T) {
 		`{"action":"move_to_location","params":{"target":"main_workshop"}}` + "\n" +
 		`{"action":"work_at_workbench","params":{"target_object_id":"workbench_01","duration_sec":14400}}`
 	tc := &fakeStrategicCaller{resp: makeStrategicResponse(raw)}
-	actions, thought, err := generateTacticalPlan(context.Background(), tc, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", &protocol.PhysicalState{Energy: 80, Fatigue: 20, JointWear: 10, Health: 100}, nil, slog.Default(), "", "", nil)
+	actions, thought, err := generateTacticalPlan(context.Background(), tc, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", &protocol.PhysicalState{Energy: 80, Fatigue: 20, JointWear: 10, Health: 100}, nil, slog.Default(), "", "", "", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -561,7 +561,7 @@ func TestGenerateTacticalPlan_ValidResponse(t *testing.T) {
 
 func TestGenerateTacticalPlan_ParseFail(t *testing.T) {
 	tc := &fakeStrategicCaller{resp: makeStrategicResponse("我今天打算去车间转转。")}
-	if _, _, err := generateTacticalPlan(context.Background(), tc, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", nil, nil, slog.Default(), "", "", nil); err == nil {
+	if _, _, err := generateTacticalPlan(context.Background(), tc, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", nil, nil, slog.Default(), "", "", "", nil); err == nil {
 		t.Fatal("expected error on parse failure (no actions)")
 	}
 }
@@ -569,7 +569,7 @@ func TestGenerateTacticalPlan_ParseFail(t *testing.T) {
 func TestGenerateTacticalPlan_EmptyActions(t *testing.T) {
 	raw := `{"inner_thought":"不知道做什么"}`
 	tc := &fakeStrategicCaller{resp: makeStrategicResponse(raw)}
-	if _, _, err := generateTacticalPlan(context.Background(), tc, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", nil, nil, slog.Default(), "", "", nil); err == nil {
+	if _, _, err := generateTacticalPlan(context.Background(), tc, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", nil, nil, slog.Default(), "", "", "", nil); err == nil {
 		t.Fatal("expected error when all actions filtered out")
 	}
 }
@@ -578,7 +578,7 @@ func TestGenerateTacticalPlan_ResetSessionCalled(t *testing.T) {
 	raw := `{"inner_thought":"开始"}` + "\n" +
 		`{"action":"wait","params":{"duration_sec":30}}`
 	tc := &fakeStrategicCaller{resp: makeStrategicResponse(raw)}
-	_, _, _ = generateTacticalPlan(context.Background(), tc, "H-01", "等待", "main_workshop", "09:00", "09:00-12:00", nil, nil, slog.Default(), "", "", nil)
+	_, _, _ = generateTacticalPlan(context.Background(), tc, "H-01", "等待", "main_workshop", "09:00", "09:00-12:00", nil, nil, slog.Default(), "", "", "", nil)
 	if !tc.resetCalled {
 		t.Error("ResetSession should be called after successful tactical generation")
 	}

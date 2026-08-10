@@ -102,6 +102,7 @@ func generateTacticalPlan(
 	logger *slog.Logger,
 	hint string,
 	memories string,
+	relationships string,
 	registry *CapabilityRegistry,
 ) ([]plannedAction, string, error) {
 	var capActions []protocol.CapabilityAction
@@ -109,16 +110,17 @@ func generateTacticalPlan(
 		capActions = registry.EffectiveActions(agentID)
 	}
 	promptText := prompt.BuildTactical(prompt.TacticalInput{
-		Goal:      goal,
-		Zone:      zone,
-		TimeOfDay: timeOfDay,
-		Slot:      slot,
-		Physical:  physical,
-		KB:        kb,
-		Hint:      hint,
-		Memories:  memories,
-		Actions:   capActions,
-		AgentID:   agentID,
+		Goal:          goal,
+		Zone:          zone,
+		TimeOfDay:     timeOfDay,
+		Slot:          slot,
+		Physical:      physical,
+		KB:            kb,
+		Hint:          hint,
+		Memories:      memories,
+		Relationships: relationships,
+		Actions:       capActions,
+		AgentID:       agentID,
 	})
 	logger.Info("[MCP→LLM/TACTICAL-PROMPT]",
 		"agent_id", agentID, "goal", goal, "game_time", timeOfDay, "text", promptText,
@@ -163,6 +165,7 @@ func generateTacticalPlanStreaming(
 	logger *slog.Logger,
 	hint string,
 	memories string,
+	relationships string,
 	registry *CapabilityRegistry,
 	onAction func(plannedAction),
 ) ([]plannedAction, string, error) {
@@ -171,16 +174,17 @@ func generateTacticalPlanStreaming(
 		capActions = registry.EffectiveActions(agentID)
 	}
 	promptText := prompt.BuildTactical(prompt.TacticalInput{
-		Goal:      goal,
-		Zone:      zone,
-		TimeOfDay: timeOfDay,
-		Slot:      slot,
-		Physical:  physical,
-		KB:        kb,
-		Hint:      hint,
-		Memories:  memories,
-		Actions:   capActions,
-		AgentID:   agentID,
+		Goal:          goal,
+		Zone:          zone,
+		TimeOfDay:     timeOfDay,
+		Slot:          slot,
+		Physical:      physical,
+		KB:            kb,
+		Hint:          hint,
+		Memories:      memories,
+		Relationships: relationships,
+		Actions:       capActions,
+		AgentID:       agentID,
 	})
 	logger.Info("[MCP→LLM/TACTICAL-PROMPT]",
 		"agent_id", agentID, "goal", goal, "game_time", timeOfDay, "text", promptText,

@@ -1022,7 +1022,7 @@ func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
 
 	if tacticalStreamingEnabled {
 		// 流式路径：onAction 回调逐个入队 + 首 action 提前下发。
-		_, _, err = generateTacticalPlanStreaming(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, logger, hint, memories, capabilityRegistryRef,
+		_, _, err = generateTacticalPlanStreaming(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, logger, hint, memories, "", capabilityRegistryRef,
 			func(pa plannedAction) {
 				a.as.AppendQueueAction(pa)
 				if a.as.ShouldDispatchFirst() {
@@ -1033,7 +1033,7 @@ func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
 		)
 	} else {
 		// 非流式路径（默认）：等完整响应后一次性填充队列。
-		actions, _, err = generateTacticalPlan(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, logger, hint, memories, capabilityRegistryRef)
+		actions, _, err = generateTacticalPlan(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, logger, hint, memories, "", capabilityRegistryRef)
 		if err == nil {
 			a.as.ReplaceQueue(actions)
 		}
@@ -1123,7 +1123,7 @@ func (a *agentContext) tacticalRefillForReplan(
 		// 流式路径：回调收集到 local slice（不直接修改 a.actionQueue），
 		// 成功后才覆盖旧队列。失败则旧队列不受影响。
 		var collected []plannedAction
-		_, _, err = generateTacticalPlanStreaming(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, logger, hint, memories, capabilityRegistryRef,
+		_, _, err = generateTacticalPlanStreaming(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, logger, hint, memories, "", capabilityRegistryRef,
 			func(pa plannedAction) {
 				collected = append(collected, pa)
 			},
@@ -1132,7 +1132,7 @@ func (a *agentContext) tacticalRefillForReplan(
 			actions = collected
 		}
 	} else {
-		actions, _, err = generateTacticalPlan(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, logger, hint, memories, capabilityRegistryRef)
+		actions, _, err = generateTacticalPlan(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, logger, hint, memories, "", capabilityRegistryRef)
 	}
 
 	// 3. 失败处理：保留旧队列（不清空），调用方保持原 action
@@ -2183,7 +2183,7 @@ func handleDebugSchedule(ctx context.Context, logger *slog.Logger, ws *wsserver.
 
 	actions, thought, err := generateTacticalPlan(
 		tacticalCtx, tacticalHc, req.AgentID,
-		goal, zone, timeOfDay, slot, physical, kb, logger, "", "", capabilityRegistryRef,
+		goal, zone, timeOfDay, slot, physical, kb, logger, "", "", "", capabilityRegistryRef,
 	)
 	if err != nil {
 		logger.Warn("[debug/schedule] decompose failed",
