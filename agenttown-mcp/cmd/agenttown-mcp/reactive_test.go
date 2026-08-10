@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/AgentTown/agenttown-mcp/pkg/agentstate"
 	"github.com/AgentTown/agenttown-mcp/pkg/protocol"
 )
 
@@ -551,13 +552,11 @@ func TestReactiveRunner_BuildInput(t *testing.T) {
 	r := &reactiveRunner{}
 	ac, _ := newAgentContext(context.Background())
 	zone := "main_workshop"
-	ac.mu.Lock()
-	ac.latestPerception = mustMarshalPerception(t, zone, "14:30")
-	ac.latestPhysical = &protocol.PhysicalState{Energy: 18, Fatigue: 85, Health: 75, JointWear: 20}
-	ac.currentActionID = "act_001"
-	ac.currentActionCmd = protocol.CmdWorkAtWorkbench
-	ac.currentActionParams = map[string]any{"target_object_id": "workbench_01", "duration_sec": 3600}
-	ac.mu.Unlock()
+	if _, err := ac.as.SetPerception(mustMarshalPerception(t, zone, "14:30")); err != nil {
+		t.Fatalf("SetPerception: %v", err)
+	}
+	ac.as.SetPhysicalState(&protocol.PhysicalState{Energy: 18, Fatigue: 85, Health: 75, JointWear: 20}, nil)
+	ac.as.RecordActionStarted("act_001", protocol.CmdWorkAtWorkbench, map[string]any{"target_object_id": "workbench_01", "duration_sec": 3600}, agentstate.SourceTactical)
 
 	in := r.buildInput("H-01", ac, TriggerPhysicalAlert, "energy 22→18")
 	if in.AgentID != "H-01" {

@@ -8,6 +8,7 @@ package agentstate
 
 import (
 	"encoding/json"
+	"fmt"
 	"time"
 
 	"github.com/AgentTown/agenttown-mcp/pkg/protocol"
@@ -58,4 +59,36 @@ type Snapshot struct {
 	LastReplanGameTime  string
 	PendingStopActionID string
 	SelfStopInProgress  string
+}
+
+// LatestZone returns the current zone from the snapshot's embedded
+// perception. Convenience method for callers that need zone info.
+func (s Snapshot) LatestZone() string {
+	if len(s.LatestPerception) == 0 {
+		return ""
+	}
+	var p protocol.PerceptionPayload
+	if err := json.Unmarshal(s.LatestPerception, &p); err != nil {
+		return ""
+	}
+	if p.Location.CurrentZone != nil {
+		return *p.Location.CurrentZone
+	}
+	return ""
+}
+
+// LatestTimeOfDay returns "HH:MM" from the snapshot's embedded perception.
+func (s Snapshot) LatestTimeOfDay() string {
+	if len(s.LatestPerception) == 0 {
+		return ""
+	}
+	var p protocol.PerceptionPayload
+	if err := json.Unmarshal(s.LatestPerception, &p); err != nil {
+		return ""
+	}
+	totalSec := int(p.Environment.TimeOfDaySec)
+	if totalSec < 0 || totalSec >= 86400 {
+		return ""
+	}
+	return fmt.Sprintf("%02d:%02d", totalSec/3600, (totalSec%3600)/60)
 }

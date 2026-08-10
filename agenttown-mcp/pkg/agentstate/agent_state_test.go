@@ -350,6 +350,39 @@ func TestReactiveDedupe(t *testing.T) {
 	}
 }
 
+func TestDedupeReactive(t *testing.T) {
+	a := New()
+	key := "H-01|zone_change|workshop"
+	window := 60 * time.Second
+	// First call: no prior record → proceeds, records now.
+	t0 := time.Now()
+	if !a.DedupeReactive(key, t0, window) {
+		t.Fatal("first DedupeReactive should proceed (no prior record)")
+	}
+	// Within window: should skip and leave timestamp unchanged.
+	t1 := t0.Add(30 * time.Second)
+	if a.DedupeReactive(key, t1, window) {
+		t.Fatal("second DedupeReactive within window should skip")
+	}
+	got, _ := a.LastReactiveAt(key)
+	if !got.Equal(t0) {
+		t.Errorf("timestamp mutated during skip: got %v, want %v", got, t0)
+	}
+	// Outside window: should proceed and update timestamp.
+	t2 := t0.Add(61 * time.Second)
+	if !a.DedupeReactive(key, t2, window) {
+		t.Fatal("third DedupeReactive outside window should proceed")
+	}
+	got, _ = a.LastReactiveAt(key)
+	if !got.Equal(t2) {
+		t.Errorf("timestamp not updated: got %v, want %v", got, t2)
+	}
+	// Different key: independent dedupe.
+	if !a.DedupeReactive("H-01|periodic|", t0, window) {
+		t.Fatal("DedupeReactive with new key should proceed")
+	}
+}
+
 // TestConcurrentAccess verifies the AgentState mutex protects against
 // data races under concurrent reads/writes. Run with -race.
 func TestConcurrentAccess(t *testing.T) {

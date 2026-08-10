@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/AgentTown/agenttown-mcp/pkg/agentstate"
 	"github.com/AgentTown/agenttown-mcp/pkg/protocol"
 	"github.com/AgentTown/agenttown-mcp/pkg/venus"
 	"github.com/AgentTown/agenttown-mcp/pkg/wsserver"
@@ -20,20 +21,15 @@ import (
 
 // ─── 战术层队列辅助与 completion 路由 ──────────────────────────
 
-// setQueueForTest 在测试中直接设置队列（绕过 mu 的 tacticalRefill 流程）。
+// setQueueForTest 在测试中直接设置队列（绕过 tacticalRefill 流程）。
 func setQueueForTest(ac *agentContext, actions []plannedAction) {
-	ac.mu.Lock()
-	ac.actionQueue = actions
-	ac.mu.Unlock()
+	ac.as.ReplaceQueue(actions)
 }
 
 func TestRecordActionCompletion_SignalsWorkerAndClearsInFlight(t *testing.T) {
 	ac, _ := newAgentContext(context.Background())
 
-	ac.mu.Lock()
-	ac.currentActionID = "act_t1"
-	ac.currentActionSrc = sourceTactical
-	ac.mu.Unlock()
+	ac.as.RecordActionStarted("act_t1", "", nil, agentstate.SourceTactical)
 
 	// 排空 wake 通道
 	select {
@@ -55,15 +51,12 @@ func TestRecordActionCompletion_SignalsWorkerAndClearsInFlight(t *testing.T) {
 		t.Fatal("completion should signal worker via wake channel")
 	}
 	// currentActionSrc / currentActionID 应已清空
-	ac.mu.Lock()
-	src := ac.currentActionSrc
-	id := ac.currentActionID
-	ac.mu.Unlock()
-	if src != "" {
-		t.Fatalf("currentActionSrc should be cleared, got %q", src)
+	snap := ac.as.Snapshot()
+	if snap.CurrentActionSrc != "" {
+		t.Fatalf("currentActionSrc should be cleared, got %q", snap.CurrentActionSrc)
 	}
-	if id != "" {
-		t.Fatalf("currentActionID should be cleared, got %q", id)
+	if snap.CurrentActionID != "" {
+		t.Fatalf("currentActionID should be cleared, got %q", snap.CurrentActionID)
 	}
 }
 
@@ -127,14 +120,12 @@ func TestRecordActionCompletion_FailureDetailIncludesReason(t *testing.T) {
 
 func TestRecordEventNotification_ReturnsTrigger(t *testing.T) {
 	ac, _ := newAgentContext(context.Background())
-	setQueueForTest(ac, []plannedAction{
+	// RefillQueue 同时设置 queue + slot；IncrementRedecomposeCount 设置计数。
+	ac.as.RefillQueue([]plannedAction{
 		{Action: "move_to", Params: map[string]any{"target": "main_workshop"}},
 		{Action: "wait", Params: map[string]any{"duration_sec": 30}},
-	})
-	ac.mu.Lock()
-	ac.currentSlot = "08:00-12:00"
-	ac.redecomposeCount = 1
-	ac.mu.Unlock()
+	}, "08:00-12:00")
+	ac.as.IncrementRedecomposeCount()
 
 	// 反应层 P0：recordEventNotification 返回 (TriggerEventNotify, detail)
 	// 供 WS handler 异步触发 reactiveRunner。本测试验证签名 + 队列不被改动。
@@ -157,19 +148,15 @@ func TestRecordEventNotification_ReturnsTrigger(t *testing.T) {
 	}
 
 	// 队列应原样保留（recordEventNotification 不再触碰战术队列）
-	ac.mu.Lock()
-	queueLen := len(ac.actionQueue)
-	slot := ac.currentSlot
-	count := ac.redecomposeCount
-	ac.mu.Unlock()
-	if queueLen != 2 {
-		t.Fatalf("queue should be preserved, got %d items", queueLen)
+	if ac.as.QueueLen() != 2 {
+		t.Fatalf("queue should be preserved, got %d items", ac.as.QueueLen())
 	}
+	_, slot, _ := ac.as.SnapshotSchedule()
 	if slot != "08:00-12:00" {
 		t.Errorf("currentSlot should be preserved, got %q", slot)
 	}
-	if count != 1 {
-		t.Errorf("redecomposeCount should be preserved, got %d", count)
+	if ac.as.RedecomposeCount() != 1 {
+		t.Errorf("redecomposeCount should be preserved, got %d", ac.as.RedecomposeCount())
 	}
 }
 
@@ -189,21 +176,19 @@ func TestPopAndSendQueueAction_RefillOnBusyRejection(t *testing.T) {
 		{Action: "wait", Params: map[string]any{"duration_sec": 90}},
 	})
 
-	// 有在途战术 action（最后一个已 pop 但未完成）
-	ac.mu.Lock()
-	ac.currentActionSrc = sourceTactical
-	ac.mu.Unlock()
+	// 模拟"上一个战术 action 已完成（currentActionID 清空）但 currentActionSrc
+	// 仍标记为 tactical"——这正是触发回填路径的场景。生产代码中 RecordActionCompletion
+	// 会同时清 currentActionSrc，此处通过 SetCurrentActionSrc 直接设置以测试防御路径。
+	ac.as.SetCurrentActionSrc(agentstate.SourceTactical)
 
 	ac.popAndSendQueueAction(context.Background(), "H-01", ws, kb, logger)
 
 	// 回填后队列仍为 3，且队首仍是第一个 action
-	ac.mu.Lock()
-	queueLen := len(ac.actionQueue)
+	queueLen := ac.as.QueueLen()
 	firstAction := ""
 	if queueLen > 0 {
-		firstAction = ac.actionQueue[0].Action
+		firstAction = ac.as.QueueSnapshot()[0].Action
 	}
-	ac.mu.Unlock()
 	if queueLen != 3 {
 		t.Fatalf("queue should be refilled to 3 after busy rejection, got %d", queueLen)
 	}
@@ -216,33 +201,27 @@ func TestRecordActionStarted_SetsSource(t *testing.T) {
 	ac, _ := newAgentContext(context.Background())
 
 	ac.recordActionStarted("act_1", "MoveTo", map[string]any{"target": "main_workshop"}, 1, sourceTactical)
-	ac.mu.Lock()
-	src := ac.currentActionSrc
-	id := ac.currentActionID
-	ac.mu.Unlock()
-	if src != sourceTactical {
-		t.Fatalf("currentActionSrc=%q, want tactical", src)
+	snap := ac.as.Snapshot()
+	if snap.CurrentActionSrc != sourceTactical {
+		t.Fatalf("currentActionSrc=%q, want tactical", snap.CurrentActionSrc)
 	}
-	if id != "act_1" {
-		t.Fatalf("currentActionID=%q, want act_1", id)
+	if snap.CurrentActionID != "act_1" {
+		t.Fatalf("currentActionID=%q, want act_1", snap.CurrentActionID)
 	}
 
 	ac.recordActionStarted("act_2", "Wait", map[string]any{"duration_sec": 30}, 2, sourceTool)
-	ac.mu.Lock()
-	src = ac.currentActionSrc
-	id = ac.currentActionID
-	ac.mu.Unlock()
-	if src != sourceTool {
-		t.Fatalf("currentActionSrc=%q, want mcp_tool", src)
+	snap = ac.as.Snapshot()
+	if snap.CurrentActionSrc != sourceTool {
+		t.Fatalf("currentActionSrc=%q, want mcp_tool", snap.CurrentActionSrc)
 	}
-	if id != "act_2" {
-		t.Fatalf("currentActionID=%q, want act_2", id)
+	if snap.CurrentActionID != "act_2" {
+		t.Fatalf("currentActionID=%q, want act_2", snap.CurrentActionID)
 	}
 }
 
 // ─── slot 切换延迟 stop ──────────────────────────────────────────
 
-// setGameTimeForTest 在测试中直接设置 latestPerception，让 latestTimeOfDayLocked
+// setGameTimeForTest 在测试中直接设置 latestPerception，让 LatestTimeOfDay
 // 返回指定 "HH:MM"。perception_update 的 environment.time_of_day_sec 字段是当天秒数。
 func setGameTimeForTest(t *testing.T, ac *agentContext, hhmm string) {
 	t.Helper()
@@ -252,9 +231,9 @@ func setGameTimeForTest(t *testing.T, ac *agentContext, hhmm string) {
 	}
 	totalSec := h*3600 + m*60
 	raw := []byte(fmt.Sprintf(`{"environment":{"time_of_day_sec":%d}}`, totalSec))
-	ac.mu.Lock()
-	ac.latestPerception = raw
-	ac.mu.Unlock()
+	if _, err := ac.as.SetPerception(raw); err != nil {
+		t.Fatalf("SetPerception: %v", err)
+	}
 }
 
 // TestAdvanceSlotIfNeeded_DelayedStopForComposite 验证 slot 切换时对长复合动作
@@ -265,22 +244,17 @@ func TestAdvanceSlotIfNeeded_DelayedStopForComposite(t *testing.T) {
 	ws := wsserver.New(wsserver.Options{}) // 未连接；本测试不验证 stop 发送
 	logger := slog.Default()
 
-	ac.mu.Lock()
-	ac.currentSlot = "08:00-10:00"
-	ac.currentActionID = "act_composite_1"
-	ac.currentActionCmd = "WorkAtWorkbench" // 内置硬编码复合 cmd
-	ac.actionQueue = []plannedAction{{Action: "wait", Params: map[string]any{"duration_sec": 30}}}
-	ac.mu.Unlock()
+	ac.as.RefillQueue([]plannedAction{{Action: "wait", Params: map[string]any{"duration_sec": 30}}}, "08:00-10:00")
+	ac.as.RecordActionStarted("act_composite_1", "WorkAtWorkbench", nil, agentstate.SourceTactical) // 内置硬编码复合 cmd
 	setGameTimeForTest(t, ac, "10:05") // 已过 slot 结束 10:00
 
 	ac.advanceSlotIfNeeded(ws, "H-01", logger)
 
-	ac.mu.Lock()
-	pendingStop := ac.pendingStopActionID
-	currentActionID := ac.currentActionID
-	queueLen := len(ac.actionQueue)
-	slot := ac.currentSlot
-	ac.mu.Unlock()
+	snap := ac.as.Snapshot()
+	pendingStop := snap.PendingStopActionID
+	currentActionID := snap.CurrentActionID
+	queueLen := ac.as.QueueLen()
+	_, slot, _ := ac.as.SnapshotSchedule()
 
 	if pendingStop != "act_composite_1" {
 		t.Errorf("pendingStopActionID=%q, want act_composite_1 (composite 应延迟 stop)", pendingStop)
@@ -304,21 +278,14 @@ func TestAdvanceSlotIfNeeded_NoPendingStopForAtomicAction(t *testing.T) {
 	ws := wsserver.New(wsserver.Options{})
 	logger := slog.Default()
 
-	ac.mu.Lock()
-	ac.currentSlot = "08:00-10:00"
-	ac.currentActionID = "act_speak_1"
-	ac.currentActionCmd = "Speak" // 原子动作
-	ac.mu.Unlock()
+	ac.as.RefillQueue(nil, "08:00-10:00")
+	ac.as.RecordActionStarted("act_speak_1", "Speak", nil, agentstate.SourceTactical) // 原子动作
 	setGameTimeForTest(t, ac, "10:05")
 
 	ac.advanceSlotIfNeeded(ws, "H-01", logger)
 
-	ac.mu.Lock()
-	pendingStop := ac.pendingStopActionID
-	ac.mu.Unlock()
-
-	if pendingStop != "" {
-		t.Errorf("pendingStopActionID=%q, want empty (atomic action should not delay-stop)", pendingStop)
+	if ac.as.PendingStopActionID() != "" {
+		t.Errorf("pendingStopActionID=%q, want empty (atomic action should not delay-stop)", ac.as.PendingStopActionID())
 	}
 }
 
@@ -329,20 +296,14 @@ func TestAdvanceSlotIfNeeded_NoActionNoPendingStop(t *testing.T) {
 	ws := wsserver.New(wsserver.Options{})
 	logger := slog.Default()
 
-	ac.mu.Lock()
-	ac.currentSlot = "08:00-10:00"
-	ac.currentActionID = "" // 无在途
-	ac.mu.Unlock()
+	ac.as.RefillQueue(nil, "08:00-10:00")
+	// currentActionID 默认为空（无在途）
 	setGameTimeForTest(t, ac, "10:05")
 
 	ac.advanceSlotIfNeeded(ws, "H-01", logger)
 
-	ac.mu.Lock()
-	pendingStop := ac.pendingStopActionID
-	ac.mu.Unlock()
-
-	if pendingStop != "" {
-		t.Errorf("pendingStopActionID=%q, want empty (no in-flight action)", pendingStop)
+	if ac.as.PendingStopActionID() != "" {
+		t.Errorf("pendingStopActionID=%q, want empty (no in-flight action)", ac.as.PendingStopActionID())
 	}
 }
 
@@ -352,20 +313,14 @@ func TestAdvanceSlotIfNeeded_NoActionNoPendingStop(t *testing.T) {
 func TestRecordActionCompletion_ClearsPendingStop(t *testing.T) {
 	ac, _ := newAgentContext(context.Background())
 
-	ac.mu.Lock()
-	ac.pendingStopActionID = "act_old_composite"
-	ac.mu.Unlock()
+	ac.as.SetPendingStopActionID("act_old_composite")
 
 	ac.recordActionCompletion(protocol.ActionCompletedPayload{
 		ActionID: "act_old_composite", Result: protocol.ResultSuccess, Progress: 1.0,
 	})
 
-	ac.mu.Lock()
-	pendingStop := ac.pendingStopActionID
-	ac.mu.Unlock()
-
-	if pendingStop != "" {
-		t.Errorf("pendingStopActionID=%q, want empty (cleared when old action completes naturally)", pendingStop)
+	if ac.as.PendingStopActionID() != "" {
+		t.Errorf("pendingStopActionID=%q, want empty (cleared when old action completes naturally)", ac.as.PendingStopActionID())
 	}
 }
 
@@ -374,9 +329,7 @@ func TestRecordActionCompletion_ClearsPendingStop(t *testing.T) {
 func TestRecordActionCompletion_SelfStopSuppressesReactive(t *testing.T) {
 	ac, _ := newAgentContext(context.Background())
 
-	ac.mu.Lock()
-	ac.selfStopInProgress = "act_stopped_by_slot_switch"
-	ac.mu.Unlock()
+	ac.as.SetSelfStopInProgress("act_stopped_by_slot_switch")
 
 	queued, trigger, _ := ac.recordActionCompletion(protocol.ActionCompletedPayload{
 		ActionID: "act_stopped_by_slot_switch",
@@ -391,11 +344,8 @@ func TestRecordActionCompletion_SelfStopSuppressesReactive(t *testing.T) {
 		t.Errorf("trigger=%q, want empty (self-stop should not trigger reactive)", trigger)
 	}
 
-	ac.mu.Lock()
-	selfStop := ac.selfStopInProgress
-	ac.mu.Unlock()
-	if selfStop != "" {
-		t.Errorf("selfStopInProgress=%q, want empty (cleared after completion)", selfStop)
+	if ac.as.SelfStopInProgress() != "" {
+		t.Errorf("selfStopInProgress=%q, want empty (cleared after completion)", ac.as.SelfStopInProgress())
 	}
 }
 
@@ -777,41 +727,41 @@ func TestAgentContext_DebugOverrideLifecycle(t *testing.T) {
 	ac, _ := newAgentContext(context.Background())
 
 	// 初始 false
-	ac.mu.Lock()
+	ac.coordMu.Lock()
 	if ac.debugOverride {
 		t.Error("debugOverride should start false")
 	}
-	ac.mu.Unlock()
+	ac.coordMu.Unlock()
 
 	// set true
-	ac.mu.Lock()
+	ac.coordMu.Lock()
 	ac.debugOverride = true
-	ac.mu.Unlock()
+	ac.coordMu.Unlock()
 
-	ac.mu.Lock()
+	ac.coordMu.Lock()
 	if !ac.debugOverride {
 		t.Error("debugOverride should be true after set")
 	}
-	ac.mu.Unlock()
+	ac.coordMu.Unlock()
 
 	// defer 模式：set true → ... → clear + signal
 	func() {
-		ac.mu.Lock()
+		ac.coordMu.Lock()
 		ac.debugOverride = true
-		ac.mu.Unlock()
+		ac.coordMu.Unlock()
 		defer func() {
-			ac.mu.Lock()
+			ac.coordMu.Lock()
 			ac.debugOverride = false
-			ac.mu.Unlock()
+			ac.coordMu.Unlock()
 			ac.signal()
 		}()
 	}()
 
-	ac.mu.Lock()
+	ac.coordMu.Lock()
 	if ac.debugOverride {
 		t.Error("debugOverride should be false after defer clear")
 	}
-	ac.mu.Unlock()
+	ac.coordMu.Unlock()
 
 	// signal 应该投递到 wake
 	select {
@@ -837,10 +787,8 @@ func TestTacticalRefillForReplan_NoTacticalHc(t *testing.T) {
 func TestTacticalRefillForReplan_NoGoal(t *testing.T) {
 	ac, _ := newAgentContext(context.Background())
 	// 设置 tacticalHc 但不设 dailyPlan → selectCurrentGoal 返回 ""
-	ac.mu.Lock()
 	ac.tacticalHc = newFailedVenusClient()
-	ac.dailyPlan = ""
-	ac.mu.Unlock()
+	ac.as.SetDailyPlan("", 0)
 	ok := ac.tacticalRefillForReplan(context.Background(), "H-01", nil, nil, slog.Default(), "test hint")
 	if ok {
 		t.Error("should return false when no current goal")
@@ -857,21 +805,18 @@ func TestTacticalRefillForReplan_LLMFail(t *testing.T) {
 	percJSON, _ := json.Marshal(protocol.PerceptionPayload{
 		Environment: protocol.Environment{GameTimeSec: 32400, TimeOfDaySec: 32400, DayCount: 0, TimeScale: 60},
 	})
-	ac.mu.Lock()
 	ac.tacticalHc = newFailedVenusClient()
-	ac.dailyPlan = "06:00-12:00: 上午装配\n12:00-13:00: 午休"
-	ac.latestPerception = percJSON
-	ac.mu.Unlock()
+	ac.as.SetDailyPlan("06:00-12:00: 上午装配\n12:00-13:00: 午休", 0)
+	if _, err := ac.as.SetPerception(percJSON); err != nil {
+		t.Fatalf("SetPerception: %v", err)
+	}
 	ok := ac.tacticalRefillForReplan(context.Background(), "H-01", nil, nil, slog.Default(), "test hint")
 	if ok {
 		t.Error("should return false when LLM call fails")
 	}
 	// 验证旧队列保留
-	ac.mu.Lock()
-	queueLen := len(ac.actionQueue)
-	ac.mu.Unlock()
-	if queueLen != 1 {
-		t.Errorf("old queue should be preserved on failure, got len=%d", queueLen)
+	if ac.as.QueueLen() != 1 {
+		t.Errorf("old queue should be preserved on failure, got len=%d", ac.as.QueueLen())
 	}
 }
 
@@ -893,19 +838,16 @@ func TestTacticalRefill_ConsumesReplanHint(t *testing.T) {
 	percJSON, _ := json.Marshal(protocol.PerceptionPayload{
 		Environment: protocol.Environment{GameTimeSec: 32400, TimeOfDaySec: 32400, DayCount: 0, TimeScale: 60},
 	})
-	ac.mu.Lock()
 	ac.tacticalHc = newFailedVenusClient() // LLM 必失败，但 hint 读取/清空在调用前
-	ac.dailyPlan = "06:00-12:00: 上午装配\n12:00-13:00: 午休"
-	ac.latestPerception = percJSON
-	ac.replanHint = "疲劳=65超过60，需要休息"
-	ac.mu.Unlock()
+	ac.as.SetDailyPlan("06:00-12:00: 上午装配\n12:00-13:00: 午休", 0)
+	if _, err := ac.as.SetPerception(percJSON); err != nil {
+		t.Fatalf("SetPerception: %v", err)
+	}
+	ac.as.SetReplanHint("疲劳=65超过60，需要休息")
 
 	_ = ac.tacticalRefill(context.Background(), "H-01", nil, nil, slog.Default())
 
-	ac.mu.Lock()
-	hint := ac.replanHint
-	ac.mu.Unlock()
-	if hint != "" {
+	if hint := ac.as.Snapshot().ReplanHint; hint != "" {
 		t.Errorf("replanHint 应被 tacticalRefill 消费清空，仍剩 %q", hint)
 	}
 }
@@ -916,20 +858,17 @@ func TestTacticalRefill_NoHintDoesNotPanic(t *testing.T) {
 	percJSON, _ := json.Marshal(protocol.PerceptionPayload{
 		Environment: protocol.Environment{GameTimeSec: 32400, TimeOfDaySec: 32400, DayCount: 0, TimeScale: 60},
 	})
-	ac.mu.Lock()
 	ac.tacticalHc = newFailedVenusClient()
-	ac.dailyPlan = "06:00-12:00: 上午装配\n12:00-13:00: 午休"
-	ac.latestPerception = percJSON
-	ac.replanHint = "" // 无 hint
-	ac.mu.Unlock()
+	ac.as.SetDailyPlan("06:00-12:00: 上午装配\n12:00-13:00: 午休", 0)
+	if _, err := ac.as.SetPerception(percJSON); err != nil {
+		t.Fatalf("SetPerception: %v", err)
+	}
+	// 无 hint（默认空）
 
 	// 不应 panic
 	_ = ac.tacticalRefill(context.Background(), "H-01", nil, nil, slog.Default())
 
-	ac.mu.Lock()
-	hint := ac.replanHint
-	ac.mu.Unlock()
-	if hint != "" {
+	if hint := ac.as.Snapshot().ReplanHint; hint != "" {
 		t.Errorf("replanHint 应保持空，得到 %q", hint)
 	}
 }
@@ -1390,8 +1329,8 @@ func TestExtractTimeOfDay_LegacyEmptyEnv(t *testing.T) {
 	}
 }
 
-// setPerceptionForDayTest 在 ac.latestPerception 注入同时含 time_of_day_sec 和
-// day_count 的 perception payload，用于跨日检测测试。
+// setPerceptionForDayTest 在 ac 注入同时含 time_of_day_sec 和 day_count 的
+// perception payload，用于跨日检测测试。
 func setPerceptionForDayTest(t *testing.T, ac *agentContext, hhmm string, dayCount int) {
 	t.Helper()
 	var h, m int
@@ -1402,9 +1341,9 @@ func setPerceptionForDayTest(t *testing.T, ac *agentContext, hhmm string, dayCou
 	raw := []byte(fmt.Sprintf(
 		`{"environment":{"game_time_sec":%d,"time_of_day_sec":%d,"day_count":%d,"time_scale":60}}`,
 		dayCount*86400+totalSec, totalSec, dayCount))
-	ac.mu.Lock()
-	ac.latestPerception = raw
-	ac.mu.Unlock()
+	if _, err := ac.as.SetPerception(raw); err != nil {
+		t.Fatalf("SetPerception: %v", err)
+	}
 }
 
 // TestDetectDayRollover_FirstSyncNoRollover 验证首条 perception 到达时
@@ -1412,8 +1351,8 @@ func setPerceptionForDayTest(t *testing.T, ac *agentContext, hhmm string, dayCou
 // 已调过 generateDailyPlan 规划当天。
 func TestDetectDayRollover_FirstSyncNoRollover(t *testing.T) {
 	ac, _ := newAgentContext(context.Background())
-	if ac.currentDay != -1 {
-		t.Fatalf("initial currentDay = %d, want -1", ac.currentDay)
+	if ac.as.CurrentDay() != -1 {
+		t.Fatalf("initial currentDay = %d, want -1", ac.as.CurrentDay())
 	}
 	setPerceptionForDayTest(t, ac, "06:30", 0)
 	rollover, prev, newDay := ac.detectDayRollover()
@@ -1426,22 +1365,23 @@ func TestDetectDayRollover_FirstSyncNoRollover(t *testing.T) {
 	if newDay != 0 {
 		t.Errorf("newDay = %d, want 0", newDay)
 	}
-	if ac.currentDay != 0 {
-		t.Errorf("after first sync currentDay = %d, want 0", ac.currentDay)
+	if ac.as.CurrentDay() != 0 {
+		t.Errorf("after first sync currentDay = %d, want 0", ac.as.CurrentDay())
 	}
 }
 
 // TestDetectDayRollover_SameDayNoRollover 验证同一天内多次 perception 不触发。
 func TestDetectDayRollover_SameDayNoRollover(t *testing.T) {
 	ac, _ := newAgentContext(context.Background())
-	ac.currentDay = 0
+	// currentDay=0 表示"首日已规划"；SetDailyPlan 同时设置 plan + day。
+	ac.as.SetDailyPlan("", 0)
 	setPerceptionForDayTest(t, ac, "10:00", 0)
 	rollover, _, _ := ac.detectDayRollover()
 	if rollover {
 		t.Errorf("same day should not trigger rollover")
 	}
-	if ac.currentDay != 0 {
-		t.Errorf("currentDay = %d, want 0", ac.currentDay)
+	if ac.as.CurrentDay() != 0 {
+		t.Errorf("currentDay = %d, want 0", ac.as.CurrentDay())
 	}
 }
 
@@ -1449,7 +1389,7 @@ func TestDetectDayRollover_SameDayNoRollover(t *testing.T) {
 // （跨日）触发 rollover=true 并更新 currentDay。
 func TestDetectDayRollover_DayIncrementTriggersRollover(t *testing.T) {
 	ac, _ := newAgentContext(context.Background())
-	ac.currentDay = 0 // 首日已规划
+	ac.as.SetDailyPlan("", 0) // 首日已规划
 	setPerceptionForDayTest(t, ac, "06:00", 1) // 第二天 06:00
 	rollover, prev, newDay := ac.detectDayRollover()
 	if !rollover {
@@ -1461,8 +1401,8 @@ func TestDetectDayRollover_DayIncrementTriggersRollover(t *testing.T) {
 	if newDay != 1 {
 		t.Errorf("newDay = %d, want 1", newDay)
 	}
-	if ac.currentDay != 1 {
-		t.Errorf("after rollover currentDay = %d, want 1", ac.currentDay)
+	if ac.as.CurrentDay() != 1 {
+		t.Errorf("after rollover currentDay = %d, want 1", ac.as.CurrentDay())
 	}
 }
 
@@ -1470,12 +1410,12 @@ func TestDetectDayRollover_DayIncrementTriggersRollover(t *testing.T) {
 // 不触发（day_count 解析失败返回 -1，-1 <= prev 恒真）。
 func TestDetectDayRollover_NoPerceptionNoRollover(t *testing.T) {
 	ac, _ := newAgentContext(context.Background())
-	ac.currentDay = 0
+	ac.as.SetDailyPlan("", 0)
 	rollover, _, _ := ac.detectDayRollover()
 	if rollover {
 		t.Errorf("empty perception should not trigger rollover")
 	}
-	if ac.currentDay != 0 {
-		t.Errorf("currentDay = %d, want 0 (unchanged)", ac.currentDay)
+	if ac.as.CurrentDay() != 0 {
+		t.Errorf("currentDay = %d, want 0 (unchanged)", ac.as.CurrentDay())
 	}
 }

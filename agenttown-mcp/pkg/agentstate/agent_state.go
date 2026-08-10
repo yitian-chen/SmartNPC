@@ -211,6 +211,18 @@ func (a *AgentState) SelfStopInProgress() string {
 	return a.selfStopInProgress
 }
 
+// SetCurrentActionSrc overrides the current action source without touching
+// other in-flight fields. Used by tests that need to simulate "previous
+// tactical action completed (currentActionID cleared) but source marker
+// retained" to exercise the prepend-on-busy-rejection defensive path.
+// Production code should use RecordActionStarted to set the source together
+// with the action ID.
+func (a *AgentState) SetCurrentActionSrc(src ActionSource) {
+	a.mu.Lock()
+	a.currentActionSrc = src
+	a.mu.Unlock()
+}
+
 // ClearForReplan resets queue, in-flight tracking, slot marker, and
 // redecompose counter — used by advanceSlotIfNeeded on slot expiry and
 // by tacticalRefillForReplan before re-decomposition. Returns the
@@ -300,6 +312,200 @@ func (a *AgentState) PeekAction() (PlannedAction, bool) {
 	return a.actionQueue[0], true
 }
 
+// PopActionIfIdle atomically checks that no action is in-flight and, if
+// so, pops the first queued action. Returns ok=false if the queue is
+// empty or an action is in-flight (UE busy). Also returns and clears
+// the pendingStopActionID so the caller can issue a deferred stop.
+func (a *AgentState) PopActionIfIdle() (action PlannedAction, pendingStop string, ok bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if len(a.actionQueue) == 0 {
+		return PlannedAction{}, "", false
+	}
+	if a.currentActionID != "" {
+		return PlannedAction{}, "", false
+	}
+	action = a.actionQueue[0]
+	a.actionQueue = a.actionQueue[1:]
+	pendingStop = a.pendingStopActionID
+	a.pendingStopActionID = ""
+	return action, pendingStop, true
+}
+
+// PrependAction pushes an action to the front of the queue (used when
+// re-queueing an action that failed to dispatch due to UE busy).
+func (a *AgentState) PrependAction(action PlannedAction) {
+	a.mu.Lock()
+	a.actionQueue = append([]PlannedAction{action}, a.actionQueue...)
+	a.mu.Unlock()
+}
+
+// AppendQueueAction appends an action to the queue (used by tactical
+// streaming callback).
+func (a *AgentState) AppendQueueAction(action PlannedAction) {
+	a.mu.Lock()
+	a.actionQueue = append(a.actionQueue, action)
+	a.mu.Unlock()
+}
+
+// ShouldDispatchFirst reports whether the just-appended action is the
+// first in the queue and no action is in-flight (streaming fast-path).
+// Caller should call PopActionIfIdle to dispatch.
+func (a *AgentState) ShouldDispatchFirst() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.currentActionID == "" && len(a.actionQueue) == 1
+}
+
+// ReplaceQueue replaces the entire action queue (used by non-streaming
+// tactical refill).
+func (a *AgentState) ReplaceQueue(actions []PlannedAction) {
+	a.mu.Lock()
+	a.actionQueue = actions
+	a.mu.Unlock()
+}
+
+// NeedFallbackDispatch reports whether there's a queued action ready to
+// dispatch with no in-flight action (used after tactical refill completes).
+func (a *AgentState) NeedFallbackDispatch() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.currentActionID == "" && len(a.actionQueue) > 0
+}
+
+// TacticalRefillPrep carries the snapshot data needed by the tactical
+// layer to call the LLM, plus guard flags. Produced atomically by
+// BeginTacticalRefill.
+type TacticalRefillPrep struct {
+	Goal            string
+	Slot            string
+	Index           int
+	Zone            string
+	Physical        *protocol.PhysicalState
+	Hint            string
+	IsRedecompose   bool
+	ShouldSkip      bool // guard failed (in-flight, no goal, redecompose limit)
+	AlreadyHasQueue bool // queue non-empty in same slot → skip redecompose
+}
+
+// BeginTacticalRefill atomically checks guards and prepares for a tactical
+// refill LLM call. It receives the goal/slot/idx pre-computed by the caller
+// (via selectCurrentGoal on the daily plan). If ShouldSkip is true the
+// caller must abort the refill. On success, the action queue is cleared
+// and the replanHint is consumed (returned in Hint for prompt injection).
+func (a *AgentState) BeginTacticalRefill(goal, slot string, idx int, hasTacticalHc bool) TacticalRefillPrep {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	prep := TacticalRefillPrep{
+		Goal:     goal,
+		Slot:     slot,
+		Index:    idx,
+		Zone:     a.latestZoneLocked(),
+		Physical: clonePhysical(a.latestPhysical),
+	}
+	if !hasTacticalHc {
+		prep.ShouldSkip = true
+		return prep
+	}
+	if a.currentActionID != "" {
+		prep.ShouldSkip = true
+		return prep
+	}
+	if goal == "" {
+		prep.ShouldSkip = true
+		return prep
+	}
+	// 同时段重复分解守卫
+	if slot == a.currentSlot {
+		if len(a.actionQueue) > 0 {
+			prep.AlreadyHasQueue = true
+			prep.ShouldSkip = true
+			return prep
+		}
+		if a.redecomposeCount >= 3 {
+			prep.ShouldSkip = true
+			return prep
+		}
+		// 注入"未安排长动作"hint
+		if a.replanHint == "" {
+			a.replanHint = "上次队列提前耗尽，未安排长动作收尾——本次请确保最后一个 action 是标记为 [复合] 的长复合动作（见上方可用工具列表），让 NPC 持续工作到下一时段"
+		}
+	}
+	prep.IsRedecompose = slot == a.currentSlot
+	prep.Hint = a.replanHint
+	a.replanHint = ""
+	a.actionQueue = nil
+	return prep
+}
+
+// CommitTacticalRefill records the slot/index after a successful tactical
+// refill LLM call. For redecompose (same slot), bumps the counter; for a
+// new slot, resets the counter and updates slot/index.
+func (a *AgentState) CommitTacticalRefill(slot string, idx int, isRedecompose bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if isRedecompose {
+		a.redecomposeCount++
+	} else {
+		a.currentSlot = slot
+		a.currentPlanIndex = idx
+		a.redecomposeCount = 0
+	}
+}
+
+// QueueSnapshot returns a copy of the current action queue (for logging).
+func (a *AgentState) QueueSnapshot() []PlannedAction {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return cloneQueue(a.actionQueue)
+}
+
+// RedecomposeCountSnapshot returns the current redecompose count.
+func (a *AgentState) RedecomposeCountSnapshot() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.redecomposeCount
+}
+
+// ReplanPrep carries the snapshot data needed by the tactical layer to
+// re-decompose for a reactive replan. Unlike BeginTacticalRefill, this
+// does NOT check the in-flight guard (replan explicitly allows planning
+// while an action is in-flight — the caller will stop it after success).
+type ReplanPrep struct {
+	Goal     string
+	Slot     string
+	Index    int
+	Zone     string
+	Physical *protocol.PhysicalState
+}
+
+// BeginReplan reads the snapshot for a reactive replan. Does not clear
+// the queue or consume hint — the caller provides the hint. Returns
+// ShouldSkip=true if tacticalHc is nil or no goal.
+func (a *AgentState) BeginReplan(goal, slot string, idx int, hasTacticalHc bool) ReplanPrep {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return ReplanPrep{
+		Goal:     goal,
+		Slot:     slot,
+		Index:    idx,
+		Zone:     a.latestZoneLocked(),
+		Physical: clonePhysical(a.latestPhysical),
+	}
+}
+
+// CommitReplan replaces the queue, resets counters, and updates slot on
+// successful replan. Called after the LLM returns new actions.
+func (a *AgentState) CommitReplan(actions []PlannedAction, slot string, idx int) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.actionQueue = actions
+	a.redecomposeCount = 0
+	a.currentSlot = slot
+	a.currentPlanIndex = idx
+	a.replanHint = ""
+}
+
 // HasQueueNext reports whether the action queue has any pending actions.
 func (a *AgentState) HasQueueNext() bool {
 	a.mu.Lock()
@@ -313,6 +519,20 @@ func (a *AgentState) HasInFlightAction() bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.currentActionID != ""
+}
+
+// CurrentActionID returns the in-flight action ID (empty if none).
+func (a *AgentState) CurrentActionID() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.currentActionID
+}
+
+// CurrentActionSrc returns the source of the in-flight action.
+func (a *AgentState) CurrentActionSrc() ActionSource {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.currentActionSrc
 }
 
 // QueueLen returns the current action queue length.
@@ -406,6 +626,23 @@ func (a *AgentState) SetLastReactiveAt(key string, t time.Time) {
 	a.mu.Lock()
 	a.lastReactiveAt[key] = t
 	a.mu.Unlock()
+}
+
+// DedupeReactive atomically checks the dedupe window for a reactive trigger
+// and records now if the trigger should proceed. Returns true when the key
+// has not been seen within window (caller should proceed; now is recorded).
+// Returns false when a recent trigger exists within window (caller should
+// skip; timestamp is left unchanged). The check-and-set is atomic under
+// AgentState.mu, preserving the original single-mutex dedupe semantics.
+func (a *AgentState) DedupeReactive(key string, now time.Time, window time.Duration) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	lastAt, exists := a.lastReactiveAt[key]
+	if exists && now.Sub(lastAt) < window {
+		return false
+	}
+	a.lastReactiveAt[key] = now
+	return true
 }
 
 // DetectDayRollover checks for day_count increment (cross-day) and updates
