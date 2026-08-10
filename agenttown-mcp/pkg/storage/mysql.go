@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -94,4 +95,107 @@ func (s *MySQLStore) Close() error {
 		return nil
 	}
 	return s.db.Close()
+}
+
+// nullableString returns nil for empty strings so the column receives NULL,
+// otherwise the string value. Used for nullable VARCHAR columns
+// (related_*_id, action_id, result).
+func nullableString(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
+}
+
+// SaveMemory inserts a memory row. importance defaults to 50 in schema;
+// related_* fields are NULL when empty string. Returns the auto-increment ID.
+func (s *MySQLStore) SaveMemory(ctx context.Context, agentID string, m Memory) (int64, error) {
+	res, err := s.db.ExecContext(ctx,
+		`INSERT INTO agent_memories
+		   (agent_id, memory_type, content, importance,
+		    related_agent_id, related_object_id, related_zone_id,
+		    created_at, last_accessed_at, decay_score)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		agentID, m.MemoryType, m.Content, m.Importance,
+		nullableString(m.RelatedAgentID), nullableString(m.RelatedObjectID), nullableString(m.RelatedZoneID),
+		m.CreatedAt, m.LastAccessedAt, m.DecayScore,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("save memory for %s: %w", agentID, err)
+	}
+	id, _ := res.LastInsertId()
+	return id, nil
+}
+
+// LoadRecentMemories returns the top-N memories for agentID by created_at DESC.
+// Empty related_* columns (NULL) are coerced to "" via COALESCE.
+func (s *MySQLStore) LoadRecentMemories(ctx context.Context, agentID string, limit int) ([]Memory, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, agent_id, memory_type, content, importance,
+		        COALESCE(related_agent_id,''), COALESCE(related_object_id,''), COALESCE(related_zone_id,''),
+		        created_at, last_accessed_at, decay_score
+		 FROM agent_memories WHERE agent_id = ?
+		 ORDER BY created_at DESC LIMIT ?`, agentID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("load recent memories for %s: %w", agentID, err)
+	}
+	defer rows.Close()
+	var out []Memory
+	for rows.Next() {
+		var m Memory
+		if err := rows.Scan(&m.ID, &m.AgentID, &m.MemoryType, &m.Content, &m.Importance,
+			&m.RelatedAgentID, &m.RelatedObjectID, &m.RelatedZoneID,
+			&m.CreatedAt, &m.LastAccessedAt, &m.DecayScore); err != nil {
+			return nil, fmt.Errorf("scan memory for %s: %w", agentID, err)
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
+// SaveActionRecord inserts one action_history row at action completion.
+// params is marshaled to JSON; empty action_id/result become NULL.
+func (s *MySQLStore) SaveActionRecord(ctx context.Context, agentID string, r ActionRecord) error {
+	paramsJSON, _ := json.Marshal(r.Params)
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO action_history
+		   (agent_id, action_id, cmd, params, source, started_at, completed_at, result, duration_ms)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		agentID, nullableString(r.ActionID), r.Cmd, string(paramsJSON),
+		r.Source, r.StartedAt, r.CompletedAt, nullableString(r.Result), r.DurationMs,
+	)
+	if err != nil {
+		return fmt.Errorf("save action record for %s: %w", agentID, err)
+	}
+	return nil
+}
+
+// LoadActionHistory returns the top-N action records for agentID by started_at DESC.
+// Caller reverses the slice for chronological order before feeding to the LLM.
+func (s *MySQLStore) LoadActionHistory(ctx context.Context, agentID string, limit int) ([]ActionRecord, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, agent_id, action_id, cmd, params, source, started_at, completed_at, result, duration_ms
+		 FROM action_history WHERE agent_id = ?
+		 ORDER BY started_at DESC LIMIT ?`, agentID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("load action history for %s: %w", agentID, err)
+	}
+	defer rows.Close()
+	var out []ActionRecord
+	for rows.Next() {
+		var r ActionRecord
+		var actionID, result sql.NullString
+		var paramsJSON []byte
+		if err := rows.Scan(&r.ID, &r.AgentID, &actionID, &r.Cmd, &paramsJSON, &r.Source,
+			&r.StartedAt, &r.CompletedAt, &result, &r.DurationMs); err != nil {
+			return nil, fmt.Errorf("scan action record for %s: %w", agentID, err)
+		}
+		r.ActionID = actionID.String
+		r.Result = result.String
+		if len(paramsJSON) > 0 {
+			_ = json.Unmarshal(paramsJSON, &r.Params)
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
 }

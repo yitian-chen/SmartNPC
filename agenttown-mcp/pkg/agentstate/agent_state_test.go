@@ -445,6 +445,26 @@ func (f *fakeStore) SaveScheduleState(_ context.Context, agentID string, s stora
 	return nil
 }
 
+// Stage 4 stubs — fakeStore focuses on schedule-state write-through; memory
+// and action_history methods are no-ops so tests compile against the extended
+// Store interface. Memory-specific behavior is tested in pkg/storage.
+
+func (f *fakeStore) SaveMemory(_ context.Context, _ string, _ storage.Memory) (int64, error) {
+	return 0, nil
+}
+
+func (f *fakeStore) LoadRecentMemories(_ context.Context, _ string, _ int) ([]storage.Memory, error) {
+	return nil, nil
+}
+
+func (f *fakeStore) SaveActionRecord(_ context.Context, _ string, _ storage.ActionRecord) error {
+	return nil
+}
+
+func (f *fakeStore) LoadActionHistory(_ context.Context, _ string, _ int) ([]storage.ActionRecord, error) {
+	return nil, nil
+}
+
 func (f *fakeStore) Close() error { return nil }
 
 func (f *fakeStore) snapshot(agentID string) (storage.ScheduleState, bool) {

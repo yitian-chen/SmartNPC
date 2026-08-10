@@ -17,6 +17,7 @@ package storage
 import (
 	"context"
 	"errors"
+	"time"
 )
 
 // ErrNotFound is returned by LoadScheduleState when no row exists for the
@@ -32,6 +33,38 @@ type ScheduleState struct {
 	CurrentSlot      string
 }
 
+// Memory represents one row in agent_memories. Stage 4: daily-batch
+// generation at day rollover, retrieval by created_at DESC.
+// decay_score is persisted but always 1.0 (decay logic deferred).
+type Memory struct {
+	ID              int64
+	AgentID         string
+	MemoryType      string // "daily_summary" | "event" | "skill" | "relationship"
+	Content         string
+	Importance      int // 0-100, default 50
+	RelatedAgentID  string // "" = NULL
+	RelatedObjectID string // "" = NULL
+	RelatedZoneID   string // "" = NULL
+	CreatedAt       time.Time
+	LastAccessedAt  time.Time
+	DecayScore      float64 // always 1.0
+}
+
+// ActionRecord represents one row in action_history. Written as a single
+// INSERT at action completion (not two-phase started/completed split).
+type ActionRecord struct {
+	ID          int64
+	AgentID     string
+	ActionID    string
+	Cmd         string
+	Params      map[string]any // marshaled to JSON column
+	Source      string         // "mcp_tool" | "tactical" | ""
+	StartedAt   time.Time
+	CompletedAt time.Time
+	Result      string // "success" | "failed" | "interrupted" | "error"
+	DurationMs  int
+}
+
 // Store is the persistence interface consumed by pkg/agentstate.
 // Methods must be safe for concurrent use by multiple goroutines
 // (MySQLStore uses database/sql's connection pool, which is concurrency-safe).
@@ -43,6 +76,20 @@ type Store interface {
 	// SaveScheduleState upserts the schedule state for an agent. Called
 	// write-through from AgentState setters (no batching).
 	SaveScheduleState(ctx context.Context, agentID string, s ScheduleState) error
+
+	// SaveMemory inserts a new memory row, returns the auto-increment ID.
+	SaveMemory(ctx context.Context, agentID string, m Memory) (int64, error)
+
+	// LoadRecentMemories returns the most recent N memories by created_at DESC.
+	// decay_score is currently always 1.0; future decay logic can filter here.
+	LoadRecentMemories(ctx context.Context, agentID string, limit int) ([]Memory, error)
+
+	// SaveActionRecord inserts one action_history row (single INSERT at completion).
+	SaveActionRecord(ctx context.Context, agentID string, r ActionRecord) error
+
+	// LoadActionHistory returns the most recent N action records by started_at DESC.
+	// Used by memory generation at day rollover to summarize yesterday's activities.
+	LoadActionHistory(ctx context.Context, agentID string, limit int) ([]ActionRecord, error)
 
 	// Close releases the underlying resources (DB connection pool).
 	// It must be idempotent and safe to call on a NoopStore.
@@ -63,6 +110,26 @@ func (NoopStore) LoadScheduleState(context.Context, string) (ScheduleState, erro
 // SaveScheduleState is a no-op.
 func (NoopStore) SaveScheduleState(context.Context, string, ScheduleState) error {
 	return nil
+}
+
+// SaveMemory is a no-op. Returns 0 ID (no row inserted).
+func (NoopStore) SaveMemory(context.Context, string, Memory) (int64, error) {
+	return 0, nil
+}
+
+// LoadRecentMemories returns nil (no memories in in-memory mode).
+func (NoopStore) LoadRecentMemories(context.Context, string, int) ([]Memory, error) {
+	return nil, nil
+}
+
+// SaveActionRecord is a no-op.
+func (NoopStore) SaveActionRecord(context.Context, string, ActionRecord) error {
+	return nil
+}
+
+// LoadActionHistory returns nil (no history in in-memory mode).
+func (NoopStore) LoadActionHistory(context.Context, string, int) ([]ActionRecord, error) {
+	return nil, nil
 }
 
 // Close is a no-op.

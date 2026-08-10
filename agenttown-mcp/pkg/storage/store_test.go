@@ -35,6 +35,52 @@ func TestNoopStore_CloseIsNoOp(t *testing.T) {
 	}
 }
 
+// ─── Stage 4: memory + action_history no-op stubs ───
+
+// TestNoopStore_SaveMemoryIsNoOp verifies SaveMemory returns 0,nil without panic.
+func TestNoopStore_SaveMemoryIsNoOp(t *testing.T) {
+	st := NoopStore{}
+	id, err := st.SaveMemory(context.Background(), "H-01", Memory{Content: "x"})
+	if err != nil {
+		t.Errorf("SaveMemory: got err=%v, want nil", err)
+	}
+	if id != 0 {
+		t.Errorf("SaveMemory id: got %d, want 0", id)
+	}
+}
+
+// TestNoopStore_LoadRecentMemoriesIsNoOp verifies LoadRecentMemories returns nil,nil.
+func TestNoopStore_LoadRecentMemoriesIsNoOp(t *testing.T) {
+	st := NoopStore{}
+	got, err := st.LoadRecentMemories(context.Background(), "H-01", 10)
+	if err != nil {
+		t.Errorf("LoadRecentMemories: got err=%v, want nil", err)
+	}
+	if got != nil {
+		t.Errorf("LoadRecentMemories: got %v, want nil", got)
+	}
+}
+
+// TestNoopStore_SaveActionRecordIsNoOp verifies SaveActionRecord returns nil without panic.
+func TestNoopStore_SaveActionRecordIsNoOp(t *testing.T) {
+	st := NoopStore{}
+	if err := st.SaveActionRecord(context.Background(), "H-01", ActionRecord{Cmd: "MoveTo"}); err != nil {
+		t.Errorf("SaveActionRecord: got err=%v, want nil", err)
+	}
+}
+
+// TestNoopStore_LoadActionHistoryIsNoOp verifies LoadActionHistory returns nil,nil.
+func TestNoopStore_LoadActionHistoryIsNoOp(t *testing.T) {
+	st := NoopStore{}
+	got, err := st.LoadActionHistory(context.Background(), "H-01", 100)
+	if err != nil {
+		t.Errorf("LoadActionHistory: got err=%v, want nil", err)
+	}
+	if got != nil {
+		t.Errorf("LoadActionHistory: got %v, want nil", got)
+	}
+}
+
 // ─── migration file embedding sanity ───
 
 // TestEmbeddedMigrations_Listed verifies the embed directive picked up
