@@ -41,6 +41,7 @@ import (
 	"github.com/AgentTown/agenttown-mcp/pkg/ollama"
 	"github.com/AgentTown/agenttown-mcp/pkg/prompt"
 	"github.com/AgentTown/agenttown-mcp/pkg/protocol"
+	"github.com/AgentTown/agenttown-mcp/pkg/storage"
 	"github.com/AgentTown/agenttown-mcp/pkg/transport"
 	"github.com/AgentTown/agenttown-mcp/pkg/venus"
 	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
@@ -103,6 +104,35 @@ func newAgentContext(parent context.Context, epochs ...int64) (*agentContext, co
 		pendingActionTimeouts: make(map[string]*time.Timer),
 		completedBeforeArm:    make(map[string]struct{}),
 	}, ctx
+}
+
+// buildStore 构造持久化 Store。空 dsn 返回 NoopStore（内存模式，当前行为，
+// 测试和 quick-smoke 无需 MySQL）；非空 dsn 建 MySQLStore（含 schema 迁移）。
+// 失败时返回错误，main 调用方据此 os.Exit(1)——MySQL 不可用但用户期望持久化时
+// 不应静默降级为内存模式（会导致重启后状态丢失）。
+func buildStore(ctx context.Context, dsn string, logger *slog.Logger) (storage.Store, error) {
+	if dsn == "" {
+		logger.Info("mysql persistence disabled (in-memory mode)")
+		return storage.NoopStore{}, nil
+	}
+	logger.Info("mysql persistence enabled", "dsn_redacted", redactDSN(dsn))
+	ms, err := storage.NewMySQLStore(ctx, dsn)
+	if err != nil {
+		return nil, fmt.Errorf("init mysql store: %w", err)
+	}
+	return ms, nil
+}
+
+// redactDSN 隐藏 DSN 中的密码字段，日志中只保留 host/db。
+func redactDSN(dsn string) string {
+	// DSN 格式: user:pass@tcp(host:port)/db?params
+	// 简单遮蔽：把第一个 ':' 到 '@' 之间的内容替换为 ***。
+	at := strings.IndexByte(dsn, '@')
+	colon := strings.IndexByte(dsn, ':')
+	if at > 0 && colon >= 0 && colon < at {
+		return dsn[:colon+1] + "***" + dsn[at:]
+	}
+	return dsn
 }
 
 // observePerception 存储最新感知payload，供战术层 refill 时读取当前世界状态。
@@ -1029,6 +1059,12 @@ func main() {
 	// 解引用后赋给 package-level autoPlanEnabled（worker / WS handler 读此变量）。
 	autoPlanFlag = flag.Bool("auto-plan", true,
 		"enable auto planning (strategic + tactical + reactive). false = manual mode, only /debug/schedule and /debug/action drive actions")
+	// mysqlDSN 控制 MySQL 持久化层。空串 = 内存模式（NoopStore，当前行为），
+	// 非空 = 启用 MySQL 持久化（Stage 3：4 个调度字段 write-through 落盘 +
+	// 预埋 Stage 4/5 表骨架）。DSN 需含 parseTime=true 以正确扫描 DATETIME。
+	mysqlDSN = flag.String("mysql-dsn", "",
+		"MySQL DSN for state persistence (empty = in-memory mode, no persistence). "+
+			"Example: user:pass@tcp(127.0.0.1:3306)/agenttown?parseTime=true&charset=utf8mb4")
 	)
 	flag.Parse()
 	if *showVersion {
@@ -1041,6 +1077,20 @@ func main() {
 	tacticalStreamingEnabled = *tacticalStream
 	tacticalCallTimeout = *tacticalTimeout
 	autoPlanEnabled = *autoPlanFlag
+
+	// ─── Persistence store (Stage 3) ──────────────────────────
+	// 空 DSN → NoopStore（内存模式，当前行为）；非空 → MySQLStore（含迁移）。
+	// env MYSQL_DSN 作为 flag 空值时的回退（类比 VENUS_API_KEY 模式）。
+	dsn := *mysqlDSN
+	if dsn == "" {
+		dsn = os.Getenv("MYSQL_DSN")
+	}
+	store, err := buildStore(context.Background(), dsn, logger)
+	if err != nil {
+		logger.Error("init storage failed", "err", err)
+		os.Exit(1)
+	}
+	defer store.Close()
 	logger.Info("starting agenttown-mcp",
 		"version", version,
 		"http", *httpAddr,
@@ -1053,6 +1103,7 @@ func main() {
 		"ollama_url", *ollamaURL,
 		"ollama_model", *ollamaModel,
 		"auto_plan", autoPlanEnabled,
+		"mysql_persistence", dsn != "",
 	)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -1147,6 +1198,14 @@ func main() {
 		firstAgentRegistered = true
 		nextAgentEpoch++
 		ac, workerCtx := newAgentContext(ctx, nextAgentEpoch)
+		// Stage 3: 绑定持久化身份 + 从 DB 恢复 4 个调度字段。
+		// store==nil（内存模式）时 SetIdentity 仍记录 agentID 但持久化调用跳过；
+		// LoadPersistent 在 NoopStore 下返回 ErrNotFound→保持默认值（cold start）。
+		ac.as.SetIdentity(id, store)
+		if err := ac.as.LoadPersistent(ctx); err != nil {
+			logger.Warn("[main] load persistent state failed, continuing with cold start",
+				"agent_id", id, "err", err)
+		}
 		// 战略层/战术层各用一个独立 LLM client 实例。
 		// Venus 直连（OpenAI Chat Completions API），是唯一的战略/战术层后端。
 		venusAPIKeyValue := *venusAPIKey

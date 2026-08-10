@@ -1,12 +1,15 @@
 package agentstate
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 
 	"github.com/AgentTown/agenttown-mcp/pkg/protocol"
+	"github.com/AgentTown/agenttown-mcp/pkg/storage"
 )
 
 // AgentState holds per-agent business state: persistent fields (survive
@@ -18,7 +21,14 @@ import (
 type AgentState struct {
 	mu sync.Mutex
 
-	// Persistent fields (cross-session, backed by MySQL in stage 3)
+	// Identity + persistence handle. Set once via SetIdentity by the main
+	// package's registerAgent, before LoadPersistent and before any
+	// write-through can fire. When store == nil (tests / in-memory mode),
+	// persistence calls are skipped — the struct behaves as pure in-memory.
+	agentID string
+	store   storage.Store
+
+	// Persistent fields (cross-session, backed by MySQL when store != nil)
 	dailyPlan        string
 	currentDay       int // -1 = unplanned
 	currentPlanIndex int
@@ -54,6 +64,90 @@ func New() *AgentState {
 	return &AgentState{
 		currentDay:     -1,
 		lastReactiveAt: make(map[string]time.Time),
+	}
+}
+
+// SetIdentity binds the agent's identity and persistence store. Must be
+// called once after New, before LoadPersistent and before any setter that
+// triggers write-through. When store == nil, all persistence is skipped
+// (in-memory mode for tests and quick-smoke runs without MySQL).
+//
+// Passing a non-nil store over a previously-nil one is allowed (used by
+// registerAgent on first registration); the store is then used by all
+// subsequent setters. Re-binding a non-nil store to another non-nil store
+// is not supported — each AgentState is scoped to one agent lifecycle.
+func (a *AgentState) SetIdentity(agentID string, store storage.Store) {
+	a.mu.Lock()
+	a.agentID = agentID
+	a.store = store
+	a.mu.Unlock()
+}
+
+// LoadPersistent hydrates the four persistent fields from the store.
+// Called by registerAgent after SetIdentity, before spawning the worker.
+//
+//   - ErrNotFound (first run / cold start): keeps defaults (currentDay=-1),
+//     so the worker generates a fresh daily plan as if no DB existed.
+//   - Other errors: logs a warning and keeps defaults — the agent
+//     degrades to re-planning rather than failing to start.
+//   - Success: overwrites the four fields; the worker sees currentDay
+//     matches today and skips generateDailyPlan (plan survives restart).
+func (a *AgentState) LoadPersistent(ctx context.Context) error {
+	if a.store == nil {
+		return nil
+	}
+	snap, err := a.store.LoadScheduleState(ctx, a.agentID)
+	if err == storage.ErrNotFound {
+		return nil
+	}
+	if err != nil {
+		slog.Default().Warn("[agentstate] load persistent state failed, degrading to cold start",
+			"agent_id", a.agentID, "err", err)
+		return err
+	}
+	a.mu.Lock()
+	a.dailyPlan = snap.DailyPlan
+	a.currentDay = snap.CurrentDay
+	a.currentPlanIndex = snap.CurrentPlanIndex
+	a.currentSlot = snap.CurrentSlot
+	a.mu.Unlock()
+	return nil
+}
+
+// SnapshotPersistent returns a copy of the four persistent fields. Used by
+// tests and diagnostics to assert write-through state without touching the
+// store.
+func (a *AgentState) SnapshotPersistent() storage.ScheduleState {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.snapshotPersistentLocked()
+}
+
+// snapshotPersistentLocked reads the four persistent fields; caller holds a.mu.
+func (a *AgentState) snapshotPersistentLocked() storage.ScheduleState {
+	return storage.ScheduleState{
+		DailyPlan:        a.dailyPlan,
+		CurrentDay:       a.currentDay,
+		CurrentPlanIndex: a.currentPlanIndex,
+		CurrentSlot:      a.currentSlot,
+	}
+}
+
+// persistSchedule write-throughs the snapshot to the store. Caller must NOT
+// hold a.mu (DB I/O outside the lock avoids blocking other goroutines).
+// Errors are logged as warnings — the in-memory state is already correct,
+// and the DB will catch up on the next successful write. This matches the
+// "log and continue" pattern: persistence is best-effort, never blocks the
+// decision pipeline.
+func (a *AgentState) persistSchedule(snap storage.ScheduleState) {
+	if a.store == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := a.store.SaveScheduleState(ctx, a.agentID, snap); err != nil {
+		slog.Default().Warn("[agentstate] persist schedule state failed",
+			"agent_id", a.agentID, "err", err)
 	}
 }
 
@@ -252,7 +346,9 @@ func (a *AgentState) ClearForSlotSwitch() InFlightInfo {
 	a.currentActionSrc = ""
 	a.currentSlot = ""
 	a.redecomposeCount = 0
+	snap := a.snapshotPersistentLocked()
 	a.mu.Unlock()
+	a.persistSchedule(snap)
 	return info
 }
 
@@ -277,7 +373,9 @@ func (a *AgentState) Stop() {
 	a.actionQueue = nil
 	a.currentSlot = ""
 	a.redecomposeCount = 0
+	snap := a.snapshotPersistentLocked()
 	a.mu.Unlock()
+	a.persistSchedule(snap)
 }
 
 // RefillQueue replaces the action queue with the given actions and records
@@ -286,7 +384,9 @@ func (a *AgentState) RefillQueue(actions []PlannedAction, slot string) {
 	a.mu.Lock()
 	a.actionQueue = actions
 	a.currentSlot = slot
+	snap := a.snapshotPersistentLocked()
 	a.mu.Unlock()
+	a.persistSchedule(snap)
 }
 
 // PopAction removes and returns the first action in the queue (FIFO).
@@ -443,14 +543,17 @@ func (a *AgentState) BeginTacticalRefill(goal, slot string, idx int, hasTactical
 // new slot, resets the counter and updates slot/index.
 func (a *AgentState) CommitTacticalRefill(slot string, idx int, isRedecompose bool) {
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	if isRedecompose {
 		a.redecomposeCount++
-	} else {
-		a.currentSlot = slot
-		a.currentPlanIndex = idx
-		a.redecomposeCount = 0
+		a.mu.Unlock()
+		return
 	}
+	a.currentSlot = slot
+	a.currentPlanIndex = idx
+	a.redecomposeCount = 0
+	snap := a.snapshotPersistentLocked()
+	a.mu.Unlock()
+	a.persistSchedule(snap)
 }
 
 // QueueSnapshot returns a copy of the current action queue (for logging).
@@ -498,12 +601,14 @@ func (a *AgentState) BeginReplan(goal, slot string, idx int, hasTacticalHc bool)
 // successful replan. Called after the LLM returns new actions.
 func (a *AgentState) CommitReplan(actions []PlannedAction, slot string, idx int) {
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	a.actionQueue = actions
 	a.redecomposeCount = 0
 	a.currentSlot = slot
 	a.currentPlanIndex = idx
 	a.replanHint = ""
+	snap := a.snapshotPersistentLocked()
+	a.mu.Unlock()
+	a.persistSchedule(snap)
 }
 
 // HasQueueNext reports whether the action queue has any pending actions.
@@ -556,14 +661,18 @@ func (a *AgentState) SetDailyPlan(plan string, day int) {
 	a.mu.Lock()
 	a.dailyPlan = plan
 	a.currentDay = day
+	snap := a.snapshotPersistentLocked()
 	a.mu.Unlock()
+	a.persistSchedule(snap)
 }
 
 // SetCurrentPlanIndex records which daily-plan item is currently executing.
 func (a *AgentState) SetCurrentPlanIndex(idx int) {
 	a.mu.Lock()
 	a.currentPlanIndex = idx
+	snap := a.snapshotPersistentLocked()
 	a.mu.Unlock()
+	a.persistSchedule(snap)
 }
 
 // CurrentDay returns the day_count the current daily plan was generated for
@@ -651,13 +760,16 @@ func (a *AgentState) DedupeReactive(key string, now time.Time, window time.Durat
 // currentDay but returns rollover=false (worker already planned on startup).
 func (a *AgentState) DetectDayRollover() (rollover bool, prevDay, newDay int) {
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	day := a.latestDayCountLocked()
 	prev := a.currentDay
 	if day <= prev {
+		a.mu.Unlock()
 		return false, prev, day
 	}
 	a.currentDay = day
+	snap := a.snapshotPersistentLocked()
+	a.mu.Unlock()
+	a.persistSchedule(snap)
 	if prev < 0 {
 		return false, prev, day
 	}

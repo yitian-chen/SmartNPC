@@ -1,13 +1,16 @@
 package agentstate
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/AgentTown/agenttown-mcp/pkg/protocol"
+	"github.com/AgentTown/agenttown-mcp/pkg/storage"
 )
 
 // setPerceptionForTest builds a perception payload with the given game time
@@ -404,4 +407,277 @@ func TestConcurrentAccess(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+// ─── Stage 3: write-through persistence tests ──────────────────────────
+//
+// fakeStore is a minimal Store recording Save calls. Defined here (not in
+// pkg/storage) because it's test-only and agentstate-specific.
+
+type fakeStore struct {
+	mu        sync.Mutex
+	saved     map[string]storage.ScheduleState
+	saveCalls int
+	loadErr   error
+}
+
+func newFakeStore() *fakeStore {
+	return &fakeStore{saved: make(map[string]storage.ScheduleState)}
+}
+
+func (f *fakeStore) LoadScheduleState(_ context.Context, agentID string) (storage.ScheduleState, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.loadErr != nil {
+		return storage.ScheduleState{}, f.loadErr
+	}
+	if st, ok := f.saved[agentID]; ok {
+		return st, nil
+	}
+	return storage.ScheduleState{}, storage.ErrNotFound
+}
+
+func (f *fakeStore) SaveScheduleState(_ context.Context, agentID string, s storage.ScheduleState) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.saveCalls++
+	f.saved[agentID] = s
+	return nil
+}
+
+func (f *fakeStore) Close() error { return nil }
+
+func (f *fakeStore) snapshot(agentID string) (storage.ScheduleState, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	st, ok := f.saved[agentID]
+	return st, ok
+}
+
+func (f *fakeStore) saveCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.saveCalls
+}
+
+// bindStore wires a fresh fakeStore to an AgentState for write-through tests.
+func bindStore(t *testing.T, a *AgentState, agentID string) *fakeStore {
+	t.Helper()
+	fs := newFakeStore()
+	a.SetIdentity(agentID, fs)
+	return fs
+}
+
+// TestSetDailyPlan_Persists verifies SetDailyPlan triggers a write-through
+// saving both the plan and the day.
+func TestSetDailyPlan_Persists(t *testing.T) {
+	a := New()
+	fs := bindStore(t, a, "H-01")
+	a.SetDailyPlan("06:00-22:00 工作计划", 3)
+	if got := fs.saveCount(); got != 1 {
+		t.Fatalf("save calls: got %d, want 1", got)
+	}
+	snap, ok := fs.snapshot("H-01")
+	if !ok {
+		t.Fatal("no snapshot saved")
+	}
+	if snap.DailyPlan != "06:00-22:00 工作计划" || snap.CurrentDay != 3 {
+		t.Errorf("snapshot: got %+v, want plan+day=3", snap)
+	}
+}
+
+// TestSetCurrentPlanIndex_Persists verifies index changes are persisted.
+func TestSetCurrentPlanIndex_Persists(t *testing.T) {
+	a := New()
+	fs := bindStore(t, a, "H-01")
+	a.SetCurrentPlanIndex(4)
+	if got := fs.saveCount(); got != 1 {
+		t.Fatalf("save calls: got %d, want 1", got)
+	}
+	snap, _ := fs.snapshot("H-01")
+	if snap.CurrentPlanIndex != 4 {
+		t.Errorf("CurrentPlanIndex: got %d, want 4", snap.CurrentPlanIndex)
+	}
+}
+
+// TestCommitTacticalRefill_PersistsNewSlot verifies a new-slot commit
+// (isRedecompose=false) writes slot+index.
+func TestCommitTacticalRefill_PersistsNewSlot(t *testing.T) {
+	a := New()
+	fs := bindStore(t, a, "H-01")
+	a.CommitTacticalRefill("08:00-12:00", 1, false)
+	if got := fs.saveCount(); got != 1 {
+		t.Fatalf("save calls: got %d, want 1", got)
+	}
+	snap, _ := fs.snapshot("H-01")
+	if snap.CurrentSlot != "08:00-12:00" || snap.CurrentPlanIndex != 1 {
+		t.Errorf("snapshot: got %+v, want slot=08:00-12:00 idx=1", snap)
+	}
+}
+
+// TestCommitTacticalRefill_RedecomposeDoesNotPersist verifies the
+// redecompose branch (same slot, just bumping counter) does NOT trigger
+// a save — redecomposeCount is transient.
+func TestCommitTacticalRefill_RedecomposeDoesNotPersist(t *testing.T) {
+	a := New()
+	fs := bindStore(t, a, "H-01")
+	a.CommitTacticalRefill("", 0, true)
+	if got := fs.saveCount(); got != 0 {
+		t.Fatalf("redecompose save calls: got %d, want 0 (transient counter)", got)
+	}
+}
+
+// TestCommitReplan_Persists verifies replan writes the new slot+index.
+func TestCommitReplan_Persists(t *testing.T) {
+	a := New()
+	fs := bindStore(t, a, "H-01")
+	a.CommitReplan([]PlannedAction{{Action: "wait"}}, "13:00-17:00", 2)
+	if got := fs.saveCount(); got != 1 {
+		t.Fatalf("save calls: got %d, want 1", got)
+	}
+	snap, _ := fs.snapshot("H-01")
+	if snap.CurrentSlot != "13:00-17:00" || snap.CurrentPlanIndex != 2 {
+		t.Errorf("snapshot: got %+v, want slot=13:00-17:00 idx=2", snap)
+	}
+}
+
+// TestClearForSlotSwitch_PersistsClearedSlot verifies clearing the slot
+// persists the empty currentSlot so a restart doesn't resume a stale slot.
+func TestClearForSlotSwitch_PersistsClearedSlot(t *testing.T) {
+	a := New()
+	fs := bindStore(t, a, "H-01")
+	a.RefillQueue([]PlannedAction{{Action: "work"}}, "08:00-12:00") // 1 save
+	a.ClearForSlotSwitch()                                            // 2nd save
+	if got := fs.saveCount(); got != 2 {
+		t.Fatalf("save calls: got %d, want 2", got)
+	}
+	snap, _ := fs.snapshot("H-01")
+	if snap.CurrentSlot != "" {
+		t.Errorf("after clear, CurrentSlot: got %q, want empty", snap.CurrentSlot)
+	}
+}
+
+// TestStop_PersistsClearedSlot verifies Stop persists the cleared slot
+// (agent going offline should not leave a stale slot in the DB).
+func TestStop_PersistsClearedSlot(t *testing.T) {
+	a := New()
+	fs := bindStore(t, a, "H-01")
+	a.RefillQueue(nil, "08:00-12:00") // 1 save
+	a.Stop()                          // 2nd save
+	snap, _ := fs.snapshot("H-01")
+	if snap.CurrentSlot != "" {
+		t.Errorf("after Stop, CurrentSlot: got %q, want empty", snap.CurrentSlot)
+	}
+}
+
+// TestRefillQueue_Persists verifies RefillQueue writes the slot.
+func TestRefillQueue_Persists(t *testing.T) {
+	a := New()
+	fs := bindStore(t, a, "H-01")
+	a.RefillQueue([]PlannedAction{{Action: "work_at_workbench"}}, "07:00-11:00")
+	if got := fs.saveCount(); got != 1 {
+		t.Fatalf("save calls: got %d, want 1", got)
+	}
+	snap, _ := fs.snapshot("H-01")
+	if snap.CurrentSlot != "07:00-11:00" {
+		t.Errorf("CurrentSlot: got %q, want 07:00-11:00", snap.CurrentSlot)
+	}
+}
+
+// TestDetectDayRollover_Persists verifies day advancement triggers a save.
+func TestDetectDayRollover_Persists(t *testing.T) {
+	a := New()
+	fs := bindStore(t, a, "H-01")
+	// Seed currentDay=1 via SetDailyPlan (1 save), then advance to day 2.
+	a.SetDailyPlan("plan", 1) // save 1
+	setPerceptionForTest(t, a, "06:00", 2)
+	rollover, _, newDay := a.DetectDayRollover()
+	if !rollover || newDay != 2 {
+		t.Fatalf("rollover: got %v day=%d, want true day=2", rollover, newDay)
+	}
+	if got := fs.saveCount(); got != 2 {
+		t.Fatalf("save calls: got %d, want 2 (SetDailyPlan + rollover)", got)
+	}
+	snap, _ := fs.snapshot("H-01")
+	if snap.CurrentDay != 2 {
+		t.Errorf("CurrentDay: got %d, want 2", snap.CurrentDay)
+	}
+}
+
+// TestDetectDayRollover_NoSaveWhenUnchanged verifies no save fires when
+// the day hasn't advanced (idempotent guard).
+func TestDetectDayRollover_NoSaveWhenUnchanged(t *testing.T) {
+	a := New()
+	fs := bindStore(t, a, "H-01")
+	a.SetDailyPlan("plan", 3) // save 1
+	setPerceptionForTest(t, a, "10:00", 3) // same day
+	a.DetectDayRollover()                  // no change → no save
+	if got := fs.saveCount(); got != 1 {
+		t.Fatalf("save calls: got %d, want 1 (no save on unchanged day)", got)
+	}
+}
+
+// TestLoadPersistent_Hydrates verifies LoadPersistent restores the four
+// fields from the store.
+func TestLoadPersistent_Hydrates(t *testing.T) {
+	a := New()
+	fs := bindStore(t, a, "H-01")
+	// Seed the store directly.
+	fs.saved["H-01"] = storage.ScheduleState{
+		DailyPlan:        "cached plan",
+		CurrentDay:       5,
+		CurrentPlanIndex: 3,
+		CurrentSlot:      "14:00-18:00",
+	}
+	if err := a.LoadPersistent(context.Background()); err != nil {
+		t.Fatalf("LoadPersistent: %v", err)
+	}
+	snap := a.SnapshotPersistent()
+	if snap.DailyPlan != "cached plan" || snap.CurrentDay != 5 ||
+		snap.CurrentPlanIndex != 3 || snap.CurrentSlot != "14:00-18:00" {
+		t.Errorf("after load: got %+v, want seeded values", snap)
+	}
+}
+
+// TestLoadPersistent_NotFoundKeepsDefaults verifies ErrNotFound is treated
+// as cold-start (defaults preserved, no error returned).
+func TestLoadPersistent_NotFoundKeepsDefaults(t *testing.T) {
+	a := New()
+	bindStore(t, a, "H-01") // empty store → Load returns ErrNotFound
+	if err := a.LoadPersistent(context.Background()); err != nil {
+		t.Fatalf("LoadPersistent on empty: got err=%v, want nil (cold start)", err)
+	}
+	snap := a.SnapshotPersistent()
+	if snap.CurrentDay != -1 {
+		t.Errorf("CurrentDay: got %d, want -1 (default unplanned)", snap.CurrentDay)
+	}
+	if snap.DailyPlan != "" {
+		t.Errorf("DailyPlan: got %q, want empty", snap.DailyPlan)
+	}
+}
+
+// TestLoadPersistent_StoreErrorPropagates verifies non-NotFound errors
+// are returned so the caller can log them.
+func TestLoadPersistent_StoreErrorPropagates(t *testing.T) {
+	a := New()
+	fs := bindStore(t, a, "H-01")
+	fs.loadErr = errors.New("connection refused")
+	if err := a.LoadPersistent(context.Background()); err == nil {
+		t.Fatal("LoadPersistent: got nil err, want connection error")
+	}
+}
+
+// TestWriteThrough_NilStoreNoOp verifies that when store is nil (the
+// default — no SetIdentity call), setters don't panic and in-memory state
+// still updates. This is the in-memory mode.
+func TestWriteThrough_NilStoreNoOp(t *testing.T) {
+	a := New() // no SetIdentity → store is nil
+	a.SetDailyPlan("plan", 1)
+	a.SetCurrentPlanIndex(2)
+	a.RefillQueue(nil, "08:00-12:00")
+	snap := a.SnapshotPersistent()
+	if snap.DailyPlan != "plan" || snap.CurrentDay != 1 ||
+		snap.CurrentPlanIndex != 2 || snap.CurrentSlot != "08:00-12:00" {
+		t.Errorf("in-memory state: got %+v, want all fields set", snap)
+	}
 }
