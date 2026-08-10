@@ -227,11 +227,10 @@ func (s *MySQLStore) SaveRelationship(ctx context.Context, agentA, agentB string
 // agent_b), ordered by most recently updated first. Used to inject the
 // 【人际关系】段 in the tactical prompt. last_interaction_at may be NULL
 // (seed rows that have never been interacted through SaveRelationship);
-// COALESCE coerces to the zero time.
+// we scan via sql.NullTime and keep the zero value when NULL.
 func (s *MySQLStore) LoadRelationships(ctx context.Context, agentID string, limit int) ([]Relationship, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT agent_a, agent_b, familiarity, affection, interaction_count,
-		        COALESCE(last_interaction_at, '0000-00-00 00:00:00')
+		`SELECT agent_a, agent_b, familiarity, affection, interaction_count, last_interaction_at
 		 FROM agent_relationships
 		 WHERE agent_a = ? OR agent_b = ?
 		 ORDER BY updated_at DESC LIMIT ?`, agentID, agentID, limit)
@@ -242,9 +241,13 @@ func (s *MySQLStore) LoadRelationships(ctx context.Context, agentID string, limi
 	var out []Relationship
 	for rows.Next() {
 		var r Relationship
+		var lastAt sql.NullTime
 		if err := rows.Scan(&r.AgentA, &r.AgentB, &r.Familiarity, &r.Affection,
-			&r.InteractionCount, &r.LastInteractionAt); err != nil {
+			&r.InteractionCount, &lastAt); err != nil {
 			return nil, fmt.Errorf("scan relationship for %s: %w", agentID, err)
+		}
+		if lastAt.Valid {
+			r.LastInteractionAt = lastAt.Time
 		}
 		out = append(out, r)
 	}

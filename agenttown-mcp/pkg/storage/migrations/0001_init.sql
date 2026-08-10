@@ -8,10 +8,10 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 );
 
 -- Stage 3: per-agent schedule state (the 4 persistent fields).
--- One row per agent; upserted on every write-through.
+-- One row per agent, upserted on every write-through.
 CREATE TABLE IF NOT EXISTS agent_schedule_state (
   agent_id           VARCHAR(64) NOT NULL PRIMARY KEY,
-  daily_plan         TEXT        NOT NULL DEFAULT '',
+  daily_plan         TEXT        NOT NULL,
   current_day        INT         NOT NULL DEFAULT -1,
   current_plan_index INT         NOT NULL DEFAULT 0,
   current_slot       VARCHAR(64) NOT NULL DEFAULT '',
