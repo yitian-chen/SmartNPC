@@ -1014,6 +1014,9 @@ func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
 
 	// Stage 4: 加载近期记忆注入战术层 prompt（top-3 by created_at DESC）。
 	memories := a.loadTacticalMemories(ctx, agentID)
+	// Stage 5: 加载关系列表注入战术层 prompt【人际关系】段。
+	// 单 agent 场景（kb.Agents ≤ 1）返回空串，不污染 prompt。
+	relationships := a.loadRelationships(ctx, agentID, kbRef)
 
 	// 战术层 LLM 调用统一 30s 硬超时：避免 Venus 后端排队时单次调用卡 120s
 	// 拖死整个游戏时段。超时后调用方发 idle wait，下一感知周期重试。
@@ -1022,7 +1025,7 @@ func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
 
 	if tacticalStreamingEnabled {
 		// 流式路径：onAction 回调逐个入队 + 首 action 提前下发。
-		_, _, err = generateTacticalPlanStreaming(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, logger, hint, memories, "", capabilityRegistryRef,
+		_, _, err = generateTacticalPlanStreaming(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, logger, hint, memories, relationships, capabilityRegistryRef,
 			func(pa plannedAction) {
 				a.as.AppendQueueAction(pa)
 				if a.as.ShouldDispatchFirst() {
@@ -1033,7 +1036,7 @@ func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
 		)
 	} else {
 		// 非流式路径（默认）：等完整响应后一次性填充队列。
-		actions, _, err = generateTacticalPlan(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, logger, hint, memories, "", capabilityRegistryRef)
+		actions, _, err = generateTacticalPlan(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, logger, hint, memories, relationships, capabilityRegistryRef)
 		if err == nil {
 			a.as.ReplaceQueue(actions)
 		}
@@ -1115,6 +1118,9 @@ func (a *agentContext) tacticalRefillForReplan(
 
 	// Stage 4: 加载近期记忆注入战术层 prompt（top-3 by created_at DESC）。
 	memories := a.loadTacticalMemories(ctx, agentID)
+	// Stage 5: 加载关系列表注入战术层 prompt【人际关系】段。
+	// 单 agent 场景（kb.Agents ≤ 1）返回空串，不污染 prompt。
+	relationships := a.loadRelationships(ctx, agentID, kbRef)
 
 	var actions []plannedAction
 	var err error
@@ -1123,7 +1129,7 @@ func (a *agentContext) tacticalRefillForReplan(
 		// 流式路径：回调收集到 local slice（不直接修改 a.actionQueue），
 		// 成功后才覆盖旧队列。失败则旧队列不受影响。
 		var collected []plannedAction
-		_, _, err = generateTacticalPlanStreaming(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, logger, hint, memories, "", capabilityRegistryRef,
+		_, _, err = generateTacticalPlanStreaming(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, logger, hint, memories, relationships, capabilityRegistryRef,
 			func(pa plannedAction) {
 				collected = append(collected, pa)
 			},
@@ -1132,7 +1138,7 @@ func (a *agentContext) tacticalRefillForReplan(
 			actions = collected
 		}
 	} else {
-		actions, _, err = generateTacticalPlan(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, logger, hint, memories, "", capabilityRegistryRef)
+		actions, _, err = generateTacticalPlan(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, logger, hint, memories, relationships, capabilityRegistryRef)
 	}
 
 	// 3. 失败处理：保留旧队列（不清空），调用方保持原 action
