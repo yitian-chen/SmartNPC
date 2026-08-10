@@ -83,6 +83,24 @@ func (a *AgentState) SetIdentity(agentID string, store storage.Store) {
 	a.mu.Unlock()
 }
 
+// AgentID returns the bound agent identity (empty before SetIdentity).
+// Callers use this to scope store calls (SaveMemory, SaveActionRecord, etc.)
+// without having to thread the agent ID separately.
+func (a *AgentState) AgentID() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.agentID
+}
+
+// Store returns the bound persistence store (nil in in-memory mode).
+// Callers use this to access memory/action_history methods directly,
+// checking for nil before proceeding.
+func (a *AgentState) Store() storage.Store {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.store
+}
+
 // LoadPersistent hydrates the four persistent fields from the store.
 // Called by registerAgent after SetIdentity, before spawning the worker.
 //
@@ -232,11 +250,17 @@ func (a *AgentState) RecordActionStarted(actionID, cmd string, params map[string
 // so the caller (agentContext.recordActionCompletion) can handle
 // coordination fields (pendingActionTimeouts, completedBeforeArm) and
 // reactive trigger decisions.
+//
+// Stage 4 adds Cmd/Params/Start: captured BEFORE clearing in-flight tracking,
+// so the caller can record a full action_history row at completion time.
 type CompletionResult struct {
 	WasInFlight    bool
 	WasPendingStop bool
 	WasSelfStop    bool
 	Src            ActionSource
+	Cmd            string
+	Params         map[string]any
+	Start          time.Time
 }
 
 // RecordActionCompletion clears in-flight tracking for the given action
@@ -249,7 +273,14 @@ func (a *AgentState) RecordActionCompletion(actionID string) CompletionResult {
 		a.currentTask = nil
 	}
 	wasInFlight := a.currentActionID == actionID
+	// Stage 4: capture in-flight fields BEFORE clearing, for action_history.
+	var cmd string
+	var params map[string]any
+	var start time.Time
 	if wasInFlight {
+		cmd = a.currentActionCmd
+		params = a.currentActionParams
+		start = a.currentActionStart
 		a.currentActionID = ""
 		a.currentActionCmd = ""
 		a.currentActionParams = nil
@@ -272,6 +303,9 @@ func (a *AgentState) RecordActionCompletion(actionID string) CompletionResult {
 		WasPendingStop: wasPendingStop,
 		WasSelfStop:    wasSelfStop,
 		Src:            src,
+		Cmd:            cmd,
+		Params:         params,
+		Start:          start,
 	}
 }
 

@@ -219,8 +219,38 @@ func TestRecordActionStarted_Completion(t *testing.T) {
 	if res.Src != SourceTactical {
 		t.Errorf("Src = %q, want tactical", res.Src)
 	}
+	// Stage 4: verify Cmd/Params/Start captured before clearing.
+	if res.Cmd != "WorkAtWorkbench" {
+		t.Errorf("Cmd = %q, want WorkAtWorkbench", res.Cmd)
+	}
+	if res.Params == nil || res.Params["duration_sec"] != 60 {
+		t.Errorf("Params = %+v, want {duration_sec:60}", res.Params)
+	}
+	if res.Start.IsZero() {
+		t.Error("Start = zero, want non-zero (captured from RecordActionStarted)")
+	}
 	if a.HasInFlightAction() {
 		t.Error("HasInFlightAction = true after completion")
+	}
+}
+
+// TestAgentState_Accessors verifies AgentID() and Store() return bound
+// values after SetIdentity, and zero values before.
+func TestAgentState_Accessors(t *testing.T) {
+	a := New()
+	if got := a.AgentID(); got != "" {
+		t.Errorf("AgentID before SetIdentity = %q, want empty", got)
+	}
+	if got := a.Store(); got != nil {
+		t.Errorf("Store before SetIdentity = %v, want nil", got)
+	}
+	fs := newFakeStore()
+	a.SetIdentity("H-01", fs)
+	if got := a.AgentID(); got != "H-01" {
+		t.Errorf("AgentID = %q, want H-01", got)
+	}
+	if a.Store() != fs {
+		t.Errorf("Store mismatch after SetIdentity")
 	}
 }
 
