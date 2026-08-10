@@ -423,7 +423,7 @@ MCP 是唯一的 LLM 调用入口，启动后即可接收感知事件、调用 V
 - **加载时机**：`agent_registered` → `SetIdentity(agentID, store)` → `LoadPersistent` 从 DB 恢复 4 字段。冷启动（无行）保持默认值，worker 生成新计划；热重启（有行）跳过 `generateDailyPlan`，计划跨进程存活
 - **降级**：DB 写失败仅 log warn，不回滚内存状态（内存已正确，DB 下次写追上）；`LoadPersistent` 非 `ErrNotFound` 错误降级为 cold start
 - **迁移**：`//go:embed migrations/*.sql` 原生 SQL，启动时自动跑（`schema_migrations` 版本表跟踪）。无需外部迁移工具
-- **持久化表全集**：`agent_schedule_state`（Stage 3 调度状态）+ `agent_memories`（Stage 4 记忆）+ `action_history`（Stage 4 动作历史）+ `agent_relationships`（Stage 5 关系，仅建表骨架）
+- **持久化表全集**：`agent_schedule_state`（Stage 3 调度状态）+ `agent_memories`（Stage 4 记忆）+ `action_history`（Stage 4 动作历史）+ `agent_relationships`（Stage 5 关系数值，双向独立行）
 - **优雅关停**：write-through 已同步落盘，SIGTERM 仅 `defer store.Close()`，无需 flush
 
 DSN 必须含 `parseTime=true` 以正确扫描 `DATETIME` 列。示例：`user:pass@tcp(127.0.0.1:3306)/agenttown?parseTime=true&charset=utf8mb4`。
@@ -439,6 +439,18 @@ Stage 4 在 Stage 3 的存储层之上接入 NPC 长期记忆：日终批量生�
 - **检索策略**：仅按 `created_at DESC` 取最近 N 条，`decay_score` 字段持久化但当前始终 1.0（Stage 4 不实现衰减/召回算法，预留 Stage 6+）
 - **memory_type 取值**：`event` / `skill` / `relationship` / `daily_summary`，由 LLM 在生成时指定
 - **JSON 解析容错**：`parseMemoryGenerationResult` 容忍 markdown 围栏 ```json ... ``` 和尾随散文，定位首个 `{` 到末个 `}` 后 `json.Unmarshal`
+
+### 关系数值动态维护（Stage 5）
+
+Stage 5 在 Stage 3/4 之上接入 NPC 间关系数值动态维护：动作完成时 Ollama 语义判断是否触发关系更新 → 双向 familiarity += 1 → 战术层 prompt 注入【人际关系】段。仅 `--mysql-dsn` 非空时启用，内存模式全程 no-op。
+
+- **双向独立行**：`agent_relationships` 表复合 PK (agent_a, agent_b) 有序，A→B 和 B→A 各一行。A 主动与 B 交互时两次调 `SaveRelationship`（A→B + B→A），各自 upsert。affection 初期不动，仅 familiarity += 1
+- **Ollama 语义判断**：每次动作完成时（`recordActionCompletion` 旁路异步 `go maybeUpdateRelationship`），仅当 `Params["target_agent_id"]` 非空才调 Ollama 判断该次 cmd+params 是否构成直接社交互动（yes/no）。5s 超时，失败/超时/无法解析 → false（保守，不触发更新）。不硬编码触发 cmd 列表，适配动态注册的新 cmd
+- **关系数据流**：动作完成 → Ollama 判断 → 双向 `SaveRelationship(A,B,1,0)` + `SaveRelationship(B,A,1,0)` → DB upsert（familiarity+=1, interaction_count+=1, last_interaction_at=NOW()）→ 战术层 refill 调 `loadRelationships` 取关系行 → `formatRelationshipsForPrompt` 格式化 → 注入 prompt【人际关系】段
+- **KB 种子导入**：`agent_registered` 时调 `seedRelationshipsFromKB`，遍历 `kb.Relationships` 对涉及 agentID 的关系用 `SeedRelationship` (INSERT IGNORE) 导入，不覆盖既有交互累积。重连走 else 分支提前 return，不会重复导入
+- **战术层注入条件**：仅 `len(kb.Agents) > 1` 且关系非空才注入【人际关系】段；单 agent 场景不污染 prompt。`/debug/schedule` 路径保持空串（调试上下文不需关系注入）
+- **自指保护**：`target == agentID` 时跳过（避免 agent 与自己建立关系）
+- **异步非阻塞**：`go a.maybeUpdateRelationship(...)` 不阻塞 `recordActionCompletion` 主路径，best-effort 5s 超时 + slog.Warn
 
 ### world_kb 自动适配
 
@@ -665,6 +677,7 @@ python3 src/run_day.py   # 默认连 :9091
 | `agenttown-mcp/cmd/agenttown-mcp/reactive.go` | 反应层纯函数：prompt 构建 + 决策解析 |
 | `agenttown-mcp/cmd/agenttown-mcp/reactive_runner.go` | 反应层运行时：Ollama 调用 + WS 副作用 |
 | `agenttown-mcp/cmd/agenttown-mcp/memory.go` | Stage 4 记忆层：日终 LLM 总结 action_history → 结构化 memories + narrative |
+| `agenttown-mcp/cmd/agenttown-mcp/relationship.go` | Stage 5 关系层：Ollama 判断 + 关系格式化 + KB 种子导入 |
 | `agenttown-mcp/cmd/agenttown-mcp/capability.go` | NPC 能力注册表：per-agent cmd 能力声明（system 全局默认 + 具体 agent 覆盖） |
 | `agenttown-mcp/cmd/agenttown-mcp/debug_ui.go` | `/debug/` 浏览器控制台 + `/debug/kb` JSON 端点 |
 | `agenttown-mcp/cmd/agenttown-mcp/web/debug.html` | debug 控制台单页 HTML（单 Action + Schedule 注入双 tab） |
@@ -730,6 +743,7 @@ python3 src/run_day.py   # 默认连 :9091
 | 战术层流式输出 | ✅ | `--tactical-stream` flag（默认关，DeepSeek 高峰排队时回退） |
 | 状态访问与业务逻辑分离 Stage 3 | ✅ | MySQL 持久化层：4 调度字段 write-through + `LoadPersistent` 热重启 + `//go:embed` SQL 迁移 |
 | 状态访问与业务逻辑分离 Stage 4 | ✅ | 长期经历记忆：日终 LLM 批量生成 memories + 战略层注入昨日总结 + 战术层注入 top-3 近期记忆 + action_history 完整落盘 |
+| 状态访问与业务逻辑分离 Stage 5 | ✅ | 关系数值动态维护：动作完成 Ollama 判断 + 双向 familiarity+=1 + 战术层注入【人际关系】段 + KB 种子导入 |
 
 ## 当前已知问题（2026-07-29 仿真分析）
 
