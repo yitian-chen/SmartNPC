@@ -90,10 +90,14 @@ VENUS_MODEL="${VENUS_MODEL:-qwen3.6-35b-a3b}"
 
 # ─── 参数 ──────────────────────────────────────────────────────
 STOP_ONLY=false
+# --drop-tables：重置 ${MYSQL_DB} 全部表（DROP DATABASE + CREATE），
+# 让 MCP 启动时 migrations 从零重建。默认 false（保留累积状态）。
+DROP_TABLES=false
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --stop)        STOP_ONLY=true; shift ;;
+        --drop-tables) DROP_TABLES=true; shift ;;
         # 向后兼容：旧版有 Adapter/Hermes 相关 flag，现均已废弃，识别后忽略
         --no-adapter|--with-adapter|--no-hermes|--no-rebuild) warn "$1 已废弃（Hermes/Adapter 已移除），忽略"; shift ;;
         -h|--help)
@@ -103,6 +107,7 @@ while [[ $# -gt 0 ]]; do
             echo ""
             echo "Options:"
             echo "  --stop          仅停止所有服务，不重启"
+            echo "  --drop-tables   重置 MySQL 表（DROP DATABASE + CREATE，MCP 启动时 migrations 重建）"
             echo ""
             echo "UE 端连接地址：ws://<本机局域网IP>:$WS_PORT/ws"
             exit 0 ;;
@@ -330,6 +335,28 @@ ensure_mysql_db() {
         >/dev/null 2>&1 || fail "CREATE DATABASE $MYSQL_DB failed"
 }
 
+# ─── Step 0.6: 重置 MySQL 表（可选，--drop-tables 触发）──────────
+# 删除 ${MYSQL_DB} 全部表，让 MCP 启动时 migrations 从零重建（包括 schema_migrations，
+# 否则 MCP 认为 schema 已是最新不会重跑）。实现用 DROP DATABASE + CREATE DATABASE
+# 而非逐表 DROP —— 自动覆盖未来新增的表，且无需与 migration 保持表名同步。
+# 仅在 Linux 且未 SKIP_MYSQL 且 DROP_TABLES=true 时生效；默认 false，保留累积状态。
+drop_mysql_tables() {
+    if ! $IN_LINUX; then
+        return 0
+    fi
+    if [ "${SKIP_MYSQL:-0}" = "1" ]; then
+        return 0
+    fi
+    if [ "${DROP_TABLES:-false}" != "true" ]; then
+        return 0
+    fi
+    info "=== Step 0.6: Drop MySQL tables (db=$MYSQL_DB) ==="
+    mysql --socket="$MYSQL_SOCKET" -uroot -e \
+        "DROP DATABASE IF EXISTS \`$MYSQL_DB\`; CREATE DATABASE \`$MYSQL_DB\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci" \
+        >/dev/null 2>&1 || fail "DROP/CREATE DATABASE $MYSQL_DB failed"
+    ok "MySQL tables dropped (db=$MYSQL_DB, will be recreated by MCP migrations)"
+}
+
 # ─── Step 1: 编译 MCP Windows exe ──────────────────────────────
 build_mcp() {
     info "=== Step 1: Build agenttown-mcp.exe (Windows) ==="
@@ -546,6 +573,7 @@ mkdir -p "$LOG_SUBDIR"
 
 stop_all
 ensure_mysql
+drop_mysql_tables
 build_mcp
 start_mcp
 print_summary
