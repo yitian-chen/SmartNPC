@@ -1234,8 +1234,8 @@ func main() {
 		"directory of NPC profile.md files (filename = <agentID>.md; empty disables profile override)")
 	tacticalStream = flag.Bool("tactical-stream", false,
 		"enable streaming for tactical layer LLM calls (experimental: only helps if upstream LLM emits tokens incrementally)")
-	ollamaURL = flag.String("ollama-url", "http://localhost:11434",
-		"Ollama base URL for reactive layer (empty disables reactive layer)")
+	ollamaURL = flag.String("ollama-url", "",
+		"Ollama base URL for reactive layer (empty by default disables reactive layer; set to http://localhost:11434 to enable)")
 	ollamaModel = flag.String("ollama-model", "qwen2.5:7b-instruct-q4_K_M",
 		"Ollama model name for reactive layer decisions")
 	ollamaNumThread = flag.Int("ollama-num-thread", 16,

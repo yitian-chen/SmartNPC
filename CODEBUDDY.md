@@ -602,7 +602,7 @@ cp .env.example .env
 | `--tactical-stream` | `false` | 战术层流式输出（实验性，默认关） |
 | `--auto-plan` | `true` | 自动规划总开关（false=手动模式，跳过战略/战术/反应层自动决策，仅响应 /debug/schedule 注入和 /debug/action 手动下发） |
 | `--mysql-dsn` | `""` | MySQL DSN（空=内存模式无持久化；非空启用 Stage 3 存储层，DSN 需含 `parseTime=true`）。env 回退 `MYSQL_DSN` |
-| `--ollama-url` | `http://localhost:11434` | Ollama URL（空串=禁用反应层） |
+| `--ollama-url` | `""` | Ollama URL（默认空串=禁用反应层；设为 `http://localhost:11434` 启用） |
 | `--ollama-model` | `qwen2.5:7b-instruct-q4_K_M` | 反应层模型 |
 | `--ollama-num-thread` | `16` | Ollama CPU 推理线程数（0=默认 16，-1=让 Ollama 自决）。高核数 CPU 上默认用满所有核反而劣化，实测 96 vCPU EPYC 限制到 16 线程可获得 3x 加速 |
 | `--world-kb` | `assets/world_kb.yaml` | 世界 KB 路径（fail-fast 启动加载；UE 推送 world_kb 时也写入此路径） |
