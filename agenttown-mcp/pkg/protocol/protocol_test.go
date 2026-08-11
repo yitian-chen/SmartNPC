@@ -88,12 +88,12 @@ func TestScanAreaPayloadAndPerceptionScanID(t *testing.T) {
 func TestActionLifecyclePayloads(t *testing.T) {
 	cmd := ActionCommandPayload{
 		ActionID: "act_001",
-		Cmd:      CmdMoveToLocation,
-		Params:   map[string]any{"dest": []float64{100, 200, 0}, "speed": "walk"},
+		Cmd:      CmdMoveTo,
+		Params:   map[string]any{"target_type": "zone", "target_id": "workshop"},
 	}
 	raw, _ := json.Marshal(cmd)
 	var gotCmd ActionCommandPayload
-	if json.Unmarshal(raw, &gotCmd) != nil || gotCmd.ActionID != "act_001" || gotCmd.Cmd != CmdMoveToLocation {
+	if json.Unmarshal(raw, &gotCmd) != nil || gotCmd.ActionID != "act_001" || gotCmd.Cmd != CmdMoveTo {
 		t.Fatalf("action_command round-trip failed: %+v", gotCmd)
 	}
 

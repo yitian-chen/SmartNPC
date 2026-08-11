@@ -12,16 +12,16 @@ import (
 
 func TestAllToolInputsRequireAgentAndDecisionEpoch(t *testing.T) {
 	inputs := []any{
-		// Composite tools (6)
-		WorkAtWorkbenchInput{}, WorkAtWorkshopInput{}, ChatWithInput{}, RepairTargetInput{},
-		ChargeAtStationInput{}, PatrolZoneInput{},
-		// Atomic tools (8) + control tools (stop/scan_area)
-		MoveToLocationInput{}, MoveToAgentInput{}, TurnToInput{}, PlayMontageInput{},
+		// Composite tools (5)
+		WorkShiftInput{}, ChargeAtStationInput{}, SelfMaintenanceInput{},
+		RestAtResidenceInput{}, SurfInternetInput{},
+		// Atomic tools (7) + control tools (stop/scan_area)
+		GenericActInput{}, MoveToInput{}, TurnToInput{},
 		SpeakInput{}, EmoteInput{}, InteractInput{}, WaitInput{},
 		ScanAreaInput{}, StopInput{},
 	}
-	if len(inputs) != 16 {
-		t.Fatalf("input count=%d, want 16", len(inputs))
+	if len(inputs) != 14 {
+		t.Fatalf("input count=%d, want 14", len(inputs))
 	}
 	for _, input := range inputs {
 		typeOf := reflect.TypeOf(input)
@@ -47,9 +47,9 @@ func TestBuildAckResultEchoesDecisionEpoch(t *testing.T) {
 
 func TestPascalToSnake(t *testing.T) {
 	cases := []struct{ in, want string }{
-		{"MoveToLocation", "move_to_location"},
+		{"MoveTo", "move_to"},
 		{"TurnTo", "turn_to"},
-		{"WorkAtWorkbench", "work_at_workbench"},
+		{"WorkShift", "work_shift"},
 		{"ChargeAtStation", "charge_at_station"},
 		{"Speak", "speak"},
 		{"", ""},
@@ -63,7 +63,7 @@ func TestPascalToSnake(t *testing.T) {
 
 func TestSnakeToPascal(t *testing.T) {
 	cases := []struct{ in, want string }{
-		{"move_to_location", "MoveToLocation"},
+		{"move_to", "MoveTo"},
 		{"turn_to", "TurnTo"},
 		{"speak", "Speak"},
 		{"", ""},
@@ -77,7 +77,7 @@ func TestSnakeToPascal(t *testing.T) {
 
 func TestCmdToToolName_Builtin(t *testing.T) {
 	cases := []struct{ cmd, want string }{
-		{protocol.CmdMoveToLocation, "move_to_location"},
+		{protocol.CmdMoveTo, "move_to"},
 		{protocol.CmdInteractSmartObject, "interact"}, // shortened name
 		{protocol.CmdChargeAtStation, "charge_at_station"},
 		{protocol.CmdSpeak, "speak"},
@@ -105,9 +105,9 @@ func TestCmdToToolName_NewCmd(t *testing.T) {
 
 func TestBuildInputSchemaFromParams(t *testing.T) {
 	params := []protocol.CapabilityParam{
-		{Name: "target_agent_id", Type: "string", Description: "target", Required: true},
-		{Name: "speed", Type: "enum", Description: "speed", Required: false, DefaultValue: "walk", EnumValues: []string{"walk", "run"}},
-		{Name: "dest", Type: "vector", Description: "coords", Required: true},
+		{Name: "target_id", Type: "string", Description: "target", Required: true},
+		{Name: "target_type", Type: "enum", Description: "type", Required: false, DefaultValue: "zone", EnumValues: []string{"agent", "smart_object", "zone", "position"}},
+		{Name: "target_position", Type: "vector", Description: "coords", Required: false},
 	}
 	schema := buildInputSchemaFromParams(params)
 
@@ -128,23 +128,23 @@ func TestBuildInputSchemaFromParams(t *testing.T) {
 	if _, ok := props["decision_epoch"]; !ok {
 		t.Error("missing decision_epoch property")
 	}
-	speedProp := props["speed"].(map[string]any)
-	if speedProp["type"] != "string" {
-		t.Errorf("speed type=%v, want string (enum→string)", speedProp["type"])
+	typeProp := props["target_type"].(map[string]any)
+	if typeProp["type"] != "string" {
+		t.Errorf("target_type type=%v, want string (enum→string)", typeProp["type"])
 	}
-	destProp := props["dest"].(map[string]any)
-	if destProp["type"] != "array" {
-		t.Errorf("dest type=%v, want array (vector→array)", destProp["type"])
+	posProp := props["target_position"].(map[string]any)
+	if posProp["type"] != "array" {
+		t.Errorf("target_position type=%v, want array (vector→array)", posProp["type"])
 	}
 
 	required, ok := schema["required"].([]string)
 	if !ok {
 		t.Fatalf("required not []string: %T", schema["required"])
 	}
-	// agent_id + decision_epoch + target_agent_id + dest = 4 required
-	wantRequired := map[string]bool{"agent_id": true, "decision_epoch": true, "target_agent_id": true, "dest": true}
-	if len(required) != 4 {
-		t.Errorf("required count=%d, want 4: %v", len(required), required)
+	// agent_id + decision_epoch + target_id = 3 required
+	wantRequired := map[string]bool{"agent_id": true, "decision_epoch": true, "target_id": true}
+	if len(required) != 3 {
+		t.Errorf("required count=%d, want 3: %v", len(required), required)
 	}
 	for _, r := range required {
 		if !wantRequired[r] {
@@ -219,28 +219,26 @@ func TestReconcileTools_NewCmdRegistersGenericTool(t *testing.T) {
 	)
 	ex := &fakeExecutor{}
 	actions := []protocol.CapabilityAction{
-		// All 14 built-in cmds (so none get dropped).
-		{Cmd: protocol.CmdMoveToLocation, Kind: "atomic", Description: "move"},
-		{Cmd: protocol.CmdMoveToAgent, Kind: "atomic", Description: "move agent"},
+		// All 12 built-in cmds (so none get dropped).
+		{Cmd: protocol.CmdGenericAct, Kind: "atomic", Description: "generic"},
+		{Cmd: protocol.CmdMoveTo, Kind: "atomic", Description: "move"},
 		{Cmd: protocol.CmdTurnTo, Kind: "atomic", Description: "turn"},
-		{Cmd: protocol.CmdPlayMontage, Kind: "atomic", Description: "montage"},
 		{Cmd: protocol.CmdSpeak, Kind: "atomic", Description: "speak"},
 		{Cmd: protocol.CmdEmote, Kind: "atomic", Description: "emote"},
 		{Cmd: protocol.CmdInteractSmartObject, Kind: "atomic", Description: "interact"},
 		{Cmd: protocol.CmdWait, Kind: "atomic", Description: "wait"},
-		{Cmd: protocol.CmdWorkAtWorkbench, Kind: "composite", Description: "workbench"},
-		{Cmd: protocol.CmdWorkAtWorkshop, Kind: "composite", Description: "workshop"},
-		{Cmd: protocol.CmdChatWith, Kind: "composite", Description: "chat"},
-		{Cmd: protocol.CmdRepairTarget, Kind: "composite", Description: "repair"},
+		{Cmd: protocol.CmdWorkShift, Kind: "composite", Description: "work shift"},
 		{Cmd: protocol.CmdChargeAtStation, Kind: "composite", Description: "charge"},
-		{Cmd: protocol.CmdPatrolZone, Kind: "composite", Description: "patrol"},
+		{Cmd: protocol.CmdSelfMaintenance, Kind: "composite", Description: "maintenance"},
+		{Cmd: protocol.CmdRestAtResidence, Kind: "composite", Description: "rest"},
+		{Cmd: protocol.CmdSurfInternet, Kind: "composite", Description: "surf"},
 		// New cmd not in BuiltinToolSpecs.
 		{
 			Cmd:         "WaveHand",
 			Kind:        "atomic",
 			Description: "挥手致意",
 			Params: []protocol.CapabilityParam{
-				{Name: "target_agent_id", Type: "string", Required: true, Description: "目标"},
+				{Name: "target_id", Type: "string", Required: true, Description: "目标"},
 			},
 		},
 	}

@@ -10,30 +10,30 @@ import (
 func TestCapabilityRegistry_GlobalDefault(t *testing.T) {
 	r := NewCapabilityRegistry(nil)
 	r.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
-		{Cmd: protocol.CmdMoveToLocation, Kind: "atomic", Description: "move"},
+		{Cmd: protocol.CmdMoveTo, Kind: "atomic", Description: "move"},
 		{Cmd: protocol.CmdWait, Kind: "atomic", Description: "wait"},
 	})
-	if !r.HasCmd("H-01", protocol.CmdMoveToLocation) {
-		t.Errorf("HasCmd(H-01, MoveToLocation) = false; want true (global default)")
+	if !r.HasCmd("H-01", protocol.CmdMoveTo) {
+		t.Errorf("HasCmd(H-01, MoveTo) = false; want true (global default)")
 	}
 	got := r.EffectiveActions("H-01")
 	if len(got) != 2 {
 		t.Fatalf("EffectiveActions(H-01) len = %d; want 2", len(got))
 	}
 	// Sorted by Cmd.
-	if got[0].Cmd != protocol.CmdMoveToLocation {
-		t.Errorf("EffectiveActions[0].Cmd = %q; want %q", got[0].Cmd, protocol.CmdMoveToLocation)
+	if got[0].Cmd != protocol.CmdMoveTo {
+		t.Errorf("EffectiveActions[0].Cmd = %q; want %q", got[0].Cmd, protocol.CmdMoveTo)
 	}
 }
 
 func TestCapabilityRegistry_PerAgentOverrideWins(t *testing.T) {
 	r := NewCapabilityRegistry(nil)
 	r.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
-		{Cmd: protocol.CmdMoveToLocation, Kind: "atomic", Description: "global-move"},
+		{Cmd: protocol.CmdMoveTo, Kind: "atomic", Description: "global-move"},
 		{Cmd: protocol.CmdWait, Kind: "atomic", Description: "global-wait"},
 	})
 	r.Register("H-01", []protocol.CapabilityAction{
-		{Cmd: protocol.CmdMoveToLocation, Kind: "atomic", Description: "h01-move"},
+		{Cmd: protocol.CmdMoveTo, Kind: "atomic", Description: "h01-move"},
 	})
 	got := r.EffectiveActions("H-01")
 	// Per-agent override REPLACES global (not augments): H-01 only has
@@ -41,33 +41,33 @@ func TestCapabilityRegistry_PerAgentOverrideWins(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("EffectiveActions(H-01) len = %d; want 1 (override replaces global)", len(got))
 	}
-	if got[0].Cmd != protocol.CmdMoveToLocation || got[0].Description != "h01-move" {
-		t.Errorf("EffectiveActions[0] = %+v; want {Cmd:MoveToLocation, Description:h01-move}", got[0])
+	if got[0].Cmd != protocol.CmdMoveTo || got[0].Description != "h01-move" {
+		t.Errorf("EffectiveActions[0] = %+v; want {Cmd:MoveTo, Description:h01-move}", got[0])
 	}
 }
 
 func TestCapabilityRegistry_PerAgentRejectsCmdAbsentEverywhere(t *testing.T) {
 	r := NewCapabilityRegistry(nil)
 	r.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
-		{Cmd: protocol.CmdMoveToLocation, Kind: "atomic"},
+		{Cmd: protocol.CmdMoveTo, Kind: "atomic"},
 	})
-	// CmdPlayMontage is not declared anywhere — HasCmd must return false.
-	if r.HasCmd("H-01", protocol.CmdPlayMontage) {
-		t.Errorf("HasCmd(H-01, PlayMontage) = true; want false (not in global or override)")
+	// CmdGenericAct is not declared anywhere — HasCmd must return false.
+	if r.HasCmd("H-01", protocol.CmdGenericAct) {
+		t.Errorf("HasCmd(H-01, GenericAct) = true; want false (not in global or override)")
 	}
 }
 
 func TestCapabilityRegistry_PerAgentOverrideReplacesGlobal(t *testing.T) {
 	r := NewCapabilityRegistry(nil)
 	r.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
-		{Cmd: protocol.CmdMoveToLocation, Kind: "atomic"},
+		{Cmd: protocol.CmdMoveTo, Kind: "atomic"},
 	})
 	r.Register("H-01", []protocol.CapabilityAction{
 		{Cmd: protocol.CmdSpeak, Kind: "atomic"},
 	})
-	// Override REPLACES global: H-01 only has CmdSpeak, not CmdMoveToLocation.
-	if r.HasCmd("H-01", protocol.CmdMoveToLocation) {
-		t.Errorf("HasCmd(H-01, MoveToLocation) = true; want false (override replaces global)")
+	// Override REPLACES global: H-01 only has CmdSpeak, not CmdMoveTo.
+	if r.HasCmd("H-01", protocol.CmdMoveTo) {
+		t.Errorf("HasCmd(H-01, MoveTo) = true; want false (override replaces global)")
 	}
 	if !r.HasCmd("H-01", protocol.CmdSpeak) {
 		t.Errorf("HasCmd(H-01, Speak) = false; want true (per-agent override)")
@@ -81,15 +81,15 @@ func TestCapabilityRegistry_PerAgentOverrideReplacesGlobal(t *testing.T) {
 func TestCapabilityRegistry_RegisterReplacesWholesale(t *testing.T) {
 	r := NewCapabilityRegistry(nil)
 	r.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
-		{Cmd: protocol.CmdMoveToLocation, Kind: "atomic"},
+		{Cmd: protocol.CmdMoveTo, Kind: "atomic"},
 		{Cmd: protocol.CmdWait, Kind: "atomic"},
 	})
 	// Second global Register replaces, not merges.
 	r.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
 		{Cmd: protocol.CmdSpeak, Kind: "atomic"},
 	})
-	if r.HasCmd("H-01", protocol.CmdMoveToLocation) {
-		t.Errorf("HasCmd(H-01, MoveToLocation) = true; want false (global replaced wholesale)")
+	if r.HasCmd("H-01", protocol.CmdMoveTo) {
+		t.Errorf("HasCmd(H-01, MoveTo) = true; want false (global replaced wholesale)")
 	}
 	if r.HasCmd("H-01", protocol.CmdSpeak) {
 		// Expected.
@@ -101,7 +101,7 @@ func TestCapabilityRegistry_RegisterReplacesWholesale(t *testing.T) {
 func TestCapabilityRegistry_ClearAgent(t *testing.T) {
 	r := NewCapabilityRegistry(nil)
 	r.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
-		{Cmd: protocol.CmdMoveToLocation, Kind: "atomic"},
+		{Cmd: protocol.CmdMoveTo, Kind: "atomic"},
 	})
 	r.Register("H-01", []protocol.CapabilityAction{
 		{Cmd: protocol.CmdSpeak, Kind: "atomic"},
@@ -111,8 +111,8 @@ func TestCapabilityRegistry_ClearAgent(t *testing.T) {
 		t.Errorf("HasCmd(H-01, Speak) = true after Clear; want false")
 	}
 	// Global still applies.
-	if !r.HasCmd("H-01", protocol.CmdMoveToLocation) {
-		t.Errorf("HasCmd(H-01, MoveToLocation) = false after clearing per-agent; want true (global)")
+	if !r.HasCmd("H-01", protocol.CmdMoveTo) {
+		t.Errorf("HasCmd(H-01, MoveTo) = false after clearing per-agent; want true (global)")
 	}
 }
 
@@ -120,12 +120,12 @@ func TestCapabilityRegistry_EffectiveActionsSortedByCmd(t *testing.T) {
 	r := NewCapabilityRegistry(nil)
 	r.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
 		{Cmd: protocol.CmdWait, Kind: "atomic"},
-		{Cmd: protocol.CmdMoveToLocation, Kind: "atomic"},
-		{Cmd: protocol.CmdWorkAtWorkbench, Kind: "composite"},
+		{Cmd: protocol.CmdMoveTo, Kind: "atomic"},
+		{Cmd: protocol.CmdWorkShift, Kind: "composite"},
 	})
 	got := r.EffectiveActions("H-01")
-	// Sorted by Cmd alphabetically: MoveToLocation < Wait < WorkAtWorkbench
-	want := []string{protocol.CmdMoveToLocation, protocol.CmdWait, protocol.CmdWorkAtWorkbench}
+	// Sorted by Cmd alphabetically: MoveTo < Wait < WorkShift
+	want := []string{protocol.CmdMoveTo, protocol.CmdWait, protocol.CmdWorkShift}
 	gotCmds := make([]string, len(got))
 	for i, a := range got {
 		gotCmds[i] = a.Cmd
@@ -142,7 +142,7 @@ func TestCapabilityRegistry_Snapshot_GlobalOnly(t *testing.T) {
 	r := NewCapabilityRegistry(nil)
 	r.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
 		{Cmd: protocol.CmdWait, Kind: "atomic"},
-		{Cmd: protocol.CmdMoveToLocation, Kind: "atomic"},
+		{Cmd: protocol.CmdMoveTo, Kind: "atomic"},
 	})
 	snap := r.Snapshot()
 	if len(snap.Agents) != 1 {
@@ -155,8 +155,8 @@ func TestCapabilityRegistry_Snapshot_GlobalOnly(t *testing.T) {
 	if len(sys) != 2 {
 		t.Fatalf("system actions len = %d; want 2", len(sys))
 	}
-	// Sorted by Cmd: MoveToLocation < Wait
-	want := []string{protocol.CmdMoveToLocation, protocol.CmdWait}
+	// Sorted by Cmd: MoveTo < Wait
+	want := []string{protocol.CmdMoveTo, protocol.CmdWait}
 	gotCmds := make([]string, len(sys))
 	for i, a := range sys {
 		gotCmds[i] = a.Cmd
@@ -172,7 +172,7 @@ func TestCapabilityRegistry_Snapshot_GlobalOnly(t *testing.T) {
 func TestCapabilityRegistry_Snapshot_WithPerAgent(t *testing.T) {
 	r := NewCapabilityRegistry(nil)
 	r.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
-		{Cmd: protocol.CmdMoveToLocation, Kind: "atomic"},
+		{Cmd: protocol.CmdMoveTo, Kind: "atomic"},
 		{Cmd: protocol.CmdWait, Kind: "atomic"},
 	})
 	r.Register("H-01", []protocol.CapabilityAction{
@@ -271,35 +271,35 @@ func TestCapabilityRegistry_NormalizesAgentID(t *testing.T) {
 }
 
 // TestIsCompositeCmdDynamic 验证动态复合 cmd 判断：
-//   - 硬编码的 6 个内置复合 cmd 始终识别（向后兼容）
-//   - registry 兜底识别 UE5 新推送的复合 cmd（如 WorkShift）
+//   - 硬编码的 5 个内置复合 cmd 始终识别（向后兼容）
+//   - registry 兜底识别 UE5 新推送的复合 cmd
 //   - registry==nil 退化为仅查硬编码列表
 //   - atomic cmd 不被误判为复合
 func TestIsCompositeCmdDynamic(t *testing.T) {
 	// 内置硬编码复合 cmd（无需 registry）
-	if !isCompositeCmdDynamic(protocol.CmdWorkAtWorkbench, nil) {
-		t.Errorf("isCompositeCmdDynamic(WorkAtWorkbench, nil) = false; want true (builtin composite)")
+	if !isCompositeCmdDynamic(protocol.CmdWorkShift, nil) {
+		t.Errorf("isCompositeCmdDynamic(WorkShift, nil) = false; want true (builtin composite)")
 	}
 	if !isCompositeCmdDynamic(protocol.CmdChargeAtStation, nil) {
 		t.Errorf("isCompositeCmdDynamic(ChargeAtStation, nil) = false; want true (builtin composite)")
 	}
 	// 原子 cmd 不应是复合
-	if isCompositeCmdDynamic(protocol.CmdMoveToLocation, nil) {
-		t.Errorf("isCompositeCmdDynamic(MoveToLocation, nil) = true; want false (atomic)")
+	if isCompositeCmdDynamic(protocol.CmdMoveTo, nil) {
+		t.Errorf("isCompositeCmdDynamic(MoveTo, nil) = true; want false (atomic)")
 	}
 
 	// registry 兜底：UE5 新推送的复合 cmd（不在硬编码列表里）
 	r := NewCapabilityRegistry(nil)
 	r.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
-		{Cmd: "WorkShift", Kind: "composite"},
-		{Cmd: "SelfMaintenance", Kind: "composite"},
+		{Cmd: "CustomWork", Kind: "composite"},
+		{Cmd: "CustomMaintain", Kind: "composite"},
 		{Cmd: "MoveTo", Kind: "atomic"},
 	})
-	if !isCompositeCmdDynamic("WorkShift", r) {
-		t.Errorf("isCompositeCmdDynamic(WorkShift, registry) = false; want true (registry kind=composite)")
+	if !isCompositeCmdDynamic("CustomWork", r) {
+		t.Errorf("isCompositeCmdDynamic(CustomWork, registry) = false; want true (registry kind=composite)")
 	}
-	if !isCompositeCmdDynamic("SelfMaintenance", r) {
-		t.Errorf("isCompositeCmdDynamic(SelfMaintenance, registry) = false; want true (registry kind=composite)")
+	if !isCompositeCmdDynamic("CustomMaintain", r) {
+		t.Errorf("isCompositeCmdDynamic(CustomMaintain, registry) = false; want true (registry kind=composite)")
 	}
 	// registry 里标记为 atomic 的 cmd 不应是复合
 	if isCompositeCmdDynamic("MoveTo", r) {

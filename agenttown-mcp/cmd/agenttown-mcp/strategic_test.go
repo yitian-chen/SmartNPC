@@ -209,8 +209,8 @@ func TestBuildStrategicContext_NilKB(t *testing.T) {
 	if !strings.Contains(got, "【可用能力】") {
 		t.Errorf("nil KB should still include builtin composite capability section: %q", got)
 	}
-	if !strings.Contains(got, "work_at_workbench") {
-		t.Errorf("nil KB should list builtin composite tool 'work_at_workbench': %q", got)
+	if !strings.Contains(got, "work_shift") {
+		t.Errorf("nil KB should list builtin composite tool 'work_shift': %q", got)
 	}
 }
 
@@ -235,38 +235,38 @@ func TestBuildStrategicCapabilitySummary_NilRegistry(t *testing.T) {
 		t.Fatal("got empty summary for nil registry, want builtin composite tools")
 	}
 	// 内置复合工具应在列表中
-	for _, name := range []string{"work_at_workbench", "work_at_workshop", "chat_with", "repair_target", "charge_at_station", "patrol_zone"} {
+	for _, name := range []string{"work_shift", "charge_at_station", "self_maintenance", "rest_at_residence", "surf_internet"} {
 		if !strings.Contains(got, name) {
 			t.Errorf("summary missing builtin composite tool %q: %q", name, got)
 		}
 	}
 	// 不应包含原子动作
-	if strings.Contains(got, "move_to_location") {
+	if strings.Contains(got, "move_to") {
 		t.Errorf("summary should not include atomic tools: %q", got)
 	}
 }
 
 func TestBuildStrategicCapabilitySummary_WithRegistry(t *testing.T) {
 	// 注册 2 个复合 + 1 个原子，验证只列出复合动作。
-	// 内置工具（work_at_workbench/charge_at_station）的 desc 来自 tacticalToolOverride
-	// 覆盖表（"在工作台装配"），registry 的 Description 字段仅对非内置 cmd 生效。
+	// 内置工具（work_shift/charge_at_station）的 desc 来自 tacticalToolOverride
+	// 覆盖表（"工作班次（装配/作业）"），registry 的 Description 字段仅对非内置 cmd 生效。
 	r := NewCapabilityRegistry(nil)
 	r.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
-		{Cmd: protocol.CmdWorkAtWorkbench, Kind: "composite", Description: "装配工作"},
+		{Cmd: protocol.CmdWorkShift, Kind: "composite", Description: "装配工作"},
 		{Cmd: protocol.CmdChargeAtStation, Kind: "composite", Description: "充电"},
-		{Cmd: protocol.CmdMoveToLocation, Kind: "atomic", Description: "移动"},
+		{Cmd: protocol.CmdMoveTo, Kind: "atomic", Description: "移动"},
 	})
 	got := prompt.StrategicCapabilitySummary(r.EffectiveActions("H-01"))
-	// work_at_workbench 走 override desc "在工作台装配"
-	if !strings.Contains(got, "在工作台装配") {
-		t.Errorf("summary missing override desc '在工作台装配': %q", got)
+	// work_shift 走 override desc "工作班次（装配/作业）"
+	if !strings.Contains(got, "工作班次（装配/作业）") {
+		t.Errorf("summary missing override desc '工作班次（装配/作业）': %q", got)
 	}
 	// charge_at_station 无 override，走 registry Description "充电"
 	if !strings.Contains(got, "充电") {
 		t.Errorf("summary missing registry desc '充电': %q", got)
 	}
-	if !strings.Contains(got, "work_at_workbench") {
-		t.Errorf("summary missing tool name 'work_at_workbench': %q", got)
+	if !strings.Contains(got, "work_shift") {
+		t.Errorf("summary missing tool name 'work_shift': %q", got)
 	}
 	if strings.Contains(got, "移动") {
 		t.Errorf("summary should not include atomic action '移动': %q", got)
@@ -277,7 +277,7 @@ func TestBuildStrategicCapabilitySummary_NoComposite(t *testing.T) {
 	// 只注册原子动作时，返回空串（无复合动作可列）。
 	r := NewCapabilityRegistry(nil)
 	r.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
-		{Cmd: protocol.CmdMoveToLocation, Kind: "atomic", Description: "移动"},
+		{Cmd: protocol.CmdMoveTo, Kind: "atomic", Description: "移动"},
 		{Cmd: protocol.CmdSpeak, Kind: "atomic", Description: "说话"},
 	})
 	got := prompt.StrategicCapabilitySummary(r.EffectiveActions("H-01"))
@@ -292,7 +292,7 @@ func TestBuildStrategicCapabilitySummary_NewCompositeFromUE(t *testing.T) {
 	r := NewCapabilityRegistry(nil)
 	r.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
 		{Cmd: "GroomSelf", Kind: "composite", Description: "整理仪容"},
-		{Cmd: protocol.CmdWorkAtWorkbench, Kind: "composite", Description: "装配"},
+		{Cmd: protocol.CmdWorkShift, Kind: "composite", Description: "装配"},
 	})
 	got := prompt.StrategicCapabilitySummary(r.EffectiveActions("H-01"))
 	if !strings.Contains(got, "整理仪容") {
@@ -311,7 +311,7 @@ func TestBuildStrategicContext_IncludesCapabilitySection(t *testing.T) {
 	kb := loadTestKB(t)
 	r := NewCapabilityRegistry(nil)
 	r.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
-		{Cmd: protocol.CmdWorkAtWorkbench, Kind: "composite", Description: "装配"},
+		{Cmd: protocol.CmdWorkShift, Kind: "composite", Description: "装配"},
 	})
 	got := prompt.BuildStrategic(kb, "H-01", r.EffectiveActions("H-01"))
 	if !strings.Contains(got, "【可用能力】") {
@@ -329,7 +329,7 @@ func TestBuildStrategicContext_NilKBWithRegistry(t *testing.T) {
 	// kb == nil 但 registry != nil：【可用能力】段仍注入（不依赖 KB）。
 	r := NewCapabilityRegistry(nil)
 	r.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
-		{Cmd: protocol.CmdWorkAtWorkbench, Kind: "composite", Description: "装配"},
+		{Cmd: protocol.CmdWorkShift, Kind: "composite", Description: "装配"},
 	})
 	got := prompt.BuildStrategic(nil, "H-01", r.EffectiveActions("H-01"))
 	if !strings.Contains(got, "【可用能力】") {

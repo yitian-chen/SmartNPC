@@ -338,7 +338,7 @@ func TestAdvanceSlotIfNeeded_DelayedStopForComposite(t *testing.T) {
 	logger := slog.Default()
 
 	ac.as.RefillQueue([]plannedAction{{Action: "wait", Params: map[string]any{"duration_sec": 30}}}, "08:00-10:00")
-	ac.as.RecordActionStarted("act_composite_1", "WorkAtWorkbench", nil, agentstate.SourceTactical) // 内置硬编码复合 cmd
+	ac.as.RecordActionStarted("act_composite_1", "WorkShift", nil, agentstate.SourceTactical) // 内置硬编码复合 cmd
 	setGameTimeForTest(t, ac, "10:05") // 已过 slot 结束 10:00
 
 	ac.advanceSlotIfNeeded(ws, "H-01", logger)
@@ -470,20 +470,18 @@ func TestMapDebugCmd(t *testing.T) {
 		wantCmd  string
 		wantOK   bool
 	}{
-		{"move_to_location", protocol.CmdMoveToLocation, true},
-		{"move_to_agent", protocol.CmdMoveToAgent, true},
+		{"generic_act", protocol.CmdGenericAct, true},
+		{"move_to", protocol.CmdMoveTo, true},
 		{"turn_to", protocol.CmdTurnTo, true},
-		{"play_montage", protocol.CmdPlayMontage, true},
 		{"speak", protocol.CmdSpeak, true},
 		{"emote", protocol.CmdEmote, true},
 		{"interact", protocol.CmdInteractSmartObject, true},
 		{"wait", protocol.CmdWait, true},
-		{"work_at_workbench", protocol.CmdWorkAtWorkbench, true},
-		{"work_at_workshop", protocol.CmdWorkAtWorkshop, true},
-		{"chat_with", protocol.CmdChatWith, true},
-		{"repair_target", protocol.CmdRepairTarget, true},
+		{"work_shift", protocol.CmdWorkShift, true},
 		{"charge_at_station", protocol.CmdChargeAtStation, true},
-		{"patrol_zone", protocol.CmdPatrolZone, true},
+		{"self_maintenance", protocol.CmdSelfMaintenance, true},
+		{"rest_at_residence", protocol.CmdRestAtResidence, true},
+		{"surf_internet", protocol.CmdSurfInternet, true},
 		{"unknown_cmd", "", false},
 		{"", "", false},
 	}
@@ -504,7 +502,7 @@ func TestMapDebugCmd(t *testing.T) {
 func TestMapDebugCmd_RegistryDerived(t *testing.T) {
 	reg := NewCapabilityRegistry(nil)
 	reg.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
-		{Cmd: protocol.CmdMoveToLocation, Kind: "atomic"},
+		{Cmd: protocol.CmdMoveTo, Kind: "atomic"},
 		{Cmd: "WaveHand", Kind: "atomic"},
 	})
 	cases := []struct {
@@ -512,7 +510,7 @@ func TestMapDebugCmd_RegistryDerived(t *testing.T) {
 		wantCmd  string
 		wantOK   bool
 	}{
-		{"move_to_location", protocol.CmdMoveToLocation, true}, // built-in
+		{"move_to", protocol.CmdMoveTo, true}, // built-in
 		{"wave_hand", "WaveHand", true},                         // new cmd via registry
 		{"fly_to", "", false},                                   // not in registry
 	}
@@ -528,245 +526,22 @@ func TestMapDebugCmd_RegistryDerived(t *testing.T) {
 	}
 }
 
-func TestResolveDebugMoveToLocation_Valid(t *testing.T) {
-	kb := loadTestKB(t)
-	params := map[string]any{"target": "workbench"}
-	out, err := resolveDebugMoveToLocation(params, kb)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	dest, ok := out["dest"].([]float64)
-	if !ok {
-		t.Fatalf("dest should be []float64, got %T", out["dest"])
-	}
-	if len(dest) != 3 {
-		t.Fatalf("dest should have 3 coords, got %d", len(dest))
-	}
-	if out["speed"] != "walk" {
-		t.Errorf("speed=%v, want walk", out["speed"])
-	}
-}
-
-func TestResolveDebugMoveToLocation_Zone(t *testing.T) {
-	kb := loadTestKB(t)
-	// main_workshop 是 zone，应解析成功
-	out, err := resolveDebugMoveToLocation(map[string]any{"target": "main_workshop"}, kb)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	dest, ok := out["dest"].([]float64)
-	if !ok || len(dest) != 3 {
-		t.Fatalf("dest should be [3]float64, got %T len %d", out["dest"], len(dest))
-	}
-}
-
-func TestResolveDebugMoveToLocation_UnknownTarget(t *testing.T) {
-	kb := loadTestKB(t)
-	_, err := resolveDebugMoveToLocation(map[string]any{"target": "nonexistent_place"}, kb)
-	if err == nil {
-		t.Fatal("expected error for unknown target")
-	}
-}
-
-func TestResolveDebugMoveToLocation_EmptyTarget(t *testing.T) {
-	kb := loadTestKB(t)
-	_, err := resolveDebugMoveToLocation(map[string]any{"target": ""}, kb)
-	if err == nil {
-		t.Fatal("expected error for empty target")
-	}
-}
-
-func TestResolveDebugMoveToLocation_NilKB(t *testing.T) {
-	_, err := resolveDebugMoveToLocation(map[string]any{"target": "workbench_01"}, nil)
-	if err == nil {
-		t.Fatal("expected error when kb is nil")
-	}
-}
-
-// ─── move_to_location 坐标直传 ──────────────────────────
-
-func TestResolveDebugMoveToLocation_DestCoords(t *testing.T) {
-	kb := loadTestKB(t)
-	// 直接传 dest 坐标，不走 kb 解析
-	params := map[string]any{"dest": []any{10000.0, 20000.0, 0.0}}
-	out, err := resolveDebugMoveToLocation(params, kb)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	dest, ok := out["dest"].([]float64)
-	if !ok {
-		t.Fatalf("dest should be []float64, got %T", out["dest"])
-	}
-	if len(dest) != 3 || dest[0] != 10000 || dest[1] != 20000 || dest[2] != 0 {
-		t.Fatalf("dest=%v, want [10000 20000 0]", dest)
-	}
-	if out["speed"] != "walk" {
-		t.Errorf("speed=%v, want walk", out["speed"])
-	}
-}
-
-func TestResolveDebugMoveToLocation_DestWithIntCoords(t *testing.T) {
-	// JSON 解码整数常会变 float64，但也支持 int / int64
-	kb := loadTestKB(t)
-	params := map[string]any{"dest": []any{10000, 20000, 0}}
-	out, err := resolveDebugMoveToLocation(params, kb)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	dest, _ := out["dest"].([]float64)
-	if len(dest) != 3 || dest[0] != 10000 || dest[1] != 20000 {
-		t.Fatalf("dest=%v, want [10000 20000 0]", dest)
-	}
-}
-
-func TestResolveDebugMoveTo_DestWithTargetLabel(t *testing.T) {
-	// dest + target 同时传：dest 优先，target 在 dest 模式下被忽略
-	kb := loadTestKB(t)
-	params := map[string]any{
-		"dest":   []any{15000.0, 11000.0, 0.0},
-		"target": "custom_spot",
-	}
-	out, err := resolveDebugMoveToLocation(params, kb)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	dest, _ := out["dest"].([]float64)
-	if len(dest) != 3 || dest[0] != 15000 || dest[1] != 11000 {
-		t.Errorf("dest=%v, want [15000 11000 0] (dest 优先)", dest)
-	}
-	if _, ok := out["target"]; ok {
-		t.Errorf("target should not be preserved in dest mode, got: %v", out["target"])
-	}
-}
-
-func TestResolveDebugMoveTo_DestWrongLength(t *testing.T) {
-	kb := loadTestKB(t)
-	cases := [][]any{
-		{1.0, 2.0},           // 太少
-		{1.0, 2.0, 3.0, 4.0}, // 太多
-	}
-	for i, arr := range cases {
-		_, err := resolveDebugMoveToLocation(map[string]any{"dest": arr}, kb)
-		if err == nil {
-			t.Errorf("[%d] expected error for wrong-length dest, got nil", i)
-		}
-	}
-}
-
-func TestResolveDebugMoveTo_DestNonNumeric(t *testing.T) {
-	kb := loadTestKB(t)
-	params := map[string]any{"dest": []any{"foo", 2.0, 3.0}}
-	_, err := resolveDebugMoveToLocation(params, kb)
-	if err == nil {
-		t.Fatal("expected error for non-numeric dest element")
-	}
-}
-
-func TestResolveDebugMoveTo_DestNotArray(t *testing.T) {
-	kb := loadTestKB(t)
-	params := map[string]any{"dest": "not an array"}
-	_, err := resolveDebugMoveToLocation(params, kb)
-	if err == nil {
-		t.Fatal("expected error when dest is not an array")
-	}
-}
-
-func TestResolveDebugMoveTo_NoDestNoTarget(t *testing.T) {
-	kb := loadTestKB(t)
-	// 既没 dest 也没 target，应报错提示两种模式
-	_, err := resolveDebugMoveToLocation(map[string]any{}, kb)
-	if err == nil {
-		t.Fatal("expected error when neither dest nor target is provided")
-	}
-	if !strings.Contains(err.Error(), "dest") || !strings.Contains(err.Error(), "target") {
-		t.Errorf("error should mention both dest and target options, got: %v", err)
-	}
-}
-
-func TestResolveDebugMoveTo_DestNilKB(t *testing.T) {
-	// dest 模式不应依赖 kb，nil kb 也能正常工作
-	out, err := resolveDebugMoveToLocation(map[string]any{"dest": []any{1.0, 2.0, 3.0}}, nil)
-	if err != nil {
-		t.Fatalf("dest mode should work without kb: %v", err)
-	}
-	dest, _ := out["dest"].([]float64)
-	if len(dest) != 3 || dest[0] != 1 || dest[1] != 2 || dest[2] != 3 {
-		t.Errorf("dest=%v, want [1 2 3]", dest)
-	}
-}
-
-func TestParseDestCoords_FloatSlice(t *testing.T) {
-	out, err := parseDestCoords([]float64{1.5, 2.5, 3.5})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(out) != 3 || out[0] != 1.5 || out[2] != 3.5 {
-		t.Fatalf("got %v", out)
-	}
-}
-
-func TestParseDestCoords_StringNumbers(t *testing.T) {
-	// 字符串数字也应支持（容错）
-	out, err := parseDestCoords([]any{"100", "200", "0"})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if out[0] != 100 || out[1] != 200 || out[2] != 0 {
-		t.Fatalf("got %v", out)
-	}
-}
-
-func TestToFloat64_Types(t *testing.T) {
-	cases := []struct {
-		in   any
-		want float64
-		err  bool
-	}{
-		{float64(1.5), 1.5, false},
-		{int(10), 10, false},
-		{int64(20), 20, false},
-		{float32(0.5), 0.5, false},
-		{json.Number("3.14"), 3.14, false},
-		{"42", 42, false},
-		{"not a number", 0, true},
-		{nil, 0, true},
-		{[]int{1}, 0, true},
-	}
-	for i, c := range cases {
-		got, err := toFloat64(c.in)
-		if c.err {
-			if err == nil {
-				t.Errorf("[%d] expected error for %v", i, c.in)
-			}
-			continue
-		}
-		if err != nil {
-			t.Errorf("[%d] unexpected error: %v", i, err)
-		}
-		if got != c.want {
-			t.Errorf("[%d] got %v, want %v", i, got, c.want)
-		}
-	}
-}
 
 func TestBuildDebugParams_CompositePassthrough(t *testing.T) {
 	kb := loadTestKB(t)
-	// charge_at_station 应直接透传 params，不再注入 name 字段
+	// charge_at_station 应直接透传 params
 	out, err := buildDebugParams("charge_at_station", map[string]any{
-		"target_object_id": "charging_station_01",
-		"duration_sec":     1800,
+		"smart_object": "charging_station_01",
+		"interaction":  "charge",
 	}, kb)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if _, ok := out["name"]; ok {
-		t.Errorf("name should not be injected for composite cmds, got: %v", out["name"])
+	if out["smart_object"] != "charging_station_01" {
+		t.Errorf("smart_object=%v, want charging_station_01", out["smart_object"])
 	}
-	if out["target_object_id"] != "charging_station_01" {
-		t.Errorf("target_object_id=%v, want charging_station_01", out["target_object_id"])
-	}
-	if out["duration_sec"] != 1800 {
-		t.Errorf("duration_sec=%v, want 1800", out["duration_sec"])
+	if out["interaction"] != "charge" {
+		t.Errorf("interaction=%v, want charge", out["interaction"])
 	}
 }
 
