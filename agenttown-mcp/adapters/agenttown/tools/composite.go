@@ -14,136 +14,68 @@ import (
 // carries agent_id as the first parameter. Per 约定14, Agent prefers
 // composite behaviors for routine goals; atomic behaviors are for
 // reactions or cases the composite library doesn't cover.
+//
+// New 5 composite cmds (2026-08-11): WorkShift / ChargeAtStation /
+// SelfMaintenance / RestAtResidence / SurfInternet. All share the same
+// params schema: smart_object + interaction.
 
-// WorkAtWorkbenchInput — composite: work at a specific workbench.
-type WorkAtWorkbenchInput struct {
-	AgentID        string  `json:"agent_id" jsonschema:"the NPC's id"`
-	DecisionEpoch  int64   `json:"decision_epoch" jsonschema:"required epoch from the current decision_context"`
-	TargetObjectID string  `json:"target_object_id" jsonschema:"workbench object id from the world_kb"`
-	DurationSec    float64 `json:"duration_sec,omitempty" jsonschema:"work duration in seconds (optional)"`
-}
-
-// WorkAtWorkshopInput — composite: work in the workshop (auto-pick bench).
-type WorkAtWorkshopInput struct {
+// WorkShiftInput — composite: work at a specified facility.
+type WorkShiftInput struct {
 	AgentID       string `json:"agent_id" jsonschema:"the NPC's id"`
 	DecisionEpoch int64  `json:"decision_epoch" jsonschema:"required epoch from the current decision_context"`
+	SmartObject   string `json:"smart_object" jsonschema:"work facility id, e.g. workbench_01, sortconveyor_01"`
+	Interaction   string `json:"interaction" jsonschema:"interaction work type"`
 }
 
-// ChatWithInput — composite: chat with another agent.
-type ChatWithInput struct {
-	AgentID        string `json:"agent_id" jsonschema:"the NPC's id"`
-	DecisionEpoch  int64  `json:"decision_epoch" jsonschema:"required epoch from the current decision_context"`
-	TargetAgentID  string `json:"target_agent_id" jsonschema:"the agent to chat with"`
-	Topic          string `json:"topic,omitempty" jsonschema:"conversation topic (optional)"`
-}
-
-// RepairTargetInput — composite: repair another agent.
-type RepairTargetInput struct {
-	AgentID        string `json:"agent_id" jsonschema:"the NPC's id"`
-	DecisionEpoch  int64  `json:"decision_epoch" jsonschema:"required epoch from the current decision_context"`
-	TargetAgentID  string `json:"target_agent_id" jsonschema:"the agent to repair"`
-	ToolID         string `json:"tool_id,omitempty" jsonschema:"tool id (optional)"`
-}
-
-// ChargeAtStationInput — composite: charge at a station.
-// 兼容两种 UE schema：mock UE 用 target_object_id；真实 UE5 用 smart_object + interaction。
-// 三字段均 omitempty，handler 按非空值透传，UE 侧按自己声明的 schema 取用。
+// ChargeAtStationInput — composite: charge at a charging station.
 type ChargeAtStationInput struct {
-	AgentID        string `json:"agent_id" jsonschema:"the NPC's id"`
-	DecisionEpoch  int64  `json:"decision_epoch" jsonschema:"required epoch from the current decision_context"`
-	TargetObjectID string `json:"target_object_id,omitempty" jsonschema:"charging station id (mock UE; auto-pick if empty)"`
-	SmartObject    string `json:"smart_object,omitempty" jsonschema:"charging station id (real UE5 schema)"`
-	Interaction    string `json:"interaction,omitempty" jsonschema:"interaction verb, e.g. charge (real UE5 schema)"`
+	AgentID       string `json:"agent_id" jsonschema:"the NPC's id"`
+	DecisionEpoch int64  `json:"decision_epoch" jsonschema:"required epoch from the current decision_context"`
+	SmartObject   string `json:"smart_object" jsonschema:"charging station id, e.g. charging_pillar_01"`
+	Interaction   string `json:"interaction" jsonschema:"interaction type, fixed to charge"`
 }
 
-// PatrolZoneInput — composite: patrol a zone.
-type PatrolZoneInput struct {
-	AgentID       string  `json:"agent_id" jsonschema:"the NPC's id"`
-	DecisionEpoch int64   `json:"decision_epoch" jsonschema:"required epoch from the current decision_context"`
-	TargetZone    string  `json:"target_zone" jsonschema:"zone id to patrol"`
-	DurationSec   float64 `json:"duration_sec,omitempty" jsonschema:"patrol duration in seconds (optional)"`
+// SelfMaintenanceInput — composite: self-maintenance at a repair table.
+type SelfMaintenanceInput struct {
+	AgentID       string `json:"agent_id" jsonschema:"the NPC's id"`
+	DecisionEpoch int64  `json:"decision_epoch" jsonschema:"required epoch from the current decision_context"`
+	SmartObject   string `json:"smart_object" jsonschema:"repair table id, e.g. repair_table_01"`
+	Interaction   string `json:"interaction" jsonschema:"interaction type, fixed to repair_self"`
+}
+
+// RestAtResidenceInput — composite: rest at a sleep pod.
+type RestAtResidenceInput struct {
+	AgentID       string `json:"agent_id" jsonschema:"the NPC's id"`
+	DecisionEpoch int64  `json:"decision_epoch" jsonschema:"required epoch from the current decision_context"`
+	SmartObject   string `json:"smart_object" jsonschema:"sleep pod id, e.g. sleep_pod_01"`
+	Interaction   string `json:"interaction" jsonschema:"interaction type, fixed to sleep"`
+}
+
+// SurfInternetInput — composite: surf the internet at a computer.
+type SurfInternetInput struct {
+	AgentID       string `json:"agent_id" jsonschema:"the NPC's id"`
+	DecisionEpoch int64  `json:"decision_epoch" jsonschema:"required epoch from the current decision_context"`
+	SmartObject   string `json:"smart_object" jsonschema:"computer id"`
+	Interaction   string `json:"interaction" jsonschema:"interaction type, fixed to surf_internet"`
 }
 
 // registerComposite installs the composite-behavior tools.
 func registerComposite(s *mcp.Server, ex Executor, logger *slog.Logger) {
-	// work_at_workbench
+	// work_shift
 	mcp.AddTool(s, &mcp.Tool{
-		Name:        "work_at_workbench",
-		Description: "Work at a specific workbench for a duration. Composite behavior — runs a full assembly routine.",
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, in WorkAtWorkbenchInput) (*mcp.CallToolResult, ackResult, error) {
-		if in.AgentID == "" || in.TargetObjectID == "" {
-			return nil, ackResult{}, fmt.Errorf("agent_id and target_object_id are required")
+		Name:        "work_shift",
+		Description: "Go to a specified facility and work. Composite behavior — runs a full work routine.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in WorkShiftInput) (*mcp.CallToolResult, ackResult, error) {
+		if in.AgentID == "" || in.SmartObject == "" || in.Interaction == "" {
+			return nil, ackResult{}, fmt.Errorf("agent_id, smart_object and interaction are required")
 		}
-		logToolCall("work_at_workbench", in.AgentID, in.DecisionEpoch, in)
-		params := map[string]any{
-			"target_object_id": in.TargetObjectID,
-		}
-		if in.DurationSec > 0 {
-			params["duration_sec"] = in.DurationSec
-		}
-		ack, err := ex.SendAction(ctx, in.AgentID, in.DecisionEpoch, protocol.CmdWorkAtWorkbench, params)
+		logToolCall("work_shift", in.AgentID, in.DecisionEpoch, in)
+		ack, err := ex.SendAction(ctx, in.AgentID, in.DecisionEpoch, protocol.CmdWorkShift, map[string]any{
+			"smart_object": in.SmartObject,
+			"interaction":  in.Interaction,
+		})
 		if err != nil {
-			return nil, ackResult{}, fmt.Errorf("work_at_workbench: %w", err)
-		}
-		return nil, buildAckResult(ack, in.DecisionEpoch), nil
-	})
-
-	// work_at_workshop
-	mcp.AddTool(s, &mcp.Tool{
-		Name:        "work_at_workshop",
-		Description: "Go to the workshop and perform routine work (auto-picks an available bench). Composite behavior.",
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, in WorkAtWorkshopInput) (*mcp.CallToolResult, ackResult, error) {
-		if in.AgentID == "" {
-			return nil, ackResult{}, fmt.Errorf("agent_id is required")
-		}
-		logToolCall("work_at_workshop", in.AgentID, in.DecisionEpoch, in)
-		ack, err := ex.SendAction(ctx, in.AgentID, in.DecisionEpoch, protocol.CmdWorkAtWorkshop, map[string]any{})
-		if err != nil {
-			return nil, ackResult{}, fmt.Errorf("work_at_workshop: %w", err)
-		}
-		return nil, buildAckResult(ack, in.DecisionEpoch), nil
-	})
-
-	// chat_with
-	mcp.AddTool(s, &mcp.Tool{
-		Name:        "chat_with",
-		Description: "Have a social chat with another agent. Composite behavior — approaches, faces, and converses.",
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, in ChatWithInput) (*mcp.CallToolResult, ackResult, error) {
-		if in.AgentID == "" || in.TargetAgentID == "" {
-			return nil, ackResult{}, fmt.Errorf("agent_id and target_agent_id are required")
-		}
-		logToolCall("chat_with", in.AgentID, in.DecisionEpoch, in)
-		params := map[string]any{
-			"target_agent_id": in.TargetAgentID,
-		}
-		if in.Topic != "" {
-			params["topic"] = in.Topic
-		}
-		ack, err := ex.SendAction(ctx, in.AgentID, in.DecisionEpoch, protocol.CmdChatWith, params)
-		if err != nil {
-			return nil, ackResult{}, fmt.Errorf("chat_with: %w", err)
-		}
-		return nil, buildAckResult(ack, in.DecisionEpoch), nil
-	})
-
-	// repair_target
-	mcp.AddTool(s, &mcp.Tool{
-		Name:        "repair_target",
-		Description: "Repair another agent. Composite behavior — approaches, inspects, and repairs.",
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, in RepairTargetInput) (*mcp.CallToolResult, ackResult, error) {
-		if in.AgentID == "" || in.TargetAgentID == "" {
-			return nil, ackResult{}, fmt.Errorf("agent_id and target_agent_id are required")
-		}
-		logToolCall("repair_target", in.AgentID, in.DecisionEpoch, in)
-		params := map[string]any{
-			"target_agent_id": in.TargetAgentID,
-		}
-		if in.ToolID != "" {
-			params["tool_id"] = in.ToolID
-		}
-		ack, err := ex.SendAction(ctx, in.AgentID, in.DecisionEpoch, protocol.CmdRepairTarget, params)
-		if err != nil {
-			return nil, ackResult{}, fmt.Errorf("repair_target: %w", err)
+			return nil, ackResult{}, fmt.Errorf("work_shift: %w", err)
 		}
 		return nil, buildAckResult(ack, in.DecisionEpoch), nil
 	})
@@ -151,48 +83,75 @@ func registerComposite(s *mcp.Server, ex Executor, logger *slog.Logger) {
 	// charge_at_station
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "charge_at_station",
-		Description: "Charge at a charging station. Composite behavior — restores battery. Auto-picks a station if target id is empty.",
+		Description: "Charge at a charging station. Composite behavior — restores battery.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in ChargeAtStationInput) (*mcp.CallToolResult, ackResult, error) {
-		if in.AgentID == "" {
-			return nil, ackResult{}, fmt.Errorf("agent_id is required")
+		if in.AgentID == "" || in.SmartObject == "" || in.Interaction == "" {
+			return nil, ackResult{}, fmt.Errorf("agent_id, smart_object and interaction are required")
 		}
 		logToolCall("charge_at_station", in.AgentID, in.DecisionEpoch, in)
-		// 全量透传非空字段：mock UE 取 target_object_id，真实 UE5 取 smart_object + interaction。
-		params := map[string]any{}
-		if in.TargetObjectID != "" {
-			params["target_object_id"] = in.TargetObjectID
-		}
-		if in.SmartObject != "" {
-			params["smart_object"] = in.SmartObject
-		}
-		if in.Interaction != "" {
-			params["interaction"] = in.Interaction
-		}
-		ack, err := ex.SendAction(ctx, in.AgentID, in.DecisionEpoch, protocol.CmdChargeAtStation, params)
+		ack, err := ex.SendAction(ctx, in.AgentID, in.DecisionEpoch, protocol.CmdChargeAtStation, map[string]any{
+			"smart_object": in.SmartObject,
+			"interaction":  in.Interaction,
+		})
 		if err != nil {
 			return nil, ackResult{}, fmt.Errorf("charge_at_station: %w", err)
 		}
 		return nil, buildAckResult(ack, in.DecisionEpoch), nil
 	})
 
-	// patrol_zone
+	// self_maintenance
 	mcp.AddTool(s, &mcp.Tool{
-		Name:        "patrol_zone",
-		Description: "Patrol a zone. Composite behavior — enters the zone and follows its patrol strategy.",
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, in PatrolZoneInput) (*mcp.CallToolResult, ackResult, error) {
-		if in.AgentID == "" || in.TargetZone == "" {
-			return nil, ackResult{}, fmt.Errorf("agent_id and target_zone are required")
+		Name:        "self_maintenance",
+		Description: "Go to a repair table and perform self-inspection/maintenance. Composite behavior.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in SelfMaintenanceInput) (*mcp.CallToolResult, ackResult, error) {
+		if in.AgentID == "" || in.SmartObject == "" || in.Interaction == "" {
+			return nil, ackResult{}, fmt.Errorf("agent_id, smart_object and interaction are required")
 		}
-		logToolCall("patrol_zone", in.AgentID, in.DecisionEpoch, in)
-		params := map[string]any{
-			"target_zone": in.TargetZone,
-		}
-		if in.DurationSec > 0 {
-			params["duration_sec"] = in.DurationSec
-		}
-		ack, err := ex.SendAction(ctx, in.AgentID, in.DecisionEpoch, protocol.CmdPatrolZone, params)
+		logToolCall("self_maintenance", in.AgentID, in.DecisionEpoch, in)
+		ack, err := ex.SendAction(ctx, in.AgentID, in.DecisionEpoch, protocol.CmdSelfMaintenance, map[string]any{
+			"smart_object": in.SmartObject,
+			"interaction":  in.Interaction,
+		})
 		if err != nil {
-			return nil, ackResult{}, fmt.Errorf("patrol_zone: %w", err)
+			return nil, ackResult{}, fmt.Errorf("self_maintenance: %w", err)
+		}
+		return nil, buildAckResult(ack, in.DecisionEpoch), nil
+	})
+
+	// rest_at_residence
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "rest_at_residence",
+		Description: "Go to a sleep pod and rest. Composite behavior — restores energy overnight.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in RestAtResidenceInput) (*mcp.CallToolResult, ackResult, error) {
+		if in.AgentID == "" || in.SmartObject == "" || in.Interaction == "" {
+			return nil, ackResult{}, fmt.Errorf("agent_id, smart_object and interaction are required")
+		}
+		logToolCall("rest_at_residence", in.AgentID, in.DecisionEpoch, in)
+		ack, err := ex.SendAction(ctx, in.AgentID, in.DecisionEpoch, protocol.CmdRestAtResidence, map[string]any{
+			"smart_object": in.SmartObject,
+			"interaction":  in.Interaction,
+		})
+		if err != nil {
+			return nil, ackResult{}, fmt.Errorf("rest_at_residence: %w", err)
+		}
+		return nil, buildAckResult(ack, in.DecisionEpoch), nil
+	})
+
+	// surf_internet
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "surf_internet",
+		Description: "Go to a computer and surf the internet. Composite behavior — for leisure or research.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in SurfInternetInput) (*mcp.CallToolResult, ackResult, error) {
+		if in.AgentID == "" || in.SmartObject == "" || in.Interaction == "" {
+			return nil, ackResult{}, fmt.Errorf("agent_id, smart_object and interaction are required")
+		}
+		logToolCall("surf_internet", in.AgentID, in.DecisionEpoch, in)
+		ack, err := ex.SendAction(ctx, in.AgentID, in.DecisionEpoch, protocol.CmdSurfInternet, map[string]any{
+			"smart_object": in.SmartObject,
+			"interaction":  in.Interaction,
+		})
+		if err != nil {
+			return nil, ackResult{}, fmt.Errorf("surf_internet: %w", err)
 		}
 		return nil, buildAckResult(ack, in.DecisionEpoch), nil
 	})
