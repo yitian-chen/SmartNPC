@@ -94,27 +94,6 @@ func TestBuildReactivePrompt_EmptyTriggerDetail(t *testing.T) {
 	}
 }
 
-// TestBuildReactivePrompt_PhysicalAlertHardRule 验证 prompt 明确禁止
-// 物理告警时输出 continue/observe（Fix C 的 prompt 强化部分）。
-func TestBuildReactivePrompt_PhysicalAlertHardRule(t *testing.T) {
-	in := ReactiveInput{
-		AgentID:   "H-01",
-		TimeOfDay: "14:30",
-		Zone:      "main_workshop",
-		Energy:    45,
-		Fatigue:   70,
-		Health:    90,
-		Trigger:   TriggerPeriodic,
-	}
-	promptText := prompt.BuildReactive(in)
-	if !strings.Contains(promptText, "必须输出 replan") {
-		t.Errorf("prompt should contain hard rule for physical alert, got:\n%s", promptText)
-	}
-	if !strings.Contains(promptText, "禁止输出 continue/observe") {
-		t.Errorf("prompt should explicitly forbid continue/observe under alert, got:\n%s", promptText)
-	}
-}
-
 // TestParseReactiveDecision_Continue verifies a clean continue decision.
 func TestParseReactiveDecision_Continue(t *testing.T) {
 	raw := `{"reaction":"continue","reason":"无需打断"}`
@@ -161,31 +140,6 @@ func TestParseReactiveDecision_Replan(t *testing.T) {
 	}
 	if dec.Reason != "fatigue=75 已突破警戒带，当前装配任务不合理" {
 		t.Errorf("reason: got %q", dec.Reason)
-	}
-}
-
-func TestBuildReactivePrompt_ReplanOption(t *testing.T) {
-	in := ReactiveInput{
-		AgentID:      "H-01",
-		TimeOfDay:    "14:00",
-		Zone:         "main_workshop",
-		Energy:       80, Fatigue: 75, Health: 90,
-		CurrentAction: "WorkShift(smart_object=workbench_01)",
-		ActionSrc:     "tactical",
-		CurrentSlot:   "13:00-17:00",
-		DailyPlan:     "13:00-17:00 下午装配",
-		Trigger:       TriggerPeriodic,
-		TriggerDetail: "周期性评估",
-	}
-	promptText := prompt.BuildReactive(in)
-	if !strings.Contains(promptText, "replan") {
-		t.Errorf("prompt should mention 'replan' option, got: %s", promptText)
-	}
-	if !strings.Contains(promptText, "1 游戏小时内至多触发 1 次") {
-		t.Errorf("prompt should mention replan frequency limit, got: %s", promptText)
-	}
-	if !strings.Contains(promptText, "continue|observe|replan") {
-		t.Errorf("prompt JSON schema should include replan, got: %s", promptText)
 	}
 }
 

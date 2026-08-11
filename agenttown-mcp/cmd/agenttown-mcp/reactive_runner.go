@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/AgentTown/agenttown-mcp/pkg/ollama"
+	"github.com/AgentTown/agenttown-mcp/pkg/profile"
 	"github.com/AgentTown/agenttown-mcp/pkg/prompt"
 	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
 	"github.com/AgentTown/agenttown-mcp/pkg/wsserver"
@@ -49,10 +50,11 @@ const reactiveCallTimeout = 20 * time.Second
 // reactiveRunner 持有反应层运行所需的全部依赖。
 // 通过 package-level `reactiveRunnerRef` 在 main() 中注入，WS handler 调用。
 type reactiveRunner struct {
-	ollama *ollama.Client
-	ws     *wsserver.Server
-	kb     *worldkb.KB
-	logger *slog.Logger
+	ollama   *ollama.Client
+	ws       *wsserver.Server
+	kb       *worldkb.KB
+	profiles map[string]*profile.Profile // NPC persona override（profile.md），nil=禁用
+	logger   *slog.Logger
 
 	// mu 串行化 Ollama 调用。多触发源（perception/state/event）并发到达时
 	// 排队执行，避免本地模型过载。持有期间包括 Ollama 调用 + 决策执行
@@ -61,15 +63,16 @@ type reactiveRunner struct {
 }
 
 // newReactiveRunner 构造 reactiveRunner。client 为 nil 时返回 nil（反应层禁用）。
-func newReactiveRunner(client *ollama.Client, ws *wsserver.Server, kb *worldkb.KB, logger *slog.Logger) *reactiveRunner {
+func newReactiveRunner(client *ollama.Client, ws *wsserver.Server, kb *worldkb.KB, profiles map[string]*profile.Profile, logger *slog.Logger) *reactiveRunner {
 	if client == nil {
 		return nil
 	}
 	return &reactiveRunner{
-		ollama: client,
-		ws:     ws,
-		kb:     kb,
-		logger: logger,
+		ollama:   client,
+		ws:       ws,
+		kb:       kb,
+		profiles: profiles,
+		logger:   logger,
 	}
 }
 
@@ -202,7 +205,7 @@ func (r *reactiveRunner) buildInput(agentID string, ac *agentContext, trigger Re
 			agentName = agent.DisplayName
 		}
 	}
-	agentRole := prompt.AgentRole(r.kb, agentID)
+	agentRole := prompt.AgentRole(r.kb, r.profiles, agentID)
 
 	// 实时从 dailyPlan 计算 slot，避免长动作在途时 currentSlot stale。
 	// __debug__ 前缀的 slot 是 /debug/schedule 注入的临时覆盖，保留原值。
@@ -326,7 +329,7 @@ func (r *reactiveRunner) execute(agentID string, ac *agentContext, dec ReactiveD
 		//    worker 被 replanInProgress 守卫挡住不 pop 不 refill。
 		r.logger.Info("[反应层] replan 开始，规划期间保持原 action",
 			"agent_id", agentID, "replan_reason", dec.Reason)
-		ok := ac.tacticalRefillForReplan(context.Background(), agentID, r.ws, r.kb, r.logger, dec.Reason)
+		ok := ac.tacticalRefillForReplan(context.Background(), agentID, r.ws, r.kb, r.profiles, r.logger, dec.Reason)
 		if !ok {
 			// 规划失败：仍需打断坏 action，否则 agent 继续执行触发 replan 的
 			// 不合理 action（如疲劳仍工作），且旧队列也可能已过期。清空队列 +

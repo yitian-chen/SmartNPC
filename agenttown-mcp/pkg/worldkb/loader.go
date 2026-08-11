@@ -453,6 +453,20 @@ func (k *KB) buildIndex() {
 	}
 }
 
+// NewKB constructs a KB from the given slices and builds the lookup indexes.
+// Intended for tests and callers that need an in-memory KB without loading
+// from disk. The slices are stored by reference; do not mutate them after
+// construction.
+func NewKB(zones []Zone, objects []Object, agents []Agent) *KB {
+	kb := &KB{
+		Zones:  zones,
+		Objects: objects,
+		Agents: agents,
+	}
+	kb.buildIndex()
+	return kb
+}
+
 // convertRawConnections converts YAML-loaded rawConnection into KB Connection.
 func convertRawConnections(conns []rawConnection) []Connection {
 	if len(conns) == 0 {

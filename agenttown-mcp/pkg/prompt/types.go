@@ -12,6 +12,7 @@
 package prompt
 
 import (
+	"github.com/AgentTown/agenttown-mcp/pkg/profile"
 	"github.com/AgentTown/agenttown-mcp/pkg/protocol"
 	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
 )
@@ -25,6 +26,7 @@ type TacticalInput struct {
 	Slot      string
 	Physical  *protocol.PhysicalState
 	KB        *worldkb.KB
+	Profiles  map[string]*profile.Profile // NPC persona override; nil → AgentRole falls back to KB then hardcoded
 	Hint      string
 	Memories  string // Stage 4: formatted bullet list of recent memories; empty = skip segment
 	Relationships string // Stage 5: formatted relationship list for 【人际关系】段; empty = skip segment (single-NPC scenario)

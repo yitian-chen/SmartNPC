@@ -9,6 +9,7 @@ import (
 
 	"github.com/AgentTown/agenttown-mcp/adapters/agenttown/tools"
 	"github.com/AgentTown/agenttown-mcp/pkg/agentstate"
+	"github.com/AgentTown/agenttown-mcp/pkg/profile"
 	"github.com/AgentTown/agenttown-mcp/pkg/prompt"
 	"github.com/AgentTown/agenttown-mcp/pkg/protocol"
 	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
@@ -99,6 +100,7 @@ func generateTacticalPlan(
 	goal, zone, timeOfDay, slot string,
 	physical *protocol.PhysicalState,
 	kb *worldkb.KB,
+	profiles map[string]*profile.Profile,
 	logger *slog.Logger,
 	hint string,
 	memories string,
@@ -116,6 +118,7 @@ func generateTacticalPlan(
 		Slot:          slot,
 		Physical:      physical,
 		KB:            kb,
+		Profiles:      profiles,
 		Hint:          hint,
 		Memories:      memories,
 		Relationships: relationships,
@@ -162,6 +165,7 @@ func generateTacticalPlanStreaming(
 	agentID, goal, zone, timeOfDay, slot string,
 	physical *protocol.PhysicalState,
 	kb *worldkb.KB,
+	profiles map[string]*profile.Profile,
 	logger *slog.Logger,
 	hint string,
 	memories string,
@@ -180,6 +184,7 @@ func generateTacticalPlanStreaming(
 		Slot:          slot,
 		Physical:      physical,
 		KB:            kb,
+		Profiles:      profiles,
 		Hint:          hint,
 		Memories:      memories,
 		Relationships: relationships,

@@ -40,6 +40,7 @@ import (
 	"github.com/AgentTown/agenttown-mcp/pkg/agentstate"
 	"github.com/AgentTown/agenttown-mcp/pkg/llmtypes"
 	"github.com/AgentTown/agenttown-mcp/pkg/ollama"
+	"github.com/AgentTown/agenttown-mcp/pkg/profile"
 	"github.com/AgentTown/agenttown-mcp/pkg/prompt"
 	"github.com/AgentTown/agenttown-mcp/pkg/protocol"
 	"github.com/AgentTown/agenttown-mcp/pkg/storage"
@@ -529,6 +530,7 @@ func runPerceptionWorker(
 	ac *agentContext,
 	ws *wsserver.Server,
 	kb *worldkb.KB,
+	profiles map[string]*profile.Profile,
 	logger *slog.Logger,
 ) {
 	// 战略层：进入感知循环前生成当日计划。
@@ -536,7 +538,7 @@ func runPerceptionWorker(
 	// 也不会被调，UE 端不会收到任何自动 action_command。手动模式仅响应
 	// /debug/schedule 注入和 /debug/action 下发。
 	if autoPlanEnabled {
-		plan := generateDailyPlan(ctx, ac.strategicHc, agentID, kb, capabilityRegistryRef, logger, "")
+		plan := generateDailyPlan(ctx, ac.strategicHc, agentID, kb, profiles, capabilityRegistryRef, logger, "")
 		// 同步 currentDay：若首条 perception 已到则用其 day_count，否则保持 -1
 		// （由 detectDayRollover 在首条 perception 到达时同步）。
 		ac.as.SetDailyPlan(plan, ac.as.LatestDayCount())
@@ -576,8 +578,8 @@ func runPerceptionWorker(
 				// Stage 4: 日终记忆生成——从昨日 action_history 总结出
 				// narrative（注入战略层 prompt）+ 结构化 memories（存 DB）。
 				// 失败/冷启动返回 ""，generateDailyPlan 内部回退到常量。
-				narrative := generateDailyMemories(ctx, ac.strategicHc, ac.as.Store(), agentID, kb, logger)
-				plan := generateDailyPlan(ctx, ac.strategicHc, agentID, kb, capabilityRegistryRef, logger, narrative)
+				narrative := generateDailyMemories(ctx, ac.strategicHc, ac.as.Store(), agentID, kb, profiles, logger)
+				plan := generateDailyPlan(ctx, ac.strategicHc, agentID, kb, profiles, capabilityRegistryRef, logger, narrative)
 				// 不清 currentSlot/actionQueue/currentActionID：让 NPC 自然睡眠到 07:00，
 				// 由 advanceSlotIfNeeded 打断后走 tacticalRefill 选新计划 slot。
 				// currentDay 已由 detectDayRollover 更新为 newDay。
@@ -623,7 +625,7 @@ func runPerceptionWorker(
 		// 感知推进 game_time 后会进入新 slot，redecomposeCount 重置即可重新分解。
 		// 不再发 idle wait：长复合动作应持续到时段切换，短动作队列空时让
 		// 战术层重新分解（tacticalRefill 内部会在重分解时注入"未安排长动作"hint）。
-		ac.tacticalRefill(ctx, agentID, ws, kb, logger)
+		ac.tacticalRefill(ctx, agentID, ws, kb, profiles, logger)
 	}
 	// 队列空 + 自动规划关闭：不主动下发，阻塞在 wake 等手动注入 signal。
 	}
@@ -1025,7 +1027,7 @@ func snapshotUEErrors() []ueErrorEntry {
 // tacticalRefill 调战术层 LLM 流式分解当前时段 goal，边接收边入队，
 // 首 action 在流式期间即提前下发以降低体感延迟。成功返回 true。
 func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
-	ws *wsserver.Server, kb *worldkb.KB, logger *slog.Logger) bool {
+	ws *wsserver.Server, kb *worldkb.KB, profiles map[string]*profile.Profile, logger *slog.Logger) bool {
 
 	// 1. 取当前时段 goal（先读快照，再原子守卫检查+清队列）
 	plan, _, _ := a.as.SnapshotSchedule()
@@ -1058,7 +1060,7 @@ func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
 
 	if tacticalStreamingEnabled {
 		// 流式路径：onAction 回调逐个入队 + 首 action 提前下发。
-		_, _, err = generateTacticalPlanStreaming(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, logger, hint, memories, relationships, capabilityRegistryRef,
+		_, _, err = generateTacticalPlanStreaming(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, profiles, logger, hint, memories, relationships, capabilityRegistryRef,
 			func(pa plannedAction) {
 				a.as.AppendQueueAction(pa)
 				if a.as.ShouldDispatchFirst() {
@@ -1069,7 +1071,7 @@ func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
 		)
 	} else {
 		// 非流式路径（默认）：等完整响应后一次性填充队列。
-		actions, _, err = generateTacticalPlan(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, logger, hint, memories, relationships, capabilityRegistryRef)
+		actions, _, err = generateTacticalPlan(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, profiles, logger, hint, memories, relationships, capabilityRegistryRef)
 		if err == nil {
 			a.as.ReplaceQueue(actions)
 		}
@@ -1113,7 +1115,7 @@ func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
 //  4. 通过 replanHint 注入"上次中断原因"到战术层 prompt
 func (a *agentContext) tacticalRefillForReplan(
 	ctx context.Context, agentID string, ws *wsserver.Server,
-	kb *worldkb.KB, logger *slog.Logger, replanHint string,
+	kb *worldkb.KB, profiles map[string]*profile.Profile, logger *slog.Logger, replanHint string,
 ) bool {
 	// 1. 取当前时段 goal —— 不检查 currentActionID（replan 允许在途规划）
 	if a.tacticalHc == nil {
@@ -1162,7 +1164,7 @@ func (a *agentContext) tacticalRefillForReplan(
 		// 流式路径：回调收集到 local slice（不直接修改 a.actionQueue），
 		// 成功后才覆盖旧队列。失败则旧队列不受影响。
 		var collected []plannedAction
-		_, _, err = generateTacticalPlanStreaming(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, logger, hint, memories, relationships, capabilityRegistryRef,
+		_, _, err = generateTacticalPlanStreaming(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, profiles, logger, hint, memories, relationships, capabilityRegistryRef,
 			func(pa plannedAction) {
 				collected = append(collected, pa)
 			},
@@ -1171,7 +1173,7 @@ func (a *agentContext) tacticalRefillForReplan(
 			actions = collected
 		}
 	} else {
-		actions, _, err = generateTacticalPlan(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, logger, hint, memories, relationships, capabilityRegistryRef)
+		actions, _, err = generateTacticalPlan(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, profiles, logger, hint, memories, relationships, capabilityRegistryRef)
 	}
 
 	// 3. 失败处理：保留旧队列（不清空），调用方保持原 action
@@ -1211,6 +1213,11 @@ func main() {
 	worldKBPath = flag.String("world-kb", "assets/world_kb.yaml", "path to world_kb.yaml (required, fail-fast on error)")
 	worldKBManifest    = flag.String("world-kb-manifest", "assets/world_kb.manifest.json",
 		"path to write world_kb.manifest.json (empty skips manifest; written when UE pushes world_kb)")
+	// profilesDir 指向存放 NPC profile.md 的目录（每个文件名 = agentID.md）。
+	// 空串=禁用 profile override，AgentRole 仅走 KB → hardcoded fallback。
+	// 启动时一次性加载，UE 推送 world_kb 不触发重载（与 kb 启动时适配一致）。
+	profilesDir = flag.String("profiles-dir", "assets/profiles",
+		"directory of NPC profile.md files (filename = <agentID>.md; empty disables profile override)")
 	tacticalStream = flag.Bool("tactical-stream", false,
 		"enable streaming for tactical layer LLM calls (experimental: only helps if upstream LLM emits tokens incrementally)")
 	ollamaURL = flag.String("ollama-url", "http://localhost:11434",
@@ -1331,6 +1338,24 @@ func main() {
 	)
 	kbRef = kb // expose to /debug/kb handler
 
+	// ─── NPC profile.md 加载 ─────────────────────────────────────
+	// 扫描 *profilesDir 下 *.md，按文件名映射 agentID → Profile。空目录或
+	// 空串 → profiles=nil，AgentRole 仅走 KB → fallback，行为不变。
+	// profiles 是进程级只读 map（启动加载，UE 推 world_kb 不影响），与 kb
+	// 同级参数化传递，不入 agentContext。
+	var profiles map[string]*profile.Profile
+	if *profilesDir != "" {
+		profiles, err = profile.LoadDir(*profilesDir)
+		if err != nil {
+			logger.Error("failed to load profiles dir", "path", *profilesDir, "err", err)
+			os.Exit(1)
+		}
+	}
+	logger.Info("profiles loaded",
+		"path", *profilesDir,
+		"count", len(profiles),
+	)
+
 	// ─── 反应层 Ollama 客户端 ────────────────────────────────────
 	// --ollama-url="" 显式禁用反应层；否则初始化客户端（即使 Ollama 进程
 	// 不在跑也不报错——Chat 调用失败时反应层静默降级为 continue）。
@@ -1352,7 +1377,7 @@ func main() {
 			NumThread: *ollamaNumThread,
 			Logger:    logger,
 		})
-		reactiveRunnerRef = newReactiveRunner(ollamaClient, ws, kb, logger)
+		reactiveRunnerRef = newReactiveRunner(ollamaClient, ws, kb, profiles, logger)
 		logger.Info("reactive layer enabled",
 			"ollama_url", ollamaClient.BaseURL(),
 			"ollama_model", ollamaClient.Model(),
@@ -1441,7 +1466,7 @@ func main() {
 	// 禁用反应层时，maybeUpdateRelationship 会早返回不调用 Ollama。
 	ac.ollama = ollamaClient
 	agents[id] = ac
-		go runPerceptionWorker(workerCtx, id, ac, ws, kb, logger)
+		go runPerceptionWorker(workerCtx, id, ac, ws, kb, profiles, logger)
 		return ac, true
 	}
 
@@ -2126,7 +2151,7 @@ func handleDebugSchedule(ctx context.Context, logger *slog.Logger, ws *wsserver.
 
 	actions, thought, err := generateTacticalPlan(
 		tacticalCtx, tacticalHc, req.AgentID,
-		goal, zone, timeOfDay, slot, physical, kb, logger, "", "", "", capabilityRegistryRef,
+		goal, zone, timeOfDay, slot, physical, kb, nil, logger, "", "", "", capabilityRegistryRef,
 	)
 	if err != nil {
 		logger.Warn("[debug/schedule] decompose failed",
