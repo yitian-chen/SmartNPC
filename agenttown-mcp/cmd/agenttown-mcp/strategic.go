@@ -60,7 +60,7 @@ func generateDailyPlan(ctx context.Context, sc strategicCaller, agentID string, 
 		yesterdaySummary = yesterdaySummaryForFirstDay
 	}
 	promptText := fmt.Sprintf(prompt.StrategicPromptTemplate,
-		prompt.BuildStrategic(kb, agentID, actions),
+		prompt.BuildStrategic(kb, nil, agentID, actions),
 		"昨日总结："+yesterdaySummary)
 	logger.Info("[MCP→LLM/STRATEGIC-PROMPT]", "agent_id", agentID, "text", promptText)
 

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/AgentTown/agenttown-mcp/pkg/profile"
 	"github.com/AgentTown/agenttown-mcp/pkg/protocol"
 	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
 )
@@ -75,17 +76,18 @@ const StrategicPromptTemplate = `[战略层/每日规划] 现在是仿真时间 
 
 // BuildStrategic constructs the strategic layer prompt's KB context segment,
 // containing four parts:
-//   - 【你的角色】: from AgentRole(kb, agentID)
+//   - 【你的角色】: from AgentRole(kb, profiles, agentID)
 //   - 【世界知识】: from KBContext(kb) (shared with tactical layer)
 //   - 【区域设施映射】: zone→object mapping (currently disabled — see comment)
 //   - 【可用能力】: composite actions from capabilities
 //
 // kb == nil → skips KB segments but still injects capabilities.
 // actions == nil → falls back to builtin 6 composite tools (same as tactical).
-func BuildStrategic(kb *worldkb.KB, agentID string, actions []protocol.CapabilityAction) string {
+// profiles == nil → AgentRole falls back to KB fields then hardcoded fallback.
+func BuildStrategic(kb *worldkb.KB, profiles map[string]*profile.Profile, agentID string, actions []protocol.CapabilityAction) string {
 	var sb strings.Builder
 	if kb != nil {
-		if role := AgentRole(kb, nil, agentID); role != "" {
+		if role := AgentRole(kb, profiles, agentID); role != "" {
 			sb.WriteString("【你的角色】\n")
 			sb.WriteString(role)
 		}
