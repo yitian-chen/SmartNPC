@@ -76,33 +76,34 @@ const (
 // Data-driven via UE's DT_ActionBTMap; these are the framework-builtin
 // representative cmds. Atomic = standalone minimal action; Composite =
 // pre-registered high-level behavior tree.
+//
+// 12 cmds total (7 atomic + 5 composite), aligned with the real UE5
+// capability_registry push (2026-08-11).
 const (
-	// Atomic cmds (8).
-	CmdMoveToLocation      = "MoveToLocation"
-	CmdMoveToAgent         = "MoveToAgent"
-	CmdTurnTo              = "TurnTo"
-	CmdPlayMontage         = "PlayMontage"
-	CmdSpeak               = "Speak"
-	CmdEmote               = "Emote"
+	// Atomic cmds (7).
+	CmdGenericAct          = "GenericAct"
+	CmdMoveTo              = "MoveTo"
 	CmdWait                = "Wait"
+	CmdTurnTo              = "TurnTo"
+	CmdSpeak               = "Speak"
 	CmdInteractSmartObject = "InteractSmartObject"
-	// Composite cmds (6).
-	CmdWorkAtWorkbench  = "WorkAtWorkbench"
-	CmdWorkAtWorkshop   = "WorkAtWorkshop"
-	CmdChatWith         = "ChatWith"
-	CmdRepairTarget     = "RepairTarget"
+	CmdEmote               = "Emote"
+	// Composite cmds (5).
+	CmdWorkShift        = "WorkShift"
 	CmdChargeAtStation  = "ChargeAtStation"
-	CmdPatrolZone       = "PatrolZone"
+	CmdSelfMaintenance  = "SelfMaintenance"
+	CmdRestAtResidence  = "RestAtResidence"
+	CmdSurfInternet     = "SurfInternet"
 )
 
-// IsCompositeCmd reports whether the given cmd is one of the 6 long
-// composite cmds (ExecuteComposite family). Used by main.go to skip
-// armActionTimeout for long composites — they run until the next
-// schedule slot transition, not until a self timeout.
+// IsCompositeCmd reports whether the given cmd is one of the 5 long
+// composite cmds. Used by main.go to skip armActionTimeout for long
+// composites — they run until the next schedule slot transition, not
+// until a self timeout.
 func IsCompositeCmd(cmd string) bool {
 	switch cmd {
-	case CmdWorkAtWorkbench, CmdWorkAtWorkshop, CmdChatWith,
-		CmdRepairTarget, CmdChargeAtStation, CmdPatrolZone:
+	case CmdWorkShift, CmdChargeAtStation, CmdSelfMaintenance,
+		CmdRestAtResidence, CmdSurfInternet:
 		return true
 	}
 	return false
