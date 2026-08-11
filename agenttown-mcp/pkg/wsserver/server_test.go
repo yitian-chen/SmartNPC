@@ -253,3 +253,56 @@ func readEnvelope(t *testing.T, c *websocket.Conn) protocol.Envelope {
 	}
 	return env
 }
+
+// TestCall_AutoQueueField verifies the auto_queue flag is threaded from
+// Call's parameter into the wire-level ActionCommandPayload. Two cases:
+//   - autoQueue=true  → marshaled JSON contains "auto_queue":true
+//   - autoQueue=false → field omitted (backward compatible)
+//
+// We don't wait for ACK (no fake UE responding), so Call will time out
+// — but the action_command frame is already on the wire and readable.
+func TestCall_AutoQueueField(t *testing.T) {
+	tests := []struct {
+		name      string
+		autoQueue bool
+		wantField bool // field present in JSON?
+	}{
+		{"true_sets_field", true, true},
+		{"false_omits_field", false, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestServer()
+			srvConn, cliConn := wsPipe(t, s)
+			defer srvConn.Close(websocket.StatusNormalClosure, "")
+			defer cliConn.Close(websocket.StatusNormalClosure, "")
+
+			// Call blocks on ACK; run async and let it time out.
+			go func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+				defer cancel()
+				_, _ = s.Call(ctx, "H-01", protocol.CmdWorkShift,
+					map[string]any{"smart_object": "workbench_01"}, tc.autoQueue)
+			}()
+
+			env := readEnvelope(t, cliConn)
+			if env.Type != protocol.TypeActionCommand {
+				t.Fatalf("envelope type = %q, want action_command", env.Type)
+			}
+			var payload protocol.ActionCommandPayload
+			if err := json.Unmarshal(env.Payload, &payload); err != nil {
+				t.Fatalf("unmarshal payload: %v", err)
+			}
+			if payload.AutoQueue != tc.autoQueue {
+				t.Errorf("AutoQueue field = %v, want %v", payload.AutoQueue, tc.autoQueue)
+			}
+			// Verify wire-level JSON omits auto_queue when false.
+			rawJSON := string(env.Payload)
+			containsField := strings.Contains(rawJSON, "auto_queue")
+			if containsField != tc.wantField {
+				t.Errorf("JSON contains auto_queue=%v, want %v; raw=%s",
+					containsField, tc.wantField, rawJSON)
+			}
+		})
+	}
+}

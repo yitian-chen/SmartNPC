@@ -2,6 +2,7 @@ package protocol
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -97,6 +98,26 @@ func TestActionLifecyclePayloads(t *testing.T) {
 		t.Fatalf("action_command round-trip failed: %+v", gotCmd)
 	}
 
+	// AutoQueue=false (default) should omit the field from JSON for
+	// backward compatibility with UE servers that don't know about
+	// auto_queue yet.
+	rawDefault, _ := json.Marshal(cmd)
+	if strings.Contains(string(rawDefault), "auto_queue") {
+		t.Fatalf("auto_queue should be omitted when false: %s", rawDefault)
+	}
+
+	// AutoQueue=true should marshal the field.
+	cmdQueue := ActionCommandPayload{
+		ActionID:  "act_002",
+		Cmd:       CmdWorkShift,
+		Params:    map[string]any{"smart_object": "workbench_01"},
+		AutoQueue: true,
+	}
+	rawQueue, _ := json.Marshal(cmdQueue)
+	var gotQueue ActionCommandPayload
+	if err := json.Unmarshal(rawQueue, &gotQueue); err != nil || !gotQueue.AutoQueue {
+		t.Fatalf("auto_queue=true round-trip failed: %+v err=%v", gotQueue, err)
+	}
 	est := 30.0
 	ack := ActionStartedPayload{ActionID: "act_001", Accepted: true, EstimatedDurationSec: &est}
 	raw, _ = json.Marshal(ack)
@@ -178,5 +199,64 @@ func TestWorldKBPayloadRoundTrip(t *testing.T) {
 	}
 	if json.Unmarshal(got.Generated, &probe) != nil || probe.Version != "1.0" {
 		t.Errorf("generated blob not independently parseable: %+v", probe)
+	}
+}
+
+// TestActionQueuedPayload verifies the action_queued message payload
+// round-trips with all fields including optional pointer fields.
+func TestActionQueuedPayload(t *testing.T) {
+	pos := 2
+	wait := 30.0
+	aq := ActionQueuedPayload{
+		ActionID:         "act_001",
+		Status:           QueueStatusQueued,
+		Group:            "workbench",
+		Position:         &pos,
+		EstimatedWaitSec: &wait,
+	}
+	raw, err := json.Marshal(aq)
+	if err != nil {
+		t.Fatalf("marshal action_queued: %v", err)
+	}
+	var got ActionQueuedPayload
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("unmarshal action_queued: %v", err)
+	}
+	if got.ActionID != "act_001" || got.Status != QueueStatusQueued || got.Group != "workbench" {
+		t.Fatalf("action_queued core fields lost: %+v", got)
+	}
+	if got.Position == nil || *got.Position != 2 {
+		t.Fatalf("position lost: %+v", got)
+	}
+	if got.EstimatedWaitSec == nil || *got.EstimatedWaitSec != 30.0 {
+		t.Fatalf("estimated_wait_sec lost: %+v", got)
+	}
+
+	// Optional fields omitted → nil pointers.
+	minimal := ActionQueuedPayload{
+		ActionID: "act_002",
+		Status:   QueueStatusAdvanced,
+	}
+	rawMin, _ := json.Marshal(minimal)
+	var gotMin ActionQueuedPayload
+	if err := json.Unmarshal(rawMin, &gotMin); err != nil {
+		t.Fatalf("unmarshal minimal action_queued: %v", err)
+	}
+	if gotMin.Position != nil || gotMin.EstimatedWaitSec != nil {
+		t.Fatalf("optional fields should be nil: %+v", gotMin)
+	}
+	// omitempty should drop the optional fields from JSON.
+	if strings.Contains(string(rawMin), "position") || strings.Contains(string(rawMin), "estimated_wait_sec") {
+		t.Fatalf("optional fields should be omitted from JSON: %s", rawMin)
+	}
+
+	// All three status constants should round-trip.
+	for _, status := range []string{QueueStatusQueued, QueueStatusAdvanced, QueueStatusTimeout} {
+		p := ActionQueuedPayload{ActionID: "act_x", Status: status}
+		raw, _ := json.Marshal(p)
+		var got ActionQueuedPayload
+		if err := json.Unmarshal(raw, &got); err != nil || got.Status != status {
+			t.Fatalf("status %q round-trip failed: %+v", status, got)
+		}
 	}
 }

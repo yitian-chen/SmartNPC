@@ -684,7 +684,7 @@ func (g *guardedExecutor) SendAction(ctx context.Context, agentID string, decisi
 	if g.caps != nil && !g.caps.HasCmd(agentID, cmd) {
 		return nil, fmt.Errorf("agent %s lacks capability for cmd %s", agentID, cmd)
 	}
-	ack, err := g.ws.SendAction(ctx, agentID, cmd, params)
+	ack, err := g.ws.SendAction(ctx, agentID, cmd, params, shouldAutoQueue(cmd))
 	if err == nil && ack != nil {
 		ac.recordActionStarted(ack.ActionID, cmd, params, decisionEpoch, sourceTool)
 		// 长复合动作不设超时：它们持续执行直到下一 schedule 时段切换
@@ -695,6 +695,27 @@ func (g *guardedExecutor) SendAction(ctx context.Context, agentID string, decisi
 		}
 	}
 	return ack, err
+}
+
+// shouldAutoQueue reports whether the given cmd targets a Smart Object
+// that may be occupied by other NPCs. When true, action_command is sent
+// with auto_queue=true (约定21) so UE queues the agent instead of
+// rejecting the action outright.
+//
+// 6 cmds target smart objects: 5 composite (long-running facility use)
+// + 1 atomic InteractSmartObject. Other cmds (MoveTo/Speak/Wait/etc)
+// don't involve occupancy contention and default to false.
+func shouldAutoQueue(cmd string) bool {
+	switch cmd {
+	case protocol.CmdWorkShift,
+		protocol.CmdChargeAtStation,
+		protocol.CmdSelfMaintenance,
+		protocol.CmdRestAtResidence,
+		protocol.CmdSurfInternet,
+		protocol.CmdInteractSmartObject:
+		return true
+	}
+	return false
 }
 
 // RequestScan 请求 UE 立即回吐一次 perception_update（fire-and-forget）。
@@ -902,7 +923,7 @@ func (a *agentContext) popAndSendQueueAction(ctx context.Context, agentID string
 	}
 
 	logger.Info("[战术层] 下发 action", "agent_id", agentID, "action", pa.Action, "cmd", cmd, "queue_left", a.queueLen())
-	ack, err := ws.SendAction(ctx, agentID, cmd, params)
+	ack, err := ws.SendAction(ctx, agentID, cmd, params, shouldAutoQueue(cmd))
 	if err != nil {
 		// 区分两种失败：
 		//   (a) UE 在途 composite 未完成 → 回填队首，等在途 action_completed 唤醒
@@ -1605,9 +1626,28 @@ func main() {
 			"action_id", completed.ActionID, "result", completed.Result,
 			"reason", completed.Reason, "progress", completed.Progress,
 			"decision_queued", queued)
-			if trigger != "" && autoPlanEnabled {
-				go reactiveRunnerRef.trigger(agentID, ac, trigger, detail)
+		if trigger != "" && autoPlanEnabled {
+			go reactiveRunnerRef.trigger(agentID, ac, trigger, detail)
+		}
+
+		case protocol.TypeActionQueued:
+			var aq protocol.ActionQueuedPayload
+			if err := json.Unmarshal(payload, &aq); err != nil {
+				logger.Warn("action_queued parse failed", "err", err)
+				return
 			}
+			ac := lookupAgent(agentID)
+			if ac == nil {
+				logger.Warn("action_queued dropped for unregistered agent", "agent_id", agentID)
+				return
+			}
+			ac.as.RecordQueueStatus(aq)
+			logger.Info("action_queued", "agent_id", agentID,
+				"action_id", aq.ActionID, "status", aq.Status,
+				"group", aq.Group, "position", aq.Position)
+			// 不触发反应层：queued 是信息性状态，下次 periodic/action_done 等
+			// 触发时反应层 prompt 的【排队状态】段会带上。timeout 后 UE 会补
+			// action_completed{failed, queue_timeout}，走现有 TriggerActionDone 路径。
 
 		case protocol.TypeEventNotification:
 			var event protocol.EventNotificationPayload
@@ -1729,6 +1769,12 @@ func runHTTP(ctx context.Context, logger *slog.Logger, server *mcp.Server, addr 
 		// 供 debug 控制台右侧 schedule 面板展示。读 per-agent agentContext。
 		if r.URL.Path == "/debug/plan" {
 			handleDebugPlan(w, r, lookupAgent, listAgentIDs, logger)
+			return
+		}
+		// /debug/agents — 返回已注册 agent ID 列表，供前端填充 agent 下拉。
+		// 数据源是 agents map（agent_registered 写入），不是 capability_registry。
+		if r.URL.Path == "/debug/agents" {
+			handleDebugAgents(w, r, listAgentIDs, logger)
 			return
 		}
 		http.NotFound(w, r)
@@ -1957,7 +2003,9 @@ func handleDebugAction(ctx context.Context, logger *slog.Logger, ws *wsserver.Se
 		"agent_id", req.AgentID, "cmd", req.Cmd, "proto_cmd", protoCmd, "params", fmt.Sprint(params),
 		"force", force, "stopped", stoppedActionID)
 
-	ack, err := ws.Call(ctx, req.AgentID, protoCmd, params)
+	// Debug path: auto_queue=false (manual debug doesn't queue; tester
+	// wants to see the immediate rejected/accepted behavior).
+	ack, err := ws.Call(ctx, req.AgentID, protoCmd, params, false)
 	if err != nil {
 		w.WriteHeader(http.StatusBadGateway)
 		_ = json.NewEncoder(w).Encode(debugActionResponse{Error: "ws.Call failed: " + err.Error()})

@@ -1287,3 +1287,34 @@ func TestDetectDayRollover_NoPerceptionNoRollover(t *testing.T) {
 		t.Errorf("currentDay = %d, want 0 (unchanged)", ac.as.CurrentDay())
 	}
 }
+
+// ─── auto_queue (约定21) ────────────────────────────────────────
+
+// TestShouldAutoQueue verifies the cmd → auto_queue mapping. Only cmds
+// that target Smart Objects (which may be occupied) opt into queueing;
+// other cmds default to false so UE rejects them outright on contention.
+func TestShouldAutoQueue(t *testing.T) {
+	cases := []struct {
+		cmd  string
+		want bool
+	}{
+		{protocol.CmdWorkShift, true},
+		{protocol.CmdChargeAtStation, true},
+		{protocol.CmdSelfMaintenance, true},
+		{protocol.CmdRestAtResidence, true},
+		{protocol.CmdSurfInternet, true},
+		{protocol.CmdInteractSmartObject, true},
+		{protocol.CmdMoveTo, false},
+		{protocol.CmdTurnTo, false},
+		{protocol.CmdSpeak, false},
+		{protocol.CmdEmote, false},
+		{protocol.CmdWait, false},
+		{protocol.CmdGenericAct, false},
+		{"UnknownCmd", false},
+	}
+	for _, tc := range cases {
+		if got := shouldAutoQueue(tc.cmd); got != tc.want {
+			t.Errorf("shouldAutoQueue(%q) = %v, want %v", tc.cmd, got, tc.want)
+		}
+	}
+}

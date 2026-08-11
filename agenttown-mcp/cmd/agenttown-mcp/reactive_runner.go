@@ -187,6 +187,23 @@ func (r *reactiveRunner) buildInput(agentID string, ac *agentContext, trigger Re
 		actionSrc = string(snap.CurrentActionSrc)
 	}
 
+	// 排队状态（约定21）：snap.QueuedActionID 非空表示正在排队等待目标
+	// Smart Object 释放。构造可读描述注入反应层 prompt，让 Ollama 决策时
+	// 知道"在途动作其实在排队"——长时间排队时可考虑 replan 换目标。
+	queuedFor := ""
+	if snap.QueuedActionID != "" {
+		pos := -1
+		if snap.QueuedPosition != nil {
+			pos = *snap.QueuedPosition
+		}
+		wait := 0.0
+		if snap.QueuedEstimatedWait != nil {
+			wait = *snap.QueuedEstimatedWait
+		}
+		queuedFor = fmt.Sprintf("正在排队等待 %s（位置 %d，预计等待 %.0f 秒）",
+			snap.QueuedGroup, pos, wait)
+	}
+
 	// 战术层上下文：截断 dailyPlan 避免 prompt 过长（反应层只需摘要）
 	plan := snap.DailyPlan
 	if len(plan) > 400 {
@@ -229,6 +246,7 @@ func (r *reactiveRunner) buildInput(agentID string, ac *agentContext, trigger Re
 		CurrentAction:     currentAction,
 		ElapsedSec:        elapsedSec,
 		ActionSrc:         actionSrc,
+		QueuedFor:         queuedFor,
 		CurrentSlot:       liveSlot,
 		DailyPlan:         plan,
 		Trigger:           trigger,

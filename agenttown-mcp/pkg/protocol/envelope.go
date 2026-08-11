@@ -35,6 +35,7 @@ const (
 	TypeActionCommand     = "action_command"     // Agent → UE
 	TypeActionStarted     = "action_started"     // UE → Agent (ACK)
 	TypeActionCompleted   = "action_completed"   // UE → Agent
+	TypeActionQueued      = "action_queued"      // UE → Agent (queue status: queued/advanced/timeout)
 	TypeStopAction        = "stop_action"        // Agent → UE
 	TypeEventNotification = "event_notification" // Agent → Agent (internal)
 	TypeStateReport       = "state_report"       // UE → Agent
@@ -115,6 +116,15 @@ const (
 	ResultFailed      = "failed"
 	ResultInterrupted = "interrupted"
 	ResultError       = "error"
+)
+
+// action_queued status constants (约定21, §2.3).
+// queued: Agent 已入队开始排队; advanced: 轮到该 Agent 开始执行;
+// timeout: 排队超时被移除，UE 会补 action_completed{failed,queue_timeout}.
+const (
+	QueueStatusQueued   = "queued"
+	QueueStatusAdvanced = "advanced"
+	QueueStatusTimeout  = "timeout"
 )
 
 // error_code constants (§2.3).
