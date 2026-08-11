@@ -309,7 +309,11 @@ sequenceDiagram
     Note over Agent: completed 存入 pendingCompletion 队列<br/>下次 perception 时折入叙事
 ```
 
-**9 种 cmd**：`MoveTo`/`TurnTo`/`PlayAnimation`/`Speak`/`Emote`/`Wait`/`InteractSmartObject`/`ExecuteComposite`/`Stop`
+**12 种 cmd**（7 原子 + 5 复合，2026-08-11 对齐真实 UE5 `capability_registry`）：
+- 原子：`GenericAct`/`MoveTo`/`Wait`/`TurnTo`/`Speak`/`InteractSmartObject`/`Emote`
+- 复合：`WorkShift`/`ChargeAtStation`/`SelfMaintenance`/`RestAtResidence`/`SurfInternet`
+
+`Stop` 不再是 cmd，改为 `stop_action` 消息类型（Agent→UE）。`ExecuteComposite`/`PlayAnimation` 已移除，复合动作直接用各自 cmd 下发。
 
 **error_code 取值**：`ACTION_FAILED` / `STOP_ID_MISMATCH` / `INVALID_MESSAGE` / `UNKNOWN_AGENT` / `INTERNAL_ERROR`
 
@@ -343,36 +347,37 @@ energy / fatigue / joint_wear / health，通过 `state_report` 权威通道上�
 
 ## MCP 工具
 
-所有工具在 `agenttown-mcp/adapters/agenttown/tools/`。15 个工具均以 `agent_id` 为第一参数、`decision_epoch` 为第二个必填参数。
+所有工具在 `agenttown-mcp/adapters/agenttown/tools/`。14 个工具均以 `agent_id` 为第一参数、`decision_epoch` 为第二个必填参数。
 
-**工具列表由 `capability_registry` 动态驱动**：UE 连接 MCP 后发送 `capability_registry` 声明可执行 cmd，MCP 据此调 `tools.ReconcileTools` 增删工具（`AddTool`/`RemoveTools`）。启动时 seed 内置 9 cmd 默认值（`BuiltinCmdCapabilities`），保证 UE 不发 `capability_registry` 也能跑。per-agent 差异化在 `guardedExecutor.SendAction` 这一咽喉点拦截——查 `CapabilityRegistry.HasCmd(agentID, cmd)`，不通过则拒绝下发。战术层 prompt 中的可用工具列表也按 registry 对 agentID 的有效能力集动态生成（`tacticalToolMeta` 是工具元数据单一来源）。
+**工具列表由 `capability_registry` 动态驱动**：UE 连接 MCP 后发送 `capability_registry` 声明可执行 cmd，MCP 据此调 `tools.ReconcileTools` 增删工具（`AddTool`/`RemoveTools`）。启动时 seed 内置 12 cmd 默认值（`BuiltinCmdCapabilities`），保证 UE 不发 `capability_registry` 也能跑。per-agent 差异化在 `guardedExecutor.SendAction` 这一咽喉点拦截——查 `CapabilityRegistry.HasCmd(agentID, cmd)`，不通过则拒绝下发。战术层 prompt 中的可用工具列表也按 registry 对 agentID 的有效能力集动态生成（`tacticalToolMeta` 是工具元数据单一来源）。
 
-### 复合行为工具（→ `ExecuteComposite` cmd）
+### 复合行为工具（5 个，各自独立 cmd）
 
-| 工具 | 参数 | 说明 |
-|------|------|------|
-| `work_assemble` | agent_id, target, duration_min | 工作组装 |
-| `patrol_route` | agent_id, route_id | 巡逻路线 |
-| `charge_at` | agent_id, station_id, duration_min | 充电 |
-| `repair_target` | agent_id, target_agent_id | 维修目标 |
-| `social_chat_with` | agent_id, target_agent_id | 社交对话 |
-| `rest_idle` | agent_id, duration_min | 休息 |
-| `archive_research` | agent_id, duration_min | 档案研究 |
+| 工具 | 参数 | cmd | 说明 |
+|------|------|-----|------|
+| `work_shift` | agent_id, smart_object, interaction | `WorkShift` | 工作班次（装配/分拣/作业） |
+| `charge_at_station` | agent_id, smart_object, interaction | `ChargeAtStation` | 在充电站充电 |
+| `self_maintenance` | agent_id, smart_object, interaction | `SelfMaintenance` | 自我维护保养 |
+| `rest_at_residence` | agent_id, smart_object, interaction | `RestAtResidence` | 在住所休息 |
+| `surf_internet` | agent_id, smart_object, interaction | `SurfInternet` | 上网浏览 |
 
-### 原子行为工具
+5 个复合工具共享 `smart_object` + `interaction` 参数 schema，`smart_object` 引用 `world_kb` 中对应 category 的物体 id。
+
+### 原子行为工具（7 个 + 2 特殊）
 
 | 工具 | 参数 | cmd |
 |------|------|-----|
-| `move_to` | agent_id, target | MoveTo |
-| `turn_to` | agent_id, target | TurnTo |
-| `speak` | agent_id, content, target | Speak |
-| `emote` | agent_id, emotion, mode | Emote |
-| `interact` | agent_id, object_id, action | InteractSmartObject |
-| `wait` | agent_id, duration_sec | Wait |
-| `scan_area` | agent_id | 请求即时 perception |
-| `stop` | agent_id | Stop |
+| `generic_act` | agent_id, thought, behavior | `GenericAct` |
+| `move_to` | agent_id, target_type, target_id/target_position | `MoveTo` |
+| `turn_to` | agent_id, target_type, target_id/target_position | `TurnTo` |
+| `speak` | agent_id, content | `Speak` |
+| `emote` | agent_id, emotion | `Emote` |
+| `interact` | agent_id, smart_object, interaction | `InteractSmartObject` |
+| `wait` | agent_id, duration_sec | `Wait` |
+| `scan_area` | agent_id | （请求即时 perception，无 cmd） |
+| `stop` | agent_id | （发 `stop_action` 消息，非 cmd） |
 
-`duration_min` 内部 ×60 转 `duration_sec`。语义目标（如 `move_to(target="workbench_01")`）由 Mock UE 解析坐标，Agent 不接触坐标。
+`move_to`/`turn_to` 的 `target_type` 取值 `agent`/`smart_object`/`zone`/`position`；`target_id` 对应 actor id，`target_position` 对应 `[x,y,z]` 坐标。语义目标（如 `move_to(target_type="smart_object", target_id="workbench")`）由 UE 自行解析坐标，MCP 不做 KB 坐标解析。`generic_act` 是兜底通用动作，`behavior` 取值 `idle`/`look_around`/`wave_hand`/`groom`/`think`，替代旧 `PlayMontage`。
 
 ### 新增工具硬约束
 
@@ -461,16 +466,16 @@ UE 推送新 `world_kb` 后，MCP 重启即自动适配全链路，无需改任�
 - **反应层 prompt 注入角色**：`ReactiveInput.AgentRole` 由 `reactiveRunner.buildInput` 从 kb 取，注入反应层 prompt 开头。反应决策（continue/observe/replan）受 NPC 性格影响。
 - **工具列表动态派生**：`capability_registry` 驱动 `ReconcileTools` 增删工具；`buildTacticalToolEntries` 按 registry 对 agent 的有效能力集生成 prompt 工具列表；`buildTacticalExample(kb)` 从 KB 取首个 zone/object 作示例。新 cmd 由 `registerGenericActionTool` 自动注册通用工具。
 - **反应层决策简化**：反应层仅支持 `continue`/`observe`/`replan` 三种决策（已移除 `interrupt`/`act`）。物理告警时代码层 `upgradeIfPhysicalAlert` 强制升级 continue/observe → replan。
-- **工具 jsonschema 描述去硬编码 id**：`MoveToLocationInput.Target` / `InteractInput.TargetObjectID` / `WorkAtWorkbenchInput.AgentID` 等不再写死 `e.g. main_workshop`/`workbench_01`/`"H-01"`，改为引用 `world_kb`，LLM 从 prompt 注入的【世界知识】段获取合法 id。
+- **工具 jsonschema 描述去硬编码 id**：`MoveToInput.TargetID` / `InteractInput.SmartObject` / `WorkShiftInput.SmartObject` 等不再写死 `e.g. main_workshop`/`workbench_01`/`"H-01"`，改为引用 `world_kb`，LLM 从 prompt 注入的【世界知识】段获取合法 id。
 - **兜底每日计划从 KB 派生**：`buildDefaultDailyPlan(kb)` 用首个 zone 显示名 + 首个 object 显示名组装工作时段；`kb == nil` 时降级为中性表述（不引用"车间"/"装配"/"充电"等当前 KB 专属词）。
 
 **仅启动时适配**：不支持运行时热替换 KB。worker 按值捕获 kb，swap 仅在 worker 启动前发生，当前架构安全。换 KB 流程：UE 推送新 `world_kb` → MCP 重启 → worker 启动时拿新 kb。
 
 ### Mock UE Busy 状态
 
-长耗时动作（`ExecuteComposite`）不跳跃时间，设置 `npc.busy_until_min`。感知循环自然推进时间，NPC 留在原位直到时间到达。
+长耗时复合动作（`WorkShift`/`ChargeAtStation`/`SelfMaintenance`/`RestAtResidence`/`SurfInternet`）不跳跃时间，设置 `npc.busy_until_min`。感知循环自然推进时间，NPC 留在原位直到时间到达。
 
-- 忙碌期间拒绝破坏性动作：`MoveTo`/`TurnTo`/`InteractSmartObject`/`ExecuteComposite`/`Wait`
+- 忙碌期间拒绝破坏性动作：`MoveTo`/`TurnTo`/`InteractSmartObject`/5 个复合 cmd/`Wait`
 - 短动作立即执行 + 发 `action_completed`
 - 完成的 busy 动作自动清除，下一次感知通知 LLM
 
@@ -507,7 +512,7 @@ sequenceDiagram
 - 所有 perception 都更新最新世界缓存，但只有首次感知、动作完成、任务生命周期、关键环境变化、场景事件或物理警戒带变化才调用 LLM
 - 纯时间变化、相同 scan_area、busy progress 普通变化不触发决策
 - LLM 调用在途时合并触发原因，并只保留最新世界快照
-- 每次实际决策生成单调递增 `decision_epoch`；全部 15 个工具必须携带当前 `[decision_context]` 中的 epoch
+- 每次实际决策生成单调递增 `decision_epoch`；全部 14 个工具必须携带当前 `[decision_context]` 中的 epoch
 - guarded executor 在发送 UE 前校验 Agent 已注册、在线、decision_epoch 当前有效且 WebSocket 已连接
 - `agent_unregistered` 立即失效当前决策；迟到工具调用被拒绝
 
@@ -681,7 +686,7 @@ python3 src/run_day.py   # 默认连 :9091
 | `agenttown-mcp/cmd/agenttown-mcp/capability.go` | NPC 能力注册表：per-agent cmd 能力声明（system 全局默认 + 具体 agent 覆盖） |
 | `agenttown-mcp/cmd/agenttown-mcp/debug_ui.go` | `/debug/` 浏览器控制台 + `/debug/kb` JSON 端点 |
 | `agenttown-mcp/cmd/agenttown-mcp/web/debug.html` | debug 控制台单页 HTML（单 Action + Schedule 注入双 tab） |
-| `agenttown-mcp/pkg/protocol/envelope.go` | Envelope + 12 消息类型 + 9 cmd + error_code 常量 |
+| `agenttown-mcp/pkg/protocol/envelope.go` | Envelope + 12 消息类型 + 12 cmd + error_code 常量 |
 | `agenttown-mcp/pkg/protocol/messages.go` | 各消息 payload 结构体 + resync/event_lost/capability_registry |
 | `agenttown-mcp/pkg/wsserver/server.go` | WS 服务端：收发信封、seq、send buffer、重放、Call/SendAction |
 | `agenttown-mcp/pkg/llmtypes/types.go` | LLM 共享响应类型（Response/Block/Content/Usage），venus/战略/战术层复用 |
@@ -699,8 +704,8 @@ python3 src/run_day.py   # 默认连 :9091
 | `agenttown-mcp/pkg/worldkb/validator.go` | `Validate(kb)` — ID 格式、cross-reference 合法性 |
 | `agenttown-mcp/pkg/worldkb/serializer.go` | `WriteYAML`（按 ID 排序，原子替换）+ `WriteManifest`（SHA256 + RFC3339） |
 | `agenttown-mcp/adapters/agenttown/tools/registry.go` | 工具注册 + Executor 接口 |
-| `agenttown-mcp/adapters/agenttown/tools/composite.go` | 7 个复合行为工具 |
-| `agenttown-mcp/adapters/agenttown/tools/atomic.go` | 8 个原子行为工具 |
+| `agenttown-mcp/adapters/agenttown/tools/composite.go` | 5 个复合行为工具 |
+| `agenttown-mcp/adapters/agenttown/tools/atomic.go` | 7 个原子行为工具 + 2 个特殊工具（scan_area/stop） |
 | `agenttown-mcp/adapters/agenttown/perception/format.go` | 感知 → 自然语言叙事 |
 | `agenttown-mcp/internal/log/logger.go` | slog JSON 日志（写 stderr） |
 | `assets/world_kb.yaml` | 世界 KB：7 zones / 3 objects / 1 agent（新 schema，locations 已合并进 objects） |
@@ -732,7 +737,7 @@ python3 src/run_day.py   # 默认连 :9091
 | M-3 Hermes Agent Mind | ✅（已归档） | SOUL.md + SKILL.md + profile，2026-08 移除 |
 | M-4 Translator | ✅ | MCP 工具注册 |
 | M-5 Mock UE Bridge | ✅ | Python async + WebSocket |
-| MCP 层 | ✅ | Go agenttown-mcp，15 工具（7 复合+8 原子） |
+| MCP 层 | ✅ | Go agenttown-mcp，14 工具（5 复合+7 原子+2 特殊） |
 | 协议重构 Phase 1-7 | ✅ | 7 字段信封、11 消息类型、seq+ACK、物理四态、动作异步生命周期、断线重连+seq 重放 |
 | 端到端闭环 | ✅ | 感知→LLM→工具→Mock UE 全链路验证 |
 | 三层决策架构 | ✅ | 战略层（每日计划）+ 战术层（任务分解）+ 反应层（Ollama 打断） |
@@ -744,12 +749,13 @@ python3 src/run_day.py   # 默认连 :9091
 | 状态访问与业务逻辑分离 Stage 3 | ✅ | MySQL 持久化层：4 调度字段 write-through + `LoadPersistent` 热重启 + `//go:embed` SQL 迁移 |
 | 状态访问与业务逻辑分离 Stage 4 | ✅ | 长期经历记忆：日终 LLM 批量生成 memories + 战略层注入昨日总结 + 战术层注入 top-3 近期记忆 + action_history 完整落盘 |
 | 状态访问与业务逻辑分离 Stage 5 | ✅ | 关系数值动态维护：动作完成 Ollama 判断 + 双向 familiarity+=1 + 战术层注入【人际关系】段 + KB 种子导入 |
+| 12 cmd 体系迁移 | ✅ | 旧 14 cmd（8 原子+6 复合）→ 新 12 cmd（7 原子+5 复合）对齐真实 UE5；统一 MoveTo（target_type+target_id/target_position）；复合动作共享 smart_object+interaction schema；GenericAct 兜底；MCP 不再做 KB 坐标解析 |
 
 ## 当前已知问题（2026-07-29 仿真分析）
 
 按严重度排序：
 
-1. **战术层输出 schema 漂移**：模型偶尔把 `target` 放顶层而非 `params` 内，或发明不存在的动作（如 `patrol_route`）和路线。"巡检"类目标强诱导漂移。**部分缓解**：三层决策 prompt 现注入【你的角色】+【世界知识】段（`buildAgentRoleContext` + `buildKBContext`），LLM 可见 KB 内合法 zone/object/agent 名，减少编造 KB 外概念；工具 jsonschema 描述已去硬编码 id 示例
+1. **战术层输出 schema 漂移**：模型偶尔把 `target_id` 放顶层而非 `params` 内，或发明不存在的动作（如 `patrol_route`/`chat_with` 等旧体系遗留名）。**部分缓解**：三层决策 prompt 现注入【你的角色】+【世界知识】段（`buildAgentRoleContext` + `buildKBContext`），LLM 可见 KB 内合法 zone/object/agent 名，减少编造 KB 外概念；工具 jsonschema 描述已去硬编码 id 示例；新 12 cmd 体系已移除易诱导漂移的 `patrol_route`/`chat_with` 等动作，改用 `generic_act(behavior=look_around)` + `move_to` + `speak` 组合
 2. **战术层队列提前耗尽**：模型给的 action 总时长不够 slot 时长，触发频繁重分解（50 秒内重调 LLM），浪费 token
 3. **反应层冷启动超时**：Ollama 模型卸载后首 call >8s 超时，预热后稳定 1.3s
 4. **反应层 0% replan 率**：当前 prompt 强偏向 continue/observe，从未触发 replan（成本中心问题）
