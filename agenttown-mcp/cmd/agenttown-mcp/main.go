@@ -1786,117 +1786,11 @@ type debugScheduleResponse struct {
 	Error        string          `json:"error,omitempty"`
 }
 
-// resolveDebugMoveToLocation 把 move_to_location 的参数解析成 ws.Call 需要的完整参数。
-// 与 tactical.go 的 move_to_location 分支保持一致：dest + speed。
-//
-// 支持两种输入模式：
-//  1. 直接传坐标：params.dest = [x, y, z]（UE5 cm）。跳过 kb 解析。
-//     适用于临时调试未知位置。
-//  2. 传 target id：params.target = "workbench_01" / "main_workshop"。
-//     走 kb.GetPosition 解析坐标。
-//
-// 两种模式都没有 → 报错。同时传时 dest 优先（更明确）。
-func resolveDebugMoveToLocation(params map[string]any, kb *worldkb.KB) (map[string]any, error) {
-	// 模式 1：直接传 dest 坐标
-	if dest, ok := params["dest"]; ok && dest != nil {
-		coords, err := parseDestCoords(dest)
-		if err != nil {
-			return nil, fmt.Errorf("parse dest: %w", err)
-		}
-		speed, _ := params["speed"].(string)
-		if speed == "" {
-			speed = "walk"
-		}
-		return map[string]any{
-			"dest":  coords,
-			"speed": speed,
-		}, nil
-	}
-
-	// 模式 2：传 target id 走 kb 解析
-	target, _ := params["target"].(string)
-	if target == "" {
-		return nil, errors.New("move_to_location requires params.dest ([x,y,z]) or params.target (kb id)")
-	}
-	if kb == nil {
-		return nil, errors.New("world kb not loaded, cannot resolve target (use params.dest for raw coords)")
-	}
-	coord, _, err := kb.GetPosition(target)
-	if err != nil {
-		return nil, fmt.Errorf("resolve target %q: %w", target, err)
-	}
-	speed, _ := params["speed"].(string)
-	if speed == "" {
-		speed = "walk"
-	}
-	return map[string]any{
-		"dest":  []float64{coord[0], coord[1], coord[2]},
-		"speed": speed,
-	}, nil
-}
-
-// parseDestCoords 把 params.dest（可能来自 JSON 的 []any / []float64 / []int）
-// 规整成 []float64 三元组。校验长度和数值合法性。
-func parseDestCoords(v any) ([]float64, error) {
-	arr, ok := v.([]any)
-	if !ok {
-		// JSON 解码后 []float64 也会变成 []any，但保险起见也接受原生类型
-		if farr, ok2 := v.([]float64); ok2 {
-			arr = make([]any, len(farr))
-			for i, f := range farr {
-				arr[i] = f
-			}
-		} else {
-			return nil, errors.New("dest must be an array of 3 numbers [x, y, z]")
-		}
-	}
-	if len(arr) != 3 {
-		return nil, fmt.Errorf("dest must have exactly 3 elements [x, y, z], got %d", len(arr))
-	}
-	out := make([]float64, 3)
-	for i, e := range arr {
-		f, err := toFloat64(e)
-		if err != nil {
-			return nil, fmt.Errorf("dest[%d] (%v): %w", i, e, err)
-		}
-		out[i] = f
-	}
-	return out, nil
-}
-
-// toFloat64 把 any 转 float64，支持 JSON 解码后的常见数值类型。
-func toFloat64(v any) (float64, error) {
-	switch n := v.(type) {
-	case float64:
-		return n, nil
-	case float32:
-		return float64(n), nil
-	case int:
-		return float64(n), nil
-	case int64:
-		return float64(n), nil
-	case json.Number:
-		f, err := n.Float64()
-		if err != nil {
-			return 0, fmt.Errorf("not a number: %s", n.String())
-		}
-		return f, nil
-	case string:
-		var f float64
-		if _, err := fmt.Sscanf(n, "%f", &f); err != nil {
-			return 0, fmt.Errorf("not a numeric string: %q", n)
-		}
-		return f, nil
-	default:
-		return 0, fmt.Errorf("unsupported numeric type %T", v)
-	}
-}
-
 // mapDebugCmd 把 debug 端点的 cmd 名（tool_name, snake_case）映射到 UE cmd
 // （PascalCase protocol 常量）。
 //
 // registry != nil 时从 EffectiveActions(agentID) 通过 CmdToToolName 反查，
-// 覆盖内置 14 cmd 与 UE 通过 capability_registry 新推送的 cmd。
+// 覆盖内置 12 cmd 与 UE 通过 capability_registry 新推送的 cmd。
 // registry == nil 时降级为 BuiltinToolSpecs 静态查找（向后兼容旧测试）。
 // scan_area/stop 没有 UE cmd（RequiredCmd=""），不通过此路径下发。
 //
@@ -1926,12 +1820,10 @@ func mapDebugCmd(cmd string, registry *CapabilityRegistry, agentID string) (prot
 	return "", false
 }
 
-// buildDebugParams 根据 cmd 处理 params：move_to_location 走 kb 解析，
-// 其他直接透传（composite cmd 不再需要 name 字段，每个 cmd 独立）。
+// buildDebugParams 根据 cmd 处理 params。新 12 cmd 体系下 MoveTo 由 UE 自己
+// 解析 target_type+target_id/target_position，MCP 不再做 KB 坐标解析，所有
+// cmd 的 params 直接透传。
 func buildDebugParams(cmd string, params map[string]any, kb *worldkb.KB) (map[string]any, error) {
-	if cmd == "move_to_location" {
-		return resolveDebugMoveToLocation(params, kb)
-	}
 	return params, nil
 }
 

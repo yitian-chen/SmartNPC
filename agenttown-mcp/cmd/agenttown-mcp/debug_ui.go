@@ -113,7 +113,7 @@ func handleDebugKB(w http.ResponseWriter, r *http.Request, kb *worldkb.KB, logge
 //
 // tool_name 字段由 tools.CmdToToolName(act.Cmd) 派生，前端下拉用 tool_name
 // 作 value，使其与 mapDebugCmd 的 tool_name 匹配路径以及前端 cmd 特殊处理
-// （如 cmd === 'move_to_location'）保持一致。
+// （如 cmd === 'move_to'）保持一致。
 //
 // 合成 Stop 能力项始终追加到每个 agent 列表末尾（不写进 registry 的
 // EffectiveActions/Snapshot，避免影响战术层 prompt 与 ReconcileTools）。
