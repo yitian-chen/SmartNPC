@@ -135,7 +135,7 @@ func TestFormatDailyPlan_MultipleItems(t *testing.T) {
 
 func TestGenerateDailyPlan_HTTPError(t *testing.T) {
 	sc := &fakeStrategicCaller{err: errors.New("network down")}
-	plan := generateDailyPlan(context.Background(), sc, "H-01", nil, nil, slog.Default(), "")
+	plan := generateDailyPlan(context.Background(), sc, "H-01", nil, nil, nil, slog.Default(), "")
 	// HTTP 错误现在回退到 prompt.DefaultDailyPlan(nil) 而不是空字符串，
 	// 保证战术层有目标可分解、仿真不瘫痪。
 	if plan != prompt.DefaultDailyPlan(nil) {
@@ -149,7 +149,7 @@ func TestGenerateDailyPlan_HTTPError(t *testing.T) {
 func TestGenerateDailyPlan_ValidResponse(t *testing.T) {
 	raw := `[{"time":"06:00-07:00","goal":"起床晨检"},{"time":"07:00-12:00","goal":"车间装配"}]`
 	sc := &fakeStrategicCaller{resp: makeStrategicResponse(raw)}
-	plan := generateDailyPlan(context.Background(), sc, "H-01", nil, nil, slog.Default(), "")
+	plan := generateDailyPlan(context.Background(), sc, "H-01", nil, nil, nil, slog.Default(), "")
 	if plan == "" {
 		t.Fatal("got empty plan, want non-empty")
 	}
@@ -163,7 +163,7 @@ func TestGenerateDailyPlan_ValidResponse(t *testing.T) {
 
 func TestGenerateDailyPlan_ParseFail(t *testing.T) {
 	sc := &fakeStrategicCaller{resp: makeStrategicResponse("今天天气不错，我打算去车间转转。")}
-	plan := generateDailyPlan(context.Background(), sc, "H-01", nil, nil, slog.Default(), "")
+	plan := generateDailyPlan(context.Background(), sc, "H-01", nil, nil, nil, slog.Default(), "")
 	// 解析失败现在回退到 prompt.DefaultDailyPlan(nil) 而不是空字符串，
 	// 避免整天 Wait(60s) 瘫痪。
 	if plan != prompt.DefaultDailyPlan(nil) {
@@ -409,7 +409,7 @@ func TestGenerateDailyPlan_KBInjectedIntoPrompt(t *testing.T) {
 	kb := loadTestKB(t)
 	raw := `[{"time":"06:00-07:00","goal":"起床晨检"}]`
 	sc := &fakeStrategicCaller{resp: makeStrategicResponse(raw)}
-	_ = generateDailyPlan(context.Background(), sc, "H-01", kb, nil, slog.Default(), "")
+	_ = generateDailyPlan(context.Background(), sc, "H-01", kb, nil, nil, slog.Default(), "")
 	prompt := sc.capturedInput
 	if prompt == "" {
 		t.Fatal("captured prompt is empty")

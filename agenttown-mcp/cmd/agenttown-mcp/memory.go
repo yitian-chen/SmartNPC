@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/AgentTown/agenttown-mcp/pkg/profile"
 	"github.com/AgentTown/agenttown-mcp/pkg/prompt"
 	"github.com/AgentTown/agenttown-mcp/pkg/storage"
 	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
@@ -65,6 +66,7 @@ func generateDailyMemories(
 	store storage.Store,
 	agentID string,
 	kb *worldkb.KB,
+	profiles map[string]*profile.Profile,
 	logger *slog.Logger,
 ) string {
 	if store == nil {
@@ -89,7 +91,7 @@ func generateDailyMemories(
 
 	roleCtx := ""
 	if kb != nil {
-		if role := prompt.AgentRole(kb, nil, agentID); role != "" {
+		if role := prompt.AgentRole(kb, profiles, agentID); role != "" {
 			roleCtx = "【你的角色】\n" + role
 		}
 	}

@@ -646,7 +646,7 @@ func boolPtr(b bool) *bool { return &b }
 func TestTacticalRefillForReplan_NoTacticalHc(t *testing.T) {
 	ac, _ := newAgentContext(context.Background())
 	// tacticalHc 默认 nil
-	ok := ac.tacticalRefillForReplan(context.Background(), "H-01", nil, nil, slog.Default(), "test hint")
+	ok := ac.tacticalRefillForReplan(context.Background(), "H-01", nil, nil, nil, slog.Default(), "test hint")
 	if ok {
 		t.Error("should return false when tacticalHc is nil")
 	}
@@ -657,7 +657,7 @@ func TestTacticalRefillForReplan_NoGoal(t *testing.T) {
 	// 设置 tacticalHc 但不设 dailyPlan → selectCurrentGoal 返回 ""
 	ac.tacticalHc = newFailedVenusClient()
 	ac.as.SetDailyPlan("", 0)
-	ok := ac.tacticalRefillForReplan(context.Background(), "H-01", nil, nil, slog.Default(), "test hint")
+	ok := ac.tacticalRefillForReplan(context.Background(), "H-01", nil, nil, nil, slog.Default(), "test hint")
 	if ok {
 		t.Error("should return false when no current goal")
 	}
@@ -678,7 +678,7 @@ func TestTacticalRefillForReplan_LLMFail(t *testing.T) {
 	if _, err := ac.as.SetPerception(percJSON); err != nil {
 		t.Fatalf("SetPerception: %v", err)
 	}
-	ok := ac.tacticalRefillForReplan(context.Background(), "H-01", nil, nil, slog.Default(), "test hint")
+	ok := ac.tacticalRefillForReplan(context.Background(), "H-01", nil, nil, nil, slog.Default(), "test hint")
 	if ok {
 		t.Error("should return false when LLM call fails")
 	}
@@ -713,7 +713,7 @@ func TestTacticalRefill_ConsumesReplanHint(t *testing.T) {
 	}
 	ac.as.SetReplanHint("疲劳=65超过60，需要休息")
 
-	_ = ac.tacticalRefill(context.Background(), "H-01", nil, nil, slog.Default())
+	_ = ac.tacticalRefill(context.Background(), "H-01", nil, nil, nil, slog.Default())
 
 	if hint := ac.as.Snapshot().ReplanHint; hint != "" {
 		t.Errorf("replanHint 应被 tacticalRefill 消费清空，仍剩 %q", hint)
@@ -734,7 +734,7 @@ func TestTacticalRefill_NoHintDoesNotPanic(t *testing.T) {
 	// 无 hint（默认空）
 
 	// 不应 panic
-	_ = ac.tacticalRefill(context.Background(), "H-01", nil, nil, slog.Default())
+	_ = ac.tacticalRefill(context.Background(), "H-01", nil, nil, nil, slog.Default())
 
 	if hint := ac.as.Snapshot().ReplanHint; hint != "" {
 		t.Errorf("replanHint 应保持空，得到 %q", hint)

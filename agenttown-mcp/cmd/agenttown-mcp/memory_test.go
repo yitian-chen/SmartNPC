@@ -128,7 +128,7 @@ func TestFormatParamsShort(t *testing.T) {
 // TestGenerateDailyMemories_NilStore verifies nil store returns "" without panic.
 func TestGenerateDailyMemories_NilStore(t *testing.T) {
 	sc := &fakeStrategicCaller{}
-	out := generateDailyMemories(context.Background(), sc, nil, "H-01", nil, slog.Default())
+	out := generateDailyMemories(context.Background(), sc, nil, "H-01", nil, nil, slog.Default())
 	if out != "" {
 		t.Errorf("nil store = %q, want empty", out)
 	}
@@ -138,7 +138,7 @@ func TestGenerateDailyMemories_NilStore(t *testing.T) {
 func TestGenerateDailyMemories_EmptyHistory(t *testing.T) {
 	sc := &fakeStrategicCaller{}
 	store := &memoryFakeStore{} // returns empty for LoadActionHistory
-	out := generateDailyMemories(context.Background(), sc, store, "H-01", nil, slog.Default())
+	out := generateDailyMemories(context.Background(), sc, store, "H-01", nil, nil, slog.Default())
 	if out != "" {
 		t.Errorf("empty history = %q, want empty", out)
 	}
@@ -150,7 +150,7 @@ func TestGenerateDailyMemories_LLMFail(t *testing.T) {
 	store := &memoryFakeStore{
 		actions: []storage.ActionRecord{{Cmd: "MoveTo", Source: "tactical", Result: "success", StartedAt: time.Now()}},
 	}
-	out := generateDailyMemories(context.Background(), sc, store, "H-01", nil, slog.Default())
+	out := generateDailyMemories(context.Background(), sc, store, "H-01", nil, nil, slog.Default())
 	if out != "" {
 		t.Errorf("llm fail = %q, want empty", out)
 	}
@@ -169,7 +169,7 @@ func TestGenerateDailyMemories_Success(t *testing.T) {
 			{Cmd: "WorkAtWorkbench", Source: "tactical", Result: "success", StartedAt: time.Now()},
 		},
 	}
-	out := generateDailyMemories(context.Background(), sc, store, "H-01", nil, slog.Default())
+	out := generateDailyMemories(context.Background(), sc, store, "H-01", nil, nil, slog.Default())
 	if out != "今天装配顺利" {
 		t.Errorf("narrative = %q, want '今天装配顺利'", out)
 	}
@@ -192,7 +192,7 @@ func TestGenerateDailyMemories_ImportanceDefault(t *testing.T) {
 	store := &memoryFakeStore{
 		actions: []storage.ActionRecord{{Cmd: "MoveTo", Source: "tactical", Result: "success", StartedAt: time.Now()}},
 	}
-	_ = generateDailyMemories(context.Background(), sc, store, "H-01", nil, slog.Default())
+	_ = generateDailyMemories(context.Background(), sc, store, "H-01", nil, nil, slog.Default())
 	if len(store.savedMemories) != 1 {
 		t.Fatalf("saved = %d, want 1", len(store.savedMemories))
 	}
