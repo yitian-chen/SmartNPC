@@ -29,10 +29,9 @@ import (
 //
 // auto_queue (约定21) lives inside params per UE5's schema, not at the
 // envelope level. UE5 expects a string "true"/"false" for
-// ChargeAtStation and a bool for InteractSmartObject. MCP's
-// shouldAutoQueue(cmd) still drives the envelope-level AutoQueue field
-// for backward compat with any older UE5 builds, but the params-level
-// value is now the authoritative source for real UE5.
+// ChargeAtStation and a bool for InteractSmartObject. The envelope-level
+// AutoQueue field is deprecated (always omitted); params-level value is
+// the authoritative source for real UE5.
 
 // WorkShiftInput — composite: work at a specified facility.
 type WorkShiftInput struct {

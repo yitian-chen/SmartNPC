@@ -698,23 +698,16 @@ func (g *guardedExecutor) SendAction(ctx context.Context, agentID string, decisi
 }
 
 // shouldAutoQueue reports whether the given cmd targets a Smart Object
-// that may be occupied by other NPCs. When true, action_command is sent
-// with auto_queue=true (约定21) so UE queues the agent instead of
-// rejecting the action outright.
+// that may be occupied by other NPCs.
 //
-// 6 cmds target smart objects: 5 composite (long-running facility use)
-// + 1 atomic InteractSmartObject. Other cmds (MoveTo/Speak/Wait/etc)
-// don't involve occupancy contention and default to false.
+// 2026-08-11 迁移后 auto_queue 作为 params 内字段传（按 UE5 capability_registry
+// 声明的类型：ChargeAtStation=string "true"，InteractSmartObject=bool true），
+// envelope-level AutoQueue 字段不再使用——保留旧 true 会让 UE5 收到两个
+// auto_queue 字段（envelope bool + params string），与 schema 冲突导致 UE5
+// 拒绝排队、直接回 action_completed{result:failed, reason:object_occupied_queueable}。
+// 这里永远返回 false 让 envelope 字段 omit，auto_queue 仅走 params 路径。
 func shouldAutoQueue(cmd string) bool {
-	switch cmd {
-	case protocol.CmdWorkShift,
-		protocol.CmdChargeAtStation,
-		protocol.CmdSelfMaintenance,
-		protocol.CmdRestAtResidence,
-		protocol.CmdSurfInternet,
-		protocol.CmdInteractSmartObject:
-		return true
-	}
+	_ = cmd
 	return false
 }
 

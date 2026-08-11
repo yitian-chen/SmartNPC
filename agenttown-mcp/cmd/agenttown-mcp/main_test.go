@@ -1290,31 +1290,33 @@ func TestDetectDayRollover_NoPerceptionNoRollover(t *testing.T) {
 
 // ─── auto_queue (约定21) ────────────────────────────────────────
 
-// TestShouldAutoQueue verifies the cmd → auto_queue mapping. Only cmds
-// that target Smart Objects (which may be occupied) opt into queueing;
-// other cmds default to false so UE rejects them outright on contention.
+// TestShouldAutoQueue verifies that shouldAutoQueue always returns false
+// after the 2026-08-11 migration: envelope-level auto_queue is deprecated,
+// auto_queue is now exclusively a params-level field (per UE5's
+// capability_registry schema). The function is kept as a no-op to avoid
+// churning call sites; the envelope-level AutoQueue field relies on
+// omitempty + always-false to be omitted from JSON.
 func TestShouldAutoQueue(t *testing.T) {
 	cases := []struct {
-		cmd  string
-		want bool
+		cmd string
 	}{
-		{protocol.CmdWorkShift, true},
-		{protocol.CmdChargeAtStation, true},
-		{protocol.CmdSelfMaintenance, true},
-		{protocol.CmdRestAtResidence, true},
-		{protocol.CmdSurfInternet, true},
-		{protocol.CmdInteractSmartObject, true},
-		{protocol.CmdMoveTo, false},
-		{protocol.CmdTurnTo, false},
-		{protocol.CmdSpeak, false},
-		{protocol.CmdEmote, false},
-		{protocol.CmdWait, false},
-		{protocol.CmdGenericAct, false},
-		{"UnknownCmd", false},
+		{protocol.CmdWorkShift},
+		{protocol.CmdChargeAtStation},
+		{protocol.CmdSelfMaintenance},
+		{protocol.CmdRestAtResidence},
+		{protocol.CmdSurfInternet},
+		{protocol.CmdInteractSmartObject},
+		{protocol.CmdMoveTo},
+		{protocol.CmdTurnTo},
+		{protocol.CmdSpeak},
+		{protocol.CmdEmote},
+		{protocol.CmdWait},
+		{protocol.CmdGenericAct},
+		{"UnknownCmd"},
 	}
 	for _, tc := range cases {
-		if got := shouldAutoQueue(tc.cmd); got != tc.want {
-			t.Errorf("shouldAutoQueue(%q) = %v, want %v", tc.cmd, got, tc.want)
+		if got := shouldAutoQueue(tc.cmd); got != false {
+			t.Errorf("shouldAutoQueue(%q) = %v, want false (envelope-level auto_queue deprecated)", tc.cmd, got)
 		}
 	}
 }
