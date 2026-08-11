@@ -44,6 +44,16 @@ type AgentState struct {
 	currentActionParams map[string]any
 	currentActionStart  time.Time
 	currentActionSrc    ActionSource
+	// Queue state (约定21): when an auto_queue=true action targets an
+	// occupied Smart Object, UE queues the agent and notifies via
+	// action_queued. These fields track the latest queue status so the
+	// reactive layer prompt can mention "正在排队等待…". Cleared on
+	// action completion, slot switch, replan, and agent offline.
+	queuedActionID      string
+	queuedGroup         string
+	queuedPosition      *int
+	queuedEstimatedWait *float64
+	queuedAt            time.Time
 	actionQueue         []PlannedAction
 	redecomposeCount    int
 	pendingStopActionID string
@@ -330,6 +340,9 @@ func (a *AgentState) RecordActionCompletion(actionID string) CompletionResult {
 	if wasInFlight {
 		a.currentActionSrc = ""
 	}
+	// 约定21: action 完成（无论 success/failed/interrupted）都清排队状态。
+	// timeout 路径下 action_queued{timeout} 已先行清理，这里兜底覆盖其他分支。
+	a.clearQueueStatusLocked()
 	a.mu.Unlock()
 
 	return CompletionResult{
@@ -341,6 +354,43 @@ func (a *AgentState) RecordActionCompletion(actionID string) CompletionResult {
 		Params:         params,
 		Start:          start,
 	}
+}
+
+// RecordQueueStatus updates the agent's queue tracking state based on an
+// incoming action_queued message (约定21). Caller is the WS handler in
+// main.go. Behavior by status:
+//   - queued:   write queue fields (agent is now waiting for the object)
+//   - advanced: clear queue fields (the action is now executing — queue
+//     phase is over, normal action_started/completed lifecycle resumes)
+//   - timeout:  clear queue fields (UE will follow with
+//     action_completed{failed, reason=queue_timeout} which also clears)
+//
+// Unknown action_id (e.g. queue notification for an already-cancelled
+// action) is tolerated: we still update fields on queued, since the UE
+// side is the source of truth for queue membership.
+func (a *AgentState) RecordQueueStatus(payload protocol.ActionQueuedPayload) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	switch payload.Status {
+	case protocol.QueueStatusQueued:
+		a.queuedActionID = payload.ActionID
+		a.queuedGroup = payload.Group
+		a.queuedPosition = payload.Position
+		a.queuedEstimatedWait = payload.EstimatedWaitSec
+		a.queuedAt = time.Now()
+	case protocol.QueueStatusAdvanced, protocol.QueueStatusTimeout:
+		a.clearQueueStatusLocked()
+	}
+}
+
+// clearQueueStatusLocked resets all queue tracking fields. Caller must
+// hold a.mu.
+func (a *AgentState) clearQueueStatusLocked() {
+	a.queuedActionID = ""
+	a.queuedGroup = ""
+	a.queuedPosition = nil
+	a.queuedEstimatedWait = nil
+	a.queuedAt = time.Time{}
 }
 
 // ClearInFlightAction clears in-flight tracking for the given actionID if it
@@ -446,6 +496,7 @@ func (a *AgentState) ClearForSlotSwitch() InFlightInfo {
 	a.currentActionParams = nil
 	a.currentActionStart = time.Time{}
 	a.currentActionSrc = ""
+	a.clearQueueStatusLocked()
 	a.currentSlot = ""
 	a.redecomposeCount = 0
 	snap := a.snapshotPersistentLocked()
@@ -473,6 +524,7 @@ func (a *AgentState) Stop() {
 	a.currentActionParams = nil
 	a.currentActionStart = time.Time{}
 	a.actionQueue = nil
+	a.clearQueueStatusLocked()
 	a.currentSlot = ""
 	a.redecomposeCount = 0
 	a.clearedAction = nil // drop stash — offline agent has no pending completion
@@ -917,6 +969,11 @@ func (a *AgentState) Snapshot() Snapshot {
 		CurrentActionParams: cloneParams(a.currentActionParams),
 		CurrentActionStart:  a.currentActionStart,
 		CurrentActionSrc:    a.currentActionSrc,
+		QueuedActionID:      a.queuedActionID,
+		QueuedGroup:         a.queuedGroup,
+		QueuedPosition:      cloneIntPtr(a.queuedPosition),
+		QueuedEstimatedWait: cloneFloat64Ptr(a.queuedEstimatedWait),
+		QueuedAt:            a.queuedAt,
 		ActionQueue:         cloneQueue(a.actionQueue),
 		DailyPlan:           a.dailyPlan,
 		CurrentDay:          a.currentDay,
@@ -1047,4 +1104,20 @@ func cloneStrings(s []string) []string {
 	cp := make([]string, len(s))
 	copy(cp, s)
 	return cp
+}
+
+func cloneIntPtr(p *int) *int {
+	if p == nil {
+		return nil
+	}
+	cp := *p
+	return &cp
+}
+
+func cloneFloat64Ptr(p *float64) *float64 {
+	if p == nil {
+		return nil
+	}
+	cp := *p
+	return &cp
 }

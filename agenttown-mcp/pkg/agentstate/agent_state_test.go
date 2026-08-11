@@ -843,3 +843,140 @@ func TestWriteThrough_NilStoreNoOp(t *testing.T) {
 		t.Errorf("in-memory state: got %+v, want all fields set", snap)
 	}
 }
+
+// ─── Queue state (约定21) ───────────────────────────────────────
+
+func TestRecordQueueStatus_Queued(t *testing.T) {
+	a := New()
+	pos := 2
+	wait := 30.0
+	a.RecordQueueStatus(protocol.ActionQueuedPayload{
+		ActionID:         "act_001",
+		Status:           protocol.QueueStatusQueued,
+		Group:            "workbench",
+		Position:         &pos,
+		EstimatedWaitSec: &wait,
+	})
+	snap := a.Snapshot()
+	if snap.QueuedActionID != "act_001" {
+		t.Errorf("QueuedActionID = %q", snap.QueuedActionID)
+	}
+	if snap.QueuedGroup != "workbench" {
+		t.Errorf("QueuedGroup = %q", snap.QueuedGroup)
+	}
+	if snap.QueuedPosition == nil || *snap.QueuedPosition != 2 {
+		t.Errorf("QueuedPosition = %v", snap.QueuedPosition)
+	}
+	if snap.QueuedEstimatedWait == nil || *snap.QueuedEstimatedWait != 30.0 {
+		t.Errorf("QueuedEstimatedWait = %v", snap.QueuedEstimatedWait)
+	}
+	if snap.QueuedAt.IsZero() {
+		t.Error("QueuedAt should be set")
+	}
+}
+
+func TestRecordQueueStatus_AdvancedClears(t *testing.T) {
+	a := New()
+	pos := 1
+	a.RecordQueueStatus(protocol.ActionQueuedPayload{
+		ActionID: "act_001",
+		Status:   protocol.QueueStatusQueued,
+		Group:    "workbench",
+		Position: &pos,
+	})
+	// advanced → action now executing, queue phase over
+	a.RecordQueueStatus(protocol.ActionQueuedPayload{
+		ActionID: "act_001",
+		Status:   protocol.QueueStatusAdvanced,
+	})
+	snap := a.Snapshot()
+	if snap.QueuedActionID != "" {
+		t.Errorf("QueuedActionID should be cleared, got %q", snap.QueuedActionID)
+	}
+	if snap.QueuedGroup != "" || snap.QueuedPosition != nil || snap.QueuedEstimatedWait != nil {
+		t.Errorf("queue fields should all be cleared: %+v", snap)
+	}
+}
+
+func TestRecordQueueStatus_TimeoutClears(t *testing.T) {
+	a := New()
+	a.RecordQueueStatus(protocol.ActionQueuedPayload{
+		ActionID: "act_001",
+		Status:   protocol.QueueStatusQueued,
+		Group:    "workbench",
+	})
+	a.RecordQueueStatus(protocol.ActionQueuedPayload{
+		ActionID: "act_001",
+		Status:   protocol.QueueStatusTimeout,
+	})
+	snap := a.Snapshot()
+	if snap.QueuedActionID != "" {
+		t.Errorf("QueuedActionID should be cleared after timeout, got %q", snap.QueuedActionID)
+	}
+}
+
+func TestRecordActionCompletion_ClearsQueueStatus(t *testing.T) {
+	a := New()
+	a.RecordActionStarted("act_001", "WorkShift", nil, SourceTactical)
+	a.RecordQueueStatus(protocol.ActionQueuedPayload{
+		ActionID: "act_001",
+		Status:   protocol.QueueStatusQueued,
+		Group:    "workbench",
+	})
+	// Action completes (any result) → queue state must be cleared.
+	a.RecordActionCompletion("act_001")
+	snap := a.Snapshot()
+	if snap.QueuedActionID != "" {
+		t.Errorf("queue state should be cleared on completion, got %q", snap.QueuedActionID)
+	}
+}
+
+func TestClearForSlotSwitch_ClearsQueueStatus(t *testing.T) {
+	a := New()
+	a.RecordActionStarted("act_001", "WorkShift", nil, SourceTactical)
+	a.RecordQueueStatus(protocol.ActionQueuedPayload{
+		ActionID: "act_001",
+		Status:   protocol.QueueStatusQueued,
+		Group:    "workbench",
+	})
+	a.ClearForSlotSwitch()
+	snap := a.Snapshot()
+	if snap.QueuedActionID != "" {
+		t.Errorf("queue state should be cleared on slot switch, got %q", snap.QueuedActionID)
+	}
+}
+
+func TestStop_ClearsQueueStatus(t *testing.T) {
+	a := New()
+	a.RecordQueueStatus(protocol.ActionQueuedPayload{
+		ActionID: "act_001",
+		Status:   protocol.QueueStatusQueued,
+		Group:    "workbench",
+	})
+	a.Stop()
+	snap := a.Snapshot()
+	if snap.QueuedActionID != "" {
+		t.Errorf("queue state should be cleared on stop, got %q", snap.QueuedActionID)
+	}
+}
+
+func TestSnapshot_QueueDeepCopy(t *testing.T) {
+	a := New()
+	pos := 2
+	a.RecordQueueStatus(protocol.ActionQueuedPayload{
+		ActionID: "act_001",
+		Status:   protocol.QueueStatusQueued,
+		Group:    "workbench",
+		Position: &pos,
+	})
+	snap := a.Snapshot()
+	// Mutate the snapshot's pointer field; the source state must be unaffected.
+	if snap.QueuedPosition == nil {
+		t.Fatal("QueuedPosition nil")
+	}
+	*snap.QueuedPosition = 99
+	snap2 := a.Snapshot()
+	if snap2.QueuedPosition == nil || *snap2.QueuedPosition != 2 {
+		t.Errorf("snapshot should deep-copy pointer fields: got %v", snap2.QueuedPosition)
+	}
+}

@@ -1605,9 +1605,28 @@ func main() {
 			"action_id", completed.ActionID, "result", completed.Result,
 			"reason", completed.Reason, "progress", completed.Progress,
 			"decision_queued", queued)
-			if trigger != "" && autoPlanEnabled {
-				go reactiveRunnerRef.trigger(agentID, ac, trigger, detail)
+		if trigger != "" && autoPlanEnabled {
+			go reactiveRunnerRef.trigger(agentID, ac, trigger, detail)
+		}
+
+		case protocol.TypeActionQueued:
+			var aq protocol.ActionQueuedPayload
+			if err := json.Unmarshal(payload, &aq); err != nil {
+				logger.Warn("action_queued parse failed", "err", err)
+				return
 			}
+			ac := lookupAgent(agentID)
+			if ac == nil {
+				logger.Warn("action_queued dropped for unregistered agent", "agent_id", agentID)
+				return
+			}
+			ac.as.RecordQueueStatus(aq)
+			logger.Info("action_queued", "agent_id", agentID,
+				"action_id", aq.ActionID, "status", aq.Status,
+				"group", aq.Group, "position", aq.Position)
+			// 不触发反应层：queued 是信息性状态，下次 periodic/action_done 等
+			// 触发时反应层 prompt 的【排队状态】段会带上。timeout 后 UE 会补
+			// action_completed{failed, queue_timeout}，走现有 TriggerActionDone 路径。
 
 		case protocol.TypeEventNotification:
 			var event protocol.EventNotificationPayload

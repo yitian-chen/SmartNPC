@@ -45,6 +45,13 @@ type Snapshot struct {
 	CurrentActionParams map[string]any
 	CurrentActionStart  time.Time
 	CurrentActionSrc    ActionSource
+	// Queue state (约定21): populated when UE notifies the agent is
+	// queued for an occupied Smart Object. Empty/zero when not queued.
+	QueuedActionID      string
+	QueuedGroup         string
+	QueuedPosition      *int
+	QueuedEstimatedWait *float64
+	QueuedAt            time.Time
 	ActionQueue         []PlannedAction
 	DailyPlan           string
 	CurrentDay          int
