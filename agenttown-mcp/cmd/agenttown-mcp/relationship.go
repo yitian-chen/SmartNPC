@@ -95,6 +95,12 @@ func seedRelationshipsFromKB(ctx context.Context, kb *worldkb.KB, store storage.
 	if len(kb.Relationships) == 0 {
 		return nil
 	}
+	// seen tracks the "other" agent already seeded in this call. KB may
+	// declare both directions of a bidirectional pair (e.g. H-01→H-02 and
+	// H-02→H-01), in which case registering H-01 would match both rows and
+	// seed H-01→H-02 twice. Dedupe in-memory to avoid redundant INSERT
+	// IGNORE calls (DB would dedupe anyway, but skip the extra round-trip).
+	seen := make(map[string]bool)
 	seeded := 0
 	for _, rel := range kb.Relationships {
 		// Only seed rows where agentID is involved. Import as agentID→other
@@ -115,6 +121,10 @@ func seedRelationshipsFromKB(ctx context.Context, kb *worldkb.KB, store storage.
 		if other == "" {
 			continue // self-relationship guard, shouldn't happen (KB validates)
 		}
+		if seen[other] {
+			continue // already seeded agentID→other in this call (KB declared both directions)
+		}
+		seen[other] = true
 		if err := store.SeedRelationship(ctx, agentID, other, fam, aff); err != nil {
 			logger.Warn("[关系层] KB 种子导入单条失败（继续其余）",
 				"agent_id", agentID, "other", other, "err", err)

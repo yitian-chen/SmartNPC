@@ -233,6 +233,80 @@ func TestShouldUpdateRelationship_NilClient(t *testing.T) {
 	}
 }
 
+// TestSeedRelationshipsFromKB_ThreeNPCColdStart 验证 3 NPC 冷启动场景下，
+// 每个 agent 注册时都正确种子涉及自己的所有 KB 关系行。
+// KB 形态对齐 assets/world_kb.yaml：6 条关系 = 3 对双向（H-01↔H-02、H-01↔H-03、H-02↔H-03）。
+// 每个 agent 注册时应种子 2 条出向行（agentID 作为 agent_a）。
+func TestSeedRelationshipsFromKB_ThreeNPCColdStart(t *testing.T) {
+	kb := &worldkb.KB{
+		Agents: []worldkb.Agent{{ID: "H-01"}, {ID: "H-02"}, {ID: "H-03"}},
+		Relationships: []worldkb.Relationship{
+			// H-01 ↔ H-02 (colleague)
+			{From: "H-01", To: "H-02", Familiarity: 60, Affection: 50, Type: "colleague"},
+			{From: "H-02", To: "H-01", Familiarity: 60, Affection: 50, Type: "colleague"},
+			// H-01 ↔ H-03 (colleague)
+			{From: "H-01", To: "H-03", Familiarity: 55, Affection: 45, Type: "colleague"},
+			{From: "H-03", To: "H-01", Familiarity: 55, Affection: 45, Type: "colleague"},
+			// H-02 ↔ H-03 (acquaintance)
+			{From: "H-02", To: "H-03", Familiarity: 30, Affection: 35, Type: "acquaintance"},
+			{From: "H-03", To: "H-02", Familiarity: 30, Affection: 35, Type: "acquaintance"},
+		},
+	}
+
+	cases := []struct {
+		registering string
+		wantSeeded  []storage.Relationship
+	}{
+		{
+			registering: "H-01",
+			wantSeeded: []storage.Relationship{
+				{AgentA: "H-01", AgentB: "H-02", Familiarity: 60, Affection: 50},
+				{AgentA: "H-01", AgentB: "H-03", Familiarity: 55, Affection: 45},
+			},
+		},
+		{
+			registering: "H-02",
+			wantSeeded: []storage.Relationship{
+				{AgentA: "H-02", AgentB: "H-01", Familiarity: 60, Affection: 50},
+				{AgentA: "H-02", AgentB: "H-03", Familiarity: 30, Affection: 35},
+			},
+		},
+		{
+			registering: "H-03",
+			wantSeeded: []storage.Relationship{
+				{AgentA: "H-03", AgentB: "H-01", Familiarity: 55, Affection: 45},
+				{AgentA: "H-03", AgentB: "H-02", Familiarity: 30, Affection: 35},
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.registering, func(t *testing.T) {
+			store := &relationshipFakeStore{}
+			if err := seedRelationshipsFromKB(context.Background(), kb, store, tc.registering, slog.Default()); err != nil {
+				t.Fatalf("seed %s: %v", tc.registering, err)
+			}
+			if len(store.seeded) != len(tc.wantSeeded) {
+				t.Fatalf("%s: got %d seeded, want %d; seeded=%+v",
+					tc.registering, len(store.seeded), len(tc.wantSeeded), store.seeded)
+			}
+			// 顺序匹配：seedRelationshipsFromKB 按 KB Relationships 数组顺序遍历，
+			// 所以 wantSeeded 的顺序应与 KB 中涉及该 agent 的关系出现顺序一致。
+			for i, want := range tc.wantSeeded {
+				got := store.seeded[i]
+				if got.AgentA != want.AgentA || got.AgentB != want.AgentB {
+					t.Errorf("%s seeded[%d] = %s→%s, want %s→%s",
+						tc.registering, i, got.AgentA, got.AgentB, want.AgentA, want.AgentB)
+				}
+				if got.Familiarity != want.Familiarity || got.Affection != want.Affection {
+					t.Errorf("%s seeded[%d] fam/aff = %d/%d, want %d/%d",
+						tc.registering, i, got.Familiarity, got.Affection, want.Familiarity, want.Affection)
+				}
+			}
+		})
+	}
+}
+
 // ensure time package is referenced (seedRelationshipsFromKB tests use time
 // only indirectly via storage.Relationship, but keep the import active).
 var _ = time.Time{}
