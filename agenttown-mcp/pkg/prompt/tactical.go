@@ -62,7 +62,7 @@ const tacticalPromptBody = `[战术层/任务分解] 当前时段目标：%s
 1. 第一行输出 {"inner_thought":"一句话内心独白"}
 2. 后续每行输出一个 {"action":"工具名","params":{...}}，按执行顺序排列
 3. 队列必须以长复合动作（标记 [复合]）结尾——长复合动作会持续执行直到时段切换，让 NPC 一直工作到下一 schedule 节点被 worker 主动打断
-4. 禁止输出 wait 动作；若无需移动/转身等前置步骤，可直接输出单个长复合动作，长复合动作包含移动到对应位置的逻辑
+4. 禁止输出 wait 动作；复合动作已包含自动移动到对应位置的逻辑，禁止在复合动作前加 move_to——直接输出单个长复合动作即可。仅当前置目标确实没有匹配的复合动作时才用 move_to + interact 原子组合
 5. 仅当目标确实没有匹配的长复合动作时（极少见），才用原子动作组合、结合调用兜底的 generic_act 通用动作实现目标
 6. move_to/turn_to 的 target_id、interact 和复合动作的 semantic_group 必须严格使用上面"可前往区域"和"可交互物体"中给出的 id，禁止编造、禁止拼接 zone/interaction 信息
 7. 每行一个 JSON 对象，不要输出 JSON 数组，不要输出 markdown 围栏，不要输出任何其他文字
@@ -319,17 +319,15 @@ func TacticalExample(kb *worldkb.KB, goal string) string {
 		if len(obj.AvailableInteractions) > 0 {
 			verb = obj.AvailableInteractions[0]
 		}
-		return fmt.Sprintf(`{"inner_thought":"先去目标区域再开始作业"}
-{"action":"move_to","params":{"target_type":"zone","target_id":"%s"}}
-{"action":"work_shift","params":{"semantic_group":"%s","interaction":"%s"}}`, exZone, exObj, verb)
+		return fmt.Sprintf(`{"inner_thought":"去工作设施开始作业"}
+{"action":"work_shift","params":{"semantic_group":"%s","interaction":"%s"}}`, exObj, verb)
 	case "charging_station", "charging":
 		verb := "<可用 interaction>"
 		if len(obj.AvailableInteractions) > 0 {
 			verb = obj.AvailableInteractions[0]
 		}
-		return fmt.Sprintf(`{"inner_thought":"先去目标区域补充能量"}
-{"action":"move_to","params":{"target_type":"zone","target_id":"%s"}}
-{"action":"charge_at_station","params":{"semantic_group":"%s","interaction":"%s"}}`, exZone, exObj, verb)
+		return fmt.Sprintf(`{"inner_thought":"去充电设施补充能量"}
+{"action":"charge_at_station","params":{"semantic_group":"%s","interaction":"%s"}}`, exObj, verb)
 	default:
 		verb := "<可用 interaction>"
 		if len(obj.AvailableInteractions) > 0 {
@@ -363,34 +361,24 @@ func exampleForGoal(kb *worldkb.KB, goal string, zones []worldkb.ZoneInfo, objs 
 	// 2. 充电/补能/休息/恢复/疲劳 → charge_at_station
 	if containsAny(gl, "充电", "补能", "休息", "恢复", "疲劳", "charge", "rest") {
 		if obj := findObjectByCategory(objs, "charging_station", "charging"); obj != nil {
-			exZone := obj.ZoneID
-			if exZone == "" {
-				exZone = "<上方可前往区域的 id>"
-			}
 			verb := "<可用 interaction>"
 			if len(obj.AvailableInteractions) > 0 {
 				verb = obj.AvailableInteractions[0]
 			}
-			return fmt.Sprintf(`{"inner_thought":"先去目标区域补充能量"}
-{"action":"move_to","params":{"target_type":"zone","target_id":"%s"}}
-{"action":"charge_at_station","params":{"semantic_group":"%s","interaction":"%s"}}`, exZone, obj.ID, verb)
+			return fmt.Sprintf(`{"inner_thought":"去充电设施补充能量"}
+{"action":"charge_at_station","params":{"semantic_group":"%s","interaction":"%s"}}`, obj.ID, verb)
 		}
 	}
 
 	// 3. 装配/工作/作业/打磨/加工 → work_shift
 	if containsAny(gl, "装配", "工作", "作业", "打磨", "加工", "assemble", "craft") {
 		if obj := findObjectByCategory(objs, "workbench", "work"); obj != nil {
-			exZone := obj.ZoneID
-			if exZone == "" {
-				exZone = "<上方可前往区域的 id>"
-			}
 			verb := "<可用 interaction>"
 			if len(obj.AvailableInteractions) > 0 {
 				verb = obj.AvailableInteractions[0]
 			}
-			return fmt.Sprintf(`{"inner_thought":"先去目标区域再开始作业"}
-{"action":"move_to","params":{"target_type":"zone","target_id":"%s"}}
-{"action":"work_shift","params":{"semantic_group":"%s","interaction":"%s"}}`, exZone, obj.ID, verb)
+			return fmt.Sprintf(`{"inner_thought":"去工作设施开始作业"}
+{"action":"work_shift","params":{"semantic_group":"%s","interaction":"%s"}}`, obj.ID, verb)
 		}
 	}
 

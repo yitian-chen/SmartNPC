@@ -1128,8 +1128,24 @@ func TestBuildTacticalExample_NilKB(t *testing.T) {
 // 的 target_id 必须与示例 object 的 ZoneID 一致。旧版取 ListZones()[0] 作示例 zone，
 // 但 ListZones()[0]=archive_station 与 ListObjects()[0]=charge（在 central_plaza）
 // 不在同一 zone，示例本身错配，LLM 模仿后产生 zone-object 错配。
+//
+// 2026-08-11 修复后：复合动作示例（work_shift/charge_at_station）去掉 move_to 前置
+// （复合动作自带移动），只有 default 分支（interact 原子组合）才有 move_to。
+// 本测试改用 inline KB 构造一个 default 分支 object（category=rest_bench）验证配对。
 func TestBuildTacticalExample_ZoneObjectPairing(t *testing.T) {
-	kb := loadTestKB(t)
+	kb := &worldkb.KB{
+		Zones: []worldkb.Zone{
+			{ID: "archive_station", DisplayName: "档案馆"},
+			{ID: "rest_area", DisplayName: "休息区"},
+		},
+		Objects: []worldkb.Object{{
+			ID:                    "bench_01",
+			DisplayName:           "长椅",
+			Category:              "rest_bench",
+			ZoneID:                "rest_area",
+			AvailableInteractions: []string{"rest"},
+		}},
+	}
 	objs := kb.ListObjects()
 	if len(objs) == 0 {
 		t.Skip("KB has no objects, pairing test not applicable")
@@ -1140,7 +1156,7 @@ func TestBuildTacticalExample_ZoneObjectPairing(t *testing.T) {
 		t.Skip("first object has no ZoneID, cannot verify pairing")
 	}
 	got := prompt.TacticalExample(kb, "")
-	// 示例应包含 move_to 到 wantZone，且引用 firstObj.ID。
+	// default 分支示例应包含 move_to 到 wantZone，且引用 firstObj.ID。
 	moveLine := fmt.Sprintf(`{"action":"move_to","params":{"target_type":"zone","target_id":"%s"}}`, wantZone)
 	if !strings.Contains(got, moveLine) {
 		t.Errorf("example should move_to(%s) to match object's ZoneID, got: %q", wantZone, got)
@@ -1180,6 +1196,10 @@ func TestBuildTacticalExample_GoalAssembly(t *testing.T) {
 	if strings.Contains(got, "charge_at_station") {
 		t.Errorf("assembly goal must NOT fall back to charge example: %q", got)
 	}
+	// 2026-08-11 修复：复合动作示例不应含 move_to（复合动作自带移动）。
+	if strings.Contains(got, `"action":"move_to"`) {
+		t.Errorf("work_shift example must NOT contain move_to (composite includes movement): %q", got)
+	}
 }
 
 func TestBuildTacticalExample_GoalCharge(t *testing.T) {
@@ -1191,6 +1211,10 @@ func TestBuildTacticalExample_GoalCharge(t *testing.T) {
 	}
 	if !strings.Contains(got, "charge") {
 		t.Errorf("example should reference charge: %q", got)
+	}
+	// 2026-08-11 修复：复合动作示例不应含 move_to（复合动作自带移动）。
+	if strings.Contains(got, `"action":"move_to"`) {
+		t.Errorf("charge_at_station example must NOT contain move_to (composite includes movement): %q", got)
 	}
 }
 
