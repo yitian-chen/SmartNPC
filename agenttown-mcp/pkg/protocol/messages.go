@@ -77,9 +77,10 @@ type ScanAreaPayload struct {
 
 // ActionCommandPayload is the payload of an action_command message.
 type ActionCommandPayload struct {
-	ActionID string         `json:"action_id"`
-	Cmd      string         `json:"cmd"`
-	Params   map[string]any `json:"params"`
+	ActionID  string         `json:"action_id"`
+	Cmd       string         `json:"cmd"`
+	Params    map[string]any `json:"params"`
+	AutoQueue bool           `json:"auto_queue,omitempty"` // 约定21: true=目标 Smart Object 被占用时让 UE 自动排队而非直接失败
 }
 
 // ─── action_started (UE → Agent, ACK) ───────────────────────────
@@ -110,6 +111,19 @@ type ActionCompletedPayload struct {
 type StopActionPayload struct {
 	ActionID string `json:"action_id"`
 	Reason   string `json:"reason"`
+}
+
+// ─── action_queued (UE → Agent, 排队状态通知) ────────────────────
+
+// ActionQueuedPayload notifies the agent of queue status changes when
+// an auto_queue=true action targets an occupied Smart Object that
+// supports queueing (约定21). status=queued/advanced/timeout.
+type ActionQueuedPayload struct {
+	ActionID         string   `json:"action_id"`
+	Status           string   `json:"status"`                      // queued/advanced/timeout
+	Group            string   `json:"group,omitempty"`             // 目标设施的语义组名（如 workbench）
+	Position         *int     `json:"position,omitempty"`          // 排队位置（0 = 队首）
+	EstimatedWaitSec *float64 `json:"estimated_wait_sec,omitempty"` // 预计等待时长（秒）
 }
 
 // ─── event_notification (Agent internal) ────────────────────────

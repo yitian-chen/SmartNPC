@@ -162,6 +162,7 @@ sequenceDiagram
 |----------|------|----------|
 | UE → Agent | `perception_update` | 按 agent_id → 对应 Agent Mind |
 | UE → Agent | `action_started` | 按 agent_id → 对应 Agent Mind |
+| UE → Agent | `action_queued` | 按 agent_id → 对应 Agent Mind |
 | UE → Agent | `action_completed` | 按 agent_id → 对应 Agent Mind |
 | UE → Agent | `state_report` | 按 agent_id → 对应 Agent Mind |
 | UE → Agent | `agent_registered` | → Agent Manager（创建新 Agent Mind） |
@@ -237,6 +238,7 @@ graph TB
 | `perception_update` | UE → Agent | 感知快照上报（**含空间状态；物理状态仅在变化超阈值时附带**） | 每 3 秒 / zone 变化 / 事件触发 |
 | `action_command` | Agent → UE | 下发动作指令 | 战术层/反应层产出新 action |
 | `action_started` | UE → Agent | **动作已接收并开始执行的回执（ACK）** | UE 收到 action_command 并成功启动后立即回 |
+| `action_queued` | UE → Agent | 排队状态通知（queued/advanced/timeout） | Agent 自动排队时，排队入队/轮到/超时 |
 | `action_completed` | UE → Agent | 动作完成回调 | 原子 Action BT / 复合 Action BT 完成 |
 | `stop_action` | Agent → UE | 停止当前动作 | 反应层决定打断 |
 | `scan_area` | Agent → UE | 请求即时感知推送（携带 scan_id 关联响应） | scan_area 工具调用时，触发一次即时 perception_update |
@@ -375,6 +377,8 @@ graph TB
 ```
 
 > **注**：`action_id` 位于 payload 内（遵循约定1）。`action_id` 由 **Agent 侧生成并保证同一 agent 内唯一**，UE 侧原样回传于 action_started/action_completed。
+>
+> **`auto_queue` 字段**（约定21，2026-08-11 新增）：可选 bool，默认 `false`。设为 `true` 时，若目标 Smart Object 已被占用且该对象支持排队，UE 会将 Agent 加入排队队列（而非直接拒绝），并通过 `action_queued` 消息通知排队状态变化。Agent 侧对智能体对象类 cmd（`WorkShift`/`ChargeAtStation`/`SelfMaintenance`/`RestAtResidence`/`SurfInternet`/`InteractSmartObject`）默认设为 `true`。
 
 **cmd 分类总览（数据驱动，能力清单自动下发）**：
 
@@ -732,7 +736,7 @@ graph TB
     "action_id": "act_001",
     "result": "success",
     "duration_ms": 30200,
-    "reason": "xxx",
+    "reason" : "xxx",
     "progress": 1.0,
     "details": {}
   }
@@ -746,25 +750,14 @@ graph TB
 | `interrupted` | 被 stop_action 打断 |
 | `error` | 异常错误 |
 
-**payload 字段**：
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `action_id` | string | UE 原样回传 Agent 下发时的 action_id |
-| `result` | enum | `success`/`failed`/`interrupted`/`error` |
-| `duration_ms` | int | 实际执行时长（毫秒） |
-| `reason` | string (可选) | 失败/打断/异常原因（如"寻路不可达"），success 时常为空。Agent 侧记入日志并折入反应层 TriggerDetail |
-| `progress` | float | 完成进度 0.0-1.0（interrupted 时表示被打断时的进度） |
-| `details` | object | 扩展信息（如 interrupted 时的 `completed_steps` / `interrupted_at_step`） |
-
 **interrupted 时带 progress**：
 
 ```json
 {
   "result": "interrupted",
-  "reason": "stop_action received",
   "progress": 0.6,
   "details": {
+    "reason": "stop_action received",
     "completed_steps": ["MoveTo", "TurnTo"],
     "interrupted_at_step": "PlayAssembleLoop"
   }
@@ -792,6 +785,50 @@ graph TB
 > - **匹配** → UE 停止该动作，回 `action_completed {result: "interrupted", progress: ...}`。
 > - **不匹配**（目标动作已完成或已被新动作替换）→ UE **忽略该 stop**，并回一条 `error {error_code: "STOP_ID_MISMATCH", context: {requested: act_010, current: act_012}}`，避免误停新动作。
 > - Agent 侧收到 mismatch error 后，以最新的 action 状态为准重新决策，不重复发送 stop。
+
+#### action_queued（UE → Agent，排队状态通知）
+
+> **用途**：当 Agent 发起一个设置了 `auto_queue=true` 的 action，但目标 Smart Object 已被占用、且该对象支持排队时，UE 将 Agent 加入排队队列，并通过 `action_queued` 通知 Agent 排队状态变化。Agent 凭此明确知道"自己在排队 / 轮到了 / 超时了"，从而决定继续等待或重新规划。
+>
+> **背景（2026-08-11 新增）**：排队不是"立即失败"，而是"挂起等待"的中间状态。为不破坏 `action_started`（动作已开始调度的 ACK 语义），排队状态走独立的 `action_queued` 消息通道，不与 `action_started`/`action_completed` 混用。
+
+```json
+{
+  "version": "1.0",
+  "msg_id": "uuid-020",
+  "seq": 1004,
+  "timestamp": 1719456045000,
+  "type": "action_queued",
+  "agent_id": "H-01",
+  "payload": {
+    "action_id": "act_001",
+    "status": "queued",
+    "group": "workbench",
+    "position": 2,
+    "estimated_wait_sec": 30
+  }
+}
+```
+
+| payload 字段 | 类型 | 说明 |
+|--------------|------|------|
+| action_id | string | 对应的 action_command 的 action_id |
+| status | string | 排队状态：`queued` / `advanced` / `timeout` |
+| group | string | 目标设施的语义组名（如 `workbench`） |
+| position | int | 排队位置（0 = 队首），可选 |
+| estimated_wait_sec | float | 预计等待时长（秒），可选 |
+
+| status 值 | 触发时机 | Agent 应做什么 |
+|-----------|----------|----------------|
+| `queued` | Agent 已入队，开始排队等待 | 更新自身状态为"排队中"，继续等（或发 stop_action 取消） |
+| `advanced` | 轮到该 Agent（对象已释放，占用成功） | 该 Agent 获得占用，开始执行 interaction |
+| `timeout` | 排队超时（UE 侧队列超时被移除） | 放弃排队，重新规划 / 换目标 |
+
+> **约定 21（排队与 action 生命周期）**：
+> - **排队不占用 `action_started` 语义**：`action_started` 仍表示"已接收并开始调度"，不因排队改变。
+> - **`queued` 后可能没有 `action_completed`**（除非超时/取消）：排队中的 action 处于"等待中"状态，轮到后直接执行，最后以 `action_completed` 结束。
+> - **`timeout` 后 UE 会补一条 `action_completed {result: failed, reason: queue_timeout}`**，Agent 据此结束该 action。
+> - **取消排队**：Agent 发 `stop_action` 即可。UE 收到后中断行为树，`QueueForSmartObject` 的 abort 处理会把自己移出队列，并回 `action_completed {result: interrupted}`。
 
 #### scan_area（Agent → UE）
 
