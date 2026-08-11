@@ -284,6 +284,7 @@ type Envelope struct {
 | `action_command` | Agent→UE | 下发动作指令 | 工具调用 / LLM 决策 |
 | `action_started` | UE→Agent | 动作已接收的 ACK（≤2s） | UE 收到 action_command 后 |
 | `action_completed` | UE→Agent | 动作完成回调 | 动作执行完毕 |
+| `action_queued` | UE→Agent | 排队状态通知（queued/advanced/timeout） | auto_queue=true 的 action 目标 Smart Object 被占用且支持排队时 |
 | `stop_action` | Agent→UE | 停止当前动作 | 反应层打断 |
 | `event_notification` | Agent→Agent | 事件通知（内部路由） | Director 投放事件 |
 | `state_report` | UE→Agent | 物理状态权威上报 | 变化超阈值 / 每 15 秒兜底 |
@@ -326,6 +327,17 @@ sequenceDiagram
 | LLM 调用 | 120 秒 | 返回错误，跳过该轮 |
 | 心跳响应 | 15 秒 | 认为断线 |
 | 重连尝试 | 3 秒间隔，指数退避到 30 秒 | 持续重试 |
+
+### 排队机制（约定21，2026-08-11 新增）
+
+当 Agent 发起 `auto_queue=true` 的 action 但目标 Smart Object 已被占用且支持排队时，UE 将 Agent 加入排队队列，通过 `action_queued` 消息通知状态变化。MCP 侧处理：
+
+- **auto_queue 发送端**：`shouldAutoQueue(cmd)` 对 6 个智能体对象 cmd（`WorkShift`/`ChargeAtStation`/`SelfMaintenance`/`RestAtResidence`/`SurfInternet`/`InteractSmartObject`）返回 true，其他 cmd 默认 false。`guardedExecutor.SendAction` 和 `popAndSendQueueAction` 自动按 cmd 决定 `ActionCommandPayload.AutoQueue` 字段。`/debug/action` 路径传 false（手动调试不排队）
+- **action_queued 接收端**：WS handler 解析 `ActionQueuedPayload` → `agentstate.RecordQueueStatus` 按 status 处理：`queued` 写入排队字段（actionID/group/position/estimatedWait/queuedAt）、`advanced`/`timeout` 清空。不触发反应层 Ollama 决策（queued 是信息性状态，下次 periodic/action_done 等触发时 prompt 的【排队状态】段会带上）
+- **排队状态清理点**：`RecordActionCompletion`（action 完成）、`ClearForSlotSwitch`/`ClearForReplan`（slot 切换/replan）、`Stop`（agent 下线）都调 `clearQueueStatusLocked`，确保排队状态不残留
+- **timeout 路径**：UE 在排队超时后会补一条 `action_completed {result: failed, reason: queue_timeout}`，走现有 `TriggerActionDone` 路径触发反应层重新决策
+- **取消排队**：Agent 发 `stop_action` 即可。UE 收到后中断行为树，`QueueForSmartObject` 的 abort 处理会把自己移出队列，并回 `action_completed {result: interrupted}`
+- **反应层 prompt 注入**：`ReactiveInput.QueuedFor` 由 `reactive_runner.buildInput` 从 snapshot 构造为 `正在排队等待 <group>（位置 N，预计等待 M 秒）`，注入 prompt 新增的【排队状态】段。不在排队时整段省略
 
 ## 数值系统
 

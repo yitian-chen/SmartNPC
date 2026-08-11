@@ -62,6 +62,7 @@ type ReactiveInput struct {
 	CurrentAction     string // readable description of in-flight action (e.g. "WorkShift(smart_object=workbench_01)"), empty = no in-flight
 	ElapsedSec        int    // seconds the current action has been running
 	ActionSrc         string // in-flight action source: tactical / mcp_tool / empty
+	QueuedFor         string // 排队状态描述（约定21，如 "正在排队等待 workbench（位置 2，预计等待 30 秒）"），空 = 不在排队
 	CurrentSlot       string // current tactical slot "HH:MM-HH:MM", empty = not decomposed
 	DailyPlan         string // strategic daily plan summary (formatted string), empty = not generated
 	Trigger           ReactiveTrigger

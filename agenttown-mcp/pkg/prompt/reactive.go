@@ -94,7 +94,7 @@ const ReactivePromptTemplate = `你是 NPC %s 的反应决策模块。当前情�
 【在途动作】
 %s
 来源：%s（战术层规划的动作为深思熟虑的结果，非必要不打断）
-
+%s
 【战术层上下文】
 当前时段：%s
 每日计划摘要：
@@ -160,6 +160,15 @@ func BuildReactive(in ReactiveInput) string {
 		physicalLine = fmt.Sprintf("物理：体力=%.0f/100, 疲劳=%.0f/100, 健康=%.0f/100\n", in.Energy, in.Fatigue, in.Health)
 		physicalRuleLine = "- 物理状态告警时（体力<40、疲劳>80、健康<50）原则上需要输出 replan 让 NPC 休息/充电、不可输出 continue/observe\n"
 	}
+	// Queue segment (约定21): empty when not queued → entire segment
+	// collapses to a single blank line. When queued, show what the agent
+	// is waiting for so the reactive layer can factor it into continue/
+	// replan decisions (e.g. "already queued 30s, queue timeout imminent
+	// → consider replan to switch target").
+	queuedLine := "\n"
+	if in.QueuedFor != "" {
+		queuedLine = fmt.Sprintf("\n【排队状态】\n%s\n", in.QueuedFor)
+	}
 	return fmt.Sprintf(ReactivePromptTemplate,
 		agentName,
 		agentRole,
@@ -167,6 +176,7 @@ func BuildReactive(in ReactiveInput) string {
 		physicalLine,
 		currentAction,
 		actionSrc,
+		queuedLine,
 		slot,
 		plan,
 		detail,
