@@ -1771,6 +1771,12 @@ func runHTTP(ctx context.Context, logger *slog.Logger, server *mcp.Server, addr 
 			handleDebugPlan(w, r, lookupAgent, listAgentIDs, logger)
 			return
 		}
+		// /debug/agents — 返回已注册 agent ID 列表，供前端填充 agent 下拉。
+		// 数据源是 agents map（agent_registered 写入），不是 capability_registry。
+		if r.URL.Path == "/debug/agents" {
+			handleDebugAgents(w, r, listAgentIDs, logger)
+			return
+		}
 		http.NotFound(w, r)
 	})
 

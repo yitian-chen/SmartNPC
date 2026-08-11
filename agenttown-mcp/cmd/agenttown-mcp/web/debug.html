@@ -396,8 +396,8 @@
     <div id="tab-action">
     <div class="field">
       <label for="agent_id">agent_id <span class="req">*</span></label>
-      <input type="text" id="agent_id" value="H-01" />
-      <div class="hint">UE 注册的 agent id（当前固定 H-01）</div>
+      <select id="agent_id"></select>
+      <div class="hint">已注册的 agent（来自 /debug/agents，每 5s 刷新）</div>
     </div>
 
     <div class="field">
@@ -436,8 +436,8 @@
     <div id="tab-schedule" style="display:none">
       <div class="field">
         <label for="sched-agent">agent_id <span class="req">*</span></label>
-        <input type="text" id="sched-agent" value="H-01" />
-        <div class="hint">UE 注册的 agent id（当前固定 H-01）</div>
+        <select id="sched-agent"></select>
+        <div class="hint">已注册的 agent（来自 /debug/agents，每 5s 刷新）</div>
       </div>
 
       <div class="field">
@@ -474,7 +474,6 @@
     <div class="field" style="margin-bottom:10px;">
       <label for="plan-agent">agent</label>
       <select id="plan-agent" onchange="onPlanAgentChange()" style="width:auto;min-width:120px;">
-        <option value="H-01">H-01</option>
       </select>
     </div>
     <div id="plan-list">
@@ -533,19 +532,20 @@ let logEntries = []; // MCP 日志条目（来自 /debug/logs）
 let logFilter = 'ALL'; // 当前日志筛选级别
 let planData = { items: [], current_idx: -1, auto_plan: true, game_time: '' };
 let planAgentID = 'H-01';
+let registeredAgents = ['H-01']; // 已注册 agent 列表（来自 /debug/agents）
 
 // ─── 初始化 ──────────────────────────────────────────────
 async function init() {
-  await Promise.all([loadStatus(), loadKB(), loadCap(), loadUEErrors(), loadLogs(), loadPlan()]);
+  await Promise.all([loadStatus(), loadKB(), loadCap(), loadUEErrors(), loadLogs(), loadPlan(), loadAgents()]);
   onCmdChange();
   updateSchedCurlPreview();
-  rebuildPlanAgentDropdown();
-  // 定时刷新状态徽章 + capability + UE 错误 + MCP 日志 + schedule（每 5s）
+  // 定时刷新状态徽章 + capability + UE 错误 + MCP 日志 + schedule + agent 列表（每 5s）
   setInterval(loadStatus, 5000);
   setInterval(loadCap, 5000);
   setInterval(loadUEErrors, 5000);
   setInterval(loadLogs, 5000);
   setInterval(loadPlan, 5000);
+  setInterval(loadAgents, 5000);
 }
 
 async function loadStatus() {
@@ -587,7 +587,6 @@ async function loadCap() {
       capVersion = newVersion;
       capData = j || { agents: {} };
       rebuildCmdDropdown();
-      rebuildPlanAgentDropdown();
     }
   } catch (e) {
     console.warn('loadCap failed:', e);
@@ -650,17 +649,55 @@ async function loadPlan() {
   }
 }
 
-function rebuildPlanAgentDropdown() {
-  const sel = document.getElementById('plan-agent');
-  if (!sel) return;
-  // 复用 /debug/cap 的 agents map（过滤 "system" 全局默认），为多 NPC 扩展预留
-  const agents = Object.keys(capData.agents || {}).filter(k => k !== 'system').sort();
-  if (!agents.length) agents.push('H-01');
-  const cur = agents.includes(planAgentID) ? planAgentID : agents[0];
-  sel.innerHTML = agents.map(a => `<option value="${a}" ${a === cur ? 'selected' : ''}>${a}</option>`).join('');
-  if (cur !== planAgentID) {
-    planAgentID = cur;
-    loadPlan();
+// ─── 已注册 agent 列表加载和下拉填充 ─────────────────────
+// 数据源是 /debug/agents（agents map 的 key，即 agent_registered 写入的），
+// 不是 capability_registry（后者按 system 全局下发，不产生 per-agent 条目）。
+async function loadAgents() {
+  try {
+    const r = await fetch('/debug/agents');
+    if (!r.ok) return;
+    const j = await r.json();
+    const ids = (j && j.agents && j.agents.length) ? j.agents.slice() : ['H-01'];
+    // 仅在列表变化时重建，避免每 5s 刷新破坏用户当前选择
+    if (ids.join(',') !== registeredAgents.join(',')) {
+      registeredAgents = ids;
+      rebuildAgentDropdowns();
+    }
+  } catch (e) {
+    console.warn('loadAgents failed:', e);
+  }
+}
+
+// rebuildAgentDropdowns 用 registeredAgents 填充三个 agent 选择器：
+// plan-agent（日程面板）、agent_id（单 Action tab）、sched-agent（Schedule 注入 tab）。
+// 保留各选择器当前值（若新列表仍包含该值），否则选第一个。
+function rebuildAgentDropdowns() {
+  const ids = registeredAgents;
+  // plan-agent
+  const planSel = document.getElementById('plan-agent');
+  if (planSel) {
+    const cur = ids.includes(planAgentID) ? planAgentID : ids[0];
+    planSel.innerHTML = ids.map(a => `<option value="${a}" ${a === cur ? 'selected' : ''}>${a}</option>`).join('');
+    if (cur !== planAgentID) {
+      planAgentID = cur;
+      loadPlan();
+    }
+  }
+  // agent_id（单 Action tab）
+  const actionSel = document.getElementById('agent_id');
+  if (actionSel) {
+    const cur = ids.includes(actionSel.value) ? actionSel.value : ids[0];
+    actionSel.innerHTML = ids.map(a => `<option value="${a}" ${a === cur ? 'selected' : ''}>${a}</option>`).join('');
+    actionSel.value = cur;
+    updateCurlPreview();
+  }
+  // sched-agent（Schedule 注入 tab）
+  const schedSel = document.getElementById('sched-agent');
+  if (schedSel) {
+    const cur = ids.includes(schedSel.value) ? schedSel.value : ids[0];
+    schedSel.innerHTML = ids.map(a => `<option value="${a}" ${a === cur ? 'selected' : ''}>${a}</option>`).join('');
+    schedSel.value = cur;
+    updateSchedCurlPreview();
   }
 }
 
@@ -1068,7 +1105,8 @@ async function submitSchedule() {
 }
 
 function resetScheduleForm() {
-  document.getElementById('sched-agent').value = 'H-01';
+  const schedSel = document.getElementById('sched-agent');
+  if (schedSel && schedSel.options.length > 0) schedSel.selectedIndex = 0;
   document.getElementById('sched-text').value = '';
   document.getElementById('sched-force').checked = true;
   updateSchedCurlPreview();

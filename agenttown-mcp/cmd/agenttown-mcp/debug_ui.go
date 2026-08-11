@@ -173,6 +173,33 @@ type debugCapResponse struct {
 	Agents map[string][]debugCapAction `json:"agents"`
 }
 
+// handleDebugAgents 返回当前已注册的 agent ID 列表，供 debug 控制台
+// 填充 agent 下拉菜单。数据源是 main.go 的 listAgentIDs()（即 agents map
+// 的 key，按字典序排序）。未注册任何 agent 时返回 ["H-01"] 兜底，兼容
+// 旧版冷启动行为。
+//
+// 与 /debug/cap 不同：capability_registry 按 agent_id="system" 全局下发，
+// 不会为每个 NPC 产生 per-agent 条目，因此 /debug/cap 的 agents map 不能
+// 作为已注册 agent 列表的来源。本端点直接读 agents 注册表，反映真实的
+// agent_registered 状态。
+func handleDebugAgents(w http.ResponseWriter, r *http.Request, listAgentIDs func() []string, logger *slog.Logger) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+	ids := listAgentIDs()
+	if len(ids) == 0 {
+		ids = []string{"H-01"}
+	}
+	resp := debugAgentsResponse{Agents: ids}
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		logger.Warn("[debug/agents] encode failed", "err", err)
+	}
+}
+
+// debugAgentsResponse 是 /debug/agents 的响应体。
+type debugAgentsResponse struct {
+	Agents []string `json:"agents"`
+}
+
 // handleDebugUEErrors 返回最近 UE 上报的 error 消息列表（环形缓冲，最多
 // maxUEErrorEntries 条），供 debug 控制台展示 UE 侧报错（区别于 MCP 自身日志）。
 // 响应始终是 JSON 数组（无错误时为 []），前端按 received_at 倒序渲染。
