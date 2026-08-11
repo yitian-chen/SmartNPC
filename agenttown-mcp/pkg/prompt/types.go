@@ -57,7 +57,7 @@ type ReactiveInput struct {
 	Fatigue           float64
 	Health            float64
 	PhysicalAvailable bool // whether physical state is usable (state_report all-0 → false, skip physical segment)
-	CurrentAction     string // readable description of in-flight action (e.g. "WorkAtWorkbench(target_object_id=workbench_01)"), empty = no in-flight
+	CurrentAction     string // readable description of in-flight action (e.g. "WorkShift(smart_object=workbench_01)"), empty = no in-flight
 	ElapsedSec        int    // seconds the current action has been running
 	ActionSrc         string // in-flight action source: tactical / mcp_tool / empty
 	CurrentSlot       string // current tactical slot "HH:MM-HH:MM", empty = not decomposed

@@ -37,11 +37,11 @@ func TestLoad_Sample(t *testing.T) {
 	if len(kb.Zones) != 7 {
 		t.Errorf("len(Zones) = %d, want 7", len(kb.Zones))
 	}
-	if len(kb.Objects) != 4 {
-		t.Errorf("len(Objects) = %d, want 4", len(kb.Objects))
+	if len(kb.Objects) != 6 {
+		t.Errorf("len(Objects) = %d, want 6", len(kb.Objects))
 	}
-	if len(kb.Agents) != 1 {
-		t.Errorf("len(Agents) = %d, want 1", len(kb.Agents))
+	if len(kb.Agents) != 3 {
+		t.Errorf("len(Agents) = %d, want 3", len(kb.Agents))
 	}
 
 	// Index sanity.
@@ -63,11 +63,17 @@ func TestLoad_Sample(t *testing.T) {
 	if kb.GetAgent("H-01") == nil {
 		t.Error("agentByID missing H-01")
 	}
+	if kb.GetAgent("H-02") == nil {
+		t.Error("agentByID missing H-02")
+	}
+	if kb.GetAgent("H-03") == nil {
+		t.Error("agentByID missing H-03")
+	}
 
-	// Coordinates: workbench interaction_point = [7330, 7100, -21140]
+	// Coordinates: workbench interaction_point = [6290, 6760, -21140]
 	o := kb.GetObject("workbench")
-	if o.InteractionPoint != [3]float64{7330, 7100, -21140} {
-		t.Errorf("workbench interaction_point = %v, want [7330 7100 -21140]", o.InteractionPoint)
+	if o.InteractionPoint != [3]float64{6290, 6760, -21140} {
+		t.Errorf("workbench interaction_point = %v, want [6290 6760 -21140]", o.InteractionPoint)
 	}
 	if o.InteractionRadius != 1500 {
 		t.Errorf("workbench interaction_radius = %v, want 1500", o.InteractionRadius)

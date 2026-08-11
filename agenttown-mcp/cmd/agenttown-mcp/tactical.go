@@ -400,9 +400,12 @@ func prependThoughtAsSpeak(actions []plannedAction, thought, agentID string, reg
 }
 
 // mapTacticalAction 把战术层 plannedAction 映射到 ws.SendAction 的 (cmd, params)。
-// 复合工具 → 各自 Composite cmd；原子工具 → 各自 Atomic cmd；
-// move_to_location 需 KB 解析坐标。映射规则与 composite.go/atomic.go
-// 工具处理函数一致。非法/不可排队工具返回 err，调用方跳过。
+// 复合工具 → 各自 Composite cmd；原子工具 → 各自 Atomic cmd。
+// 映射规则与 composite.go/atomic.go 工具处理函数一致。非法/不可排队工具返回 err，调用方跳过。
+//
+// 新 12 cmd 体系（2026-08-11）：MoveTo 不再做 MCP 侧 KB 解析，UE 自己解析
+// target_type + target_id/target_position。InteractSmartObject 参数名从
+// target_object_id 改为 smart_object。
 //
 // registry != nil 时，未匹配内置 case 的 action 走默认 passthrough 路径：
 // 从 registry.EffectiveActions(agentID) 反查 cmd，params 原样转发。这覆盖
@@ -411,107 +414,76 @@ func prependThoughtAsSpeak(actions []plannedAction, thought, agentID string, reg
 func mapTacticalAction(pa plannedAction, agentID string, kb *worldkb.KB, registry *CapabilityRegistry) (cmd string, params map[string]any, err error) {
 	switch pa.Action {
 	// ─── Composite tools → 各自 cmd ───
-	case "work_at_workbench":
-		params := map[string]any{
-			"target_object_id": pa.Params["target_object_id"],
-		}
-		if d := toFloat(pa.Params["duration_sec"]); d > 0 {
-			params["duration_sec"] = d
-		}
-		return protocol.CmdWorkAtWorkbench, params, nil
-	case "work_at_workshop":
-		return protocol.CmdWorkAtWorkshop, map[string]any{}, nil
-	case "chat_with":
-		params := map[string]any{
-			"target_agent_id": pa.Params["target_agent_id"],
-		}
-		if t, ok := pa.Params["topic"].(string); ok && t != "" {
-			params["topic"] = t
-		}
-		return protocol.CmdChatWith, params, nil
-	case "repair_target":
-		params := map[string]any{
-			"target_agent_id": pa.Params["target_agent_id"],
-		}
-		if t, ok := pa.Params["tool_id"].(string); ok && t != "" {
-			params["tool_id"] = t
-		}
-		return protocol.CmdRepairTarget, params, nil
+	case "work_shift":
+		return protocol.CmdWorkShift, map[string]any{
+			"smart_object": pa.Params["smart_object"],
+			"interaction":  pa.Params["interaction"],
+		}, nil
 	case "charge_at_station":
-		// 全量透传 params：真实 UE5 声明 smart_object + interaction，
-		// mock UE 声明 target_object_id + duration_sec。不挑字段避免丢参数。
-		params := make(map[string]any, len(pa.Params))
-		for k, v := range pa.Params {
-			params[k] = v
-		}
-		return protocol.CmdChargeAtStation, params, nil
-	case "patrol_zone":
-		params := map[string]any{
-			"target_zone": pa.Params["target_zone"],
-		}
-		if d := toFloat(pa.Params["duration_sec"]); d > 0 {
-			params["duration_sec"] = d
-		}
-		return protocol.CmdPatrolZone, params, nil
+		return protocol.CmdChargeAtStation, map[string]any{
+			"smart_object": pa.Params["smart_object"],
+			"interaction":  pa.Params["interaction"],
+		}, nil
+	case "self_maintenance":
+		return protocol.CmdSelfMaintenance, map[string]any{
+			"smart_object": pa.Params["smart_object"],
+			"interaction":  pa.Params["interaction"],
+		}, nil
+	case "rest_at_residence":
+		return protocol.CmdRestAtResidence, map[string]any{
+			"smart_object": pa.Params["smart_object"],
+			"interaction":  pa.Params["interaction"],
+		}, nil
+	case "surf_internet":
+		return protocol.CmdSurfInternet, map[string]any{
+			"smart_object": pa.Params["smart_object"],
+			"interaction":  pa.Params["interaction"],
+		}, nil
 	// ─── Atomic tools ───
-	case "move_to_location":
-		target, _ := pa.Params["target"].(string)
-		coord, _, e := kb.GetPosition(target) // 与 atomic.go 一致
-		if e != nil {
-			return "", nil, fmt.Errorf("move_to_location resolve %q: %w", target, e)
+	case "generic_act":
+		params := map[string]any{
+			"thought": pa.Params["thought"],
 		}
-		speed, _ := pa.Params["speed"].(string)
-		if speed == "" {
-			speed = "walk"
+		if b, ok := pa.Params["behavior"].(string); ok && b != "" {
+			params["behavior"] = b
 		}
-		return protocol.CmdMoveToLocation, map[string]any{
-			"dest":  []float64{coord[0], coord[1], coord[2]},
-			"speed": speed,
-		}, nil
-	case "move_to_agent":
-		speed, _ := pa.Params["speed"].(string)
-		if speed == "" {
-			speed = "walk"
+		return protocol.CmdGenericAct, params, nil
+	case "move_to":
+		params := map[string]any{}
+		if t, ok := pa.Params["target_type"].(string); ok && t != "" {
+			params["target_type"] = t
 		}
-		return protocol.CmdMoveToAgent, map[string]any{
-			"target_agent_id": pa.Params["target_agent_id"],
-			"speed":           speed,
-			"stop_distance":   toFloat(pa.Params["stop_distance"]),
-			"keep_following":  pa.Params["keep_following"],
-		}, nil
+		if id, ok := pa.Params["target_id"].(string); ok && id != "" {
+			params["target_id"] = id
+		}
+		if pos, ok := pa.Params["target_position"].([]float64); ok && len(pos) > 0 {
+			params["target_position"] = pos
+		}
+		return protocol.CmdMoveTo, params, nil
 	case "turn_to":
 		params := map[string]any{}
-		if t, ok := pa.Params["target_agent_id"].(string); ok && t != "" {
-			params["target_agent_id"] = t
+		if t, ok := pa.Params["target_type"].(string); ok && t != "" {
+			params["target_type"] = t
 		}
-		if d, ok := pa.Params["direction"].([]float64); ok && len(d) > 0 {
-			params["direction"] = d
+		if id, ok := pa.Params["target_id"].(string); ok && id != "" {
+			params["target_id"] = id
+		}
+		if pos, ok := pa.Params["target_position"].([]float64); ok && len(pos) > 0 {
+			params["target_position"] = pos
 		}
 		return protocol.CmdTurnTo, params, nil
-	case "play_montage":
-		return protocol.CmdPlayMontage, map[string]any{
-			"montage_id":  pa.Params["montage_id"],
-			"wait_finish": pa.Params["wait_finish"],
-		}, nil
 	case "speak":
 		return protocol.CmdSpeak, map[string]any{
-			"content":         pa.Params["content"],
-			"target_agent_id": pa.Params["target_agent_id"],
-			"audio_url":       pa.Params["audio_url"],
+			"content": pa.Params["content"],
 		}, nil
 	case "emote":
-		mode, _ := pa.Params["mode"].(string)
-		if mode == "" {
-			mode = "oneshot"
-		}
 		return protocol.CmdEmote, map[string]any{
 			"emotion": pa.Params["emotion"],
-			"mode":    mode,
 		}, nil
 	case "interact":
 		return protocol.CmdInteractSmartObject, map[string]any{
-			"target_object_id": pa.Params["target_object_id"],
-			"interaction":      pa.Params["interaction"],
+			"smart_object": pa.Params["smart_object"],
+			"interaction":  pa.Params["interaction"],
 		}, nil
 	case "wait":
 		return protocol.CmdWait, map[string]any{

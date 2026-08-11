@@ -23,7 +23,7 @@ func TestBuildReactivePrompt_Defaults(t *testing.T) {
 		Fatigue:           30,
 		Health:            90,
 		PhysicalAvailable: true,
-		CurrentAction:     "WorkAtWorkbench(target_object_id=workbench_01, duration_sec=3600)",
+		CurrentAction:     "WorkShift(smart_object=workbench_01, interaction=assemble)",
 		ElapsedSec:        120,
 		ActionSrc:         "tactical",
 		CurrentSlot:       "14:00-18:00",
@@ -34,7 +34,7 @@ func TestBuildReactivePrompt_Defaults(t *testing.T) {
 	promptText := prompt.BuildReactive(in)
 	for _, want := range []string{
 		"14:30", "main_workshop", "45", "30", "90",
-		"WorkAtWorkbench(target_object_id=workbench_01, duration_sec=3600)",
+		"WorkShift(smart_object=workbench_01, interaction=assemble)",
 		"tactical", "14:00-18:00", "14:00-18:00 工作组装",
 		"zone rest_area→main_workshop",
 	} {
@@ -170,7 +170,7 @@ func TestBuildReactivePrompt_ReplanOption(t *testing.T) {
 		TimeOfDay:    "14:00",
 		Zone:         "main_workshop",
 		Energy:       80, Fatigue: 75, Health: 90,
-		CurrentAction: "WorkAtWorkbench(target_object_id=workbench_01)",
+		CurrentAction: "WorkShift(smart_object=workbench_01)",
 		ActionSrc:     "tactical",
 		CurrentSlot:   "13:00-17:00",
 		DailyPlan:     "13:00-17:00 下午装配",
@@ -202,7 +202,7 @@ func TestBuildReactivePrompt_InjectsAgentRole(t *testing.T) {
 		TimeOfDay:     "14:30",
 		Zone:          "main_workshop",
 		Energy:        45, Fatigue: 30, Health: 90,
-		CurrentAction: "WorkAtWorkbench(target_object_id=workbench_01)",
+		CurrentAction: "WorkShift(smart_object=workbench_01)",
 		ActionSrc:     "tactical",
 		CurrentSlot:   "14:00-18:00",
 		DailyPlan:     "14:00-18:00 工作组装",
@@ -427,9 +427,9 @@ func TestDescribeAction(t *testing.T) {
 	}{
 		{"empty cmd", "", nil, ""},
 		{"no params", protocol.CmdWait, nil, protocol.CmdWait},
-		{"empty params map", protocol.CmdMoveToLocation, map[string]any{}, protocol.CmdMoveToLocation},
-		{"target", protocol.CmdMoveToLocation, map[string]any{"target": "workbench_01"}, "MoveToLocation(target=workbench_01)"},
-		{"multiple keys", protocol.CmdWorkAtWorkbench, map[string]any{"target_object_id": "workbench_01", "duration_sec": 3600}, "WorkAtWorkbench(target_object_id=workbench_01, duration_sec=3600)"},
+		{"empty params map", protocol.CmdMoveTo, map[string]any{}, protocol.CmdMoveTo},
+		{"target_id", protocol.CmdMoveTo, map[string]any{"target_id": "workbench_01"}, "MoveTo(target_id=workbench_01)"},
+		{"multiple keys", protocol.CmdWorkShift, map[string]any{"smart_object": "workbench_01", "interaction": "assemble"}, "WorkShift(smart_object=workbench_01, interaction=assemble)"},
 		{"irrelevant keys ignored", protocol.CmdSpeak, map[string]any{"foo": "bar", "content": "hello"}, "Speak(content=hello)"},
 	}
 	for _, tt := range tests {
@@ -557,7 +557,7 @@ func TestReactiveRunner_BuildInput(t *testing.T) {
 		t.Fatalf("SetPerception: %v", err)
 	}
 	ac.as.SetPhysicalState(&protocol.PhysicalState{Energy: 18, Fatigue: 85, Health: 75, JointWear: 20}, nil)
-	ac.as.RecordActionStarted("act_001", protocol.CmdWorkAtWorkbench, map[string]any{"target_object_id": "workbench_01", "duration_sec": 3600}, agentstate.SourceTactical)
+	ac.as.RecordActionStarted("act_001", protocol.CmdWorkShift, map[string]any{"smart_object": "workbench_01", "interaction": "assemble"}, agentstate.SourceTactical)
 
 	in := r.buildInput("H-01", ac, TriggerPhysicalAlert, "energy 22→18")
 	if in.AgentID != "H-01" {
@@ -579,7 +579,7 @@ func TestReactiveRunner_BuildInput(t *testing.T) {
 		t.Errorf("Health: got %v, want 75", in.Health)
 	}
 	// CurrentAction 现在是可读描述（cmd + 关键 params），不再是 actionID
-	if in.CurrentAction != "WorkAtWorkbench(target_object_id=workbench_01, duration_sec=3600)" {
+	if in.CurrentAction != "WorkShift(smart_object=workbench_01, interaction=assemble)" {
 		t.Errorf("CurrentAction: got %q, want readable description", in.CurrentAction)
 	}
 	if in.Trigger != TriggerPhysicalAlert {

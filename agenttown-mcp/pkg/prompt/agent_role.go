@@ -46,16 +46,28 @@ func AgentRole(kb *worldkb.KB, agentID string) string {
 }
 
 // fallbackAgentRole is the hardcoded fallback persona when KB authored section
-// is missing. Currently only covers H-01 (phase-1 sole agent); other agentIDs
+// is missing. Covers H-01/H-02/H-03 (phase-1 three NPCs); other agentIDs
 // return empty string. Format matches AgentRole output (name/profession/
-// personality/speech style, omitting "background" for brevity).
+// background/personality/speech style), omitting fields that are empty in the
+// authored KB so fallback and KB-loaded输出 stay consistent.
 func fallbackAgentRole(agentID string) string {
 	switch agentID {
 	case "H-01":
 		return "名字：老陈\n" +
-			"职业：车间主管\n" +
-			"性格特质：沉稳、念旧、重视工艺\n" +
-			"说话风格：简洁，偶尔念叨老物件\n"
+			"职业：supervisor、worker、maintainer\n" +
+			"性格特质：沉稳、念旧、重视工艺、务实\n"
+	case "H-02":
+		return "名字：小林\n" +
+			"职业：maintainer、technician\n" +
+			"背景：维修技术员，专注精密装配与设备维护\n" +
+			"性格特质：细致、严谨、专注技术、话少\n" +
+			"说话风格：精确，技术术语多\n"
+	case "H-03":
+		return "名字：小赵\n" +
+			"职业：logistics、patrol、worker\n" +
+			"背景：物流巡检员，负责物资流转与区域巡检\n" +
+			"性格特质：活泼、勤快、话多、责任感强\n" +
+			"说话风格：热情，爱闲聊\n"
 	}
 	return ""
 }

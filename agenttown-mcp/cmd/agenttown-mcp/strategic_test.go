@@ -209,8 +209,8 @@ func TestBuildStrategicContext_NilKB(t *testing.T) {
 	if !strings.Contains(got, "【可用能力】") {
 		t.Errorf("nil KB should still include builtin composite capability section: %q", got)
 	}
-	if !strings.Contains(got, "work_at_workbench") {
-		t.Errorf("nil KB should list builtin composite tool 'work_at_workbench': %q", got)
+	if !strings.Contains(got, "work_shift") {
+		t.Errorf("nil KB should list builtin composite tool 'work_shift': %q", got)
 	}
 }
 
@@ -235,38 +235,38 @@ func TestBuildStrategicCapabilitySummary_NilRegistry(t *testing.T) {
 		t.Fatal("got empty summary for nil registry, want builtin composite tools")
 	}
 	// 内置复合工具应在列表中
-	for _, name := range []string{"work_at_workbench", "work_at_workshop", "chat_with", "repair_target", "charge_at_station", "patrol_zone"} {
+	for _, name := range []string{"work_shift", "charge_at_station", "self_maintenance", "rest_at_residence", "surf_internet"} {
 		if !strings.Contains(got, name) {
 			t.Errorf("summary missing builtin composite tool %q: %q", name, got)
 		}
 	}
 	// 不应包含原子动作
-	if strings.Contains(got, "move_to_location") {
+	if strings.Contains(got, "move_to") {
 		t.Errorf("summary should not include atomic tools: %q", got)
 	}
 }
 
 func TestBuildStrategicCapabilitySummary_WithRegistry(t *testing.T) {
 	// 注册 2 个复合 + 1 个原子，验证只列出复合动作。
-	// 内置工具（work_at_workbench/charge_at_station）的 desc 来自 tacticalToolOverride
-	// 覆盖表（"在工作台装配"），registry 的 Description 字段仅对非内置 cmd 生效。
+	// 内置工具（work_shift/charge_at_station）的 desc 来自 tacticalToolOverride
+	// 覆盖表（"工作班次（装配/作业）"），registry 的 Description 字段仅对非内置 cmd 生效。
 	r := NewCapabilityRegistry(nil)
 	r.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
-		{Cmd: protocol.CmdWorkAtWorkbench, Kind: "composite", Description: "装配工作"},
+		{Cmd: protocol.CmdWorkShift, Kind: "composite", Description: "装配工作"},
 		{Cmd: protocol.CmdChargeAtStation, Kind: "composite", Description: "充电"},
-		{Cmd: protocol.CmdMoveToLocation, Kind: "atomic", Description: "移动"},
+		{Cmd: protocol.CmdMoveTo, Kind: "atomic", Description: "移动"},
 	})
 	got := prompt.StrategicCapabilitySummary(r.EffectiveActions("H-01"))
-	// work_at_workbench 走 override desc "在工作台装配"
-	if !strings.Contains(got, "在工作台装配") {
-		t.Errorf("summary missing override desc '在工作台装配': %q", got)
+	// work_shift 走 override desc "工作班次（装配/作业）"
+	if !strings.Contains(got, "工作班次（装配/作业）") {
+		t.Errorf("summary missing override desc '工作班次（装配/作业）': %q", got)
 	}
 	// charge_at_station 无 override，走 registry Description "充电"
 	if !strings.Contains(got, "充电") {
 		t.Errorf("summary missing registry desc '充电': %q", got)
 	}
-	if !strings.Contains(got, "work_at_workbench") {
-		t.Errorf("summary missing tool name 'work_at_workbench': %q", got)
+	if !strings.Contains(got, "work_shift") {
+		t.Errorf("summary missing tool name 'work_shift': %q", got)
 	}
 	if strings.Contains(got, "移动") {
 		t.Errorf("summary should not include atomic action '移动': %q", got)
@@ -277,7 +277,7 @@ func TestBuildStrategicCapabilitySummary_NoComposite(t *testing.T) {
 	// 只注册原子动作时，返回空串（无复合动作可列）。
 	r := NewCapabilityRegistry(nil)
 	r.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
-		{Cmd: protocol.CmdMoveToLocation, Kind: "atomic", Description: "移动"},
+		{Cmd: protocol.CmdMoveTo, Kind: "atomic", Description: "移动"},
 		{Cmd: protocol.CmdSpeak, Kind: "atomic", Description: "说话"},
 	})
 	got := prompt.StrategicCapabilitySummary(r.EffectiveActions("H-01"))
@@ -292,7 +292,7 @@ func TestBuildStrategicCapabilitySummary_NewCompositeFromUE(t *testing.T) {
 	r := NewCapabilityRegistry(nil)
 	r.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
 		{Cmd: "GroomSelf", Kind: "composite", Description: "整理仪容"},
-		{Cmd: protocol.CmdWorkAtWorkbench, Kind: "composite", Description: "装配"},
+		{Cmd: protocol.CmdWorkShift, Kind: "composite", Description: "装配"},
 	})
 	got := prompt.StrategicCapabilitySummary(r.EffectiveActions("H-01"))
 	if !strings.Contains(got, "整理仪容") {
@@ -311,7 +311,7 @@ func TestBuildStrategicContext_IncludesCapabilitySection(t *testing.T) {
 	kb := loadTestKB(t)
 	r := NewCapabilityRegistry(nil)
 	r.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
-		{Cmd: protocol.CmdWorkAtWorkbench, Kind: "composite", Description: "装配"},
+		{Cmd: protocol.CmdWorkShift, Kind: "composite", Description: "装配"},
 	})
 	got := prompt.BuildStrategic(kb, "H-01", r.EffectiveActions("H-01"))
 	if !strings.Contains(got, "【可用能力】") {
@@ -329,7 +329,7 @@ func TestBuildStrategicContext_NilKBWithRegistry(t *testing.T) {
 	// kb == nil 但 registry != nil：【可用能力】段仍注入（不依赖 KB）。
 	r := NewCapabilityRegistry(nil)
 	r.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
-		{Cmd: protocol.CmdWorkAtWorkbench, Kind: "composite", Description: "装配"},
+		{Cmd: protocol.CmdWorkShift, Kind: "composite", Description: "装配"},
 	})
 	got := prompt.BuildStrategic(nil, "H-01", r.EffectiveActions("H-01"))
 	if !strings.Contains(got, "【可用能力】") {
@@ -377,12 +377,14 @@ func TestBuildAgentRoleContext_WithKB(t *testing.T) {
 
 // TestBuildAgentRoleContext_NilKB 验证 nil KB 降级到硬编码兜底（H-01），
 // 返回老陈的简短角色画像，不 panic。三层决策 prompt 仍能注入角色风格。
+// fallback 内容与 assets/world_kb.yaml 中 H-01 的字段保持一致，确保
+// KB 加载和 fallback 路径产出相同文本。
 func TestBuildAgentRoleContext_NilKB(t *testing.T) {
 	got := prompt.AgentRole(nil, "H-01")
 	if got == "" {
 		t.Fatal("got empty role for H-01 with nil KB, want fallback content")
 	}
-	for _, want := range []string{"名字：老陈", "职业：车间主管", "沉稳、念旧、重视工艺"} {
+	for _, want := range []string{"名字：老陈", "职业：supervisor、worker、maintainer", "沉稳、念旧、重视工艺、务实"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("fallback role missing %q, got: %q", want, got)
 		}
@@ -444,8 +446,8 @@ func TestBuildDefaultDailyPlan_WithKB(t *testing.T) {
 	// 有 KB 时：兜底计划应包含第一个 zone 显示名 + 第一个 object 显示名。
 	kb := loadTestKB(t)
 	got := prompt.DefaultDailyPlan(kb)
-	// 第一个 zone（按 ID 排序）是 archive_station（显示名"档案馆与广播站"）
-	if !strings.Contains(got, "档案馆与广播站") {
+	// 第一个 zone（按 ID 排序）是 archive_station（显示名"档案馆·图书馆与网络中心"）
+	if !strings.Contains(got, "档案馆·图书馆与网络中心") {
 		t.Errorf("KB-derived plan should contain first zone display name: %q", got)
 	}
 	// 第一个 object（按 ID 排序）是 charge（显示名"充电桩"）

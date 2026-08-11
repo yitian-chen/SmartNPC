@@ -134,7 +134,7 @@ func TestHandleDebugKB_NilKBReturnsEmpty(t *testing.T) {
 func TestHandleDebugCap_ReturnsAgents(t *testing.T) {
 	reg := NewCapabilityRegistry(nil)
 	reg.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
-		{Cmd: protocol.CmdMoveToLocation, Kind: "atomic", Description: "move"},
+		{Cmd: protocol.CmdMoveTo, Kind: "atomic", Description: "move"},
 		{Cmd: protocol.CmdSpeak, Kind: "atomic", Description: "speak"},
 	})
 	logger := slog.Default()
@@ -162,9 +162,9 @@ func TestHandleDebugCap_ReturnsAgents(t *testing.T) {
 	if len(sys) != 3 {
 		t.Fatalf("system actions len = %d; want 3 (2 registered + 1 synthetic Stop)", len(sys))
 	}
-	// 前 2 项按 Cmd 排序：MoveToLocation < Speak；末尾是合成 Stop
-	if sys[0].Cmd != protocol.CmdMoveToLocation || sys[1].Cmd != protocol.CmdSpeak {
-		t.Errorf("system actions order = %s, %s; want MoveToLocation, Speak", sys[0].Cmd, sys[1].Cmd)
+	// 前 2 项按 Cmd 排序：MoveTo < Speak；末尾是合成 Stop
+	if sys[0].Cmd != protocol.CmdMoveTo || sys[1].Cmd != protocol.CmdSpeak {
+		t.Errorf("system actions order = %s, %s; want MoveTo, Speak", sys[0].Cmd, sys[1].Cmd)
 	}
 	if sys[2].Cmd != "Stop" {
 		t.Errorf("system actions[2].Cmd = %q; want Stop (synthetic)", sys[2].Cmd)
@@ -194,14 +194,13 @@ func TestHandleDebugCap_NilRegistryReturnsEmpty(t *testing.T) {
 // TestHandleDebugCap_ToolNameField verifies /debug/cap enriches each action
 // with a tool_name field derived from tools.CmdToToolName, so the frontend
 // dropdown can use tool_name as the option value (matching mapDebugCmd's
-// tool_name matching path and frontend cmd-specific logic like
-// cmd === 'move_to_location').
+// tool_name matching path).
 func TestHandleDebugCap_ToolNameField(t *testing.T) {
 	reg := NewCapabilityRegistry(nil)
 	reg.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
-		{Cmd: protocol.CmdMoveToLocation, Kind: "atomic"},           // tool_name: move_to_location
+		{Cmd: protocol.CmdMoveTo, Kind: "atomic"},                   // tool_name: move_to (builtin mapping)
 		{Cmd: protocol.CmdInteractSmartObject, Kind: "atomic"},      // tool_name: interact (special shortening)
-		{Cmd: "MoveTo", Kind: "atomic"},                             // tool_name: move_to (pascalToSnake fallback)
+		{Cmd: "WaveHand", Kind: "atomic"},                           // tool_name: wave_hand (pascalToSnake fallback)
 	})
 	logger := slog.Default()
 	req := httptest.NewRequest(http.MethodGet, "/debug/cap", nil)
@@ -218,9 +217,9 @@ func TestHandleDebugCap_ToolNameField(t *testing.T) {
 		t.Fatalf("system actions len = %d; want 4 (3 registered + 1 synthetic Stop)", len(sys))
 	}
 	wantTool := map[string]string{
-		"MoveToLocation":      "move_to_location",
-		"InteractSmartObject": "interact",
 		"MoveTo":              "move_to",
+		"InteractSmartObject": "interact",
+		"WaveHand":            "wave_hand",
 		"Stop":                "stop",
 	}
 	for _, a := range sys {
@@ -247,7 +246,7 @@ func TestHandleDebugCap_AlwaysIncludesStop(t *testing.T) {
 		{Cmd: protocol.CmdSpeak, Kind: "atomic"},
 	})
 	reg.Register("H-01", []protocol.CapabilityAction{
-		{Cmd: protocol.CmdMoveToLocation, Kind: "atomic"},
+		{Cmd: protocol.CmdMoveTo, Kind: "atomic"},
 	})
 	logger := slog.Default()
 	req := httptest.NewRequest(http.MethodGet, "/debug/cap", nil)
@@ -284,8 +283,7 @@ func TestHandleDebugCap_AlwaysIncludesStop(t *testing.T) {
 func TestMapDebugCmd_AcceptsBothForms(t *testing.T) {
 	reg := NewCapabilityRegistry(nil)
 	reg.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
-		{Cmd: "MoveTo", Kind: "atomic"},
-		{Cmd: protocol.CmdMoveToLocation, Kind: "atomic"},
+		{Cmd: protocol.CmdMoveTo, Kind: "atomic"},
 	})
 	const agentID = "H-01"
 
@@ -293,10 +291,8 @@ func TestMapDebugCmd_AcceptsBothForms(t *testing.T) {
 		input string
 		want  string
 	}{
-		{"MoveTo", "MoveTo"},             // raw cmd form
-		{"move_to", "MoveTo"},            // tool_name form (pascalToSnake fallback)
-		{"MoveToLocation", "MoveToLocation"},         // raw cmd form (builtin)
-		{"move_to_location", "MoveToLocation"},       // tool_name form (builtin)
+		{"MoveTo", "MoveTo"},    // raw cmd form
+		{"move_to", "MoveTo"},   // tool_name form (builtin mapping)
 	}
 	for _, c := range cases {
 		got, ok := mapDebugCmd(c.input, reg, agentID)
@@ -324,7 +320,7 @@ func TestMapDebugCmd_AcceptsBothForms(t *testing.T) {
 func TestMapDebugCmd_StopNotMatched(t *testing.T) {
 	reg := NewCapabilityRegistry(nil)
 	reg.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
-		{Cmd: protocol.CmdMoveToLocation, Kind: "atomic"},
+		{Cmd: protocol.CmdMoveTo, Kind: "atomic"},
 	})
 	const agentID = "H-01"
 	for _, input := range []string{"stop", "Stop"} {
