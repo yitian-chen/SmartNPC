@@ -86,7 +86,7 @@ fi
 
 # Venus URL/model 默认值（与 Go flag 默认值一致）。
 VENUS_URL="${VENUS_URL:-http://v2.open.venus.oa.com/llmproxy}"
-VENUS_MODEL="${VENUS_MODEL:-qwen3.6-35b-a3b}"
+VENUS_MODEL="${VENUS_MODEL:-deepseek-v4-flash}"
 
 # ─── 参数 ──────────────────────────────────────────────────────
 STOP_ONLY=false

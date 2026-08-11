@@ -1255,9 +1255,9 @@ func main() {
 		"Venus LLM proxy base URL (OpenAI Chat Completions API compatible)")
 	venusAPIKey = flag.String("venus-api-key", "",
 		"Venus API key (overrides VENUS_API_KEY env var)")
-	venusModel = flag.String("venus-model", "qwen3.6-35b-a3b",
+	venusModel = flag.String("venus-model", "deepseek-v4-flash",
 		"Venus model name (used for tactical layer)")
-	venusStrategicModel = flag.String("venus-strategic-model", "qwen3.6-35b-a3b",
+	venusStrategicModel = flag.String("venus-strategic-model", "deepseek-v4-flash",
 		"Venus model name for strategic layer (daily plan generation). "+
 			"Set to empty to fall back to --venus-model.")
 	venusTimeout = flag.Duration("venus-timeout", 60*time.Second,

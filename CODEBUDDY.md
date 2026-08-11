@@ -11,7 +11,7 @@ AgentTown_v3 — AI NPC 模拟系统。一期单 Agent（H-01 老陈，车间主
 - **战术层**（`tactical.go`）：每个时段把 goal 分解为 1-5 个 action 进 `actionQueue`（复合优先：匹配复合动作时 1-2 步即可，否则 2-5 个原子动作组合），worker 逐个 pop 下发 UE
 - **反应层**（`reactive.go` + `reactive_runner.go`）：监听 zone 变化/动作完成/物理警戒/周期触发，调本地 Ollama 决策 continue/observe/replan
 
-**LLM 后端**：MCP 直连 Venus（OpenAI Chat Completions 协议），战略/战术层调用 Venus（`qwen3.6-35b-a3b`）。反应层始终直连本地 Ollama（`qwen2.5:7b`），不走 Venus。
+**LLM 后端**：MCP 直连 Venus（OpenAI Chat Completions 协议），战略/战术层调用 Venus（`deepseek-v4-flash`）。反应层始终直连本地 Ollama（`qwen2.5:7b`），不走 Venus。
 
 ## 架构总览
 
@@ -24,7 +24,7 @@ graph LR
         MCP["agenttown-mcp (Go)<br/>MCP Server + WS Server<br/>:8760 HTTP / :9090 WS<br/>三层决策：战略+战术+反应"]
     end
     subgraph LLM["LLM 后端"]
-        VENUS["Venus<br/>qwen3.6-35b-a3b<br/>(OpenAI 兼容)"]
+        VENUS["Venus<br/>deepseek-v4-flash<br/>(OpenAI 兼容)"]
         OLLAMA["Ollama 本地<br/>qwen2.5:7b<br/>(反应层专用)"]
     end
     UE <-->|"WebSocket :9090<br/>7-field Envelope"| MCP
@@ -85,7 +85,7 @@ MCP 直连 Venus（OpenAI Chat Completions 协议），战略/战术层调用 Ve
 ./agenttown-mcp --http :8760 --ws :9090 \
   --venus-url http://v2.open.venus.oa.com/llmproxy \
   --venus-api-key $VENUS_API_KEY \
-  --venus-model qwen3.6-35b-a3b
+  --venus-model deepseek-v4-flash
 ```
 
 Venus 客户端无状态——每次调用全量 prompt，不复用会话链。战略/战术层 prompt 完全由 MCP 构造，所有上下文（角色、世界知识、物理状态）显式注入。
@@ -595,8 +595,8 @@ cp .env.example .env
 | `--ws` | `:9090` | WebSocket 监听（Mock UE 连接） |
 | `--venus-url` | `http://v2.open.venus.oa.com/llmproxy` | Venus 后端 URL |
 | `--venus-api-key` | `""` | Venus API key（**必填**，否则 401） |
-| `--venus-model` | `qwen3.6-35b-a3b` | Venus 模型 ID（战术层） |
-| `--venus-strategic-model` | `qwen3.6-35b-a3b` | 战略层模型 ID（空值回退到 `--venus-model`） |
+| `--venus-model` | `deepseek-v4-flash` | Venus 模型 ID（战术层） |
+| `--venus-strategic-model` | `deepseek-v4-flash` | 战略层模型 ID（空值回退到 `--venus-model`） |
 | `--venus-timeout` | `60s` | Venus 调用超时 |
 | `--tactical-timeout` | `60s` | 战术层 LLM 调用超时 |
 | `--tactical-stream` | `false` | 战术层流式输出（实验性，默认关） |
