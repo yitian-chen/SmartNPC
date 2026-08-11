@@ -396,8 +396,9 @@
     <div id="tab-action">
     <div class="field">
       <label for="agent_id">agent_id <span class="req">*</span></label>
-      <select id="agent_id"></select>
-      <div class="hint">已注册的 agent（来自 /debug/agents，每 5s 刷新）</div>
+      <input type="text" id="agent_id" list="agent_id-list" autocomplete="off" placeholder="输入任意 agent id（已注册的在下方下拉）" />
+      <datalist id="agent_id-list"></datalist>
+      <div class="hint">允许填入未注册的 agent id 方便调试；已注册列表来自 /debug/agents（每 5s 刷新）</div>
     </div>
 
     <div class="field">
@@ -683,12 +684,16 @@ function rebuildAgentDropdowns() {
       loadPlan();
     }
   }
-  // agent_id（单 Action tab）
-  const actionSel = document.getElementById('agent_id');
-  if (actionSel) {
-    const cur = ids.includes(actionSel.value) ? actionSel.value : ids[0];
-    actionSel.innerHTML = ids.map(a => `<option value="${a}" ${a === cur ? 'selected' : ''}>${a}</option>`).join('');
-    actionSel.value = cur;
+  // agent_id（单 Action tab）— 自由输入框 + datalist 建议，允许未注册 id
+  const actionInput = document.getElementById('agent_id');
+  const actionList = document.getElementById('agent_id-list');
+  if (actionInput && actionList) {
+    // 仅刷新建议列表，不清空用户当前输入
+    actionList.innerHTML = ids.map(a => `<option value="${escapeHtml(a)}">`).join('');
+    // 首次加载（输入为空）默认填第一个已注册 id
+    if (!actionInput.value && ids.length > 0) {
+      actionInput.value = ids[0];
+    }
     updateCurlPreview();
   }
   // sched-agent（Schedule 注入 tab）
