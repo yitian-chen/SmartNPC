@@ -27,6 +27,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -1375,6 +1376,18 @@ func main() {
 		defer agentsMu.Unlock()
 		return agents[id]
 	}
+	// listAgentIDs 返回当前已注册的全部 agent ID（按字典序），供 debug 端点做默认值
+	// 选择（如 /debug/plan 在未显式指定 agent_id 时回落到首个注册 agent，而非硬编码）。
+	listAgentIDs := func() []string {
+		agentsMu.Lock()
+		defer agentsMu.Unlock()
+		ids := make([]string, 0, len(agents))
+		for id := range agents {
+			ids = append(ids, id)
+		}
+		sort.Strings(ids)
+		return ids
+	}
 	registerAgent := func(id string) (*agentContext, bool) {
 		agentsMu.Lock()
 		defer agentsMu.Unlock()
@@ -1632,14 +1645,14 @@ func main() {
 	}()
 
 	if *httpAddr != "" {
-		runHTTP(ctx, logger, server, *httpAddr, *httpAllowAnyOrigin, *mcpAPIKey, ws, kb, lookupAgent, registerAgent)
+		runHTTP(ctx, logger, server, *httpAddr, *httpAllowAnyOrigin, *mcpAPIKey, ws, kb, lookupAgent, listAgentIDs, registerAgent)
 	} else {
 		runStdio(ctx, logger, server)
 	}
 }
 
 // runHTTP serves the MCP server over Streamable HTTP + a /status endpoint.
-func runHTTP(ctx context.Context, logger *slog.Logger, server *mcp.Server, addr string, allowAnyOrigin bool, apiKey string, ws *wsserver.Server, kb *worldkb.KB, lookupAgent func(string) *agentContext, registerAgent func(string) (*agentContext, bool)) {
+func runHTTP(ctx context.Context, logger *slog.Logger, server *mcp.Server, addr string, allowAnyOrigin bool, apiKey string, ws *wsserver.Server, kb *worldkb.KB, lookupAgent func(string) *agentContext, listAgentIDs func() []string, registerAgent func(string) (*agentContext, bool)) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/status", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -1690,7 +1703,7 @@ func runHTTP(ctx context.Context, logger *slog.Logger, server *mcp.Server, addr 
 		// /debug/plan — 返回当日 dailyPlan（战略层生成的 7 时段 goal），
 		// 供 debug 控制台右侧 schedule 面板展示。读 per-agent agentContext。
 		if r.URL.Path == "/debug/plan" {
-			handleDebugPlan(w, r, lookupAgent, logger)
+			handleDebugPlan(w, r, lookupAgent, listAgentIDs, logger)
 			return
 		}
 		http.NotFound(w, r)

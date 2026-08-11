@@ -217,17 +217,22 @@ type debugPlanResponse struct {
 }
 
 // handleDebugPlan 返回指定 agent 当日 dailyPlan 快照，供 debug 控制台 schedule 面板展示。
-// 请求参数：?agent_id=H-01（默认 H-01）。
+// 请求参数：?agent_id=<id>。未指定时回落到 listAgentIDs() 的首个注册 agent；若没有任何
+// agent 注册，回落到 "H-01"（兼容旧版冷启动行为）。
 //
 // 响应的 CurrentIdx 在以下情况返回 -1：dailyPlan 为空、当前时段未命中任何 item、
 // 或 currentSlot 为 "__debug__" 前缀（/debug/schedule 注入的临时 slot，不在 dailyPlan 内）。
-func handleDebugPlan(w http.ResponseWriter, r *http.Request, lookupAgent func(string) *agentContext, logger *slog.Logger) {
+func handleDebugPlan(w http.ResponseWriter, r *http.Request, lookupAgent func(string) *agentContext, listAgentIDs func() []string, logger *slog.Logger) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
 
 	agentID := r.URL.Query().Get("agent_id")
 	if agentID == "" {
-		agentID = "H-01"
+		if ids := listAgentIDs(); len(ids) > 0 {
+			agentID = ids[0]
+		} else {
+			agentID = "H-01"
+		}
 	}
 
 	ac := lookupAgent(agentID)
