@@ -33,7 +33,7 @@ func loadTestKB(t *testing.T) *worldkb.KB {
 func TestParseTacticalNDJSON_Valid(t *testing.T) {
 	raw := `{"inner_thought":"先去车间再装配"}` + "\n" +
 		`{"action":"move_to","params":{"target_type":"zone","target_id":"main_workshop"}}` + "\n" +
-		`{"action":"work_shift","params":{"smart_object":"workbench_01","interaction":"assemble"}}`
+		`{"action":"work_shift","params":{"semantic_group":"workbench_01","interaction":"assemble"}}`
 	actions, thought, err := parseTacticalNDJSON(raw, nil, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -59,7 +59,7 @@ func TestParseTacticalNDJSON_Valid(t *testing.T) {
 func TestParseTacticalNDJSON_WithFence(t *testing.T) {
 	raw := "```json\n" +
 		`{"inner_thought":"充电"}` + "\n" +
-		`{"action":"charge_at_station","params":{"smart_object":"charging_station_01","interaction":"assemble"}}` + "\n" +
+		`{"action":"charge_at_station","params":{"semantic_group":"charging_station_01","interaction":"assemble"}}` + "\n" +
 		"```"
 	actions, _, err := parseTacticalNDJSON(raw, nil, "")
 	if err != nil {
@@ -238,7 +238,7 @@ func TestStreamAccumulator_Feed(t *testing.T) {
 	}
 
 	// 第三行不完整（无 \n），不应触发 onComplete
-	acc.feed(`{"action":"interact","params":{"smart_object":"workbench_01","interaction":"assemble"}}`)
+	acc.feed(`{"action":"interact","params":{"semantic_group":"workbench_01","interaction":"assemble"}}`)
 	if len(collected) != 2 {
 		t.Errorf("incomplete line should not trigger: collected=%d, want 2", len(collected))
 	}
@@ -314,7 +314,7 @@ func TestStreamAccumulator_ThoughtOnlyNoSpeak(t *testing.T) {
 
 func TestMapTacticalAction_Composite(t *testing.T) {
 	kb := loadTestKB(t)
-	pa := plannedAction{Action: "work_shift", Params: map[string]any{"smart_object": "workbench_01", "interaction": "assemble"}}
+	pa := plannedAction{Action: "work_shift", Params: map[string]any{"semantic_group": "workbench_01", "interaction": "assemble"}}
 	cmd, params, err := mapTacticalAction(pa, "", kb, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -322,8 +322,8 @@ func TestMapTacticalAction_Composite(t *testing.T) {
 	if cmd != protocol.CmdWorkShift {
 		t.Errorf("cmd=%q, want %q", cmd, protocol.CmdWorkShift)
 	}
-	if params["smart_object"] != "workbench_01" {
-		t.Errorf("smart_object=%v", params["smart_object"])
+	if params["semantic_group"] != "workbench_01" {
+		t.Errorf("semantic_group=%v", params["semantic_group"])
 	}
 	if params["interaction"] != "assemble" {
 		t.Errorf("interaction=%v, want assemble", params["interaction"])
@@ -495,7 +495,7 @@ func TestGenerateTacticalPlan_HTTPError(t *testing.T) {
 func TestGenerateTacticalPlan_ValidResponse(t *testing.T) {
 	raw := `{"inner_thought":"先移动再装配"}` + "\n" +
 		`{"action":"move_to","params":{"target_type":"zone","target_id":"main_workshop"}}` + "\n" +
-		`{"action":"work_shift","params":{"smart_object":"workbench_01","interaction":"assemble"}}`
+		`{"action":"work_shift","params":{"semantic_group":"workbench_01","interaction":"assemble"}}`
 	tc := &fakeStrategicCaller{resp: makeStrategicResponse(raw)}
 	actions, thought, err := generateTacticalPlan(context.Background(), tc, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", &protocol.PhysicalState{Energy: 80, Fatigue: 20, JointWear: 10, Health: 100}, nil, nil, slog.Default(), "", "", "", nil)
 	if err != nil {

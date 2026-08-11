@@ -409,8 +409,10 @@ func prependThoughtAsSpeak(actions []plannedAction, thought, agentID string, reg
 // 映射规则与 composite.go/atomic.go 工具处理函数一致。非法/不可排队工具返回 err，调用方跳过。
 //
 // 新 12 cmd 体系（2026-08-11）：MoveTo 不再做 MCP 侧 KB 解析，UE 自己解析
-// target_type + target_id/target_position。InteractSmartObject 参数名从
-// target_object_id 改为 smart_object。
+// target_type + target_id/target_position。InteractSmartObject / 5 个复合 cmd
+// 统一用 semantic_group 引用 world_kb 中对应 category 的物体 id（语义组名），
+// auto_queue 作为 params 内字段传 "true"（复合）/ true（interact），符合真实 UE5
+// capability_registry 声明。
 //
 // registry != nil 时，未匹配内置 case 的 action 走默认 passthrough 路径：
 // 从 registry.EffectiveActions(agentID) 反查 cmd，params 原样转发。这覆盖
@@ -421,28 +423,33 @@ func mapTacticalAction(pa plannedAction, agentID string, kb *worldkb.KB, registr
 	// ─── Composite tools → 各自 cmd ───
 	case "work_shift":
 		return protocol.CmdWorkShift, map[string]any{
-			"smart_object": pa.Params["smart_object"],
-			"interaction":  pa.Params["interaction"],
+			"semantic_group": pa.Params["semantic_group"],
+			"interaction":    pa.Params["interaction"],
+			"auto_queue":     "true",
 		}, nil
 	case "charge_at_station":
 		return protocol.CmdChargeAtStation, map[string]any{
-			"smart_object": pa.Params["smart_object"],
-			"interaction":  pa.Params["interaction"],
+			"semantic_group": pa.Params["semantic_group"],
+			"interaction":    pa.Params["interaction"],
+			"auto_queue":     "true",
 		}, nil
 	case "self_maintenance":
 		return protocol.CmdSelfMaintenance, map[string]any{
-			"smart_object": pa.Params["smart_object"],
-			"interaction":  pa.Params["interaction"],
+			"semantic_group": pa.Params["semantic_group"],
+			"interaction":    pa.Params["interaction"],
+			"auto_queue":     "true",
 		}, nil
 	case "rest_at_residence":
 		return protocol.CmdRestAtResidence, map[string]any{
-			"smart_object": pa.Params["smart_object"],
-			"interaction":  pa.Params["interaction"],
+			"semantic_group": pa.Params["semantic_group"],
+			"interaction":    pa.Params["interaction"],
+			"auto_queue":     "true",
 		}, nil
 	case "surf_internet":
 		return protocol.CmdSurfInternet, map[string]any{
-			"smart_object": pa.Params["smart_object"],
-			"interaction":  pa.Params["interaction"],
+			"semantic_group": pa.Params["semantic_group"],
+			"interaction":    pa.Params["interaction"],
+			"auto_queue":     "true",
 		}, nil
 	// ─── Atomic tools ───
 	case "generic_act":
@@ -487,8 +494,9 @@ func mapTacticalAction(pa plannedAction, agentID string, kb *worldkb.KB, registr
 		}, nil
 	case "interact":
 		return protocol.CmdInteractSmartObject, map[string]any{
-			"smart_object": pa.Params["smart_object"],
-			"interaction":  pa.Params["interaction"],
+			"semantic_group": pa.Params["semantic_group"],
+			"interaction":    pa.Params["interaction"],
+			"auto_queue":     true,
 		}, nil
 	case "wait":
 		return protocol.CmdWait, map[string]any{

@@ -383,7 +383,7 @@ func TestDescribeAction(t *testing.T) {
 		{"no params", protocol.CmdWait, nil, protocol.CmdWait},
 		{"empty params map", protocol.CmdMoveTo, map[string]any{}, protocol.CmdMoveTo},
 		{"target_id", protocol.CmdMoveTo, map[string]any{"target_id": "workbench_01"}, "MoveTo(target_id=workbench_01)"},
-		{"multiple keys", protocol.CmdWorkShift, map[string]any{"smart_object": "workbench_01", "interaction": "assemble"}, "WorkShift(smart_object=workbench_01, interaction=assemble)"},
+		{"multiple keys", protocol.CmdWorkShift, map[string]any{"semantic_group": "workbench_01", "interaction": "assemble"}, "WorkShift(semantic_group=workbench_01, interaction=assemble)"},
 		{"irrelevant keys ignored", protocol.CmdSpeak, map[string]any{"foo": "bar", "content": "hello"}, "Speak(content=hello)"},
 	}
 	for _, tt := range tests {
@@ -511,7 +511,7 @@ func TestReactiveRunner_BuildInput(t *testing.T) {
 		t.Fatalf("SetPerception: %v", err)
 	}
 	ac.as.SetPhysicalState(&protocol.PhysicalState{Energy: 18, Fatigue: 85, Health: 75, JointWear: 20}, nil)
-	ac.as.RecordActionStarted("act_001", protocol.CmdWorkShift, map[string]any{"smart_object": "workbench_01", "interaction": "assemble"}, agentstate.SourceTactical)
+	ac.as.RecordActionStarted("act_001", protocol.CmdWorkShift, map[string]any{"semantic_group": "workbench_01", "interaction": "assemble"}, agentstate.SourceTactical)
 
 	in := r.buildInput("H-01", ac, TriggerPhysicalAlert, "energy 22→18")
 	if in.AgentID != "H-01" {
@@ -533,7 +533,7 @@ func TestReactiveRunner_BuildInput(t *testing.T) {
 		t.Errorf("Health: got %v, want 75", in.Health)
 	}
 	// CurrentAction 现在是可读描述（cmd + 关键 params），不再是 actionID
-	if in.CurrentAction != "WorkShift(smart_object=workbench_01, interaction=assemble)" {
+	if in.CurrentAction != "WorkShift(semantic_group=workbench_01, interaction=assemble)" {
 		t.Errorf("CurrentAction: got %q, want readable description", in.CurrentAction)
 	}
 	if in.Trigger != TriggerPhysicalAlert {

@@ -531,14 +531,14 @@ func TestBuildDebugParams_CompositePassthrough(t *testing.T) {
 	kb := loadTestKB(t)
 	// charge_at_station 应直接透传 params
 	out, err := buildDebugParams("charge_at_station", map[string]any{
-		"smart_object": "charging_station_01",
-		"interaction":  "charge",
+		"semantic_group": "charging_station_01",
+		"interaction":    "charge",
 	}, kb)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if out["smart_object"] != "charging_station_01" {
-		t.Errorf("smart_object=%v, want charging_station_01", out["smart_object"])
+	if out["semantic_group"] != "charging_station_01" {
+		t.Errorf("semantic_group=%v, want charging_station_01", out["semantic_group"])
 	}
 	if out["interaction"] != "charge" {
 		t.Errorf("interaction=%v, want charge", out["interaction"])

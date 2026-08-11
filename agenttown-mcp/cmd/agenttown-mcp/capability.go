@@ -226,7 +226,7 @@ var BuiltinCmdCapabilities = []protocol.CapabilityAction{
 		Description: "去指定 Smart Object 并执行一次指定交互，包含前往指定smartobject和执行交互这两部分动作",
 		UsageHint:   "需要与某个设施/物件交互、但没有更具体的复合动作可用时使用",
 		Params: []protocol.CapabilityParam{
-			{Name: "smart_object", Type: "string", Description: "目标 Smart Object 的 ID，如 workbench_01、charging_pillar_01", Required: true, DefaultValue: ""},
+			{Name: "semantic_group", Type: "string", Description: "目标 Smart Object 所属语义组的 ID（world_kb 中对应 category 的物体 id），如 workbench、charging_pillar", Required: true, DefaultValue: ""},
 			{Name: "interaction", Type: "string", Description: "要执行的交互动作类型，如 assemble、charge、repair_self、sleep", Required: true, DefaultValue: ""},
 		},
 	},
@@ -246,7 +246,7 @@ var BuiltinCmdCapabilities = []protocol.CapabilityAction{
 		Description: "去指定设施执行工作，包含前往指定设施和工作两个部分的动作",
 		UsageHint:   "日程工作时间到达时使用",
 		Params: []protocol.CapabilityParam{
-			{Name: "smart_object", Type: "string", Description: "工作设施ID，如workbench_01，sortconveyor_01", Required: true, DefaultValue: ""},
+			{Name: "semantic_group", Type: "string", Description: "工作设施所属语义组的 ID（world_kb 中对应 category 的物体 id），如 workbench、sortconveyor", Required: true, DefaultValue: ""},
 			{Name: "interaction", Type: "string", Description: "交互工作类型", Required: true, DefaultValue: ""},
 		},
 	},
@@ -256,7 +256,7 @@ var BuiltinCmdCapabilities = []protocol.CapabilityAction{
 		Description: "去充电桩充电，包含去充电桩和充电两个部分的动作",
 		UsageHint:   "能量低时使用",
 		Params: []protocol.CapabilityParam{
-			{Name: "smart_object", Type: "string", Description: "充电桩ID，如charging_pillar_01", Required: true, DefaultValue: ""},
+			{Name: "semantic_group", Type: "string", Description: "充电桩所属语义组的 ID（world_kb 中对应 category 的物体 id），如 charger、charging_pillar", Required: true, DefaultValue: ""},
 			{Name: "interaction", Type: "string", Description: "交互动作类型，固定为charge", Required: true, DefaultValue: ""},
 		},
 	},
@@ -266,7 +266,7 @@ var BuiltinCmdCapabilities = []protocol.CapabilityAction{
 		Description: "去维修台进行自检和维修，包含去维修台和维修这两部分动作",
 		UsageHint:   "磨损高或需要维护时使用",
 		Params: []protocol.CapabilityParam{
-			{Name: "smart_object", Type: "string", Description: "维修台ID，如repair_table_01", Required: true, DefaultValue: ""},
+			{Name: "semantic_group", Type: "string", Description: "维修台所属语义组的 ID（world_kb 中对应 category 的物体 id），如 repair_table", Required: true, DefaultValue: ""},
 			{Name: "interaction", Type: "string", Description: "交互类型，固定为repair_self", Required: true, DefaultValue: ""},
 		},
 	},
@@ -276,7 +276,7 @@ var BuiltinCmdCapabilities = []protocol.CapabilityAction{
 		Description: "回休眠舱休息，包含前往休眠舱和休息这两个动作",
 		UsageHint:   "夜间或疲劳高时使用",
 		Params: []protocol.CapabilityParam{
-			{Name: "smart_object", Type: "string", Description: "休眠舱ID，如sleep_pod_01", Required: true, DefaultValue: ""},
+			{Name: "semantic_group", Type: "string", Description: "休眠舱所属语义组的 ID（world_kb 中对应 category 的物体 id），如 sleep_pod", Required: true, DefaultValue: ""},
 			{Name: "interaction", Type: "string", Description: "交互类型，固定为sleep", Required: true, DefaultValue: ""},
 		},
 	},
@@ -286,7 +286,7 @@ var BuiltinCmdCapabilities = []protocol.CapabilityAction{
 		Description: "去上网，包含去找电脑和上网这两部分动作",
 		UsageHint:   "娱乐放松或者需要查资料时使用",
 		Params: []protocol.CapabilityParam{
-			{Name: "smart_object", Type: "string", Description: "computer id", Required: true, DefaultValue: ""},
+			{Name: "semantic_group", Type: "string", Description: "电脑所属语义组的 ID（world_kb 中对应 category 的物体 id），如 computer", Required: true, DefaultValue: ""},
 			{Name: "interaction", Type: "string", Description: "交互类型，固定为surf_internet", Required: true, DefaultValue: ""},
 		},
 	},
