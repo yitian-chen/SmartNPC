@@ -85,7 +85,7 @@ const StrategicPromptTemplate = `[战略层/每日规划] 现在是仿真时间 
 func BuildStrategic(kb *worldkb.KB, agentID string, actions []protocol.CapabilityAction) string {
 	var sb strings.Builder
 	if kb != nil {
-		if role := AgentRole(kb, agentID); role != "" {
+		if role := AgentRole(kb, nil, agentID); role != "" {
 			sb.WriteString("【你的角色】\n")
 			sb.WriteString(role)
 		}

@@ -202,7 +202,7 @@ func (r *reactiveRunner) buildInput(agentID string, ac *agentContext, trigger Re
 			agentName = agent.DisplayName
 		}
 	}
-	agentRole := prompt.AgentRole(r.kb, agentID)
+	agentRole := prompt.AgentRole(r.kb, nil, agentID)
 
 	// 实时从 dailyPlan 计算 slot，避免长动作在途时 currentSlot stale。
 	// __debug__ 前缀的 slot 是 /debug/schedule 注入的临时覆盖，保留原值。

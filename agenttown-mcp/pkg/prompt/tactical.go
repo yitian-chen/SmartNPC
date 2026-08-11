@@ -81,7 +81,7 @@ func BuildTactical(in TacticalInput) string {
 		physicalLine = fmt.Sprintf("物理状态：能量 %.0f、疲劳 %.0f、关节磨损 %.0f、健康 %.0f。", in.Physical.Energy, in.Physical.Fatigue, in.Physical.JointWear, in.Physical.Health)
 	}
 	roleLine := ""
-	if role := AgentRole(in.KB, in.AgentID); role != "" {
+	if role := AgentRole(in.KB, nil, in.AgentID); role != "" {
 		roleLine = "【你的角色】\n" + role
 	}
 	memoriesLine := ""

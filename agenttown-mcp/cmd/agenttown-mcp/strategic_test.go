@@ -350,7 +350,7 @@ func TestBuildStrategicContext_NilKBWithRegistry(t *testing.T) {
 // helper 本身只输出裸字段）。
 func TestBuildAgentRoleContext_WithKB(t *testing.T) {
 	kb := loadTestKB(t)
-	got := prompt.AgentRole(kb, "H-01")
+	got := prompt.AgentRole(kb, nil, "H-01")
 	if got == "" {
 		t.Fatal("got empty role, want non-empty for valid KB + agent")
 	}
@@ -380,7 +380,7 @@ func TestBuildAgentRoleContext_WithKB(t *testing.T) {
 // fallback 内容与 assets/world_kb.yaml 中 H-01 的字段保持一致，确保
 // KB 加载和 fallback 路径产出相同文本。
 func TestBuildAgentRoleContext_NilKB(t *testing.T) {
-	got := prompt.AgentRole(nil, "H-01")
+	got := prompt.AgentRole(nil, nil, "H-01")
 	if got == "" {
 		t.Fatal("got empty role for H-01 with nil KB, want fallback content")
 	}
@@ -395,7 +395,7 @@ func TestBuildAgentRoleContext_NilKB(t *testing.T) {
 // 不在 KB 中时返回空串（降级路径，三层决策共用此 helper）。
 func TestBuildAgentRoleContext_AgentNotFound(t *testing.T) {
 	kb := loadTestKB(t)
-	got := prompt.AgentRole(kb, "NONEXISTENT-99")
+	got := prompt.AgentRole(kb, nil, "NONEXISTENT-99")
 	if got != "" {
 		t.Errorf("got %q, want empty for unknown agent", got)
 	}

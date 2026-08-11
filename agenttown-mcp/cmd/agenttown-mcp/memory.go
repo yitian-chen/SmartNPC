@@ -89,7 +89,7 @@ func generateDailyMemories(
 
 	roleCtx := ""
 	if kb != nil {
-		if role := prompt.AgentRole(kb, agentID); role != "" {
+		if role := prompt.AgentRole(kb, nil, agentID); role != "" {
 			roleCtx = "【你的角色】\n" + role
 		}
 	}
