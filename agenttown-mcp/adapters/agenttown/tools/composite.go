@@ -17,13 +17,28 @@ import (
 //
 // New 5 composite cmds (2026-08-11): WorkShift / ChargeAtStation /
 // SelfMaintenance / RestAtResidence / SurfInternet. All share the same
-// params schema: smart_object + interaction.
+// params schema: semantic_group + interaction.
+//
+// Parameter naming (2026-08-11 fix): MCP previously sent smart_object
+// as the param key, but real UE5's capability_registry declares the
+// required param as semantic_group. Without this key, UE5 cannot find
+// the target facility and the composite action fast-returns without
+// executing the work phase. The value passed is the semantic group name
+// (e.g. "workbench", "charger") which the world_kb already uses as
+// object IDs — UE5 resolves an idle instance from that group.
+//
+// auto_queue (约定21) lives inside params per UE5's schema, not at the
+// envelope level. UE5 expects a string "true"/"false" for
+// ChargeAtStation and a bool for InteractSmartObject. MCP's
+// shouldAutoQueue(cmd) still drives the envelope-level AutoQueue field
+// for backward compat with any older UE5 builds, but the params-level
+// value is now the authoritative source for real UE5.
 
 // WorkShiftInput — composite: work at a specified facility.
 type WorkShiftInput struct {
 	AgentID       string `json:"agent_id" jsonschema:"the NPC's id"`
 	DecisionEpoch int64  `json:"decision_epoch" jsonschema:"required epoch from the current decision_context"`
-	SmartObject   string `json:"smart_object" jsonschema:"work facility id, e.g. workbench_01, sortconveyor_01"`
+	SemanticGroup string `json:"semantic_group" jsonschema:"work facility semantic group name, e.g. workbench, sorting_conveyor"`
 	Interaction   string `json:"interaction" jsonschema:"interaction work type"`
 }
 
@@ -31,7 +46,7 @@ type WorkShiftInput struct {
 type ChargeAtStationInput struct {
 	AgentID       string `json:"agent_id" jsonschema:"the NPC's id"`
 	DecisionEpoch int64  `json:"decision_epoch" jsonschema:"required epoch from the current decision_context"`
-	SmartObject   string `json:"smart_object" jsonschema:"charging station id, e.g. charging_pillar_01"`
+	SemanticGroup string `json:"semantic_group" jsonschema:"charging facility semantic group name, e.g. charger"`
 	Interaction   string `json:"interaction" jsonschema:"interaction type, fixed to charge"`
 }
 
@@ -39,7 +54,7 @@ type ChargeAtStationInput struct {
 type SelfMaintenanceInput struct {
 	AgentID       string `json:"agent_id" jsonschema:"the NPC's id"`
 	DecisionEpoch int64  `json:"decision_epoch" jsonschema:"required epoch from the current decision_context"`
-	SmartObject   string `json:"smart_object" jsonschema:"repair table id, e.g. repair_table_01"`
+	SemanticGroup string `json:"semantic_group" jsonschema:"repair facility semantic group name, e.g. repair_table"`
 	Interaction   string `json:"interaction" jsonschema:"interaction type, fixed to repair_self"`
 }
 
@@ -47,7 +62,7 @@ type SelfMaintenanceInput struct {
 type RestAtResidenceInput struct {
 	AgentID       string `json:"agent_id" jsonschema:"the NPC's id"`
 	DecisionEpoch int64  `json:"decision_epoch" jsonschema:"required epoch from the current decision_context"`
-	SmartObject   string `json:"smart_object" jsonschema:"sleep pod id, e.g. sleep_pod_01"`
+	SemanticGroup string `json:"semantic_group" jsonschema:"rest facility semantic group name, e.g. sleep_pod"`
 	Interaction   string `json:"interaction" jsonschema:"interaction type, fixed to sleep"`
 }
 
@@ -55,7 +70,7 @@ type RestAtResidenceInput struct {
 type SurfInternetInput struct {
 	AgentID       string `json:"agent_id" jsonschema:"the NPC's id"`
 	DecisionEpoch int64  `json:"decision_epoch" jsonschema:"required epoch from the current decision_context"`
-	SmartObject   string `json:"smart_object" jsonschema:"computer id"`
+	SemanticGroup string `json:"semantic_group" jsonschema:"computer semantic group name, e.g. computer"`
 	Interaction   string `json:"interaction" jsonschema:"interaction type, fixed to surf_internet"`
 }
 
@@ -66,13 +81,14 @@ func registerComposite(s *mcp.Server, ex Executor, logger *slog.Logger) {
 		Name:        "work_shift",
 		Description: "Go to a specified facility and work. Composite behavior — runs a full work routine.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in WorkShiftInput) (*mcp.CallToolResult, ackResult, error) {
-		if in.AgentID == "" || in.SmartObject == "" || in.Interaction == "" {
-			return nil, ackResult{}, fmt.Errorf("agent_id, smart_object and interaction are required")
+		if in.AgentID == "" || in.SemanticGroup == "" || in.Interaction == "" {
+			return nil, ackResult{}, fmt.Errorf("agent_id, semantic_group and interaction are required")
 		}
 		logToolCall("work_shift", in.AgentID, in.DecisionEpoch, in)
 		ack, err := ex.SendAction(ctx, in.AgentID, in.DecisionEpoch, protocol.CmdWorkShift, map[string]any{
-			"smart_object": in.SmartObject,
-			"interaction":  in.Interaction,
+			"semantic_group": in.SemanticGroup,
+			"interaction":    in.Interaction,
+			"auto_queue":     "true",
 		})
 		if err != nil {
 			return nil, ackResult{}, fmt.Errorf("work_shift: %w", err)
@@ -85,13 +101,14 @@ func registerComposite(s *mcp.Server, ex Executor, logger *slog.Logger) {
 		Name:        "charge_at_station",
 		Description: "Charge at a charging station. Composite behavior — restores battery.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in ChargeAtStationInput) (*mcp.CallToolResult, ackResult, error) {
-		if in.AgentID == "" || in.SmartObject == "" || in.Interaction == "" {
-			return nil, ackResult{}, fmt.Errorf("agent_id, smart_object and interaction are required")
+		if in.AgentID == "" || in.SemanticGroup == "" || in.Interaction == "" {
+			return nil, ackResult{}, fmt.Errorf("agent_id, semantic_group and interaction are required")
 		}
 		logToolCall("charge_at_station", in.AgentID, in.DecisionEpoch, in)
 		ack, err := ex.SendAction(ctx, in.AgentID, in.DecisionEpoch, protocol.CmdChargeAtStation, map[string]any{
-			"smart_object": in.SmartObject,
-			"interaction":  in.Interaction,
+			"semantic_group": in.SemanticGroup,
+			"interaction":    in.Interaction,
+			"auto_queue":     "true",
 		})
 		if err != nil {
 			return nil, ackResult{}, fmt.Errorf("charge_at_station: %w", err)
@@ -104,13 +121,14 @@ func registerComposite(s *mcp.Server, ex Executor, logger *slog.Logger) {
 		Name:        "self_maintenance",
 		Description: "Go to a repair table and perform self-inspection/maintenance. Composite behavior.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in SelfMaintenanceInput) (*mcp.CallToolResult, ackResult, error) {
-		if in.AgentID == "" || in.SmartObject == "" || in.Interaction == "" {
-			return nil, ackResult{}, fmt.Errorf("agent_id, smart_object and interaction are required")
+		if in.AgentID == "" || in.SemanticGroup == "" || in.Interaction == "" {
+			return nil, ackResult{}, fmt.Errorf("agent_id, semantic_group and interaction are required")
 		}
 		logToolCall("self_maintenance", in.AgentID, in.DecisionEpoch, in)
 		ack, err := ex.SendAction(ctx, in.AgentID, in.DecisionEpoch, protocol.CmdSelfMaintenance, map[string]any{
-			"smart_object": in.SmartObject,
-			"interaction":  in.Interaction,
+			"semantic_group": in.SemanticGroup,
+			"interaction":    in.Interaction,
+			"auto_queue":     "true",
 		})
 		if err != nil {
 			return nil, ackResult{}, fmt.Errorf("self_maintenance: %w", err)
@@ -123,13 +141,14 @@ func registerComposite(s *mcp.Server, ex Executor, logger *slog.Logger) {
 		Name:        "rest_at_residence",
 		Description: "Go to a sleep pod and rest. Composite behavior — restores energy overnight.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in RestAtResidenceInput) (*mcp.CallToolResult, ackResult, error) {
-		if in.AgentID == "" || in.SmartObject == "" || in.Interaction == "" {
-			return nil, ackResult{}, fmt.Errorf("agent_id, smart_object and interaction are required")
+		if in.AgentID == "" || in.SemanticGroup == "" || in.Interaction == "" {
+			return nil, ackResult{}, fmt.Errorf("agent_id, semantic_group and interaction are required")
 		}
 		logToolCall("rest_at_residence", in.AgentID, in.DecisionEpoch, in)
 		ack, err := ex.SendAction(ctx, in.AgentID, in.DecisionEpoch, protocol.CmdRestAtResidence, map[string]any{
-			"smart_object": in.SmartObject,
-			"interaction":  in.Interaction,
+			"semantic_group": in.SemanticGroup,
+			"interaction":    in.Interaction,
+			"auto_queue":     "true",
 		})
 		if err != nil {
 			return nil, ackResult{}, fmt.Errorf("rest_at_residence: %w", err)
@@ -142,13 +161,14 @@ func registerComposite(s *mcp.Server, ex Executor, logger *slog.Logger) {
 		Name:        "surf_internet",
 		Description: "Go to a computer and surf the internet. Composite behavior — for leisure or research.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in SurfInternetInput) (*mcp.CallToolResult, ackResult, error) {
-		if in.AgentID == "" || in.SmartObject == "" || in.Interaction == "" {
-			return nil, ackResult{}, fmt.Errorf("agent_id, smart_object and interaction are required")
+		if in.AgentID == "" || in.SemanticGroup == "" || in.Interaction == "" {
+			return nil, ackResult{}, fmt.Errorf("agent_id, semantic_group and interaction are required")
 		}
 		logToolCall("surf_internet", in.AgentID, in.DecisionEpoch, in)
 		ack, err := ex.SendAction(ctx, in.AgentID, in.DecisionEpoch, protocol.CmdSurfInternet, map[string]any{
-			"smart_object": in.SmartObject,
-			"interaction":  in.Interaction,
+			"semantic_group": in.SemanticGroup,
+			"interaction":    in.Interaction,
+			"auto_queue":     "true",
 		})
 		if err != nil {
 			return nil, ackResult{}, fmt.Errorf("surf_internet: %w", err)

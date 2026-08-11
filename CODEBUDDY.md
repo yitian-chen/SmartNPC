@@ -367,13 +367,13 @@ energy / fatigue / joint_wear / health，通过 `state_report` 权威通道上�
 
 | 工具 | 参数 | cmd | 说明 |
 |------|------|-----|------|
-| `work_shift` | agent_id, smart_object, interaction | `WorkShift` | 工作班次（装配/分拣/作业） |
-| `charge_at_station` | agent_id, smart_object, interaction | `ChargeAtStation` | 在充电站充电 |
-| `self_maintenance` | agent_id, smart_object, interaction | `SelfMaintenance` | 自我维护保养 |
-| `rest_at_residence` | agent_id, smart_object, interaction | `RestAtResidence` | 在住所休息 |
-| `surf_internet` | agent_id, smart_object, interaction | `SurfInternet` | 上网浏览 |
+| `work_shift` | agent_id, semantic_group, interaction | `WorkShift` | 工作班次（装配/分拣/作业） |
+| `charge_at_station` | agent_id, semantic_group, interaction | `ChargeAtStation` | 在充电站充电 |
+| `self_maintenance` | agent_id, semantic_group, interaction | `SelfMaintenance` | 自我维护保养 |
+| `rest_at_residence` | agent_id, semantic_group, interaction | `RestAtResidence` | 在住所休息 |
+| `surf_internet` | agent_id, semantic_group, interaction | `SurfInternet` | 上网浏览 |
 
-5 个复合工具共享 `smart_object` + `interaction` 参数 schema，`smart_object` 引用 `world_kb` 中对应 category 的物体 id。
+5 个复合工具共享 `semantic_group` + `interaction` 参数 schema（按真实 UE5 `capability_registry` 声明的参数名），`semantic_group` 引用 `world_kb` 中对应 category 的物体 id（语义组名，如 `workbench`/`charger`/`sleep_pod`/`repair_table`/`computer`），UE5 从该组自动选一个空闲实例。`auto_queue` 作为 `params` 内字段传 `"true"`（约定21）。
 
 ### 原子行为工具（7 个 + 2 特殊）
 
@@ -384,7 +384,7 @@ energy / fatigue / joint_wear / health，通过 `state_report` 权威通道上�
 | `turn_to` | agent_id, target_type, target_id/target_position | `TurnTo` |
 | `speak` | agent_id, content | `Speak` |
 | `emote` | agent_id, emotion | `Emote` |
-| `interact` | agent_id, smart_object, interaction | `InteractSmartObject` |
+| `interact` | agent_id, semantic_group, interaction | `InteractSmartObject` |
 | `wait` | agent_id, duration_sec | `Wait` |
 | `scan_area` | agent_id | （请求即时 perception，无 cmd） |
 | `stop` | agent_id | （发 `stop_action` 消息，非 cmd） |
@@ -478,7 +478,7 @@ UE 推送新 `world_kb` 后，MCP 重启即自动适配全链路，无需改任�
 - **反应层 prompt 注入角色**：`ReactiveInput.AgentRole` 由 `reactiveRunner.buildInput` 从 kb 取，注入反应层 prompt 开头。反应决策（continue/observe/replan）受 NPC 性格影响。
 - **工具列表动态派生**：`capability_registry` 驱动 `ReconcileTools` 增删工具；`buildTacticalToolEntries` 按 registry 对 agent 的有效能力集生成 prompt 工具列表；`buildTacticalExample(kb)` 从 KB 取首个 zone/object 作示例。新 cmd 由 `registerGenericActionTool` 自动注册通用工具。
 - **反应层决策简化**：反应层仅支持 `continue`/`observe`/`replan` 三种决策（已移除 `interrupt`/`act`）。物理告警时代码层 `upgradeIfPhysicalAlert` 强制升级 continue/observe → replan。
-- **工具 jsonschema 描述去硬编码 id**：`MoveToInput.TargetID` / `InteractInput.SmartObject` / `WorkShiftInput.SmartObject` 等不再写死 `e.g. main_workshop`/`workbench_01`/`"H-01"`，改为引用 `world_kb`，LLM 从 prompt 注入的【世界知识】段获取合法 id。
+- **工具 jsonschema 描述去硬编码 id**：`MoveToInput.TargetID` / `InteractInput.SemanticGroup` / `WorkShiftInput.SemanticGroup` 等不再写死 `e.g. main_workshop`/`workbench_01`/`"H-01"`，改为引用 `world_kb`，LLM 从 prompt 注入的【世界知识】段获取合法 id。
 - **兜底每日计划从 KB 派生**：`buildDefaultDailyPlan(kb)` 用首个 zone 显示名 + 首个 object 显示名组装工作时段；`kb == nil` 时降级为中性表述（不引用"车间"/"装配"/"充电"等当前 KB 专属词）。
 
 **仅启动时适配**：不支持运行时热替换 KB。worker 按值捕获 kb，swap 仅在 worker 启动前发生，当前架构安全。换 KB 流程：UE 推送新 `world_kb` → MCP 重启 → worker 启动时拿新 kb。
@@ -776,7 +776,7 @@ python3 src/run_day.py   # 默认连 :9091
 | 状态访问与业务逻辑分离 Stage 3 | ✅ | MySQL 持久化层：4 调度字段 write-through + `LoadPersistent` 热重启 + `//go:embed` SQL 迁移 |
 | 状态访问与业务逻辑分离 Stage 4 | ✅ | 长期经历记忆：日终 LLM 批量生成 memories + 战略层注入昨日总结 + 战术层注入 top-3 近期记忆 + action_history 完整落盘 |
 | 状态访问与业务逻辑分离 Stage 5 | ✅ | 关系数值动态维护：动作完成 Ollama 判断 + 双向 familiarity+=1 + 战术层注入【人际关系】段 + KB 种子导入 |
-| 12 cmd 体系迁移 | ✅ | 旧 14 cmd（8 原子+6 复合）→ 新 12 cmd（7 原子+5 复合）对齐真实 UE5；统一 MoveTo（target_type+target_id/target_position）；复合动作共享 smart_object+interaction schema；GenericAct 兜底；MCP 不再做 KB 坐标解析 |
+| 12 cmd 体系迁移 | ✅ | 旧 14 cmd（8 原子+6 复合）→ 新 12 cmd（7 原子+5 复合）对齐真实 UE5；统一 MoveTo（target_type+target_id/target_position）；复合动作共享 semantic_group+interaction schema（按真实 UE5 capability_registry 参数名）；GenericAct 兜底；MCP 不再做 KB 坐标解析 |
 | NPC profile.md 人设档案 | ✅ | `pkg/profile` 加载 `assets/profiles/<agentID>.md`；三层 per-field 回退（profile > KB > hardcoded）；战略/战术/反应/记忆层透传 profiles 参数到 `AgentRole` |
 
 ## 当前已知问题（2026-07-29 仿真分析）

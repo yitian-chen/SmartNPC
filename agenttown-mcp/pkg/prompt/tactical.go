@@ -16,8 +16,10 @@ import (
 // (see toolEntries).
 //
 // 新 12 cmd 体系（2026-08-11）：MoveTo 统一替换 MoveToLocation+MoveToAgent，
-// 用 target_type+target_id/target_position；InteractSmartObject 参数名从
-// target_object_id 改为 smart_object；5 个复合动作共享 smart_object+interaction。
+// 用 target_type+target_id/target_position；InteractSmartObject 和 5 个复合
+// 动作共享 semantic_group+interaction（按真实 UE5 capability_registry
+// 声明的参数名，2026-08-11 修正：原 smart_object 字段 UE5 不识别，导致
+// 复合动作瞬时返回不执行工作阶段）。
 var toolOverride = map[string]struct {
 	Desc   string
 	Params string
@@ -27,13 +29,13 @@ var toolOverride = map[string]struct {
 	"turn_to":     {"转向目标", `{"target_type":"agent|smart_object|zone|position","target_id":"...","target_position":[x,y,z]}`},
 	"speak":       {"说话", `{"content":"..."}`},
 	"emote":       {"表达情绪", `{"emotion":"happy|sad|..."}`},
-	"interact":    {"与智能物体交互", `{"smart_object":"...","interaction":"动词"}`},
+	"interact":    {"与智能物体交互", `{"semantic_group":"...","interaction":"动词"}`},
 	// wait intentionally not in override and not shown in prompt tool list.
-	"work_shift":        {"工作班次（装配/作业）", `{"smart_object":"工作台id","interaction":"动词"}`},
-	"charge_at_station": {"在充电站充电", `{"smart_object":"充电站id","interaction":"动词"}`},
-	"self_maintenance":  {"自我维护保养", `{"smart_object":"维护台id","interaction":"动词"}`},
-	"rest_at_residence": {"在住所休息", `{"smart_object":"休眠舱id","interaction":"动词"}`},
-	"surf_internet":     {"上网浏览", `{"smart_object":"终端id","interaction":"动词"}`},
+	"work_shift":        {"工作班次（装配/作业）", `{"semantic_group":"工作设施组名","interaction":"动词"}`},
+	"charge_at_station": {"在充电站充电", `{"semantic_group":"充电设施组名","interaction":"动词"}`},
+	"self_maintenance":  {"自我维护保养", `{"semantic_group":"维护设施组名","interaction":"动词"}`},
+	"rest_at_residence": {"在住所休息", `{"semantic_group":"休眠舱组名","interaction":"动词"}`},
+	"surf_internet":     {"上网浏览", `{"semantic_group":"终端组名","interaction":"动词"}`},
 }
 
 // tacticalPromptBody is the prompt's fixed skeleton. %s placeholders are:
@@ -62,7 +64,7 @@ const tacticalPromptBody = `[战术层/任务分解] 当前时段目标：%s
 3. 队列必须以长复合动作（标记 [复合]）结尾——长复合动作会持续执行直到时段切换，让 NPC 一直工作到下一 schedule 节点被 worker 主动打断
 4. 禁止输出 wait 动作；若无需移动/转身等前置步骤，可直接输出单个长复合动作，长复合动作包含移动到对应位置的逻辑
 5. 仅当目标确实没有匹配的长复合动作时（极少见），才用原子动作组合、结合调用兜底的 generic_act 通用动作实现目标
-6. move_to/turn_to 的 target_id、interact 和复合动作的 smart_object 必须严格使用上面"可前往区域"和"可交互物体"中给出的 id，禁止编造、禁止拼接 zone/interaction 信息
+6. move_to/turn_to 的 target_id、interact 和复合动作的 semantic_group 必须严格使用上面"可前往区域"和"可交互物体"中给出的 id，禁止编造、禁止拼接 zone/interaction 信息
 7. 每行一个 JSON 对象，不要输出 JSON 数组，不要输出 markdown 围栏，不要输出任何其他文字
 8. 必须以字符 {"inner_thought 开头，不要输出步骤说明、不要解释、不要编号列表、不要 markdown 加粗
 
@@ -282,7 +284,7 @@ func paramPlaceholder(p protocol.CapabilityParam) string {
 func TacticalExample(kb *worldkb.KB, goal string) string {
 	const genericExample = `{"inner_thought":"先去目标区域再开始作业"}
 {"action":"move_to","params":{"target_type":"zone","target_id":"<上方可前往区域的 id>"}}
-{"action":"interact","params":{"smart_object":"<上方可交互物体的 id>","interaction":"<可用 interaction>"}}`
+{"action":"interact","params":{"semantic_group":"<上方可交互物体的 id>","interaction":"<可用 interaction>"}}`
 	if kb == nil {
 		return genericExample
 	}
@@ -303,7 +305,7 @@ func TacticalExample(kb *worldkb.KB, goal string) string {
 		}
 		return fmt.Sprintf(`{"inner_thought":"先去目标区域再开始作业"}
 {"action":"move_to","params":{"target_type":"zone","target_id":"%s"}}
-{"action":"interact","params":{"smart_object":"<上方可交互物体的 id>","interaction":"<可用 interaction>"}}`, exZone)
+{"action":"interact","params":{"semantic_group":"<上方可交互物体的 id>","interaction":"<可用 interaction>"}}`, exZone)
 	}
 	obj := objs[0]
 	exObj := obj.ID
@@ -319,7 +321,7 @@ func TacticalExample(kb *worldkb.KB, goal string) string {
 		}
 		return fmt.Sprintf(`{"inner_thought":"先去目标区域再开始作业"}
 {"action":"move_to","params":{"target_type":"zone","target_id":"%s"}}
-{"action":"work_shift","params":{"smart_object":"%s","interaction":"%s"}}`, exZone, exObj, verb)
+{"action":"work_shift","params":{"semantic_group":"%s","interaction":"%s"}}`, exZone, exObj, verb)
 	case "charging_station", "charging":
 		verb := "<可用 interaction>"
 		if len(obj.AvailableInteractions) > 0 {
@@ -327,7 +329,7 @@ func TacticalExample(kb *worldkb.KB, goal string) string {
 		}
 		return fmt.Sprintf(`{"inner_thought":"先去目标区域补充能量"}
 {"action":"move_to","params":{"target_type":"zone","target_id":"%s"}}
-{"action":"charge_at_station","params":{"smart_object":"%s","interaction":"%s"}}`, exZone, exObj, verb)
+{"action":"charge_at_station","params":{"semantic_group":"%s","interaction":"%s"}}`, exZone, exObj, verb)
 	default:
 		verb := "<可用 interaction>"
 		if len(obj.AvailableInteractions) > 0 {
@@ -335,7 +337,7 @@ func TacticalExample(kb *worldkb.KB, goal string) string {
 		}
 		return fmt.Sprintf(`{"inner_thought":"先去目标区域再开始作业"}
 {"action":"move_to","params":{"target_type":"zone","target_id":"%s"}}
-{"action":"interact","params":{"smart_object":"%s","interaction":"%s"}}`, exZone, exObj, verb)
+{"action":"interact","params":{"semantic_group":"%s","interaction":"%s"}}`, exZone, exObj, verb)
 	}
 }
 
@@ -371,7 +373,7 @@ func exampleForGoal(kb *worldkb.KB, goal string, zones []worldkb.ZoneInfo, objs 
 			}
 			return fmt.Sprintf(`{"inner_thought":"先去目标区域补充能量"}
 {"action":"move_to","params":{"target_type":"zone","target_id":"%s"}}
-{"action":"charge_at_station","params":{"smart_object":"%s","interaction":"%s"}}`, exZone, obj.ID, verb)
+{"action":"charge_at_station","params":{"semantic_group":"%s","interaction":"%s"}}`, exZone, obj.ID, verb)
 		}
 	}
 
@@ -388,7 +390,7 @@ func exampleForGoal(kb *worldkb.KB, goal string, zones []worldkb.ZoneInfo, objs 
 			}
 			return fmt.Sprintf(`{"inner_thought":"先去目标区域再开始作业"}
 {"action":"move_to","params":{"target_type":"zone","target_id":"%s"}}
-{"action":"work_shift","params":{"smart_object":"%s","interaction":"%s"}}`, exZone, obj.ID, verb)
+{"action":"work_shift","params":{"semantic_group":"%s","interaction":"%s"}}`, exZone, obj.ID, verb)
 		}
 	}
 
@@ -411,7 +413,7 @@ func exampleForGoal(kb *worldkb.KB, goal string, zones []worldkb.ZoneInfo, objs 
 					}
 					return fmt.Sprintf(`{"inner_thought":"先去目标区域检查设备"}
 {"action":"move_to","params":{"target_type":"zone","target_id":"%s"}}
-{"action":"interact","params":{"smart_object":"%s","interaction":"inspect"}}`, exZone, objs[i].ID)
+{"action":"interact","params":{"semantic_group":"%s","interaction":"inspect"}}`, exZone, objs[i].ID)
 				}
 			}
 		}

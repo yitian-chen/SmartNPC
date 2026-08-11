@@ -60,10 +60,15 @@ type EmoteInput struct {
 }
 
 // InteractInput — atomic: interact with a smart object.
+//
+// Field name follows real UE5's capability_registry schema which
+// declares `semantic_group` (the facility group name, e.g. "workbench")
+// rather than a specific instance id. UE5 resolves an idle instance
+// from the group. See composite.go header for the 2026-08-11 fix notes.
 type InteractInput struct {
 	AgentID       string `json:"agent_id" jsonschema:"the NPC's id"`
 	DecisionEpoch int64  `json:"decision_epoch" jsonschema:"required epoch from the current decision_context"`
-	SmartObject   string `json:"smart_object" jsonschema:"smart object id from the world_kb"`
+	SemanticGroup string `json:"semantic_group" jsonschema:"target facility semantic group name, e.g. workbench, charger, sleep_pod, repair_table, computer"`
 	Interaction   string `json:"interaction"  jsonschema:"verb from the object's available_interactions"`
 }
 
@@ -213,13 +218,14 @@ func registerAtomic(s *mcp.Server, ex Executor, kb *worldkb.KB, logger *slog.Log
 		Name:        "interact",
 		Description: "Interact with a smart object using a verb from its available_interactions.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in InteractInput) (*mcp.CallToolResult, ackResult, error) {
-		if in.AgentID == "" || in.SmartObject == "" || in.Interaction == "" {
-			return nil, ackResult{}, fmt.Errorf("agent_id, smart_object and interaction are required")
+		if in.AgentID == "" || in.SemanticGroup == "" || in.Interaction == "" {
+			return nil, ackResult{}, fmt.Errorf("agent_id, semantic_group and interaction are required")
 		}
 		logToolCall("interact", in.AgentID, in.DecisionEpoch, in)
 		ack, err := ex.SendAction(ctx, in.AgentID, in.DecisionEpoch, protocol.CmdInteractSmartObject, map[string]any{
-			"smart_object": in.SmartObject,
-			"interaction":  in.Interaction,
+			"semantic_group": in.SemanticGroup,
+			"interaction":    in.Interaction,
+			"auto_queue":     true,
 		})
 		if err != nil {
 			return nil, ackResult{}, fmt.Errorf("interact: %w", err)
