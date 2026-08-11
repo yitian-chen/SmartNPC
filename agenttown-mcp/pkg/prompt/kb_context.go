@@ -32,10 +32,10 @@ func KBContext(kb *worldkb.KB) string {
 				parts = append(parts, z.ID)
 			}
 		}
-		lines = append(lines, "可前往区域（move_to_location 的 target 用 id）: "+strings.Join(parts, "、")+"。")
+		lines = append(lines, "可前往区域（move_to 的 target_id 用 id）: "+strings.Join(parts, "、")+"。")
 	}
 	if os := kb.ListObjects(); len(os) > 0 {
-		lines = append(lines, "可交互物体（interact/work_at_workbench 的 target_object_id 用 id，interact 的 interaction 用下列可用动词）:")
+		lines = append(lines, "可交互物体（interact 和复合动作的 smart_object 用 id，interact 的 interaction 用下列可用动词）:")
 		for _, o := range os {
 			label := o.ID
 			if o.DisplayName != "" && o.DisplayName != o.ID {

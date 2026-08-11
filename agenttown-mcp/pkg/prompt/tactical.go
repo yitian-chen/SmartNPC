@@ -10,27 +10,30 @@ import (
 	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
 )
 
-// toolOverride is the hand-tuned Chinese prompt text for the 14 builtin tools.
+// toolOverride is the hand-tuned Chinese prompt text for the 12 builtin tools.
 // Keys are tool_name (snake_case). New cmds pushed via capability_registry
 // derive Desc/Params from CapabilityAction.Description and param schema
 // (see toolEntries).
+//
+// 新 12 cmd 体系（2026-08-11）：MoveTo 统一替换 MoveToLocation+MoveToAgent，
+// 用 target_type+target_id/target_position；InteractSmartObject 参数名从
+// target_object_id 改为 smart_object；5 个复合动作共享 smart_object+interaction。
 var toolOverride = map[string]struct {
 	Desc   string
 	Params string
 }{
-	"move_to_location": {"移动到目标位置", `{"target":"区域或位置id"}`},
-	"move_to_agent":    {"跟随目标agent", `{"target_agent_id":"...","speed":"walk|run"}`},
-	"turn_to":          {"转向目标", `{"target_agent_id":"实体id"} 或 {"direction":[dx,dy,dz]}`},
-	"play_montage":     {"播放蒙太奇", `{"montage_id":"...","wait_finish":true}`},
-	"speak":            {"说话", `{"content":"...","target_agent_id":"目标agent_id（可空）"}`},
-	"emote":            {"表达情绪", `{"emotion":"happy|sad|...","mode":"oneshot|sustained"}`},
-	"interact":         {"与智能物体交互", `{"target_object_id":"...","interaction":"动词"}`},
+	"generic_act": {"兜底通用动作（带内心独白，无匹配复合动作时用）", `{"thought":"...","behavior":"idle|wave_hand|look_around"}`},
+	"move_to":     {"移动到目标", `{"target_type":"agent|smart_object|zone|position","target_id":"...","target_position":[x,y,z]}`},
+	"turn_to":     {"转向目标", `{"target_type":"agent|smart_object|zone|position","target_id":"...","target_position":[x,y,z]}`},
+	"speak":       {"说话", `{"content":"..."}`},
+	"emote":       {"表达情绪", `{"emotion":"happy|sad|..."}`},
+	"interact":    {"与智能物体交互", `{"smart_object":"...","interaction":"动词"}`},
 	// wait intentionally not in override and not shown in prompt tool list.
-	"work_at_workbench": {"在工作台装配", `{"target_object_id":"工作台id","duration_sec":秒数}`},
-	"work_at_workshop":  {"车间例行工作", `{}`},
-	"chat_with":         {"与其他agent聊天", `{"target_agent_id":"...","topic":"话题（可选）"}`},
-	"repair_target":     {"修理其他agent", `{"target_agent_id":"...","tool_id":"工具id（可选）"}`},
-	"patrol_zone":       {"巡逻区域", `{"target_zone":"区域id","duration_sec":秒数}`},
+	"work_shift":        {"工作班次（装配/作业）", `{"smart_object":"工作台id","interaction":"动词"}`},
+	"charge_at_station": {"在充电站充电", `{"smart_object":"充电站id","interaction":"动词"}`},
+	"self_maintenance":  {"自我维护保养", `{"smart_object":"维护台id","interaction":"动词"}`},
+	"rest_at_residence": {"在住所休息", `{"smart_object":"休眠舱id","interaction":"动词"}`},
+	"surf_internet":     {"上网浏览", `{"smart_object":"终端id","interaction":"动词"}`},
 }
 
 // tacticalPromptBody is the prompt's fixed skeleton. %s placeholders are:
@@ -59,7 +62,7 @@ const tacticalPromptBody = `[战术层/任务分解] 当前时段目标：%s
 3. 队列必须以长复合动作（标记 [复合]）结尾——长复合动作会持续执行直到时段切换，让 NPC 一直工作到下一 schedule 节点被 worker 主动打断
 4. 禁止输出 wait 动作；若无需移动/转身等前置步骤，可直接输出单个长复合动作，长复合动作包含移动到对应位置的逻辑
 5. 仅当目标确实没有匹配的长复合动作时（极少见），才用原子动作组合、结合调用兜底的 generic_act 通用动作实现目标
-6. move_to 的 target、interact 的 target_object_id、以及复合动作中引用的 object/zone id 必须严格使用上面"可前往区域"和"可交互物体"中给出的 id，禁止编造、禁止拼接 zone/interaction 信息
+6. move_to/turn_to 的 target_id、interact 和复合动作的 smart_object 必须严格使用上面"可前往区域"和"可交互物体"中给出的 id，禁止编造、禁止拼接 zone/interaction 信息
 7. 每行一个 JSON 对象，不要输出 JSON 数组，不要输出 markdown 围栏，不要输出任何其他文字
 8. 必须以字符 {"inner_thought 开头，不要输出步骤说明、不要解释、不要编号列表、不要 markdown 加粗
 
@@ -100,8 +103,8 @@ func BuildTactical(in TacticalInput) string {
 	if strings.Contains(in.Hint, "物理状态告警") {
 		hintLine += "\n【物理告警强制约束】当前物理状态已突破警戒阈值，必须立即规划恢复类动作：\n" +
 			"- 优先 charge_at_station（充电）补能\n" +
-			"- 充电后若仍疲劳高，追加 wait 或 rest 类动作\n" +
-			"- 禁止规划 work_at_workbench / work_at_workshop / patrol_zone 等消耗体能的动作\n" +
+			"- 充电后若仍疲劳高，追加 wait 或 rest_at_residence 类动作\n" +
+			"- 禁止规划 work_shift / self_maintenance / surf_internet 等消耗体能的动作\n" +
 			"- 禁止规划 move_to 到非充电站区域（除非当前已在充电站）"
 	}
 	toolList, toolCount := BuildTacticalToolList(in.Actions)
@@ -167,8 +170,8 @@ func kindLabel(kind string) string {
 // Used when actions == nil (backward-compat scenario) to infer Kind from name.
 func builtinToolKind(name string) string {
 	switch name {
-	case "work_at_workbench", "work_at_workshop", "chat_with",
-		"repair_target", "charge_at_station", "patrol_zone":
+	case "work_shift", "charge_at_station", "self_maintenance",
+		"rest_at_residence", "surf_internet":
 		return "composite"
 	default:
 		return "atomic"
@@ -264,22 +267,22 @@ func paramPlaceholder(p protocol.CapabilityParam) string {
 // tool matches the goal semantics.
 //
 // goal keyword matching (by priority):
-//   - 巡视/巡检/巡逻      → patrol_zone example
-//   - 充电/补能/休息/恢复  → charge_at_station example (find charging_station object)
-//   - 装配/工作/作业/打磨  → work_at_workbench example (find workbench object)
-//   - 聊天/社交/对话       → chat_with example (needs ≥2 agents)
+//   - 巡视/巡检/巡逻      → move_to + generic_act example
+//   - 充电/补能/休息/恢复  → charge_at_station example (find charging object)
+//   - 装配/工作/作业/打磨  → work_shift example (find workbench object)
+//   - 聊天/社交/对话       → move_to agent + speak example (needs ≥2 agents)
 //   - 检查/自检/inspect    → interact inspect example
 //
 // No keyword match or required resource missing → degrade to default:
 // pick first object by category. KB empty → generic example with no concrete IDs.
 //
-// Key constraint: example's move_to_location target must match the example
+// Key constraint: example's move_to target_id must match the example
 // object's ZoneID — otherwise the example itself violates the prompt's
 // "interact must be called in object's zone" constraint #5.
 func TacticalExample(kb *worldkb.KB, goal string) string {
 	const genericExample = `{"inner_thought":"先去目标区域再开始作业"}
-{"action":"move_to_location","params":{"target":"<上方可前往区域的 id>"}}
-{"action":"interact","params":{"target_object_id":"<上方可交互物体的 id>","interaction":"<可用 interaction>"}}`
+{"action":"move_to","params":{"target_type":"zone","target_id":"<上方可前往区域的 id>"}}
+{"action":"interact","params":{"smart_object":"<上方可交互物体的 id>","interaction":"<可用 interaction>"}}`
 	if kb == nil {
 		return genericExample
 	}
@@ -299,8 +302,8 @@ func TacticalExample(kb *worldkb.KB, goal string) string {
 			exZone = zones[0].ID
 		}
 		return fmt.Sprintf(`{"inner_thought":"先去目标区域再开始作业"}
-{"action":"move_to_location","params":{"target":"%s"}}
-{"action":"interact","params":{"target_object_id":"<上方可交互物体的 id>","interaction":"<可用 interaction>"}}`, exZone)
+{"action":"move_to","params":{"target_type":"zone","target_id":"%s"}}
+{"action":"interact","params":{"smart_object":"<上方可交互物体的 id>","interaction":"<可用 interaction>"}}`, exZone)
 	}
 	obj := objs[0]
 	exObj := obj.ID
@@ -310,21 +313,29 @@ func TacticalExample(kb *worldkb.KB, goal string) string {
 	}
 	switch obj.Category {
 	case "workbench", "work":
+		verb := "<可用 interaction>"
+		if len(obj.AvailableInteractions) > 0 {
+			verb = obj.AvailableInteractions[0]
+		}
 		return fmt.Sprintf(`{"inner_thought":"先去目标区域再开始作业"}
-{"action":"move_to_location","params":{"target":"%s"}}
-{"action":"work_at_workbench","params":{"target_object_id":"%s","duration_sec":3600}}`, exZone, exObj)
+{"action":"move_to","params":{"target_type":"zone","target_id":"%s"}}
+{"action":"work_shift","params":{"smart_object":"%s","interaction":"%s"}}`, exZone, exObj, verb)
 	case "charging_station", "charging":
+		verb := "<可用 interaction>"
+		if len(obj.AvailableInteractions) > 0 {
+			verb = obj.AvailableInteractions[0]
+		}
 		return fmt.Sprintf(`{"inner_thought":"先去目标区域补充能量"}
-{"action":"move_to_location","params":{"target":"%s"}}
-{"action":"charge_at_station","params":{"target_object_id":"%s"}}`, exZone, exObj)
+{"action":"move_to","params":{"target_type":"zone","target_id":"%s"}}
+{"action":"charge_at_station","params":{"smart_object":"%s","interaction":"%s"}}`, exZone, exObj, verb)
 	default:
 		verb := "<可用 interaction>"
 		if len(obj.AvailableInteractions) > 0 {
 			verb = obj.AvailableInteractions[0]
 		}
 		return fmt.Sprintf(`{"inner_thought":"先去目标区域再开始作业"}
-{"action":"move_to_location","params":{"target":"%s"}}
-{"action":"interact","params":{"target_object_id":"%s","interaction":"%s"}}`, exZone, exObj, verb)
+{"action":"move_to","params":{"target_type":"zone","target_id":"%s"}}
+{"action":"interact","params":{"smart_object":"%s","interaction":"%s"}}`, exZone, exObj, verb)
 	}
 }
 
@@ -336,15 +347,15 @@ func exampleForGoal(kb *worldkb.KB, goal string, zones []worldkb.ZoneInfo, objs 
 	}
 	gl := strings.ToLower(goal)
 
-	// 1. 巡视/巡检/巡逻 → patrol_zone
+	// 1. 巡视/巡检/巡逻 → move_to zone + generic_act（新体系无 patrol_zone）
 	if containsAny(gl, "巡视", "巡检", "巡逻", "patrol") {
 		exZone := "<上方可前往区域的 id>"
 		if len(zones) > 0 {
 			exZone = zones[0].ID
 		}
-		return fmt.Sprintf(`{"inner_thought":"先去目标区域巡视一圈"}
-{"action":"move_to_location","params":{"target":"%s"}}
-{"action":"patrol_zone","params":{"target_zone":"%s","duration_sec":1800}}`, exZone, exZone)
+		return fmt.Sprintf(`{"inner_thought":"去目标区域巡视一圈"}
+{"action":"move_to","params":{"target_type":"zone","target_id":"%s"}}
+{"action":"generic_act","params":{"thought":"巡视设备状态","behavior":"look_around"}}`, exZone)
 	}
 
 	// 2. 充电/补能/休息/恢复/疲劳 → charge_at_station
@@ -354,31 +365,39 @@ func exampleForGoal(kb *worldkb.KB, goal string, zones []worldkb.ZoneInfo, objs 
 			if exZone == "" {
 				exZone = "<上方可前往区域的 id>"
 			}
+			verb := "<可用 interaction>"
+			if len(obj.AvailableInteractions) > 0 {
+				verb = obj.AvailableInteractions[0]
+			}
 			return fmt.Sprintf(`{"inner_thought":"先去目标区域补充能量"}
-{"action":"move_to_location","params":{"target":"%s"}}
-{"action":"charge_at_station","params":{"target_object_id":"%s"}}`, exZone, obj.ID)
+{"action":"move_to","params":{"target_type":"zone","target_id":"%s"}}
+{"action":"charge_at_station","params":{"smart_object":"%s","interaction":"%s"}}`, exZone, obj.ID, verb)
 		}
 	}
 
-	// 3. 装配/工作/作业/打磨/加工 → work_at_workbench
+	// 3. 装配/工作/作业/打磨/加工 → work_shift
 	if containsAny(gl, "装配", "工作", "作业", "打磨", "加工", "assemble", "craft") {
 		if obj := findObjectByCategory(objs, "workbench", "work"); obj != nil {
 			exZone := obj.ZoneID
 			if exZone == "" {
 				exZone = "<上方可前往区域的 id>"
 			}
+			verb := "<可用 interaction>"
+			if len(obj.AvailableInteractions) > 0 {
+				verb = obj.AvailableInteractions[0]
+			}
 			return fmt.Sprintf(`{"inner_thought":"先去目标区域再开始作业"}
-{"action":"move_to_location","params":{"target":"%s"}}
-{"action":"work_at_workbench","params":{"target_object_id":"%s","duration_sec":3600}}`, exZone, obj.ID)
+{"action":"move_to","params":{"target_type":"zone","target_id":"%s"}}
+{"action":"work_shift","params":{"smart_object":"%s","interaction":"%s"}}`, exZone, obj.ID, verb)
 		}
 	}
 
-	// 4. 聊天/社交/对话 → chat_with (needs ≥2 agents)
+	// 4. 聊天/社交/对话 → move_to agent + speak（新体系无 chat_with）
 	if containsAny(gl, "聊天", "社交", "对话", "chat", "social") && len(kb.Agents) >= 2 {
 		other := kb.Agents[1].ID
 		return fmt.Sprintf(`{"inner_thought":"去找同事聊两句"}
-{"action":"move_to_agent","params":{"target_agent_id":"%s","speed":"walk"}}
-{"action":"chat_with","params":{"target_agent_id":"%s","topic":"工作"}}`, other, other)
+{"action":"move_to","params":{"target_type":"agent","target_id":"%s"}}
+{"action":"speak","params":{"content":"最近工作怎么样？"}}`, other)
 	}
 
 	// 5. 检查/自检/inspect → interact inspect
@@ -391,8 +410,8 @@ func exampleForGoal(kb *worldkb.KB, goal string, zones []worldkb.ZoneInfo, objs 
 						exZone = "<上方可前往区域的 id>"
 					}
 					return fmt.Sprintf(`{"inner_thought":"先去目标区域检查设备"}
-{"action":"move_to_location","params":{"target":"%s"}}
-{"action":"interact","params":{"target_object_id":"%s","interaction":"inspect"}}`, exZone, objs[i].ID)
+{"action":"move_to","params":{"target_type":"zone","target_id":"%s"}}
+{"action":"interact","params":{"smart_object":"%s","interaction":"inspect"}}`, exZone, objs[i].ID)
 				}
 			}
 		}
