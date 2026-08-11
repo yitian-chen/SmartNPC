@@ -506,7 +506,7 @@ func (s *Server) replayFrom(peerLastSeq int64) {
 //
 // The `cmd` and `params` form the action_command payload. action_id is
 // generated here and returned via the ACK.
-func (s *Server) Call(ctx context.Context, agentID, cmd string, params map[string]any) (*protocol.ActionStartedPayload, error) {
+func (s *Server) Call(ctx context.Context, agentID, cmd string, params map[string]any, autoQueue bool) (*protocol.ActionStartedPayload, error) {
 	s.mu.RLock()
 	conn := s.conn
 	s.mu.RUnlock()
@@ -527,9 +527,10 @@ func (s *Server) Call(ctx context.Context, agentID, cmd string, params map[strin
 	}()
 
 	cmdPayload := protocol.ActionCommandPayload{
-		ActionID: actionID,
-		Cmd:      cmd,
-		Params:   params,
+		ActionID:  actionID,
+		Cmd:       cmd,
+		Params:    params,
+		AutoQueue: autoQueue,
 	}
 	s.log.Info("[MCP→UE/CMD]", "cmd", cmd, "action_id", actionID, "agent_id", agentID, "params", fmt.Sprint(params))
 	if err := s.SendEnvelope(agentID, protocol.TypeActionCommand, cmdPayload); err != nil {
@@ -564,8 +565,8 @@ func (s *Server) IsConnected() bool {
 // SendAction implements the tools.Executor interface: sends an
 // action_command and waits for the ACK. It's an alias for Call with the
 // signature the tools layer expects.
-func (s *Server) SendAction(ctx context.Context, agentID, cmd string, params map[string]any) (*protocol.ActionStartedPayload, error) {
-	return s.Call(ctx, agentID, cmd, params)
+func (s *Server) SendAction(ctx context.Context, agentID, cmd string, params map[string]any, autoQueue bool) (*protocol.ActionStartedPayload, error) {
+	return s.Call(ctx, agentID, cmd, params, autoQueue)
 }
 
 // RequestScan asks Mock UE to emit an immediate perception_update for the

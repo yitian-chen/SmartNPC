@@ -684,7 +684,7 @@ func (g *guardedExecutor) SendAction(ctx context.Context, agentID string, decisi
 	if g.caps != nil && !g.caps.HasCmd(agentID, cmd) {
 		return nil, fmt.Errorf("agent %s lacks capability for cmd %s", agentID, cmd)
 	}
-	ack, err := g.ws.SendAction(ctx, agentID, cmd, params)
+	ack, err := g.ws.SendAction(ctx, agentID, cmd, params, shouldAutoQueue(cmd))
 	if err == nil && ack != nil {
 		ac.recordActionStarted(ack.ActionID, cmd, params, decisionEpoch, sourceTool)
 		// 长复合动作不设超时：它们持续执行直到下一 schedule 时段切换
@@ -695,6 +695,27 @@ func (g *guardedExecutor) SendAction(ctx context.Context, agentID string, decisi
 		}
 	}
 	return ack, err
+}
+
+// shouldAutoQueue reports whether the given cmd targets a Smart Object
+// that may be occupied by other NPCs. When true, action_command is sent
+// with auto_queue=true (约定21) so UE queues the agent instead of
+// rejecting the action outright.
+//
+// 6 cmds target smart objects: 5 composite (long-running facility use)
+// + 1 atomic InteractSmartObject. Other cmds (MoveTo/Speak/Wait/etc)
+// don't involve occupancy contention and default to false.
+func shouldAutoQueue(cmd string) bool {
+	switch cmd {
+	case protocol.CmdWorkShift,
+		protocol.CmdChargeAtStation,
+		protocol.CmdSelfMaintenance,
+		protocol.CmdRestAtResidence,
+		protocol.CmdSurfInternet,
+		protocol.CmdInteractSmartObject:
+		return true
+	}
+	return false
 }
 
 // RequestScan 请求 UE 立即回吐一次 perception_update（fire-and-forget）。
@@ -902,7 +923,7 @@ func (a *agentContext) popAndSendQueueAction(ctx context.Context, agentID string
 	}
 
 	logger.Info("[战术层] 下发 action", "agent_id", agentID, "action", pa.Action, "cmd", cmd, "queue_left", a.queueLen())
-	ack, err := ws.SendAction(ctx, agentID, cmd, params)
+	ack, err := ws.SendAction(ctx, agentID, cmd, params, shouldAutoQueue(cmd))
 	if err != nil {
 		// 区分两种失败：
 		//   (a) UE 在途 composite 未完成 → 回填队首，等在途 action_completed 唤醒
@@ -1976,7 +1997,9 @@ func handleDebugAction(ctx context.Context, logger *slog.Logger, ws *wsserver.Se
 		"agent_id", req.AgentID, "cmd", req.Cmd, "proto_cmd", protoCmd, "params", fmt.Sprint(params),
 		"force", force, "stopped", stoppedActionID)
 
-	ack, err := ws.Call(ctx, req.AgentID, protoCmd, params)
+	// Debug path: auto_queue=false (manual debug doesn't queue; tester
+	// wants to see the immediate rejected/accepted behavior).
+	ack, err := ws.Call(ctx, req.AgentID, protoCmd, params, false)
 	if err != nil {
 		w.WriteHeader(http.StatusBadGateway)
 		_ = json.NewEncoder(w).Encode(debugActionResponse{Error: "ws.Call failed: " + err.Error()})
