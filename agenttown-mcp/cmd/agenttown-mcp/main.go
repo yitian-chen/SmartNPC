@@ -240,6 +240,31 @@ func (a *agentContext) recordActionCompletion(completion protocol.ActionComplete
 	// （如"寻路不可达"），让 Ollama 看到 UE 侧的具体失败原因再决策。
 	detail := fmt.Sprintf("result=%s reason=%s progress=%.2f",
 		completion.Result, completion.Reason, completion.Progress)
+
+	// Fix A: 失败上下文注入战术层 replanHint。让下一轮战术层 LLM 知道上次
+	// 为什么失败、避免盲重试同一动作（如工作台被占用后无限重试 work_shift）。
+	// 仅对 in-flight action（来自战术层/工具调用）写入，跳过 /debug/action
+	// 手动调试路径（WasInFlight=false，避免污染下次规划）。反应层启用时，
+	// reactive_runner 的 SetReplanHint(dec.Reason) 会覆盖此值——但 Ollama
+	// 输入的 detail 已含失败 reason，覆盖合理。反应层禁用时，这是唯一的
+	// 失败上下文注入路径：worker 唤醒 → 队列空 → tacticalRefill →
+	// BeginTacticalRefill 消费 replanHint 注入 prompt。
+	if res.WasInFlight && res.Cmd != "" {
+		sg := ""
+		if res.Params != nil {
+			if v, ok := res.Params["semantic_group"].(string); ok {
+				sg = v
+			}
+		}
+		hint := fmt.Sprintf("上次动作失败：cmd=%s", res.Cmd)
+		if sg != "" {
+			hint += fmt.Sprintf(" semantic_group=%s", sg)
+		}
+		hint += fmt.Sprintf(" result=%s reason=%s。本次规划请避免直接重试同一动作——若目标物体被占用，改用其他可用 semantic_group 或先 generic_act(behavior=look_around) 短暂等待",
+			completion.Result, completion.Reason)
+		a.as.SetReplanHint(hint)
+	}
+
 	return true, TriggerActionDone, detail
 }
 
@@ -1074,7 +1099,7 @@ func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
 
 	if tacticalStreamingEnabled {
 		// 流式路径：onAction 回调逐个入队 + 首 action 提前下发。
-		_, _, err = generateTacticalPlanStreaming(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, profiles, logger, hint, memories, relationships, capabilityRegistryRef,
+		_, _, err = generateTacticalPlanStreaming(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, profiles, logger, hint, memories, relationships, capabilityRegistryRef, a.as.LatestObjectStatus(), a.as.LatestNearbyObjects(),
 			func(pa plannedAction) {
 				a.as.AppendQueueAction(pa)
 				if a.as.ShouldDispatchFirst() {
@@ -1085,7 +1110,7 @@ func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
 		)
 	} else {
 		// 非流式路径（默认）：等完整响应后一次性填充队列。
-		actions, _, err = generateTacticalPlan(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, profiles, logger, hint, memories, relationships, capabilityRegistryRef)
+		actions, _, err = generateTacticalPlan(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, profiles, logger, hint, memories, relationships, capabilityRegistryRef, a.as.LatestObjectStatus(), a.as.LatestNearbyObjects())
 		if err == nil {
 			a.as.ReplaceQueue(actions)
 		}
@@ -1178,7 +1203,7 @@ func (a *agentContext) tacticalRefillForReplan(
 		// 流式路径：回调收集到 local slice（不直接修改 a.actionQueue），
 		// 成功后才覆盖旧队列。失败则旧队列不受影响。
 		var collected []plannedAction
-		_, _, err = generateTacticalPlanStreaming(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, profiles, logger, hint, memories, relationships, capabilityRegistryRef,
+		_, _, err = generateTacticalPlanStreaming(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, profiles, logger, hint, memories, relationships, capabilityRegistryRef, a.as.LatestObjectStatus(), a.as.LatestNearbyObjects(),
 			func(pa plannedAction) {
 				collected = append(collected, pa)
 			},
@@ -1187,7 +1212,7 @@ func (a *agentContext) tacticalRefillForReplan(
 			actions = collected
 		}
 	} else {
-		actions, _, err = generateTacticalPlan(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, profiles, logger, hint, memories, relationships, capabilityRegistryRef)
+		actions, _, err = generateTacticalPlan(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, profiles, logger, hint, memories, relationships, capabilityRegistryRef, a.as.LatestObjectStatus(), a.as.LatestNearbyObjects())
 	}
 
 	// 3. 失败处理：保留旧队列（不清空），调用方保持原 action
@@ -2192,7 +2217,7 @@ func handleDebugSchedule(ctx context.Context, logger *slog.Logger, ws *wsserver.
 
 	actions, thought, err := generateTacticalPlan(
 		tacticalCtx, tacticalHc, req.AgentID,
-		goal, zone, timeOfDay, slot, physical, kb, nil, logger, "", "", "", capabilityRegistryRef,
+		goal, zone, timeOfDay, slot, physical, kb, nil, logger, "", "", "", capabilityRegistryRef, nil, nil,
 	)
 	if err != nil {
 		logger.Warn("[debug/schedule] decompose failed",

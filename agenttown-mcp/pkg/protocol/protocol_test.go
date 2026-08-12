@@ -86,6 +86,50 @@ func TestScanAreaPayloadAndPerceptionScanID(t *testing.T) {
 	}
 }
 
+// TestPerceptionObjectStatusSummary_Unmarshal verifies that UE5's real
+// perception_update payload (which includes object_status_summary and
+// nearby_objects[].category) is correctly parsed into the new struct
+// fields. Regression guard for the Fix B bug where these fields were
+// dropped during JSON unmarshal because the struct lacked matching tags.
+func TestPerceptionObjectStatusSummary_Unmarshal(t *testing.T) {
+	// Payload shape observed in real UE5 logs (logs/2026-08-12/debug-mcp.log).
+	raw := []byte(`{
+		"location":{"position":[6421.8,6831.0,-21109.6],"rotation":[0,-156.3,0],"current_zone":"main_workshop"},
+		"nearby_objects":[
+			{"id":"WorkBench","category":"work","state":"occupied","distance":152.8,"available_interactions":["assemble"]}
+		],
+		"object_status_summary":{
+			"charging":{"total":6,"idle":6,"occupied":0,"broken":0},
+			"maintainance":{"total":1,"idle":1,"occupied":0,"broken":0},
+			"Net":{"total":1,"idle":1,"occupied":0,"broken":0},
+			"rest":{"total":1,"idle":1,"occupied":0,"broken":0},
+			"work":{"total":2,"idle":1,"occupied":1,"broken":0}
+		},
+		"environment":{"game_time_sec":36693.7,"time_of_day_sec":36693.7,"day_count":0,"time_scale":120}
+	}`)
+	var got PerceptionPayload
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("unmarshal failed: %v", err)
+	}
+	if len(got.ObjectStatusSummary) != 5 {
+		t.Errorf("ObjectStatusSummary: want 5 categories, got %d (%+v)", len(got.ObjectStatusSummary), got.ObjectStatusSummary)
+	}
+	work, ok := got.ObjectStatusSummary["work"]
+	if !ok {
+		t.Fatalf("ObjectStatusSummary missing 'work' category: %+v", got.ObjectStatusSummary)
+	}
+	if work.Total != 2 || work.Idle != 1 || work.Occupied != 1 || work.Broken != 0 {
+		t.Errorf("work category status mismatch: got %+v, want {Total:2 Idle:1 Occupied:1 Broken:0}", work)
+	}
+	if len(got.NearbyObjects) != 1 {
+		t.Fatalf("NearbyObjects: want 1, got %d", len(got.NearbyObjects))
+	}
+	nb := got.NearbyObjects[0]
+	if nb.ID != "WorkBench" || nb.Category != "work" || nb.State != "occupied" {
+		t.Errorf("NearbyObject mismatch: got %+v, want {ID:WorkBench Category:work State:occupied}", nb)
+	}
+}
+
 func TestActionLifecyclePayloads(t *testing.T) {
 	cmd := ActionCommandPayload{
 		ActionID: "act_001",
