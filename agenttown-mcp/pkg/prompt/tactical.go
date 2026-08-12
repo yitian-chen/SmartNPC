@@ -64,7 +64,7 @@ const tacticalPromptBody = `[战术层/任务分解] 当前时段目标：%s
 3. 队列必须以长复合动作（标记 [复合]）结尾——长复合动作会持续执行直到时段切换，让 NPC 一直工作到下一 schedule 节点被 worker 主动打断
 4. 禁止输出 wait 动作；复合动作已包含自动移动到对应位置的逻辑，禁止在复合动作前加 move_to——直接输出单个长复合动作即可。仅当前置目标确实没有匹配的复合动作时才用 move_to + interact 原子组合
 5. 仅当目标确实没有匹配的长复合动作时（极少见），才用原子动作组合、结合调用兜底的 generic_act 通用动作实现目标
-6. move_to/turn_to 的 target_id、interact 和复合动作的 semantic_group 必须严格使用上面"可前往区域"和"可交互物体"中给出的 id，禁止编造、禁止拼接 zone/interaction 信息
+6. move_to/turn_to 的 target_id 用上方"可前往区域"的 zone id；interact 和复合动作的 semantic_group 必须严格使用上方"可交互物体"给出的 semantic_group 值，禁止编造、禁止用实例 id（如 Charge-1）、禁止拼接 zone/interaction 信息
 7. 每行一个 JSON 对象，不要输出 JSON 数组，不要输出 markdown 围栏，不要输出任何其他文字
 8. 必须以字符 {"inner_thought 开头，不要输出步骤说明、不要解释、不要编号列表、不要 markdown 加粗
 
@@ -284,7 +284,7 @@ func paramPlaceholder(p protocol.CapabilityParam) string {
 func TacticalExample(kb *worldkb.KB, goal string) string {
 	const genericExample = `{"inner_thought":"先去目标区域再开始作业"}
 {"action":"move_to","params":{"target_type":"zone","target_id":"<上方可前往区域的 id>"}}
-{"action":"interact","params":{"semantic_group":"<上方可交互物体的 id>","interaction":"<可用 interaction>"}}`
+{"action":"interact","params":{"semantic_group":"<上方可交互物体的 semantic_group>","interaction":"<可用 interaction>"}}`
 	if kb == nil {
 		return genericExample
 	}
@@ -305,10 +305,10 @@ func TacticalExample(kb *worldkb.KB, goal string) string {
 		}
 		return fmt.Sprintf(`{"inner_thought":"先去目标区域再开始作业"}
 {"action":"move_to","params":{"target_type":"zone","target_id":"%s"}}
-{"action":"interact","params":{"semantic_group":"<上方可交互物体的 id>","interaction":"<可用 interaction>"}}`, exZone)
+{"action":"interact","params":{"semantic_group":"<上方可交互物体的 semantic_group>","interaction":"<可用 interaction>"}}`, exZone)
 	}
 	obj := objs[0]
-	exObj := obj.ID
+	exObj := semanticGroupOf(obj)
 	exZone := obj.ZoneID
 	if exZone == "" {
 		exZone = "<上方可前往区域的 id>"
@@ -366,7 +366,7 @@ func exampleForGoal(kb *worldkb.KB, goal string, zones []worldkb.ZoneInfo, objs 
 				verb = obj.AvailableInteractions[0]
 			}
 			return fmt.Sprintf(`{"inner_thought":"去充电设施补充能量"}
-{"action":"charge_at_station","params":{"semantic_group":"%s","interaction":"%s"}}`, obj.ID, verb)
+{"action":"charge_at_station","params":{"semantic_group":"%s","interaction":"%s"}}`, semanticGroupOf(*obj), verb)
 		}
 	}
 
@@ -378,7 +378,7 @@ func exampleForGoal(kb *worldkb.KB, goal string, zones []worldkb.ZoneInfo, objs 
 				verb = obj.AvailableInteractions[0]
 			}
 			return fmt.Sprintf(`{"inner_thought":"去工作设施开始作业"}
-{"action":"work_shift","params":{"semantic_group":"%s","interaction":"%s"}}`, obj.ID, verb)
+{"action":"work_shift","params":{"semantic_group":"%s","interaction":"%s"}}`, semanticGroupOf(*obj), verb)
 		}
 	}
 
@@ -401,7 +401,7 @@ func exampleForGoal(kb *worldkb.KB, goal string, zones []worldkb.ZoneInfo, objs 
 					}
 					return fmt.Sprintf(`{"inner_thought":"先去目标区域检查设备"}
 {"action":"move_to","params":{"target_type":"zone","target_id":"%s"}}
-{"action":"interact","params":{"semantic_group":"%s","interaction":"inspect"}}`, exZone, objs[i].ID)
+{"action":"interact","params":{"semantic_group":"%s","interaction":"inspect"}}`, exZone, semanticGroupOf(objs[i]))
 				}
 			}
 		}
@@ -423,6 +423,8 @@ func containsAny(s string, subs ...string) bool {
 // findObjectByCategory finds the first object matching any of the category
 // aliases. Supports new/old KB schema: UE5 new schema uses "charging"/"work"/
 // "rest", old schema uses "charging_station"/"workbench"/"rest_bench".
+// Also matches by semantic_group as a fallback (UE5 categories like "Net" or
+// "maintainance" don't always align with the prompt's category aliases).
 func findObjectByCategory(objs []worldkb.ObjectInfo, categories ...string) *worldkb.ObjectInfo {
 	if len(categories) == 0 {
 		return nil
@@ -436,6 +438,21 @@ func findObjectByCategory(objs []worldkb.ObjectInfo, categories ...string) *worl
 			o := objs[i]
 			return &o
 		}
+		if _, ok := wanted[objs[i].SemanticGroup]; ok {
+			o := objs[i]
+			return &o
+		}
 	}
 	return nil
+}
+
+// semanticGroupOf returns the UE5-facing semantic_group value for an object,
+// falling back to the instance ID when the field is absent (legacy KB).
+// The tactical prompt examples use this so they emit UE5-recognized values
+// like "charger" instead of instance IDs like "Charge-1".
+func semanticGroupOf(o worldkb.ObjectInfo) string {
+	if o.SemanticGroup != "" {
+		return o.SemanticGroup
+	}
+	return o.ID
 }

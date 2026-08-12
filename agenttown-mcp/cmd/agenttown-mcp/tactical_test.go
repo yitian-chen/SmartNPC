@@ -611,9 +611,9 @@ func TestBuildTacticalPrompt_InjectsKBContext(t *testing.T) {
 	if strings.Contains(promptText, "workbench|main_workshop[") {
 		t.Errorf("prompt should not contain legacy 'id|zone[interactions]' format, got: %s", promptText)
 	}
-	// 应包含明确的 id/zone/interaction 标注
-	if !strings.Contains(promptText, "id=workbench") {
-		t.Errorf("prompt should contain 'id=workbench' label, got: %s", promptText)
+	// 应包含明确的 semantic_group/zone/interaction 标注
+	if !strings.Contains(promptText, "semantic_group=workbench") {
+		t.Errorf("prompt should contain 'semantic_group=workbench' label, got: %s", promptText)
 	}
 	if !strings.Contains(promptText, "位于 zone=main_workshop") {
 		t.Errorf("prompt should contain '位于 zone=main_workshop', got: %s", promptText)
