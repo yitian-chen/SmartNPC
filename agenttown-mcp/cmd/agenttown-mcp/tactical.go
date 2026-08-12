@@ -20,9 +20,11 @@ import (
 // alias 供 main 包过渡期使用，避免一次性重命名几十处引用。
 type plannedAction = agentstate.PlannedAction
 
-// ndjsonLine 是战术层 NDJSON 输出的单行判别联合体：要么是 inner_thought，要么是一个 action。
+// ndjsonLine 是战术层 NDJSON 输出的单行判别联合体：当前仅支持 action 行
+// （inner_thought 字段已废弃——内心独白改由 prompt 要求首个 action 为 speak 表达）。
+// 保留 InnerThought 字段仅用于向后兼容解析旧 LLM 输出，解析时直接忽略。
 type ndjsonLine struct {
-	InnerThought string         `json:"inner_thought,omitempty"`
+	InnerThought string         `json:"inner_thought,omitempty"` // deprecated, 解析时忽略
 	Action       string         `json:"action,omitempty"`
 	Params       map[string]any `json:"params,omitempty"`
 }
@@ -90,7 +92,7 @@ func physicalAlertOverrideGoal(hint, origGoal string, physical *protocol.Physica
 }
 
 // generateTacticalPlan 调战术层 LLM 分解当前时段 goal（非流式路径）。
-// 返回分解出的 action 列表 + inner_thought（作为整个时段独白）。
+// 返回分解出的 action 列表。
 // 任一步失败返回 err，调用方决定回退兜底。
 // 复用 strategicCaller 接口（venus.Client 已满足）。
 func generateTacticalPlan(
@@ -108,7 +110,7 @@ func generateTacticalPlan(
 	registry *CapabilityRegistry,
 	objectStatus map[string]protocol.ObjectCategoryStatus,
 	nearbyObjects []protocol.NearbyObject,
-) ([]plannedAction, string, error) {
+) ([]plannedAction, error) {
 	var capActions []protocol.CapabilityAction
 	if registry != nil {
 		capActions = registry.EffectiveActions(agentID)
@@ -135,7 +137,7 @@ func generateTacticalPlan(
 
 	resp, err := tc.SendWithSummary(ctx, promptText, "")
 	if err != nil {
-		return nil, "", fmt.Errorf("tactical llm: %w", err)
+		return nil, fmt.Errorf("tactical llm: %w", err)
 	}
 	tc.ResetSession() // 战术调用一次性，立即清链（与战略层一致）
 
@@ -143,18 +145,18 @@ func generateTacticalPlan(
 	logger.Info("[LLM→MCP/TACTICAL-RESPONSE]",
 		"agent_id", agentID, "tokens", resp.Usage.TotalTokens, "raw_len", len(raw), "raw", raw)
 
-	actions, thought, err := parseTacticalNDJSON(raw, registry, agentID)
+	actions, err := parseTacticalNDJSON(raw, registry, agentID)
 	if err != nil {
-		return nil, "", fmt.Errorf("tactical parse: %w (raw=%s)", err, truncateText(raw, 200))
+		return nil, fmt.Errorf("tactical parse: %w (raw=%s)", err, truncateText(raw, 200))
 	}
 	if len(actions) == 0 {
-		return nil, "", fmt.Errorf("tactical plan has no actions (raw=%s)", truncateText(raw, 200))
+		return nil, fmt.Errorf("tactical plan has no actions (raw=%s)", truncateText(raw, 200))
 	}
 	actionsJSON, _ := json.Marshal(actions)
 	logger.Info("[战术层] 分解成功",
 		"agent_id", agentID, "steps", len(actions),
-		"thought", thought, "actions", string(actionsJSON))
-	return actions, thought, nil
+		"actions", string(actionsJSON))
+	return actions, nil
 }
 
 // generateTacticalPlanStreaming 是 generateTacticalPlan 的流式版本：
@@ -178,7 +180,7 @@ func generateTacticalPlanStreaming(
 	objectStatus map[string]protocol.ObjectCategoryStatus,
 	nearbyObjects []protocol.NearbyObject,
 	onAction func(plannedAction),
-) ([]plannedAction, string, error) {
+) ([]plannedAction, error) {
 	var capActions []protocol.CapabilityAction
 	if registry != nil {
 		capActions = registry.EffectiveActions(agentID)
@@ -221,7 +223,7 @@ func generateTacticalPlanStreaming(
 	if err != nil {
 		logger.Warn("[LLM→MCP/TACTICAL-STREAM] stream error, keeping actions already parsed",
 			"agent_id", agentID, "parsed_actions", len(actions), "err", err)
-		return actions, acc.thought, fmt.Errorf("tactical llm stream: %w", err)
+		return actions, fmt.Errorf("tactical llm stream: %w", err)
 	}
 	acc.flush()
 	tc.ResetSession()
@@ -231,22 +233,25 @@ func generateTacticalPlanStreaming(
 		"agent_id", agentID, "tokens", resp.Usage.TotalTokens, "raw_len", len(raw), "raw", raw, "streaming", true)
 
 	if len(actions) == 0 {
-		return nil, "", fmt.Errorf("tactical plan has no actions (raw=%s)", truncateText(raw, 200))
+		return nil, fmt.Errorf("tactical plan has no actions (raw=%s)", truncateText(raw, 200))
 	}
 	actionsJSON, _ := json.Marshal(actions)
 	logger.Info("[战术层] 分解成功",
 		"agent_id", agentID, "steps", len(actions),
-		"thought", acc.thought, "actions", string(actionsJSON))
-	return actions, acc.thought, nil
+		"actions", string(actionsJSON))
+	return actions, nil
 }
 
-// parseTacticalNDJSON 从 LLM 的 NDJSON 输出解析 action 列表 + inner_thought。
+// parseTacticalNDJSON 从 LLM 的 NDJSON 输出解析 action 列表。
 // 容错：剥 ```json 围栏 → 按行解析 → 跳过空行/parse 失败行 → 过滤非法工具。
 // 返回的 actions 已经过 filterValidActions。
 //
 // registry 非 nil 时，过滤还会剔除依赖的 cmd 在 registry 中对 agentID 不可用
 // 的工具（与 prompt 工具列表保持一致）。
-func parseTacticalNDJSON(raw string, registry *CapabilityRegistry, agentID string) ([]plannedAction, string, error) {
+//
+// 内心独白已不再通过 inner_thought 字段传递——prompt 要求首个 action 直接是
+// speak。若 LLM 仍输出 inner_thought 行（向后兼容），该行被静默忽略。
+func parseTacticalNDJSON(raw string, registry *CapabilityRegistry, agentID string) ([]plannedAction, error) {
 	s := strings.TrimSpace(raw)
 	// 剥 markdown 围栏（LLM 可能仍加，即使 prompt 禁止）
 	if strings.HasPrefix(s, "```json") {
@@ -260,44 +265,37 @@ func parseTacticalNDJSON(raw string, registry *CapabilityRegistry, agentID strin
 	}
 
 	var actions []plannedAction
-	var thought string
 	for _, line := range strings.Split(s, "\n") {
-		pa, th, isAction, ok := parseTacticalNDJSONLine(line)
-		if !ok {
-			continue
+		pa, isAction, ok := parseTacticalNDJSONLine(line)
+		if !ok || !isAction {
+			continue // 跳过空行、parse 失败行、inner_thought 行（向后兼容）
 		}
-		if isAction {
-			actions = append(actions, pa)
-		} else {
-			thought = th
-		}
+		actions = append(actions, pa)
 	}
 	actions = filterValidActions(actions, registry, agentID)
-	// inner_thought 转为队列首部的 speak 动作（2026-08 需求）。
-	// actions 为空时不注入，保留"无动作即报错"契约。
-	actions = prependThoughtAsSpeak(actions, thought, agentID, registry)
-	return actions, thought, nil
+	return actions, nil
 }
 
-// parseTacticalNDJSONLine 解析单行 NDJSON。返回 (action, thought, isAction, ok)。
+// parseTacticalNDJSONLine 解析单行 NDJSON。返回 (action, isAction, ok)。
 // ok=false 表示空行或 parse 失败（调用方跳过）。isAction=true 表示该行是 action；
-// isAction=false 且 ok=true 表示该行是 inner_thought。
-func parseTacticalNDJSONLine(line string) (pa plannedAction, thought string, isAction bool, ok bool) {
+// isAction=false 且 ok=true 表示该行是 inner_thought（向后兼容，调用方忽略）。
+func parseTacticalNDJSONLine(line string) (pa plannedAction, isAction bool, ok bool) {
 	line = strings.TrimSpace(line)
 	if line == "" {
-		return plannedAction{}, "", false, false
+		return plannedAction{}, false, false
 	}
 	var nl ndjsonLine
 	if err := json.Unmarshal([]byte(line), &nl); err != nil {
-		return plannedAction{}, "", false, false
+		return plannedAction{}, false, false
 	}
 	if nl.Action != "" {
-		return plannedAction{Action: nl.Action, Params: nl.Params}, "", true, true
+		return plannedAction{Action: nl.Action, Params: nl.Params}, true, true
 	}
+	// inner_thought 行（已废弃）：ok=true 但 isAction=false，调用方跳过
 	if nl.InnerThought != "" {
-		return plannedAction{}, nl.InnerThought, false, true
+		return plannedAction{}, false, true
 	}
-	return plannedAction{}, "", false, false
+	return plannedAction{}, false, false
 }
 
 // streamAccumulator 是流式回调的增量 NDJSON 解析器。
@@ -305,12 +303,10 @@ func parseTacticalNDJSONLine(line string) (pa plannedAction, thought string, isA
 // 最后一行（可能不完整）保留在 buffer 等下次 feed 补全。
 // flush() 在流结束后调用，处理 buffer 中的残余内容。
 type streamAccumulator struct {
-	buf           strings.Builder
-	onComplete    func(plannedAction) // 每完整解析出一个合法 action 调一次
-	thought       string
-	registry      *CapabilityRegistry // 用于过滤依赖 cmd 不可用的工具；nil = 不过滤
-	agentID       string              // 配合 registry 做 per-agent 过滤
-	actionStarted bool                // 是否已发出过任意 action；一旦 true，迟到的 thought 不再转 speak
+	buf        strings.Builder
+	onComplete func(plannedAction) // 每完整解析出一个合法 action 调一次
+	registry   *CapabilityRegistry // 用于过滤依赖 cmd 不可用的工具；nil = 不过滤
+	agentID    string              // 配合 registry 做 per-agent 过滤
 }
 
 // feed 追加一段 delta 文本并处理所有已完成的行（以 \n 结尾）。
@@ -337,33 +333,17 @@ func (a *streamAccumulator) flush() {
 	a.processLine(remaining)
 }
 
-// processLine 解析单行：合法 action 调 onComplete，inner_thought 存入 thought。
+// processLine 解析单行：合法 action 调 onComplete；inner_thought 行（向后兼容）忽略。
 func (a *streamAccumulator) processLine(line string) {
-	pa, thought, isAction, ok := parseTacticalNDJSONLine(line)
-	if !ok {
-		return
+	pa, isAction, ok := parseTacticalNDJSONLine(line)
+	if !ok || !isAction {
+		return // 跳过空行、parse 失败行、inner_thought 行
 	}
-	if isAction {
-		if !tacticalActionAvailable(pa.Action, a.agentID, a.registry) {
-			return // 过滤非法工具或依赖 cmd 不可用的工具（与 parseTacticalNDJSON 一致）
-		}
-		// 在首个 action 之前把 inner_thought 转为 speak 注入队列首部
-		// （2026-08 需求：inner_thought → 队列开头的 speak 动作）。
-		// 与非流式 parseTacticalNDJSON 的 prependThoughtAsSpeak 语义一致：
-		// 若队列最终无 action，speak 也不注入（保留"无动作即报错"契约）。
-		// 若 thought 迟到（LLM 违反"第一行 inner_thought"约定），跳过 speak
-		// 注入，避免把独白插到队列中段。
-		if !a.actionStarted && a.onComplete != nil {
-			if speak := thoughtAsSpeak(a.thought, a.agentID, a.registry); speak != nil {
-				a.onComplete(*speak)
-			}
-		}
-		a.actionStarted = true
-		if a.onComplete != nil {
-			a.onComplete(pa)
-		}
-	} else {
-		a.thought = thought
+	if !tacticalActionAvailable(pa.Action, a.agentID, a.registry) {
+		return // 过滤非法工具或依赖 cmd 不可用的工具（与 parseTacticalNDJSON 一致）
+	}
+	if a.onComplete != nil {
+		a.onComplete(pa)
 	}
 }
 
@@ -377,39 +357,6 @@ func filterValidActions(actions []plannedAction, registry *CapabilityRegistry, a
 		}
 	}
 	return out
-}
-
-// thoughtAsSpeak 把 inner_thought 包装为 speak plannedAction，让 NPC 把
-// "内心独白"实际说出来（2026-08 需求：inner_thought 转为队列首部的 speak 调用）。
-// 返回 nil 表示不注入：thought 为空，或 speak 工具对 agentID 不可用
-// （registry 未授权 CmdSpeak）。
-func thoughtAsSpeak(thought, agentID string, registry *CapabilityRegistry) *plannedAction {
-	if thought == "" {
-		return nil
-	}
-	if !tacticalActionAvailable("speak", agentID, registry) {
-		return nil
-	}
-	return &plannedAction{
-		Action: "speak",
-		Params: map[string]any{"content": thought},
-	}
-}
-
-// prependThoughtAsSpeak 在 actions 队列开头插入一个 speak 动作，内容为
-// inner_thought。跳过注入的情况：
-//   - thought 为空（LLM 未输出 inner_thought）
-//   - actions 为空（保留"无动作即报错"契约，避免只输出独白导致空转）
-//   - speak 工具对 agentID 不可用
-func prependThoughtAsSpeak(actions []plannedAction, thought, agentID string, registry *CapabilityRegistry) []plannedAction {
-	if len(actions) == 0 {
-		return actions
-	}
-	speak := thoughtAsSpeak(thought, agentID, registry)
-	if speak == nil {
-		return actions
-	}
-	return append([]plannedAction{*speak}, actions...)
 }
 
 // mapTacticalAction 把战术层 plannedAction 映射到 ws.SendAction 的 (cmd, params)。

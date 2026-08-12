@@ -60,15 +60,14 @@ const tacticalPromptBody = `[战术层/任务分解] 当前时段目标：%s
 %s
 
 要求：
-1. 第一行输出 {"inner_thought":"一句话内心独白"}
+1. 队列首个动作必须是 speak（用一句话表达此刻内心想法或独白），然后才是其他动作
 2. 后续每行输出一个 {"action":"工具名","params":{...}}，按执行顺序排列
 3. 队列必须以长复合动作（标记 [复合]）结尾——长复合动作会持续执行直到时段切换，让 NPC 一直工作到下一 schedule 节点被 worker 主动打断
 4. 禁止输出 wait 动作；复合动作已包含自动移动到对应位置的逻辑，禁止在复合动作前加 move_to——直接输出单个长复合动作即可。仅当前置目标确实没有匹配的复合动作时才用 move_to + interact 原子组合
 5. 仅当目标确实没有匹配的长复合动作时（极少见），才用原子动作组合、结合调用兜底的 generic_act 通用动作实现目标
 6. move_to/turn_to 的 target_id 用上方"可前往区域"的 zone id；interact 和复合动作的 semantic_group 必须严格使用上方"可交互物体"给出的 semantic_group 值，禁止编造、禁止用实例 id（如 Charge-1）、禁止拼接 zone/interaction 信息
-7. 每行一个 JSON 对象，不要输出 JSON 数组，不要输出 markdown 围栏，不要输出任何其他文字
-8. 必须以字符 {"inner_thought 开头，不要输出步骤说明、不要解释、不要编号列表、不要 markdown 加粗
-9. 若上方【物体实时占用】显示目标 semantic_group 全部占用，必须改用其他空闲 semantic_group 或先安排 generic_act(behavior=look_around) 短暂等待，禁止规划必然失败的占用动作
+7. 每行一个 JSON 对象，不要输出 JSON 数组，不要输出 markdown 围栏，不要输出任何其他文字；不要输出 inner_thought 字段，内心独白直接用首个 speak 动作表达
+8. 若上方【物体实时占用】显示目标 semantic_group 全部占用，必须改用其他空闲 semantic_group 或先安排 generic_act(behavior=look_around) 短暂等待，禁止规划必然失败的占用动作
 
 示例（id 来自上方可用列表，不可照抄示例中的 id）：
 %s`
@@ -285,7 +284,7 @@ func paramPlaceholder(p protocol.CapabilityParam) string {
 // object's ZoneID — otherwise the example itself violates the prompt's
 // "interact must be called in object's zone" constraint #5.
 func TacticalExample(kb *worldkb.KB, goal string) string {
-	const genericExample = `{"inner_thought":"先去目标区域再开始作业"}
+	const genericExample = `{"action":"speak","params":{"content":"先去目标区域再开始作业"}}
 {"action":"move_to","params":{"target_type":"zone","target_id":"<上方可前往区域的 id>"}}
 {"action":"interact","params":{"semantic_group":"<上方可交互物体的 semantic_group>","interaction":"<可用 interaction>"}}`
 	if kb == nil {
@@ -306,7 +305,7 @@ func TacticalExample(kb *worldkb.KB, goal string) string {
 		if len(zones) > 0 {
 			exZone = zones[0].ID
 		}
-		return fmt.Sprintf(`{"inner_thought":"先去目标区域再开始作业"}
+		return fmt.Sprintf(`{"action":"speak","params":{"content":"先去目标区域再开始作业"}}
 {"action":"move_to","params":{"target_type":"zone","target_id":"%s"}}
 {"action":"interact","params":{"semantic_group":"<上方可交互物体的 semantic_group>","interaction":"<可用 interaction>"}}`, exZone)
 	}
@@ -322,21 +321,21 @@ func TacticalExample(kb *worldkb.KB, goal string) string {
 		if len(obj.AvailableInteractions) > 0 {
 			verb = obj.AvailableInteractions[0]
 		}
-		return fmt.Sprintf(`{"inner_thought":"去工作设施开始作业"}
+		return fmt.Sprintf(`{"action":"speak","params":{"content":"去工作设施开始作业"}}
 {"action":"work_shift","params":{"semantic_group":"%s","interaction":"%s"}}`, exObj, verb)
 	case "charging_station", "charging":
 		verb := "<可用 interaction>"
 		if len(obj.AvailableInteractions) > 0 {
 			verb = obj.AvailableInteractions[0]
 		}
-		return fmt.Sprintf(`{"inner_thought":"去充电设施补充能量"}
+		return fmt.Sprintf(`{"action":"speak","params":{"content":"去充电设施补充能量"}}
 {"action":"charge_at_station","params":{"semantic_group":"%s","interaction":"%s"}}`, exObj, verb)
 	default:
 		verb := "<可用 interaction>"
 		if len(obj.AvailableInteractions) > 0 {
 			verb = obj.AvailableInteractions[0]
 		}
-		return fmt.Sprintf(`{"inner_thought":"先去目标区域再开始作业"}
+		return fmt.Sprintf(`{"action":"speak","params":{"content":"先去目标区域再开始作业"}}
 {"action":"move_to","params":{"target_type":"zone","target_id":"%s"}}
 {"action":"interact","params":{"semantic_group":"%s","interaction":"%s"}}`, exZone, exObj, verb)
 	}
@@ -350,50 +349,50 @@ func exampleForGoal(kb *worldkb.KB, goal string, zones []worldkb.ZoneInfo, objs 
 	}
 	gl := strings.ToLower(goal)
 
-	// 1. 巡视/巡检/巡逻 → move_to zone + generic_act（新体系无 patrol_zone）
+	// 1. 巡视/巡检/巡逻 → speak + move_to zone + generic_act（新体系无 patrol_zone）
 	if containsAny(gl, "巡视", "巡检", "巡逻", "patrol") {
 		exZone := "<上方可前往区域的 id>"
 		if len(zones) > 0 {
 			exZone = zones[0].ID
 		}
-		return fmt.Sprintf(`{"inner_thought":"去目标区域巡视一圈"}
+		return fmt.Sprintf(`{"action":"speak","params":{"content":"去目标区域巡视一圈"}}
 {"action":"move_to","params":{"target_type":"zone","target_id":"%s"}}
 {"action":"generic_act","params":{"thought":"巡视设备状态","behavior":"look_around"}}`, exZone)
 	}
 
-	// 2. 充电/补能/休息/恢复/疲劳 → charge_at_station
+	// 2. 充电/补能/休息/恢复/疲劳 → speak + charge_at_station
 	if containsAny(gl, "充电", "补能", "休息", "恢复", "疲劳", "charge", "rest") {
 		if obj := findObjectByCategory(objs, "charging_station", "charging"); obj != nil {
 			verb := "<可用 interaction>"
 			if len(obj.AvailableInteractions) > 0 {
 				verb = obj.AvailableInteractions[0]
 			}
-			return fmt.Sprintf(`{"inner_thought":"去充电设施补充能量"}
+			return fmt.Sprintf(`{"action":"speak","params":{"content":"去充电设施补充能量"}}
 {"action":"charge_at_station","params":{"semantic_group":"%s","interaction":"%s"}}`, semanticGroupOf(*obj), verb)
 		}
 	}
 
-	// 3. 装配/工作/作业/打磨/加工 → work_shift
+	// 3. 装配/工作/作业/打磨/加工 → speak + work_shift
 	if containsAny(gl, "装配", "工作", "作业", "打磨", "加工", "assemble", "craft") {
 		if obj := findObjectByCategory(objs, "workbench", "work"); obj != nil {
 			verb := "<可用 interaction>"
 			if len(obj.AvailableInteractions) > 0 {
 				verb = obj.AvailableInteractions[0]
 			}
-			return fmt.Sprintf(`{"inner_thought":"去工作设施开始作业"}
+			return fmt.Sprintf(`{"action":"speak","params":{"content":"去工作设施开始作业"}}
 {"action":"work_shift","params":{"semantic_group":"%s","interaction":"%s"}}`, semanticGroupOf(*obj), verb)
 		}
 	}
 
-	// 4. 聊天/社交/对话 → move_to agent + speak（新体系无 chat_with）
+	// 4. 聊天/社交/对话 → speak + move_to agent + speak（新体系无 chat_with）
 	if containsAny(gl, "聊天", "社交", "对话", "chat", "social") && len(kb.Agents) >= 2 {
 		other := kb.Agents[1].ID
-		return fmt.Sprintf(`{"inner_thought":"去找同事聊两句"}
+		return fmt.Sprintf(`{"action":"speak","params":{"content":"去找同事聊两句"}}
 {"action":"move_to","params":{"target_type":"agent","target_id":"%s"}}
 {"action":"speak","params":{"content":"最近工作怎么样？"}}`, other)
 	}
 
-	// 5. 检查/自检/inspect → interact inspect
+	// 5. 检查/自检/inspect → speak + move_to + interact inspect
 	if containsAny(gl, "检查", "自检", "inspect", "examine") {
 		for i := range objs {
 			for _, v := range objs[i].AvailableInteractions {
@@ -402,7 +401,7 @@ func exampleForGoal(kb *worldkb.KB, goal string, zones []worldkb.ZoneInfo, objs 
 					if exZone == "" {
 						exZone = "<上方可前往区域的 id>"
 					}
-					return fmt.Sprintf(`{"inner_thought":"先去目标区域检查设备"}
+					return fmt.Sprintf(`{"action":"speak","params":{"content":"先去目标区域检查设备"}}
 {"action":"move_to","params":{"target_type":"zone","target_id":"%s"}}
 {"action":"interact","params":{"semantic_group":"%s","interaction":"inspect"}}`, exZone, semanticGroupOf(objs[i]))
 				}

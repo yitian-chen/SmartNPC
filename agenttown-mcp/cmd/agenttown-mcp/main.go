@@ -1099,7 +1099,7 @@ func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
 
 	if tacticalStreamingEnabled {
 		// 流式路径：onAction 回调逐个入队 + 首 action 提前下发。
-		_, _, err = generateTacticalPlanStreaming(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, profiles, logger, hint, memories, relationships, capabilityRegistryRef, a.as.LatestObjectStatus(), a.as.LatestNearbyObjects(),
+		_, err = generateTacticalPlanStreaming(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, profiles, logger, hint, memories, relationships, capabilityRegistryRef, a.as.LatestObjectStatus(), a.as.LatestNearbyObjects(),
 			func(pa plannedAction) {
 				a.as.AppendQueueAction(pa)
 				if a.as.ShouldDispatchFirst() {
@@ -1110,7 +1110,7 @@ func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
 		)
 	} else {
 		// 非流式路径（默认）：等完整响应后一次性填充队列。
-		actions, _, err = generateTacticalPlan(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, profiles, logger, hint, memories, relationships, capabilityRegistryRef, a.as.LatestObjectStatus(), a.as.LatestNearbyObjects())
+		actions, err = generateTacticalPlan(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, profiles, logger, hint, memories, relationships, capabilityRegistryRef, a.as.LatestObjectStatus(), a.as.LatestNearbyObjects())
 		if err == nil {
 			a.as.ReplaceQueue(actions)
 		}
@@ -1203,7 +1203,7 @@ func (a *agentContext) tacticalRefillForReplan(
 		// 流式路径：回调收集到 local slice（不直接修改 a.actionQueue），
 		// 成功后才覆盖旧队列。失败则旧队列不受影响。
 		var collected []plannedAction
-		_, _, err = generateTacticalPlanStreaming(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, profiles, logger, hint, memories, relationships, capabilityRegistryRef, a.as.LatestObjectStatus(), a.as.LatestNearbyObjects(),
+		_, err = generateTacticalPlanStreaming(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, profiles, logger, hint, memories, relationships, capabilityRegistryRef, a.as.LatestObjectStatus(), a.as.LatestNearbyObjects(),
 			func(pa plannedAction) {
 				collected = append(collected, pa)
 			},
@@ -1212,7 +1212,7 @@ func (a *agentContext) tacticalRefillForReplan(
 			actions = collected
 		}
 	} else {
-		actions, _, err = generateTacticalPlan(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, profiles, logger, hint, memories, relationships, capabilityRegistryRef, a.as.LatestObjectStatus(), a.as.LatestNearbyObjects())
+		actions, err = generateTacticalPlan(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, profiles, logger, hint, memories, relationships, capabilityRegistryRef, a.as.LatestObjectStatus(), a.as.LatestNearbyObjects())
 	}
 
 	// 3. 失败处理：保留旧队列（不清空），调用方保持原 action
@@ -1864,15 +1864,14 @@ type debugScheduleRequest struct {
 // dispatched=false 表示 actions 已入 actionQueue，实际下发由 worker 异步完成
 // （handler 不自己 pop，避免 UE stop 未处理完时下发被 busy 拒）。
 type debugScheduleResponse struct {
-	OK           bool            `json:"ok"`
-	Slot         string          `json:"slot,omitempty"`
-	Goal         string          `json:"goal,omitempty"`
-	Actions      []plannedAction `json:"actions,omitempty"`
-	QueueLen     int             `json:"queue_len,omitempty"`
-	InnerThought string          `json:"inner_thought,omitempty"`
-	Dispatched   bool            `json:"dispatched"` // false=已入队异步下发
-	Warning      string          `json:"warning,omitempty"` // agent 无感知时非空
-	Error        string          `json:"error,omitempty"`
+	OK         bool            `json:"ok"`
+	Slot       string          `json:"slot,omitempty"`
+	Goal       string          `json:"goal,omitempty"`
+	Actions    []plannedAction `json:"actions,omitempty"`
+	QueueLen   int             `json:"queue_len,omitempty"`
+	Dispatched bool            `json:"dispatched"`           // false=已入队异步下发
+	Warning    string          `json:"warning,omitempty"`    // agent 无感知时非空
+	Error      string          `json:"error,omitempty"`
 }
 
 // mapDebugCmd 把 debug 端点的 cmd 名（tool_name, snake_case）映射到 UE cmd
@@ -2215,7 +2214,7 @@ func handleDebugSchedule(ctx context.Context, logger *slog.Logger, ws *wsserver.
 	tacticalCtx, tacticalCancel := context.WithTimeout(ctx, tacticalCallTimeout)
 	defer tacticalCancel()
 
-	actions, thought, err := generateTacticalPlan(
+	actions, err := generateTacticalPlan(
 		tacticalCtx, tacticalHc, req.AgentID,
 		goal, zone, timeOfDay, slot, physical, kb, nil, logger, "", "", "", capabilityRegistryRef, nil, nil,
 	)
@@ -2238,19 +2237,18 @@ func handleDebugSchedule(ctx context.Context, logger *slog.Logger, ws *wsserver.
 
 	logger.Info("[debug/schedule] decompose ok",
 		"agent_id", req.AgentID, "slot", slot, "goal", goal,
-		"queue_len", queueLen, "thought", thought,
+		"queue_len", queueLen,
 		"stopped", stoppedActionID)
 	// 不调 popAndSendQueueAction：依赖 defer signal() 唤醒 worker 走正常 pop 路径
 	// （含 currentActionID 守卫 + busy 重试），避免 UE stop 未处理完时下发被拒。
 
 	resp := debugScheduleResponse{
-		OK:           true,
-		Slot:         slot,
-		Goal:         goal,
-		Actions:      actions,
-		QueueLen:     queueLen,
-		InnerThought: thought,
-		Dispatched:   false, // worker 异步下发
+		OK:         true,
+		Slot:       slot,
+		Goal:       goal,
+		Actions:    actions,
+		QueueLen:   queueLen,
+		Dispatched: false, // worker 异步下发
 	}
 	if !hasPerception {
 		resp.Warning = "agent 未上报感知，zone/timeOfDay/physical 为空，分解质量可能下降"

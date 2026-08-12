@@ -31,25 +31,22 @@ func loadTestKB(t *testing.T) *worldkb.KB {
 // ─── parseTacticalNDJSON ─────────────────────────────────────
 
 func TestParseTacticalNDJSON_Valid(t *testing.T) {
-	raw := `{"inner_thought":"先去车间再装配"}` + "\n" +
+	// inner_thought 行被静默忽略（向后兼容）；speak 由 LLM 显式输出为首个 action
+	raw := `{"action":"speak","params":{"content":"先去车间再装配"}}` + "\n" +
 		`{"action":"move_to","params":{"target_type":"zone","target_id":"main_workshop"}}` + "\n" +
 		`{"action":"work_shift","params":{"semantic_group":"workbench_01","interaction":"assemble"}}`
-	actions, thought, err := parseTacticalNDJSON(raw, nil, "")
+	actions, err := parseTacticalNDJSON(raw, nil, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if thought != "先去车间再装配" {
-		t.Errorf("inner_thought=%q", thought)
-	}
-	// inner_thought 被转为队列首部的 speak 动作（2026-08 需求）
 	if len(actions) != 3 {
 		t.Fatalf("got %d actions, want 3 (speak + move + work)", len(actions))
 	}
 	if actions[0].Action != "speak" {
-		t.Errorf("action[0]=%q, want speak (thought 转为 speak)", actions[0].Action)
+		t.Errorf("action[0]=%q, want speak", actions[0].Action)
 	}
 	if actions[0].Params["content"] != "先去车间再装配" {
-		t.Errorf("speak content=%v, want thought content", actions[0].Params["content"])
+		t.Errorf("speak content=%v", actions[0].Params["content"])
 	}
 	if actions[1].Action != "move_to" {
 		t.Errorf("action[1]=%q, want move_to", actions[1].Action)
@@ -58,31 +55,26 @@ func TestParseTacticalNDJSON_Valid(t *testing.T) {
 
 func TestParseTacticalNDJSON_WithFence(t *testing.T) {
 	raw := "```json\n" +
-		`{"inner_thought":"充电"}` + "\n" +
+		`{"action":"speak","params":{"content":"充电"}}` + "\n" +
 		`{"action":"charge_at_station","params":{"semantic_group":"charging_station_01","interaction":"assemble"}}` + "\n" +
 		"```"
-	actions, _, err := parseTacticalNDJSON(raw, nil, "")
+	actions, err := parseTacticalNDJSON(raw, nil, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	// speak (thought"充电") + charge_at_station
 	if len(actions) != 2 || actions[0].Action != "speak" || actions[1].Action != "charge_at_station" {
 		t.Errorf("actions=%+v, want [speak, charge_at_station]", actions)
 	}
 }
 
 func TestParseTacticalNDJSON_BlankLines(t *testing.T) {
-	raw := `{"inner_thought":"开始"}` + "\n\n" +
+	raw := `{"action":"speak","params":{"content":"开始"}}` + "\n\n" +
 		`{"action":"move_to","params":{"target_type":"zone","target_id":"main_workshop"}}` + "\n" +
 		"\n"
-	actions, thought, err := parseTacticalNDJSON(raw, nil, "")
+	actions, err := parseTacticalNDJSON(raw, nil, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if thought != "开始" {
-		t.Errorf("thought=%q", thought)
-	}
-	// speak (thought"开始") + move_to
 	if len(actions) != 2 || actions[0].Action != "speak" || actions[1].Action != "move_to" {
 		t.Errorf("actions=%+v, want [speak, move_to]", actions)
 	}
@@ -90,56 +82,68 @@ func TestParseTacticalNDJSON_BlankLines(t *testing.T) {
 
 func TestParseTacticalNDJSON_MalformedLine(t *testing.T) {
 	// 单行 parse 失败应跳过，不影响其他行
-	raw := `{"inner_thought":"计划"}` + "\n" +
+	raw := `{"action":"speak","params":{"content":"计划"}}` + "\n" +
 		`这不是JSON` + "\n" +
 		`{"action":"move_to","params":{"target_type":"zone","target_id":"main_workshop"}}`
-	actions, _, err := parseTacticalNDJSON(raw, nil, "")
+	actions, err := parseTacticalNDJSON(raw, nil, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	// speak (thought"计划") + move_to
 	if len(actions) != 2 || actions[0].Action != "speak" || actions[1].Action != "move_to" {
 		t.Errorf("actions=%+v, want [speak, move_to]", actions)
 	}
 }
 
 func TestParseTacticalNDJSON_Empty(t *testing.T) {
-	actions, thought, err := parseTacticalNDJSON("", nil, "")
+	actions, err := parseTacticalNDJSON("", nil, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if len(actions) != 0 {
 		t.Errorf("got %d actions, want 0", len(actions))
-	}
-	if thought != "" {
-		t.Errorf("thought=%q, want empty", thought)
 	}
 }
 
-func TestParseTacticalNDJSON_ThoughtOnly(t *testing.T) {
+// TestParseTacticalNDJSON_LegacyInnerThoughtIgnored 验证旧 LLM 输出仍含
+// inner_thought 行时被静默忽略（不报错、不转 speak、不污染 actions）。
+// 向后兼容路径：prompt 已要求首个 action 为 speak，但模型偶尔可能仍输出
+// inner_thought 字段，解析层需优雅降级。
+func TestParseTacticalNDJSON_LegacyInnerThoughtIgnored(t *testing.T) {
+	raw := `{"inner_thought":"不知道做什么"}` + "\n" +
+		`{"action":"move_to","params":{"target_type":"zone","target_id":"main_workshop"}}`
+	actions, err := parseTacticalNDJSON(raw, nil, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// inner_thought 行被忽略，只剩 move_to
+	if len(actions) != 1 || actions[0].Action != "move_to" {
+		t.Errorf("actions=%+v, want [move_to] (inner_thought silently dropped)", actions)
+	}
+}
+
+// TestParseTacticalNDJSON_ThoughtOnlyNoActions 验证只有 inner_thought、
+// 无任何 action 行时返回空 actions（不注入 speak）。
+func TestParseTacticalNDJSON_ThoughtOnlyNoActions(t *testing.T) {
 	raw := `{"inner_thought":"不知道做什么"}`
-	actions, thought, err := parseTacticalNDJSON(raw, nil, "")
+	actions, err := parseTacticalNDJSON(raw, nil, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if len(actions) != 0 {
 		t.Errorf("got %d actions, want 0", len(actions))
-	}
-	if thought != "不知道做什么" {
-		t.Errorf("thought=%q", thought)
 	}
 }
 
 func TestParseTacticalNDJSON_FiltersScanAreaAndStop(t *testing.T) {
-	raw := `{"inner_thought":"扫描一下"}` + "\n" +
+	raw := `{"action":"speak","params":{"content":"扫描一下"}}` + "\n" +
 		`{"action":"scan_area","params":{}}` + "\n" +
 		`{"action":"move_to","params":{"target_type":"zone","target_id":"main_workshop"}}` + "\n" +
 		`{"action":"stop","params":{}}`
-	actions, _, err := parseTacticalNDJSON(raw, nil, "")
+	actions, err := parseTacticalNDJSON(raw, nil, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	// speak (thought"扫描一下") + move_to（scan_area/stop 被过滤）
+	// speak + move_to（scan_area/stop 被过滤）
 	if len(actions) != 2 {
 		t.Fatalf("got %d actions, want 2 (speak + move_to)", len(actions))
 	}
@@ -151,54 +155,16 @@ func TestParseTacticalNDJSON_FiltersScanAreaAndStop(t *testing.T) {
 	}
 }
 
-// TestParseTacticalNDJSON_NoThoughtNoSpeak 验证无 inner_thought 时不注入 speak。
-func TestParseTacticalNDJSON_NoThoughtNoSpeak(t *testing.T) {
+// TestParseTacticalNDJSON_NoSpeakNoInjection 验证 LLM 未输出 speak 时
+// 不会自动注入 speak（speak 现在是 LLM 显式输出的 action，不再由 thought 转换）。
+func TestParseTacticalNDJSON_NoSpeakNoInjection(t *testing.T) {
 	raw := `{"action":"move_to","params":{"target_type":"zone","target_id":"main_workshop"}}`
-	actions, thought, err := parseTacticalNDJSON(raw, nil, "")
+	actions, err := parseTacticalNDJSON(raw, nil, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
-	}
-	if thought != "" {
-		t.Errorf("thought=%q, want empty", thought)
 	}
 	if len(actions) != 1 || actions[0].Action != "move_to" {
-		t.Errorf("actions=%+v, want [move_to] (no speak without thought)", actions)
-	}
-}
-
-// TestParseTacticalNDJSON_ThoughtOnlyNoSpeak 验证只有 thought 无 action 时
-// 不注入 speak（保留"无动作即报错"契约，避免只输出独白导致空转）。
-func TestParseTacticalNDJSON_ThoughtOnlyNoSpeak(t *testing.T) {
-	raw := `{"inner_thought":"不知道做什么"}`
-	actions, thought, err := parseTacticalNDJSON(raw, nil, "")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(actions) != 0 {
-		t.Errorf("got %d actions, want 0 (speak not injected when no real actions)", len(actions))
-	}
-	if thought != "不知道做什么" {
-		t.Errorf("thought=%q", thought)
-	}
-}
-
-// TestParseTacticalNDJSON_SpeakFilteredByRegistry 验证 registry 未授权
-// CmdSpeak 时 thought 不转为 speak（speak 工具对 agentID 不可用）。
-func TestParseTacticalNDJSON_SpeakFilteredByRegistry(t *testing.T) {
-	reg := NewCapabilityRegistry(nil)
-	reg.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
-		{Cmd: protocol.CmdMoveTo, Kind: "atomic"},
-		// CmdSpeak 未注册 → speak 工具不可用
-	})
-	raw := `{"inner_thought":"开工"}` + "\n" +
-		`{"action":"move_to","params":{"target_type":"zone","target_id":"main_workshop"}}`
-	actions, _, err := parseTacticalNDJSON(raw, reg, "H-01")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	// speak 不可用，不注入；只剩 move_to
-	if len(actions) != 1 || actions[0].Action != "move_to" {
-		t.Errorf("actions=%+v, want [move_to] (speak filtered by registry)", actions)
+		t.Errorf("actions=%+v, want [move_to] (no auto speak injection)", actions)
 	}
 }
 
@@ -210,28 +176,23 @@ func TestStreamAccumulator_Feed(t *testing.T) {
 		onComplete: func(pa plannedAction) { collected = append(collected, pa) },
 	}
 
-	// 模拟流式 delta：第一行 inner_thought 完整到达，第二行 action 分两次到达
-	acc.feed(`{"inner_thought":"开工"}` + "\n")
-	if acc.thought != "开工" {
-		t.Errorf("after first feed: thought=%q, want 开工", acc.thought)
+	// 第一行 speak 完整到达，立即触发 onComplete
+	acc.feed(`{"action":"speak","params":{"content":"开工"}}` + "\n")
+	if len(collected) != 1 {
+		t.Fatalf("after first feed: collected=%d, want 1 (speak immediate)", len(collected))
 	}
-	// thought 已解析但尚未发出 speak（speak 在首个 action 到达时才注入）
-	if len(collected) != 0 {
-		t.Errorf("after first feed: collected=%d, want 0 (speak deferred until first action)", len(collected))
+	if collected[0].Action != "speak" {
+		t.Errorf("collected[0]=%q, want speak", collected[0].Action)
+	}
+	if collected[0].Params["content"] != "开工" {
+		t.Errorf("speak content=%v, want 开工", collected[0].Params["content"])
 	}
 
 	// 第二行被拆成两个 delta
 	acc.feed(`{"action":"move_to","params":{"targ`)
 	acc.feed(`et":"main_workshop"}}` + "\n")
-	// 首个 action 到达时先注入 speak（thought"开工"），再发 move_to
 	if len(collected) != 2 {
 		t.Fatalf("after second line: collected=%d, want 2 (speak + move_to)", len(collected))
-	}
-	if collected[0].Action != "speak" {
-		t.Errorf("collected[0]=%q, want speak (thought 转为 speak)", collected[0].Action)
-	}
-	if collected[0].Params["content"] != "开工" {
-		t.Errorf("speak content=%v, want 开工", collected[0].Params["content"])
 	}
 	if collected[1].Action != "move_to" {
 		t.Errorf("collected[1]=%q, want move_to", collected[1].Action)
@@ -269,33 +230,28 @@ func TestStreamAccumulator_FiltersInvalidAction(t *testing.T) {
 	}
 }
 
-// TestStreamAccumulator_ThoughtAfterActionSkipsSpeak 验证 LLM 违反"第一行
-// inner_thought"约定、把 thought 放到 action 之后时，speak 不被注入（避免
-// 把独白插到队列中段）。
-func TestStreamAccumulator_ThoughtAfterActionSkipsSpeak(t *testing.T) {
+// TestStreamAccumulator_LegacyInnerThoughtIgnored 验证流式路径收到
+// inner_thought 行时静默忽略（不报错、不触发 onComplete）。
+func TestStreamAccumulator_LegacyInnerThoughtIgnored(t *testing.T) {
 	var collected []plannedAction
 	acc := &streamAccumulator{
 		onComplete: func(pa plannedAction) { collected = append(collected, pa) },
 	}
-	// action 先到，thought 后到（违规顺序）
-	acc.feed(`{"action":"move_to","params":{"target_type":"zone","target_id":"main_workshop"}}` + "\n")
+	// inner_thought 行应被忽略
 	acc.feed(`{"inner_thought":"开工"}` + "\n")
+	acc.feed(`{"action":"move_to","params":{"target_type":"zone","target_id":"main_workshop"}}` + "\n")
 	acc.flush()
-	// thought 迟到：speak 不注入，只有 move_to
 	if len(collected) != 1 {
-		t.Fatalf("collected=%d, want 1 (speak skipped when thought arrives after action)", len(collected))
+		t.Fatalf("collected=%d, want 1 (inner_thought ignored, only move_to)", len(collected))
 	}
 	if collected[0].Action != "move_to" {
 		t.Errorf("collected[0]=%q, want move_to", collected[0].Action)
 	}
-	if acc.thought != "开工" {
-		t.Errorf("thought should still be stored for logging, got %q", acc.thought)
-	}
 }
 
-// TestStreamAccumulator_ThoughtOnlyNoSpeak 验证流式路径只有 thought 无 action
-// 时 speak 不注入（与非流式 parseTacticalNDJSON 语义一致）。
-func TestStreamAccumulator_ThoughtOnlyNoSpeak(t *testing.T) {
+// TestStreamAccumulator_ThoughtOnlyNoAction 验证流式路径只有 inner_thought、
+// 无任何 action 行时不触发 onComplete。
+func TestStreamAccumulator_ThoughtOnlyNoAction(t *testing.T) {
 	var collected []plannedAction
 	acc := &streamAccumulator{
 		onComplete: func(pa plannedAction) { collected = append(collected, pa) },
@@ -303,10 +259,7 @@ func TestStreamAccumulator_ThoughtOnlyNoSpeak(t *testing.T) {
 	acc.feed(`{"inner_thought":"不知道做什么"}` + "\n")
 	acc.flush()
 	if len(collected) != 0 {
-		t.Errorf("collected=%d, want 0 (speak not emitted without any action)", len(collected))
-	}
-	if acc.thought != "不知道做什么" {
-		t.Errorf("thought=%q", acc.thought)
+		t.Errorf("collected=%d, want 0 (inner_thought ignored, no actions)", len(collected))
 	}
 }
 
@@ -480,12 +433,12 @@ func TestSelectCurrentGoal_PlanningWindowBoundary(t *testing.T) {
 
 func TestGenerateTacticalPlan_HTTPError(t *testing.T) {
 	tc := &fakeStrategicCaller{err: errors.New("network down")}
-	actions, thought, err := generateTacticalPlan(context.Background(), tc, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", &protocol.PhysicalState{Energy: 80, Fatigue: 20, JointWear: 10, Health: 100}, nil, nil, slog.Default(), "", "", "", nil, nil, nil)
+	actions, err := generateTacticalPlan(context.Background(), tc, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", &protocol.PhysicalState{Energy: 80, Fatigue: 20, JointWear: 10, Health: 100}, nil, nil, slog.Default(), "", "", "", nil, nil, nil)
 	if err == nil {
 		t.Fatal("expected error on HTTP failure")
 	}
-	if actions != nil || thought != "" {
-		t.Errorf("got actions=%v thought=%q, want nil/empty", actions, thought)
+	if actions != nil {
+		t.Errorf("got actions=%v, want nil", actions)
 	}
 	if tc.resetCalled {
 		t.Error("ResetSession should not be called when SendWithSummary fails")
@@ -493,15 +446,15 @@ func TestGenerateTacticalPlan_HTTPError(t *testing.T) {
 }
 
 func TestGenerateTacticalPlan_ValidResponse(t *testing.T) {
-	raw := `{"inner_thought":"先移动再装配"}` + "\n" +
+	raw := `{"action":"speak","params":{"content":"先移动再装配"}}` + "\n" +
 		`{"action":"move_to","params":{"target_type":"zone","target_id":"main_workshop"}}` + "\n" +
 		`{"action":"work_shift","params":{"semantic_group":"workbench_01","interaction":"assemble"}}`
 	tc := &fakeStrategicCaller{resp: makeStrategicResponse(raw)}
-	actions, thought, err := generateTacticalPlan(context.Background(), tc, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", &protocol.PhysicalState{Energy: 80, Fatigue: 20, JointWear: 10, Health: 100}, nil, nil, slog.Default(), "", "", "", nil, nil, nil)
+	actions, err := generateTacticalPlan(context.Background(), tc, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", &protocol.PhysicalState{Energy: 80, Fatigue: 20, JointWear: 10, Health: 100}, nil, nil, slog.Default(), "", "", "", nil, nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	// inner_thought 被转为队列首部的 speak 动作
+	// LLM 显式输出 speak 作为首个 action
 	if len(actions) != 3 {
 		t.Fatalf("got %d actions, want 3 (speak + move + work)", len(actions))
 	}
@@ -509,10 +462,7 @@ func TestGenerateTacticalPlan_ValidResponse(t *testing.T) {
 		t.Errorf("actions[0]=%q, want speak", actions[0].Action)
 	}
 	if actions[0].Params["content"] != "先移动再装配" {
-		t.Errorf("speak content=%v, want thought content", actions[0].Params["content"])
-	}
-	if thought != "先移动再装配" {
-		t.Errorf("thought=%q", thought)
+		t.Errorf("speak content=%v", actions[0].Params["content"])
 	}
 	if !tc.resetCalled {
 		t.Error("ResetSession should be called after successful generation")
@@ -521,7 +471,7 @@ func TestGenerateTacticalPlan_ValidResponse(t *testing.T) {
 
 func TestGenerateTacticalPlan_ParseFail(t *testing.T) {
 	tc := &fakeStrategicCaller{resp: makeStrategicResponse("我今天打算去车间转转。")}
-	if _, _, err := generateTacticalPlan(context.Background(), tc, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", nil, nil, nil, slog.Default(), "", "", "", nil, nil, nil); err == nil {
+	if _, err := generateTacticalPlan(context.Background(), tc, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", nil, nil, nil, slog.Default(), "", "", "", nil, nil, nil); err == nil {
 		t.Fatal("expected error on parse failure (no actions)")
 	}
 }
@@ -529,16 +479,16 @@ func TestGenerateTacticalPlan_ParseFail(t *testing.T) {
 func TestGenerateTacticalPlan_EmptyActions(t *testing.T) {
 	raw := `{"inner_thought":"不知道做什么"}`
 	tc := &fakeStrategicCaller{resp: makeStrategicResponse(raw)}
-	if _, _, err := generateTacticalPlan(context.Background(), tc, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", nil, nil, nil, slog.Default(), "", "", "", nil, nil, nil); err == nil {
+	if _, err := generateTacticalPlan(context.Background(), tc, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", nil, nil, nil, slog.Default(), "", "", "", nil, nil, nil); err == nil {
 		t.Fatal("expected error when all actions filtered out")
 	}
 }
 
 func TestGenerateTacticalPlan_ResetSessionCalled(t *testing.T) {
-	raw := `{"inner_thought":"开始"}` + "\n" +
+	raw := `{"action":"speak","params":{"content":"开始"}}` + "\n" +
 		`{"action":"wait","params":{"duration_sec":30}}`
 	tc := &fakeStrategicCaller{resp: makeStrategicResponse(raw)}
-	_, _, _ = generateTacticalPlan(context.Background(), tc, "H-01", "等待", "main_workshop", "09:00", "09:00-12:00", nil, nil, nil, slog.Default(), "", "", "", nil, nil, nil)
+	_, _ = generateTacticalPlan(context.Background(), tc, "H-01", "等待", "main_workshop", "09:00", "09:00-12:00", nil, nil, nil, slog.Default(), "", "", "", nil, nil, nil)
 	if !tc.resetCalled {
 		t.Error("ResetSession should be called after successful tactical generation")
 	}
@@ -1190,8 +1140,12 @@ func TestBuildTacticalExample_RestBenchOnly(t *testing.T) {
 func TestBuildTacticalExample_NilKB(t *testing.T) {
 	// nil KB 返回通用占位示例，不引用任何具体 id。
 	got := prompt.TacticalExample(nil, "")
-	if !strings.Contains(got, "inner_thought") {
-		t.Errorf("nil KB example should still contain inner_thought: %q", got)
+	// 示例应包含 speak 作为首个 action（prompt 要求 NPC 执行动作前先 speak）
+	if !strings.Contains(got, `"action":"speak"`) {
+		t.Errorf("nil KB example should start with speak action: %q", got)
+	}
+	if strings.Contains(got, "inner_thought") {
+		t.Errorf("nil KB example should NOT contain deprecated inner_thought: %q", got)
 	}
 	if strings.Contains(got, "work_shift") || strings.Contains(got, "charge_at_station") {
 		t.Errorf("nil KB example should not reference specific composite tools: %q", got)
