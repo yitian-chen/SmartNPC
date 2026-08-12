@@ -86,9 +86,9 @@ type agentContext struct {
 	tacticalHc  llmClient
 
 	// ollama is the local Ollama client for relationship-update judgments
-	// (Stage 5). nil when --ollama-url="" (reactive layer disabled), in
-	// which case maybeUpdateRelationship short-circuits. Immutable after
-	// construction.
+	// (Stage 5). nil when --ollama-url="" explicitly disables the reactive
+	// layer (default is http://localhost:11435), in which case
+	// maybeUpdateRelationship short-circuits. Immutable after construction.
 	ollama *ollama.Client
 
 	// Lifecycle (no lock needed — single writer: worker goroutine for cancel,
@@ -336,7 +336,7 @@ func (a *agentContext) loadTacticalMemories(ctx context.Context, agentID string)
 // in the initial rule. Self-targeting (target == agentID) is skipped.
 func (a *agentContext) maybeUpdateRelationship(completion protocol.ActionCompletedPayload, res agentstate.CompletionResult) {
 	if a.ollama == nil {
-		return // reactive layer disabled (--ollama-url="")
+		return // reactive layer explicitly disabled (--ollama-url="")
 	}
 	store := a.as.Store()
 	if store == nil {
@@ -1003,7 +1003,7 @@ type llmClient interface {
 var _ llmClient = (*venus.Client)(nil)
 
 // reactiveRunnerRef 是进程级反应层执行器（package-level 便于 WS handler 调用）。
-// nil 表示反应层未启用（--ollama-url="" 或客户端初始化失败）。
+// nil 表示反应层未启用（--ollama-url="" 显式禁用或客户端初始化失败）。
 // trigger() 内部 nil-check，WS handler 无需额外判空。
 var reactiveRunnerRef *reactiveRunner
 
@@ -1259,8 +1259,8 @@ func main() {
 		"directory of NPC profile.md files (filename = <agentID>.md; empty disables profile override)")
 	tacticalStream = flag.Bool("tactical-stream", false,
 		"enable streaming for tactical layer LLM calls (experimental: only helps if upstream LLM emits tokens incrementally)")
-	ollamaURL = flag.String("ollama-url", "",
-		"Ollama base URL for reactive layer (empty by default disables reactive layer; set to http://localhost:11434 to enable)")
+	ollamaURL = flag.String("ollama-url", "http://localhost:11435",
+		"Ollama base URL for reactive layer (default enables reactive layer via SSH reverse tunnel on cloud; set to empty string to disable, or http://localhost:11434 for local Windows)")
 	ollamaModel = flag.String("ollama-model", "qwen2.5:7b-instruct-q4_K_M",
 		"Ollama model name for reactive layer decisions")
 	ollamaNumThread = flag.Int("ollama-num-thread", 16,
@@ -1396,8 +1396,9 @@ func main() {
 	)
 
 	// ─── 反应层 Ollama 客户端 ────────────────────────────────────
-	// --ollama-url="" 显式禁用反应层；否则初始化客户端（即使 Ollama 进程
-	// 不在跑也不报错——Chat 调用失败时反应层静默降级为 continue）。
+	// --ollama-url 默认 http://localhost:11435（云端 SSH 反向隧道端口），
+	// 显式传空串禁用反应层。否则初始化客户端（即使 Ollama 进程不在跑也
+	// 不报错——Chat 调用失败时反应层静默降级为 continue）。
 	// ollamaClient 提升到外层作用域，供 registerAgent 闭包捕获注入
 	// agentContext.ollama（Stage 5 关系层判断用）。nil 表示禁用。
 	var ollamaClient *ollama.Client
@@ -1502,7 +1503,7 @@ func main() {
 		Timeout: *venusTimeout,
 	})
 	// Stage 5: 注入 Ollama 客户端供关系层判断。nil 表示 --ollama-url=""
-	// 禁用反应层时，maybeUpdateRelationship 会早返回不调用 Ollama。
+	// 显式禁用反应层时，maybeUpdateRelationship 会早返回不调用 Ollama。
 	ac.ollama = ollamaClient
 	agents[id] = ac
 		go runPerceptionWorker(workerCtx, id, ac, ws, kb, profiles, logger)
