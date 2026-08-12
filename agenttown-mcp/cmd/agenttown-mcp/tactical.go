@@ -84,6 +84,8 @@ func physicalAlertOverrideGoal(hint, origGoal string, physical *protocol.Physica
 		return "前往充电站休息补能（疲劳过高，停止工作）", true
 	case physical.Energy < prompt.EnergyAlertThreshold:
 		return "前往充电站补能（体力过低）", true
+	case physical.JointWear > prompt.JointWearAlertThreshold:
+		return "前往维护点进行保养检修（关节磨损过高）", true
 	case physical.Health < prompt.HealthAlertThreshold:
 		return "前往维修点检修（健康过低）", true
 	default:

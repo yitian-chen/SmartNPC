@@ -100,15 +100,49 @@ func BuildTactical(in TacticalInput) string {
 		hintLine = "【上次中断原因】" + in.Hint + "（请据此调整本轮规划）"
 	}
 	// 物理告警强约束段: when hint contains "物理状态告警" marker (set by
-	// upgradeIfPhysicalAlert), insert explicit prohibition — forbid work
-	// actions, require recovery actions. Pairs with physicalAlertOverrideGoal
-	// (code-layer goal override) as double insurance.
-	if strings.Contains(in.Hint, "物理状态告警") {
-		hintLine += "\n【物理告警强制约束】当前物理状态已突破警戒阈值，必须立即规划恢复类动作：\n" +
-			"- 优先 charge_at_station（充电）补能\n" +
-			"- 充电后若仍疲劳高，追加 wait 或 rest_at_residence 类动作\n" +
-			"- 禁止规划 work_shift / self_maintenance / surf_internet 等消耗体能的动作\n" +
-			"- 禁止规划 move_to 到非充电站区域（除非当前已在充电站）"
+	// upgradeIfPhysicalAlert), insert type-specific recovery constraints based
+	// on which physical values are actually in alert. Pairs with
+	// physicalAlertOverrideGoal (code-layer goal override) as double insurance.
+	// Different alert types drive different recovery actions:
+	//   - 低电量 → charge_at_station 充电
+	//   - 高疲劳 → charge_at_station 充电 / rest_at_residence 休息
+	//   - 高关节磨损 → self_maintenance 维修保养
+	//   - 低健康 → rest_at_residence / self_maintenance 恢复
+	if strings.Contains(in.Hint, "物理状态告警") && in.Physical != nil && !in.Physical.IsZero() {
+		var reqs, forbids []string
+		if in.Physical.Energy < EnergyAlertThreshold {
+			reqs = append(reqs, "- 电量过低：必须优先 charge_at_station（充电）补能")
+		}
+		if in.Physical.Fatigue > FatigueAlertThreshold {
+			reqs = append(reqs, "- 疲劳过高：优先 charge_at_station（充电）或 rest_at_residence（休息），充电后若仍疲劳追加 rest_at_residence")
+		}
+		if in.Physical.JointWear > JointWearAlertThreshold {
+			reqs = append(reqs, "- 关节磨损过高：必须优先 self_maintenance（维护保养），否则持续工作会加剧损耗")
+		}
+		if in.Physical.Health < HealthAlertThreshold {
+			reqs = append(reqs, "- 健康过低：优先 rest_at_residence（休息）或 self_maintenance（保养）恢复")
+		}
+		// 禁止项：仅禁止与所有活跃告警冲突的消耗性动作
+		// 关节磨损告警时不禁 self_maintenance（那是需要的恢复动作）
+		fatigueAlert := in.Physical.Fatigue > FatigueAlertThreshold
+		jointWearAlert := in.Physical.JointWear > JointWearAlertThreshold
+		healthAlert := in.Physical.Health < HealthAlertThreshold
+		if fatigueAlert || healthAlert {
+			forbids = append(forbids, "work_shift（消耗体力）")
+		}
+		if jointWearAlert || healthAlert {
+			forbids = append(forbids, "surf_internet（无助于恢复）")
+		}
+		if fatigueAlert {
+			forbids = append(forbids, "move_to 到非恢复设施区域")
+		}
+		if len(reqs) > 0 {
+			hintLine += "\n【物理告警强制约束】当前物理状态已突破警戒阈值，必须立即规划恢复类动作：\n" +
+				strings.Join(reqs, "\n")
+			if len(forbids) > 0 {
+				hintLine += "\n禁止规划以下动作：" + strings.Join(forbids, "、")
+			}
+		}
 	}
 	toolList, toolCount := BuildTacticalToolList(in.Actions)
 	objectStatusLine := ObjectStatusContext(in.ObjectStatus, in.NearbyObjects, in.KB)
