@@ -953,6 +953,51 @@ func (a *AgentState) LatestZone() string {
 	return a.latestZoneLocked()
 }
 
+// LatestObjectStatus returns the per-category smart object availability
+// aggregate from the latest perception_update. Returns nil if no
+// perception has arrived, parsing fails, or UE5 didn't push the
+// object_status_summary field (e.g. mock UE). Used by tacticalRefill to
+// inject the 【物体实时占用】 segment into the tactical prompt.
+func (a *AgentState) LatestObjectStatus() map[string]protocol.ObjectCategoryStatus {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if len(a.latestPerception) == 0 {
+		return nil
+	}
+	var p protocol.PerceptionPayload
+	if err := json.Unmarshal(a.latestPerception, &p); err != nil {
+		return nil
+	}
+	if len(p.ObjectStatusSummary) == 0 {
+		return nil
+	}
+	return p.ObjectStatusSummary
+}
+
+// LatestNearbyObjects returns the per-instance nearby object list from the
+// latest perception_update (current zone only). Returns nil if no
+// perception has arrived or parsing fails. Paired with LatestObjectStatus:
+// the per-instance state disambiguates which semantic_group within a
+// multi-group category is occupied (e.g. WorkBench occupied → sorting_conveyor
+// is the idle one in the "work" category).
+func (a *AgentState) LatestNearbyObjects() []protocol.NearbyObject {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if len(a.latestPerception) == 0 {
+		return nil
+	}
+	var p protocol.PerceptionPayload
+	if err := json.Unmarshal(a.latestPerception, &p); err != nil {
+		return nil
+	}
+	if len(p.NearbyObjects) == 0 {
+		return nil
+	}
+	out := make([]protocol.NearbyObject, len(p.NearbyObjects))
+	copy(out, p.NearbyObjects)
+	return out
+}
+
 // Snapshot returns an exported read-only copy of all business fields.
 // Slice and pointer fields are deep-copied so the caller can mutate the
 // snapshot without affecting the source state.

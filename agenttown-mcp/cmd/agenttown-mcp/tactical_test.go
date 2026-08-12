@@ -480,7 +480,7 @@ func TestSelectCurrentGoal_PlanningWindowBoundary(t *testing.T) {
 
 func TestGenerateTacticalPlan_HTTPError(t *testing.T) {
 	tc := &fakeStrategicCaller{err: errors.New("network down")}
-	actions, thought, err := generateTacticalPlan(context.Background(), tc, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", &protocol.PhysicalState{Energy: 80, Fatigue: 20, JointWear: 10, Health: 100}, nil, nil, slog.Default(), "", "", "", nil)
+	actions, thought, err := generateTacticalPlan(context.Background(), tc, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", &protocol.PhysicalState{Energy: 80, Fatigue: 20, JointWear: 10, Health: 100}, nil, nil, slog.Default(), "", "", "", nil, nil, nil)
 	if err == nil {
 		t.Fatal("expected error on HTTP failure")
 	}
@@ -497,7 +497,7 @@ func TestGenerateTacticalPlan_ValidResponse(t *testing.T) {
 		`{"action":"move_to","params":{"target_type":"zone","target_id":"main_workshop"}}` + "\n" +
 		`{"action":"work_shift","params":{"semantic_group":"workbench_01","interaction":"assemble"}}`
 	tc := &fakeStrategicCaller{resp: makeStrategicResponse(raw)}
-	actions, thought, err := generateTacticalPlan(context.Background(), tc, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", &protocol.PhysicalState{Energy: 80, Fatigue: 20, JointWear: 10, Health: 100}, nil, nil, slog.Default(), "", "", "", nil)
+	actions, thought, err := generateTacticalPlan(context.Background(), tc, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", &protocol.PhysicalState{Energy: 80, Fatigue: 20, JointWear: 10, Health: 100}, nil, nil, slog.Default(), "", "", "", nil, nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -521,7 +521,7 @@ func TestGenerateTacticalPlan_ValidResponse(t *testing.T) {
 
 func TestGenerateTacticalPlan_ParseFail(t *testing.T) {
 	tc := &fakeStrategicCaller{resp: makeStrategicResponse("我今天打算去车间转转。")}
-	if _, _, err := generateTacticalPlan(context.Background(), tc, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", nil, nil, nil, slog.Default(), "", "", "", nil); err == nil {
+	if _, _, err := generateTacticalPlan(context.Background(), tc, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", nil, nil, nil, slog.Default(), "", "", "", nil, nil, nil); err == nil {
 		t.Fatal("expected error on parse failure (no actions)")
 	}
 }
@@ -529,7 +529,7 @@ func TestGenerateTacticalPlan_ParseFail(t *testing.T) {
 func TestGenerateTacticalPlan_EmptyActions(t *testing.T) {
 	raw := `{"inner_thought":"不知道做什么"}`
 	tc := &fakeStrategicCaller{resp: makeStrategicResponse(raw)}
-	if _, _, err := generateTacticalPlan(context.Background(), tc, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", nil, nil, nil, slog.Default(), "", "", "", nil); err == nil {
+	if _, _, err := generateTacticalPlan(context.Background(), tc, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", nil, nil, nil, slog.Default(), "", "", "", nil, nil, nil); err == nil {
 		t.Fatal("expected error when all actions filtered out")
 	}
 }
@@ -538,7 +538,7 @@ func TestGenerateTacticalPlan_ResetSessionCalled(t *testing.T) {
 	raw := `{"inner_thought":"开始"}` + "\n" +
 		`{"action":"wait","params":{"duration_sec":30}}`
 	tc := &fakeStrategicCaller{resp: makeStrategicResponse(raw)}
-	_, _, _ = generateTacticalPlan(context.Background(), tc, "H-01", "等待", "main_workshop", "09:00", "09:00-12:00", nil, nil, nil, slog.Default(), "", "", "", nil)
+	_, _, _ = generateTacticalPlan(context.Background(), tc, "H-01", "等待", "main_workshop", "09:00", "09:00-12:00", nil, nil, nil, slog.Default(), "", "", "", nil, nil, nil)
 	if !tc.resetCalled {
 		t.Error("ResetSession should be called after successful tactical generation")
 	}
@@ -617,6 +617,80 @@ func TestBuildTacticalPrompt_InjectsKBContext(t *testing.T) {
 	}
 	if !strings.Contains(promptText, "位于 zone=main_workshop") {
 		t.Errorf("prompt should contain '位于 zone=main_workshop', got: %s", promptText)
+	}
+}
+
+// TestBuildTacticalPrompt_InjectsObjectStatus (Fix B) 验证战术层 prompt 注入
+// 【物体实时占用】段：当 ObjectStatus 非空且 KB 存在时，prompt 应包含按 category
+// 聚合的占用摘要 + 附近物体实例状态。
+func TestBuildTacticalPrompt_InjectsObjectStatus(t *testing.T) {
+	kb := loadTestKB(t)
+	status := map[string]protocol.ObjectCategoryStatus{
+		"work":     {Total: 2, Idle: 1, Occupied: 1},
+		"charging": {Total: 6, Idle: 6, Occupied: 0},
+	}
+	nearby := []protocol.NearbyObject{
+		{ID: "WorkBench", Category: "work", State: "occupied"},
+		{ID: "Charge-1", Category: "charging", State: "idle"},
+	}
+	promptText := prompt.BuildTactical(prompt.TacticalInput{
+		Goal:          "装配",
+		Zone:          "main_workshop",
+		TimeOfDay:     "09:00",
+		Slot:          "09:00-12:00",
+		Physical:      &protocol.PhysicalState{Energy: 75, Fatigue: 30, JointWear: 5, Health: 90},
+		KB:            kb,
+		Hint:          "",
+		Actions:       nil,
+		AgentID:       "",
+		ObjectStatus:  status,
+		NearbyObjects: nearby,
+	})
+	// 应包含段落标题
+	if !strings.Contains(promptText, "物体实时占用") {
+		t.Errorf("prompt should contain '物体实时占用' section, got: %s", promptText)
+	}
+	// 应包含 work category 的占用摘要（1 空闲 / 1 占用）
+	if !strings.Contains(promptText, "1 空闲") || !strings.Contains(promptText, "1 占用") {
+		t.Errorf("prompt should show work category 1 idle / 1 occupied, got: %s", promptText)
+	}
+	// 应包含 charging category 全空闲
+	if !strings.Contains(promptText, "6 空闲") {
+		t.Errorf("prompt should show charging category 6 idle, got: %s", promptText)
+	}
+	// 应包含附近实例状态
+	if !strings.Contains(promptText, "WorkBench") {
+		t.Errorf("prompt should mention nearby WorkBench, got: %s", promptText)
+	}
+	// 应包含"避免直接重试"或"全部占用"相关的引导文本
+	if !strings.Contains(promptText, "禁止规划必然失败") {
+		t.Errorf("prompt should guide LLM to avoid doomed occupancy actions, got: %s", promptText)
+	}
+}
+
+// TestBuildTacticalPrompt_NilObjectStatusNoSection 验证 ObjectStatus 为空时
+// 【物体实时占用】段整体省略，不污染 prompt（兼容 UE 未推送 object_status 的场景）。
+// 注意：要求 #9 模板里固定提及"物体实时占用"字样，故不能 grep 该词；改用段体特征
+// "按 category 聚合"判断段是否实际渲染。
+func TestBuildTacticalPrompt_NilObjectStatusNoSection(t *testing.T) {
+	kb := loadTestKB(t)
+	promptText := prompt.BuildTactical(prompt.TacticalInput{
+		Goal:     "装配",
+		Zone:     "main_workshop",
+		TimeOfDay: "09:00",
+		Slot:     "09:00-12:00",
+		Physical: &protocol.PhysicalState{Energy: 75, Fatigue: 30, JointWear: 5, Health: 90},
+		KB:       kb,
+		Hint:     "",
+		Actions:  nil,
+		AgentID:  "",
+		// ObjectStatus / NearbyObjects 留空
+	})
+	if strings.Contains(promptText, "按 category 聚合") {
+		t.Errorf("prompt should NOT render object status section body when ObjectStatus is nil, got: %s", promptText)
+	}
+	if strings.Contains(promptText, "你附近的实例状态") {
+		t.Errorf("prompt should NOT render nearby instances section when NearbyObjects is nil, got: %s", promptText)
 	}
 }
 

@@ -118,6 +118,86 @@ func TestRecordActionCompletion_FailureDetailIncludesReason(t *testing.T) {
 	}
 }
 
+// TestRecordActionCompletion_FailureSetsReplanHint 验证 Fix A：失败的 in-flight
+// action 把失败上下文（cmd/semantic_group/result/reason）写入 replanHint，让下一轮
+// 战术层 LLM 看到上次失败原因、避免盲重试同一动作（如工作台被占用后无限重试 work_shift）。
+// 仅 in-flight action 写入；/debug/action 手动调试路径（WasInFlight=false）不污染 hint。
+func TestRecordActionCompletion_FailureSetsReplanHint(t *testing.T) {
+	ac, _ := newAgentContext(context.Background())
+	// 模拟战术层下发的 work_shift（被 UE 拒绝，因为工作台被占用）
+	ac.as.RecordActionStarted("act_workbench_fail", "work_shift",
+		map[string]any{"semantic_group": "workbench", "interaction": "assemble"},
+		agentstate.SourceTactical)
+
+	ac.recordActionCompletion(protocol.ActionCompletedPayload{
+		ActionID: "act_workbench_fail",
+		Result:   protocol.ResultFailed,
+		Reason:   "claim_queue_not_supported",
+		Progress: 0,
+	})
+
+	snap := ac.as.Snapshot()
+	hint := snap.ReplanHint
+	if hint == "" {
+		t.Fatal("ReplanHint should be set on in-flight failure (Fix A)")
+	}
+	// 应包含 cmd
+	if !strings.Contains(hint, "cmd=work_shift") {
+		t.Errorf("hint should mention cmd=work_shift: %q", hint)
+	}
+	// 应包含 semantic_group
+	if !strings.Contains(hint, "semantic_group=workbench") {
+		t.Errorf("hint should mention semantic_group=workbench: %q", hint)
+	}
+	// 应包含 result 和 reason
+	if !strings.Contains(hint, "result=failed") {
+		t.Errorf("hint should mention result=failed: %q", hint)
+	}
+	if !strings.Contains(hint, "claim_queue_not_supported") {
+		t.Errorf("hint should mention failure reason: %q", hint)
+	}
+	// 应包含"避免直接重试"的引导文本
+	if !strings.Contains(hint, "避免直接重试") {
+		t.Errorf("hint should guide LLM to avoid blind retry: %q", hint)
+	}
+}
+
+// TestRecordActionCompletion_FailureNoHintForManualAction 验证 /debug/action
+// 手动调试路径（不经 recordActionStarted，WasInFlight=false）不写 ReplanHint，
+// 避免污染下一轮战术层规划。
+func TestRecordActionCompletion_FailureNoHintForManualAction(t *testing.T) {
+	ac, _ := newAgentContext(context.Background())
+	// 不调 RecordActionStarted —— 模拟 /debug/action 直接走 ws.Call 路径
+	ac.recordActionCompletion(protocol.ActionCompletedPayload{
+		ActionID: "act_manual_fail",
+		Result:   protocol.ResultFailed,
+		Reason:   "manual test failure",
+		Progress: 0,
+	})
+	snap := ac.as.Snapshot()
+	if snap.ReplanHint != "" {
+		t.Errorf("ReplanHint should remain empty for manual /debug/action failures, got %q", snap.ReplanHint)
+	}
+}
+
+// TestRecordActionCompletion_SuccessNoReplanHint 验证成功完成不写 ReplanHint
+// （成功是常态，不应让下一轮战术层误以为上次失败）。
+func TestRecordActionCompletion_SuccessNoReplanHint(t *testing.T) {
+	ac, _ := newAgentContext(context.Background())
+	ac.as.RecordActionStarted("act_work_ok", "work_shift",
+		map[string]any{"semantic_group": "workbench", "interaction": "assemble"},
+		agentstate.SourceTactical)
+	ac.recordActionCompletion(protocol.ActionCompletedPayload{
+		ActionID: "act_work_ok",
+		Result:   protocol.ResultSuccess,
+		Progress: 1,
+	})
+	snap := ac.as.Snapshot()
+	if snap.ReplanHint != "" {
+		t.Errorf("ReplanHint should remain empty on success, got %q", snap.ReplanHint)
+	}
+}
+
 func TestRecordEventNotification_ReturnsTrigger(t *testing.T) {
 	ac, _ := newAgentContext(context.Background())
 	// RefillQueue 同时设置 queue + slot；IncrementRedecomposeCount 设置计数。
