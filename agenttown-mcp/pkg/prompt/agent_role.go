@@ -12,14 +12,20 @@ import (
 	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
 )
 
-// AgentRole constructs the 【你的角色】 segment by merging three sources,
-// per field, with priority: profile (non-empty) > KB (non-empty) > hardcoded
-// fallback (non-empty). Shared by all three decision layers.
+// AgentRole constructs the 【你的角色】 segment by merging two sources,
+// per field, with priority: profile (non-empty) > hardcoded fallback
+// (non-empty). KB agent persona fields are intentionally ignored — persona
+// is authored solely in assets/profiles/<agentID>.md. Shared by all three
+// decision layers.
 //
-// Any of kb / profiles may be nil. When the agent is missing from all three
-// sources the returned string is empty.
+// The kb parameter is retained in the signature to avoid churn at call sites
+// (which still pass kb for KBContext etc.) but is not read here.
+//
+// Any of kb / profiles may be nil. When the agent is missing from both
+// profile and fallback the returned string is empty.
 func AgentRole(kb *worldkb.KB, profiles map[string]*profile.Profile, agentID string) string {
-	p, kbAgent, fbName, fbProf, fbDesc, fbTraits, fbSpeech := roleSources(kb, profiles, agentID)
+	_ = kb // KB persona fields intentionally ignored; persona comes from profile only.
+	p, fbName, fbProf, fbDesc, fbTraits, fbSpeech := roleSources(profiles, agentID)
 	// p may be nil when agentID is absent from profiles; substitute an empty
 	// Profile so field reads below are nil-safe.
 	if p == nil {
@@ -27,34 +33,30 @@ func AgentRole(kb *worldkb.KB, profiles map[string]*profile.Profile, agentID str
 	}
 
 	var sb strings.Builder
-	if name := firstNonEmpty(p.DisplayName, kbName(kbAgent), fbName); name != "" {
+	if name := firstNonEmpty(p.DisplayName, fbName); name != "" {
 		sb.WriteString("名字：" + name + "\n")
 	}
-	if prof := firstNonEmpty(p.Profession, kbProfession(kbAgent), fbProf); prof != "" {
+	if prof := firstNonEmpty(p.Profession, fbProf); prof != "" {
 		sb.WriteString("职业：" + prof + "\n")
 	}
-	if desc := firstNonEmpty(p.Description, kbDescription(kbAgent), fbDesc); desc != "" {
+	if desc := firstNonEmpty(p.Description, fbDesc); desc != "" {
 		sb.WriteString("背景：" + desc + "\n")
 	}
-	if traits := firstNonEmptyTraits(p.Traits, kbTraits(kbAgent), fbTraits); len(traits) > 0 {
+	if traits := firstNonEmptyTraits(p.Traits, fbTraits); len(traits) > 0 {
 		sb.WriteString("性格特质：" + strings.Join(traits, "、") + "\n")
 	}
-	if speech := firstNonEmpty(p.SpeechStyle, kbSpeechStyle(kbAgent), fbSpeech); speech != "" {
+	if speech := firstNonEmpty(p.SpeechStyle, fbSpeech); speech != "" {
 		sb.WriteString("说话风格：" + speech + "\n")
 	}
 	return sb.String()
 }
 
-// roleSources resolves the three persona sources for agentID:
+// roleSources resolves the persona sources for agentID:
 //   - p: profile from profiles map (nil if missing)
-//   - kbAgent: agent from KB (nil if kb nil or agent missing)
 //   - fb*: hardcoded fallback fields (zero values if agentID unknown)
-func roleSources(kb *worldkb.KB, profiles map[string]*profile.Profile, agentID string) (p *profile.Profile, kbAgent *worldkb.Agent, fbName, fbProf, fbDesc string, fbTraits []string, fbSpeech string) {
+func roleSources(profiles map[string]*profile.Profile, agentID string) (p *profile.Profile, fbName, fbProf, fbDesc string, fbTraits []string, fbSpeech string) {
 	if profiles != nil {
 		p = profiles[agentID]
-	}
-	if kb != nil {
-		kbAgent = kb.GetAgent(agentID)
 	}
 	fbName, fbProf, fbDesc, fbTraits, fbSpeech = fallbackFields(agentID)
 	return
@@ -80,47 +82,11 @@ func firstNonEmptyTraits(slices ...[]string) []string {
 	return nil
 }
 
-// kbName extracts DisplayName from a KB agent (nil-safe).
-func kbName(a *worldkb.Agent) string {
-	if a == nil {
-		return ""
-	}
-	return a.DisplayName
-}
-
-func kbProfession(a *worldkb.Agent) string {
-	if a == nil {
-		return ""
-	}
-	return a.Profession
-}
-
-func kbDescription(a *worldkb.Agent) string {
-	if a == nil {
-		return ""
-	}
-	return a.Description
-}
-
-func kbTraits(a *worldkb.Agent) []string {
-	if a == nil {
-		return nil
-	}
-	return a.Personality.Traits
-}
-
-func kbSpeechStyle(a *worldkb.Agent) string {
-	if a == nil {
-		return ""
-	}
-	return a.Personality.SpeechStyle
-}
-
 // fallbackFields returns the hardcoded fallback persona fields for agentID.
 // Covers H-01/H-02/H-03 (phase-1 three NPCs); other agentIDs return zero
 // values. Format matches AgentRole output (name/profession/background/
 // personality/speech style), omitting fields that are empty in the authored
-// KB so fallback and KB-loaded输出 stay consistent.
+// profile so fallback and profile-loaded 输出 stay consistent.
 func fallbackFields(agentID string) (name, profession, description string, traits []string, speechStyle string) {
 	switch agentID {
 	case "H-01":

@@ -81,16 +81,17 @@ const StrategicPromptTemplate = `[战略层/每日规划] 现在是仿真时间 
 //   - 【区域设施映射】: zone→object mapping (currently disabled — see comment)
 //   - 【可用能力】: composite actions from capabilities
 //
-// kb == nil → skips KB segments but still injects capabilities.
+// kb == nil → skips 【世界知识】 segment but still injects persona + capabilities.
 // actions == nil → falls back to builtin 6 composite tools (same as tactical).
-// profiles == nil → AgentRole falls back to KB fields then hardcoded fallback.
+// profiles == nil → AgentRole falls back to hardcoded fallback (KB persona ignored).
 func BuildStrategic(kb *worldkb.KB, profiles map[string]*profile.Profile, agentID string, actions []protocol.CapabilityAction) string {
 	var sb strings.Builder
+	// 【你的角色】段仅依赖 profile + fallback，与 KB 可用性解耦。
+	if role := AgentRole(kb, profiles, agentID); role != "" {
+		sb.WriteString("【你的角色】\n")
+		sb.WriteString(role)
+	}
 	if kb != nil {
-		if role := AgentRole(kb, profiles, agentID); role != "" {
-			sb.WriteString("【你的角色】\n")
-			sb.WriteString(role)
-		}
 		if kbCtx := KBContext(kb); kbCtx != "" {
 			sb.WriteString("【世界知识】\n")
 			sb.WriteString(kbCtx)

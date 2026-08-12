@@ -111,8 +111,9 @@ func TestAgentRole_ProfileOverridesKB(t *testing.T) {
 	}
 }
 
-// TestAgentRole_KBFillsWhenProfileEmpty 验证 profile 缺字段时 KB 回填。
-func TestAgentRole_KBFillsWhenProfileEmpty(t *testing.T) {
+// TestAgentRole_FallbackFillsWhenProfileEmpty 验证 profile 缺字段时 fallback 回填
+//（KB persona 字段被忽略，不再参与回退链）。
+func TestAgentRole_FallbackFillsWhenProfileEmpty(t *testing.T) {
 	kb := worldkb.NewKB(nil, nil, []worldkb.Agent{
 		{
 			ID:          "H-01",
@@ -135,9 +136,20 @@ func TestAgentRole_KBFillsWhenProfileEmpty(t *testing.T) {
 	if !strings.Contains(got, "名字：Profile名") {
 		t.Errorf("名字应来自 profile，got=%q", got)
 	}
-	for _, want := range []string{"职业：KB职业", "背景：KB背景", "性格特质：KB特质", "说话风格：KB说话"} {
+	// KB 字段被忽略，缺失的 profile 字段回退到 hardcoded fallback（H-01）。
+	for _, want := range []string{
+		"职业：supervisor、worker、maintainer",
+		"性格特质：沉稳、念旧、重视工艺、务实",
+	} {
 		if !strings.Contains(got, want) {
-			t.Errorf("缺失字段应回填 KB：%q，got=%q", want, got)
+			t.Errorf("缺失字段应回填 fallback：%q，got=%q", want, got)
+		}
+	}
+	// H-01 fallback 的 description/speechStyle 为空，对应行不应出现；
+	// 且 KB 的 KB背景/KB说话 也应被忽略。
+	for _, notWant := range []string{"背景：", "说话风格：", "KB职业", "KB背景", "KB特质", "KB说话"} {
+		if strings.Contains(got, notWant) {
+			t.Errorf("不应包含 KB persona 或空 fallback 字段：%q，got=%q", notWant, got)
 		}
 	}
 }
