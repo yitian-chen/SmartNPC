@@ -131,10 +131,14 @@ type ZoneInfo struct {
 // ZoneID so consumers can express zone-object relationships in prompts.
 // Category lets consumers pick the right tool for the object type
 // (e.g. workbench→work_at_workbench, charging_station→charge_at_station).
+// SemanticGroup is the UE5-facing group name (e.g. "charger", "workbench")
+// used as the `semantic_group` parameter value for InteractSmartObject and
+// composite actions — distinct from the instance ID (e.g. "Charge-1").
 type ObjectInfo struct {
 	ID                    string
 	DisplayName           string
 	Category              string
+	SemanticGroup         string
 	ZoneID                string
 	AvailableInteractions []string
 }
@@ -169,6 +173,7 @@ func (k *KB) ListObjects() []ObjectInfo {
 			ID:                    o.ID,
 			DisplayName:           o.DisplayName,
 			Category:              o.Category,
+			SemanticGroup:         o.SemanticGroup,
 			ZoneID:                o.ZoneID,
 			AvailableInteractions: interactions,
 		})

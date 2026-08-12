@@ -44,9 +44,11 @@ func (s *IssueSet) All() []Issue {
 }
 
 // idRegex matches stable semantic IDs per §5.1: lowercase letters/digits/
-// underscores, 3-64 chars, leading letter. Agent IDs like "H-01" are exempt
-// (validated separately).
-var idRegex = regexp.MustCompile(`^[a-z][a-z0-9_]{2,63}$`)
+// underscores, 3-64 chars, leading letter. Hyphens are permitted for
+// generated instance IDs that carry a numeric suffix (e.g. "charge-1"...
+// "charge-6" for multi-instance smart object groups). Agent IDs like "H-01"
+// are exempt (validated separately).
+var idRegex = regexp.MustCompile(`^[a-z][a-z0-9_-]{2,63}$`)
 
 // agentIDRegex allows uppercase + hyphen for Agent IDs (e.g. "H-01", "H-02").
 var agentIDRegex = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_-]{1,63}$`)
@@ -66,7 +68,7 @@ func Validate(kb *KB) *IssueSet {
 		if !idRegex.MatchString(z.ID) {
 			set.Errors = append(set.Errors, Issue{
 				Code: "INVALID_ID_FORMAT", Entity: z.ID,
-				Message: "zone id does not match ^[a-z][a-z0-9_]{2,63}$",
+				Message: "zone id does not match ^[a-z][a-z0-9_-]{2,63}$",
 			})
 		}
 		zoneIDs[z.ID] = true
@@ -77,7 +79,7 @@ func Validate(kb *KB) *IssueSet {
 		if !idRegex.MatchString(o.ID) {
 			set.Errors = append(set.Errors, Issue{
 				Code: "INVALID_ID_FORMAT", Entity: o.ID,
-				Message: "object id does not match ^[a-z][a-z0-9_]{2,63}$",
+				Message: "object id does not match ^[a-z][a-z0-9_-]{2,63}$",
 			})
 		}
 		if o.ZoneID != "" && !zoneIDs[o.ZoneID] {

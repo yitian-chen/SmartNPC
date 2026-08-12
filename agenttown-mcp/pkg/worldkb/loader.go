@@ -50,6 +50,7 @@ type rawObject struct {
 	DisplayName           string         `yaml:"display_name"`
 	Description           string         `yaml:"description"`
 	Category              string         `yaml:"category"`
+	SemanticGroup         string         `yaml:"semantic_group"`
 	ZoneID                string         `yaml:"zone_id"`
 	ActorClass            string         `yaml:"actor_class"`
 	ActorPosition         []float64      `yaml:"actor_position"`
@@ -283,22 +284,23 @@ func Load(path string) (*KB, error) {
 		if radius == 0 {
 			radius = defaultInteractionRadius
 		}
-		kb.Objects = append(kb.Objects, Object{
-			ID:                    ro.ID,
-			DisplayName:           ro.DisplayName,
-			Description:           ro.Description,
-			Category:              ro.Category,
-			ZoneID:                ro.ZoneID,
-			ActorClass:            ro.ActorClass,
-			ActorPosition:         actorPos,
-			InteractionPoint:      ip,
-			InteractionFacing:     ifacing,
-			InteractionRadius:     radius,
-			AvailableInteractions: ro.AvailableInteractions,
-			DefaultState:          ro.DefaultState,
-			Tags:                  ro.Tags,
-			Extra:                 ro.Extra,
-		})
+	kb.Objects = append(kb.Objects, Object{
+		ID:                    ro.ID,
+		DisplayName:           ro.DisplayName,
+		Description:           ro.Description,
+		Category:              ro.Category,
+		SemanticGroup:         ro.SemanticGroup,
+		ZoneID:                ro.ZoneID,
+		ActorClass:            ro.ActorClass,
+		ActorPosition:         actorPos,
+		InteractionPoint:      ip,
+		InteractionFacing:     ifacing,
+		InteractionRadius:     radius,
+		AvailableInteractions: ro.AvailableInteractions,
+		DefaultState:          ro.DefaultState,
+		Tags:                  ro.Tags,
+		Extra:                 ro.Extra,
+	})
 		kb.objectByID[ro.ID] = &kb.Objects[len(kb.Objects)-1]
 	}
 

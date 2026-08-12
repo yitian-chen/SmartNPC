@@ -109,6 +109,9 @@ func objectToMap(o *Object) map[string]any {
 		"interaction_radius":  o.InteractionRadius,
 		"default_state":       o.DefaultState,
 	}
+	if o.SemanticGroup != "" {
+		m["semantic_group"] = o.SemanticGroup
+	}
 	if len(o.AvailableInteractions) > 0 {
 		m["available_interactions"] = o.AvailableInteractions
 	}

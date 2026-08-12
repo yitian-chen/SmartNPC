@@ -50,11 +50,19 @@ type Connection struct {
 // Location fields (interaction_point, zone_id, etc) with the smart-object
 // metadata (category, tags). Per design doc §6.5 the separate locations[]
 // array is gone — all spatial fields live here.
+//
+// SemanticGroup is the UE5-facing group name used as the `semantic_group`
+// parameter value for InteractSmartObject and composite actions (e.g.
+// "charger", "workbench", "sleep_pod"). It is authored in world.authored.json
+// per object group and flows into the tactical prompt so the LLM emits
+// UE5-recognized values. Instance IDs like "Charge-1" are NOT valid
+// semantic_group values — the group name is.
 type Object struct {
 	ID                   string
 	DisplayName          string
 	Description          string
 	Category             string
+	SemanticGroup        string
 	ZoneID               string
 	ActorClass           string
 	ActorPosition        [3]float64

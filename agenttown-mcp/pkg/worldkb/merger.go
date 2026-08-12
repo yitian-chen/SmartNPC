@@ -77,11 +77,11 @@ var knownZoneKeys = map[string]bool{
 
 var knownObjectKeys = map[string]bool{
 	"id": true, "display_name": true, "description": true,
-	"category": true, "zone_id": true, "actor_class": true,
-	"actor_position": true, "interaction_point": true,
-	"interaction_facing": true, "interaction_radius": true,
-	"available_interactions": true, "default_state": true,
-	"tags": true,
+	"category": true, "semantic_group": true, "zone_id": true,
+	"actor_class": true, "actor_position": true,
+	"interaction_point": true, "interaction_facing": true,
+	"interaction_radius": true, "available_interactions": true,
+	"default_state": true, "tags": true,
 }
 
 var knownAgentKeys = map[string]bool{
@@ -306,8 +306,14 @@ func MergeMaps(genMap, authMap map[string]any) (*KB, []MergeWarning, error) {
 	}
 
 	// ---- Objects ----
+	// Authored key matches generated instance by exact ID OR group prefix:
+	// authored "Charge" matches generated "Charge-1"..."Charge-6" (one
+	// authored overlay applies to every instance in the group). This bridges
+	// the authored KB (semantic group names as keys) with the generated KB
+	// (concrete instance IDs with -<n> suffixes for multi-instance groups).
 	authObjects, _ := authMap["objects"].(map[string]any)
 	objectByID := make(map[string]int)
+	authoredMatched := make(map[string]bool, len(authObjects))
 	genObjects, _ := genMap["objects"].([]any)
 	for i, o := range genObjects {
 		om, ok := o.(map[string]any)
@@ -323,12 +329,14 @@ func MergeMaps(genMap, authMap map[string]any) (*KB, []MergeWarning, error) {
 		}
 
 		merged := cloneMap(om)
-		if ao, ok := authObjects[id]; ok {
-			aom, ok := ao.(map[string]any)
+		matchedAuthKey := matchAuthoredObject(authObjects, id)
+		if matchedAuthKey != "" {
+			aom, ok := authObjects[matchedAuthKey].(map[string]any)
 			if !ok {
-				return nil, nil, fmt.Errorf("authored.objects[%q]: not an object", id)
+				return nil, nil, fmt.Errorf("authored.objects[%q]: not an object", matchedAuthKey)
 			}
 			deepMergeMaps(merged, aom, protectedObjectFields)
+			authoredMatched[matchedAuthKey] = true
 		} else {
 			warnings = append(warnings, MergeWarning{
 				EntityType: "object", EntityID: id,
@@ -344,7 +352,7 @@ func MergeMaps(genMap, authMap map[string]any) (*KB, []MergeWarning, error) {
 		objectByID[id] = len(kb.Objects) - 1
 	}
 	for id := range authObjects {
-		if _, ok := objectByID[id]; !ok {
+		if !authoredMatched[id] {
 			return nil, nil, fmt.Errorf("authored.objects[%q]: dangling id (not in generated)", id)
 		}
 	}
@@ -413,6 +421,39 @@ func MergeMaps(genMap, authMap map[string]any) (*KB, []MergeWarning, error) {
 // ---------------------------------------------------------------------------
 // Deep merge
 // ---------------------------------------------------------------------------
+
+// matchAuthoredObject finds the authored key that applies to a generated
+// object ID. Exact match wins; otherwise the longest authored key K such that
+// the generated ID equals K or starts with K+"-" (group prefix match, e.g.
+// authored "charge" matches generated "charge-1"..."charge-6"). Returns ""
+// when no authored overlay applies.
+//
+// All comparisons run against post-normalization lowercase IDs (caller
+// normalizes via normalizeEntityIDsMaps before MergeMaps).
+func matchAuthoredObject(authObjects map[string]any, generatedID string) string {
+	if len(authObjects) == 0 || generatedID == "" {
+		return ""
+	}
+	if _, ok := authObjects[generatedID]; ok {
+		return generatedID
+	}
+	best := ""
+	for authKey := range authObjects {
+		if authKey == "" {
+			continue
+		}
+		if generatedID == authKey {
+			return authKey
+		}
+		if strings.HasPrefix(generatedID, authKey+"-") {
+			// Prefer the longest matching prefix to avoid ambiguity.
+			if len(authKey) > len(best) {
+				best = authKey
+			}
+		}
+	}
+	return best
+}
 
 // deepMergeMaps overlays src onto dst (mutates dst). Authored wins for
 // scalar/array keys; nested maps recurse. Keys in the protected list are
@@ -610,6 +651,9 @@ func projectObject(m map[string]any) (Object, error) {
 	}
 	if v, ok := m["category"].(string); ok {
 		o.Category = v
+	}
+	if v, ok := m["semantic_group"].(string); ok {
+		o.SemanticGroup = v
 	}
 	if v, ok := m["zone_id"].(string); ok {
 		o.ZoneID = v
