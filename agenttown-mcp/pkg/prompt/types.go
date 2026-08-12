@@ -67,6 +67,7 @@ type ReactiveInput struct {
 	Zone              string // current zone id
 	Energy            float64
 	Fatigue           float64
+	JointWear         float64 // joint wear (0-100, higher = more worn); triggers maintenance alert above JointWearAlertThreshold
 	Health            float64
 	PhysicalAvailable bool // whether physical state is usable (state_report all-0 → false, skip physical segment)
 	CurrentAction     string // readable description of in-flight action (e.g. "WorkShift(smart_object=workbench_01)"), empty = no in-flight
