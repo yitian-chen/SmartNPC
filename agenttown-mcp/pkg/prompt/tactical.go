@@ -42,7 +42,7 @@ var toolOverride = map[string]struct {
 // goal / zone / timeOfDay /
 // physicalLine (physical state line, empty when all-0) / roleLine / memoriesLine /
 // relationshipsLine /
-// hintLine / slotDurationHint / kbContext / toolCount / toolList / exampleBlock.
+// hintLine / slotDurationHint / kbContext / objectStatusLine / toolCount / toolList / exampleBlock.
 const tacticalPromptBody = `[战术层/任务分解] 当前时段目标：%s
 你目前在：%s，游戏时间 %s。
 %s
@@ -50,6 +50,7 @@ const tacticalPromptBody = `[战术层/任务分解] 当前时段目标：%s
 %s
 %s
 请把这个目标分解为一个或多个 action，按顺序执行。
+%s
 %s
 %s
 %s
@@ -67,6 +68,7 @@ const tacticalPromptBody = `[战术层/任务分解] 当前时段目标：%s
 6. move_to/turn_to 的 target_id 用上方"可前往区域"的 zone id；interact 和复合动作的 semantic_group 必须严格使用上方"可交互物体"给出的 semantic_group 值，禁止编造、禁止用实例 id（如 Charge-1）、禁止拼接 zone/interaction 信息
 7. 每行一个 JSON 对象，不要输出 JSON 数组，不要输出 markdown 围栏，不要输出任何其他文字
 8. 必须以字符 {"inner_thought 开头，不要输出步骤说明、不要解释、不要编号列表、不要 markdown 加粗
+9. 若上方【物体实时占用】显示目标 semantic_group 全部占用，必须改用其他空闲 semantic_group 或先安排 generic_act(behavior=look_around) 短暂等待，禁止规划必然失败的占用动作
 
 示例（id 来自上方可用列表，不可照抄示例中的 id）：
 %s`
@@ -110,12 +112,13 @@ func BuildTactical(in TacticalInput) string {
 			"- 禁止规划 move_to 到非充电站区域（除非当前已在充电站）"
 	}
 	toolList, toolCount := BuildTacticalToolList(in.Actions)
+	objectStatusLine := ObjectStatusContext(in.ObjectStatus, in.NearbyObjects, in.KB)
 	return fmt.Sprintf(tacticalPromptBody, in.Goal, in.Zone, in.TimeOfDay,
 		physicalLine,
 		roleLine,
 		memoriesLine,
 		relationshipsLine,
-		hintLine, SlotDurationHint(in.Slot, in.TimeOfDay), KBContext(in.KB), toolCount, toolList,
+		hintLine, SlotDurationHint(in.Slot, in.TimeOfDay), KBContext(in.KB), objectStatusLine, toolCount, toolList,
 		TacticalExample(in.KB, in.Goal))
 }
 

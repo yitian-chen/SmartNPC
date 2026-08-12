@@ -32,6 +32,16 @@ type TacticalInput struct {
 	Relationships string // Stage 5: formatted relationship list for 【人际关系】段; empty = skip segment (single-NPC scenario)
 	Actions   []protocol.CapabilityAction // from registry.EffectiveActions(agentID); nil → builtin fallback
 	AgentID   string
+	// ObjectStatus is UE5's per-category smart object availability aggregate
+	// (cross-zone). Injected into the tactical prompt as 【物体实时占用】 so
+	// the LLM can avoid planning actions targeting occupied objects. nil =
+	// no perception data yet (cold start) → skip the segment.
+	ObjectStatus map[string]protocol.ObjectCategoryStatus
+	// NearbyObjects is the per-instance object state for the NPC's current
+	// zone (from the latest perception_update). Used to disambiguate which
+	// semantic_group within a multi-group category is occupied. nil/empty =
+	// no nearby objects → only the category aggregate is shown.
+	NearbyObjects []protocol.NearbyObject
 }
 
 // ReactiveTrigger identifies what triggered a reactive evaluation.
