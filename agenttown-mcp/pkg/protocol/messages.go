@@ -9,17 +9,38 @@ import "encoding/json"
 
 // PerceptionPayload is the payload of a perception_update message.
 type PerceptionPayload struct {
-	Location           Location           `json:"location"`
-	PhysicalStateDelta map[string]float64 `json:"physical_state_delta,omitempty"` // only changed values over threshold
-	VisibleAgents      []VisibleAgent     `json:"visible_agents"`
-	NearbyObjects      []NearbyObject     `json:"nearby_objects"`
-	AudibleEvents      []AudibleEvent     `json:"audible_events"`
-	CurrentAnimation   string             `json:"current_animation"`
-	CurrentEmote       *string            `json:"current_emote"`
-	Environment        Environment        `json:"environment"`
+	Location           Location                       `json:"location"`
+	PhysicalStateDelta map[string]float64             `json:"physical_state_delta,omitempty"` // only changed values over threshold
+	VisibleAgents      []VisibleAgent                 `json:"visible_agents"`
+	NearbyObjects      []NearbyObject                 `json:"nearby_objects"`
+	AudibleEvents      []AudibleEvent                 `json:"audible_events"`
+	CurrentAnimation   string                         `json:"current_animation"`
+	CurrentEmote       *string                        `json:"current_emote"`
+	Environment        Environment                    `json:"environment"`
+	// ObjectStatusSummary is UE5's per-category aggregate of smart object
+	// availability across all zones (not just the NPC's current zone). MCP
+	// uses the KB to map category → semantic_group for tactical prompt
+	// injection, letting the LLM avoid planning actions targeting occupied
+	// objects. Optional: real UE5 pushes this; mock UE may omit it.
+	ObjectStatusSummary map[string]ObjectCategoryStatus `json:"object_status_summary,omitempty"`
 	// ScanID correlates an immediate scan_area request with its one-shot
 	// perception response. It is transport metadata, not world state.
 	ScanID string `json:"scan_id,omitempty"`
+}
+
+// ObjectCategoryStatus is UE5's per-category aggregate of smart object
+// availability. UE5 groups objects by its own category strings (e.g.
+// "work", "charging", "Net", "rest", "maintainance"); MCP maps these to
+// the KB's semantic_group values when injecting into the tactical prompt.
+// A single category may contain multiple semantic_groups (e.g. "work"
+// contains both "workbench" and "sorting_conveyor"), in which case the
+// tactical prompt also shows per-instance state from nearby_objects to
+// disambiguate which semantic_group is occupied.
+type ObjectCategoryStatus struct {
+	Total    int `json:"total"`
+	Idle     int `json:"idle"`
+	Occupied int `json:"occupied"`
+	Broken   int `json:"broken"`
 }
 
 // Location is the spatial state block of a perception.
@@ -41,10 +62,11 @@ type VisibleAgent struct {
 
 // NearbyObject is a nearby interactable smart object.
 type NearbyObject struct {
-	ID                   string   `json:"id"`
-	Name                 string   `json:"name"`
-	Distance             float64  `json:"distance"`
-	State                string   `json:"state"`
+	ID                    string   `json:"id"`
+	Name                  string   `json:"name"`
+	Category              string   `json:"category,omitempty"`
+	Distance              float64  `json:"distance"`
+	State                 string   `json:"state"`
 	AvailableInteractions []string `json:"available_interactions"`
 }
 
