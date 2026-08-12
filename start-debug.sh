@@ -60,6 +60,23 @@ MYSQL_RUN_DIR="/data/mysql-run"
 MYSQL_DB="${MYSQL_DB:-agenttown_stable}"
 MYSQL_DSN_DEFAULT="root@tcp(127.0.0.1:3306)/${MYSQL_DB}?parseTime=true&charset=utf8mb4"
 
+# ─── Ollama / SSH 反向隧道配置 ────────────────────────────────
+# 反应层 LLM 后端：MCP 通过 --ollama-url 调用本地 Ollama（qwen2.5:7b）。
+# 云端场景下 Ollama 跑在用户 Windows 本地，通过 SSH 反向隧道暴露到云端
+# localhost:${OLLAMA_TUNNEL_PORT}（用户在 Windows 端运行 start-tunnel.sh）。
+#
+# 环境变量（可在 .env 配置覆盖）：
+#   OLLAMA_URL               MCP 连接 Ollama 的 URL（默认空=禁用反应层；
+#                            云端用 http://localhost:11435 走反向隧道）
+#   OLLAMA_MODEL             Ollama 模型名（默认 qwen2.5:7b-instruct-q4_K_M）
+#   OLLAMA_NUM_THREAD        CPU 推理线程数（默认 16）
+#   OLLAMA_TUNNEL_PORT       云端反隧道端口（默认 11435，与 start-tunnel.sh 对齐）
+#   SKIP_OLLAMA_TUNNEL_CHECK 跳过隧道检测（=1 时不检查不警告，用于无反应层场景）
+OLLAMA_URL="${OLLAMA_URL:-}"
+OLLAMA_MODEL="${OLLAMA_MODEL:-qwen2.5:7b-instruct-q4_K_M}"
+OLLAMA_NUM_THREAD="${OLLAMA_NUM_THREAD:-16}"
+OLLAMA_TUNNEL_PORT="${OLLAMA_TUNNEL_PORT:-11435}"
+
 LOG_DATE=$(date +%Y-%m-%d)
 LOG_SUBDIR_BASE="$PROJECT_DIR/logs/$LOG_DATE"
 LOG_SUBDIR="${LOG_SUBDIR:-$LOG_SUBDIR_BASE}"
@@ -76,10 +93,11 @@ if [ -f "$ENV_FILE" ]; then
         case "$key" in
             ''|\#*) continue ;;
         esac
-        # 只 export VENUS_ / AGENTTOWN_MCP_ 前缀变量
+        # 只 export VENUS_ / AGENTTOWN_MCP_ / OLLAMA_ 前缀变量
         case "$key" in
             VENUS_*) export "$key=$value" ;;
             AGENTTOWN_MCP_*) export "$key=$value" ;;
+            OLLAMA_*) export "$key=$value" ;;
         esac
     done < "$ENV_FILE"
 fi
@@ -335,6 +353,74 @@ ensure_mysql_db() {
         >/dev/null 2>&1 || fail "CREATE DATABASE $MYSQL_DB failed"
 }
 
+# ─── Step 0.55: 检测 SSH 反向隧道（仅云端 Linux + 反应层启用时）──
+# 反应层 LLM 跑在用户 Windows 本地 Ollama，通过 SSH 反向隧道暴露到云端
+# localhost:${OLLAMA_TUNNEL_PORT}（用户在 Windows 端运行 start-tunnel.sh）。
+# 本函数检测隧道是否已建立（云端该端口有监听），未建立时显眼提醒用户。
+#
+# 触发条件（全部满足才检测）：
+#   1. IN_LINUX（云端场景；Windows 原生 MCP 直接访问 localhost:11434 无需隧道）
+#   2. OLLAMA_URL 非空（反应层启用）
+#   3. OLLAMA_URL 指向 localhost:${OLLAMA_TUNNEL_PORT}（走隧道的标志）
+#   4. SKIP_OLLAMA_TUNNEL_CHECK != 1
+#
+# 检测方法：ss -ltn 查 :${OLLAMA_TUNNEL_PORT} 是否有监听。
+# SSH -R 反向隧道建立后，云端 SSH 服务端会在该端口开 listener。
+check_ollama_tunnel() {
+    if ! $IN_LINUX; then
+        return 0  # Windows/WSL 场景 MCP 直接连本地 Ollama，无需隧道
+    fi
+    if [ -z "$OLLAMA_URL" ]; then
+        return 0  # 反应层禁用，无需检测
+    fi
+    # 仅当 OLLAMA_URL 指向 localhost 的隧道端口时才检测
+    # （其他 URL 如 http://10.0.0.5:11434 是直连，不走隧道）
+    case "$OLLAMA_URL" in
+        http://localhost:${OLLAMA_TUNNEL_PORT}*|http://127.0.0.1:${OLLAMA_TUNNEL_PORT}*)
+            : # 走隧道的 URL，继续检测
+            ;;
+        *)
+            return 0  # 非隧道 URL，跳过检测
+            ;;
+    esac
+    if [ "${SKIP_OLLAMA_TUNNEL_CHECK:-0}" = "1" ]; then
+        return 0
+    fi
+
+    info "=== Step 0.55: Check SSH reverse tunnel (Ollama) ==="
+    # ss -ltn 列出所有 TCP 监听，匹配 :${OLLAMA_TUNNEL_PORT}$ 避免误匹配 114350 等
+    if ss -ltn 2>/dev/null | awk -v p=":${OLLAMA_TUNNEL_PORT}" '$4 ~ p"$" {found=1} END {exit !found}'; then
+        ok "SSH 反向隧道已建立（localhost:${OLLAMA_TUNNEL_PORT} 有监听）"
+        return 0
+    fi
+
+    # 未建立——显眼提醒
+    echo ""
+    echo -e "${RED}${BOLD}═══════════════════════════════════════════════════════════════${NC}"
+    echo -e "${RED}${BOLD}  ⚠️  SSH 反向隧道未建立 — 反应层 Ollama 将无法连接 ${NC}"
+    echo -e "${RED}${BOLD}═══════════════════════════════════════════════════════════════${NC}"
+    echo ""
+    echo -e "  ${YELLOW}当前配置${NC}"
+    echo -e "    OLLAMA_URL=${OLLAMA_URL}"
+    echo -e "    → MCP 会尝试连接云端 localhost:${OLLAMA_TUNNEL_PORT}，但该端口无监听"
+    echo -e "    → 反应层调用会失败，MCP 会静默降级（不打断战术层），但反应层形同虚设"
+    echo ""
+    echo -e "  ${BOLD}${GREEN}解决方法${NC}"
+    echo -e "    ${CYAN}在 Windows 端打开 Git Bash，运行：${NC}"
+    echo -e "      cd <项目根目录> && bash start-tunnel.sh"
+    echo ""
+    echo -e "    脚本会后台拉起 SSH 反向隧道并保活，云端 localhost:${OLLAMA_TUNNEL_PORT}"
+    echo -e "    即可访问你 Windows 本地的 Ollama。"
+    echo ""
+    echo -e "  ${YELLOW}其他选项${NC}"
+    echo -e "    - 若暂不需要反应层：在 .env 注释掉 OLLAMA_URL，重启 MCP"
+    echo -e "    - 若已确认隧道可忽略：SKIP_OLLAMA_TUNNEL_CHECK=1 bash start-dev.sh"
+    echo -e "${RED}${BOLD}═══════════════════════════════════════════════════════════════${NC}"
+    echo ""
+    warn "继续启动 MCP（反应层将在调用时失败并降级）"
+    return 1
+}
+
 # ─── Step 0.6: 重置 MySQL 表（可选，--drop-tables 触发）──────────
 # 删除 ${MYSQL_DB} 全部表，让 MCP 启动时 migrations 从零重建（包括 schema_migrations，
 # 否则 MCP 认为 schema 已是最新不会重跑）。实现用 DROP DATABASE + CREATE DATABASE
@@ -460,6 +546,11 @@ start_mcp() {
     # --http :8760 同理
     # MCP 直连 Venus（OpenAI Chat Completions 协议），--venus-api-key 透传凭据。
     # --world-kb 用绝对路径，避免 cwd 不对找不到 assets/world_kb.yaml
+    # --ollama-url 反应层 LLM 后端：空=禁用反应层；云端用 http://localhost:11435 走隧道
+    local ollama_args=()
+    if [ -n "$OLLAMA_URL" ]; then
+        ollama_args=(--ollama-url "$OLLAMA_URL" --ollama-model "$OLLAMA_MODEL" --ollama-num-thread "$OLLAMA_NUM_THREAD")
+    fi
     if $IN_LINUX; then
         # 纯 Linux：直接 nohup 启动 Linux 二进制，无需 .bat/cmd.exe
         # --auto-plan 从 .env 的 AGENTTOWN_MCP_AUTO_PLAN 读取（默认 true）
@@ -475,6 +566,7 @@ start_mcp() {
             --world-kb "$PROJECT_DIR/assets/world_kb.yaml" \
             --auto-plan="${AGENTTOWN_MCP_AUTO_PLAN:-true}" \
             "${mysql_args[@]}" \
+            "${ollama_args[@]}" \
             --log-level debug >> "$MCP_LOG" 2>&1 &
         disown
     else
@@ -482,10 +574,15 @@ start_mcp() {
         # 避免在 bash 里嵌套 cmd.exe /C 时的多层引号转义问题（反斜杠+引号
         # 在 bash 双引号里会被部分解释，导致路径破损）。
         local bat_file="$LOG_SUBDIR/start_mcp.bat"
+        # .bat 里 ollama args 拼成单行字符串（cmd.exe 不支持 bash 数组）
+        local ollama_args_str=""
+        if [ -n "$OLLAMA_URL" ]; then
+            ollama_args_str="--ollama-url \"$OLLAMA_URL\" --ollama-model \"$OLLAMA_MODEL\" --ollama-num-thread $OLLAMA_NUM_THREAD"
+        fi
         cat > "$bat_file" << EOF
 @echo off
 pushd "$cwd_win"
-"$mcp_exe_win" --http ":$HTTP_PORT" --ws ":$WS_PORT" --venus-api-key "$venus_key" --world-kb "$world_kb_win" --auto-plan="${AGENTTOWN_MCP_AUTO_PLAN:-true}" --log-level debug >> "$mcp_log_win" 2>&1
+"$mcp_exe_win" --http ":$HTTP_PORT" --ws ":$WS_PORT" --venus-api-key "$venus_key" --world-kb "$world_kb_win" --auto-plan="${AGENTTOWN_MCP_AUTO_PLAN:-true}" $ollama_args_str --log-level debug >> "$mcp_log_win" 2>&1
 EOF
         if $IN_WSL; then
             local bat_win
@@ -525,6 +622,27 @@ print_summary() {
     if $IN_LINUX && [ "${SKIP_MYSQL:-0}" != "1" ]; then
         echo -e "    MySQL:      127.0.0.1:3306 (socket=$MYSQL_SOCKET, db=$MYSQL_DB)"
         echo -e "                DSN: ${MYSQL_DSN:-$MYSQL_DSN_DEFAULT}"
+    fi
+    if [ -n "$OLLAMA_URL" ]; then
+        echo -e "    反应层 LLM:  Ollama（$OLLAMA_URL, model=$OLLAMA_MODEL, threads=$OLLAMA_NUM_THREAD）"
+        # 云端走隧道时显示隧道状态
+        if $IN_LINUX; then
+            case "$OLLAMA_URL" in
+                http://localhost:${OLLAMA_TUNNEL_PORT}*|http://127.0.0.1:${OLLAMA_TUNNEL_PORT}*)
+                    if ss -ltn 2>/dev/null | awk -v p=":${OLLAMA_TUNNEL_PORT}" '$4 ~ p"$" {found=1} END {exit !found}'; then
+                        echo -e "                ${GREEN}SSH 反向隧道已建立（localhost:${OLLAMA_TUNNEL_PORT} 监听中）${NC}"
+                    else
+                        echo -e "                ${RED}⚠ SSH 反向隧道未建立 — 反应层将无法调用 Ollama${NC}"
+                        echo -e "                ${YELLOW}  在 Windows 端运行：bash start-tunnel.sh${NC}"
+                    fi
+                    ;;
+                *)
+                    echo -e "                （直连 Ollama，不走隧道）"
+                    ;;
+            esac
+        fi
+    else
+        echo -e "    反应层 LLM:  ${YELLOW}未启用${NC}（OLLAMA_URL 为空，仅战略/战术层决策）"
     fi
     echo ""
     echo -e "  ${BOLD}日志${NC}"
@@ -574,6 +692,7 @@ mkdir -p "$LOG_SUBDIR"
 stop_all
 ensure_mysql
 drop_mysql_tables
+check_ollama_tunnel
 build_mcp
 start_mcp
 print_summary
