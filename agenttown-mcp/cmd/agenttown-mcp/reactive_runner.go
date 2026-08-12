@@ -123,7 +123,7 @@ func (r *reactiveRunner) trigger(agentID string, ac *agentContext, trigger React
 	r.logger.Info("[反应层/触发]",
 		"agent_id", agentID, "trigger", trigger, "detail", detail,
 		"zone", input.Zone, "time_of_day", input.TimeOfDay,
-		"energy", input.Energy, "fatigue", input.Fatigue, "health", input.Health,
+		"energy", input.Energy, "fatigue", input.Fatigue, "joint_wear", input.JointWear, "health", input.Health,
 		"current_action", input.CurrentAction, "elapsed_sec", input.ElapsedSec,
 		"action_src", input.ActionSrc, "current_slot", input.CurrentSlot)
 	r.logger.Info("[反应层/PROMPT]",
@@ -151,7 +151,7 @@ func (r *reactiveRunner) trigger(agentID string, ac *agentContext, trigger React
 		"agent_id", agentID, "reaction", dec.Reaction, "reason", dec.Reason,
 		"trigger", trigger,
 		"zone", input.Zone, "time_of_day", input.TimeOfDay,
-		"energy", input.Energy, "fatigue", input.Fatigue, "health", input.Health,
+		"energy", input.Energy, "fatigue", input.Fatigue, "joint_wear", input.JointWear, "health", input.Health,
 		"current_action", input.CurrentAction, "elapsed_sec", input.ElapsedSec,
 		"action_src", input.ActionSrc, "current_slot", input.CurrentSlot)
 
@@ -167,12 +167,13 @@ func (r *reactiveRunner) buildInput(agentID string, ac *agentContext, trigger Re
 
 	zone := snap.LatestZone()
 	tod := snap.LatestTimeOfDay()
-	// 物理状态默认值：energy/health 满格，fatigue 为 0（保守安全的"正常"状态）。
+	// 物理状态默认值：energy/health 满格，fatigue/joint_wear 为 0（保守安全的"正常"状态）。
 	// state_report 尚未到达时用默认值，避免反应层拿到 0 误判为警戒带触发。
-	energy, fatigue, health := 100.0, 0.0, 100.0
+	energy, fatigue, jointWear, health := 100.0, 0.0, 0.0, 100.0
 	if snap.LatestPhysical != nil {
 		energy = snap.LatestPhysical.Energy
 		fatigue = snap.LatestPhysical.Fatigue
+		jointWear = snap.LatestPhysical.JointWear
 		health = snap.LatestPhysical.Health
 	}
 	// 构造可读的"在途动作"描述：cmd + 关键 params（target/duration_min）
@@ -210,12 +211,12 @@ func (r *reactiveRunner) buildInput(agentID string, ac *agentContext, trigger Re
 		plan = plan[:400] + "…"
 	}
 
-	// 从 KB 查 agent 显示名 + 完整角色段，供 prompt 中角色称呼与性格注入使用。
+	// 从 KB 查 agent 显示名 + 从 profile 取完整角色段，供 prompt 中角色称呼与性格注入使用。
 	// agentName 用于 prompt 开头的 "你是 NPC %s" 称呼；agentRole 用于【你的角色】
-	// 段（由 buildAgentRoleContext 生成，含名字/职业/背景/性格/说话风格），
+	// 段（由 AgentRole 生成，含名字/职业/背景/性格/说话风格），
 	// 让反应层决策也参考角色性格（如"沉稳"→偏向 continue，"急躁"→偏向 replan）。
-	// kb==nil 或 agent 不存在时 buildAgentRoleContext 降级到 fallbackAgentRole
-	// （H-01 硬编码兜底），agentName 降级为 agentID。
+	// persona 仅以 profile 为准（KB 性格字段被忽略），kb==nil 或 agent 不存在时
+	// AgentRole 降级到 hardcoded fallback（H-01 硬编码兜底），agentName 降级为 agentID。
 	agentName := ""
 	if r.kb != nil {
 		if agent := r.kb.GetAgent(agentID); agent != nil {
@@ -241,6 +242,7 @@ func (r *reactiveRunner) buildInput(agentID string, ac *agentContext, trigger Re
 		Zone:              zone,
 		Energy:            energy,
 		Fatigue:           fatigue,
+		JointWear:         jointWear,
 		Health:            health,
 		PhysicalAvailable: snap.LatestPhysical != nil && !snap.LatestPhysical.IsZero(),
 		CurrentAction:     currentAction,

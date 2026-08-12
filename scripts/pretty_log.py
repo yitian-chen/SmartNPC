@@ -26,6 +26,7 @@ DEPRECATED 提示（2026-08）：
     python scripts/pretty_log.py --html                   # 今天的日志
     python scripts/pretty_log.py --html 2026-07-20        # 指定日期
     python scripts/pretty_log.py --html -f PERCEPTION     # 只看 PERCEPTION
+    python scripts/pretty_log.py --html -a H-01           # 只看 H-01 相关日志
     python scripts/pretty_log.py --html -o report.html    # 指定输出路径
     python scripts/pretty_log.py --html --no-open         # 生成但不自动打开
     python scripts/pretty_log.py --html --hermes          # 整合 Hermes 容器日志（DEPRECATED，仅历史日志）
@@ -34,6 +35,7 @@ DEPRECATED 提示（2026-08）：
     # 终端渲染
     python scripts/pretty_log.py                          # 查看今天的 sim.log
     python scripts/pretty_log.py -f PERCEPTION -n 50      # 最近 50 条 PERCEPTION
+    python scripts/pretty_log.py -a H-02 -n 20            # 最近 20 条 H-02 日志
     python scripts/pretty_log.py --raw                    # 原始 JSON
 
 方向过滤器（-f）支持的简写（不区分大小写）：
@@ -219,7 +221,7 @@ def render_line(line: str, color: bool, show_source: bool = False) -> str:
 
     header = f"{time_s} {level} {msg_s}{source_s}"
 
-    skip = {"time", "level", "msg", "source", "_direction", "_game_time", "_raw"}
+    skip = {"time", "level", "msg", "source", "_direction", "_game_time", "_agent", "_raw"}
     parts = [header]
     for k in rec:
         if k in skip:
@@ -325,7 +327,35 @@ def _extract_game_time(rec: dict) -> str:
     return ""
 
 
-def _collect_records(log_path: Path, filt: str | None, tail: int | None) -> list[dict]:
+def _extract_agent_id(rec: dict) -> str:
+    """从日志记录提取 agent_id（H-01/H-02/H-03 或 system）。
+
+    优先级：
+    1. 顶层 agent_id 字段（perception_update/action_command/战略/战术/反应层等）
+    2. payload 内的 agent_id（部分消息嵌套在 payload 里）
+    3. text 字段中【NPC 名】模式（perception 叙事开头常有「我是老陈」等，不解析）
+    """
+    aid = rec.get("agent_id", "")
+    if isinstance(aid, str) and aid:
+        return aid
+    # payload 内查找（action_command 等消息 agent_id 在 payload）
+    payload = rec.get("payload", "")
+    if isinstance(payload, str) and payload.startswith("{"):
+        try:
+            obj = json.loads(payload)
+            aid = obj.get("agent_id", "")
+            if isinstance(aid, str) and aid:
+                return aid
+        except Exception:
+            pass
+    elif isinstance(payload, dict):
+        aid = payload.get("agent_id", "")
+        if isinstance(aid, str) and aid:
+            return aid
+    return ""
+
+
+def _collect_records(log_path: Path, filt: str | None, tail: int | None, agent: str | None = None) -> list[dict]:
     """读取日志文件，返回匹配的记录列表（已解析为 dict，含 game_time）。"""
     f_lower = (filt or "").lower()
     explicit_heartbeat = f_lower == "heartbeat"
@@ -344,6 +374,10 @@ def _collect_records(log_path: Path, filt: str | None, tail: int | None) -> list
             if filt and not _match_filter(rec, filt):
                 continue
             if _hide_heartbeat(rec, explicit_heartbeat):
+                continue
+            # 提取 agent_id 并填充到 _agent 字段（用于 HTML 筛选）
+            rec["_agent"] = _extract_agent_id(rec)
+            if agent and rec["_agent"] != agent:
                 continue
             # 提取游戏时间（仅记录本身有则填充，不做相邻填充）
             rec["_game_time"] = _extract_game_time(rec)
@@ -583,6 +617,10 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
   --strategic: #b267e6;
   --tactical: #f4a261;
   --reactive: #56c8d8;
+  --agent-h01: #4ec9b0;
+  --agent-h02: #dcdcaa;
+  --agent-h03: #c586c0;
+  --agent-system: #888;
 }}
 * {{ box-sizing: border-box; }}
 body {{
@@ -667,6 +705,15 @@ body {{
   font-size: 11px; flex-shrink: 0;
   border: 1px solid rgba(78, 201, 176, 0.3);
 }}
+.entry-agent {{
+  font-size: 11px; flex-shrink: 0;
+  padding: 1px 6px; border-radius: 3px;
+  font-weight: bold;
+}}
+.entry-agent.agent-H-01 {{ color: var(--agent-h01); background: rgba(78, 201, 176, 0.1); border: 1px solid rgba(78, 201, 176, 0.3); }}
+.entry-agent.agent-H-02 {{ color: var(--agent-h02); background: rgba(220, 220, 170, 0.1); border: 1px solid rgba(220, 220, 170, 0.3); }}
+.entry-agent.agent-H-03 {{ color: var(--agent-h03); background: rgba(197, 134, 192, 0.1); border: 1px solid rgba(197, 134, 192, 0.3); }}
+.entry-agent.agent-system {{ color: var(--agent-system); background: rgba(136, 136, 136, 0.1); border: 1px solid rgba(136, 136, 136, 0.3); }}
 .entry-level {{ width: 44px; flex-shrink: 0; font-weight: bold; }}
 .entry.level-INFO .entry-level {{ color: var(--info); }}
 .entry.level-WARN .entry-level {{ color: var(--warn); }}
@@ -723,6 +770,9 @@ body {{
   <select id="game-time-filter" title="按游戏时间过滤">
     <option value="ALL">游戏时间：全部</option>
   </select>
+  <select id="agent-filter" title="按 NPC 过滤">
+    <option value="ALL">NPC：全部</option>
+  </select>
   <span class="stats" id="stats"></span>
 </div>
 <div class="container" id="container">{entries}</div>
@@ -731,23 +781,40 @@ const entries = document.querySelectorAll('.entry');
 const stats = document.getElementById('stats');
 const search = document.getElementById('search');
 const gameTimeFilter = document.getElementById('game-time-filter');
+const agentFilter = document.getElementById('agent-filter');
 let currentFilter = 'ALL';
 let currentSearch = '';
 let currentGameTime = 'ALL';
+let currentAgent = 'ALL';
 
-// 收集所有出现过的游戏时间，填充下拉框
+// 收集所有出现过的游戏时间与 agent_id，填充下拉框
 (function() {{
   const times = new Set();
+  const agents = new Set();
   entries.forEach(e => {{
     const gt = e.dataset.gametime || '';
+    const ag = e.dataset.agent || '';
     if (gt) times.add(gt);
+    if (ag) agents.add(ag);
   }});
-  const sorted = Array.from(times).sort();
-  sorted.forEach(t => {{
+  const sortedTimes = Array.from(times).sort();
+  sortedTimes.forEach(t => {{
     const opt = document.createElement('option');
     opt.value = t;
     opt.textContent = t;
     gameTimeFilter.appendChild(opt);
+  }});
+  // agent 按字母序，但 H-01/H-02/H-03 优先于 system
+  const sortedAgents = Array.from(agents).sort((a, b) => {{
+    if (a === 'system') return 1;
+    if (b === 'system') return -1;
+    return a.localeCompare(b);
+  }});
+  sortedAgents.forEach(a => {{
+    const opt = document.createElement('option');
+    opt.value = a;
+    opt.textContent = a;
+    agentFilter.appendChild(opt);
   }});
 }})();
 
@@ -757,6 +824,7 @@ function applyFilters() {{
     const dir = e.dataset.direction || '';
     const text = e.dataset.searchtext || '';
     const gt = e.dataset.gametime || '';
+    const ag = e.dataset.agent || '';
     let show = true;
     if (currentFilter !== 'ALL') {{
       const filterMap = {{
@@ -775,6 +843,9 @@ function applyFilters() {{
     }}
     if (show && currentGameTime !== 'ALL') {{
       show = gt === currentGameTime;
+    }}
+    if (show && currentAgent !== 'ALL') {{
+      show = ag === currentAgent;
     }}
     if (show && currentSearch) {{
       try {{
@@ -799,6 +870,11 @@ document.querySelectorAll('.filter-btn').forEach(btn => {{
 
 gameTimeFilter.addEventListener('change', () => {{
   currentGameTime = gameTimeFilter.value;
+  applyFilters();
+}});
+
+agentFilter.addEventListener('change', () => {{
+  currentAgent = agentFilter.value;
   applyFilters();
 }});
 
@@ -891,9 +967,11 @@ def _entry_html(rec: dict) -> str:
 
     # 游戏时间（仅 perception_update / PERCEPTION 有）
     game_time = rec.get("_game_time", "")
+    # agent_id（perception_update/action_command/战略/战术/反应层等）
+    agent_id = rec.get("_agent", "")
 
     # body：所有字段
-    skip = {"time", "level", "msg", "source", "_game_time", "_direction", "_raw"}
+    skip = {"time", "level", "msg", "source", "_game_time", "_direction", "_raw", "_agent"}
     body_parts = []
     for k in rec:
         if k in skip:
@@ -935,11 +1013,13 @@ def _entry_html(rec: dict) -> str:
         f'<div class="entry {css_dir} level-{level}" '
         f'data-direction="{_html.escape(direction)}" '
         f'data-gametime="{_html.escape(game_time)}" '
+        f'data-agent="{_html.escape(agent_id)}" '
         f'data-searchtext="{_html.escape(search_text)}">'
         f'<div class="entry-header">'
         f'<span class="entry-time">{_html.escape(time_s)}</span>'
         f'<span class="entry-level">{_html.escape(level)}</span>'
-        f'<span class="entry-msg">{_html.escape(header_msg)}</span>'
+        + (f'<span class="entry-agent agent-{_html.escape(agent_id)}">{_html.escape(agent_id)}</span>' if agent_id else '')
+        + f'<span class="entry-msg">{_html.escape(header_msg)}</span>'
         + (f'<span class="entry-game-time">🎮 {_html.escape(game_time)}</span>' if game_time else '')
         + f'<span class="entry-meta">{_html.escape(meta_s)}</span>'
         f'</div>'
@@ -1009,6 +1089,7 @@ def main() -> int:
         help="日志文件路径或日期（如 2026-07-20）；默认今天",
     )
     ap.add_argument("-f", "--filter", help="按方向或 msg 子串过滤")
+    ap.add_argument("-a", "--agent", help="按 NPC agent_id 过滤（如 H-01/H-02/H-03）；system 为系统消息")
     ap.add_argument("-n", "--tail", type=int, help="只显示最后 N 条")
     ap.add_argument("--no-color", action="store_true", help="禁用颜色（终端模式）")
     ap.add_argument("--raw", action="store_true", help="原始 JSON，不渲染")
@@ -1055,7 +1136,7 @@ def main() -> int:
         print(f"日志文件不存在：{log_path}", file=sys.stderr)
         return 1
 
-    records = _collect_records(log_path, args.filter, args.tail)
+    records = _collect_records(log_path, args.filter, args.tail, agent=args.agent)
 
     # 整合 Hermes 日志
     if args.hermes or args.hermes_log or args.hermes_all:

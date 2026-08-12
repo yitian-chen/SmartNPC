@@ -237,6 +237,19 @@ func TestUpgradeIfPhysicalAlert(t *testing.T) {
 			wantSub:  "物理状态告警自动升级",
 		},
 		{
+			name:     "joint_wear alert upgrades observe to replan",
+			input:    ReactiveInput{Fatigue: 30, Energy: 70, JointWear: 75, Health: 100, PhysicalAvailable: true},
+			dec:      ReactiveDecision{Reaction: ReactionObserve, Reason: "状态尚可"},
+			wantKind: ReactionReplan,
+			wantSub:  "关节磨损",
+		},
+		{
+			name:     "boundary: joint_wear exactly at threshold not upgraded",
+			input:    ReactiveInput{Fatigue: 30, Energy: 70, JointWear: 70, Health: 100, PhysicalAvailable: true},
+			dec:      ReactiveDecision{Reaction: ReactionObserve, Reason: "ok"},
+			wantKind: ReactionObserve,
+		},
+		{
 			name:     "no alert preserves observe",
 			input:    ReactiveInput{Fatigue: 50, Energy: 70, Health: 100, PhysicalAvailable: true},
 			dec:      ReactiveDecision{Reaction: ReactionObserve, Reason: "状态尚可"},

@@ -21,6 +21,7 @@ func TestBuildReactivePrompt_Defaults(t *testing.T) {
 		Zone:              "main_workshop",
 		Energy:            45,
 		Fatigue:           30,
+		JointWear:         15,
 		Health:            90,
 		PhysicalAvailable: true,
 		CurrentAction:     "WorkShift(smart_object=workbench_01, interaction=assemble)",
@@ -33,7 +34,8 @@ func TestBuildReactivePrompt_Defaults(t *testing.T) {
 	}
 	promptText := prompt.BuildReactive(in)
 	for _, want := range []string{
-		"14:30", "main_workshop", "45", "30", "90",
+		"14:30", "main_workshop", "45", "30", "15", "90",
+		"关节磨损",
 		"WorkShift(smart_object=workbench_01, interaction=assemble)",
 		"tactical", "14:00-18:00", "14:00-18:00 工作组装",
 		"zone rest_area→main_workshop",
@@ -325,6 +327,30 @@ func TestShouldTriggerReactive_FatigueAlert(t *testing.T) {
 	}
 }
 
+// TestShouldTriggerReactive_JointWearAlert verifies joint_wear threshold crossing.
+func TestShouldTriggerReactive_JointWearAlert(t *testing.T) {
+	prev := &protocol.PhysicalState{Energy: 50, Health: 90, Fatigue: 30, JointWear: 65}
+	cur := &protocol.PhysicalState{Energy: 50, Health: 90, Fatigue: 30, JointWear: 72}
+	trig, detail := prompt.ShouldTriggerReactive("z", "z", nil, nil, prev, cur)
+	if trig != TriggerPhysicalAlert {
+		t.Errorf("trigger: got %q, want physical_alert", trig)
+	}
+	if !strings.Contains(detail, "joint_wear") || !strings.Contains(detail, "70") {
+		t.Errorf("detail should mention joint_wear + 70: %q", detail)
+	}
+}
+
+// TestShouldTriggerReactive_JointWearStaysHigh verifies no trigger when joint_wear
+// stays above threshold (already in alert zone, no new crossing).
+func TestShouldTriggerReactive_JointWearStaysHigh(t *testing.T) {
+	prev := &protocol.PhysicalState{Energy: 50, Health: 90, Fatigue: 30, JointWear: 72}
+	cur := &protocol.PhysicalState{Energy: 50, Health: 90, Fatigue: 30, JointWear: 75}
+	trig, _ := prompt.ShouldTriggerReactive("z", "z", nil, nil, prev, cur)
+	if trig != "" {
+		t.Errorf("trigger: got %q, want empty (already in alert)", trig)
+	}
+}
+
 // TestShouldTriggerReactive_NoPhysical verifies no trigger when physical
 // states are nil.
 func TestShouldTriggerReactive_NoPhysical(t *testing.T) {
@@ -529,6 +555,9 @@ func TestReactiveRunner_BuildInput(t *testing.T) {
 	if in.Fatigue != 85 {
 		t.Errorf("Fatigue: got %v, want 85", in.Fatigue)
 	}
+	if in.JointWear != 20 {
+		t.Errorf("JointWear: got %v, want 20", in.JointWear)
+	}
 	if in.Health != 75 {
 		t.Errorf("Health: got %v, want 75", in.Health)
 	}
@@ -559,6 +588,9 @@ func TestReactiveRunner_BuildInput_DefaultsPhysicalWhenNil(t *testing.T) {
 	}
 	if in.Fatigue != 0 {
 		t.Errorf("Fatigue default: got %v, want 0", in.Fatigue)
+	}
+	if in.JointWear != 0 {
+		t.Errorf("JointWear default: got %v, want 0", in.JointWear)
 	}
 }
 

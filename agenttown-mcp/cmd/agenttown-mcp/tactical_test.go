@@ -1379,6 +1379,21 @@ func TestPhysicalAlertOverrideGoal_HealthAlert(t *testing.T) {
 	}
 }
 
+func TestPhysicalAlertOverrideGoal_JointWearAlert(t *testing.T) {
+	origGoal := "车间装配"
+	got, ok := physicalAlertOverrideGoal(
+		"物理状态告警自动升级(关节磨损=75超过70)",
+		origGoal,
+		&protocol.PhysicalState{Fatigue: 30, Energy: 80, JointWear: 75, Health: 100},
+	)
+	if !ok {
+		t.Errorf("joint_wear>70 should trigger override")
+	}
+	if !strings.Contains(got, "维护") || !strings.Contains(got, "关节磨损") {
+		t.Errorf("override goal should mention 维护 and 关节磨损, got=%q", got)
+	}
+}
+
 func TestPhysicalAlertOverrideGoal_FatigueTakesPrecedence(t *testing.T) {
 	// 同时 fatigue 高 + energy 低时，fatigue 优先（switch 顺序）
 	got, ok := physicalAlertOverrideGoal(
@@ -1404,11 +1419,34 @@ func TestBuildTacticalPrompt_PhysicalAlertConstraint(t *testing.T) {
 	if !strings.Contains(promptText, "【物理告警强制约束】") {
 		t.Errorf("prompt should contain physical alert constraint section, got: %s", promptText)
 	}
-	if !strings.Contains(promptText, "禁止规划 work_shift") {
+	if !strings.Contains(promptText, "work_shift（消耗体力）") {
 		t.Errorf("prompt should forbid work_shift, got: %s", promptText)
 	}
 	if !strings.Contains(promptText, "优先 charge_at_station") {
 		t.Errorf("prompt should prioritize charge_at_station, got: %s", promptText)
+	}
+}
+
+// TestBuildTacticalPrompt_PhysicalAlertJointWearConstraint 验证关节磨损告警时
+// 强约束段要求 self_maintenance 且不禁 self_maintenance（那是恢复动作）。
+func TestBuildTacticalPrompt_PhysicalAlertJointWearConstraint(t *testing.T) {
+	kb := loadTestKB(t)
+	hint := "物理状态告警自动升级(关节磨损=75超过70)；原决策=observe/..."
+	promptText := prompt.BuildTactical(prompt.TacticalInput{Goal: "车间装配", Zone: "main_workshop", TimeOfDay: "14:00", Slot: "13:00-17:00", Physical: &protocol.PhysicalState{Energy: 88, Fatigue: 30, JointWear: 75, Health: 100}, KB: kb, Hint: hint, Actions: nil, AgentID: "H-01"})
+
+	if !strings.Contains(promptText, "【物理告警强制约束】") {
+		t.Errorf("prompt should contain constraint section, got: %s", promptText)
+	}
+	if !strings.Contains(promptText, "self_maintenance") {
+		t.Errorf("prompt should require self_maintenance for joint_wear alert, got: %s", promptText)
+	}
+	// 关节磨损告警不禁 self_maintenance（那是恢复动作）
+	if strings.Contains(promptText, "self_maintenance（无助于恢复）") {
+		t.Errorf("prompt should NOT forbid self_maintenance for joint_wear-only alert, got: %s", promptText)
+	}
+	// 关节磨损告警不禁 work_shift（仅疲劳/健康告警才禁）
+	if strings.Contains(promptText, "work_shift（消耗体力）") {
+		t.Errorf("prompt should NOT forbid work_shift for joint_wear-only alert, got: %s", promptText)
 	}
 }
 

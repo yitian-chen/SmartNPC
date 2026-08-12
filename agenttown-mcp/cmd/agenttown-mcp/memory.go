@@ -90,10 +90,8 @@ func generateDailyMemories(
 	}
 
 	roleCtx := ""
-	if kb != nil {
-		if role := prompt.AgentRole(kb, profiles, agentID); role != "" {
-			roleCtx = "【你的角色】\n" + role
-		}
+	if role := prompt.AgentRole(kb, profiles, agentID); role != "" {
+		roleCtx = "【你的角色】\n" + role
 	}
 	actionList := formatActionHistoryForPrompt(records)
 	promptText := fmt.Sprintf(memoryPromptTemplate, roleCtx, actionList)

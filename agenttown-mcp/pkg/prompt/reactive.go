@@ -35,11 +35,13 @@ type ReactiveDecision struct {
 // fatigue threshold raised from 60 to 80 (paired with mock_ue fatigue rate
 // reduction) so fatigue alerts fire naturally mid-afternoon (~14:00) rather
 // than at 11:00. energy/health kept at early-warning levels so 1-2 hour
-// simulations also trigger naturally.
+// simulations also trigger naturally. joint_wear threshold at 70 lets
+// maintenance trigger before wear becomes critical (0-100, higher = worse).
 const (
-	EnergyAlertThreshold  = 40.0 // energy below this triggers "low battery alert"
-	HealthAlertThreshold  = 50.0 // health below this triggers "health alert"
-	FatigueAlertThreshold = 80.0 // fatigue above this triggers "fatigue alert"
+	EnergyAlertThreshold     = 40.0 // energy below this triggers "low battery alert" → bias toward charge_at_station
+	FatigueAlertThreshold    = 80.0 // fatigue above this triggers "fatigue alert" → bias toward charge/rest
+	JointWearAlertThreshold  = 70.0 // joint_wear above this triggers "wear alert" → bias toward self_maintenance
+	HealthAlertThreshold     = 50.0 // health below this triggers "health alert" → bias toward recovery
 )
 
 // PeriodicTriggerInterval is the perception count interval for periodic
@@ -157,8 +159,8 @@ func BuildReactive(in ReactiveInput) string {
 	physicalLine := ""
 	physicalRuleLine := ""
 	if in.PhysicalAvailable {
-		physicalLine = fmt.Sprintf("物理：体力=%.0f/100, 疲劳=%.0f/100, 健康=%.0f/100\n", in.Energy, in.Fatigue, in.Health)
-		physicalRuleLine = "- 物理状态告警时（体力<40、疲劳>80、健康<50）原则上需要输出 replan 让 NPC 休息/充电、不可输出 continue/observe\n"
+		physicalLine = fmt.Sprintf("物理：体力=%.0f/100, 疲劳=%.0f/100, 关节磨损=%.0f/100, 健康=%.0f/100\n", in.Energy, in.Fatigue, in.JointWear, in.Health)
+		physicalRuleLine = "- 物理状态告警时（体力<40 需充电、疲劳>80 需休息、关节磨损>70 需维修、健康<50 需恢复）原则上需要输出 replan 让 NPC 优先处理物理需求、不可输出 continue/observe\n"
 	}
 	// Queue segment (约定21): empty when not queued → entire segment
 	// collapses to a single blank line. When queued, show what the agent
@@ -263,11 +265,14 @@ func ShouldTriggerReactive(
 		if !belowThreshold(prevPhysical.Energy, EnergyAlertThreshold) && belowThreshold(curPhysical.Energy, EnergyAlertThreshold) {
 			return TriggerPhysicalAlert, fmt.Sprintf("energy %.0f→%.0f 跌破警戒带 %.0f", prevPhysical.Energy, curPhysical.Energy, EnergyAlertThreshold)
 		}
-		if !belowThreshold(prevPhysical.Health, HealthAlertThreshold) && belowThreshold(curPhysical.Health, HealthAlertThreshold) {
-			return TriggerPhysicalAlert, fmt.Sprintf("health %.0f→%.0f 跌破警戒带 %.0f", prevPhysical.Health, curPhysical.Health, HealthAlertThreshold)
-		}
 		if !aboveThreshold(prevPhysical.Fatigue, FatigueAlertThreshold) && aboveThreshold(curPhysical.Fatigue, FatigueAlertThreshold) {
 			return TriggerPhysicalAlert, fmt.Sprintf("fatigue %.0f→%.0f 突破警戒带 %.0f", prevPhysical.Fatigue, curPhysical.Fatigue, FatigueAlertThreshold)
+		}
+		if !aboveThreshold(prevPhysical.JointWear, JointWearAlertThreshold) && aboveThreshold(curPhysical.JointWear, JointWearAlertThreshold) {
+			return TriggerPhysicalAlert, fmt.Sprintf("joint_wear %.0f→%.0f 突破警戒带 %.0f", prevPhysical.JointWear, curPhysical.JointWear, JointWearAlertThreshold)
+		}
+		if !belowThreshold(prevPhysical.Health, HealthAlertThreshold) && belowThreshold(curPhysical.Health, HealthAlertThreshold) {
+			return TriggerPhysicalAlert, fmt.Sprintf("health %.0f→%.0f 跌破警戒带 %.0f", prevPhysical.Health, curPhysical.Health, HealthAlertThreshold)
 		}
 	}
 	return "", ""
@@ -336,15 +341,15 @@ func DedupeKey(agentID string, trigger ReactiveTrigger, detail string) string {
 }
 
 // UpgradeIfPhysicalAlert is a code-level fallback: when physical state is in
-// alert (fatigue>80 / energy<40 / health<50) but the LLM still outputs
-// continue/observe, force-upgrade to replan.
+// alert (fatigue>80 / energy<40 / joint_wear>70 / health<50) but the LLM still
+// outputs continue/observe, force-upgrade to replan.
 //
 // Motivation: in testing qwen2.5:7b still outputs observe ("物理状态尚可")
 // when fatigue crosses the threshold; prompt constraints alone are unreliable.
 // The code-level guarantee ensures the agent actually stops and replans on
 // physical alerts. The upgraded replan invokes the tactical layer to
 // re-decompose the current slot goal (see execute), guiding the LLM to plan
-// rest/charging.
+// rest/charging/maintenance.
 //
 // Note: only upgrades continue/observe; replan decisions pass through.
 // trigger=physical_alert usually already yields replan from the LLM; this
@@ -359,13 +364,16 @@ func UpgradeIfPhysicalAlert(input ReactiveInput, dec ReactiveDecision) ReactiveD
 		return dec
 	}
 	alert := ""
-	if input.Fatigue > FatigueAlertThreshold {
+	switch {
+	case input.Fatigue > FatigueAlertThreshold:
 		alert = fmt.Sprintf("疲劳=%.0f超过%.0f", input.Fatigue, FatigueAlertThreshold)
-	} else if input.Energy < EnergyAlertThreshold {
+	case input.Energy < EnergyAlertThreshold:
 		alert = fmt.Sprintf("体力=%.0f低于%.0f", input.Energy, EnergyAlertThreshold)
-	} else if input.Health < HealthAlertThreshold {
+	case input.JointWear > JointWearAlertThreshold:
+		alert = fmt.Sprintf("关节磨损=%.0f超过%.0f", input.JointWear, JointWearAlertThreshold)
+	case input.Health < HealthAlertThreshold:
 		alert = fmt.Sprintf("健康=%.0f低于%.0f", input.Health, HealthAlertThreshold)
-	} else {
+	default:
 		return dec
 	}
 	origReason := dec.Reason
