@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""pretty_log.py — 可读化查看 sim.log（JSON Lines）。
+"""pretty_log.py — 可读化查看 debug-mcp.log（JSON Lines）。
 
-sim.log 每行是一条 JSON，单行可能上千字（perception text 完整不截断）。
+debug-mcp.log 每行是一条 JSON，单行可能上千字（perception text 完整不截断）。
 本脚本提供两种查看方式：
 
 1. HTML 报告（推荐，--html）：生成独立 HTML 文件并自动打开浏览器。
@@ -33,7 +33,7 @@ DEPRECATED 提示（2026-08）：
     python scripts/pretty_log.py --html --dev             # dev 实例（logs-dev/ + h01-dev）
 
     # 终端渲染
-    python scripts/pretty_log.py                          # 查看今天的 sim.log
+    python scripts/pretty_log.py                          # 查看今天的 debug-mcp.log
     python scripts/pretty_log.py -f PERCEPTION -n 50      # 最近 50 条 PERCEPTION
     python scripts/pretty_log.py -a H-02 -n 20            # 最近 20 条 H-02 日志
     python scripts/pretty_log.py --raw                    # 原始 JSON
@@ -267,8 +267,9 @@ def _hide_heartbeat(rec: dict, explicit_heartbeat: bool) -> bool:
 
 def _resolve_log_path(arg: str | None, dev: bool = False) -> Path:
     # dev 实例：logs-dev/YYYY-MM-DD/debug-mcp.log
-    # stable 实例：logs/YYYY-MM-DD/sim.log
-    log_dir, log_name = ("logs-dev", "debug-mcp.log") if dev else ("logs", "sim.log")
+    # stable 实例：logs/YYYY-MM-DD/debug-mcp.log
+    log_dir = "logs-dev" if dev else "logs"
+    log_name = "debug-mcp.log"
     if arg is None:
         today = _dt.date.today().isoformat()
         return Path(log_dir) / today / log_name
@@ -594,7 +595,7 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
-<title>sim.log 报告 — {title}</title>
+<title>debug-mcp.log 报告 — {title}</title>
 <style>
 :root {{
   --bg: #1e1e1e;
@@ -755,7 +756,7 @@ body {{
 </head>
 <body>
 <div class="toolbar">
-  <h1>sim.log — {title}</h1>
+  <h1>debug-mcp.log — {title}</h1>
   <input type="text" id="search" placeholder="搜索（正则）..." />
   <button class="filter-btn active" data-filter="ALL">全部</button>
   <button class="filter-btn" data-filter="UE→MCP">UE→MCP</button>
@@ -1078,7 +1079,7 @@ def _open_in_browser(path: Path) -> bool:
 # ── 主入口 ────────────────────────────────────────────────────────────
 def main() -> int:
     ap = argparse.ArgumentParser(
-        description="可读化查看 sim.log（JSON Lines）",
+        description="可读化查看 debug-mcp.log（JSON Lines）",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
