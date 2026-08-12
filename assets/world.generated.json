@@ -275,6 +275,7 @@
       "actor_class": "/AgentTownBridge/WorldKB/SmartObject/Charge/BP_Charging_Station.BP_Charging_Station_C",
       "display_name": "充电桩",
       "description": "用于给机器人充能的装置",
+      "semantic_group": "charger",
       "actor_position": [
         -12830,
         12730,
@@ -299,6 +300,38 @@
       "default_state": "idle"
     },
     {
+      "id": "Computer",
+      "category": "Net",
+      "zone_id": "archive_station",
+      "editor_label": "BP_AT_Computer",
+      "actor_class": "/AgentTownBridge/WorldKB/SmartObject/Computer/BP_AT_Computer.BP_AT_Computer_C",
+      "display_name": "电脑",
+      "description": "放置在档案馆的公共上网终端，机器人居民可以在这里联网查询资料、浏览信息、收发信息，也能用来学习和娱乐。",
+      "semantic_group": "computer",
+      "actor_position": [
+        -4700,
+        -2640,
+        -21860
+      ],
+      "interaction_point": [
+        -4700,
+        -2640,
+        -21860
+      ],
+      "interaction_facing": [
+        -0.77,
+        0.64,
+        0
+      ],
+      "available_interactions": [
+        {
+          "name": "surf_internet",
+          "description": "上网浏览信息、查资料、看新闻，放松娱乐"
+        }
+      ],
+      "default_state": "idle"
+    },
+    {
       "id": "RepairTable",
       "category": "maintainance",
       "zone_id": "repair_bay",
@@ -306,6 +339,7 @@
       "actor_class": "/AgentTownBridge/WorldKB/SmartObject/RepairTable/BP_AT_RepairTable.BP_AT_RepairTable_C",
       "display_name": "修理台",
       "description": "用于机器人居民的日常维修和保养",
+      "semantic_group": "repair_table",
       "actor_position": [
         -11570,
         3020,
@@ -337,6 +371,7 @@
       "actor_class": "/AgentTownBridge/WorldKB/SmartObject/SleepPod/BP_AT_SleepPod.BP_AT_SleepPod_C",
       "display_name": "睡眠舱",
       "description": "用于休息和睡觉",
+      "semantic_group": "sleep_pod",
       "actor_position": [
         -9220,
         -12680,
@@ -361,6 +396,38 @@
       "default_state": "idle"
     },
     {
+      "id": "SortingConveyor",
+      "category": "work",
+      "zone_id": "logistics_hub",
+      "editor_label": "BP_AT_SortingConveyor",
+      "actor_class": "/AgentTownBridge/WorldKB/SmartObject/SortingConveyor/BP_AT_SortingConveyor.BP_AT_SortingConveyor_C",
+      "display_name": "分拣传送带",
+      "description": "物流中转站的分拣传送带，负责对原料、半成品和成品进行分拣与流转输送。机器人居民在这里搬运、分类和配送物资，是物资进出的关键设施。",
+      "semantic_group": "sorting_conveyor",
+      "actor_position": [
+        -6130,
+        -10910,
+        -22780
+      ],
+      "interaction_point": [
+        -6130,
+        -10910,
+        -22780
+      ],
+      "interaction_facing": [
+        1,
+        0,
+        0
+      ],
+      "available_interactions": [
+        {
+          "name": "sort_cargo",
+          "description": "在传送带上对物资进行分类、分拣，送到对应货位。物流站最核心的工作。"
+        }
+      ],
+      "default_state": "idle"
+    },
+    {
       "id": "WorkBench",
       "category": "work",
       "zone_id": "main_workshop",
@@ -368,6 +435,7 @@
       "actor_class": "/AgentTownBridge/WorldKB/SmartObject/WorkBench/BP_AT_WorkBench.BP_AT_WorkBench_C",
       "display_name": "工作台",
       "description": "装配工作台",
+      "semantic_group": "workbench",
       "actor_position": [
         7330,
         7100,
