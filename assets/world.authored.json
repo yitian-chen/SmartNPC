@@ -31,18 +31,32 @@
   },
   "objects": {
     "Charge": {
+      "semantic_group": "charger",
+      "required_roles": [],
+      "capacity": 1
+    },
+    "Computer": {
+      "semantic_group": "computer",
       "required_roles": [],
       "capacity": 1
     },
     "RepairTable": {
+      "semantic_group": "repair_table",
       "required_roles": ["maintainer"],
       "capacity": 1
     },
     "SleepPod": {
+      "semantic_group": "sleep_pod",
       "required_roles": [],
       "capacity": 1
     },
+    "SortingConveyor": {
+      "semantic_group": "sorting_conveyor",
+      "required_roles": ["worker"],
+      "capacity": 1
+    },
     "WorkBench": {
+      "semantic_group": "workbench",
       "required_roles": ["worker"],
       "capacity": 1
     }
