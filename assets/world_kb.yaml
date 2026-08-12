@@ -7,9 +7,9 @@ agents:
       editor_label: BP_AT_Agent_LaoChen
       id: H-01
       initial_position:
-        - -7300
-        - -2170
-        - -22520
+        - -8510
+        - -11640
+        - -22710
       initial_zone: residential_quarters
       main_behavior_tree: /Game/AI/AgentTown/AgentBT/BT_AT_LaoChen.BT_AT_LaoChen
       personality:
@@ -22,51 +22,33 @@ agents:
       type: Human
       work_preference: main_workshop
     - action_table: ""
-      actor_class: /Game/AI/AgentTown/AgentBP/Human/BP_AT_Agent_XiaoLin.BP_AT_Agent_XiaoLin_C
-      core_memories: []
-      description: 维修技术员，专注精密装配与设备维护
-      display_name: 小林
-      editor_label: BP_AT_Agent_XiaoLin
+      actor_class: /Game/AI/AgentTown/AgentBP/Human/BP_AT_Agent_LaoLi.BP_AT_Agent_LaoLi_C
+      description: ""
+      display_name: 老李
+      editor_label: BP_AT_Agent_LaoLi
       id: H-02
       initial_position:
-        - -10980
-        - 2040
-        - -22320
-      initial_zone: repair_bay
-      main_behavior_tree: /Game/AI/AgentTown/AgentBT/BT_AT_XiaoLin.BT_AT_XiaoLin
-      personality:
-        speech_style: 精确，技术术语多
-        traits:
-            - 细致
-            - 严谨
-            - 专注技术
-            - 话少
-      profession: maintainer、technician
+        - -8750
+        - -11910
+        - -22712
+      initial_zone: residential_quarters
+      main_behavior_tree: /Game/AI/AgentTown/AgentBT/BT_AT_LaoChen.BT_AT_LaoChen
+      profession: ""
       type: Human
-      work_preference: repair_bay
     - action_table: ""
-      actor_class: /Game/AI/AgentTown/AgentBP/Human/BP_AT_Agent_XiaoZhao.BP_AT_Agent_XiaoZhao_C
-      core_memories: []
-      description: 物流巡检员，负责物资流转与区域巡检
-      display_name: 小赵
-      editor_label: BP_AT_Agent_XiaoZhao
+      actor_class: /Game/AI/AgentTown/AgentBP/Human/BP_AT_Agent_LaoWang.BP_AT_Agent_LaoWang_C
+      description: ""
+      display_name: 老王
+      editor_label: BP_AT_Agent_LaoWang
       id: H-03
       initial_position:
-        - -8423
-        - -8360
-        - -22802
-      initial_zone: logistics_hub
-      main_behavior_tree: /Game/AI/AgentTown/AgentBT/BT_AT_XiaoZhao.BT_AT_XiaoZhao
-      personality:
-        speech_style: 热情，爱闲聊
-        traits:
-            - 活泼
-            - 勤快
-            - 话多
-            - 责任感强
-      profession: logistics、patrol、worker
+        - -8850
+        - -12130
+        - -22712
+      initial_zone: residential_quarters
+      main_behavior_tree: /Game/AI/AgentTown/AgentBT/BT_AT_LaoChen.BT_AT_LaoChen
+      profession: ""
       type: Human
-      work_preference: logistics_hub
 narrative:
     setting: 工业机器人小镇
     theme: 一座由机器人居民维持生产和日常生活的封闭工业园区。居民在车间、物流站、维修厂等工作，在广场社交、在居住区休息，构成了自给自足的工业生活共同体。
@@ -84,7 +66,7 @@ objects:
       description: 用于给机器人充能的装置
       display_name: 充电桩
       editor_label: BP_Charging_Station
-      id: charge
+      id: charge-1
       interaction_facing:
         - 1
         - 0
@@ -95,6 +77,143 @@ objects:
         - -21750
       interaction_radius: 1500
       required_roles: []
+      semantic_group: charger
+      supports_queue: true
+      zone_id: central_plaza
+    - actor_class: /AgentTownBridge/WorldKB/SmartObject/Charge/BP_Charging_Station.BP_Charging_Station_C
+      actor_position:
+        - -12830
+        - 13710
+        - -21750
+      available_interactions:
+        - charge
+      capacity: 1
+      category: charging
+      default_state: idle
+      description: 用于给机器人充能的装置
+      display_name: 充电桩
+      editor_label: BP_Charging_Station2
+      id: charge-2
+      interaction_facing:
+        - 1
+        - 0
+        - 0
+      interaction_point:
+        - -12830
+        - 13710
+        - -21750
+      interaction_radius: 1500
+      required_roles: []
+      semantic_group: charger
+      supports_queue: true
+      zone_id: central_plaza
+    - actor_class: /AgentTownBridge/WorldKB/SmartObject/Charge/BP_Charging_Station.BP_Charging_Station_C
+      actor_position:
+        - -12830
+        - 14620
+        - -21750
+      available_interactions:
+        - charge
+      capacity: 1
+      category: charging
+      default_state: idle
+      description: 用于给机器人充能的装置
+      display_name: 充电桩
+      editor_label: BP_Charging_Station3
+      id: charge-3
+      interaction_facing:
+        - 1
+        - 0
+        - 0
+      interaction_point:
+        - -12830
+        - 14620
+        - -21750
+      interaction_radius: 1500
+      required_roles: []
+      semantic_group: charger
+      supports_queue: true
+      zone_id: central_plaza
+    - actor_class: /AgentTownBridge/WorldKB/SmartObject/Charge/BP_Charging_Station.BP_Charging_Station_C
+      actor_position:
+        - -12830
+        - 15510
+        - -21750
+      available_interactions:
+        - charge
+      capacity: 1
+      category: charging
+      default_state: idle
+      description: 用于给机器人充能的装置
+      display_name: 充电桩
+      editor_label: BP_Charging_Station4
+      id: charge-4
+      interaction_facing:
+        - 1
+        - 0
+        - 0
+      interaction_point:
+        - -12830
+        - 15510
+        - -21750
+      interaction_radius: 1500
+      required_roles: []
+      semantic_group: charger
+      supports_queue: true
+      zone_id: central_plaza
+    - actor_class: /AgentTownBridge/WorldKB/SmartObject/Charge/BP_Charging_Station.BP_Charging_Station_C
+      actor_position:
+        - -12830
+        - 16510
+        - -21750
+      available_interactions:
+        - charge
+      capacity: 1
+      category: charging
+      default_state: idle
+      description: 用于给机器人充能的装置
+      display_name: 充电桩
+      editor_label: BP_Charging_Station5
+      id: charge-5
+      interaction_facing:
+        - 1
+        - 0
+        - 0
+      interaction_point:
+        - -12830
+        - 16510
+        - -21750
+      interaction_radius: 1500
+      required_roles: []
+      semantic_group: charger
+      supports_queue: true
+      zone_id: central_plaza
+    - actor_class: /AgentTownBridge/WorldKB/SmartObject/Charge/BP_Charging_Station.BP_Charging_Station_C
+      actor_position:
+        - -12810
+        - 17670
+        - -21750
+      available_interactions:
+        - charge
+      capacity: 1
+      category: charging
+      default_state: idle
+      description: 用于给机器人充能的装置
+      display_name: 充电桩
+      editor_label: BP_Charging_Station6
+      id: charge-6
+      interaction_facing:
+        - 1
+        - 0
+        - 0
+      interaction_point:
+        - -12810
+        - 17670
+        - -21750
+      interaction_radius: 1500
+      required_roles: []
+      semantic_group: charger
+      supports_queue: true
       zone_id: central_plaza
     - actor_class: /AgentTownBridge/WorldKB/SmartObject/Computer/BP_AT_Computer.BP_AT_Computer_C
       actor_position:
@@ -118,6 +237,7 @@ objects:
         - -2640
         - -21860
       interaction_radius: 1500
+      semantic_group: computer
       zone_id: archive_station
     - actor_class: /AgentTownBridge/WorldKB/SmartObject/RepairTable/BP_AT_RepairTable.BP_AT_RepairTable_C
       actor_position:
@@ -144,6 +264,7 @@ objects:
       interaction_radius: 1500
       required_roles:
         - maintainer
+      semantic_group: repair_table
       zone_id: repair_bay
     - actor_class: /AgentTownBridge/WorldKB/SmartObject/SleepPod/BP_AT_SleepPod.BP_AT_SleepPod_C
       actor_position:
@@ -169,6 +290,7 @@ objects:
         - -22720
       interaction_radius: 1500
       required_roles: []
+      semantic_group: sleep_pod
       zone_id: residential_quarters
     - actor_class: /AgentTownBridge/WorldKB/SmartObject/SortingConveyor/BP_AT_SortingConveyor.BP_AT_SortingConveyor_C
       actor_position:
@@ -192,6 +314,7 @@ objects:
         - -10910
         - -22780
       interaction_radius: 1500
+      semantic_group: sorting_conveyor
       zone_id: logistics_hub
     - actor_class: /AgentTownBridge/WorldKB/SmartObject/WorkBench/BP_AT_WorkBench.BP_AT_WorkBench_C
       actor_position:
@@ -218,39 +341,9 @@ objects:
       interaction_radius: 1500
       required_roles:
         - worker
+      semantic_group: workbench
       zone_id: main_workshop
 version: "1.0"
-relationships:
-    - affection: 50
-      familiarity: 60
-      from: H-01
-      to: H-02
-      type: colleague
-    - affection: 50
-      familiarity: 60
-      from: H-02
-      to: H-01
-      type: colleague
-    - affection: 45
-      familiarity: 55
-      from: H-01
-      to: H-03
-      type: colleague
-    - affection: 45
-      familiarity: 55
-      from: H-03
-      to: H-01
-      type: colleague
-    - affection: 35
-      familiarity: 30
-      from: H-02
-      to: H-03
-      type: acquaintance
-    - affection: 35
-      familiarity: 30
-      from: H-03
-      to: H-02
-      type: acquaintance
 zones:
     - actor_path: /AgentTownBridge/Map/AgentTown.AgentTown:PersistentLevel.BP_AT_ArchiveStation_C_UAID_ACF46673A2EA24F302_1534280443
       bounds:
