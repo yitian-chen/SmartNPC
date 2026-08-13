@@ -46,6 +46,13 @@ var discreteReplayTypes = map[string]bool{
 // It receives the message type, agent_id, and raw payload.
 type MessageHandler func(ctx context.Context, msgType, agentID string, payload json.RawMessage)
 
+// DisconnectHandler is invoked once when the current UE WebSocket connection
+// closes (read loop returned). It is NOT called when an existing connection
+// is replaced by a newer one — only when the active connection itself ends.
+// Used by main to stop all agentContexts so workers/reactive-layer goroutines
+// don't keep running against a dead UE.
+type DisconnectHandler func()
+
 // Options configures New.
 type Options struct {
 	Addr        string
@@ -99,6 +106,10 @@ type Server struct {
 
 	handlerMu sync.RWMutex
 	handler   MessageHandler
+
+	// onDisconnect is invoked from handleWS's defer when the active
+	// connection ends. Guarded by handlerMu (same pattern as handler).
+	onDisconnect DisconnectHandler
 }
 
 type pendingCall struct {
@@ -135,6 +146,19 @@ func New(opts Options) *Server {
 func (s *Server) SetMessageHandler(h MessageHandler) {
 	s.handlerMu.Lock()
 	s.handler = h
+	s.handlerMu.Unlock()
+}
+
+// SetDisconnectHandler registers a callback invoked when the active UE
+// WebSocket connection ends (read loop returned). The handler runs inline
+// in the defer so it must return promptly — main uses it to stop agents
+// (cancel contexts, stop timers), which is fast.
+//
+// Not called when an existing connection is replaced by a new one — only
+// when the currently-active connection itself closes.
+func (s *Server) SetDisconnectHandler(h DisconnectHandler) {
+	s.handlerMu.Lock()
+	s.onDisconnect = h
 	s.handlerMu.Unlock()
 }
 
@@ -214,13 +238,26 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 
 	readCtx := context.Background()
 	defer func() {
+		// 仅当前活跃连接断开才清 conn + 触发回调。若 s.conn 已被新连接
+		// replace（handleWS 顶部把旧 conn Close），此处 s.conn != c，
+		// 不应清掉新连接，也不应触发 onDisconnect（新连接仍活着）。
 		s.mu.Lock()
-		if s.conn == c {
+		isCurrent := s.conn == c
+		if isCurrent {
 			s.conn = nil
 		}
 		s.mu.Unlock()
 		_ = c.CloseNow()
-		s.log.Info("ue disconnected", "remote", r.RemoteAddr)
+		s.log.Info("ue disconnected", "remote", r.RemoteAddr, "is_current", isCurrent)
+
+		if isCurrent {
+			s.handlerMu.RLock()
+			h := s.onDisconnect
+			s.handlerMu.RUnlock()
+			if h != nil {
+				h()
+			}
+		}
 	}()
 
 	s.readLoop(readCtx, c)
@@ -397,7 +434,7 @@ func (s *Server) SendEnvelope(agentID, msgType string, payload any) error {
 
 	// Log outbound envelopes. Full payload for low-frequency types;
 	// compact for heartbeat/resync (narrative text is logged separately
-	// at main.go:525 as [Hermes→MCP/RESPONSE]).
+	// by the tactical/strategic layers as [LLM→MCP/...-RESPONSE]).
 	switch msgType {
 	case protocol.TypeHeartbeat, protocol.TypeResync:
 		s.log.Debug("[MCP→UE]", "type", msgType, "seq", seq, "agent_id", agentID)

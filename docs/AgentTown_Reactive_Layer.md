@@ -51,7 +51,7 @@
 - **zone 变化**：NPC 进入新区域
 - **新物体出现**：perception 中 nearby_objects 出现之前没见过的 object_id
 - **事件到达**：收到 `event_notification` 消息
-- **物理状态突破警戒带**：energy < 20 / health < 30 / fatigue > 80（从正常区间跨入警戒带的那一刻，而非持续在警戒带内重复触发）
+- **物理状态突破警戒带**：energy < 40 / fatigue > 80 / joint_wear > 70（从正常区间跨入警戒带的那一刻，而非持续在警戒带内重复触发）
 
 非显著变化（不触发反应层）：
 - 纯时间推进、物理状态正常波动、busy progress 普通变化、相同 scan_area 重复结果
@@ -103,8 +103,8 @@ func (c *Client) Chat(ctx context.Context, prompt string) (string, error)
    - 检测 zone 变化、新物体出现
    - 满足"显著变化"则调 `runReactiveCheck`
 
-2. **`updateState` 回调**（`main.go:97` 附近）
-   - 检测物理状态突破警戒带（energy/health/fatigue 跨阈值）
+2. **`observePerception` 回调**（`main.go` 附近）
+   - 检测物理状态突破警戒带（energy/fatigue/joint_wear 跨阈值）
    - 满足则调 `runReactiveCheck`
 
 3. **`recordEventNotification` 回调**（`main.go:140`，当前是 no-op）
@@ -138,7 +138,7 @@ Prompt 模板（中文，qwen2.5 中文表现好）：
 【当前状态】
 时段：{time_of_day}
 位置：{zone}
-物理：体力={energy}/100, 疲劳={fatigue}/100, 健康={health}/100
+物理：体力={energy}/100, 疲劳={fatigue}/100, 关节磨损={joint_wear}/100
 在途动作：{current_action}（{elapsed_sec}秒前开始）
 
 【触发原因】

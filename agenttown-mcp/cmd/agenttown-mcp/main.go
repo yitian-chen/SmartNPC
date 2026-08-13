@@ -87,8 +87,9 @@ type agentContext struct {
 
 	// ollama is the local Ollama client for relationship-update judgments
 	// (Stage 5). nil when --ollama-url="" explicitly disables the reactive
-	// layer (default is http://localhost:11435), in which case
-	// maybeUpdateRelationship short-circuits. Immutable after construction.
+	// layer (default is http://localhost:11434 — cloud dev env's local
+	// Ollama), in which case maybeUpdateRelationship short-circuits.
+	// Immutable after construction.
 	ollama *ollama.Client
 
 	// Lifecycle (no lock needed — single writer: worker goroutine for cancel,
@@ -161,10 +162,11 @@ func (a *agentContext) observePerception(payload json.RawMessage) (ReactiveTrigg
 	}
 	pCount := upd.PerceptionCount
 
-	// 检测显著变化（zone/新物体）。物理警戒带由 updateState 检测，
-	// 这里 prev/cur physical 都用 latestPhysical（即上次 state_report），
-	// 不重复检测物理触发。
-	trigger, detail := prompt.ShouldTriggerReactive(upd.PrevZone, upd.CurZone, upd.PrevObjectIDs, upd.CurObjectIDs, upd.PrevPhysical, upd.PrevPhysical)
+	// 检测显著变化（zone/新物体）+ 物理警戒带突破。物理状态由 perception_update
+	// 携带全量 3 项（energy/fatigue/joint_wear）上传，SetPerception 写入
+	// latestPhysical 并返回 PrevPhysical/CurPhysical 供此处警戒带检测。
+	// state_report 路径（updateState）作为兜底，在 perception 未带物理状态时补写。
+	trigger, detail := prompt.ShouldTriggerReactive(upd.PrevZone, upd.CurZone, upd.PrevObjectIDs, upd.CurObjectIDs, upd.PrevPhysical, upd.CurPhysical)
 	// 事件类触发优先；无事件时检查周期性触发
 	if trigger == "" {
 		trigger, detail = prompt.ShouldTriggerPeriodic(pCount)
@@ -176,8 +178,11 @@ func (a *agentContext) observePerception(payload json.RawMessage) (ReactiveTrigg
 	return trigger, detail, nil
 }
 
-// updateState 存储权威的物理/任务状态。反应层：检测物理状态突破警戒带，
-// 返回 trigger 信息供 message handler 触发 reactiveRunner。
+// updateState 存储兜底物理状态 + 当前任务进度。物理状态主数据源是
+// perception_update（observePerception 路径），state_report 作为兜底：
+// 当 perception_update 未携带物理状态时由这里补写 latestPhysical。
+// 反应层：检测物理状态突破警戒带，返回 trigger 信息供 message handler
+// 触发 reactiveRunner。current_task_progress 始终更新（战术层在用）。
 func (a *agentContext) updateState(report protocol.StateReportPayload) (ReactiveTrigger, string) {
 	a.coordMu.Lock()
 	if a.stopped {
@@ -260,7 +265,7 @@ func (a *agentContext) recordActionCompletion(completion protocol.ActionComplete
 		if sg != "" {
 			hint += fmt.Sprintf(" semantic_group=%s", sg)
 		}
-		hint += fmt.Sprintf(" result=%s reason=%s。本次规划请避免直接重试同一动作——若目标物体被占用，改用其他可用 semantic_group 或先 generic_act(behavior=look_around) 短暂等待",
+		hint += fmt.Sprintf(" result=%s reason=%s。本次规划请避免直接重试同一动作——若目标物体被占用，如同类物体有空余，请先直接重试同一动作；如果同类物品已没有空余，可先 generic_act(behavior=look_around) 短暂等待后安排其他的事情做",
 			completion.Result, completion.Reason)
 		a.as.SetReplanHint(hint)
 	}
@@ -563,7 +568,7 @@ func runPerceptionWorker(
 	// 也不会被调，UE 端不会收到任何自动 action_command。手动模式仅响应
 	// /debug/schedule 注入和 /debug/action 下发。
 	if autoPlanEnabled {
-		plan := generateDailyPlan(ctx, ac.strategicHc, agentID, kb, profiles, capabilityRegistryRef, logger, "")
+		plan := generateDailyPlan(ctx, ac.strategicHc, agentID, kb, profiles, capabilityRegistryRef, logger, "", ac.as.Snapshot().LatestPhysical)
 		// 同步 currentDay：若首条 perception 已到则用其 day_count，否则保持 -1
 		// （由 detectDayRollover 在首条 perception 到达时同步）。
 		ac.as.SetDailyPlan(plan, ac.as.LatestDayCount())
@@ -604,7 +609,7 @@ func runPerceptionWorker(
 				// narrative（注入战略层 prompt）+ 结构化 memories（存 DB）。
 				// 失败/冷启动返回 ""，generateDailyPlan 内部回退到常量。
 				narrative := generateDailyMemories(ctx, ac.strategicHc, ac.as.Store(), agentID, kb, profiles, logger)
-				plan := generateDailyPlan(ctx, ac.strategicHc, agentID, kb, profiles, capabilityRegistryRef, logger, narrative)
+				plan := generateDailyPlan(ctx, ac.strategicHc, agentID, kb, profiles, capabilityRegistryRef, logger, narrative, ac.as.Snapshot().LatestPhysical)
 				// 不清 currentSlot/actionQueue/currentActionID：让 NPC 自然睡眠到 07:00，
 				// 由 advanceSlotIfNeeded 打断后走 tacticalRefill 选新计划 slot。
 				// currentDay 已由 detectDayRollover 更新为 newDay。
@@ -1259,8 +1264,8 @@ func main() {
 		"directory of NPC profile.md files (filename = <agentID>.md; empty disables profile override)")
 	tacticalStream = flag.Bool("tactical-stream", false,
 		"enable streaming for tactical layer LLM calls (experimental: only helps if upstream LLM emits tokens incrementally)")
-	ollamaURL = flag.String("ollama-url", "http://localhost:11435",
-		"Ollama base URL for reactive layer (default enables reactive layer via SSH reverse tunnel on cloud; set to empty string to disable, or http://localhost:11434 for local Windows)")
+	ollamaURL = flag.String("ollama-url", "http://localhost:11434",
+		"Ollama base URL for reactive layer (default enables reactive layer via cloud dev env's local Ollama on 11434; set to empty string to disable, or http://localhost:11435 for SSH reverse tunnel to a remote Windows host)")
 	ollamaModel = flag.String("ollama-model", "qwen2.5:7b-instruct-q4_K_M",
 		"Ollama model name for reactive layer decisions")
 	ollamaNumThread = flag.Int("ollama-num-thread", 16,
@@ -1396,7 +1401,7 @@ func main() {
 	)
 
 	// ─── 反应层 Ollama 客户端 ────────────────────────────────────
-	// --ollama-url 默认 http://localhost:11435（云端 SSH 反向隧道端口），
+	// --ollama-url 默认 http://localhost:11434（云开发环境本地 Ollama），
 	// 显式传空串禁用反应层。否则初始化客户端（即使 Ollama 进程不在跑也
 	// 不报错——Chat 调用失败时反应层静默降级为 continue）。
 	// ollamaClient 提升到外层作用域，供 registerAgent 闭包捕获注入
@@ -1523,6 +1528,27 @@ func main() {
 	executor := &guardedExecutor{ws: ws, lookup: lookupAgent, caps: capabilityRegistry}
 	tools.RegisterAll(server, executor, kb, logger)
 
+	// ─── Wire WS disconnect handler ─────────────────────────────
+	// UE 被 kill / 进程退出时不会主动发 agent_unregistered，readLoop 自然返回，
+	// 此处统一清理所有 agent：cancel worker ctx + 设 stopped=true，让反应层
+	// 排队 goroutine 拿锁后二次检查时快速退出。仅当前活跃连接断开才触发
+	// （新连接 replace 旧连接时旧 defer 看到 s.conn != c，不触发）。
+	ws.SetDisconnectHandler(func() {
+		agentsMu.Lock()
+		stopped := make([]*agentContext, 0, len(agents))
+		for id, ac := range agents {
+			stopped = append(stopped, ac)
+			delete(agents, id)
+		}
+		agentsMu.Unlock()
+		for _, ac := range stopped {
+			ac.stop()
+		}
+		if len(stopped) > 0 {
+			logger.Info("ws disconnected, stopped all agents", "agent_count", len(stopped))
+		}
+	})
+
 	// ─── Wire inbound message handler ──────────────────────────
 	ws.SetMessageHandler(func(_ context.Context, msgType, agentID string, payload json.RawMessage) {
 		switch msgType {
@@ -1624,7 +1650,7 @@ func main() {
 			trigger, detail := ac.updateState(sr)
 			logger.Info("state_report", "agent_id", agentID,
 				"energy", sr.PhysicalState.Energy, "fatigue", sr.PhysicalState.Fatigue,
-				"joint_wear", sr.PhysicalState.JointWear, "health", sr.PhysicalState.Health)
+				"joint_wear", sr.PhysicalState.JointWear)
 			if trigger != "" && autoPlanEnabled {
 				go reactiveRunnerRef.trigger(agentID, ac, trigger, detail)
 			}

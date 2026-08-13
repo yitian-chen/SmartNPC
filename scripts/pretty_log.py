@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""pretty_log.py — 可读化查看 sim.log（JSON Lines）。
+"""pretty_log.py — 可读化查看 debug-mcp.log（JSON Lines）。
 
-sim.log 每行是一条 JSON，单行可能上千字（perception text 完整不截断）。
+debug-mcp.log 每行是一条 JSON，单行可能上千字（perception text 完整不截断）。
 本脚本提供两种查看方式：
 
 1. HTML 报告（推荐，--html）：生成独立 HTML 文件并自动打开浏览器。
@@ -30,10 +30,10 @@ DEPRECATED 提示（2026-08）：
     python scripts/pretty_log.py --html -o report.html    # 指定输出路径
     python scripts/pretty_log.py --html --no-open         # 生成但不自动打开
     python scripts/pretty_log.py --html --hermes          # 整合 Hermes 容器日志（DEPRECATED，仅历史日志）
-    python scripts/pretty_log.py --html --dev             # dev 实例（logs-dev/ + h01-dev）
+    python scripts/pretty_log.py --html --stable          # stable 实例（logs/ + h01）
 
     # 终端渲染
-    python scripts/pretty_log.py                          # 查看今天的 sim.log
+    python scripts/pretty_log.py                          # 查看今天的 debug-mcp.log（默认 logs-dev/）
     python scripts/pretty_log.py -f PERCEPTION -n 50      # 最近 50 条 PERCEPTION
     python scripts/pretty_log.py -a H-02 -n 20            # 最近 20 条 H-02 日志
     python scripts/pretty_log.py --raw                    # 原始 JSON
@@ -81,7 +81,7 @@ _DIRECTION_ALIASES = {
     "MCP→UE": "MCP→UE",
     "PERCEPTION": "MCP→Hermes/PERCEPTION",
     "RESPONSE": "Hermes→MCP/RESPONSE",
-    "TOOL": "Hermes→MCP/TOOL",
+    "TOOL": ["LLM→MCP/TOOL", "Hermes→MCP/TOOL"],
     "STRATEGIC-PROMPT": "MCP→Hermes/STRATEGIC-PROMPT",
     "STRATEGIC-RESPONSE": "Hermes→MCP/STRATEGIC-RESPONSE",
     "TACTICAL-PROMPT": "MCP→Hermes/TACTICAL-PROMPT",
@@ -102,6 +102,9 @@ _DIRECTION_CSS = {
     "MCP→Hermes/PERCEPTION": "dir-perception",
     "Hermes→MCP/RESPONSE": "dir-response",
     "Hermes→MCP/TOOL": "dir-tool",
+    "LLM→MCP/TOOL": "dir-tool",
+    "MCP→LLM/PERCEPTION": "dir-perception",
+    "LLM→MCP/RESPONSE": "dir-response",
     "MCP→Hermes/STRATEGIC-PROMPT": "dir-strategic",
     "Hermes→MCP/STRATEGIC-RESPONSE": "dir-strategic",
     "MCP→Hermes/TACTICAL-PROMPT": "dir-tactical",
@@ -252,10 +255,13 @@ def render_line(line: str, color: bool, show_source: bool = False) -> str:
 # ── 过滤与路径解析 ────────────────────────────────────────────────────
 def _match_filter(rec: dict, f: str) -> bool:
     f_lower = f.lower()
+    msg = str(rec.get("msg", ""))
     for alias, full in _DIRECTION_ALIASES.items():
         if f_lower == alias.lower():
-            return full in str(rec.get("msg", ""))
-    return f in str(rec.get("msg", ""))
+            if isinstance(full, list):
+                return any(x in msg for x in full)
+            return full in msg
+    return f in msg
 
 
 def _hide_heartbeat(rec: dict, explicit_heartbeat: bool) -> bool:
@@ -265,10 +271,11 @@ def _hide_heartbeat(rec: dict, explicit_heartbeat: bool) -> bool:
     return "heartbeat" in msg
 
 
-def _resolve_log_path(arg: str | None, dev: bool = False) -> Path:
-    # dev 实例：logs-dev/YYYY-MM-DD/debug-mcp.log
-    # stable 实例：logs/YYYY-MM-DD/sim.log
-    log_dir, log_name = ("logs-dev", "debug-mcp.log") if dev else ("logs", "sim.log")
+def _resolve_log_path(arg: str | None, stable: bool = False) -> Path:
+    # 默认 dev 实例：logs-dev/YYYY-MM-DD/debug-mcp.log
+    # stable 实例（--stable）：logs/YYYY-MM-DD/debug-mcp.log
+    log_dir = "logs" if stable else "logs-dev"
+    log_name = "debug-mcp.log"
     if arg is None:
         today = _dt.date.today().isoformat()
         return Path(log_dir) / today / log_name
@@ -594,7 +601,7 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
-<title>sim.log 报告 — {title}</title>
+<title>debug-mcp.log 报告 — {title}</title>
 <style>
 :root {{
   --bg: #1e1e1e;
@@ -755,7 +762,7 @@ body {{
 </head>
 <body>
 <div class="toolbar">
-  <h1>sim.log — {title}</h1>
+  <h1>debug-mcp.log — {title}</h1>
   <input type="text" id="search" placeholder="搜索（正则）..." />
   <button class="filter-btn active" data-filter="ALL">全部</button>
   <button class="filter-btn" data-filter="UE→MCP">UE→MCP</button>
@@ -832,7 +839,7 @@ function applyFilters() {{
         'MCP→UE': 'MCP→UE',
         'PERCEPTION': 'MCP→Hermes/PERCEPTION',
         'RESPONSE': 'Hermes→MCP/RESPONSE',
-        'TOOL': 'Hermes→MCP/TOOL',
+        'TOOL': ['LLM→MCP/TOOL', 'Hermes→MCP/TOOL'],
         'STRATEGIC': ['MCP→Hermes/STRATEGIC-PROMPT', 'Hermes→MCP/STRATEGIC-RESPONSE', '[战略层]'],
         'TACTICAL': ['MCP→Hermes/TACTICAL-PROMPT', 'Hermes→MCP/TACTICAL-RESPONSE', '[战术层]'],
         'REACTIVE': ['[反应层/PROMPT]', '[反应层/RESPONSE]', '[反应层/触发]', '[反应层/决策]', '[反应层/失败]', '[反应层]'],
@@ -1078,7 +1085,7 @@ def _open_in_browser(path: Path) -> bool:
 # ── 主入口 ────────────────────────────────────────────────────────────
 def main() -> int:
     ap = argparse.ArgumentParser(
-        description="可读化查看 sim.log（JSON Lines）",
+        description="可读化查看 debug-mcp.log（JSON Lines）",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
@@ -1102,7 +1109,7 @@ def main() -> int:
     ap.add_argument(
         "-o",
         "--output",
-        help="HTML 输出路径（仅 --html 模式）；默认 logs/YYYY-MM-DD/sim_report.html",
+        help="HTML 输出路径（仅 --html 模式）；默认 logs-dev/YYYY-MM-DD/sim_report.html",
     )
     ap.add_argument(
         "--no-open",
@@ -1125,13 +1132,13 @@ def main() -> int:
         help="(DEPRECATED) 显示 Hermes 日志全部条目（默认只保留 LLM 决策相关 + WARNING/ERROR）",
     )
     ap.add_argument(
-        "--dev",
+        "--stable",
         action="store_true",
-        help="查看 dev 实例日志（默认 logs-dev/YYYY-MM-DD/debug-mcp.log；--hermes 默认 h01-dev profile）",
+        help="查看 stable 实例日志（默认 logs-dev/YYYY-MM-DD/debug-mcp.log；--stable 切到 logs/；--hermes 默认 h01 profile）",
     )
     args = ap.parse_args()
 
-    log_path = _resolve_log_path(args.path, dev=args.dev)
+    log_path = _resolve_log_path(args.path, stable=args.stable)
     if not log_path.exists():
         print(f"日志文件不存在：{log_path}", file=sys.stderr)
         return 1
@@ -1144,10 +1151,10 @@ def main() -> int:
             hermes_path = Path(args.hermes_log)
         else:
             # 默认位置：项目根 hermes/profiles/<profile>/logs/agent.log
-            # dev 实例用 h01-dev profile，stable 用 h01
+            # stable 实例用 h01 profile，默认（dev）用 h01-dev
             # 从 sim.log 路径回推项目根（logs/YYYY-MM-DD/sim.log → ../..）
             project_root = log_path.parent.parent.parent
-            profile = "h01-dev" if args.dev else "h01"
+            profile = "h01" if args.stable else "h01-dev"
             hermes_path = project_root / "hermes" / "profiles" / profile / "logs" / "agent.log"
         if not hermes_path.exists():
             print(f"警告：Hermes 日志不存在：{hermes_path}", file=sys.stderr)
