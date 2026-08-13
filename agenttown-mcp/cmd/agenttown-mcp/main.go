@@ -87,8 +87,9 @@ type agentContext struct {
 
 	// ollama is the local Ollama client for relationship-update judgments
 	// (Stage 5). nil when --ollama-url="" explicitly disables the reactive
-	// layer (default is http://localhost:11435), in which case
-	// maybeUpdateRelationship short-circuits. Immutable after construction.
+	// layer (default is http://localhost:11434 — cloud dev env's local
+	// Ollama), in which case maybeUpdateRelationship short-circuits.
+	// Immutable after construction.
 	ollama *ollama.Client
 
 	// Lifecycle (no lock needed — single writer: worker goroutine for cancel,
@@ -1259,8 +1260,8 @@ func main() {
 		"directory of NPC profile.md files (filename = <agentID>.md; empty disables profile override)")
 	tacticalStream = flag.Bool("tactical-stream", false,
 		"enable streaming for tactical layer LLM calls (experimental: only helps if upstream LLM emits tokens incrementally)")
-	ollamaURL = flag.String("ollama-url", "http://localhost:11435",
-		"Ollama base URL for reactive layer (default enables reactive layer via SSH reverse tunnel on cloud; set to empty string to disable, or http://localhost:11434 for local Windows)")
+	ollamaURL = flag.String("ollama-url", "http://localhost:11434",
+		"Ollama base URL for reactive layer (default enables reactive layer via cloud dev env's local Ollama on 11434; set to empty string to disable, or http://localhost:11435 for SSH reverse tunnel to a remote Windows host)")
 	ollamaModel = flag.String("ollama-model", "qwen2.5:7b-instruct-q4_K_M",
 		"Ollama model name for reactive layer decisions")
 	ollamaNumThread = flag.Int("ollama-num-thread", 16,
@@ -1396,7 +1397,7 @@ func main() {
 	)
 
 	// ─── 反应层 Ollama 客户端 ────────────────────────────────────
-	// --ollama-url 默认 http://localhost:11435（云端 SSH 反向隧道端口），
+	// --ollama-url 默认 http://localhost:11434（云开发环境本地 Ollama），
 	// 显式传空串禁用反应层。否则初始化客户端（即使 Ollama 进程不在跑也
 	// 不报错——Chat 调用失败时反应层静默降级为 continue）。
 	// ollamaClient 提升到外层作用域，供 registerAgent 闭包捕获注入

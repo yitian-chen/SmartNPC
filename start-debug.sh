@@ -60,19 +60,20 @@ MYSQL_RUN_DIR="/data/mysql-run"
 MYSQL_DB="${MYSQL_DB:-agenttown_stable}"
 MYSQL_DSN_DEFAULT="root@tcp(127.0.0.1:3306)/${MYSQL_DB}?parseTime=true&charset=utf8mb4"
 
-# ─── Ollama / SSH 反向隧道配置 ────────────────────────────────
+# ─── Ollama 配置 ─────────────────────────────────────────────
 # 反应层 LLM 后端：MCP 通过 --ollama-url 调用本地 Ollama（qwen2.5:7b）。
-# 云端场景下 Ollama 跑在用户 Windows 本地，通过 SSH 反向隧道暴露到云端
-# localhost:${OLLAMA_TUNNEL_PORT}（用户在 Windows 端运行 start-tunnel.sh）。
+# 默认连接云开发环境本地 Ollama（localhost:11434，ollama serve 直接运行）。
+# 若需连接远端 Windows 本地 Ollama，可在 Windows 端运行 start-tunnel.sh
+# 拉起 SSH 反向隧道（云端 localhost:11435），并将 OLLAMA_URL 改为该端口。
 #
 # 环境变量（可在 .env 配置覆盖）：
-#   OLLAMA_URL               MCP 连接 Ollama 的 URL（默认 http://localhost:11435
-#                            走反向隧道启用反应层；设为空串禁用反应层）
+#   OLLAMA_URL               MCP 连接 Ollama 的 URL（默认 http://localhost:11434
+#                            连接云环境本地 Ollama 启用反应层；设为空串禁用反应层）
 #   OLLAMA_MODEL             Ollama 模型名（默认 qwen2.5:7b-instruct-q4_K_M）
 #   OLLAMA_NUM_THREAD        CPU 推理线程数（默认 16）
 #   OLLAMA_TUNNEL_PORT       云端反隧道端口（默认 11435，与 start-tunnel.sh 对齐）
 #   SKIP_OLLAMA_TUNNEL_CHECK 跳过隧道检测（=1 时不检查不警告，用于无反应层场景）
-OLLAMA_URL="${OLLAMA_URL:-http://localhost:11435}"
+OLLAMA_URL="${OLLAMA_URL:-http://localhost:11434}"
 OLLAMA_MODEL="${OLLAMA_MODEL:-qwen2.5:7b-instruct-q4_K_M}"
 OLLAMA_NUM_THREAD="${OLLAMA_NUM_THREAD:-16}"
 OLLAMA_TUNNEL_PORT="${OLLAMA_TUNNEL_PORT:-11435}"
@@ -546,7 +547,7 @@ start_mcp() {
     # --http :8760 同理
     # MCP 直连 Venus（OpenAI Chat Completions 协议），--venus-api-key 透传凭据。
     # --world-kb 用绝对路径，避免 cwd 不对找不到 assets/world_kb.yaml
-    # --ollama-url 反应层 LLM 后端：默认 http://localhost:11435 走隧道；空=禁用反应层
+    # --ollama-url 反应层 LLM 后端：默认 http://localhost:11434 连云环境本地 Ollama；空=禁用反应层
     local ollama_args=()
     if [ -n "$OLLAMA_URL" ]; then
         ollama_args=(--ollama-url "$OLLAMA_URL" --ollama-model "$OLLAMA_MODEL" --ollama-num-thread "$OLLAMA_NUM_THREAD")
