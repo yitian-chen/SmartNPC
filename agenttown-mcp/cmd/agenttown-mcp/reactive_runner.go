@@ -117,6 +117,18 @@ func (r *reactiveRunner) trigger(agentID string, ac *agentContext, trigger React
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	// 拿锁后二次检查 stopped：排队期间 agent 可能已被 WS 断连回调 stop()。
+	// 不检查则排队 goroutine 继续调 Ollama，是 UE 被 kill 后反应层仍出日志
+	// 的直接根因（全局 r.mu 排队 + stopped 检查在锁外）。
+	ac.coordMu.Lock()
+	if ac.stopped {
+		ac.coordMu.Unlock()
+		r.logger.Debug("[反应层] 拿锁后 agent 已停止，跳过",
+			"agent_id", agentID, "trigger", trigger, "detail", detail)
+		return
+	}
+	ac.coordMu.Unlock()
+
 	// 3. 构造 prompt 输入
 	input := r.buildInput(agentID, ac, trigger, detail)
 	promptText := prompt.BuildReactive(input)

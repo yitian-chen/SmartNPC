@@ -1524,6 +1524,27 @@ func main() {
 	executor := &guardedExecutor{ws: ws, lookup: lookupAgent, caps: capabilityRegistry}
 	tools.RegisterAll(server, executor, kb, logger)
 
+	// ─── Wire WS disconnect handler ─────────────────────────────
+	// UE 被 kill / 进程退出时不会主动发 agent_unregistered，readLoop 自然返回，
+	// 此处统一清理所有 agent：cancel worker ctx + 设 stopped=true，让反应层
+	// 排队 goroutine 拿锁后二次检查时快速退出。仅当前活跃连接断开才触发
+	// （新连接 replace 旧连接时旧 defer 看到 s.conn != c，不触发）。
+	ws.SetDisconnectHandler(func() {
+		agentsMu.Lock()
+		stopped := make([]*agentContext, 0, len(agents))
+		for id, ac := range agents {
+			stopped = append(stopped, ac)
+			delete(agents, id)
+		}
+		agentsMu.Unlock()
+		for _, ac := range stopped {
+			ac.stop()
+		}
+		if len(stopped) > 0 {
+			logger.Info("ws disconnected, stopped all agents", "agent_count", len(stopped))
+		}
+	})
+
 	// ─── Wire inbound message handler ──────────────────────────
 	ws.SetMessageHandler(func(_ context.Context, msgType, agentID string, payload json.RawMessage) {
 		switch msgType {
