@@ -158,7 +158,7 @@ func BuildReactive(in ReactiveInput) string {
 	physicalLine := ""
 	physicalRuleLine := ""
 	if in.PhysicalAvailable {
-		physicalLine = fmt.Sprintf("物理：体力=%.0f/100, 疲劳=%.0f/100, 关节磨损=%.0f/100\n", in.Energy, in.Fatigue, in.JointWear)
+		physicalLine = fmt.Sprintf("物理：体力=%.0f/100, 疲劳=%.0f/100, 关节磨损=%.0f/100, 余额=%.0f\n", in.Energy, in.Fatigue, in.JointWear, in.Money)
 		physicalRuleLine = "- 物理状态告警时（体力<40 需充电、疲劳>80 需休息、关节磨损>70 需维修）原则上需要输出 replan 让 NPC 优先处理物理需求、不可输出 continue/observe\n"
 	}
 	// Queue segment (约定21): empty when not queued → entire segment
