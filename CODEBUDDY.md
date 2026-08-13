@@ -39,7 +39,7 @@ graph LR
 | Mock UE | Python 3.10+ | `src/agenttown/mock_ue.py` | — | 模拟 UE5：物理状态、空间状态、动作执行、感知推送 |
 | agenttown-mcp | Go 1.25+ | `agenttown-mcp/` | HTTP `:8760`, WS `:9090` | 协议适配、感知语义化、工具暴露、三层决策、LLM 桥接 |
 | Venus | 远程 | `--venus-url` | — | OpenAI 兼容 LLM 服务（战略/战术层后端） |
-| Ollama | 本地 | `--ollama-url` | `:11434` | 反应层本地 LLM（qwen2.5:7b） |
+| Ollama | 本地 | `--ollama-url` | `:11434`（默认禁用，需显式启用） | 反应层本地 LLM（qwen2.5:7b） |
 
 ### 三层决策架构
 
@@ -602,7 +602,7 @@ cp .env.example .env
 | `--tactical-stream` | `false` | 战术层流式输出（实验性，默认关） |
 | `--auto-plan` | `true` | 自动规划总开关（false=手动模式，跳过战略/战术/反应层自动决策，仅响应 /debug/schedule 注入和 /debug/action 手动下发） |
 | `--mysql-dsn` | `""` | MySQL DSN（空=内存模式无持久化；非空启用 Stage 3 存储层，DSN 需含 `parseTime=true`）。env 回退 `MYSQL_DSN` |
-| `--ollama-url` | `""` | Ollama URL（默认空串=禁用反应层；设为 `http://localhost:11434` 启用） |
+| `--ollama-url` | `""` | Ollama URL（**默认空串=禁用反应层**——当前误判率高、延迟成本大，待优化后再默认启用；设为 `http://localhost:11434` 启用） |
 | `--ollama-model` | `qwen2.5:7b-instruct-q4_K_M` | 反应层模型 |
 | `--ollama-num-thread` | `16` | Ollama CPU 推理线程数（0=默认 16，-1=让 Ollama 自决）。高核数 CPU 上默认用满所有核反而劣化，实测 96 vCPU EPYC 限制到 16 线程可获得 3x 加速 |
 | `--world-kb` | `assets/world_kb.yaml` | 世界 KB 路径（fail-fast 启动加载；UE 推送 world_kb 时也写入此路径） |
@@ -630,7 +630,8 @@ cp .env.example .env  # 填入 VENUS_API_KEY
 pip install websockets pyyaml
 python src/run_day.py
 
-# 5.（可选）反应层需要本地 Ollama
+# 5.（可选）启用反应层需在 MCP 启动时加 --ollama-url http://localhost:11434，
+#    并启动本地 Ollama：
 ollama serve &  # 或用 systemd
 ollama pull qwen2.5:7b-instruct-q4_K_M
 ```

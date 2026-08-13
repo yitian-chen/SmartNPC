@@ -1264,8 +1264,8 @@ func main() {
 		"directory of NPC profile.md files (filename = <agentID>.md; empty disables profile override)")
 	tacticalStream = flag.Bool("tactical-stream", false,
 		"enable streaming for tactical layer LLM calls (experimental: only helps if upstream LLM emits tokens incrementally)")
-	ollamaURL = flag.String("ollama-url", "http://localhost:11434",
-		"Ollama base URL for reactive layer (default enables reactive layer via cloud dev env's local Ollama on 11434; set to empty string to disable, or http://localhost:11435 for SSH reverse tunnel to a remote Windows host)")
+	ollamaURL = flag.String("ollama-url", "",
+		"Ollama base URL for reactive layer (default empty disables reactive layer — reactive layer is opt-in due to high misjudgment rate and latency cost; set to http://localhost:11434 to enable via cloud dev env's local Ollama, or http://localhost:11435 for SSH reverse tunnel to a remote Windows host)")
 	ollamaModel = flag.String("ollama-model", "qwen2.5:7b-instruct-q4_K_M",
 		"Ollama model name for reactive layer decisions")
 	ollamaNumThread = flag.Int("ollama-num-thread", 16,
@@ -1401,9 +1401,9 @@ func main() {
 	)
 
 	// ─── 反应层 Ollama 客户端 ────────────────────────────────────
-	// --ollama-url 默认 http://localhost:11434（云开发环境本地 Ollama），
-	// 显式传空串禁用反应层。否则初始化客户端（即使 Ollama 进程不在跑也
-	// 不报错——Chat 调用失败时反应层静默降级为 continue）。
+	// --ollama-url 默认空串（反应层默认禁用——当前误判率高、延迟成本大，
+	// 待优化后再默认启用）。显式传 URL 启用反应层。否则初始化客户端（即使
+	// Ollama 进程不在跑也不报错——Chat 调用失败时反应层静默降级为 continue）。
 	// ollamaClient 提升到外层作用域，供 registerAgent 闭包捕获注入
 	// agentContext.ollama（Stage 5 关系层判断用）。nil 表示禁用。
 	var ollamaClient *ollama.Client
