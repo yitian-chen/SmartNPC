@@ -46,6 +46,7 @@ import (
 	"github.com/AgentTown/agenttown-mcp/pkg/storage"
 	"github.com/AgentTown/agenttown-mcp/pkg/transport"
 	"github.com/AgentTown/agenttown-mcp/pkg/venus"
+	"github.com/AgentTown/agenttown-mcp/pkg/weeklyschedule"
 	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
 	"github.com/AgentTown/agenttown-mcp/pkg/wsserver"
 )
@@ -561,6 +562,7 @@ func runPerceptionWorker(
 	ws *wsserver.Server,
 	kb *worldkb.KB,
 	profiles map[string]*profile.Profile,
+	weeklySched *weeklyschedule.Schedule,
 	logger *slog.Logger,
 ) {
 	// 战略层：进入感知循环前生成当日计划。
@@ -568,7 +570,8 @@ func runPerceptionWorker(
 	// 也不会被调，UE 端不会收到任何自动 action_command。手动模式仅响应
 	// /debug/schedule 注入和 /debug/action 下发。
 	if autoPlanEnabled {
-		plan := generateDailyPlan(ctx, ac.strategicHc, agentID, kb, profiles, capabilityRegistryRef, logger, "", ac.as.Snapshot().LatestPhysical)
+		dayCtx := weeklyschedule.WeeklyLine(ac.as.LatestDayCount(), weeklySched)
+		plan := generateDailyPlan(ctx, ac.strategicHc, agentID, kb, profiles, capabilityRegistryRef, logger, "", ac.as.Snapshot().LatestPhysical, dayCtx)
 		// 同步 currentDay：若首条 perception 已到则用其 day_count，否则保持 -1
 		// （由 detectDayRollover 在首条 perception 到达时同步）。
 		ac.as.SetDailyPlan(plan, ac.as.LatestDayCount())
@@ -609,7 +612,8 @@ func runPerceptionWorker(
 				// narrative（注入战略层 prompt）+ 结构化 memories（存 DB）。
 				// 失败/冷启动返回 ""，generateDailyPlan 内部回退到常量。
 				narrative := generateDailyMemories(ctx, ac.strategicHc, ac.as.Store(), agentID, kb, profiles, logger)
-				plan := generateDailyPlan(ctx, ac.strategicHc, agentID, kb, profiles, capabilityRegistryRef, logger, narrative, ac.as.Snapshot().LatestPhysical)
+				dayCtx := weeklyschedule.WeeklyLine(newDay, weeklySched)
+				plan := generateDailyPlan(ctx, ac.strategicHc, agentID, kb, profiles, capabilityRegistryRef, logger, narrative, ac.as.Snapshot().LatestPhysical, dayCtx)
 				// 不清 currentSlot/actionQueue/currentActionID：让 NPC 自然睡眠到 07:00，
 				// 由 advanceSlotIfNeeded 打断后走 tacticalRefill 选新计划 slot。
 				// currentDay 已由 detectDayRollover 更新为 newDay。
@@ -1262,6 +1266,11 @@ func main() {
 	// 启动时一次性加载，UE 推送 world_kb 不触发重载（与 kb 启动时适配一致）。
 	profilesDir = flag.String("profiles-dir", "assets/profiles",
 		"directory of NPC profile.md files (filename = <agentID>.md; empty disables profile override)")
+	// weeklySchedulePath 指向每周日程配置 YAML（7 天周期：工作日/休息日/上网日/派对日）。
+	// 空串=禁用每周日程上下文（不注入【今日日程】段，行为不变）。
+	// 启动时一次性加载，与 kb/profiles 同级参数化传递，不入 agentContext。
+	weeklySchedulePath = flag.String("weekly-schedule", "assets/weekly_schedule.yaml",
+		"path to weekly schedule YAML (empty disables weekly context injection)")
 	tacticalStream = flag.Bool("tactical-stream", false,
 		"enable streaming for tactical layer LLM calls (experimental: only helps if upstream LLM emits tokens incrementally)")
 	ollamaURL = flag.String("ollama-url", "",
@@ -1400,6 +1409,23 @@ func main() {
 		"count", len(profiles),
 	)
 
+	// ─── 每周日程配置加载 ───────────────────────────────────────
+	// 扫描 *weeklySchedulePath 的 YAML，解析 7 天周期配置。空串 → 禁用
+	// （weeklySched=nil，WeeklyLine 返回 ""，不注入【今日日程】段，行为不变）。
+	// 非空路径但文件缺失/格式错 → fail-fast。进程级只读，与 kb/profiles 同级。
+	var weeklySched *weeklyschedule.Schedule
+	if *weeklySchedulePath != "" {
+		weeklySched, err = weeklyschedule.Load(*weeklySchedulePath)
+		if err != nil {
+			logger.Error("failed to load weekly schedule", "path", *weeklySchedulePath, "err", err)
+			os.Exit(1)
+		}
+	}
+	logger.Info("weekly schedule loaded",
+		"path", *weeklySchedulePath,
+		"enabled", weeklySched != nil,
+	)
+
 	// ─── 反应层 Ollama 客户端 ────────────────────────────────────
 	// --ollama-url 默认空串（反应层默认禁用——当前误判率高、延迟成本大，
 	// 待优化后再默认启用）。显式传 URL 启用反应层。否则初始化客户端（即使
@@ -1511,7 +1537,7 @@ func main() {
 	// 显式禁用反应层时，maybeUpdateRelationship 会早返回不调用 Ollama。
 	ac.ollama = ollamaClient
 	agents[id] = ac
-		go runPerceptionWorker(workerCtx, id, ac, ws, kb, profiles, logger)
+		go runPerceptionWorker(workerCtx, id, ac, ws, kb, profiles, weeklySched, logger)
 		return ac, true
 	}
 
