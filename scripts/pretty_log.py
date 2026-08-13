@@ -81,7 +81,7 @@ _DIRECTION_ALIASES = {
     "MCP→UE": "MCP→UE",
     "PERCEPTION": "MCP→Hermes/PERCEPTION",
     "RESPONSE": "Hermes→MCP/RESPONSE",
-    "TOOL": "Hermes→MCP/TOOL",
+    "TOOL": ["LLM→MCP/TOOL", "Hermes→MCP/TOOL"],
     "STRATEGIC-PROMPT": "MCP→Hermes/STRATEGIC-PROMPT",
     "STRATEGIC-RESPONSE": "Hermes→MCP/STRATEGIC-RESPONSE",
     "TACTICAL-PROMPT": "MCP→Hermes/TACTICAL-PROMPT",
@@ -102,6 +102,9 @@ _DIRECTION_CSS = {
     "MCP→Hermes/PERCEPTION": "dir-perception",
     "Hermes→MCP/RESPONSE": "dir-response",
     "Hermes→MCP/TOOL": "dir-tool",
+    "LLM→MCP/TOOL": "dir-tool",
+    "MCP→LLM/PERCEPTION": "dir-perception",
+    "LLM→MCP/RESPONSE": "dir-response",
     "MCP→Hermes/STRATEGIC-PROMPT": "dir-strategic",
     "Hermes→MCP/STRATEGIC-RESPONSE": "dir-strategic",
     "MCP→Hermes/TACTICAL-PROMPT": "dir-tactical",
@@ -252,10 +255,13 @@ def render_line(line: str, color: bool, show_source: bool = False) -> str:
 # ── 过滤与路径解析 ────────────────────────────────────────────────────
 def _match_filter(rec: dict, f: str) -> bool:
     f_lower = f.lower()
+    msg = str(rec.get("msg", ""))
     for alias, full in _DIRECTION_ALIASES.items():
         if f_lower == alias.lower():
-            return full in str(rec.get("msg", ""))
-    return f in str(rec.get("msg", ""))
+            if isinstance(full, list):
+                return any(x in msg for x in full)
+            return full in msg
+    return f in msg
 
 
 def _hide_heartbeat(rec: dict, explicit_heartbeat: bool) -> bool:
@@ -833,7 +839,7 @@ function applyFilters() {{
         'MCP→UE': 'MCP→UE',
         'PERCEPTION': 'MCP→Hermes/PERCEPTION',
         'RESPONSE': 'Hermes→MCP/RESPONSE',
-        'TOOL': 'Hermes→MCP/TOOL',
+        'TOOL': ['LLM→MCP/TOOL', 'Hermes→MCP/TOOL'],
         'STRATEGIC': ['MCP→Hermes/STRATEGIC-PROMPT', 'Hermes→MCP/STRATEGIC-RESPONSE', '[战略层]'],
         'TACTICAL': ['MCP→Hermes/TACTICAL-PROMPT', 'Hermes→MCP/TACTICAL-RESPONSE', '[战术层]'],
         'REACTIVE': ['[反应层/PROMPT]', '[反应层/RESPONSE]', '[反应层/触发]', '[反应层/决策]', '[反应层/失败]', '[反应层]'],

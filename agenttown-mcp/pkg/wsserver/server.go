@@ -397,7 +397,7 @@ func (s *Server) SendEnvelope(agentID, msgType string, payload any) error {
 
 	// Log outbound envelopes. Full payload for low-frequency types;
 	// compact for heartbeat/resync (narrative text is logged separately
-	// at main.go:525 as [Hermes→MCP/RESPONSE]).
+	// by the tactical/strategic layers as [LLM→MCP/...-RESPONSE]).
 	switch msgType {
 	case protocol.TypeHeartbeat, protocol.TypeResync:
 		s.log.Debug("[MCP→UE]", "type", msgType, "seq", seq, "agent_id", agentID)
