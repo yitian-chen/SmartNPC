@@ -63,7 +63,7 @@ const tacticalPromptBody = `[战术层/任务分解] 当前时段目标：%s
 1. 队列首个动作必须是 speak（用一句话表达此刻内心想法或独白），然后才是其他动作
 2. 后续每行输出一个 {"action":"工具名","params":{...}}，按执行顺序排列
 3. 队列必须以长复合动作（标记 [复合]）结尾——长复合动作会持续执行直到时段切换，让 NPC 一直工作到下一 schedule 节点被 worker 主动打断
-4. 禁止输出 wait 动作；复合动作已包含自动移动到对应位置的逻辑，禁止在复合动作前加 move_to——直接输出单个长复合动作即可。仅当前置目标确实没有匹配的复合动作时才用 move_to + interact 原子组合
+4. 禁止输出 wait 动作；复合动作已包含自动移动到对应位置的逻辑，禁止在复合动作前加 move_to——直接输出单个长复合动作即可。
 5. 仅当目标确实没有匹配的长复合动作时（极少见），才用原子动作组合、结合调用兜底的 generic_act 通用动作实现目标
 6. move_to/turn_to 的 target_id 用上方"可前往区域"的 zone id；interact 和复合动作的 semantic_group 必须严格使用上方"可交互物体"给出的 semantic_group 值，禁止编造、禁止用实例 id（如 Charge-1）、禁止拼接 zone/interaction 信息
 7. 每行一个 JSON 对象，不要输出 JSON 数组，不要输出 markdown 围栏，不要输出任何其他文字；不要输出 inner_thought 字段，内心独白直接用首个 speak 动作表达
