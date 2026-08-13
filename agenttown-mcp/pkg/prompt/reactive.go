@@ -80,7 +80,7 @@ const ReplanDedupeGameMinutes = 60
 // knows the field exists but is currently unavailable.
 // physicalLine is injected by the caller: empty when UE hasn't implemented
 // physical state (prompt omits physical segment); non-empty looks like
-// "物理：体力=X/100, 疲劳=Y/100, 健康=Z/100".
+// "物理：体力=X/100, 疲劳=Y/100, 关节磨损=Z/100".
 // physicalRuleLine is injected by the caller: physical alert judgment points
 // when physical state is available; empty skips.
 const ReactivePromptTemplate = `你是 NPC %s 的反应决策模块。当前情况需要你判断是否打断当前行动进行重规划。

@@ -273,8 +273,8 @@ type Envelope struct {
 | 时间单位 | 所有时间戳为**毫秒**；时长字段以 `_ms`/`_sec` 后缀标注 |
 | 坐标单位 | UE5 厘米(cm)，position=[X,Y,Z]，rotation=[Pitch,Yaw,Roll] 度 |
 | 保留 ID | `agent_id = "system"` 仅用于 heartbeat/error 等系统级消息 |
-| 感知 vs 状态分工 | perception_update 负责空间+环境；state_report 是物理状态权威通道 |
-| 物理 delta 阈值 | energy/fatigue/health 变化 ≥5，joint_wear 变化 ≥1 才携带 |
+| 感知 vs 状态分工 | perception_update 负责空间+环境+物理状态全量三项；state_report 兜底物理状态 + 任务进度 |
+| 物理 delta 阈值 | perception_update 携带全量 energy/fatigue/joint_wear 三项；state_report 兜底 |
 
 ### 消息类型总表
 
@@ -287,7 +287,7 @@ type Envelope struct {
 | `action_queued` | UE→Agent | 排队状态通知（queued/advanced/timeout） | auto_queue=true 的 action 目标 Smart Object 被占用且支持排队时 |
 | `stop_action` | Agent→UE | 停止当前动作 | 反应层打断 |
 | `event_notification` | Agent→Agent | 事件通知（内部路由） | Director 投放事件 |
-| `state_report` | UE→Agent | 物理状态权威上报 | 变化超阈值 / 每 15 秒兜底 |
+| `state_report` | UE→Agent | 物理状态兜底上报 + 任务进度 | 兜底（perception_update 主数据源） |
 | `agent_registered` | UE→Agent | 机器人上线 | RobotActor BeginPlay |
 | `agent_unregistered` | UE→Agent | 机器人下线 | RobotActor EndPlay |
 | `heartbeat` | 双向 | 心跳保活 | 每 5 秒 |
@@ -348,14 +348,14 @@ sequenceDiagram
 | 数值类别 | 主人 | 变更触发 | UE 需要 | 同步方式 |
 |----------|------|----------|---------|----------|
 | Agent 内部状态（mood/social_need/emotion） | Agent | LLM 反思 / 交互判断 | ❌ | 不同步 |
-| 物理状态（energy/fatigue/joint_wear/health） | UE | 行为消耗 / 充电恢复 | ✅ 主人 | state_report 上报 |
+| 物理状态（energy/fatigue/joint_wear） | UE | 行为消耗 / 充电恢复 | ✅ 主人 | perception_update 全量上报（state_report 兜底） |
 | 关系数值（familiarity/affection） | Agent | 交互后 LLM 更新 | ❌ | 不同步 |
 | 空间状态（position/rotation/zone） | UE | 每帧 / Overlap 触发 | ✅ 主人 | perception_update 上报 |
 | 任务状态（plan/queue/stack） | Agent | 分层思考产出 | ❌ | 不同步 |
 
-### 物理状态四项
+### 物理状态三项
 
-energy / fatigue / joint_wear / health，通过 `state_report` 权威通道上报。delta 阈值：energy/fatigue/health ≥5，joint_wear ≥1。每 15 秒兜底全量上报。
+energy / fatigue / joint_wear，通过 `perception_update` 全量上传（`physical_state_delta` map 携带三项）。`state_report` 保留 `PhysicalState` 作为兜底（perception 未带物理状态时补写）。delta 阈值不再适用（perception_update 始终全量）。
 
 ## MCP 工具
 

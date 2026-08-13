@@ -258,8 +258,8 @@ graph TB
 > **系统初始化消息**：`capability_registry` 与 `world_kb` 是**连接成功后 UE 主动下发的系统级数据初始化消息**（`agent_id="system"`），在 Agent 进程准备就绪后首先送达，Agent 据此构建能力认知与世界认知。二者不期待 ACK 回执。
 
 > **约定 5（感知 vs 状态分工，消除 #6 冗余）**：
-> - `perception_update` 负责**空间与环境感知**（position/rotation/zone/visible_agents/nearby_objects/audible_events/environment），**默认不携带 physical_state**；仅当某项物理数值自上次上报变化 ≥ 阈值（energy/fatigue/health 变化 ≥5，joint_wear 变化 ≥1）时，在 perception_update 中附带该变化项。
-> - `state_report` 是 **physical_state 的权威通道**：状态变化超阈值时即时上报，且每 15 秒做一次兜底全量上报，保证 Agent 侧物理状态不漂移。
+> - `perception_update` 负责**空间与环境感知 + 物理状态全量上报**（position/rotation/zone/visible_agents/nearby_objects/audible_events/environment + physical_state 全量 energy/fatigue/joint_wear 三项）。每次 perception_update 携带当前全量物理状态。
+> - `state_report` 作为 **physical_state 的兜底通道**：当 perception_update 未携带物理状态时补写，同时上报 current_task_progress。
 
 ### 2.3 各消息详细定义
 
@@ -900,8 +900,7 @@ graph TB
     "physical_state": {
       "energy": 20,
       "fatigue": 70,
-      "joint_wear": 85,
-      "health": 85
+      "joint_wear": 85
     },
     "current_task_progress": {
       "action_id": "act_010",
@@ -1020,7 +1019,6 @@ graph TB
             P1["energy"]
             P2["fatigue"]
             P3["joint_wear"]
-            P4["health"]
         end
 
         subgraph Relational["Relationship (Agent owns)"]
@@ -1052,7 +1050,7 @@ graph TB
 | 数值类别 | 主人 | 存储位置 | 变更触发 | UE 是否需要 | 同步方式 |
 |----------|------|----------|----------|-------------|----------|
 | **Agent 内部状态**（mood/social_need/emotion） | Agent | Agent Mind 内存 | LLM 反思 / 交互后判断 | ❌ 不需要 | 不同步 |
-| **物理持久状态**（energy/fatigue/joint_wear/health） | UE | RobotStateComponent | 行为消耗 / 充电恢复 | ✅ 主人 | 上报给 Agent |
+| **物理持久状态**（energy/fatigue/joint_wear） | UE | RobotStateComponent | 行为消耗 / 充电恢复 | ✅ 主人 | 上报给 Agent |
 | **关系数值**（familiarity/affection） | Agent | 关系服务 | 交互后 LLM 判断更新 | ❌ 不需要 | 不同步 |
 | **空间状态**（position/zone） | UE | Actor Transform / ZoneTrigger | 每帧 / Overlap 触发 | ✅ 主人 | 上报给 Agent |
 | **任务状态**（plan/queue/stack） | Agent | Agent Mind 内存 | 分层思考产出 | ❌ 不需要 | 不同步 |
@@ -1093,7 +1091,6 @@ graph TB
 | energy | 物理 | UE | RobotStateComponent | 行为消耗/充电恢复 | ✅ 主人 | perception_update 上报 |
 | fatigue | 物理 | UE | RobotStateComponent | 持续工作累积 | ✅ 主人 | perception_update 上报 |
 | joint_wear | 物理 | UE | RobotStateComponent | 移动/重体力累积 | ✅ 主人 | perception_update 上报 |
-| health | 物理 | UE | RobotStateComponent | 事故/修理 | ✅ 主人 | perception_update 上报 |
 | familiarity | 关系 | Agent | 关系服务 | 交互后 LLM 更新 | ❌ | 不同步 |
 | affection | 关系 | Agent | 关系服务 | 交互后 LLM 更新 | ❌ | 不同步 |
 | relationship_type | 关系 | Agent | 关系服务 | LLM 判断更新 | ❌ | 不同步 |
