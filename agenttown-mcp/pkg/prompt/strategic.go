@@ -77,8 +77,10 @@ const StrategicPromptTemplate = `[战略层/每日规划] 现在是仿真时间 
 示例：[{"time":"07:00-09:00","goal":"早晨去上网休闲放松"},{"time":"09:00-12:00","goal":"上午车间装配作业"},{"time":"12:00-14:00","goal":"午间停工短暂休息"},{"time":"14:00-18:00","goal":"下午继续在车间装配"},{"time":"18:00-22:00","goal":"傍晚去充电站补电"},{"time":"22:00-07:00","goal":"夜间在休眠舱休息"}]`
 
 // BuildStrategic constructs the strategic layer prompt's KB context segment,
-// containing five parts:
+// containing six parts:
 //   - 【你的角色】: from AgentRole(kb, profiles, agentID)
+//   - 【今日日程】: from dayContext (pre-formatted by weeklyschedule.WeeklyLine;
+//     "" skips the segment — disabled or dayCount<0)
 //   - 【物理状态】: from PhysicalLine(physical); nil → default fresh state
 //   - 【世界知识】: from KBContext(kb) (shared with tactical layer)
 //   - 【区域设施映射】: zone→object mapping (currently disabled — see comment)
@@ -88,12 +90,22 @@ const StrategicPromptTemplate = `[战略层/每日规划] 现在是仿真时间 
 // actions == nil → falls back to builtin 6 composite tools (same as tactical).
 // profiles == nil → AgentRole falls back to hardcoded fallback (KB persona ignored).
 // physical == nil → PhysicalLine falls back to default fresh state (100/0/0/100).
-func BuildStrategic(kb *worldkb.KB, profiles map[string]*profile.Profile, agentID string, actions []protocol.CapabilityAction, physical *protocol.PhysicalState) string {
+// dayContext == "" → skips 【今日日程】 segment (weekly schedule disabled or
+// dayCount < 0 before first perception).
+func BuildStrategic(kb *worldkb.KB, profiles map[string]*profile.Profile, agentID string, actions []protocol.CapabilityAction, physical *protocol.PhysicalState, dayContext string) string {
 	var sb strings.Builder
 	// 【你的角色】段仅依赖 profile + fallback，与 KB 可用性解耦。
 	if role := AgentRole(kb, profiles, agentID); role != "" {
 		sb.WriteString("【你的角色】\n")
 		sb.WriteString(role)
+	}
+	// 【今日日程】段：每周日程上下文（星期几 + 工作日/休息日 + 当日提示）。
+	// dayContext 由调用方通过 weeklyschedule.WeeklyLine(dayCount, sched) 预格式化，
+	// pkg/prompt 不依赖 weeklyschedule 包（解耦）。空串=禁用或 dayCount<0，跳过。
+	if dayContext != "" {
+		sb.WriteString("【今日日程】\n")
+		sb.WriteString(dayContext)
+		sb.WriteString("\n")
 	}
 	if line := PhysicalLine(physical); line != "" {
 		sb.WriteString("【物理状态】\n")
