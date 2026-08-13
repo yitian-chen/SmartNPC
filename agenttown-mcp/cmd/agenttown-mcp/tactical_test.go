@@ -433,7 +433,7 @@ func TestSelectCurrentGoal_PlanningWindowBoundary(t *testing.T) {
 
 func TestGenerateTacticalPlan_HTTPError(t *testing.T) {
 	tc := &fakeStrategicCaller{err: errors.New("network down")}
-	actions, err := generateTacticalPlan(context.Background(), tc, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", &protocol.PhysicalState{Energy: 80, Fatigue: 20, JointWear: 10, Health: 100}, nil, nil, slog.Default(), "", "", "", nil, nil, nil)
+	actions, err := generateTacticalPlan(context.Background(), tc, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", &protocol.PhysicalState{Energy: 80, Fatigue: 20, JointWear: 10}, nil, nil, slog.Default(), "", "", "", nil, nil, nil)
 	if err == nil {
 		t.Fatal("expected error on HTTP failure")
 	}
@@ -450,7 +450,7 @@ func TestGenerateTacticalPlan_ValidResponse(t *testing.T) {
 		`{"action":"move_to","params":{"target_type":"zone","target_id":"main_workshop"}}` + "\n" +
 		`{"action":"work_shift","params":{"semantic_group":"workbench_01","interaction":"assemble"}}`
 	tc := &fakeStrategicCaller{resp: makeStrategicResponse(raw)}
-	actions, err := generateTacticalPlan(context.Background(), tc, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", &protocol.PhysicalState{Energy: 80, Fatigue: 20, JointWear: 10, Health: 100}, nil, nil, slog.Default(), "", "", "", nil, nil, nil)
+	actions, err := generateTacticalPlan(context.Background(), tc, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", &protocol.PhysicalState{Energy: 80, Fatigue: 20, JointWear: 10}, nil, nil, slog.Default(), "", "", "", nil, nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -521,7 +521,7 @@ func TestBuildTacticalPrompt_ZeroPhysical(t *testing.T) {
 }
 
 func TestBuildTacticalPrompt_WithPhysical(t *testing.T) {
-	promptText := prompt.BuildTactical(prompt.TacticalInput{Goal: "装配", Zone: "main_workshop", TimeOfDay: "09:00", Slot: "09:00-12:00", Physical: &protocol.PhysicalState{Energy: 75, Fatigue: 30, JointWear: 5, Health: 90}, KB: nil, Hint: "", Actions: nil, AgentID: ""})
+	promptText := prompt.BuildTactical(prompt.TacticalInput{Goal: "装配", Zone: "main_workshop", TimeOfDay: "09:00", Slot: "09:00-12:00", Physical: &protocol.PhysicalState{Energy: 75, Fatigue: 30, JointWear: 5}, KB: nil, Hint: "", Actions: nil, AgentID: ""})
 	if !strings.Contains(promptText, "能量 75") {
 		t.Errorf("prompt should contain '能量 75', got: %s", promptText)
 	}
@@ -536,7 +536,7 @@ func TestBuildTacticalPrompt_WithPhysical(t *testing.T) {
 
 func TestBuildTacticalPrompt_InjectsKBContext(t *testing.T) {
 	kb := loadTestKB(t)
-	promptText := prompt.BuildTactical(prompt.TacticalInput{Goal: "装配", Zone: "main_workshop", TimeOfDay: "09:00", Slot: "09:00-12:00", Physical: &protocol.PhysicalState{Energy: 75, Fatigue: 30, JointWear: 5, Health: 90}, KB: kb, Hint: "", Actions: nil, AgentID: ""})
+	promptText := prompt.BuildTactical(prompt.TacticalInput{Goal: "装配", Zone: "main_workshop", TimeOfDay: "09:00", Slot: "09:00-12:00", Physical: &protocol.PhysicalState{Energy: 75, Fatigue: 30, JointWear: 5}, KB: kb, Hint: "", Actions: nil, AgentID: ""})
 	// 应包含 KB 中所有 zone（assets/world_kb.yaml 当前是 7-zone 工业园区）
 	for _, zID := range []string{"main_workshop", "central_plaza", "logistics_hub", "repair_bay", "residential_quarters", "archive_station", "recycling_yard"} {
 		if !strings.Contains(promptText, zID) {
@@ -588,7 +588,7 @@ func TestBuildTacticalPrompt_InjectsObjectStatus(t *testing.T) {
 		Zone:          "main_workshop",
 		TimeOfDay:     "09:00",
 		Slot:          "09:00-12:00",
-		Physical:      &protocol.PhysicalState{Energy: 75, Fatigue: 30, JointWear: 5, Health: 90},
+		Physical:      &protocol.PhysicalState{Energy: 75, Fatigue: 30, JointWear: 5},
 		KB:            kb,
 		Hint:          "",
 		Actions:       nil,
@@ -629,7 +629,7 @@ func TestBuildTacticalPrompt_NilObjectStatusNoSection(t *testing.T) {
 		Zone:     "main_workshop",
 		TimeOfDay: "09:00",
 		Slot:     "09:00-12:00",
-		Physical: &protocol.PhysicalState{Energy: 75, Fatigue: 30, JointWear: 5, Health: 90},
+		Physical: &protocol.PhysicalState{Energy: 75, Fatigue: 30, JointWear: 5},
 		KB:       kb,
 		Hint:     "",
 		Actions:  nil,
@@ -665,7 +665,7 @@ func TestBuildTacticalPrompt_NilKB(t *testing.T) {
 // "沉稳"性格影响 action 选择与节奏），而非机械分解。
 func TestBuildTacticalPrompt_InjectsAgentRole(t *testing.T) {
 	kb := loadTestKB(t)
-	promptText := prompt.BuildTactical(prompt.TacticalInput{Goal: "装配", Zone: "main_workshop", TimeOfDay: "09:00", Slot: "09:00-12:00", Physical: &protocol.PhysicalState{Energy: 75, Fatigue: 30, JointWear: 5, Health: 90}, KB: kb, Hint: "", Actions: nil, AgentID: "H-01"})
+	promptText := prompt.BuildTactical(prompt.TacticalInput{Goal: "装配", Zone: "main_workshop", TimeOfDay: "09:00", Slot: "09:00-12:00", Physical: &protocol.PhysicalState{Energy: 75, Fatigue: 30, JointWear: 5}, KB: kb, Hint: "", Actions: nil, AgentID: "H-01"})
 	if !strings.Contains(promptText, "【你的角色】") {
 		t.Errorf("prompt missing '【你的角色】' section header, got: %s", promptText)
 	}
@@ -696,7 +696,7 @@ func TestBuildTacticalPrompt_AgentNotFoundNoRole(t *testing.T) {
 }
 
 func TestBuildTacticalPrompt_WithHint(t *testing.T) {
-	promptText := prompt.BuildTactical(prompt.TacticalInput{Goal: "装配", Zone: "main_workshop", TimeOfDay: "09:00", Slot: "09:00-12:00", Physical: &protocol.PhysicalState{Energy: 75, Fatigue: 30, JointWear: 5, Health: 90}, KB: nil, Hint: "fatigue=72 已突破警戒带，当前装配任务不合理", Actions: nil, AgentID: ""})
+	promptText := prompt.BuildTactical(prompt.TacticalInput{Goal: "装配", Zone: "main_workshop", TimeOfDay: "09:00", Slot: "09:00-12:00", Physical: &protocol.PhysicalState{Energy: 75, Fatigue: 30, JointWear: 5}, KB: nil, Hint: "fatigue=72 已突破警戒带，当前装配任务不合理", Actions: nil, AgentID: ""})
 	if !strings.Contains(promptText, "【上次中断原因】") {
 		t.Errorf("prompt should contain '【上次中断原因】' when hint is non-empty, got: %s", promptText)
 	}
@@ -709,7 +709,7 @@ func TestBuildTacticalPrompt_WithHint(t *testing.T) {
 }
 
 func TestBuildTacticalPrompt_NoHint(t *testing.T) {
-	promptText := prompt.BuildTactical(prompt.TacticalInput{Goal: "装配", Zone: "main_workshop", TimeOfDay: "09:00", Slot: "09:00-12:00", Physical: &protocol.PhysicalState{Energy: 75, Fatigue: 30, JointWear: 5, Health: 90}, KB: nil, Hint: "", Actions: nil, AgentID: ""})
+	promptText := prompt.BuildTactical(prompt.TacticalInput{Goal: "装配", Zone: "main_workshop", TimeOfDay: "09:00", Slot: "09:00-12:00", Physical: &protocol.PhysicalState{Energy: 75, Fatigue: 30, JointWear: 5}, KB: nil, Hint: "", Actions: nil, AgentID: ""})
 	if strings.Contains(promptText, "【上次中断原因】") {
 		t.Errorf("prompt should not contain '【上次中断原因】' when hint is empty, got: %s", promptText)
 	}
@@ -727,7 +727,7 @@ func TestBuildTacticalPrompt_RegistryFiltersTools(t *testing.T) {
 		{Cmd: protocol.CmdMoveTo, Kind: "atomic"},
 		{Cmd: protocol.CmdWait, Kind: "atomic"},
 	})
-	promptText := prompt.BuildTactical(prompt.TacticalInput{Goal: "装配", Zone: "main_workshop", TimeOfDay: "09:00", Slot: "09:00-12:00", Physical: &protocol.PhysicalState{Energy: 75, Fatigue: 30, JointWear: 5, Health: 90}, KB: nil, Hint: "", Actions: reg.EffectiveActions("H-01"), AgentID: "H-01"})
+	promptText := prompt.BuildTactical(prompt.TacticalInput{Goal: "装配", Zone: "main_workshop", TimeOfDay: "09:00", Slot: "09:00-12:00", Physical: &protocol.PhysicalState{Energy: 75, Fatigue: 30, JointWear: 5}, KB: nil, Hint: "", Actions: reg.EffectiveActions("H-01"), AgentID: "H-01"})
 	// Tool bullet list should contain move_to.
 	if !strings.Contains(promptText, "- move_to [原子]:") {
 		t.Errorf("prompt should list move_to as [原子] bullet, got: %s", promptText)
@@ -1339,7 +1339,7 @@ func TestPhysicalAlertOverrideGoal_FatigueAlert(t *testing.T) {
 	got, ok := physicalAlertOverrideGoal(
 		"物理状态告警自动升级(疲劳=82超过80)；原决策=observe/...",
 		origGoal,
-		&protocol.PhysicalState{Fatigue: 82, Energy: 80, Health: 100},
+		&protocol.PhysicalState{Fatigue: 82, Energy: 80},
 	)
 	if !ok {
 		t.Errorf("fatigue>80 should trigger override")
@@ -1354,7 +1354,7 @@ func TestPhysicalAlertOverrideGoal_EnergyAlert(t *testing.T) {
 	got, ok := physicalAlertOverrideGoal(
 		"物理状态告警自动升级(体力=35低于40)",
 		origGoal,
-		&protocol.PhysicalState{Fatigue: 30, Energy: 35, Health: 100},
+		&protocol.PhysicalState{Fatigue: 30, Energy: 35},
 	)
 	if !ok {
 		t.Errorf("energy<40 should trigger override")
@@ -1364,27 +1364,12 @@ func TestPhysicalAlertOverrideGoal_EnergyAlert(t *testing.T) {
 	}
 }
 
-func TestPhysicalAlertOverrideGoal_HealthAlert(t *testing.T) {
-	origGoal := "车间装配"
-	got, ok := physicalAlertOverrideGoal(
-		"物理状态告警自动升级(健康=45低于50)",
-		origGoal,
-		&protocol.PhysicalState{Fatigue: 30, Energy: 80, Health: 45},
-	)
-	if !ok {
-		t.Errorf("health<50 should trigger override")
-	}
-	if !strings.Contains(got, "维修") {
-		t.Errorf("override goal should mention 维修, got=%q", got)
-	}
-}
-
 func TestPhysicalAlertOverrideGoal_JointWearAlert(t *testing.T) {
 	origGoal := "车间装配"
 	got, ok := physicalAlertOverrideGoal(
 		"物理状态告警自动升级(关节磨损=75超过70)",
 		origGoal,
-		&protocol.PhysicalState{Fatigue: 30, Energy: 80, JointWear: 75, Health: 100},
+		&protocol.PhysicalState{Fatigue: 30, Energy: 80, JointWear: 75},
 	)
 	if !ok {
 		t.Errorf("joint_wear>70 should trigger override")
@@ -1399,7 +1384,7 @@ func TestPhysicalAlertOverrideGoal_FatigueTakesPrecedence(t *testing.T) {
 	got, ok := physicalAlertOverrideGoal(
 		"物理状态告警",
 		"工作",
-		&protocol.PhysicalState{Fatigue: 85, Energy: 30, Health: 100},
+		&protocol.PhysicalState{Fatigue: 85, Energy: 30},
 	)
 	if !ok {
 		t.Errorf("should trigger override")
@@ -1414,7 +1399,7 @@ func TestPhysicalAlertOverrideGoal_FatigueTakesPrecedence(t *testing.T) {
 func TestBuildTacticalPrompt_PhysicalAlertConstraint(t *testing.T) {
 	kb := loadTestKB(t)
 	hint := "物理状态告警自动升级(疲劳=82超过80)；原决策=observe/..."
-	promptText := prompt.BuildTactical(prompt.TacticalInput{Goal: "前往充电站休息", Zone: "main_workshop", TimeOfDay: "13:15", Slot: "13:00-17:00", Physical: &protocol.PhysicalState{Energy: 88, Fatigue: 82, JointWear: 0, Health: 100}, KB: kb, Hint: hint, Actions: nil, AgentID: "H-01"})
+	promptText := prompt.BuildTactical(prompt.TacticalInput{Goal: "前往充电站休息", Zone: "main_workshop", TimeOfDay: "13:15", Slot: "13:00-17:00", Physical: &protocol.PhysicalState{Energy: 88, Fatigue: 82, JointWear: 0}, KB: kb, Hint: hint, Actions: nil, AgentID: "H-01"})
 
 	if !strings.Contains(promptText, "【物理告警强制约束】") {
 		t.Errorf("prompt should contain physical alert constraint section, got: %s", promptText)
@@ -1432,7 +1417,7 @@ func TestBuildTacticalPrompt_PhysicalAlertConstraint(t *testing.T) {
 func TestBuildTacticalPrompt_PhysicalAlertJointWearConstraint(t *testing.T) {
 	kb := loadTestKB(t)
 	hint := "物理状态告警自动升级(关节磨损=75超过70)；原决策=observe/..."
-	promptText := prompt.BuildTactical(prompt.TacticalInput{Goal: "车间装配", Zone: "main_workshop", TimeOfDay: "14:00", Slot: "13:00-17:00", Physical: &protocol.PhysicalState{Energy: 88, Fatigue: 30, JointWear: 75, Health: 100}, KB: kb, Hint: hint, Actions: nil, AgentID: "H-01"})
+	promptText := prompt.BuildTactical(prompt.TacticalInput{Goal: "车间装配", Zone: "main_workshop", TimeOfDay: "14:00", Slot: "13:00-17:00", Physical: &protocol.PhysicalState{Energy: 88, Fatigue: 30, JointWear: 75}, KB: kb, Hint: hint, Actions: nil, AgentID: "H-01"})
 
 	if !strings.Contains(promptText, "【物理告警强制约束】") {
 		t.Errorf("prompt should contain constraint section, got: %s", promptText)
@@ -1444,7 +1429,7 @@ func TestBuildTacticalPrompt_PhysicalAlertJointWearConstraint(t *testing.T) {
 	if strings.Contains(promptText, "self_maintenance（无助于恢复）") {
 		t.Errorf("prompt should NOT forbid self_maintenance for joint_wear-only alert, got: %s", promptText)
 	}
-	// 关节磨损告警不禁 work_shift（仅疲劳/健康告警才禁）
+	// 关节磨损告警不禁 work_shift（仅疲劳告警才禁）
 	if strings.Contains(promptText, "work_shift（消耗体力）") {
 		t.Errorf("prompt should NOT forbid work_shift for joint_wear-only alert, got: %s", promptText)
 	}
@@ -1453,7 +1438,7 @@ func TestBuildTacticalPrompt_PhysicalAlertJointWearConstraint(t *testing.T) {
 func TestBuildTacticalPrompt_NoPhysicalAlertConstraint(t *testing.T) {
 	kb := loadTestKB(t)
 	// 普通 hint（无"物理状态告警"标记）不应插入强约束段
-	promptText := prompt.BuildTactical(prompt.TacticalInput{Goal: "车间装配", Zone: "main_workshop", TimeOfDay: "09:00", Slot: "09:00-12:00", Physical: &protocol.PhysicalState{Energy: 90, Fatigue: 20, JointWear: 0, Health: 100}, KB: kb, Hint: "上次中断原因：zone 变化", Actions: nil, AgentID: "H-01"})
+	promptText := prompt.BuildTactical(prompt.TacticalInput{Goal: "车间装配", Zone: "main_workshop", TimeOfDay: "09:00", Slot: "09:00-12:00", Physical: &protocol.PhysicalState{Energy: 90, Fatigue: 20, JointWear: 0}, KB: kb, Hint: "上次中断原因：zone 变化", Actions: nil, AgentID: "H-01"})
 
 	if strings.Contains(promptText, "【物理告警强制约束】") {
 		t.Errorf("non-physical-alert hint should NOT contain constraint section, got: %s", promptText)

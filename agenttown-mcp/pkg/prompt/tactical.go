@@ -104,7 +104,6 @@ func BuildTactical(in TacticalInput) string {
 	//   - 低电量 → charge_at_station 充电
 	//   - 高疲劳 → charge_at_station 充电 / rest_at_residence 休息
 	//   - 高关节磨损 → self_maintenance 维修保养
-	//   - 低健康 → rest_at_residence / self_maintenance 恢复
 	if strings.Contains(in.Hint, "物理状态告警") && in.Physical != nil && !in.Physical.IsZero() {
 		var reqs, forbids []string
 		if in.Physical.Energy < EnergyAlertThreshold {
@@ -116,18 +115,14 @@ func BuildTactical(in TacticalInput) string {
 		if in.Physical.JointWear > JointWearAlertThreshold {
 			reqs = append(reqs, "- 关节磨损过高：必须优先 self_maintenance（维护保养），否则持续工作会加剧损耗")
 		}
-		if in.Physical.Health < HealthAlertThreshold {
-			reqs = append(reqs, "- 健康过低：优先 rest_at_residence（休息）或 self_maintenance（保养）恢复")
-		}
 		// 禁止项：仅禁止与所有活跃告警冲突的消耗性动作
 		// 关节磨损告警时不禁 self_maintenance（那是需要的恢复动作）
 		fatigueAlert := in.Physical.Fatigue > FatigueAlertThreshold
 		jointWearAlert := in.Physical.JointWear > JointWearAlertThreshold
-		healthAlert := in.Physical.Health < HealthAlertThreshold
-		if fatigueAlert || healthAlert {
+		if fatigueAlert {
 			forbids = append(forbids, "work_shift（消耗体力）")
 		}
-		if jointWearAlert || healthAlert {
+		if jointWearAlert {
 			forbids = append(forbids, "surf_internet（无助于恢复）")
 		}
 		if fatigueAlert {

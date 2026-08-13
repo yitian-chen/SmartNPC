@@ -162,10 +162,11 @@ func (a *agentContext) observePerception(payload json.RawMessage) (ReactiveTrigg
 	}
 	pCount := upd.PerceptionCount
 
-	// 检测显著变化（zone/新物体）。物理警戒带由 updateState 检测，
-	// 这里 prev/cur physical 都用 latestPhysical（即上次 state_report），
-	// 不重复检测物理触发。
-	trigger, detail := prompt.ShouldTriggerReactive(upd.PrevZone, upd.CurZone, upd.PrevObjectIDs, upd.CurObjectIDs, upd.PrevPhysical, upd.PrevPhysical)
+	// 检测显著变化（zone/新物体）+ 物理警戒带突破。物理状态由 perception_update
+	// 携带全量 3 项（energy/fatigue/joint_wear）上传，SetPerception 写入
+	// latestPhysical 并返回 PrevPhysical/CurPhysical 供此处警戒带检测。
+	// state_report 路径（updateState）作为兜底，在 perception 未带物理状态时补写。
+	trigger, detail := prompt.ShouldTriggerReactive(upd.PrevZone, upd.CurZone, upd.PrevObjectIDs, upd.CurObjectIDs, upd.PrevPhysical, upd.CurPhysical)
 	// 事件类触发优先；无事件时检查周期性触发
 	if trigger == "" {
 		trigger, detail = prompt.ShouldTriggerPeriodic(pCount)
@@ -177,8 +178,11 @@ func (a *agentContext) observePerception(payload json.RawMessage) (ReactiveTrigg
 	return trigger, detail, nil
 }
 
-// updateState 存储权威的物理/任务状态。反应层：检测物理状态突破警戒带，
-// 返回 trigger 信息供 message handler 触发 reactiveRunner。
+// updateState 存储兜底物理状态 + 当前任务进度。物理状态主数据源是
+// perception_update（observePerception 路径），state_report 作为兜底：
+// 当 perception_update 未携带物理状态时由这里补写 latestPhysical。
+// 反应层：检测物理状态突破警戒带，返回 trigger 信息供 message handler
+// 触发 reactiveRunner。current_task_progress 始终更新（战术层在用）。
 func (a *agentContext) updateState(report protocol.StateReportPayload) (ReactiveTrigger, string) {
 	a.coordMu.Lock()
 	if a.stopped {
@@ -261,7 +265,7 @@ func (a *agentContext) recordActionCompletion(completion protocol.ActionComplete
 		if sg != "" {
 			hint += fmt.Sprintf(" semantic_group=%s", sg)
 		}
-		hint += fmt.Sprintf(" result=%s reason=%s。本次规划请避免直接重试同一动作——若目标物体被占用，改用其他可用 semantic_group 或先 generic_act(behavior=look_around) 短暂等待",
+		hint += fmt.Sprintf(" result=%s reason=%s。本次规划请避免直接重试同一动作——若目标物体被占用，如同类物体有空余，请先直接重试同一动作；如果同类物品已没有空余，可先 generic_act(behavior=look_around) 短暂等待后安排其他的事情做",
 			completion.Result, completion.Reason)
 		a.as.SetReplanHint(hint)
 	}
@@ -1646,7 +1650,7 @@ func main() {
 			trigger, detail := ac.updateState(sr)
 			logger.Info("state_report", "agent_id", agentID,
 				"energy", sr.PhysicalState.Energy, "fatigue", sr.PhysicalState.Fatigue,
-				"joint_wear", sr.PhysicalState.JointWear, "health", sr.PhysicalState.Health)
+				"joint_wear", sr.PhysicalState.JointWear)
 			if trigger != "" && autoPlanEnabled {
 				go reactiveRunnerRef.trigger(agentID, ac, trigger, detail)
 			}

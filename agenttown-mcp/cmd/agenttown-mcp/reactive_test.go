@@ -22,7 +22,6 @@ func TestBuildReactivePrompt_Defaults(t *testing.T) {
 		Energy:            45,
 		Fatigue:           30,
 		JointWear:         15,
-		Health:            90,
 		PhysicalAvailable: true,
 		CurrentAction:     "WorkShift(smart_object=workbench_01, interaction=assemble)",
 		ElapsedSec:        120,
@@ -157,7 +156,7 @@ func TestBuildReactivePrompt_InjectsAgentRole(t *testing.T) {
 		AgentRole:     role,
 		TimeOfDay:     "14:30",
 		Zone:          "main_workshop",
-		Energy:        45, Fatigue: 30, Health: 90,
+		Energy:        45, Fatigue: 30,
 		CurrentAction: "WorkShift(smart_object=workbench_01)",
 		ActionSrc:     "tactical",
 		CurrentSlot:   "14:00-18:00",
@@ -279,8 +278,8 @@ func TestShouldTriggerReactive_NewObject(t *testing.T) {
 
 // TestShouldTriggerReactive_EnergyAlert verifies energy threshold crossing.
 func TestShouldTriggerReactive_EnergyAlert(t *testing.T) {
-	prev := &protocol.PhysicalState{Energy: 45, Health: 90, Fatigue: 30}
-	cur := &protocol.PhysicalState{Energy: 38, Health: 90, Fatigue: 30}
+	prev := &protocol.PhysicalState{Energy: 45, Fatigue: 30}
+	cur := &protocol.PhysicalState{Energy: 38, Fatigue: 30}
 	trig, detail := prompt.ShouldTriggerReactive("z", "z", nil, nil, prev, cur)
 	if trig != TriggerPhysicalAlert {
 		t.Errorf("trigger: got %q, want physical_alert", trig)
@@ -293,31 +292,18 @@ func TestShouldTriggerReactive_EnergyAlert(t *testing.T) {
 // TestShouldTriggerReactive_EnergyStaysLow verifies no trigger when energy
 // stays below threshold (already in alert zone, no new crossing).
 func TestShouldTriggerReactive_EnergyStaysLow(t *testing.T) {
-	prev := &protocol.PhysicalState{Energy: 38, Health: 90, Fatigue: 30}
-	cur := &protocol.PhysicalState{Energy: 35, Health: 90, Fatigue: 30}
+	prev := &protocol.PhysicalState{Energy: 38, Fatigue: 30}
+	cur := &protocol.PhysicalState{Energy: 35, Fatigue: 30}
 	trig, _ := prompt.ShouldTriggerReactive("z", "z", nil, nil, prev, cur)
 	if trig != "" {
 		t.Errorf("trigger: got %q, want empty (already in alert)", trig)
 	}
 }
 
-// TestShouldTriggerReactive_HealthAlert verifies health threshold crossing.
-func TestShouldTriggerReactive_HealthAlert(t *testing.T) {
-	prev := &protocol.PhysicalState{Energy: 50, Health: 55, Fatigue: 30}
-	cur := &protocol.PhysicalState{Energy: 50, Health: 48, Fatigue: 30}
-	trig, detail := prompt.ShouldTriggerReactive("z", "z", nil, nil, prev, cur)
-	if trig != TriggerPhysicalAlert {
-		t.Errorf("trigger: got %q, want physical_alert", trig)
-	}
-	if !strings.Contains(detail, "health") || !strings.Contains(detail, "50") {
-		t.Errorf("detail should mention health + 50: %q", detail)
-	}
-}
-
 // TestShouldTriggerReactive_FatigueAlert verifies fatigue threshold crossing.
 func TestShouldTriggerReactive_FatigueAlert(t *testing.T) {
-	prev := &protocol.PhysicalState{Energy: 50, Health: 90, Fatigue: 75}
-	cur := &protocol.PhysicalState{Energy: 50, Health: 90, Fatigue: 82}
+	prev := &protocol.PhysicalState{Energy: 50, Fatigue: 75}
+	cur := &protocol.PhysicalState{Energy: 50, Fatigue: 82}
 	trig, detail := prompt.ShouldTriggerReactive("z", "z", nil, nil, prev, cur)
 	if trig != TriggerPhysicalAlert {
 		t.Errorf("trigger: got %q, want physical_alert", trig)
@@ -329,8 +315,8 @@ func TestShouldTriggerReactive_FatigueAlert(t *testing.T) {
 
 // TestShouldTriggerReactive_JointWearAlert verifies joint_wear threshold crossing.
 func TestShouldTriggerReactive_JointWearAlert(t *testing.T) {
-	prev := &protocol.PhysicalState{Energy: 50, Health: 90, Fatigue: 30, JointWear: 65}
-	cur := &protocol.PhysicalState{Energy: 50, Health: 90, Fatigue: 30, JointWear: 72}
+	prev := &protocol.PhysicalState{Energy: 50, Fatigue: 30, JointWear: 65}
+	cur := &protocol.PhysicalState{Energy: 50, Fatigue: 30, JointWear: 72}
 	trig, detail := prompt.ShouldTriggerReactive("z", "z", nil, nil, prev, cur)
 	if trig != TriggerPhysicalAlert {
 		t.Errorf("trigger: got %q, want physical_alert", trig)
@@ -343,8 +329,8 @@ func TestShouldTriggerReactive_JointWearAlert(t *testing.T) {
 // TestShouldTriggerReactive_JointWearStaysHigh verifies no trigger when joint_wear
 // stays above threshold (already in alert zone, no new crossing).
 func TestShouldTriggerReactive_JointWearStaysHigh(t *testing.T) {
-	prev := &protocol.PhysicalState{Energy: 50, Health: 90, Fatigue: 30, JointWear: 72}
-	cur := &protocol.PhysicalState{Energy: 50, Health: 90, Fatigue: 30, JointWear: 75}
+	prev := &protocol.PhysicalState{Energy: 50, Fatigue: 30, JointWear: 72}
+	cur := &protocol.PhysicalState{Energy: 50, Fatigue: 30, JointWear: 75}
 	trig, _ := prompt.ShouldTriggerReactive("z", "z", nil, nil, prev, cur)
 	if trig != "" {
 		t.Errorf("trigger: got %q, want empty (already in alert)", trig)
@@ -536,7 +522,7 @@ func TestReactiveRunner_BuildInput(t *testing.T) {
 	if _, err := ac.as.SetPerception(mustMarshalPerception(t, zone, "14:30")); err != nil {
 		t.Fatalf("SetPerception: %v", err)
 	}
-	ac.as.SetPhysicalState(&protocol.PhysicalState{Energy: 18, Fatigue: 85, Health: 75, JointWear: 20}, nil)
+	ac.as.SetPhysicalState(&protocol.PhysicalState{Energy: 18, Fatigue: 85, JointWear: 20}, nil)
 	ac.as.RecordActionStarted("act_001", protocol.CmdWorkShift, map[string]any{"semantic_group": "workbench_01", "interaction": "assemble"}, agentstate.SourceTactical)
 
 	in := r.buildInput("H-01", ac, TriggerPhysicalAlert, "energy 22→18")
@@ -558,9 +544,6 @@ func TestReactiveRunner_BuildInput(t *testing.T) {
 	if in.JointWear != 20 {
 		t.Errorf("JointWear: got %v, want 20", in.JointWear)
 	}
-	if in.Health != 75 {
-		t.Errorf("Health: got %v, want 75", in.Health)
-	}
 	// CurrentAction 现在是可读描述（cmd + 关键 params），不再是 actionID
 	if in.CurrentAction != "WorkShift(semantic_group=workbench_01, interaction=assemble)" {
 		t.Errorf("CurrentAction: got %q, want readable description", in.CurrentAction)
@@ -574,7 +557,7 @@ func TestReactiveRunner_BuildInput(t *testing.T) {
 }
 
 // TestReactiveRunner_BuildInput_DefaultsPhysicalWhenNil verifies default physical
-// values when state_report has not yet arrived (latestPhysical == nil).
+// values when perception_update has not yet arrived (latestPhysical == nil).
 func TestReactiveRunner_BuildInput_DefaultsPhysicalWhenNil(t *testing.T) {
 	r := &reactiveRunner{}
 	ac, _ := newAgentContext(context.Background())
@@ -582,9 +565,6 @@ func TestReactiveRunner_BuildInput_DefaultsPhysicalWhenNil(t *testing.T) {
 	in := r.buildInput("H-01", ac, TriggerZoneChange, "zone A→B")
 	if in.Energy != 100 {
 		t.Errorf("Energy default: got %v, want 100", in.Energy)
-	}
-	if in.Health != 100 {
-		t.Errorf("Health default: got %v, want 100", in.Health)
 	}
 	if in.Fatigue != 0 {
 		t.Errorf("Fatigue default: got %v, want 0", in.Fatigue)

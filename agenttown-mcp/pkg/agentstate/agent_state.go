@@ -207,6 +207,7 @@ type PerceptionUpdate struct {
 	PrevZone        string
 	PrevObjectIDs   []string
 	PrevPhysical    *protocol.PhysicalState
+	CurPhysical     *protocol.PhysicalState
 	PerceptionCount int
 }
 
@@ -214,6 +215,11 @@ type PerceptionUpdate struct {
 // perception counter. It returns the zone/object/physical deltas so the
 // caller can run reactive trigger detection. The caller is responsible
 // for the stopped-check (coordination field, lives in agentContext).
+//
+// 物理状态数据源：perception_update 携带全量 3 项（energy/fatigue/joint_wear）
+// 通过 PhysicalStateDelta map 上传。若 map 非空则构造 PhysicalState 写入
+// latestPhysical（覆盖式），作为三层决策的主物理状态来源。map 为空时保持
+// 旧值（PrevPhysical == CurPhysical），跳过物理警戒带检测。
 func (a *AgentState) SetPerception(payload json.RawMessage) (PerceptionUpdate, error) {
 	var p protocol.PerceptionPayload
 	if err := json.Unmarshal(payload, &p); err != nil {
@@ -225,10 +231,25 @@ func (a *AgentState) SetPerception(payload json.RawMessage) (PerceptionUpdate, e
 	}
 	curObjectIDs := extractObjectIDs(p)
 
+	// 从 PhysicalStateDelta map 构造全量 PhysicalState（UE5 上传 3 项）。
+	var newPhysical *protocol.PhysicalState
+	if len(p.PhysicalStateDelta) > 0 {
+		newPhysical = &protocol.PhysicalState{
+			Energy:    p.PhysicalStateDelta["energy"],
+			Fatigue:   p.PhysicalStateDelta["fatigue"],
+			JointWear: p.PhysicalStateDelta["joint_wear"],
+		}
+	}
+
 	a.mu.Lock()
 	prevZone := a.prevZone
 	prevObjectIDs := a.prevObjectIDs
 	prevPhysical := a.latestPhysical
+	curPhysical := prevPhysical
+	if newPhysical != nil {
+		a.latestPhysical = newPhysical
+		curPhysical = newPhysical
+	}
 	a.latestPerception = cloneRawMessage(payload)
 	a.prevZone = curZone
 	a.prevObjectIDs = curObjectIDs
@@ -242,6 +263,7 @@ func (a *AgentState) SetPerception(payload json.RawMessage) (PerceptionUpdate, e
 		PrevZone:        prevZone,
 		PrevObjectIDs:   prevObjectIDs,
 		PrevPhysical:    prevPhysical,
+		CurPhysical:     curPhysical,
 		PerceptionCount: count,
 	}, nil
 }

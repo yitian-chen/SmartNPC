@@ -191,10 +191,10 @@ func TestActionLifecyclePayloads(t *testing.T) {
 	}
 }
 
-// TestStateReportPayload verifies the four physical values.
+// TestStateReportPayload verifies the three physical values.
 func TestStateReportPayload(t *testing.T) {
 	sr := StateReportPayload{
-		PhysicalState:       PhysicalState{Energy: 20, Fatigue: 70, JointWear: 85, Health: 90},
+		PhysicalState:       PhysicalState{Energy: 20, Fatigue: 70, JointWear: 85},
 		CurrentTaskProgress: &CurrentTaskProgress{ActionID: "act_010", Progress: 0.6},
 	}
 	raw, _ := json.Marshal(sr)
@@ -202,7 +202,7 @@ func TestStateReportPayload(t *testing.T) {
 	if json.Unmarshal(raw, &got) != nil {
 		t.Fatal("state_report unmarshal failed")
 	}
-	if got.PhysicalState.Energy != 20 || got.PhysicalState.JointWear != 85 || got.PhysicalState.Health != 90 {
+	if got.PhysicalState.Energy != 20 || got.PhysicalState.JointWear != 85 {
 		t.Fatalf("physical state lost: %+v", got.PhysicalState)
 	}
 	if got.CurrentTaskProgress == nil || got.CurrentTaskProgress.Progress != 0.6 {

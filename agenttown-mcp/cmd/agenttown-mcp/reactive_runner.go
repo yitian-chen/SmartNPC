@@ -135,7 +135,7 @@ func (r *reactiveRunner) trigger(agentID string, ac *agentContext, trigger React
 	r.logger.Info("[反应层/触发]",
 		"agent_id", agentID, "trigger", trigger, "detail", detail,
 		"zone", input.Zone, "time_of_day", input.TimeOfDay,
-		"energy", input.Energy, "fatigue", input.Fatigue, "joint_wear", input.JointWear, "health", input.Health,
+		"energy", input.Energy, "fatigue", input.Fatigue, "joint_wear", input.JointWear,
 		"current_action", input.CurrentAction, "elapsed_sec", input.ElapsedSec,
 		"action_src", input.ActionSrc, "current_slot", input.CurrentSlot)
 	r.logger.Info("[反应层/PROMPT]",
@@ -163,7 +163,7 @@ func (r *reactiveRunner) trigger(agentID string, ac *agentContext, trigger React
 		"agent_id", agentID, "reaction", dec.Reaction, "reason", dec.Reason,
 		"trigger", trigger,
 		"zone", input.Zone, "time_of_day", input.TimeOfDay,
-		"energy", input.Energy, "fatigue", input.Fatigue, "joint_wear", input.JointWear, "health", input.Health,
+		"energy", input.Energy, "fatigue", input.Fatigue, "joint_wear", input.JointWear,
 		"current_action", input.CurrentAction, "elapsed_sec", input.ElapsedSec,
 		"action_src", input.ActionSrc, "current_slot", input.CurrentSlot)
 
@@ -179,14 +179,13 @@ func (r *reactiveRunner) buildInput(agentID string, ac *agentContext, trigger Re
 
 	zone := snap.LatestZone()
 	tod := snap.LatestTimeOfDay()
-	// 物理状态默认值：energy/health 满格，fatigue/joint_wear 为 0（保守安全的"正常"状态）。
-	// state_report 尚未到达时用默认值，避免反应层拿到 0 误判为警戒带触发。
-	energy, fatigue, jointWear, health := 100.0, 0.0, 0.0, 100.0
+	// 物理状态默认值：energy 满格，fatigue/joint_wear 为 0（保守安全的"正常"状态）。
+	// perception_update 尚未到达时用默认值，避免反应层拿到 0 误判为警戒带触发。
+	energy, fatigue, jointWear := 100.0, 0.0, 0.0
 	if snap.LatestPhysical != nil {
 		energy = snap.LatestPhysical.Energy
 		fatigue = snap.LatestPhysical.Fatigue
 		jointWear = snap.LatestPhysical.JointWear
-		health = snap.LatestPhysical.Health
 	}
 	// 构造可读的"在途动作"描述：cmd + 关键 params（target/duration_min）
 	currentAction := ""
@@ -255,7 +254,6 @@ func (r *reactiveRunner) buildInput(agentID string, ac *agentContext, trigger Re
 		Energy:            energy,
 		Fatigue:           fatigue,
 		JointWear:         jointWear,
-		Health:            health,
 		PhysicalAvailable: snap.LatestPhysical != nil && !snap.LatestPhysical.IsZero(),
 		CurrentAction:     currentAction,
 		ElapsedSec:        elapsedSec,
