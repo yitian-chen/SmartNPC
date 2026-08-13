@@ -16,12 +16,13 @@ import (
 
 // defaultPhysical is the fallback physical state used when UE5 has not
 // reported perception_update yet. Represents a fully-rested NPC: energy full,
-// no fatigue, no wear. Matches the mock_ue initial values
-// (energy=100, fatigue=0, joint_wear=0).
+// no fatigue, no wear, initial money 200 (matches mock_ue initial values
+// energy=100, fatigue=0, joint_wear=0, money=200).
 var defaultPhysical = protocol.PhysicalState{
 	Energy:    100,
 	Fatigue:   0,
 	JointWear: 0,
+	Money:     200,
 }
 
 // PhysicalLine renders the 物理状态 line for prompt injection.
@@ -38,5 +39,5 @@ func PhysicalLine(physical *protocol.PhysicalState) string {
 	if physical != nil && !physical.IsZero() {
 		p = *physical
 	}
-	return fmt.Sprintf("物理状态：能量 %.0f、疲劳 %.0f、关节磨损 %.0f。", p.Energy, p.Fatigue, p.JointWear)
+	return fmt.Sprintf("物理状态：能量 %.0f、疲劳 %.0f、关节磨损 %.0f、余额 %.0f。", p.Energy, p.Fatigue, p.JointWear, p.Money)
 }

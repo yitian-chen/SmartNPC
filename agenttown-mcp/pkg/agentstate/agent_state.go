@@ -231,13 +231,16 @@ func (a *AgentState) SetPerception(payload json.RawMessage) (PerceptionUpdate, e
 	}
 	curObjectIDs := extractObjectIDs(p)
 
-	// 从 PhysicalStateDelta map 构造全量 PhysicalState（UE5 上传 3 项）。
+	// 从 PhysicalStateDelta map 构造全量 PhysicalState（UE5 上传 4 项：
+	// energy/fatigue/joint_wear/money）。money 是 NPC 经济余额，工作赚取、
+	// 充电/维修/睡觉消耗，用于让 NPC 平衡各设备工作并考虑必要性。
 	var newPhysical *protocol.PhysicalState
 	if len(p.PhysicalStateDelta) > 0 {
 		newPhysical = &protocol.PhysicalState{
 			Energy:    p.PhysicalStateDelta["energy"],
 			Fatigue:   p.PhysicalStateDelta["fatigue"],
 			JointWear: p.PhysicalStateDelta["joint_wear"],
+			Money:     p.PhysicalStateDelta["money"],
 		}
 	}
 

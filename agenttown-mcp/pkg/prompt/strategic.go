@@ -72,8 +72,9 @@ const StrategicPromptTemplate = `[战略层/每日规划] 现在是仿真时间 
 9. goal 的主要活动应能用【可用能力】中列出的复合动作实现（如装配→work_shift、充电→charge_at_station），不得规划【可用能力】未列出且无法用基础动作（移动/说话/表达情绪/交互物体/等待）组合实现的活动——如"整理仪容""冥想"等无对应能力的活动会被战术层拒绝。
 10. 首个时段（从 07:00 起）必须是日间活动（如晨间巡视、装配、维护），不得安排休眠——你刚从休眠舱醒来，应立即离开开始当日活动；休眠只能安排在午间和夜间。
 11. 充电（charge_at_station）仅在【物理状态】显示能量偏低（<40）或疲劳较高（>80）时安排；能量充足（如刚从休眠醒来、能量接近 100）时不得安排充电时段，应优先安排工作/巡视/维护等产出性活动。
+12. 维护（self_maintenance）仅在【物理状态】显示关节磨损较高（>50）时安排；磨损较低（<30）时不得安排维护时段，应优先安排工作/巡视/上网等产出或低成本活动以积累余额。维护是周期性大修（类比人去医院，不是每天都要去），通常需要工作多日积累的磨损才值得一次维护——频繁维护会使余额入不敷出。
 
-示例：[{"time":"07:00-09:00","goal":"晨间巡视车间设备状态"},{"time":"09:00-12:00","goal":"上午车间装配作业"},{"time":"12:00-14:00","goal":"午间停工短暂休息"},{"time":"14:00-18:00","goal":"下午继续在车间装配"},{"time":"18:00-22:00","goal":"傍晚去维修台维护修理"},{"time":"22:00-07:00","goal":"夜间在休眠舱休息"}]`
+示例：[{"time":"07:00-09:00","goal":"早晨去上网休闲放松"},{"time":"09:00-12:00","goal":"上午车间装配作业"},{"time":"12:00-14:00","goal":"午间停工短暂休息"},{"time":"14:00-18:00","goal":"下午继续在车间装配"},{"time":"18:00-22:00","goal":"傍晚去充电站补电"},{"time":"22:00-07:00","goal":"夜间在休眠舱休息"}]`
 
 // BuildStrategic constructs the strategic layer prompt's KB context segment,
 // containing five parts:
@@ -115,6 +116,13 @@ func BuildStrategic(kb *worldkb.KB, profiles map[string]*profile.Profile, agentI
 		sb.WriteString(cap)
 		sb.WriteString("此外始终可用基础动作：移动、说话、表达情绪、与物体交互、等待（用于短耗时或衔接）。\n")
 	}
+	sb.WriteString("【动作对状态的影响】\n")
+	sb.WriteString("- work_shift（装配/分拣等）：消耗能量、积累疲劳与少量关节磨损，赚取余额\n")
+	sb.WriteString("- charge_at_station（充电）：恢复能量、缓解疲劳，消耗余额\n")
+	sb.WriteString("- self_maintenance（维护）：缓解关节磨损，大量消耗余额\n")
+	sb.WriteString("- rest_at_residence（休息）：缓解疲劳\n")
+	sb.WriteString("- surf_internet（上网）：少量消耗能量与余额、缓解疲劳\n")
+	sb.WriteString("规划时请综合权衡：产出性活动（工作）赚取余额但消耗体力、缓慢积攒关节磨损；恢复性活动（充电/维护/休息）花余额但延续工作能力。避免长时间连续工作导致体力耗尽，也避免频繁恢复导致余额入不敷出。\n")
 	return sb.String()
 }
 

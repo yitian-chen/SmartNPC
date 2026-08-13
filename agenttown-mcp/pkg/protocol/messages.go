@@ -165,11 +165,15 @@ type StateReportPayload struct {
 	CurrentTaskProgress *CurrentTaskProgress `json:"current_task_progress,omitempty"`
 }
 
-// PhysicalState holds the three UE-owned physical values.
+// PhysicalState holds the UE-owned physical values. Money is the NPC's
+// economic balance (working at workbench/sorting earns, charging/repair/
+// sleep spends); UE uploads it alongside energy/fatigue/joint_wear in
+// perception_update's physical_state_delta map.
 type PhysicalState struct {
 	Energy    float64 `json:"energy"`
 	Fatigue   float64 `json:"fatigue"`
 	JointWear float64 `json:"joint_wear"`
+	Money     float64 `json:"money"`
 }
 
 // IsZero reports whether all three physical values are zero.
