@@ -494,6 +494,17 @@ NPC 性格、背景、说话风格等 persona 字段从 `assets/profiles/<agentI
 - **三层决策注入**：战略层（`BuildStrategic`）、战术层（`BuildTactical` via `TacticalInput.Profiles`）、反应层（`reactiveRunner.profiles` → `AgentRole`）、日终记忆层（`generateDailyMemories`）均接收 profiles 参数并透传到 `AgentRole`。`/debug/schedule` 路径传 nil（调试上下文不需 persona 注入）。
 - **字段优先级示例**：H-01 的 `description` 和 `speech_style` 在 KB 中为空，profile.md 填充后三层决策可读到完整角色段；H-02/H-03 的 `display_name`/`profession`/`traits` 在 KB 已有值，profile.md 以更自然的中文表述覆盖（如 `supervisor、worker、maintainer` → `车间主管、装配工人、维护技师`）。
 
+### 每周日程配置
+
+NPC 行为随 7 天周期变化：前 5 天工作日、后 2 天休息日；第 2 天上网日（下班后倾向上网）、第 3 天派对日（下班后倾向放松休闲，社交功能后续做）。仅注入战略层 prompt，影响当日计划安排。
+
+- **配置文件**：`assets/weekly_schedule.yaml`，7 条 `day_of_week` 1-7 各一条，每条声明 `type`（work/rest）、可选 `after_work` 语义标签（internet/party，不注入 prompt）、可选 `note`（注入 prompt 的提示语）
+- **加载机制**：`pkg/weeklyschedule.Load(path)` 启动时加载，`--weekly-schedule=""` → 禁用（nil，不注入【今日日程】段，行为不变），非空路径格式错 fail-fast。进程级只读，与 kb/profiles 同级参数化传递，不入 `agentContext`
+- **星期映射**：UE `Environment.DayCount` 从 0 开始，`dayOfWeek = (dayCount % 7) + 1`（Day 0 → 周一，Day 6 → 周日）。`WeeklyLine(dayCount, sched)` 返回预格式化字符串（如"今天是周二（工作日）。下班后适合上网休闲放松。"），dayCount<0 或 nil 返回空
+- **战略层注入**：`BuildStrategic` 接收 `dayContext string` 参数，【今日日程】段插在【你的角色】后、【物理状态】前。`pkg/prompt` 不依赖 `pkg/weeklyschedule`（预格式化字符串解耦，镜像 `PhysicalLine` 模式）
+- **调用点**：worker 启动计划用 `ac.as.LatestDayCount()`（首条 perception 未到为 -1，无星期上下文）；跨日计划用 `detectDayRollover` 返回的 `newDay`
+- **仅战略层**：战术层不动 — 它分解战略层为晚间时段写的 goal（如"傍晚去上网休闲"→`surf_internet` 复合动作）
+
 ### Mock UE Busy 状态
 
 长耗时复合动作（`WorkShift`/`ChargeAtStation`/`SelfMaintenance`/`RestAtResidence`/`SurfInternet`）不跳跃时间，设置 `npc.busy_until_min`。感知循环自然推进时间，NPC 留在原位直到时间到达。
@@ -608,6 +619,7 @@ cp .env.example .env
 | `--world-kb` | `assets/world_kb.yaml` | 世界 KB 路径（fail-fast 启动加载；UE 推送 world_kb 时也写入此路径） |
 | `--world-kb-manifest` | `assets/world_kb.manifest.json` | manifest.json 输出路径（UE 推送 world_kb 时写入；空串=跳过 manifest） |
 | `--profiles-dir` | `assets/profiles` | NPC profile.md 目录（文件名 = `<agentID>.md`；空串=禁用 profile override，仅走 KB → fallback） |
+| `--weekly-schedule` | `assets/weekly_schedule.yaml` | 每周日程配置 YAML（7 天周期：工作日/休息日/上网日/派对日；空串=禁用，不注入【今日日程】段） |
 | `--log-level` | `debug` | `debug`/`info`/`warn`/`error` |
 
 ### 云开发环境（AnyDev / 远程 Linux）
@@ -729,6 +741,8 @@ python3 src/run_day.py   # 默认连 :9091
 | `agenttown-mcp/pkg/worldkb/validator.go` | `Validate(kb)` — ID 格式、cross-reference 合法性 |
 | `agenttown-mcp/pkg/worldkb/serializer.go` | `WriteYAML`（按 ID 排序，原子替换）+ `WriteManifest`（SHA256 + RFC3339） |
 | `agenttown-mcp/pkg/profile/profile.go` | NPC profile.md 加载：`LoadDir` 扫描 `*.md` → agentID → Profile map |
+| `agenttown-mcp/pkg/weeklyschedule/loader.go` | 每周日程配置加载：`Load` 解析 7 天 YAML + `Day` 查询 |
+| `agenttown-mcp/pkg/weeklyschedule/format.go` | `WeeklyLine(dayCount, sched)` 把 UE DayCount 映射到星期 + 注入【今日日程】段 |
 | `agenttown-mcp/pkg/prompt/agent_role.go` | `AgentRole(kb, profiles, agentID)` 三层 per-field 回退构造【你的角色】段 |
 | `agenttown-mcp/adapters/agenttown/tools/registry.go` | 工具注册 + Executor 接口 |
 | `agenttown-mcp/adapters/agenttown/tools/composite.go` | 5 个复合行为工具 |
@@ -738,8 +752,7 @@ python3 src/run_day.py   # 默认连 :9091
 | `assets/world_kb.yaml` | 世界 KB：7 zones / 3 objects / 1 agent（新 schema，locations 已合并进 objects） |
 | `assets/world_kb.manifest.json` | merge 产物：源 SHA256 + 时间戳（UE 推送 world_kb 时写入） |
 | `assets/profiles/H-01.md` / `H-02.md` / `H-03.md` | NPC 人设档案：纯 markdown 固定标题分段（名字/职业/背景/性格特质/说话风格），三层决策 persona override |
-| `src/agenttown/mock_ue.py` | Mock UE：协议常量、NPCState、物理状态、感知循环、动作处理、重连+重放 |
-| `src/run_day.py` | Mock UE 启动入口 |
+| `assets/weekly_schedule.yaml` | 每周日程配置：7 天周期（工作日/休息日/上网日/派对日），战略层注入【今日日程】段 |
 | `start.sh` | 一键启动脚本（Windows+WSL 专用） |
 | `start-debug.sh` | UE 联调启动脚本（MCP 跑 Windows 原生，监听 0.0.0.0） |
 | `start-dev.sh` | dev 实例启动 wrapper（偏移端口 8770/9091） |
@@ -779,6 +792,7 @@ python3 src/run_day.py   # 默认连 :9091
 | 状态访问与业务逻辑分离 Stage 5 | ✅ | 关系数值动态维护：动作完成 Ollama 判断 + 双向 familiarity+=1 + 战术层注入【人际关系】段 + KB 种子导入 |
 | 12 cmd 体系迁移 | ✅ | 旧 14 cmd（8 原子+6 复合）→ 新 12 cmd（7 原子+5 复合）对齐真实 UE5；统一 MoveTo（target_type+target_id/target_position）；复合动作共享 semantic_group+interaction schema（按真实 UE5 capability_registry 参数名）；GenericAct 兜底；MCP 不再做 KB 坐标解析 |
 | NPC profile.md 人设档案 | ✅ | `pkg/profile` 加载 `assets/profiles/<agentID>.md`；三层 per-field 回退（profile > KB > hardcoded）；战略/战术/反应/记忆层透传 profiles 参数到 `AgentRole` |
+| 每周日程配置 | ✅ | `pkg/weeklyschedule` 加载 `assets/weekly_schedule.yaml`；7 天周期（工作日/休息日/上网日/派对日）；战略层注入【今日日程】段；`WeeklyLine` 预格式化解耦 pkg/prompt |
 
 ## 当前已知问题（2026-07-29 仿真分析）
 
