@@ -116,13 +116,12 @@ func BuildStrategic(kb *worldkb.KB, profiles map[string]*profile.Profile, agentI
 		sb.WriteString("此外始终可用基础动作：移动、说话、表达情绪、与物体交互、等待（用于短耗时或衔接）。\n")
 	}
 	sb.WriteString("【动作对状态的影响】\n")
-	sb.WriteString("- work_shift（装配/分拣等）：消耗能量、积累疲劳与关节磨损，赚取余额\n")
+	sb.WriteString("- work_shift（装配/分拣等）：消耗能量、积累疲劳与少量关节磨损，赚取余额\n")
 	sb.WriteString("- charge_at_station（充电）：恢复能量、缓解疲劳，消耗余额\n")
-	sb.WriteString("- self_maintenance（维护）：缓解关节磨损，消耗余额\n")
-	sb.WriteString("- rest_at_residence（休息）：缓解疲劳、少量恢复能量，消耗余额\n")
+	sb.WriteString("- self_maintenance（维护）：缓解关节磨损，大量消耗余额\n")
+	sb.WriteString("- rest_at_residence（休息）：缓解疲劳、少量恢复能量，少量消耗余额\n")
 	sb.WriteString("- surf_internet（上网）：少量消耗能量与余额、缓解疲劳\n")
-	sb.WriteString("- 移动/说话/交互等基础动作：少量消耗能量、积累疲劳\n")
-	sb.WriteString("规划时请综合权衡：产出性活动（工作）赚取余额但消耗体力与关节；恢复性活动（充电/维护/休息）花余额但延续工作能力。避免长时间连续工作导致体力耗尽，也避免频繁恢复导致余额入不敷出。\n")
+	sb.WriteString("规划时请综合权衡：产出性活动（工作）赚取余额但消耗体力、缓慢积攒关节磨损；恢复性活动（充电/维护/休息）花余额但延续工作能力。避免长时间连续工作导致体力耗尽，也避免频繁恢复导致余额入不敷出。\n")
 	return sb.String()
 }
 
