@@ -30,10 +30,10 @@ DEPRECATED 提示（2026-08）：
     python scripts/pretty_log.py --html -o report.html    # 指定输出路径
     python scripts/pretty_log.py --html --no-open         # 生成但不自动打开
     python scripts/pretty_log.py --html --hermes          # 整合 Hermes 容器日志（DEPRECATED，仅历史日志）
-    python scripts/pretty_log.py --html --dev             # dev 实例（logs-dev/ + h01-dev）
+    python scripts/pretty_log.py --html --stable          # stable 实例（logs/ + h01）
 
     # 终端渲染
-    python scripts/pretty_log.py                          # 查看今天的 debug-mcp.log
+    python scripts/pretty_log.py                          # 查看今天的 debug-mcp.log（默认 logs-dev/）
     python scripts/pretty_log.py -f PERCEPTION -n 50      # 最近 50 条 PERCEPTION
     python scripts/pretty_log.py -a H-02 -n 20            # 最近 20 条 H-02 日志
     python scripts/pretty_log.py --raw                    # 原始 JSON
@@ -265,10 +265,10 @@ def _hide_heartbeat(rec: dict, explicit_heartbeat: bool) -> bool:
     return "heartbeat" in msg
 
 
-def _resolve_log_path(arg: str | None, dev: bool = False) -> Path:
-    # dev 实例：logs-dev/YYYY-MM-DD/debug-mcp.log
-    # stable 实例：logs/YYYY-MM-DD/debug-mcp.log
-    log_dir = "logs-dev" if dev else "logs"
+def _resolve_log_path(arg: str | None, stable: bool = False) -> Path:
+    # 默认 dev 实例：logs-dev/YYYY-MM-DD/debug-mcp.log
+    # stable 实例（--stable）：logs/YYYY-MM-DD/debug-mcp.log
+    log_dir = "logs" if stable else "logs-dev"
     log_name = "debug-mcp.log"
     if arg is None:
         today = _dt.date.today().isoformat()
@@ -1103,7 +1103,7 @@ def main() -> int:
     ap.add_argument(
         "-o",
         "--output",
-        help="HTML 输出路径（仅 --html 模式）；默认 logs/YYYY-MM-DD/sim_report.html",
+        help="HTML 输出路径（仅 --html 模式）；默认 logs-dev/YYYY-MM-DD/sim_report.html",
     )
     ap.add_argument(
         "--no-open",
@@ -1126,13 +1126,13 @@ def main() -> int:
         help="(DEPRECATED) 显示 Hermes 日志全部条目（默认只保留 LLM 决策相关 + WARNING/ERROR）",
     )
     ap.add_argument(
-        "--dev",
+        "--stable",
         action="store_true",
-        help="查看 dev 实例日志（默认 logs-dev/YYYY-MM-DD/debug-mcp.log；--hermes 默认 h01-dev profile）",
+        help="查看 stable 实例日志（默认 logs-dev/YYYY-MM-DD/debug-mcp.log；--stable 切到 logs/；--hermes 默认 h01 profile）",
     )
     args = ap.parse_args()
 
-    log_path = _resolve_log_path(args.path, dev=args.dev)
+    log_path = _resolve_log_path(args.path, stable=args.stable)
     if not log_path.exists():
         print(f"日志文件不存在：{log_path}", file=sys.stderr)
         return 1
@@ -1145,10 +1145,10 @@ def main() -> int:
             hermes_path = Path(args.hermes_log)
         else:
             # 默认位置：项目根 hermes/profiles/<profile>/logs/agent.log
-            # dev 实例用 h01-dev profile，stable 用 h01
+            # stable 实例用 h01 profile，默认（dev）用 h01-dev
             # 从 sim.log 路径回推项目根（logs/YYYY-MM-DD/sim.log → ../..）
             project_root = log_path.parent.parent.parent
-            profile = "h01-dev" if args.dev else "h01"
+            profile = "h01" if args.stable else "h01-dev"
             hermes_path = project_root / "hermes" / "profiles" / profile / "logs" / "agent.log"
         if not hermes_path.exists():
             print(f"警告：Hermes 日志不存在：{hermes_path}", file=sys.stderr)
