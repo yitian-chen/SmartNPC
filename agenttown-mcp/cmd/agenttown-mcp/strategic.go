@@ -53,7 +53,8 @@ const yesterdaySummaryForFirstDay = "昨天按计划完成了车间装配。"
 // registry 用于注入【可用能力】段，让 LLM 知道可用复合动作，避免规划无对应
 // 动作的 goal（如"整理仪容"）。profiles 是 NPC persona override（profile.md），
 // nil 时 AgentRole 仅走 KB → fallback。kb/registry/profiles == nil 时降级为对应段缺失。
-func generateDailyPlan(ctx context.Context, sc strategicCaller, agentID string, kb *worldkb.KB, profiles map[string]*profile.Profile, registry *CapabilityRegistry, logger *slog.Logger, yesterdaySummary string) string {
+// physical 注入【物理状态】段；nil 时 PhysicalLine 用默认满状态兜底。
+func generateDailyPlan(ctx context.Context, sc strategicCaller, agentID string, kb *worldkb.KB, profiles map[string]*profile.Profile, registry *CapabilityRegistry, logger *slog.Logger, yesterdaySummary string, physical *protocol.PhysicalState) string {
 	var actions []protocol.CapabilityAction
 	if registry != nil {
 		actions = registry.EffectiveActions(agentID)
@@ -62,7 +63,7 @@ func generateDailyPlan(ctx context.Context, sc strategicCaller, agentID string, 
 		yesterdaySummary = yesterdaySummaryForFirstDay
 	}
 	promptText := fmt.Sprintf(prompt.StrategicPromptTemplate,
-		prompt.BuildStrategic(kb, profiles, agentID, actions),
+		prompt.BuildStrategic(kb, profiles, agentID, actions, physical),
 		"昨日总结："+yesterdaySummary)
 	logger.Info("[MCP→LLM/STRATEGIC-PROMPT]", "agent_id", agentID, "text", promptText)
 

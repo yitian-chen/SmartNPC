@@ -135,7 +135,7 @@ func TestFormatDailyPlan_MultipleItems(t *testing.T) {
 
 func TestGenerateDailyPlan_HTTPError(t *testing.T) {
 	sc := &fakeStrategicCaller{err: errors.New("network down")}
-	plan := generateDailyPlan(context.Background(), sc, "H-01", nil, nil, nil, slog.Default(), "")
+	plan := generateDailyPlan(context.Background(), sc, "H-01", nil, nil, nil, slog.Default(), "", nil)
 	// HTTP 错误现在回退到 prompt.DefaultDailyPlan(nil) 而不是空字符串，
 	// 保证战术层有目标可分解、仿真不瘫痪。
 	if plan != prompt.DefaultDailyPlan(nil) {
@@ -149,7 +149,7 @@ func TestGenerateDailyPlan_HTTPError(t *testing.T) {
 func TestGenerateDailyPlan_ValidResponse(t *testing.T) {
 	raw := `[{"time":"06:00-07:00","goal":"起床晨检"},{"time":"07:00-12:00","goal":"车间装配"}]`
 	sc := &fakeStrategicCaller{resp: makeStrategicResponse(raw)}
-	plan := generateDailyPlan(context.Background(), sc, "H-01", nil, nil, nil, slog.Default(), "")
+	plan := generateDailyPlan(context.Background(), sc, "H-01", nil, nil, nil, slog.Default(), "", nil)
 	if plan == "" {
 		t.Fatal("got empty plan, want non-empty")
 	}
@@ -163,7 +163,7 @@ func TestGenerateDailyPlan_ValidResponse(t *testing.T) {
 
 func TestGenerateDailyPlan_ParseFail(t *testing.T) {
 	sc := &fakeStrategicCaller{resp: makeStrategicResponse("今天天气不错，我打算去车间转转。")}
-	plan := generateDailyPlan(context.Background(), sc, "H-01", nil, nil, nil, slog.Default(), "")
+	plan := generateDailyPlan(context.Background(), sc, "H-01", nil, nil, nil, slog.Default(), "", nil)
 	// 解析失败现在回退到 prompt.DefaultDailyPlan(nil) 而不是空字符串，
 	// 避免整天 Wait(60s) 瘫痪。
 	if plan != prompt.DefaultDailyPlan(nil) {
@@ -175,7 +175,7 @@ func TestGenerateDailyPlan_ParseFail(t *testing.T) {
 
 func TestBuildStrategicContext_WithKB(t *testing.T) {
 	kb := loadTestKB(t)
-	got := prompt.BuildStrategic(kb, nil, "H-01", nil)
+	got := prompt.BuildStrategic(kb, nil, "H-01", nil, nil)
 	if got == "" {
 		t.Fatal("got empty context, want non-empty for valid KB")
 	}
@@ -205,7 +205,7 @@ func TestBuildStrategicContext_WithKB(t *testing.T) {
 func TestBuildStrategicContext_NilKB(t *testing.T) {
 	// kb == nil 且 registry == nil：【可用能力】段降级为内置 6 个复合工具，
 	// 让 AI 即使无 KB 上下文也知能力边界（不规划无对应动作的活动）。
-	got := prompt.BuildStrategic(nil, nil, "H-01", nil)
+	got := prompt.BuildStrategic(nil, nil, "H-01", nil, nil)
 	if !strings.Contains(got, "【可用能力】") {
 		t.Errorf("nil KB should still include builtin composite capability section: %q", got)
 	}
@@ -217,7 +217,7 @@ func TestBuildStrategicContext_NilKB(t *testing.T) {
 func TestBuildStrategicContext_AgentNotFound(t *testing.T) {
 	// KB 存在但 agentID 不在 KB 中：跳过角色段，仍注入世界知识段。
 	kb := loadTestKB(t)
-	got := prompt.BuildStrategic(kb, nil, "NONEXISTENT-99", nil)
+	got := prompt.BuildStrategic(kb, nil, "NONEXISTENT-99", nil, nil)
 	if strings.Contains(got, "【你的角色】") {
 		t.Errorf("should not include persona section for unknown agent: %q", got)
 	}
@@ -313,7 +313,7 @@ func TestBuildStrategicContext_IncludesCapabilitySection(t *testing.T) {
 	r.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
 		{Cmd: protocol.CmdWorkShift, Kind: "composite", Description: "装配"},
 	})
-	got := prompt.BuildStrategic(kb, nil, "H-01", r.EffectiveActions("H-01"))
+	got := prompt.BuildStrategic(kb, nil, "H-01", r.EffectiveActions("H-01"), nil)
 	if !strings.Contains(got, "【可用能力】") {
 		t.Errorf("context missing '【可用能力】' header: %q", got)
 	}
@@ -331,7 +331,7 @@ func TestBuildStrategicContext_NilKBWithRegistry(t *testing.T) {
 	r.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
 		{Cmd: protocol.CmdWorkShift, Kind: "composite", Description: "装配"},
 	})
-	got := prompt.BuildStrategic(nil, nil, "H-01", r.EffectiveActions("H-01"))
+	got := prompt.BuildStrategic(nil, nil, "H-01", r.EffectiveActions("H-01"), nil)
 	if !strings.Contains(got, "【可用能力】") {
 		t.Errorf("context should include capability section even with nil KB: %q", got)
 	}
@@ -409,7 +409,7 @@ func TestGenerateDailyPlan_KBInjectedIntoPrompt(t *testing.T) {
 	kb := loadTestKB(t)
 	raw := `[{"time":"06:00-07:00","goal":"起床晨检"}]`
 	sc := &fakeStrategicCaller{resp: makeStrategicResponse(raw)}
-	_ = generateDailyPlan(context.Background(), sc, "H-01", kb, nil, nil, slog.Default(), "")
+	_ = generateDailyPlan(context.Background(), sc, "H-01", kb, nil, nil, slog.Default(), "", nil)
 	prompt := sc.capturedInput
 	if prompt == "" {
 		t.Fatal("captured prompt is empty")
@@ -725,7 +725,7 @@ func TestBuildStrategicContext_ZoneObjectMapRemoved(t *testing.T) {
 	// buildStrategicContext 不应再包含该段；日后若 LLM 又出现 zone-object
 	// 错配可重新启用并恢复此断言。
 	kb := loadTestKB(t)
-	got := prompt.BuildStrategic(kb, nil, "H-01", nil)
+	got := prompt.BuildStrategic(kb, nil, "H-01", nil, nil)
 	if strings.Contains(got, "【区域设施映射】") {
 		t.Errorf("context should NOT include '【区域设施映射】' section (temporarily removed): %q", got)
 	}

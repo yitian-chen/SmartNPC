@@ -75,8 +75,9 @@ const StrategicPromptTemplate = `[战略层/每日规划] 现在是仿真时间 
 示例：[{"time":"07:00-09:00","goal":"去中央广场晨间补电"},{"time":"09:00-12:00","goal":"上午车间装配作业"},{"time":"12:00-14:00","goal":"午间停工，前往充电区域短暂补电休息"},{"time":"14:00-18:00","goal":"下午继续在车间装配"},{"time":"18:00-22:00","goal":"傍晚去维修台维护修理"},{"time":"22:00-07:00","goal":"夜间在休眠舱休息"}]`
 
 // BuildStrategic constructs the strategic layer prompt's KB context segment,
-// containing four parts:
+// containing five parts:
 //   - 【你的角色】: from AgentRole(kb, profiles, agentID)
+//   - 【物理状态】: from PhysicalLine(physical); nil → default fresh state
 //   - 【世界知识】: from KBContext(kb) (shared with tactical layer)
 //   - 【区域设施映射】: zone→object mapping (currently disabled — see comment)
 //   - 【可用能力】: composite actions from capabilities
@@ -84,12 +85,18 @@ const StrategicPromptTemplate = `[战略层/每日规划] 现在是仿真时间 
 // kb == nil → skips 【世界知识】 segment but still injects persona + capabilities.
 // actions == nil → falls back to builtin 6 composite tools (same as tactical).
 // profiles == nil → AgentRole falls back to hardcoded fallback (KB persona ignored).
-func BuildStrategic(kb *worldkb.KB, profiles map[string]*profile.Profile, agentID string, actions []protocol.CapabilityAction) string {
+// physical == nil → PhysicalLine falls back to default fresh state (100/0/0/100).
+func BuildStrategic(kb *worldkb.KB, profiles map[string]*profile.Profile, agentID string, actions []protocol.CapabilityAction, physical *protocol.PhysicalState) string {
 	var sb strings.Builder
 	// 【你的角色】段仅依赖 profile + fallback，与 KB 可用性解耦。
 	if role := AgentRole(kb, profiles, agentID); role != "" {
 		sb.WriteString("【你的角色】\n")
 		sb.WriteString(role)
+	}
+	if line := PhysicalLine(physical); line != "" {
+		sb.WriteString("【物理状态】\n")
+		sb.WriteString(line)
+		sb.WriteString("\n")
 	}
 	if kb != nil {
 		if kbCtx := KBContext(kb); kbCtx != "" {

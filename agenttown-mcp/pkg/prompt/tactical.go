@@ -79,10 +79,7 @@ const tacticalPromptBody = `[战术层/任务分解] 当前时段目标：%s
 // produce steps whose total duration approaches the slot length.
 // actions (from registry.EffectiveActions) drives the tool list; nil → builtin fallback.
 func BuildTactical(in TacticalInput) string {
-	physicalLine := ""
-	if in.Physical != nil && !in.Physical.IsZero() {
-		physicalLine = fmt.Sprintf("物理状态：能量 %.0f、疲劳 %.0f、关节磨损 %.0f、健康 %.0f。", in.Physical.Energy, in.Physical.Fatigue, in.Physical.JointWear, in.Physical.Health)
-	}
+	physicalLine := PhysicalLine(in.Physical)
 	roleLine := ""
 	if role := AgentRole(in.KB, in.Profiles, in.AgentID); role != "" {
 		roleLine = "【你的角色】\n" + role
