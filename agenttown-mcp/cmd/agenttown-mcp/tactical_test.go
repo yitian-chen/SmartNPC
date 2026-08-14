@@ -1249,6 +1249,48 @@ func TestBuildTacticalExample_GoalCharge(t *testing.T) {
 	}
 }
 
+// TestBuildTacticalExample_GoalBenchRest 回归测试 P0-2：goal 含"长椅休息"
+// 必须返回 interact(bench/rest) 示例，禁止错配到 rest_at_residence(sleep_pod/sleep)。
+// 旧版 exampleForGoal 第 2 分支用"休息"关键词统一路由到 charge_at_station，
+// LLM 模仿后会把"长椅休息"goal 和 rest_at_residence 复合动作自由组合，产生
+// rest_at_residence(bench/rest) 这种参数错配（bench 不是住所）。
+func TestBuildTacticalExample_GoalBenchRest(t *testing.T) {
+	kb := loadTestKB(t)
+	got := prompt.TacticalExample(kb, "午间到中央广场长椅短暂休息，缓解疲劳")
+	if !strings.Contains(got, `"action":"interact"`) {
+		t.Errorf("goal=长椅休息 should pick interact example: %q", got)
+	}
+	if !strings.Contains(got, `"semantic_group":"bench"`) || !strings.Contains(got, `"interaction":"rest"`) {
+		t.Errorf("bench rest example must use semantic_group=bench interaction=rest: %q", got)
+	}
+	if strings.Contains(got, "rest_at_residence") {
+		t.Errorf("bench rest must NOT use rest_at_residence (bench is not residence): %q", got)
+	}
+	if strings.Contains(got, "sleep_pod") {
+		t.Errorf("bench rest must NOT reference sleep_pod: %q", got)
+	}
+}
+
+// TestBuildTacticalExample_GoalSleepAtResidence 回归测试 P0-2：goal 含"回休眠舱睡觉"
+// 必须返回 rest_at_residence(sleep_pod/sleep) 示例，参数严格对应。
+func TestBuildTacticalExample_GoalSleepAtResidence(t *testing.T) {
+	kb := loadTestKB(t)
+	got := prompt.TacticalExample(kb, "夜间回休眠舱居住区睡眠，恢复体力迎接明天")
+	if !strings.Contains(got, "rest_at_residence") {
+		t.Errorf("goal=回休眠舱睡觉 should pick rest_at_residence example: %q", got)
+	}
+	if !strings.Contains(got, `"semantic_group":"sleep_pod"`) || !strings.Contains(got, `"interaction":"sleep"`) {
+		t.Errorf("rest_at_residence example must use sleep_pod/sleep: %q", got)
+	}
+	if strings.Contains(got, `"semantic_group":"bench"`) {
+		t.Errorf("sleep example must NOT use bench (bench is not residence): %q", got)
+	}
+	// 复合动作不应含 move_to（复合动作自带移动）
+	if strings.Contains(got, `"action":"move_to"`) {
+		t.Errorf("rest_at_residence example must NOT contain move_to: %q", got)
+	}
+}
+
 func TestBuildTacticalExample_GoalPatrol(t *testing.T) {
 	// goal 含"巡视"应选 move_to + generic_act 示例，不引用任何 object。
 	// 新 12 cmd 体系无 patrol_zone，巡视用 generic_act(behavior=look_around) 兜底。
