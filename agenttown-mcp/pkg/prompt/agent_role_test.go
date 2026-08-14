@@ -21,13 +21,13 @@ func TestAgentRole_FallbackEachAgent(t *testing.T) {
 		},
 		{
 			agentID:    "H-02",
-			wantName:   "小林",
-			wantSubstr: []string{"maintainer、technician", "维修技术员", "细致", "严谨", "专注技术", "话少", "精确，技术术语多"},
+			wantName:   "小赵",
+			wantSubstr: []string{"logistics、patrol、worker", "物流巡检员", "活泼", "勤快", "话多", "责任感强", "热情，爱闲聊"},
 		},
 		{
 			agentID:    "H-03",
-			wantName:   "小赵",
-			wantSubstr: []string{"logistics、patrol、worker", "物流巡检员", "活泼", "勤快", "话多", "责任感强", "热情，爱闲聊"},
+			wantName:   "小林",
+			wantSubstr: []string{"maintainer、technician", "维修技术员", "细致", "严谨", "专注技术", "话少", "精确，技术术语多"},
 		},
 	}
 	for _, tc := range cases {
@@ -58,12 +58,12 @@ func TestAgentRole_KBLoadedMatchesFallbackShape(t *testing.T) {
 	kb := worldkb.NewKB(nil, nil, []worldkb.Agent{
 		{
 			ID:          "H-02",
-			DisplayName: "小林",
-			Profession:  "maintainer、technician",
-			Description: "维修技术员，专注精密装配与设备维护",
+			DisplayName: "小赵",
+			Profession:  "logistics、patrol、worker",
+			Description: "物流巡检员，负责物资流转与区域巡检",
 			Personality: worldkb.Personality{
-				Traits:      []string{"细致", "严谨", "专注技术", "话少"},
-				SpeechStyle: "精确，技术术语多",
+				Traits:      []string{"活泼", "勤快", "话多", "责任感强"},
+				SpeechStyle: "热情，爱闲聊",
 			},
 		},
 	})

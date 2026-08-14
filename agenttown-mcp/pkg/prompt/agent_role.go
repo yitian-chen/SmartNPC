@@ -96,17 +96,17 @@ func fallbackFields(agentID string) (name, profession, description string, trait
 			[]string{"沉稳", "念旧", "重视工艺", "务实"},
 			""
 	case "H-02":
-		return "小林",
-			"maintainer、technician",
-			"维修技术员，专注精密装配与设备维护",
-			[]string{"细致", "严谨", "专注技术", "话少"},
-			"精确，技术术语多"
-	case "H-03":
 		return "小赵",
 			"logistics、patrol、worker",
 			"物流巡检员，负责物资流转与区域巡检",
 			[]string{"活泼", "勤快", "话多", "责任感强"},
 			"热情，爱闲聊"
+	case "H-03":
+		return "小林",
+			"maintainer、technician",
+			"维修技术员，专注精密装配与设备维护",
+			[]string{"细致", "严谨", "专注技术", "话少"},
+			"精确，技术术语多"
 	}
 	return "", "", "", nil, ""
 }
