@@ -675,7 +675,7 @@ func TestBuildTacticalPrompt_InjectsAgentRole(t *testing.T) {
 	if !strings.Contains(promptText, "【你的角色】") {
 		t.Errorf("prompt missing '【你的角色】' section header, got: %s", promptText)
 	}
-	for _, want := range []string{"老陈", "supervisor、worker、maintainer", "沉稳"} {
+	for _, want := range []string{"老陈", "装配工人", "沉稳"} {
 		if !strings.Contains(promptText, want) {
 			t.Errorf("prompt missing role field %q, got: %s", want, promptText)
 		}
