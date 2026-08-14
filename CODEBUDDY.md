@@ -620,7 +620,7 @@ cp .env.example .env
 | `--world-kb-manifest` | `assets/world_kb.manifest.json` | manifest.json 输出路径（UE 推送 world_kb 时写入；空串=跳过 manifest） |
 | `--profiles-dir` | `assets/profiles` | NPC profile.md 目录（文件名 = `<agentID>.md`；空串=禁用 profile override，仅走 KB → fallback） |
 | `--weekly-schedule` | `assets/weekly_schedule.yaml` | 每周日程配置 YAML（7 天周期：工作日/休息日/上网日/派对日；空串=禁用，不注入【今日日程】段） |
-| `--log-level` | `debug` | `debug`/`info`/`warn`/`error` |
+| `--log-level` | `info` | `debug`/`info`/`warn`/`error` |
 
 ### 云开发环境（AnyDev / 远程 Linux）
 

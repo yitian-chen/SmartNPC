@@ -1271,7 +1271,7 @@ func main() {
 
 	var (
 		showVersion        = flag.Bool("version", false, "print version and exit")
-		logLevel           = flag.String("log-level", "debug", "log level: debug|info|warn|error")
+		logLevel           = flag.String("log-level", "info", "log level: debug|info|warn|error")
 		httpAddr           = flag.String("http", ":8760", "MCP Streamable HTTP addr (empty = stdio)")
 		wsAddr             = flag.String("ws", ":9090", "WebSocket server addr for Mock UE")
 		mcpAPIKey          = flag.String("mcp-api-key", "", "if set, require this Bearer token on /mcp")
