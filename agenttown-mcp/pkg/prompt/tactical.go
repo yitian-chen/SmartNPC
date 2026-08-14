@@ -33,7 +33,7 @@ var toolOverride = map[string]struct {
 	"turn_to":     {"转向目标", `{"target_type":"agent|smart_object|zone|position","target_id":"...","target_position":[x,y,z]}`},
 	"speak":       {"说话", `{"content":"..."}`},
 	"emote":       {"表达情绪", `{"emotion":"happy|sad|..."}`},
-	"interact":    {"与智能物体交互", `{"semantic_group":"...","interaction":"动词"}`},
+	"interact":    {"与智能物体交互（长耗时动作，单次持续到时段切换，可作队列收尾）", `{"semantic_group":"...","interaction":"动词"}`},
 	// wait intentionally not in override and not shown in prompt tool list.
 	// 复合动作 params 给出具体合法值示例（来自当前 world_kb.yaml），
 	// LLM 模仿时直接套用即可，避免编造 semantic_group 或 interaction。
@@ -62,15 +62,16 @@ const tacticalPromptBody = `[战术层/任务分解] 当前时段目标：%s
 %s
 可用工具（仅限以下 %d 个）。工具分两类：
 - 复合动作（标记 [复合]）：长耗时、单步即可完成一段工作（如装配、充电、巡逻、聊天），会自动移动到对应位置，无需自己调用 move_to。若目标语义与某复合动作匹配，应优先使用复合动作。
-- 原子动作（标记 [原子]）：短耗时、作为基本 building block（如移动、说话、等待、交互）。仅当复合动作无法覆盖 schedule 要求时，才用 2-5 个原子动作组合实现。
+- 原子动作（标记 [原子]）：作为基本 building block。其中 move_to/speak/emote/turn_to/generic_act 是短耗时动作；interact（与智能物体交互）是长耗时动作——单次 interact 会持续执行直到时段切换（如在长椅上 rest、在工作台前 assemble），可作为队列收尾动作让 NPC 持续活动到下一 schedule 节点。
+仅当复合动作无法覆盖 schedule 要求时，才用原子动作组合实现；interact 因已是长动作，无需重复多次填充时段。
 %s
 
 要求：
 1. 队列首个动作必须是 speak（用一句话表达此刻内心想法或独白），然后才是其他动作
 2. 后续每行输出一个 {"action":"工具名","params":{...}}，按执行顺序排列。action 字段必须严格使用上方"可用工具"列表中给出的工具名（如 work_shift / charge_at_station / rest_at_residence / surf_internet / self_maintenance / interact / move_to / speak / generic_act / emote / turn_to），禁止编造、禁止近形变换（如把 work_shift 写成 work_short、rest_at_residence 写成 rest_at_composite），否则动作会被丢弃导致队列提前耗尽
-3. 队列必须以长复合动作（标记 [复合]）结尾——长复合动作会持续执行直到时段切换，让 NPC 一直工作到下一 schedule 节点被 worker 主动打断
+3. 队列必须以长动作结尾（长复合动作 或 interact 原子动作均可）——长动作会持续执行直到时段切换，让 NPC 一直活动到下一 schedule 节点被 worker 主动打断
 4. 禁止输出 wait 动作；复合动作已包含自动移动到对应位置的逻辑，禁止在复合动作前加 move_to——直接输出单个长复合动作即可。
-5. 仅当目标确实没有匹配的长复合动作时（极少见），才用原子动作组合、结合调用兜底的 generic_act 通用动作实现目标
+5. 仅当目标确实没有匹配的长复合动作时（极少见），才用原子动作组合实现目标。长椅/广场休息等场景用单个 interact(bench/rest) 即可（interact 是长动作，会持续到时段切换），禁止把同一动作重复多次填充时段——队列提前耗尽会自动触发重分解生成新动作
 6. move_to/turn_to 的 target_id 用上方"可前往区域"的 zone id；interact 和复合动作的 semantic_group 必须严格使用上方"可交互物体"给出的 semantic_group 值，禁止编造、禁止用实例 id（如 Charge-1）、禁止拼接 zone/interaction 信息
 7. 复合动作与 semantic_group 必须严格对应，禁止跨类别组合：
    - work_shift → workbench（装配）/ sorting_conveyor（分拣）/ inspection_table（质检），interaction 用 assemble / sort_cargo / inspect
