@@ -73,12 +73,20 @@ const StrategicPromptTemplate = `[战略层/每日规划] 现在是仿真时间 
 10. 首个时段（从 07:00 起）必须是日间活动（如晨间巡视、装配、维护），不得安排休眠——你刚从休眠舱醒来，应立即离开开始当日活动；休眠只能安排在午间和夜间。
 11. 充电（charge_at_station）仅在【物理状态】显示能量偏低（<40）或疲劳较高（>80）时安排；能量充足（如刚从休眠醒来、能量接近 100）时不得安排充电时段，应优先安排工作/巡视/维护等产出性活动。
 12. 维护（self_maintenance）仅在【物理状态】显示关节磨损较高（>50）时安排；磨损较低（<30）时不得安排维护时段，应优先安排工作/巡视/上网等产出或低成本活动以积累余额。维护是周期性大修（类比人去医院，不是每天都要去），通常需要工作多日积累的磨损才值得一次维护——频繁维护会使余额入不敷出。
+13. 规划必须综合考虑【物理状态】当前四项数值，据此调整当日安排的侧重点：
+    - 能量偏低（<40）：今天多安排充电时段（如午间+傍晚各一次），减少连续工作时长，避免体力耗尽。
+    - 疲劳偏高（>80）：今天把夜间休眠时段提前（如 21:00 甚至 20:00 入睡），白天穿插短暂休息，避免疲劳继续累积。
+    - 关节磨损偏高（>50）：今天安排一次维护时段（符合规则 12），其余时段减少重体力工作，可改上网/巡视等低磨损活动。
+    - 余额偏低（<50）：今天多安排工作时段（work_shift）赚取余额，减少花钱的恢复性活动（如上网、非必要的维护），仅在能量/疲劳确实告警时才充电/休息。
+    各项状态正常时按常规节奏规划，不必刻意偏向某一类活动；多项状态同时异常时按最紧迫的优先（体力耗尽 > 疲劳过高 > 余额过低 > 关节磨损）。
 
 示例：[{"time":"07:00-09:00","goal":"早晨去上网休闲放松"},{"time":"09:00-12:00","goal":"上午车间装配作业"},{"time":"12:00-14:00","goal":"午间停工短暂休息"},{"time":"14:00-18:00","goal":"下午继续在车间装配"},{"time":"18:00-22:00","goal":"傍晚去充电站补电"},{"time":"22:00-07:00","goal":"夜间在休眠舱休息"}]`
 
 // BuildStrategic constructs the strategic layer prompt's KB context segment,
-// containing five parts:
+// containing six parts:
 //   - 【你的角色】: from AgentRole(kb, profiles, agentID)
+//   - 【今日日程】: from dayContext (pre-formatted by weeklyschedule.WeeklyLine;
+//     "" skips the segment — disabled or dayCount<0)
 //   - 【物理状态】: from PhysicalLine(physical); nil → default fresh state
 //   - 【世界知识】: from KBContext(kb) (shared with tactical layer)
 //   - 【区域设施映射】: zone→object mapping (currently disabled — see comment)
@@ -88,12 +96,22 @@ const StrategicPromptTemplate = `[战略层/每日规划] 现在是仿真时间 
 // actions == nil → falls back to builtin 6 composite tools (same as tactical).
 // profiles == nil → AgentRole falls back to hardcoded fallback (KB persona ignored).
 // physical == nil → PhysicalLine falls back to default fresh state (100/0/0/100).
-func BuildStrategic(kb *worldkb.KB, profiles map[string]*profile.Profile, agentID string, actions []protocol.CapabilityAction, physical *protocol.PhysicalState) string {
+// dayContext == "" → skips 【今日日程】 segment (weekly schedule disabled or
+// dayCount < 0 before first perception).
+func BuildStrategic(kb *worldkb.KB, profiles map[string]*profile.Profile, agentID string, actions []protocol.CapabilityAction, physical *protocol.PhysicalState, dayContext string) string {
 	var sb strings.Builder
 	// 【你的角色】段仅依赖 profile + fallback，与 KB 可用性解耦。
 	if role := AgentRole(kb, profiles, agentID); role != "" {
 		sb.WriteString("【你的角色】\n")
 		sb.WriteString(role)
+	}
+	// 【今日日程】段：每周日程上下文（星期几 + 工作日/休息日 + 当日提示）。
+	// dayContext 由调用方通过 weeklyschedule.WeeklyLine(dayCount, sched) 预格式化，
+	// pkg/prompt 不依赖 weeklyschedule 包（解耦）。空串=禁用或 dayCount<0，跳过。
+	if dayContext != "" {
+		sb.WriteString("【今日日程】\n")
+		sb.WriteString(dayContext)
+		sb.WriteString("\n")
 	}
 	if line := PhysicalLine(physical); line != "" {
 		sb.WriteString("【物理状态】\n")

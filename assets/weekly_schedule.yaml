@@ -1,0 +1,28 @@
+# 每周日程配置 — 7 天一个周期
+# day_of_week: 1-7（DayCount % 7 + 1，1=周一）
+# type: work（工作日）/ rest（休息日）
+# after_work: 语义标签（internet=上网日 / party=派对日 / 空=无特殊），不注入 prompt
+#   - after_work 仅供未来代码逻辑识别当日主题（如社交功能上线后判断 party 日）
+#   - 实际注入 prompt 的文本由 note 字段承载
+# note: 注入战略层 prompt【今日日程】段的当日提示语
+days:
+  - day_of_week: 1
+    type: work
+    after_work: internet
+    note: "下班后适合上网休闲放松"
+  - day_of_week: 2
+    type: work
+  - day_of_week: 3
+    type: work
+    after_work: party
+    note: "下班后适合放松休闲"
+  - day_of_week: 4
+    type: work
+  - day_of_week: 5
+    type: work
+  - day_of_week: 6
+    type: rest
+    note: "周末以休息放松为主，少安排工作"
+  - day_of_week: 7
+    type: rest
+    note: "周末以休息放松为主，少安排工作"

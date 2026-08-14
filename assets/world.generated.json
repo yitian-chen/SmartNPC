@@ -1,7 +1,7 @@
 {
   "$schema": "agenttown-world-generated/v1",
   "schema_version": "1.0",
-  "generated_at": "2026-08-06T09:22:19.907Z",
+  "generated_at": "2026-08-14T02:09:32.824Z",
   "generator":
   {
     "name": "AgentTownBridgeEditor",
@@ -24,8 +24,8 @@
       "id": "archive_station",
       "editor_label": "BP_AT_ArchiveStation",
       "actor_path": "/AgentTownBridge/Map/AgentTown.AgentTown:PersistentLevel.BP_AT_ArchiveStation_C_UAID_ACF46673A2EA24F302_1534280443",
-      "display_name": "档案馆与广播站",
-      "description": "保存园区历史、技术资料和个人记忆的文化中心，也负责公共广播。机器人居民可以来这里查阅资料、录入档案，是文化与生活交汇的区域。",
+      "display_name": "档案馆·图书馆与网络中心",
+      "description": "保存园区历史、技术资料和个人记忆的文化中心，也负责公共广播。同时设有图书馆和网络机房，机器人居民可以来这里查阅资料、录入档案、读书上网，是文化与娱乐交汇的区域。",
       "bounds":
       {
         "center": [
@@ -268,7 +268,130 @@
   ],
   "objects": [
     {
-      "id": "Charge",
+      "id": "Bench-1",
+      "category": "rest",
+      "zone_id": "central_plaza",
+      "editor_label": "BP_AT_Bench",
+      "actor_class": "/AgentTownBridge/WorldKB/SmartObject/bench/BP_AT_Bench.BP_AT_Bench_C",
+      "display_name": "长椅",
+      "description": "坐一坐，恢复少量疲劳",
+      "semantic_group": "bench",
+      "actor_position": [
+        -5530,
+        13190,
+        -21720
+      ],
+      "interaction_point": [
+        -5530,
+        13190,
+        -21720
+      ],
+      "interaction_facing": [
+        0,
+        -1,
+        0
+      ],
+      "available_interactions": [
+        {
+          "name": "rest",
+          "description": "坐一坐，恢复少量疲劳",
+          "money_delta_per_hour": 0,
+          "money_one_shot": 0,
+          "min_money_to_use": 0,
+          "energy_delta_per_hour": 0,
+          "fatigue_delta_per_hour": -10,
+          "joint_wear_delta_per_hour": 0,
+          "min_energy_to_use": 0,
+          "max_fatigue_to_use": 100,
+          "max_joint_wear_to_use": 100
+        }
+      ],
+      "default_state": "idle"
+    },
+    {
+      "id": "Bench-2",
+      "category": "rest",
+      "zone_id": "central_plaza",
+      "editor_label": "BP_AT_Bench2",
+      "actor_class": "/AgentTownBridge/WorldKB/SmartObject/bench/BP_AT_Bench.BP_AT_Bench_C",
+      "display_name": "长椅",
+      "description": "坐一坐，恢复少量疲劳",
+      "semantic_group": "bench",
+      "actor_position": [
+        -5530,
+        13940,
+        -21720
+      ],
+      "interaction_point": [
+        -5530,
+        13940,
+        -21720
+      ],
+      "interaction_facing": [
+        0,
+        -1,
+        0
+      ],
+      "available_interactions": [
+        {
+          "name": "rest",
+          "description": "坐一坐，恢复少量疲劳",
+          "money_delta_per_hour": 0,
+          "money_one_shot": 0,
+          "min_money_to_use": 0,
+          "energy_delta_per_hour": 0,
+          "fatigue_delta_per_hour": -10,
+          "joint_wear_delta_per_hour": 0,
+          "min_energy_to_use": 0,
+          "max_fatigue_to_use": 100,
+          "max_joint_wear_to_use": 100
+        }
+      ],
+      "default_state": "idle"
+    },
+    {
+      "id": "Bench-3",
+      "category": "rest",
+      "zone_id": "central_plaza",
+      "editor_label": "BP_AT_Bench3",
+      "actor_class": "/AgentTownBridge/WorldKB/SmartObject/bench/BP_AT_Bench.BP_AT_Bench_C",
+      "display_name": "长椅",
+      "description": "坐一坐，恢复少量疲劳",
+      "semantic_group": "bench",
+      "actor_position": [
+        -5530,
+        14810,
+        -21720
+      ],
+      "interaction_point": [
+        -5530,
+        14810,
+        -21720
+      ],
+      "interaction_facing": [
+        0,
+        -1,
+        0
+      ],
+      "available_interactions": [
+        {
+          "name": "rest",
+          "description": "坐一坐，恢复少量疲劳",
+          "money_delta_per_hour": 0,
+          "money_one_shot": 0,
+          "min_money_to_use": 0,
+          "energy_delta_per_hour": 0,
+          "fatigue_delta_per_hour": -10,
+          "joint_wear_delta_per_hour": 0,
+          "min_energy_to_use": 0,
+          "max_fatigue_to_use": 100,
+          "max_joint_wear_to_use": 100
+        }
+      ],
+      "default_state": "idle"
+    },
+    {
+      "id": "Charge-1",
       "category": "charging",
       "zone_id": "central_plaza",
       "editor_label": "BP_Charging_Station",
@@ -276,6 +399,7 @@
       "display_name": "充电桩",
       "description": "用于给机器人充能的装置",
       "semantic_group": "charger",
+      "supports_queue": true,
       "actor_position": [
         -12830,
         12730,
@@ -294,13 +418,232 @@
       "available_interactions": [
         {
           "name": "charge",
-          "description": "连接到充电桩补充能量。能量低时前往，可恢复能量值。"
+          "description": "连接到充电桩补充能量。能量低时前往，可恢复能量值。",
+          "money_delta_per_hour": -20,
+          "money_one_shot": -30,
+          "min_money_to_use": 40,
+          "energy_delta_per_hour": 80,
+          "fatigue_delta_per_hour": -5,
+          "joint_wear_delta_per_hour": 0,
+          "min_energy_to_use": 0,
+          "max_fatigue_to_use": 100,
+          "max_joint_wear_to_use": 100
         }
       ],
       "default_state": "idle"
     },
     {
-      "id": "Computer",
+      "id": "Charge-2",
+      "category": "charging",
+      "zone_id": "central_plaza",
+      "editor_label": "BP_Charging_Station2",
+      "actor_class": "/AgentTownBridge/WorldKB/SmartObject/Charge/BP_Charging_Station.BP_Charging_Station_C",
+      "display_name": "充电桩",
+      "description": "用于给机器人充能的装置",
+      "semantic_group": "charger",
+      "supports_queue": true,
+      "actor_position": [
+        -12830,
+        13710,
+        -21750
+      ],
+      "interaction_point": [
+        -12830,
+        13710,
+        -21750
+      ],
+      "interaction_facing": [
+        1,
+        0,
+        0
+      ],
+      "available_interactions": [
+        {
+          "name": "charge",
+          "description": "连接到充电桩补充能量。能量低时前往，可恢复能量值。",
+          "money_delta_per_hour": -20,
+          "money_one_shot": -30,
+          "min_money_to_use": 40,
+          "energy_delta_per_hour": 80,
+          "fatigue_delta_per_hour": -5,
+          "joint_wear_delta_per_hour": 0,
+          "min_energy_to_use": 0,
+          "max_fatigue_to_use": 100,
+          "max_joint_wear_to_use": 100
+        }
+      ],
+      "default_state": "idle"
+    },
+    {
+      "id": "Charge-3",
+      "category": "charging",
+      "zone_id": "central_plaza",
+      "editor_label": "BP_Charging_Station3",
+      "actor_class": "/AgentTownBridge/WorldKB/SmartObject/Charge/BP_Charging_Station.BP_Charging_Station_C",
+      "display_name": "充电桩",
+      "description": "用于给机器人充能的装置",
+      "semantic_group": "charger",
+      "supports_queue": true,
+      "actor_position": [
+        -12830,
+        14620,
+        -21750
+      ],
+      "interaction_point": [
+        -12830,
+        14620,
+        -21750
+      ],
+      "interaction_facing": [
+        1,
+        0,
+        0
+      ],
+      "available_interactions": [
+        {
+          "name": "charge",
+          "description": "连接到充电桩补充能量。能量低时前往，可恢复能量值。",
+          "money_delta_per_hour": -20,
+          "money_one_shot": -30,
+          "min_money_to_use": 40,
+          "energy_delta_per_hour": 80,
+          "fatigue_delta_per_hour": -5,
+          "joint_wear_delta_per_hour": 0,
+          "min_energy_to_use": 0,
+          "max_fatigue_to_use": 100,
+          "max_joint_wear_to_use": 100
+        }
+      ],
+      "default_state": "idle"
+    },
+    {
+      "id": "Charge-4",
+      "category": "charging",
+      "zone_id": "central_plaza",
+      "editor_label": "BP_Charging_Station4",
+      "actor_class": "/AgentTownBridge/WorldKB/SmartObject/Charge/BP_Charging_Station.BP_Charging_Station_C",
+      "display_name": "充电桩",
+      "description": "用于给机器人充能的装置",
+      "semantic_group": "charger",
+      "supports_queue": true,
+      "actor_position": [
+        -12830,
+        15510,
+        -21750
+      ],
+      "interaction_point": [
+        -12830,
+        15510,
+        -21750
+      ],
+      "interaction_facing": [
+        1,
+        0,
+        0
+      ],
+      "available_interactions": [
+        {
+          "name": "charge",
+          "description": "连接到充电桩补充能量。能量低时前往，可恢复能量值。",
+          "money_delta_per_hour": -20,
+          "money_one_shot": -30,
+          "min_money_to_use": 40,
+          "energy_delta_per_hour": 80,
+          "fatigue_delta_per_hour": -5,
+          "joint_wear_delta_per_hour": 0,
+          "min_energy_to_use": 0,
+          "max_fatigue_to_use": 100,
+          "max_joint_wear_to_use": 100
+        }
+      ],
+      "default_state": "idle"
+    },
+    {
+      "id": "Charge-5",
+      "category": "charging",
+      "zone_id": "central_plaza",
+      "editor_label": "BP_Charging_Station5",
+      "actor_class": "/AgentTownBridge/WorldKB/SmartObject/Charge/BP_Charging_Station.BP_Charging_Station_C",
+      "display_name": "充电桩",
+      "description": "用于给机器人充能的装置",
+      "semantic_group": "charger",
+      "supports_queue": true,
+      "actor_position": [
+        -12830,
+        16510,
+        -21750
+      ],
+      "interaction_point": [
+        -12830,
+        16510,
+        -21750
+      ],
+      "interaction_facing": [
+        1,
+        0,
+        0
+      ],
+      "available_interactions": [
+        {
+          "name": "charge",
+          "description": "连接到充电桩补充能量。能量低时前往，可恢复能量值。",
+          "money_delta_per_hour": -20,
+          "money_one_shot": -30,
+          "min_money_to_use": 40,
+          "energy_delta_per_hour": 80,
+          "fatigue_delta_per_hour": -5,
+          "joint_wear_delta_per_hour": 0,
+          "min_energy_to_use": 0,
+          "max_fatigue_to_use": 100,
+          "max_joint_wear_to_use": 100
+        }
+      ],
+      "default_state": "idle"
+    },
+    {
+      "id": "Charge-6",
+      "category": "charging",
+      "zone_id": "central_plaza",
+      "editor_label": "BP_Charging_Station6",
+      "actor_class": "/AgentTownBridge/WorldKB/SmartObject/Charge/BP_Charging_Station.BP_Charging_Station_C",
+      "display_name": "充电桩",
+      "description": "用于给机器人充能的装置",
+      "semantic_group": "charger",
+      "supports_queue": true,
+      "actor_position": [
+        -12810,
+        17670,
+        -21750
+      ],
+      "interaction_point": [
+        -12810,
+        17670,
+        -21750
+      ],
+      "interaction_facing": [
+        1,
+        0,
+        0
+      ],
+      "available_interactions": [
+        {
+          "name": "charge",
+          "description": "连接到充电桩补充能量。能量低时前往，可恢复能量值。",
+          "money_delta_per_hour": -20,
+          "money_one_shot": -30,
+          "min_money_to_use": 40,
+          "energy_delta_per_hour": 80,
+          "fatigue_delta_per_hour": -5,
+          "joint_wear_delta_per_hour": 0,
+          "min_energy_to_use": 0,
+          "max_fatigue_to_use": 100,
+          "max_joint_wear_to_use": 100
+        }
+      ],
+      "default_state": "idle"
+    },
+    {
+      "id": "Computer-1",
       "category": "Net",
       "zone_id": "archive_station",
       "editor_label": "BP_AT_Computer",
@@ -326,13 +669,145 @@
       "available_interactions": [
         {
           "name": "surf_internet",
-          "description": "上网浏览信息、查资料、看新闻，放松娱乐"
+          "description": "上网浏览信息、查资料、看新闻，放松娱乐",
+          "money_delta_per_hour": -5,
+          "money_one_shot": 0,
+          "min_money_to_use": 10,
+          "energy_delta_per_hour": -2,
+          "fatigue_delta_per_hour": -6,
+          "joint_wear_delta_per_hour": 0,
+          "min_energy_to_use": 0,
+          "max_fatigue_to_use": 100,
+          "max_joint_wear_to_use": 100
         }
       ],
       "default_state": "idle"
     },
     {
-      "id": "RepairTable",
+      "id": "Computer-2",
+      "category": "Net",
+      "zone_id": "archive_station",
+      "editor_label": "BP_AT_Computer2",
+      "actor_class": "/AgentTownBridge/WorldKB/SmartObject/Computer/BP_AT_Computer.BP_AT_Computer_C",
+      "display_name": "电脑",
+      "description": "放置在档案馆的公共上网终端，机器人居民可以在这里联网查询资料、浏览信息、收发信息，也能用来学习和娱乐。",
+      "semantic_group": "computer",
+      "actor_position": [
+        -4130,
+        -3370,
+        -21860
+      ],
+      "interaction_point": [
+        -4130,
+        -3370,
+        -21860
+      ],
+      "interaction_facing": [
+        0.64,
+        -0.77,
+        0
+      ],
+      "available_interactions": [
+        {
+          "name": "surf_internet",
+          "description": "上网浏览信息、查资料、看新闻，放松娱乐",
+          "money_delta_per_hour": -5,
+          "money_one_shot": 0,
+          "min_money_to_use": 10,
+          "energy_delta_per_hour": -2,
+          "fatigue_delta_per_hour": -6,
+          "joint_wear_delta_per_hour": 0,
+          "min_energy_to_use": 0,
+          "max_fatigue_to_use": 100,
+          "max_joint_wear_to_use": 100
+        }
+      ],
+      "default_state": "idle"
+    },
+    {
+      "id": "InspectionTable-1",
+      "category": "work",
+      "zone_id": "main_workshop",
+      "editor_label": "BP_AT_QualityInspect",
+      "actor_class": "/AgentTownBridge/WorldKB/SmartObject/QualityInspect/BP_AT_QualityInspect.BP_AT_QualityInspect_C",
+      "display_name": "质检台",
+      "description": "用于检测装配零件精度的质检工位，机器人可在此进行质检工作，工作强度较低",
+      "semantic_group": "inspection_table",
+      "actor_position": [
+        3480,
+        7390,
+        -20750
+      ],
+      "interaction_point": [
+        3480,
+        7390,
+        -20750
+      ],
+      "interaction_facing": [
+        -1,
+        0,
+        0
+      ],
+      "available_interactions": [
+        {
+          "name": "inspect",
+          "description": "对装配完成的零件进行质检，检查尺寸与精度是否符合标准",
+          "money_delta_per_hour": 20,
+          "money_one_shot": 0,
+          "min_money_to_use": 0,
+          "energy_delta_per_hour": -2,
+          "fatigue_delta_per_hour": 6,
+          "joint_wear_delta_per_hour": 0.70,
+          "min_energy_to_use": 5,
+          "max_fatigue_to_use": 95,
+          "max_joint_wear_to_use": 95
+        }
+      ],
+      "default_state": "idle"
+    },
+    {
+      "id": "InspectionTable-2",
+      "category": "work",
+      "zone_id": "main_workshop",
+      "editor_label": "BP_AT_QualityInspect2",
+      "actor_class": "/AgentTownBridge/WorldKB/SmartObject/QualityInspect/BP_AT_QualityInspect.BP_AT_QualityInspect_C",
+      "display_name": "质检台",
+      "description": "用于检测装配零件精度的质检工位，机器人可在此进行质检工作，工作强度较低",
+      "semantic_group": "inspection_table",
+      "actor_position": [
+        2980,
+        7390,
+        -20750
+      ],
+      "interaction_point": [
+        2980,
+        7390,
+        -20750
+      ],
+      "interaction_facing": [
+        -1,
+        0,
+        0
+      ],
+      "available_interactions": [
+        {
+          "name": "inspect",
+          "description": "对装配完成的零件进行质检，检查尺寸与精度是否符合标准",
+          "money_delta_per_hour": 20,
+          "money_one_shot": 0,
+          "min_money_to_use": 0,
+          "energy_delta_per_hour": -2,
+          "fatigue_delta_per_hour": 6,
+          "joint_wear_delta_per_hour": 0.70,
+          "min_energy_to_use": 5,
+          "max_fatigue_to_use": 95,
+          "max_joint_wear_to_use": 95
+        }
+      ],
+      "default_state": "idle"
+    },
+    {
+      "id": "RepairTable-1",
       "category": "maintainance",
       "zone_id": "repair_bay",
       "editor_label": "BP_AT_RepairTable",
@@ -358,13 +833,63 @@
       "available_interactions": [
         {
           "name": "repair",
-          "description": "在维修台进行自检和维修，修复磨损、更换零件。磨损高时前往，可降低磨损并恢复健康。"
+          "description": "在维修台对自己进行自检和维修，修复磨损、更换零件。磨损高时前往，可降低磨损并恢复健康。",
+          "money_delta_per_hour": -30,
+          "money_one_shot": -50,
+          "min_money_to_use": 80,
+          "energy_delta_per_hour": 0,
+          "fatigue_delta_per_hour": -5,
+          "joint_wear_delta_per_hour": -50,
+          "min_energy_to_use": 0,
+          "max_fatigue_to_use": 100,
+          "max_joint_wear_to_use": 100
         }
       ],
       "default_state": "idle"
     },
     {
-      "id": "SleepPod",
+      "id": "RepairTable-2",
+      "category": "maintainance",
+      "zone_id": "repair_bay",
+      "editor_label": "BP_AT_RepairTable2",
+      "actor_class": "/AgentTownBridge/WorldKB/SmartObject/RepairTable/BP_AT_RepairTable.BP_AT_RepairTable_C",
+      "display_name": "修理台",
+      "description": "用于机器人居民的日常维修和保养",
+      "semantic_group": "repair_table",
+      "actor_position": [
+        -11570,
+        2480,
+        -22670
+      ],
+      "interaction_point": [
+        -11570,
+        2480,
+        -22670
+      ],
+      "interaction_facing": [
+        1,
+        0,
+        0
+      ],
+      "available_interactions": [
+        {
+          "name": "repair",
+          "description": "在维修台对自己进行自检和维修，修复磨损、更换零件。磨损高时前往，可降低磨损并恢复健康。",
+          "money_delta_per_hour": -30,
+          "money_one_shot": -50,
+          "min_money_to_use": 80,
+          "energy_delta_per_hour": 0,
+          "fatigue_delta_per_hour": -5,
+          "joint_wear_delta_per_hour": -50,
+          "min_energy_to_use": 0,
+          "max_fatigue_to_use": 100,
+          "max_joint_wear_to_use": 100
+        }
+      ],
+      "default_state": "idle"
+    },
+    {
+      "id": "SleepPod-1",
       "category": "rest",
       "zone_id": "residential_quarters",
       "editor_label": "BP_AT_SleepPod",
@@ -373,13 +898,54 @@
       "description": "用于休息和睡觉",
       "semantic_group": "sleep_pod",
       "actor_position": [
-        -9220,
-        -12680,
+        -8420,
+        -12660,
+        -22690
+      ],
+      "interaction_point": [
+        -8420,
+        -12660,
+        -22690
+      ],
+      "interaction_facing": [
+        -0.77,
+        -0.64,
+        0
+      ],
+      "available_interactions": [
+        {
+          "name": "sleep",
+          "description": "进入休眠舱休息，恢复精力和状态。夜间或疲劳高时使用。",
+          "money_delta_per_hour": 0,
+          "money_one_shot": 0,
+          "min_money_to_use": 0,
+          "energy_delta_per_hour": 0,
+          "fatigue_delta_per_hour": -25,
+          "joint_wear_delta_per_hour": 0,
+          "min_energy_to_use": 0,
+          "max_fatigue_to_use": 100,
+          "max_joint_wear_to_use": 100
+        }
+      ],
+      "default_state": "idle"
+    },
+    {
+      "id": "SleepPod-2",
+      "category": "rest",
+      "zone_id": "residential_quarters",
+      "editor_label": "BP_AT_SleepPod2",
+      "actor_class": "/AgentTownBridge/WorldKB/SmartObject/SleepPod/BP_AT_SleepPod.BP_AT_SleepPod_C",
+      "display_name": "睡眠舱",
+      "description": "用于休息和睡觉",
+      "semantic_group": "sleep_pod",
+      "actor_position": [
+        -6760,
+        -13050,
         -22720
       ],
       "interaction_point": [
-        -9220,
-        -12680,
+        -6760,
+        -13050,
         -22720
       ],
       "interaction_facing": [
@@ -390,13 +956,145 @@
       "available_interactions": [
         {
           "name": "sleep",
-          "description": "进入休眠舱休息，恢复精力和状态。夜间或疲劳高时使用。"
+          "description": "进入休眠舱休息，恢复精力和状态。夜间或疲劳高时使用。",
+          "money_delta_per_hour": 0,
+          "money_one_shot": 0,
+          "min_money_to_use": 0,
+          "energy_delta_per_hour": 0,
+          "fatigue_delta_per_hour": -25,
+          "joint_wear_delta_per_hour": 0,
+          "min_energy_to_use": 0,
+          "max_fatigue_to_use": 100,
+          "max_joint_wear_to_use": 100
         }
       ],
       "default_state": "idle"
     },
     {
-      "id": "SortingConveyor",
+      "id": "SleepPod-3",
+      "category": "rest",
+      "zone_id": "residential_quarters",
+      "editor_label": "BP_AT_SleepPod3",
+      "actor_class": "/AgentTownBridge/WorldKB/SmartObject/SleepPod/BP_AT_SleepPod.BP_AT_SleepPod_C",
+      "display_name": "睡眠舱",
+      "description": "用于休息和睡觉",
+      "semantic_group": "sleep_pod",
+      "actor_position": [
+        -7600,
+        -13780,
+        -22320
+      ],
+      "interaction_point": [
+        -7600,
+        -13780,
+        -22320
+      ],
+      "interaction_facing": [
+        0.64,
+        0.77,
+        0
+      ],
+      "available_interactions": [
+        {
+          "name": "sleep",
+          "description": "进入休眠舱休息，恢复精力和状态。夜间或疲劳高时使用。",
+          "money_delta_per_hour": 0,
+          "money_one_shot": 0,
+          "min_money_to_use": 0,
+          "energy_delta_per_hour": 0,
+          "fatigue_delta_per_hour": -25,
+          "joint_wear_delta_per_hour": 0,
+          "min_energy_to_use": 0,
+          "max_fatigue_to_use": 100,
+          "max_joint_wear_to_use": 100
+        }
+      ],
+      "default_state": "idle"
+    },
+    {
+      "id": "SleepPod-4",
+      "category": "rest",
+      "zone_id": "residential_quarters",
+      "editor_label": "BP_AT_SleepPod4",
+      "actor_class": "/AgentTownBridge/WorldKB/SmartObject/SleepPod/BP_AT_SleepPod.BP_AT_SleepPod_C",
+      "display_name": "睡眠舱",
+      "description": "用于休息和睡觉",
+      "semantic_group": "sleep_pod",
+      "actor_position": [
+        -7570,
+        -12880,
+        -22320
+      ],
+      "interaction_point": [
+        -7570,
+        -12880,
+        -22320
+      ],
+      "interaction_facing": [
+        0.64,
+        -0.77,
+        0
+      ],
+      "available_interactions": [
+        {
+          "name": "sleep",
+          "description": "进入休眠舱休息，恢复精力和状态。夜间或疲劳高时使用。",
+          "money_delta_per_hour": 0,
+          "money_one_shot": 0,
+          "min_money_to_use": 0,
+          "energy_delta_per_hour": 0,
+          "fatigue_delta_per_hour": -25,
+          "joint_wear_delta_per_hour": 0,
+          "min_energy_to_use": 0,
+          "max_fatigue_to_use": 100,
+          "max_joint_wear_to_use": 100
+        }
+      ],
+      "default_state": "idle"
+    },
+    {
+      "id": "SleepPod-5",
+      "category": "rest",
+      "zone_id": "residential_quarters",
+      "editor_label": "BP_AT_SleepPod5",
+      "actor_class": "/AgentTownBridge/WorldKB/SmartObject/SleepPod/BP_AT_SleepPod.BP_AT_SleepPod_C",
+      "display_name": "睡眠舱",
+      "description": "用于休息和睡觉",
+      "semantic_group": "sleep_pod",
+      "actor_position": [
+        -7430,
+        -13680,
+        -22740
+      ],
+      "interaction_point": [
+        -7430,
+        -13680,
+        -22740
+      ],
+      "interaction_facing": [
+        0.77,
+        0.64,
+        0
+      ],
+      "available_interactions": [
+        {
+          "name": "sleep",
+          "description": "进入休眠舱休息，恢复精力和状态。夜间或疲劳高时使用。",
+          "money_delta_per_hour": 0,
+          "money_one_shot": 0,
+          "min_money_to_use": 0,
+          "energy_delta_per_hour": 0,
+          "fatigue_delta_per_hour": -25,
+          "joint_wear_delta_per_hour": 0,
+          "min_energy_to_use": 0,
+          "max_fatigue_to_use": 100,
+          "max_joint_wear_to_use": 100
+        }
+      ],
+      "default_state": "idle"
+    },
+    {
+      "id": "SortingConveyor-1",
       "category": "work",
       "zone_id": "logistics_hub",
       "editor_label": "BP_AT_SortingConveyor",
@@ -422,28 +1120,78 @@
       "available_interactions": [
         {
           "name": "sort_cargo",
-          "description": "在传送带上对物资进行分类、分拣，送到对应货位。物流站最核心的工作。"
+          "description": "在传送带上对物资进行分类、分拣，送到对应货位。物流站最核心的工作。",
+          "money_delta_per_hour": 26,
+          "money_one_shot": 0,
+          "min_money_to_use": 0,
+          "energy_delta_per_hour": -3,
+          "fatigue_delta_per_hour": 10,
+          "joint_wear_delta_per_hour": 1.10,
+          "min_energy_to_use": 10,
+          "max_fatigue_to_use": 80,
+          "max_joint_wear_to_use": 80
         }
       ],
       "default_state": "idle"
     },
     {
-      "id": "WorkBench",
+      "id": "SortingConveyor-2",
+      "category": "work",
+      "zone_id": "logistics_hub",
+      "editor_label": "BP_AT_SortingConveyor2",
+      "actor_class": "/AgentTownBridge/WorldKB/SmartObject/SortingConveyor/BP_AT_SortingConveyor.BP_AT_SortingConveyor_C",
+      "display_name": "分拣传送带",
+      "description": "物流中转站的分拣传送带，负责对原料、半成品和成品进行分拣与流转输送。机器人居民在这里搬运、分类和配送物资，是物资进出的关键设施。",
+      "semantic_group": "sorting_conveyor",
+      "actor_position": [
+        -6710,
+        -10260,
+        -22780
+      ],
+      "interaction_point": [
+        -6710,
+        -10260,
+        -22780
+      ],
+      "interaction_facing": [
+        1,
+        0,
+        0
+      ],
+      "available_interactions": [
+        {
+          "name": "sort_cargo",
+          "description": "在传送带上对物资进行分类、分拣，送到对应货位。物流站最核心的工作。",
+          "money_delta_per_hour": 26,
+          "money_one_shot": 0,
+          "min_money_to_use": 0,
+          "energy_delta_per_hour": -3,
+          "fatigue_delta_per_hour": 10,
+          "joint_wear_delta_per_hour": 1.10,
+          "min_energy_to_use": 10,
+          "max_fatigue_to_use": 80,
+          "max_joint_wear_to_use": 80
+        }
+      ],
+      "default_state": "idle"
+    },
+    {
+      "id": "WorkBench-1",
       "category": "work",
       "zone_id": "main_workshop",
-      "editor_label": "BP_AT_WorkBench",
+      "editor_label": "BP_AT_WorkBench2",
       "actor_class": "/AgentTownBridge/WorldKB/SmartObject/WorkBench/BP_AT_WorkBench.BP_AT_WorkBench_C",
       "display_name": "工作台",
       "description": "装配工作台",
       "semantic_group": "workbench",
       "actor_position": [
-        7330,
-        7100,
+        6290,
+        6760,
         -21140
       ],
       "interaction_point": [
-        7330,
-        7100,
+        6290,
+        6760,
         -21140
       ],
       "interaction_facing": [
@@ -454,7 +1202,139 @@
       "available_interactions": [
         {
           "name": "assemble",
-          "description": "在工作台上进行零件装配，产出成品。机器人居民最常做的工作。"
+          "description": "在工作台上进行零件装配，产出成品。机器人居民最常做的工作。",
+          "money_delta_per_hour": 30,
+          "money_one_shot": 0,
+          "min_money_to_use": 0,
+          "energy_delta_per_hour": -4,
+          "fatigue_delta_per_hour": 12,
+          "joint_wear_delta_per_hour": 1.40,
+          "min_energy_to_use": 10,
+          "max_fatigue_to_use": 80,
+          "max_joint_wear_to_use": 80
+        }
+      ],
+      "default_state": "idle"
+    },
+    {
+      "id": "WorkBench-2",
+      "category": "work",
+      "zone_id": "main_workshop",
+      "editor_label": "BP_AT_WorkBench",
+      "actor_class": "/AgentTownBridge/WorldKB/SmartObject/WorkBench/BP_AT_WorkBench.BP_AT_WorkBench_C",
+      "display_name": "工作台",
+      "description": "装配工作台",
+      "semantic_group": "workbench",
+      "actor_position": [
+        5850,
+        6760,
+        -21140
+      ],
+      "interaction_point": [
+        5850,
+        6760,
+        -21140
+      ],
+      "interaction_facing": [
+        1,
+        0,
+        0
+      ],
+      "available_interactions": [
+        {
+          "name": "assemble",
+          "description": "在工作台上进行零件装配，产出成品。机器人居民最常做的工作。",
+          "money_delta_per_hour": 30,
+          "money_one_shot": 0,
+          "min_money_to_use": 0,
+          "energy_delta_per_hour": -4,
+          "fatigue_delta_per_hour": 12,
+          "joint_wear_delta_per_hour": 1.40,
+          "min_energy_to_use": 10,
+          "max_fatigue_to_use": 80,
+          "max_joint_wear_to_use": 80
+        }
+      ],
+      "default_state": "idle"
+    },
+    {
+      "id": "WorkBench-3",
+      "category": "work",
+      "zone_id": "main_workshop",
+      "editor_label": "BP_AT_WorkBench3",
+      "actor_class": "/AgentTownBridge/WorldKB/SmartObject/WorkBench/BP_AT_WorkBench.BP_AT_WorkBench_C",
+      "display_name": "工作台",
+      "description": "装配工作台",
+      "semantic_group": "workbench",
+      "actor_position": [
+        5140,
+        6760,
+        -21140
+      ],
+      "interaction_point": [
+        5140,
+        6760,
+        -21140
+      ],
+      "interaction_facing": [
+        1,
+        0,
+        0
+      ],
+      "available_interactions": [
+        {
+          "name": "assemble",
+          "description": "在工作台上进行零件装配，产出成品。机器人居民最常做的工作。",
+          "money_delta_per_hour": 30,
+          "money_one_shot": 0,
+          "min_money_to_use": 0,
+          "energy_delta_per_hour": -4,
+          "fatigue_delta_per_hour": 12,
+          "joint_wear_delta_per_hour": 1.40,
+          "min_energy_to_use": 10,
+          "max_fatigue_to_use": 80,
+          "max_joint_wear_to_use": 80
+        }
+      ],
+      "default_state": "idle"
+    },
+    {
+      "id": "WorkBench-4",
+      "category": "work",
+      "zone_id": "main_workshop",
+      "editor_label": "BP_AT_WorkBench4",
+      "actor_class": "/AgentTownBridge/WorldKB/SmartObject/WorkBench/BP_AT_WorkBench.BP_AT_WorkBench_C",
+      "display_name": "工作台",
+      "description": "装配工作台",
+      "semantic_group": "workbench",
+      "actor_position": [
+        4480,
+        6760,
+        -21140
+      ],
+      "interaction_point": [
+        4480,
+        6760,
+        -21140
+      ],
+      "interaction_facing": [
+        1,
+        0,
+        0
+      ],
+      "available_interactions": [
+        {
+          "name": "assemble",
+          "description": "在工作台上进行零件装配，产出成品。机器人居民最常做的工作。",
+          "money_delta_per_hour": 30,
+          "money_one_shot": 0,
+          "min_money_to_use": 0,
+          "energy_delta_per_hour": -4,
+          "fatigue_delta_per_hour": 12,
+          "joint_wear_delta_per_hour": 1.40,
+          "min_energy_to_use": 10,
+          "max_fatigue_to_use": 80,
+          "max_joint_wear_to_use": 80
         }
       ],
       "default_state": "idle"
@@ -469,8 +1349,64 @@
       "actor_class": "/Game/AI/AgentTown/AgentBP/Human/BP_AT_Agent_LaoChen.BP_AT_Agent_LaoChen_C",
       "display_name": "老陈",
       "initial_position": [
-        -8680,
-        -11560,
+        -8510,
+        -11640,
+        -22710
+      ],
+      "main_behavior_tree": "/Game/AI/AgentTown/AgentBT/BT_AT_LaoChen.BT_AT_LaoChen"
+    },
+    {
+      "id": "H-02",
+      "type": "Human",
+      "initial_zone": "residential_quarters",
+      "editor_label": "BP_AT_Agent_LaoWang",
+      "actor_class": "/Game/AI/AgentTown/AgentBP/Human/BP_AT_Agent_LaoWang.BP_AT_Agent_LaoWang_C",
+      "display_name": "老王",
+      "initial_position": [
+        -7280,
+        -13200,
+        -22712
+      ],
+      "main_behavior_tree": "/Game/AI/AgentTown/AgentBT/BT_AT_LaoChen.BT_AT_LaoChen"
+    },
+    {
+      "id": "H-03",
+      "type": "Human",
+      "initial_zone": "residential_quarters",
+      "editor_label": "BP_AT_Agent_LaoLi",
+      "actor_class": "/Game/AI/AgentTown/AgentBP/Human/BP_AT_Agent_LaoLi.BP_AT_Agent_LaoLi_C",
+      "display_name": "老李",
+      "initial_position": [
+        -8330,
+        -13240,
+        -22312
+      ],
+      "main_behavior_tree": "/Game/AI/AgentTown/AgentBT/BT_AT_LaoChen.BT_AT_LaoChen"
+    },
+    {
+      "id": "H-04",
+      "type": "Human",
+      "initial_zone": "residential_quarters",
+      "editor_label": "BP_AT_Agent_LaoLiu",
+      "actor_class": "/Game/AI/AgentTown/AgentBP/Human/BP_AT_Agent_LaoLiu.BP_AT_Agent_LaoLiu_C",
+      "display_name": "老刘",
+      "initial_position": [
+        -8230,
+        -12820,
+        -22312
+      ],
+      "main_behavior_tree": "/Game/AI/AgentTown/AgentBT/BT_AT_LaoChen.BT_AT_LaoChen"
+    },
+    {
+      "id": "H-05",
+      "type": "Human",
+      "initial_zone": "residential_quarters",
+      "editor_label": "BP_AT_Agent_LaoZhang",
+      "actor_class": "/Game/AI/AgentTown/AgentBP/Human/BP_AT_Agent_LaoZhang.BP_AT_Agent_LaoZhang_C",
+      "display_name": "老张",
+      "initial_position": [
+        -8110,
+        -13400,
         -22712
       ],
       "main_behavior_tree": "/Game/AI/AgentTown/AgentBT/BT_AT_LaoChen.BT_AT_LaoChen"
@@ -479,6 +1415,6 @@
   "validation_summary":
   {
     "errors": 0,
-    "warnings": 0
+    "warnings": 1
   }
 }
