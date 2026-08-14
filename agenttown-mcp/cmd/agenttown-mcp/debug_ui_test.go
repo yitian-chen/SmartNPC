@@ -84,10 +84,10 @@ func TestHandleDebugKB_ReturnsZonesAndObjects(t *testing.T) {
 	}
 	foundWorkbench := false
 	for _, o := range resp.Objects {
-		if o.ID == "workbench" {
+		if o.ID == "workbench-1" {
 			foundWorkbench = true
 			if o.ZoneID != "main_workshop" {
-				t.Errorf("workbench zone_id: got %q, want main_workshop", o.ZoneID)
+				t.Errorf("workbench-1 zone_id: got %q, want main_workshop", o.ZoneID)
 			}
 			foundAssemble := false
 			for _, a := range o.AvailableInteractions {
@@ -97,13 +97,13 @@ func TestHandleDebugKB_ReturnsZonesAndObjects(t *testing.T) {
 				}
 			}
 			if !foundAssemble {
-				t.Errorf("workbench available_interactions should contain assemble, got %v", o.AvailableInteractions)
+				t.Errorf("workbench-1 available_interactions should contain assemble, got %v", o.AvailableInteractions)
 			}
 			break
 		}
 	}
 	if !foundWorkbench {
-		t.Error("Objects should contain workbench")
+		t.Error("Objects should contain workbench-1")
 	}
 }
 

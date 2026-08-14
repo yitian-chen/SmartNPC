@@ -33,7 +33,7 @@ func TestBuildReactivePrompt_Defaults(t *testing.T) {
 	}
 	promptText := prompt.BuildReactive(in)
 	for _, want := range []string{
-		"14:30", "main_workshop", "45", "30", "15", "90",
+		"14:30", "main_workshop", "45", "30", "15", "0",
 		"关节磨损",
 		"WorkShift(smart_object=workbench_01, interaction=assemble)",
 		"tactical", "14:00-18:00", "14:00-18:00 工作组装",

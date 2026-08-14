@@ -450,8 +450,8 @@ func TestBuildDefaultDailyPlan_WithKB(t *testing.T) {
 	if !strings.Contains(got, "档案馆·图书馆与网络中心") {
 		t.Errorf("KB-derived plan should contain first zone display name: %q", got)
 	}
-	// 第一个 object（按 ID 排序）是 charge（显示名"充电桩"）
-	if !strings.Contains(got, "充电桩") {
+	// 第一个 object（按 ID 排序）是 bench-1（显示名"长椅"）
+	if !strings.Contains(got, "长椅") {
 		t.Errorf("KB-derived plan should contain first object display name: %q", got)
 	}
 	// 跨日仿真：兜底计划含 5 个时段（07:00-12:00 / 12:00-14:00 / 14:00-18:00 /
@@ -691,8 +691,8 @@ func TestBuildStrategicZoneObjectMap_RealKB(t *testing.T) {
 	if !strings.Contains(got, "workbench") {
 		t.Errorf("map should list workbench under main_workshop: %q", got)
 	}
-	if !strings.Contains(got, "sleeppod") {
-		t.Errorf("map should list sleeppod under residential_quarters: %q", got)
+	if !strings.Contains(got, "sleep_pod") {
+		t.Errorf("map should list sleep_pod under residential_quarters: %q", got)
 	}
 	// 无 object 的 zone 应显式标注（让战略层 LLM 知道这些 zone 不能做 interact）。
 	if !strings.Contains(got, "无可交互物体") {
