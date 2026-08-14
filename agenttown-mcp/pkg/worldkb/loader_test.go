@@ -37,11 +37,11 @@ func TestLoad_Sample(t *testing.T) {
 	if len(kb.Zones) != 7 {
 		t.Errorf("len(Zones) = %d, want 7", len(kb.Zones))
 	}
-	if len(kb.Objects) != 6 {
-		t.Errorf("len(Objects) = %d, want 6", len(kb.Objects))
+	if len(kb.Objects) != 26 {
+		t.Errorf("len(Objects) = %d, want 26", len(kb.Objects))
 	}
-	if len(kb.Agents) != 3 {
-		t.Errorf("len(Agents) = %d, want 3", len(kb.Agents))
+	if len(kb.Agents) != 5 {
+		t.Errorf("len(Agents) = %d, want 5", len(kb.Agents))
 	}
 
 	// Index sanity.
@@ -54,11 +54,11 @@ func TestLoad_Sample(t *testing.T) {
 	if kb.GetZone("repair_bay") == nil {
 		t.Error("zoneByID missing repair_bay")
 	}
-	if kb.GetObject("workbench") == nil {
-		t.Error("objectByID missing workbench")
+	if kb.GetObject("workbench-1") == nil {
+		t.Error("objectByID missing workbench-1")
 	}
-	if kb.GetObject("charge") == nil {
-		t.Error("objectByID missing charge")
+	if kb.GetObject("charge-1") == nil {
+		t.Error("objectByID missing charge-1")
 	}
 	if kb.GetAgent("H-01") == nil {
 		t.Error("agentByID missing H-01")
@@ -70,8 +70,8 @@ func TestLoad_Sample(t *testing.T) {
 		t.Error("agentByID missing H-03")
 	}
 
-	// Coordinates: workbench interaction_point = [6290, 6760, -21140]
-	o := kb.GetObject("workbench")
+	// Coordinates: workbench-1 interaction_point = [6290, 6760, -21140]
+	o := kb.GetObject("workbench-1")
 	if o.InteractionPoint != [3]float64{6290, 6760, -21140} {
 		t.Errorf("workbench interaction_point = %v, want [6290 6760 -21140]", o.InteractionPoint)
 	}

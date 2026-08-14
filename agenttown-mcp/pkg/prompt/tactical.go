@@ -20,6 +20,10 @@ import (
 // 动作共享 semantic_group+interaction（按真实 UE5 capability_registry
 // 声明的参数名，2026-08-11 修正：原 smart_object 字段 UE5 不识别，导致
 // 复合动作瞬时返回不执行工作阶段）。
+//
+// 2026-08-14 P0-2 修复：5 个复合动作的 params 占位符从抽象中文（"休眠舱组名"/"动词"）
+// 改为具体的合法值示例（sleep_pod/sleep 等），让 LLM 看到明确的合法参数，
+// 避免把"长椅休息"goal 错配到 rest_at_residence 复合动作上。
 var toolOverride = map[string]struct {
 	Desc   string
 	Params string
@@ -31,11 +35,13 @@ var toolOverride = map[string]struct {
 	"emote":       {"表达情绪", `{"emotion":"happy|sad|..."}`},
 	"interact":    {"与智能物体交互", `{"semantic_group":"...","interaction":"动词"}`},
 	// wait intentionally not in override and not shown in prompt tool list.
-	"work_shift":        {"工作班次（装配/作业）", `{"semantic_group":"工作设施组名","interaction":"动词"}`},
-	"charge_at_station": {"在充电站充电", `{"semantic_group":"充电设施组名","interaction":"动词"}`},
-	"self_maintenance":  {"自我维护保养", `{"semantic_group":"维护设施组名","interaction":"动词"}`},
-	"rest_at_residence": {"在住所休息", `{"semantic_group":"休眠舱组名","interaction":"动词"}`},
-	"surf_internet":     {"上网浏览", `{"semantic_group":"终端组名","interaction":"动词"}`},
+	// 复合动作 params 给出具体合法值示例（来自当前 world_kb.yaml），
+	// LLM 模仿时直接套用即可，避免编造 semantic_group 或 interaction。
+	"work_shift":        {"工作班次（装配/作业）", `{"semantic_group":"workbench|sorting_conveyor|inspection_table","interaction":"assemble|sort_cargo|inspect"}`},
+	"charge_at_station": {"在充电站充电", `{"semantic_group":"charger","interaction":"charge"}`},
+	"self_maintenance":  {"自我维护保养", `{"semantic_group":"repair_table","interaction":"repair"}`},
+	"rest_at_residence": {"在住所休息（仅搭配 sleep_pod/sleep；长椅休息用 interact）", `{"semantic_group":"sleep_pod","interaction":"sleep"}`},
+	"surf_internet":     {"上网浏览", `{"semantic_group":"computer","interaction":"surf_internet"}`},
 }
 
 // tacticalPromptBody is the prompt's fixed skeleton. %s placeholders are:
@@ -61,13 +67,19 @@ const tacticalPromptBody = `[战术层/任务分解] 当前时段目标：%s
 
 要求：
 1. 队列首个动作必须是 speak（用一句话表达此刻内心想法或独白），然后才是其他动作
-2. 后续每行输出一个 {"action":"工具名","params":{...}}，按执行顺序排列
+2. 后续每行输出一个 {"action":"工具名","params":{...}}，按执行顺序排列。action 字段必须严格使用上方"可用工具"列表中给出的工具名（如 work_shift / charge_at_station / rest_at_residence / surf_internet / self_maintenance / interact / move_to / speak / generic_act / emote / turn_to），禁止编造、禁止近形变换（如把 work_shift 写成 work_short、rest_at_residence 写成 rest_at_composite），否则动作会被丢弃导致队列提前耗尽
 3. 队列必须以长复合动作（标记 [复合]）结尾——长复合动作会持续执行直到时段切换，让 NPC 一直工作到下一 schedule 节点被 worker 主动打断
 4. 禁止输出 wait 动作；复合动作已包含自动移动到对应位置的逻辑，禁止在复合动作前加 move_to——直接输出单个长复合动作即可。
 5. 仅当目标确实没有匹配的长复合动作时（极少见），才用原子动作组合、结合调用兜底的 generic_act 通用动作实现目标
 6. move_to/turn_to 的 target_id 用上方"可前往区域"的 zone id；interact 和复合动作的 semantic_group 必须严格使用上方"可交互物体"给出的 semantic_group 值，禁止编造、禁止用实例 id（如 Charge-1）、禁止拼接 zone/interaction 信息
-7. 每行一个 JSON 对象，不要输出 JSON 数组，不要输出 markdown 围栏，不要输出任何其他文字；不要输出 inner_thought 字段，内心独白直接用首个 speak 动作表达
-8. 若上方【物体实时占用】显示目标 semantic_group 全部占用，必须改用其他空闲 semantic_group 或先安排 generic_act(behavior=look_around) 短暂等待，禁止规划必然失败的占用动作
+7. 复合动作与 semantic_group 必须严格对应，禁止跨类别组合：
+   - work_shift → workbench（装配）/ sorting_conveyor（分拣）/ inspection_table（质检），interaction 用 assemble / sort_cargo / inspect
+   - charge_at_station → charger，interaction 用 charge
+   - rest_at_residence → sleep_pod（仅休眠舱），interaction 用 sleep；长椅（bench）休息不属于"在住所休息"，必须改用 interact 原子动作（semantic_group=bench, interaction=rest）
+   - self_maintenance → repair_table，interaction 用 repair
+   - surf_internet → computer，interaction 用 surf_internet
+8. 每行一个 JSON 对象，不要输出 JSON 数组，不要输出 markdown 围栏，不要输出任何其他文字；不要输出 inner_thought 字段，内心独白直接用首个 speak 动作表达
+9. 若上方【物体实时占用】显示目标 semantic_group 全部占用，必须改用其他空闲 semantic_group 或先安排 generic_act(behavior=look_around) 短暂等待，禁止规划必然失败的占用动作
 
 示例（id 来自上方可用列表，不可照抄示例中的 id）：
 %s`
@@ -386,8 +398,10 @@ func exampleForGoal(kb *worldkb.KB, goal string, zones []worldkb.ZoneInfo, objs 
 {"action":"generic_act","params":{"thought":"巡视设备状态","behavior":"look_around"}}`, exZone)
 	}
 
-	// 2. 充电/补能/休息/恢复/疲劳 → speak + charge_at_station
-	if containsAny(gl, "充电", "补能", "休息", "恢复", "疲劳", "charge", "rest") {
+	// 2. 充电/补能 → speak + charge_at_station
+	//    仅匹配明确的"充电"语义，避免把"休息/恢复/疲劳"也路由到充电示例
+	//    （P0-2 修复：原分支含"休息/恢复/疲劳"会把"长椅休息"goal 错配到 charge_at_station）。
+	if containsAny(gl, "充电", "补能", "charge") {
 		if obj := findObjectByCategory(objs, "charging_station", "charging"); obj != nil {
 			verb := "<可用 interaction>"
 			if len(obj.AvailableInteractions) > 0 {
@@ -395,6 +409,25 @@ func exampleForGoal(kb *worldkb.KB, goal string, zones []worldkb.ZoneInfo, objs 
 			}
 			return fmt.Sprintf(`{"action":"speak","params":{"content":"去充电设施补充能量"}}
 {"action":"charge_at_station","params":{"semantic_group":"%s","interaction":"%s"}}`, semanticGroupOf(*obj), verb)
+		}
+	}
+
+	// 2b. 回住所/休眠/睡觉 → speak + rest_at_residence(sleep_pod/sleep)
+	//     仅匹配"回舱/休眠/睡觉"语义，rest_at_residence 只能搭配 sleep_pod。
+	if containsAny(gl, "回住所", "回休眠", "休眠舱", "睡觉", "睡个", "睡眠", "回舱", "rest_at_residence", "sleep") {
+		if obj := findObjectBySemanticGroup(objs, "sleep_pod"); obj != nil {
+			return fmt.Sprintf(`{"action":"speak","params":{"content":"回休眠舱好好睡一觉"}}
+{"action":"rest_at_residence","params":{"semantic_group":"sleep_pod","interaction":"sleep"}}`)
+		}
+	}
+
+	// 2c. 长椅/广场休息 → speak + interact(bench/rest)
+	//     长椅休息不是"在住所休息"，必须用 interact 原子动作，禁止套用 rest_at_residence。
+	if containsAny(gl, "长椅", "广场休息", "短暂休息", "歇会儿", "歇会", "休息", "rest") {
+		if obj := findObjectBySemanticGroup(objs, "bench"); obj != nil {
+			return fmt.Sprintf(`{"action":"speak","params":{"content":"去中央广场长椅坐会儿"}}
+{"action":"move_to","params":{"target_type":"zone","target_id":"central_plaza"}}
+{"action":"interact","params":{"semantic_group":"bench","interaction":"rest"}}`)
 		}
 	}
 
@@ -466,6 +499,26 @@ func findObjectByCategory(objs []worldkb.ObjectInfo, categories ...string) *worl
 			o := objs[i]
 			return &o
 		}
+		if _, ok := wanted[objs[i].SemanticGroup]; ok {
+			o := objs[i]
+			return &o
+		}
+	}
+	return nil
+}
+
+// findObjectBySemanticGroup finds the first object whose semantic_group
+// matches any of the given names. Used by exampleForGoal to locate a
+// specific semantic_group (e.g. "sleep_pod", "bench") regardless of category.
+func findObjectBySemanticGroup(objs []worldkb.ObjectInfo, semanticGroups ...string) *worldkb.ObjectInfo {
+	if len(semanticGroups) == 0 {
+		return nil
+	}
+	wanted := make(map[string]struct{}, len(semanticGroups))
+	for _, sg := range semanticGroups {
+		wanted[sg] = struct{}{}
+	}
+	for i := range objs {
 		if _, ok := wanted[objs[i].SemanticGroup]; ok {
 			o := objs[i]
 			return &o

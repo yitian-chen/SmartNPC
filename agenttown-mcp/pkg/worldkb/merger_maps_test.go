@@ -87,8 +87,8 @@ func TestMergeMaps_RealUE5Payload(t *testing.T) {
 	if len(kb.Objects) == 0 {
 		t.Fatal("expected non-empty objects from real payload")
 	}
-	if len(kb.Agents) != 1 || kb.GetAgent("H-01") == nil {
-		t.Errorf("expected agent H-01, got: %+v", kb.Agents)
+	if len(kb.Agents) != 5 || kb.GetAgent("H-01") == nil {
+		t.Errorf("expected 5 agents with H-01, got: %+v", kb.Agents)
 	}
 
 	// display_name from generated survives (not dropped by typed struct).

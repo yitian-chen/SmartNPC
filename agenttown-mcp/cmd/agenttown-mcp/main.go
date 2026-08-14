@@ -266,12 +266,31 @@ func (a *agentContext) recordActionCompletion(completion protocol.ActionComplete
 		if sg != "" {
 			hint += fmt.Sprintf(" semantic_group=%s", sg)
 		}
-		hint += fmt.Sprintf(" result=%s reason=%s。本次规划请避免直接重试同一动作——若目标物体被占用，如同类物体有空余，请先直接重试同一动作；如果同类物品已没有空余，可先 generic_act(behavior=look_around) 短暂等待后安排其他的事情做",
-			completion.Result, completion.Reason)
+		hint += fmt.Sprintf(" result=%s reason=%s。", completion.Result, completion.Reason)
+		hint += replanHintByReason(completion.Reason)
 		a.as.SetReplanHint(hint)
 	}
 
 	return true, TriggerActionDone, detail
+}
+
+// replanHintByReason 根据上次动作失败的 reason 给出针对性的战术层重规划建议。
+// 避免 too_tired 时还引导 LLM 重试工作（会死循环到时段切换）。
+func replanHintByReason(reason string) string {
+	switch {
+	case strings.Contains(reason, "too_tired"):
+		return "本次规划请避免安排 work_shift 等消耗体力的动作——NPC 当前过于疲劳，" +
+			"应优先安排 rest_at_residence（回住所休息）或 charge_at_station（充电）" +
+			"缓解疲劳/恢复能量，待状态恢复后再安排工作。"
+	case strings.Contains(reason, "object_occupied"):
+		return "本次规划请避免直接重试同一动作——若目标物体被占用，如同类物体有空余，" +
+			"请先直接重试同一动作；如果同类物品已没有空余，可先 generic_act(behavior=look_around) " +
+			"短暂等待后安排其他的事情做。"
+	default:
+		return "本次规划请避免直接重试同一动作——若目标物体被占用，如同类物体有空余，" +
+			"请先直接重试同一动作；如果同类物品已没有空余，可先 generic_act(behavior=look_around) " +
+			"短暂等待后安排其他的事情做。"
+	}
 }
 
 // recordActionHistory saves a single action_history row at action completion.

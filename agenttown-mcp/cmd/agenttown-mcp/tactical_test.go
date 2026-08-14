@@ -501,9 +501,12 @@ func TestBuildTacticalPrompt_NilPhysical(t *testing.T) {
 	if promptText == "" {
 		t.Fatal("promptText should not be empty")
 	}
-	// nil physical 时跳过物理状态行（UE 未实现物理状态，不传 0 值避免 LLM 误判）
-	if strings.Contains(promptText, "物理状态") {
-		t.Errorf("prompt should not contain '物理状态' for nil physical, got: %s", promptText)
+	// nil physical 时注入默认物理状态（100/0/0/200），让 LLM 始终看到有效物理上下文
+	if !strings.Contains(promptText, "物理状态") {
+		t.Errorf("prompt should contain '物理状态' with default values for nil physical, got: %s", promptText)
+	}
+	if !strings.Contains(promptText, "100") {
+		t.Errorf("prompt should contain default energy 100 for nil physical, got: %s", promptText)
 	}
 	// slot 为空时不应有时长提示行
 	if strings.Contains(promptText, "请让步骤总时长接近此时长") {
@@ -512,11 +515,14 @@ func TestBuildTacticalPrompt_NilPhysical(t *testing.T) {
 }
 
 // TestBuildTacticalPrompt_ZeroPhysical 验证全 0 物理状态（UE 已上报但值全 0）
-// 也跳过物理状态行注入，与 nil physical 同等处理。
+// 也注入默认物理状态，与 nil physical 同等处理。
 func TestBuildTacticalPrompt_ZeroPhysical(t *testing.T) {
 	promptText := prompt.BuildTactical(prompt.TacticalInput{Goal: "装配", Zone: "main_workshop", TimeOfDay: "09:00", Slot: "09:00-12:00", Physical: &protocol.PhysicalState{}, KB: nil, Hint: "", Actions: nil, AgentID: ""})
-	if strings.Contains(promptText, "物理状态") {
-		t.Errorf("prompt should not contain '物理状态' for all-zero physical, got: %s", promptText)
+	if !strings.Contains(promptText, "物理状态") {
+		t.Errorf("prompt should contain '物理状态' with default values for all-zero physical, got: %s", promptText)
+	}
+	if !strings.Contains(promptText, "100") {
+		t.Errorf("prompt should contain default energy 100 for all-zero physical, got: %s", promptText)
 	}
 }
 
@@ -543,10 +549,10 @@ func TestBuildTacticalPrompt_InjectsKBContext(t *testing.T) {
 			t.Errorf("prompt should list zone %q, got: %s", zID, promptText)
 		}
 	}
-	// 应包含所有 object（新 UE5 KB: charge/repairtable/sleeppod/workbench）
-	for _, oID := range []string{"workbench", "charge", "sleeppod", "repairtable"} {
-		if !strings.Contains(promptText, oID) {
-			t.Errorf("prompt should list object %q, got: %s", oID, promptText)
+	// 应包含所有 object 的 semantic_group（新 UE5 KB: charger/repair_table/sleep_pod/workbench）
+	for _, sg := range []string{"workbench", "charger", "sleep_pod", "repair_table"} {
+		if !strings.Contains(promptText, sg) {
+			t.Errorf("prompt should list semantic_group %q, got: %s", sg, promptText)
 		}
 	}
 	// 应包含"可交互物体"段落标题及交互动词
@@ -1077,18 +1083,15 @@ func TestBuildTacticalToolEntries_NilRegistryBuiltinFullSet(t *testing.T) {
 // ─── buildTacticalExample (category-aware) ──────────────────
 
 func TestBuildTacticalExample_ChargingStationFirst(t *testing.T) {
-	// 回归测试：当前 KB 第一个 object（按 ID 排序）是 charge（category=charging），
-	// 示例必须用 charge_at_station，不能用 work_shift 配 charging object。
+	// 回归测试：当前 KB 第一个 object（按 ID 排序）是 bench-1（category=rest），
+	// 示例走 default 分支：move_to + interact。
 	kb := loadTestKB(t)
 	got := prompt.TacticalExample(kb, "")
-	if !strings.Contains(got, "charge_at_station") {
-		t.Errorf("example should use charge_at_station for charging category: %q", got)
+	if !strings.Contains(got, "interact") {
+		t.Errorf("example should use interact for rest category: %q", got)
 	}
-	if !strings.Contains(got, "charge") {
-		t.Errorf("example should reference charge: %q", got)
-	}
-	if strings.Contains(got, "work_shift") {
-		t.Errorf("example must NOT use work_shift for charging object: %q", got)
+	if !strings.Contains(got, "bench") {
+		t.Errorf("example should reference bench semantic_group: %q", got)
 	}
 }
 
@@ -1216,10 +1219,10 @@ func TestBuildTacticalExample_GoalAssembly(t *testing.T) {
 	if !strings.Contains(got, "work_shift") {
 		t.Errorf("goal=装配 should pick work_shift example: %q", got)
 	}
-	// 示例应引用某个 work category 物体（sortingconveyor 或 workbench）。
-	hasWorkObj := strings.Contains(got, "sortingconveyor") || strings.Contains(got, "workbench")
+	// 示例应引用某个 work category 物体（inspection_table/sortingconveyor/workbench）。
+	hasWorkObj := strings.Contains(got, "inspection_table") || strings.Contains(got, "sortingconveyor") || strings.Contains(got, "workbench")
 	if !hasWorkObj {
-		t.Errorf("example should reference a work-category object (sortingconveyor or workbench): %q", got)
+		t.Errorf("example should reference a work-category object (inspection_table/sortingconveyor/workbench): %q", got)
 	}
 	if strings.Contains(got, "charge_at_station") {
 		t.Errorf("assembly goal must NOT fall back to charge example: %q", got)
@@ -1243,6 +1246,48 @@ func TestBuildTacticalExample_GoalCharge(t *testing.T) {
 	// 2026-08-11 修复：复合动作示例不应含 move_to（复合动作自带移动）。
 	if strings.Contains(got, `"action":"move_to"`) {
 		t.Errorf("charge_at_station example must NOT contain move_to (composite includes movement): %q", got)
+	}
+}
+
+// TestBuildTacticalExample_GoalBenchRest 回归测试 P0-2：goal 含"长椅休息"
+// 必须返回 interact(bench/rest) 示例，禁止错配到 rest_at_residence(sleep_pod/sleep)。
+// 旧版 exampleForGoal 第 2 分支用"休息"关键词统一路由到 charge_at_station，
+// LLM 模仿后会把"长椅休息"goal 和 rest_at_residence 复合动作自由组合，产生
+// rest_at_residence(bench/rest) 这种参数错配（bench 不是住所）。
+func TestBuildTacticalExample_GoalBenchRest(t *testing.T) {
+	kb := loadTestKB(t)
+	got := prompt.TacticalExample(kb, "午间到中央广场长椅短暂休息，缓解疲劳")
+	if !strings.Contains(got, `"action":"interact"`) {
+		t.Errorf("goal=长椅休息 should pick interact example: %q", got)
+	}
+	if !strings.Contains(got, `"semantic_group":"bench"`) || !strings.Contains(got, `"interaction":"rest"`) {
+		t.Errorf("bench rest example must use semantic_group=bench interaction=rest: %q", got)
+	}
+	if strings.Contains(got, "rest_at_residence") {
+		t.Errorf("bench rest must NOT use rest_at_residence (bench is not residence): %q", got)
+	}
+	if strings.Contains(got, "sleep_pod") {
+		t.Errorf("bench rest must NOT reference sleep_pod: %q", got)
+	}
+}
+
+// TestBuildTacticalExample_GoalSleepAtResidence 回归测试 P0-2：goal 含"回休眠舱睡觉"
+// 必须返回 rest_at_residence(sleep_pod/sleep) 示例，参数严格对应。
+func TestBuildTacticalExample_GoalSleepAtResidence(t *testing.T) {
+	kb := loadTestKB(t)
+	got := prompt.TacticalExample(kb, "夜间回休眠舱居住区睡眠，恢复体力迎接明天")
+	if !strings.Contains(got, "rest_at_residence") {
+		t.Errorf("goal=回休眠舱睡觉 should pick rest_at_residence example: %q", got)
+	}
+	if !strings.Contains(got, `"semantic_group":"sleep_pod"`) || !strings.Contains(got, `"interaction":"sleep"`) {
+		t.Errorf("rest_at_residence example must use sleep_pod/sleep: %q", got)
+	}
+	if strings.Contains(got, `"semantic_group":"bench"`) {
+		t.Errorf("sleep example must NOT use bench (bench is not residence): %q", got)
+	}
+	// 复合动作不应含 move_to（复合动作自带移动）
+	if strings.Contains(got, `"action":"move_to"`) {
+		t.Errorf("rest_at_residence example must NOT contain move_to: %q", got)
 	}
 }
 
@@ -1301,11 +1346,14 @@ func TestBuildTacticalExample_GoalFallbackOnMissingObject(t *testing.T) {
 }
 
 func TestBuildTacticalExample_GoalEmptyFallback(t *testing.T) {
-	// 空 goal 应降级到默认示例（首个 object 的 category）
+	// 空 goal 应降级到默认示例（首个 object 是 bench-1，走 default interact 分支）
 	kb := loadTestKB(t)
 	got := prompt.TacticalExample(kb, "")
-	if !strings.Contains(got, "charge_at_station") {
+	if !strings.Contains(got, "interact") {
 		t.Errorf("empty goal should fall back to first-object example: %q", got)
+	}
+	if !strings.Contains(got, "bench") {
+		t.Errorf("empty goal example should reference bench: %q", got)
 	}
 }
 

@@ -162,6 +162,35 @@ func TestRecordActionCompletion_FailureSetsReplanHint(t *testing.T) {
 	}
 }
 
+// TestRecordActionCompletion_TooTiredHintGuidesRest 验证 too_tired 失败时
+// replanHint 引导 LLM 改派休息/充电，而非重试工作（历史 bug：too_tired 时
+// hint 仍建议"直接重试同一动作"，导致 work_shift 死循环到时段切换）。
+func TestRecordActionCompletion_TooTiredHintGuidesRest(t *testing.T) {
+	ac, _ := newAgentContext(context.Background())
+	ac.as.RecordActionStarted("act_too_tired", "work_shift",
+		map[string]any{"semantic_group": "workbench", "interaction": "assemble"},
+		agentstate.SourceTactical)
+
+	ac.recordActionCompletion(protocol.ActionCompletedPayload{
+		ActionID: "act_too_tired",
+		Result:   protocol.ResultFailed,
+		Reason:   "too_tired",
+		Progress: 0,
+	})
+
+	snap := ac.as.Snapshot()
+	hint := snap.ReplanHint
+	if !strings.Contains(hint, "too_tired") {
+		t.Errorf("hint should mention too_tired reason: %q", hint)
+	}
+	if !strings.Contains(hint, "rest_at_residence") || !strings.Contains(hint, "charge_at_station") {
+		t.Errorf("too_tired hint should guide to rest/charge: %q", hint)
+	}
+	if strings.Contains(hint, "直接重试同一动作") {
+		t.Errorf("too_tired hint must NOT guide blind retry: %q", hint)
+	}
+}
+
 // TestRecordActionCompletion_FailureNoHintForManualAction 验证 /debug/action
 // 手动调试路径（不经 recordActionStarted，WasInFlight=false）不写 ReplanHint，
 // 避免污染下一轮战术层规划。
