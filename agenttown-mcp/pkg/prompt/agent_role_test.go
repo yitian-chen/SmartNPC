@@ -17,17 +17,27 @@ func TestAgentRole_FallbackEachAgent(t *testing.T) {
 		{
 			agentID:    "H-01",
 			wantName:   "老陈",
-			wantSubstr: []string{"supervisor、worker、maintainer", "沉稳", "念旧", "重视工艺", "务实"},
+			wantSubstr: []string{"装配工人", "assemble", "沉稳", "念旧", "耐久省电"},
 		},
 		{
 			agentID:    "H-02",
-			wantName:   "小赵",
-			wantSubstr: []string{"logistics、patrol、worker", "物流巡检员", "活泼", "勤快", "话多", "责任感强", "热情，爱闲聊"},
+			wantName:   "老王",
+			wantSubstr: []string{"物流分拣员", "sort_cargo", "沉稳", "懒散", "慵懒闲适"},
 		},
 		{
 			agentID:    "H-03",
-			wantName:   "小林",
-			wantSubstr: []string{"maintainer、technician", "维修技术员", "细致", "严谨", "专注技术", "话少", "精确，技术术语多"},
+			wantName:   "老李",
+			wantSubstr: []string{"精密装配技术员", "assemble", "细致", "严谨", "干劲足"},
+		},
+		{
+			agentID:    "H-04",
+			wantName:   "老刘",
+			wantSubstr: []string{"物流搬运工", "sort_cargo", "老实", "踏实", "力气大"},
+		},
+		{
+			agentID:    "H-05",
+			wantName:   "老张",
+			wantSubstr: []string{"质检员", "inspect", "谨慎", "啰嗦", "责任心强"},
 		},
 	}
 	for _, tc := range cases {
@@ -58,12 +68,12 @@ func TestAgentRole_KBLoadedMatchesFallbackShape(t *testing.T) {
 	kb := worldkb.NewKB(nil, nil, []worldkb.Agent{
 		{
 			ID:          "H-02",
-			DisplayName: "小赵",
-			Profession:  "logistics、patrol、worker",
-			Description: "物流巡检员，负责物资流转与区域巡检",
+			DisplayName: "老王",
+			Profession:  "物流分拣员（专做分拣传送带分拣作业）",
+			Description: "物流分拣员，常驻物流转运站分拣传送带，只做分拣（sort_cargo）",
 			Personality: worldkb.Personality{
-				Traits:      []string{"活泼", "勤快", "话多", "责任感强"},
-				SpeechStyle: "热情，爱闲聊",
+				Traits:      []string{"沉稳", "懒散", "耗电慢", "疲劳上涨快"},
+				SpeechStyle: "慵懒闲适，常常打哈欠",
 			},
 		},
 	})
@@ -138,18 +148,18 @@ func TestAgentRole_FallbackFillsWhenProfileEmpty(t *testing.T) {
 	}
 	// KB 字段被忽略，缺失的 profile 字段回退到 hardcoded fallback（H-01）。
 	for _, want := range []string{
-		"职业：supervisor、worker、maintainer",
-		"性格特质：沉稳、念旧、重视工艺、务实",
+		"职业：装配工人（专做工作台装配作业）",
+		"性格特质：沉稳、念旧、耐久省电、磨损慢",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("缺失字段应回填 fallback：%q，got=%q", want, got)
 		}
 	}
-	// H-01 fallback 的 description/speechStyle 为空，对应行不应出现；
+	// H-01 fallback 现在所有字段都非空，都应出现；
 	// 且 KB 的 KB背景/KB说话 也应被忽略。
-	for _, notWant := range []string{"背景：", "说话风格：", "KB职业", "KB背景", "KB特质", "KB说话"} {
+	for _, notWant := range []string{"KB职业", "KB背景", "KB特质", "KB说话"} {
 		if strings.Contains(got, notWant) {
-			t.Errorf("不应包含 KB persona 或空 fallback 字段：%q，got=%q", notWant, got)
+			t.Errorf("不应包含 KB persona 字段：%q，got=%q", notWant, got)
 		}
 	}
 }
@@ -167,7 +177,7 @@ func TestAgentRole_FallbackWhenBothEmpty(t *testing.T) {
 	if !strings.Contains(got, "名字：老陈") {
 		t.Errorf("名字应来自 fallback，got=%q", got)
 	}
-	if !strings.Contains(got, "supervisor、worker、maintainer") {
+	if !strings.Contains(got, "装配工人（专做工作台装配作业）") {
 		t.Errorf("职业应来自 fallback，got=%q", got)
 	}
 }

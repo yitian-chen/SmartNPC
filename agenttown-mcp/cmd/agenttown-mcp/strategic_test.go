@@ -183,9 +183,9 @@ func TestBuildStrategicContext_WithKB(t *testing.T) {
 	if !strings.Contains(got, "老陈") {
 		t.Errorf("context missing agent display name '老陈': %q", got)
 	}
-	// 新 UE5 authored 用 role:[supervisor,worker,maintainer]，shim 后 profession 为 joined 串
-	if !strings.Contains(got, "supervisor、worker、maintainer") {
-		t.Errorf("context missing agent profession 'supervisor、worker、maintainer': %q", got)
+	// 新 fallback 用 "装配工人（专做工作台装配作业）"
+	if !strings.Contains(got, "装配工人（专做工作台装配作业）") {
+		t.Errorf("context missing agent profession '装配工人（专做工作台装配作业）': %q", got)
 	}
 	if !strings.Contains(got, "【你的角色】") {
 		t.Errorf("context missing '【你的角色】' header: %q", got)
@@ -356,17 +356,13 @@ func TestBuildAgentRoleContext_WithKB(t *testing.T) {
 	}
 	for _, want := range []string{
 		"名字：老陈",
-		"职业：supervisor、worker、maintainer",
-		"性格特质：沉稳、念旧、重视工艺、务实",
+		"职业：装配工人（专做工作台装配作业）",
+		"性格特质：沉稳、念旧、耐久省电、磨损慢",
+		"背景：资深装配工人，常驻主生产车间工作台，只做装配（assemble）",
+		"说话风格：简短有力，多用行业术语",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("role missing %q, got: %q", want, got)
-		}
-	}
-	// UE5 authored 未提供 description / speech_style，helper 应跳过这些字段。
-	for _, notWant := range []string{"背景：", "说话风格："} {
-		if strings.Contains(got, notWant) {
-			t.Errorf("role should not contain %q (UE5 authored does not provide it): %q", notWant, got)
 		}
 	}
 	// helper 不应包含段落标题——标题由调用方添加
@@ -384,7 +380,7 @@ func TestBuildAgentRoleContext_NilKB(t *testing.T) {
 	if got == "" {
 		t.Fatal("got empty role for H-01 with nil KB, want fallback content")
 	}
-	for _, want := range []string{"名字：老陈", "职业：supervisor、worker、maintainer", "沉稳、念旧、重视工艺、务实"} {
+	for _, want := range []string{"名字：老陈", "职业：装配工人（专做工作台装配作业）", "沉稳、念旧、耐久省电、磨损慢"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("fallback role missing %q, got: %q", want, got)
 		}
