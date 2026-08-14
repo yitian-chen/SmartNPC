@@ -71,7 +71,7 @@ const tacticalPromptBody = `[战术层/任务分解] 当前时段目标：%s
 2. 后续每行输出一个 {"action":"工具名","params":{...}}，按执行顺序排列。action 字段必须严格使用上方"可用工具"列表中给出的工具名（如 work_shift / charge_at_station / rest_at_residence / surf_internet / self_maintenance / interact / move_to / speak / generic_act / emote / turn_to），禁止编造、禁止近形变换（如把 work_shift 写成 work_short、rest_at_residence 写成 rest_at_composite），否则动作会被丢弃导致队列提前耗尽
 3. 队列必须以长动作结尾（长复合动作 或 interact 原子动作均可）——长动作会持续执行直到时段切换，让 NPC 一直活动到下一 schedule 节点被 worker 主动打断
 4. 禁止输出 wait 动作；复合动作已包含自动移动到对应位置的逻辑，禁止在复合动作前加 move_to——直接输出单个长复合动作即可。
-5. 仅当目标确实没有匹配的长复合动作时（极少见），才用原子动作组合实现目标。长椅/广场休息等场景用单个 interact(bench/rest) 即可（interact 是长动作，会持续到时段切换），禁止把同一动作重复多次填充时段——队列提前耗尽会自动触发重分解生成新动作
+5. 仅当目标确实没有匹配的长复合动作时，才用原子动作组合实现目标。长椅休息等场景用单个 interact_smart_object 即可（interact_smart_object 是长动作，会持续到时段切换），禁止把同一动作重复多次填充时段——队列提前耗尽会自动触发重分解生成新动作
 6. move_to/turn_to 的 target_id 用上方"可前往区域"的 zone id；interact 和复合动作的 semantic_group 必须严格使用上方"可交互物体"给出的 semantic_group 值，禁止编造、禁止用实例 id（如 Charge-1）、禁止拼接 zone/interaction 信息
 7. 复合动作与 semantic_group 必须严格对应，禁止跨类别组合：
    - work_shift → workbench（装配）/ sorting_conveyor（分拣）/ inspection_table（质检），interaction 用 assemble / sort_cargo / inspect
