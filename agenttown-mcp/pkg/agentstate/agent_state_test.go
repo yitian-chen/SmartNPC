@@ -665,6 +665,14 @@ func (f *fakeStore) SeedRelationship(_ context.Context, _ string, _ string, _ in
 	return nil
 }
 
+func (f *fakeStore) SaveDialogue(_ context.Context, _ storage.Dialogue) error {
+	return nil
+}
+
+func (f *fakeStore) LoadRecentDialogues(_ context.Context, _ string, _ int) ([]storage.Dialogue, error) {
+	return nil, nil
+}
+
 func (f *fakeStore) Close() error { return nil }
 
 func (f *fakeStore) snapshot(agentID string) (storage.ScheduleState, bool) {

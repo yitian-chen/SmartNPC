@@ -389,3 +389,106 @@ func TestMySQLStore_SeedRelationshipInsertIgnore(t *testing.T) {
 		t.Errorf("after seed-ignore: got fam=%d, want 6 (seed should not overwrite)", rels[0].Familiarity)
 	}
 }
+
+// ─── Phase 2 Module C: agent_dialogues ───
+
+// TestMySQLStore_SaveLoadDialogueRoundTrip verifies a SaveDialogue followed
+// by LoadRecentDialogues returns the turn with fields intact.
+func TestMySQLStore_SaveLoadDialogueRoundTrip(t *testing.T) {
+	store, _ := skipIfNoMySQL(t)
+	defer store.Close()
+	ctx := context.Background()
+	now := time.Now().Truncate(time.Second)
+
+	want := Dialogue{
+		ConvID:     "conv-rt-1",
+		SpeakerID:  "test-dlg-a",
+		ListenerID: "test-dlg-b",
+		Content:    "最近装配线怎么样？",
+		TurnIndex:  2,
+		IsEnd:      false,
+		CreatedAt:  now,
+	}
+	if err := store.SaveDialogue(ctx, want); err != nil {
+		t.Fatalf("SaveDialogue: %v", err)
+	}
+	got, err := store.LoadRecentDialogues(ctx, "test-dlg-a", 10)
+	if err != nil {
+		t.Fatalf("LoadRecentDialogues speaker: %v", err)
+	}
+	if len(got) == 0 {
+		t.Fatal("LoadRecentDialogues: got 0 rows, want at least 1")
+	}
+	d := got[0] // DESC — most recent first
+	if d.ConvID != want.ConvID || d.SpeakerID != want.SpeakerID ||
+		d.ListenerID != want.ListenerID || d.Content != want.Content ||
+		d.TurnIndex != want.TurnIndex || d.IsEnd != want.IsEnd {
+		t.Errorf("roundtrip: got %+v, want %+v", d, want)
+	}
+	if d.ID == 0 {
+		t.Error("roundtrip: ID should be non-zero after insert")
+	}
+}
+
+// TestMySQLStore_LoadRecentDialoguesBothSides verifies LoadRecentDialogues
+// returns turns where agentID is either speaker OR listener.
+func TestMySQLStore_LoadRecentDialoguesBothSides(t *testing.T) {
+	store, _ := skipIfNoMySQL(t)
+	defer store.Close()
+	ctx := context.Background()
+	base := time.Now().Truncate(time.Second)
+
+	// Two turns: A speaks to B, then B speaks to A. Querying B should see both.
+	turns := []Dialogue{
+		{ConvID: "conv-both-1", SpeakerID: "test-dlg-c", ListenerID: "test-dlg-d", Content: "turn-0", TurnIndex: 0, CreatedAt: base},
+		{ConvID: "conv-both-1", SpeakerID: "test-dlg-d", ListenerID: "test-dlg-c", Content: "turn-1", TurnIndex: 1, CreatedAt: base.Add(time.Minute)},
+	}
+	for i, d := range turns {
+		if err := store.SaveDialogue(ctx, d); err != nil {
+			t.Fatalf("SaveDialogue[%d]: %v", i, err)
+		}
+	}
+	got, err := store.LoadRecentDialogues(ctx, "test-dlg-d", 10)
+	if err != nil {
+		t.Fatalf("LoadRecentDialogues D: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("querying D: got %d rows, want 2 (both sides)", len(got))
+	}
+	// DESC — newest first: turn-1 (D as speaker) then turn-0 (D as listener).
+	if got[0].Content != "turn-1" || got[1].Content != "turn-0" {
+		t.Errorf("DESC order: got [%s, %s], want [turn-1, turn-0]",
+			got[0].Content, got[1].Content)
+	}
+}
+
+// TestMySQLStore_SaveDialogueIsEnd verifies the is_end flag round-trips as
+// true (stored as TINYINT 1).
+func TestMySQLStore_SaveDialogueIsEnd(t *testing.T) {
+	store, _ := skipIfNoMySQL(t)
+	defer store.Close()
+	ctx := context.Background()
+
+	want := Dialogue{
+		ConvID:     "conv-end-1",
+		SpeakerID:  "test-dlg-e",
+		ListenerID: "test-dlg-f",
+		Content:    "那就先这样，回头再聊",
+		TurnIndex:  5,
+		IsEnd:      true,
+		CreatedAt:  time.Now().Truncate(time.Second),
+	}
+	if err := store.SaveDialogue(ctx, want); err != nil {
+		t.Fatalf("SaveDialogue: %v", err)
+	}
+	got, err := store.LoadRecentDialogues(ctx, "test-dlg-e", 5)
+	if err != nil {
+		t.Fatalf("LoadRecentDialogues: %v", err)
+	}
+	if len(got) == 0 {
+		t.Fatal("got 0 rows, want at least 1")
+	}
+	if !got[0].IsEnd {
+		t.Errorf("IsEnd: got false, want true (TINYINT round-trip)")
+	}
+}
