@@ -158,16 +158,17 @@ func TestHandleDebugCap_ReturnsAgents(t *testing.T) {
 	if !ok {
 		t.Fatal("Agents missing \"system\" key")
 	}
-	// handleDebugCap 始终追加合成 Stop 项，所以 len = 注册数 + 1
-	if len(sys) != 3 {
-		t.Fatalf("system actions len = %d; want 3 (2 registered + 1 synthetic Stop)", len(sys))
+	// handleDebugCap 始终追加合成 Stop 项，SocialChat 作为 MCP-side 兜底自动注入，
+	// 所以 len = 注册数 + 1 (SocialChat) + 1 (Stop)
+	if len(sys) != 4 {
+		t.Fatalf("system actions len = %d; want 4 (2 registered + SocialChat + 1 synthetic Stop)", len(sys))
 	}
-	// 前 2 项按 Cmd 排序：MoveTo < Speak；末尾是合成 Stop
-	if sys[0].Cmd != protocol.CmdMoveTo || sys[1].Cmd != protocol.CmdSpeak {
-		t.Errorf("system actions order = %s, %s; want MoveTo, Speak", sys[0].Cmd, sys[1].Cmd)
+	// 前 3 项按 Cmd 排序：MoveTo < SocialChat < Speak；末尾是合成 Stop
+	if sys[0].Cmd != protocol.CmdMoveTo || sys[1].Cmd != protocol.CmdSocialChat || sys[2].Cmd != protocol.CmdSpeak {
+		t.Errorf("system actions order = %s, %s, %s; want MoveTo, SocialChat, Speak", sys[0].Cmd, sys[1].Cmd, sys[2].Cmd)
 	}
-	if sys[2].Cmd != "Stop" {
-		t.Errorf("system actions[2].Cmd = %q; want Stop (synthetic)", sys[2].Cmd)
+	if sys[3].Cmd != "Stop" {
+		t.Errorf("system actions[3].Cmd = %q; want Stop (synthetic)", sys[3].Cmd)
 	}
 }
 
@@ -212,14 +213,15 @@ func TestHandleDebugCap_ToolNameField(t *testing.T) {
 		t.Fatalf("decode: %v", err)
 	}
 	sys := resp.Agents[protocol.SystemAgentID]
-	// 3 registered + 1 synthetic Stop
-	if len(sys) != 4 {
-		t.Fatalf("system actions len = %d; want 4 (3 registered + 1 synthetic Stop)", len(sys))
+	// 3 registered + SocialChat fallback + 1 synthetic Stop
+	if len(sys) != 5 {
+		t.Fatalf("system actions len = %d; want 5 (3 registered + SocialChat + 1 synthetic Stop)", len(sys))
 	}
 	wantTool := map[string]string{
 		"MoveTo":              "move_to",
 		"InteractSmartObject": "interact",
 		"WaveHand":            "wave_hand",
+		"SocialChat":          "social_chat",
 		"Stop":                "stop",
 	}
 	for _, a := range sys {

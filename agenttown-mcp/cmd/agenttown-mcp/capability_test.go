@@ -16,13 +16,23 @@ func TestCapabilityRegistry_GlobalDefault(t *testing.T) {
 	if !r.HasCmd("H-01", protocol.CmdMoveTo) {
 		t.Errorf("HasCmd(H-01, MoveTo) = false; want true (global default)")
 	}
-	got := r.EffectiveActions("H-01")
-	if len(got) != 2 {
-		t.Fatalf("EffectiveActions(H-01) len = %d; want 2", len(got))
+	// SocialChat is auto-injected as MCP-side fallback when UE doesn't declare it.
+	if !r.HasCmd("H-01", protocol.CmdSocialChat) {
+		t.Errorf("HasCmd(H-01, SocialChat) = false; want true (MCP-side fallback)")
 	}
-	// Sorted by Cmd.
+	got := r.EffectiveActions("H-01")
+	if len(got) != 3 {
+		t.Fatalf("EffectiveActions(H-01) len = %d; want 3 (2 declared + SocialChat fallback)", len(got))
+	}
+	// Sorted by Cmd: MoveTo < SocialChat < Wait.
 	if got[0].Cmd != protocol.CmdMoveTo {
 		t.Errorf("EffectiveActions[0].Cmd = %q; want %q", got[0].Cmd, protocol.CmdMoveTo)
+	}
+	if got[1].Cmd != protocol.CmdSocialChat {
+		t.Errorf("EffectiveActions[1].Cmd = %q; want %q", got[1].Cmd, protocol.CmdSocialChat)
+	}
+	if got[2].Cmd != protocol.CmdWait {
+		t.Errorf("EffectiveActions[2].Cmd = %q; want %q", got[2].Cmd, protocol.CmdWait)
 	}
 }
 
@@ -124,8 +134,9 @@ func TestCapabilityRegistry_EffectiveActionsSortedByCmd(t *testing.T) {
 		{Cmd: protocol.CmdWorkShift, Kind: "composite"},
 	})
 	got := r.EffectiveActions("H-01")
-	// Sorted by Cmd alphabetically: MoveTo < Wait < WorkShift
-	want := []string{protocol.CmdMoveTo, protocol.CmdWait, protocol.CmdWorkShift}
+	// Sorted by Cmd alphabetically: MoveTo < SocialChat < Wait < WorkShift
+	// (SocialChat auto-injected as MCP-side fallback).
+	want := []string{protocol.CmdMoveTo, protocol.CmdSocialChat, protocol.CmdWait, protocol.CmdWorkShift}
 	gotCmds := make([]string, len(got))
 	for i, a := range got {
 		gotCmds[i] = a.Cmd
@@ -152,11 +163,11 @@ func TestCapabilityRegistry_Snapshot_GlobalOnly(t *testing.T) {
 	if !ok {
 		t.Fatal("Snapshot.Agents missing \"system\" key")
 	}
-	if len(sys) != 2 {
-		t.Fatalf("system actions len = %d; want 2", len(sys))
+	if len(sys) != 3 {
+		t.Fatalf("system actions len = %d; want 3 (2 declared + SocialChat fallback)", len(sys))
 	}
-	// Sorted by Cmd: MoveTo < Wait
-	want := []string{protocol.CmdMoveTo, protocol.CmdWait}
+	// Sorted by Cmd: MoveTo < SocialChat < Wait
+	want := []string{protocol.CmdMoveTo, protocol.CmdSocialChat, protocol.CmdWait}
 	gotCmds := make([]string, len(sys))
 	for i, a := range sys {
 		gotCmds[i] = a.Cmd
@@ -184,8 +195,8 @@ func TestCapabilityRegistry_Snapshot_WithPerAgent(t *testing.T) {
 		t.Fatalf("Snapshot.Agents len = %d; want 2 (system + H-01)", len(snap.Agents))
 	}
 	sys := snap.Agents[protocol.SystemAgentID]
-	if len(sys) != 2 {
-		t.Errorf("system actions len = %d; want 2", len(sys))
+	if len(sys) != 3 {
+		t.Errorf("system actions len = %d; want 3 (2 declared + SocialChat fallback)", len(sys))
 	}
 	h01 := snap.Agents["H-01"]
 	if len(h01) != 2 {
@@ -232,8 +243,8 @@ func TestCapabilityRegistry_NormalizesWhitespace(t *testing.T) {
 	}
 
 	acts := r.EffectiveActions("H-01")
-	if len(acts) != 2 {
-		t.Fatalf("EffectiveActions len = %d; want 2", len(acts))
+	if len(acts) != 3 {
+		t.Fatalf("EffectiveActions len = %d; want 3 (2 declared + SocialChat fallback)", len(acts))
 	}
 	// 找到 InteractSmartObject 那条，验证 Kind 和 Param.Name 都被 trim。
 	var got protocol.CapabilityAction

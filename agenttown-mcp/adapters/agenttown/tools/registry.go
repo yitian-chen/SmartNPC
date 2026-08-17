@@ -102,7 +102,10 @@ func BuiltinToolSpecs() []ToolSpec {
 		{Name: "self_maintenance", RequiredCmd: protocol.CmdSelfMaintenance},
 		{Name: "rest_at_residence", RequiredCmd: protocol.CmdRestAtResidence},
 		{Name: "surf_internet", RequiredCmd: protocol.CmdSurfInternet},
-		{Name: "social_chat", RequiredCmd: protocol.CmdSocialChat},
+		// social_chat is MCP-side: the dialogue runner lives in MCP, not UE.
+		// RequiredCmd is "" so ReconcileTools never removes it even when UE's
+		// capability_registry doesn't declare SocialChat.
+		{Name: "social_chat", RequiredCmd: ""},
 	}
 }
 

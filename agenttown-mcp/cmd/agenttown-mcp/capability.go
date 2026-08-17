@@ -71,6 +71,12 @@ func (r *CapabilityRegistry) Register(agentID string, actions []protocol.Capabil
 		for _, a := range normalized {
 			r.global[a.Cmd] = a
 		}
+		// SocialChat is MCP-side (dialogue runner lives in MCP, not UE).
+		// Ensure it's always in the global set even when UE's
+		// capability_registry doesn't declare it.
+		if _, ok := r.global[protocol.CmdSocialChat]; !ok {
+			r.global[protocol.CmdSocialChat] = socialChatCapability()
+		}
 		return
 	}
 	// Per-agent override: replace this agent's map wholesale.
@@ -291,7 +297,14 @@ var BuiltinCmdCapabilities = []protocol.CapabilityAction{
 			{Name: "interaction", Type: "string", Description: "交互类型，固定为surf_internet", Required: true, DefaultValue: ""},
 		},
 	},
-	{
+	socialChatCapability(),
+}
+
+// socialChatCapability returns the CapabilityAction definition for SocialChat.
+// Extracted as a function so CapabilityRegistry.Register can inject it as a
+// fallback when UE doesn't declare SocialChat in its capability_registry.
+func socialChatCapability() protocol.CapabilityAction {
+	return protocol.CapabilityAction{
 		Cmd:         protocol.CmdSocialChat,
 		Kind:        "composite",
 		Description: "主动去找另一个 NPC 开始对话，包含走向对方、转向、对话挂起直到对话结束",
@@ -300,5 +313,5 @@ var BuiltinCmdCapabilities = []protocol.CapabilityAction{
 			{Name: "target_agent_id", Type: "string", Description: "要搭话的目标 NPC 的 id", Required: true, DefaultValue: ""},
 			{Name: "content", Type: "string", Description: "开场白内容", Required: true, DefaultValue: ""},
 		},
-	},
+	}
 }

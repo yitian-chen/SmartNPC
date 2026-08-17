@@ -778,9 +778,9 @@ func TestBuildTacticalPrompt_RegistryFiltersTools(t *testing.T) {
 	if strings.Contains(promptText, "- work_shift [复合]:") || strings.Contains(promptText, "- charge_at_station [复合]:") {
 		t.Errorf("prompt should NOT list composite tools as [复合] bullets (composite cmds unavailable), got: %s", promptText)
 	}
-	// Count in header should match available tools (1 — only move_to, wait filtered).
-	if !strings.Contains(promptText, "仅限以下 1 个") {
-		t.Errorf("prompt header should say '仅限以下 1 个', got: %s", promptText)
+	// Count in header should match available tools (2 — move_to + social_chat fallback).
+	if !strings.Contains(promptText, "仅限以下 2 个") {
+		t.Errorf("prompt header should say '仅限以下 2 个' (move_to + social_chat fallback), got: %s", promptText)
 	}
 }
 
@@ -1024,8 +1024,9 @@ func TestBuildTacticalToolList_NewCmdDerived(t *testing.T) {
 		},
 	})
 	list, count := prompt.BuildTacticalToolList(reg.EffectiveActions("H-01"))
-	if count != 2 {
-		t.Fatalf("tool count=%d, want 2 (move_to + wave_hand)", count)
+	// SocialChat auto-injected as MCP-side fallback, so count includes it.
+	if count != 3 {
+		t.Fatalf("tool count=%d, want 3 (move_to + wave_hand + social_chat fallback)", count)
 	}
 	if !strings.Contains(list, "- wave_hand [原子]:") {
 		t.Errorf("tool list should contain wave_hand bullet with [原子] kind label, got: %s", list)
