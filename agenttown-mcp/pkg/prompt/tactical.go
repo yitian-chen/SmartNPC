@@ -10,16 +10,17 @@ import (
 	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
 )
 
-// toolOverride is the hand-tuned Chinese prompt text for the 12 builtin tools.
+// toolOverride is the hand-tuned Chinese prompt text for the 13 builtin tools.
 // Keys are tool_name (snake_case). New cmds pushed via capability_registry
 // derive Desc/Params from CapabilityAction.Description and param schema
 // (see toolEntries).
 //
-// 新 12 cmd 体系（2026-08-11）：MoveTo 统一替换 MoveToLocation+MoveToAgent，
-// 用 target_type+target_id/target_position；InteractSmartObject 和 5 个复合
-// 动作共享 semantic_group+interaction（按真实 UE5 capability_registry
-// 声明的参数名，2026-08-11 修正：原 smart_object 字段 UE5 不识别，导致
-// 复合动作瞬时返回不执行工作阶段）。
+// 新 13 cmd 体系（2026-08-11 + Phase 2 Module C）：MoveTo 统一替换
+// MoveToLocation+MoveToAgent，用 target_type+target_id/target_position；
+// InteractSmartObject 和 5 个复合动作共享 semantic_group+interaction（按真实
+// UE5 capability_registry 声明的参数名，2026-08-11 修正：原 smart_object 字段
+// UE5 不识别，导致复合动作瞬时返回不执行工作阶段）。SocialChat 用
+// target_agent_id+content（对话目标为 NPC，非 Smart Object）。
 //
 // 2026-08-14 P0-2 修复：5 个复合动作的 params 占位符从抽象中文（"休眠舱组名"/"动词"）
 // 改为具体的合法值示例（sleep_pod/sleep 等），让 LLM 看到明确的合法参数，
@@ -42,15 +43,17 @@ var toolOverride = map[string]struct {
 	"self_maintenance":  {"自我维护保养", `{"semantic_group":"repair_table","interaction":"repair"}`},
 	"rest_at_residence": {"在住所休息（仅搭配 sleep_pod/sleep；长椅休息用 interact）", `{"semantic_group":"sleep_pod","interaction":"sleep"}`},
 	"surf_internet":     {"上网浏览", `{"semantic_group":"computer","interaction":"surf_internet"}`},
+	"social_chat":       {"主动去找另一个 NPC 聊天（走向对方+对话挂起，直到对话结束）", `{"target_agent_id":"<附近NPC的 id>","content":"开场白"}`},
 }
 
 // tacticalPromptBody is the prompt's fixed skeleton. %s placeholders are:
 // goal / zone / timeOfDay /
 // physicalLine (physical state line, empty when all-0) / roleLine / memoriesLine /
-// relationshipsLine /
+// relationshipsLine / nearbyLine (visible NPCs, empty when none) /
 // hintLine / slotDurationHint / kbContext / objectStatusLine / toolCount / toolList / exampleBlock.
 const tacticalPromptBody = `[战术层/任务分解] 当前时段目标：%s
 你目前在：%s，游戏时间 %s。
+%s
 %s
 %s
 %s
@@ -68,7 +71,7 @@ const tacticalPromptBody = `[战术层/任务分解] 当前时段目标：%s
 
 要求：
 1. 队列首个动作必须是 speak（用一句话表达此刻内心想法或独白），然后才是其他动作
-2. 后续每行输出一个 {"action":"工具名","params":{...}}，按执行顺序排列。action 字段必须严格使用上方"可用工具"列表中给出的工具名（如 work_shift / charge_at_station / rest_at_residence / surf_internet / self_maintenance / interact / move_to / speak / generic_act / emote / turn_to），禁止编造、禁止近形变换（如把 work_shift 写成 work_short、rest_at_residence 写成 rest_at_composite），否则动作会被丢弃导致队列提前耗尽
+2. 后续每行输出一个 {"action":"工具名","params":{...}}，按执行顺序排列。action 字段必须严格使用上方"可用工具"列表中给出的工具名（如 work_shift / charge_at_station / rest_at_residence / surf_internet / self_maintenance / social_chat / interact / move_to / speak / generic_act / emote / turn_to），禁止编造、禁止近形变换（如把 work_shift 写成 work_short、rest_at_residence 写成 rest_at_composite），否则动作会被丢弃导致队列提前耗尽
 3. 队列必须以长动作结尾（长复合动作 或 interact 原子动作均可）——长动作会持续执行直到时段切换，让 NPC 一直活动到下一 schedule 节点被 worker 主动打断
 4. 禁止输出 wait 动作；复合动作已包含自动移动到对应位置的逻辑，禁止在复合动作前加 move_to——直接输出单个长复合动作即可。
 5. 仅当目标确实没有匹配的长复合动作时，才用原子动作组合实现目标。长椅休息等场景用单个 interact_smart_object 即可（interact_smart_object 是长动作，会持续到时段切换），禁止把同一动作重复多次填充时段——队列提前耗尽会自动触发重分解生成新动作
@@ -79,6 +82,7 @@ const tacticalPromptBody = `[战术层/任务分解] 当前时段目标：%s
    - rest_at_residence → sleep_pod（仅休眠舱），interaction 用 sleep；长椅（bench）休息不属于"在住所休息"，必须改用 interact 原子动作（semantic_group=bench, interaction=rest）
    - self_maintenance → repair_table，interaction 用 repair
    - surf_internet → computer，interaction 用 surf_internet
+   - social_chat → target_agent_id 用上方【附近NPC】列出的 NPC id，content 为开场白；对话期间会自动走向对方并挂起直到对话结束
 8. 每行一个 JSON 对象，不要输出 JSON 数组，不要输出 markdown 围栏，不要输出任何其他文字；不要输出 inner_thought 字段，内心独白直接用首个 speak 动作表达
 9. 若上方【物体实时占用】显示目标 semantic_group 全部占用，必须改用其他空闲 semantic_group 或先安排 generic_act(behavior=look_around) 短暂等待，禁止规划必然失败的占用动作
 
@@ -105,6 +109,7 @@ func BuildTactical(in TacticalInput) string {
 	if in.Relationships != "" {
 		relationshipsLine = "【人际关系】\n" + in.Relationships
 	}
+	nearbyLine := NearbyAgentsLine(in.VisibleAgents)
 	hintLine := ""
 	if in.Hint != "" {
 		hintLine = "【上次中断原因】" + in.Hint + "（请据此调整本轮规划）"
@@ -156,8 +161,9 @@ func BuildTactical(in TacticalInput) string {
 		roleLine,
 		memoriesLine,
 		relationshipsLine,
+		nearbyLine,
 		hintLine, SlotDurationHint(in.Slot, in.TimeOfDay), KBContext(in.KB), objectStatusLine, toolCount, toolList,
-		TacticalExample(in.KB, in.Goal))
+		TacticalExample(in.KB, in.Goal, in.AgentID))
 }
 
 // SlotDurationHint constructs a hint line based on slot "HH:MM-HH:MM" and
@@ -214,7 +220,7 @@ func kindLabel(kind string) string {
 func builtinToolKind(name string) string {
 	switch name {
 	case "work_shift", "charge_at_station", "self_maintenance",
-		"rest_at_residence", "surf_internet":
+		"rest_at_residence", "surf_internet", "social_chat":
 		return "composite"
 	default:
 		return "atomic"
@@ -322,7 +328,7 @@ func paramPlaceholder(p protocol.CapabilityParam) string {
 // Key constraint: example's move_to target_id must match the example
 // object's ZoneID — otherwise the example itself violates the prompt's
 // "interact must be called in object's zone" constraint #5.
-func TacticalExample(kb *worldkb.KB, goal string) string {
+func TacticalExample(kb *worldkb.KB, goal, agentID string) string {
 	const genericExample = `{"action":"speak","params":{"content":"先去目标区域再开始作业"}}
 {"action":"move_to","params":{"target_type":"zone","target_id":"<上方可前往区域的 id>"}}
 {"action":"interact","params":{"semantic_group":"<上方可交互物体的 semantic_group>","interaction":"<可用 interaction>"}}`
@@ -331,12 +337,16 @@ func TacticalExample(kb *worldkb.KB, goal string) string {
 	}
 	objs := kb.ListObjects()
 	zones := kb.ListZones()
-	if len(zones) == 0 && len(objs) == 0 {
-		return genericExample
+
+	// Goal-specific example first — some branches (e.g. social_chat) only
+	// need kb.Agents and don't depend on zones/objs, so must run before the
+	// empty-map guard below.
+	if ex := exampleForGoal(kb, goal, agentID, zones, objs); ex != "" {
+		return ex
 	}
 
-	if ex := exampleForGoal(kb, goal, zones, objs); ex != "" {
-		return ex
+	if len(zones) == 0 && len(objs) == 0 {
+		return genericExample
 	}
 
 	if len(objs) == 0 {
@@ -382,7 +392,7 @@ func TacticalExample(kb *worldkb.KB, goal string) string {
 
 // exampleForGoal returns a goal-specific example; no match or required resource
 // missing returns empty string (caller degrades to default).
-func exampleForGoal(kb *worldkb.KB, goal string, zones []worldkb.ZoneInfo, objs []worldkb.ObjectInfo) string {
+func exampleForGoal(kb *worldkb.KB, goal, agentID string, zones []worldkb.ZoneInfo, objs []worldkb.ObjectInfo) string {
 	if kb == nil || goal == "" {
 		return ""
 	}
@@ -444,12 +454,12 @@ func exampleForGoal(kb *worldkb.KB, goal string, zones []worldkb.ZoneInfo, objs 
 		}
 	}
 
-	// 4. 聊天/社交/对话 → speak + move_to agent + speak（新体系无 chat_with）
+	// 4. 聊天/社交/对话 → speak + social_chat（主动找人聊天，走向对方+对话挂起）
+	//    peer 优先从 KB 关系中选熟悉度最高的；无关系则回退首个非自身 agent。
 	if containsAny(gl, "聊天", "社交", "对话", "chat", "social") && len(kb.Agents) >= 2 {
-		other := kb.Agents[1].ID
+		peer := pickChatPeer(kb, agentID)
 		return fmt.Sprintf(`{"action":"speak","params":{"content":"去找同事聊两句"}}
-{"action":"move_to","params":{"target_type":"agent","target_id":"%s"}}
-{"action":"speak","params":{"content":"最近工作怎么样？"}}`, other)
+{"action":"social_chat","params":{"target_agent_id":"%s","content":"最近怎么样？"}}`, peer)
 	}
 
 	// 5. 检查/自检/inspect → speak + move_to + interact inspect
@@ -470,6 +480,43 @@ func exampleForGoal(kb *worldkb.KB, goal string, zones []worldkb.ZoneInfo, objs 
 	}
 
 	return ""
+}
+
+// pickChatPeer chooses a social_chat target for the example prompt. Prefers
+// the KB-declared relationship peer with the highest familiarity (so the
+// example reflects an existing bond); falls back to the first non-self agent
+// in declaration order. Returns "" if fewer than 2 agents exist.
+func pickChatPeer(kb *worldkb.KB, selfID string) string {
+	if kb == nil || len(kb.Agents) < 2 {
+		return ""
+	}
+	bestFam := -1
+	bestPeer := ""
+	for _, rel := range kb.Relationships {
+		var other string
+		switch {
+		case rel.From == selfID:
+			other = rel.To
+		case rel.To == selfID:
+			other = rel.From
+		default:
+			continue
+		}
+		if rel.Familiarity > bestFam {
+			bestFam = rel.Familiarity
+			bestPeer = other
+		}
+	}
+	if bestPeer != "" {
+		return bestPeer
+	}
+	// Fallback: first non-self agent in declaration order.
+	for _, ag := range kb.Agents {
+		if ag.ID != selfID {
+			return ag.ID
+		}
+	}
+	return kb.Agents[0].ID
 }
 
 // containsAny checks if s contains any of subs (case-insensitivity by caller).

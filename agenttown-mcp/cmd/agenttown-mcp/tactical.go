@@ -110,6 +110,7 @@ func generateTacticalPlan(
 	registry *CapabilityRegistry,
 	objectStatus map[string]protocol.ObjectCategoryStatus,
 	nearbyObjects []protocol.NearbyObject,
+	visibleAgents []protocol.VisibleAgent,
 ) ([]plannedAction, error) {
 	var capActions []protocol.CapabilityAction
 	if registry != nil {
@@ -130,6 +131,7 @@ func generateTacticalPlan(
 		AgentID:       agentID,
 		ObjectStatus:  objectStatus,
 		NearbyObjects: nearbyObjects,
+		VisibleAgents: visibleAgents,
 	})
 	logger.Info("[MCP→LLM/TACTICAL-PROMPT]",
 		"agent_id", agentID, "goal", goal, "game_time", timeOfDay, "text", promptText,
@@ -179,6 +181,7 @@ func generateTacticalPlanStreaming(
 	registry *CapabilityRegistry,
 	objectStatus map[string]protocol.ObjectCategoryStatus,
 	nearbyObjects []protocol.NearbyObject,
+	visibleAgents []protocol.VisibleAgent,
 	onAction func(plannedAction),
 ) ([]plannedAction, error) {
 	var capActions []protocol.CapabilityAction
@@ -200,6 +203,7 @@ func generateTacticalPlanStreaming(
 		AgentID:       agentID,
 		ObjectStatus:  objectStatus,
 		NearbyObjects: nearbyObjects,
+		VisibleAgents: visibleAgents,
 	})
 	logger.Info("[MCP→LLM/TACTICAL-PROMPT]",
 		"agent_id", agentID, "goal", goal, "game_time", timeOfDay, "text", promptText,

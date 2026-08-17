@@ -141,6 +141,11 @@ func BuildStrategic(kb *worldkb.KB, profiles map[string]*profile.Profile, agentI
 	sb.WriteString("- rest_at_residence（休息）：缓解疲劳\n")
 	sb.WriteString("- surf_internet（上网）：少量消耗能量与余额、缓解疲劳\n")
 	sb.WriteString("规划时请综合权衡：产出性活动（工作）赚取余额但消耗体力、缓慢积攒关节磨损；恢复性活动（充电/维护/休息）花余额但延续工作能力。避免长时间连续工作导致体力耗尽，也避免频繁恢复导致余额入不敷出。\n")
+	// 【社交】段：提示战略层可安排 social_chat 目标。战略层只写意图
+	// （如"12:00 和老王聊聊"），战术层分解为 social_chat 复合动作。
+	// Phase 2 Module C。
+	sb.WriteString("【社交】\n")
+	sb.WriteString("- 可用 social_chat 主动找其他 NPC 聊天；适当安排社交时段有助于维系人际关系。\n")
 	return sb.String()
 }
 

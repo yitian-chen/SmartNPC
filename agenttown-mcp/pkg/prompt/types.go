@@ -42,6 +42,11 @@ type TacticalInput struct {
 	// semantic_group within a multi-group category is occupied. nil/empty =
 	// no nearby objects → only the category aggregate is shown.
 	NearbyObjects []protocol.NearbyObject
+	// VisibleAgents is the visible-NPC list from the latest
+	// perception_update (Phase 2 Module C). Injected as 【附近NPC】 so the
+	// LLM can pick a social_chat target_agent_id. nil/empty = no nearby
+	// NPCs → skip the segment.
+	VisibleAgents []protocol.VisibleAgent
 }
 
 // ReactiveTrigger identifies what triggered a reactive evaluation.
