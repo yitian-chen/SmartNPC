@@ -93,6 +93,11 @@ type agentContext struct {
 	// Immutable after construction.
 	ollama *ollama.Client
 
+	// dialogue is the per-agent conversation runner (Phase 2 Module C).
+	// nil when dialogue is disabled (no ws). Immutable after construction;
+	// the runner protects its own conversation state with an internal mutex.
+	dialogue *dialogueRunner
+
 	// Lifecycle (no lock needed — single writer: worker goroutine for cancel,
 	// stop() for stopped flag under coordMu)
 	wake   chan struct{}
@@ -212,7 +217,17 @@ func (a *agentContext) recordActionCompletion(completion protocol.ActionComplete
 	// Stage 5: 异步触发关系更新判断（Ollama 5s 超时，不阻塞主路径）。
 	if res.WasInFlight {
 		a.recordActionHistory(completion, res)
-		go a.maybeUpdateRelationship(completion, res)
+		// Phase 2 Module C: social_chat 走对话 runner 自己的关系增长路径，
+		// 跳过 Ollama 的 maybeUpdateRelationship 判断（避免双重 bump）。
+		if res.Cmd != protocol.CmdSocialChat {
+			go a.maybeUpdateRelationship(completion, res)
+		}
+		// 通知对话 runner：social_chat 动作结束（UE 已关 social_chat），
+		// runner 清理对话状态并归档记忆/关系。在 signal 之前调用，确保
+		// worker 唤醒时 inDialogue() 已返回 false。
+		if res.Cmd == protocol.CmdSocialChat && a.dialogue != nil {
+			a.dialogue.onActionCompleted(completion, res)
+		}
 	}
 	isSelfStop := res.WasSelfStop
 
@@ -657,6 +672,12 @@ func runPerceptionWorker(
 			continue
 		}
 
+		// 对话进行中（social_chat 挂起）时跳过 pop/refill：避免战术层生成新
+		// 动作打断对话。对话结束后 dialogue runner 会调用 signal 唤醒 worker。
+		if ac.inDialogue() {
+			continue
+		}
+
 		// debug 手动 action 期间暂停 dispatch：debug 端点刚发了 stop_action 清 UE
 		// busy，若此刻 worker 被唤醒会立刻补一个新 action 重新占用，导致手动
 		// action 被 busy 拒。debugOverride 由 handleDebugAction 设置/清除。
@@ -865,6 +886,12 @@ func (a *agentContext) hasQueueNext() bool {
 // worker 用它在主循环跳过 pop/refill，避免 UE busy 拒绝循环。
 func (a *agentContext) hasInFlightAction() bool {
 	return a.as.HasInFlightAction()
+}
+
+// inDialogue 返回是否正在对话中（Phase 2 Module C）。worker 用它在主
+// 循环跳过 pop/refill，避免对话期间生成新战术动作打断社交。
+func (a *agentContext) inDialogue() bool {
+	return a.dialogue != nil && a.dialogue.active()
 }
 
 // queueLen 返回队列长度。
@@ -1555,6 +1582,9 @@ func main() {
 	// Stage 5: 注入 Ollama 客户端供关系层判断。nil 表示 --ollama-url=""
 	// 显式禁用反应层时，maybeUpdateRelationship 会早返回不调用 Ollama。
 	ac.ollama = ollamaClient
+	// Phase 2 Module C: 每个 agent 一个对话 runner，复用战术层 Venus 客户端
+	// 做对话生成。ws==nil 时返回 nil（对话禁用）。
+	ac.dialogue = newDialogueRunner(ac, ws, kb, profiles, logger)
 	agents[id] = ac
 		go runPerceptionWorker(workerCtx, id, ac, ws, kb, profiles, weeklySched, logger)
 		return ac, true
@@ -1782,13 +1812,55 @@ func main() {
 				logger.Warn("perception_update parse failed", "agent_id", agentID, "err", err)
 				return
 			}
-			if trigger != "" && autoPlanEnabled {
-				go reactiveRunnerRef.trigger(agentID, ac, trigger, detail)
-			}
-
-		default:
-			logger.Debug("unhandled message type", "type", msgType, "agent_id", agentID)
+		if trigger != "" && autoPlanEnabled {
+			go reactiveRunnerRef.trigger(agentID, ac, trigger, detail)
 		}
+
+	case protocol.TypeChatInvite:
+		// UE → B: A 想找 B 聊天（Phase 2 Module C）。
+		var invite protocol.ChatInvitePayload
+		if err := json.Unmarshal(payload, &invite); err != nil {
+			logger.Warn("chat_invite parse failed", "err", err)
+			return
+		}
+		ac := lookupAgent(agentID)
+		if ac == nil || ac.dialogue == nil {
+			logger.Debug("chat_invite dropped (agent unregistered or dialogue disabled)", "agent_id", agentID)
+			return
+		}
+		go ac.dialogue.handleInvite(ctx, invite)
+
+	case protocol.TypeChatInviteRsp:
+		// B → UE（转发给 A）：B 的 accept/reject 决定。
+		var rsp protocol.ChatInviteRspPayload
+		if err := json.Unmarshal(payload, &rsp); err != nil {
+			logger.Warn("chat_invite_rsp parse failed", "err", err)
+			return
+		}
+		ac := lookupAgent(agentID)
+		if ac == nil || ac.dialogue == nil {
+			logger.Debug("chat_invite_rsp dropped (agent unregistered or dialogue disabled)", "agent_id", agentID)
+			return
+		}
+		go ac.dialogue.handleInviteRsp(ctx, rsp)
+
+	case protocol.TypeChatTurn:
+		// speaker → UE（转发给 peer）：一轮发言。
+		var turn protocol.ChatTurnPayload
+		if err := json.Unmarshal(payload, &turn); err != nil {
+			logger.Warn("chat_turn parse failed", "err", err)
+			return
+		}
+		ac := lookupAgent(agentID)
+		if ac == nil || ac.dialogue == nil {
+			logger.Debug("chat_turn dropped (agent unregistered or dialogue disabled)", "agent_id", agentID)
+			return
+		}
+		go ac.dialogue.handleTurn(ctx, turn)
+
+	default:
+		logger.Debug("unhandled message type", "type", msgType, "agent_id", agentID)
+	}
 	})
 
 	// ─── Start serving ─────────────────────────────────────────
