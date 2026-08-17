@@ -296,3 +296,37 @@ type WorldKBPayload struct {
 	Generated json.RawMessage `json:"generated"`           // world.generated.json blob
 	Authored  json.RawMessage `json:"authored"`            // world.authored.json blob
 }
+
+// ─── chat_invite (UE → target agent B, §3.1) ───────────────────
+//
+// UE delivers A's invitation to B after A's social_chat action_command
+// opens a session. conv_id is UE-generated and threads through the
+// subsequent rsp/turn messages. content is A's opening line (the same
+// content A sent in the social_chat action_command params).
+type ChatInvitePayload struct {
+	ConvID      string `json:"conv_id"`
+	FromAgentID string `json:"from_agent_id"`
+	Content     string `json:"content"`
+}
+
+// ─── chat_invite_rsp (B → UE, forwarded to A) ──────────────────
+//
+// Carries ONLY the accept/reject decision. Any reply content goes as a
+// separate chat_turn (§3.1 职责分离: rsp 只承载决策，所有话语都走 chat_turn).
+type ChatInviteRspPayload struct {
+	ConvID string `json:"conv_id"`
+	Accept bool   `json:"accept"`
+}
+
+// ─── chat_turn (speaker → UE, forwarded to peer) ───────────────
+//
+// One utterance in an active dialogue. end=true signals graceful close
+// (speaker is done talking); interrupted=true signals the peer already
+// left and this turn is a best-effort tail (§3.5 fallback). Both flags
+// default to false (omitempty) for normal mid-conversation turns.
+type ChatTurnPayload struct {
+	ConvID      string `json:"conv_id"`
+	Content     string `json:"content"`
+	End         bool   `json:"end,omitempty"`
+	Interrupted bool   `json:"interrupted,omitempty"`
+}

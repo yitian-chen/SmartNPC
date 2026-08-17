@@ -71,6 +71,14 @@ const (
 	// and swaps the in-memory KB. Only accepted before the first
 	// agent_registered; later pushes are rejected with a warning.
 	TypeWorldKB = "world_kb"
+
+	// Phase 2 Module C: NPC-to-NPC dialogue protocol (§3.1 of
+	// AgentTown_Dialogue_Design.md). UE owns the session state machine
+	// (Inviting/Active/Closed) and conv_id generation; MCP handles
+	// accept/reject decisions and chat_turn content generation.
+	TypeChatInvite    = "chat_invite"     // UE → B: A wants to talk (carries conv_id + A's opening line)
+	TypeChatInviteRsp = "chat_invite_rsp" // B → UE (forwarded to A): accept/reject decision only
+	TypeChatTurn      = "chat_turn"       // speaker → UE (forwarded to peer): one utterance
 )
 
 // action_command cmd constants (§2.3).
@@ -78,8 +86,8 @@ const (
 // representative cmds. Atomic = standalone minimal action; Composite =
 // pre-registered high-level behavior tree.
 //
-// 12 cmds total (7 atomic + 5 composite), aligned with the real UE5
-// capability_registry push (2026-08-11).
+// 13 cmds total (7 atomic + 6 composite), aligned with the real UE5
+// capability_registry push (2026-08-11 + Phase 2 Module C SocialChat).
 const (
 	// Atomic cmds (7).
 	CmdGenericAct          = "GenericAct"
@@ -89,22 +97,23 @@ const (
 	CmdSpeak               = "Speak"
 	CmdInteractSmartObject = "InteractSmartObject"
 	CmdEmote               = "Emote"
-	// Composite cmds (5).
+	// Composite cmds (6).
 	CmdWorkShift        = "WorkShift"
 	CmdChargeAtStation  = "ChargeAtStation"
 	CmdSelfMaintenance  = "SelfMaintenance"
 	CmdRestAtResidence  = "RestAtResidence"
 	CmdSurfInternet     = "SurfInternet"
+	CmdSocialChat       = "SocialChat" // Phase 2 Module C: proactive NPC-to-NPC dialogue
 )
 
-// IsCompositeCmd reports whether the given cmd is one of the 5 long
+// IsCompositeCmd reports whether the given cmd is one of the long
 // composite cmds. Used by main.go to skip armActionTimeout for long
 // composites — they run until the next schedule slot transition, not
 // until a self timeout.
 func IsCompositeCmd(cmd string) bool {
 	switch cmd {
 	case CmdWorkShift, CmdChargeAtStation, CmdSelfMaintenance,
-		CmdRestAtResidence, CmdSurfInternet:
+		CmdRestAtResidence, CmdSurfInternet, CmdSocialChat:
 		return true
 	}
 	return false
