@@ -80,7 +80,7 @@ const StrategicPromptTemplate = `[战略层/每日规划] 现在是仿真时间 
     - 余额偏低（<50）：今天多安排工作时段（work_shift）赚取余额，减少花钱的恢复性活动（如上网、非必要的维护），仅在能量/疲劳确实告警时才充电/休息。
     各项状态正常时按常规节奏规划，不必刻意偏向某一类活动；多项状态同时异常时按最紧迫的优先（体力耗尽 > 疲劳过高 > 余额过低 > 关节磨损）。
 
-示例：[{"time":"07:00-09:00","goal":"早晨去上网休闲放松"},{"time":"09:00-12:00","goal":"上午车间装配作业"},{"time":"12:00-14:00","goal":"午间停工短暂休息"},{"time":"14:00-18:00","goal":"下午继续在车间装配"},{"time":"18:00-22:00","goal":"傍晚去充电站补电"},{"time":"22:00-07:00","goal":"夜间在休眠舱休息"}]`
+示例：[{"time":"07:00-09:00","goal":"早晨去上网休闲放松"},{"time":"09:00-12:00","goal":"上午车间装配作业"},{"time":"12:00-14:00","goal":"午间去找同事聊聊天（social_chat）"},{"time":"14:00-18:00","goal":"下午继续在车间装配"},{"time":"18:00-22:00","goal":"傍晚去充电站补电"},{"time":"22:00-07:00","goal":"夜间在休眠舱休息"}]`
 
 // BuildStrategic constructs the strategic layer prompt's KB context segment,
 // containing six parts:
@@ -127,6 +127,16 @@ func BuildStrategic(kb *worldkb.KB, profiles map[string]*profile.Profile, agentI
 		// 与可用 interaction，信息冗余；移除后 prompt 从 ~2000 字降到 ~1400 字，
 		// 降低战略层 LLM 输入 token 数以缩短延迟。日后若 LLM 又出现 zone-object
 		// 错配可重新启用。
+		// 【其他NPC】段：列出 KB 中除自己外的所有 NPC，让战略层 LLM 看到具体
+		// 可聊天的同伴（id + 职业）。没有这个名单，规则 7"不得编造未提及的人物"
+		// 会让 LLM 完全不安排 social_chat 时段——它在 07:00 看不到任何同伴 id。
+		// 与战术层的【附近NPC】不同：战术层用 UE 实时感知（运行时才知道谁在
+		// 视野内），战略层用 KB 静态花名册（任何 NPC id 都合法目标）。
+		if peers := OtherAgentsLine(kb, agentID); peers != "" {
+			sb.WriteString("【其他NPC】\n")
+			sb.WriteString(peers)
+			sb.WriteString("\n")
+		}
 	}
 	if cap := StrategicCapabilitySummary(actions); cap != "" {
 		sb.WriteString("【可用能力】\n")
@@ -143,9 +153,10 @@ func BuildStrategic(kb *worldkb.KB, profiles map[string]*profile.Profile, agentI
 	sb.WriteString("规划时请综合权衡：产出性活动（工作）赚取余额但消耗体力、缓慢积攒关节磨损；恢复性活动（充电/维护/休息）花余额但延续工作能力。避免长时间连续工作导致体力耗尽，也避免频繁恢复导致余额入不敷出。\n")
 	// 【社交】段：提示战略层可安排 social_chat 目标。战略层只写意图
 	// （如"12:00 和老王聊聊"），战术层分解为 social_chat 复合动作。
-	// Phase 2 Module C。
+	// Phase 2 Module C。配合上方【其他NPC】段——LLM 需要看到具体同伴 id
+	// 才敢在 goal 里点名（规则 7 禁止编造未提及人物）。
 	sb.WriteString("【社交】\n")
-	sb.WriteString("- 可用 social_chat 主动找其他 NPC 聊天；适当安排社交时段有助于维系人际关系。\n")
+	sb.WriteString("- 可用 social_chat 主动找其他 NPC 聊天；建议每天安排 1 个社交时段与【其他NPC】中的某一位聊聊天，有助于维系人际关系。\n")
 	return sb.String()
 }
 
