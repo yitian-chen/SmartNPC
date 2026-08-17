@@ -1534,7 +1534,18 @@ func main() {
 		agentsMu.Lock()
 		defer agentsMu.Unlock()
 		if ac, ok := agents[id]; ok {
-			return ac, false // reconnect: preserve current lifecycle and session
+			// 热重连：断连时 ac.stop() cancel 了旧 workerCtx，worker goroutine
+			// 已退出。此处重启 worker：新 workerCtx + 新 goroutine。
+			// ac.stop() 只清了运行时状态（队列/感知/超时 timer），持久化状态
+			// （调度/关系/记忆）保留在 AgentState 和 DB 中，worker 重启后自然恢复。
+			ac.coordMu.Lock()
+			ac.stopped = false
+			ac.online = true
+			workerCtx, cancel := context.WithCancel(ctx)
+			ac.cancel = cancel
+			ac.coordMu.Unlock()
+			go runPerceptionWorker(workerCtx, id, ac, ws, kb, profiles, weeklySched, logger)
+			return ac, false
 		}
 		firstAgentRegistered = true
 		nextAgentEpoch++
@@ -1605,22 +1616,26 @@ func main() {
 
 	// ─── Wire WS disconnect handler ─────────────────────────────
 	// UE 被 kill / 进程退出时不会主动发 agent_unregistered，readLoop 自然返回，
-	// 此处统一清理所有 agent：cancel worker ctx + 设 stopped=true，让反应层
+	// 此处统一 stop 所有 agent：cancel worker ctx + 设 stopped=true，让反应层
 	// 排队 goroutine 拿锁后二次检查时快速退出。仅当前活跃连接断开才触发
 	// （新连接 replace 旧连接时旧 defer 看到 s.conn != c，不触发）。
+	//
+	// 热重连：不从 agents map 删除条目——保留注册状态，等 UE 重连后
+	// agent_registered 走 else 分支重启 worker。这样 perception_update
+	// 在断连间隙到达时不会被 "unregistered agent" 丢弃。
 	ws.SetDisconnectHandler(func() {
 		agentsMu.Lock()
 		stopped := make([]*agentContext, 0, len(agents))
-		for id, ac := range agents {
+		for _, ac := range agents {
 			stopped = append(stopped, ac)
-			delete(agents, id)
+			// 不 delete — 保留注册状态，等热重连恢复
 		}
 		agentsMu.Unlock()
 		for _, ac := range stopped {
 			ac.stop()
 		}
 		if len(stopped) > 0 {
-			logger.Info("ws disconnected, stopped all agents", "agent_count", len(stopped))
+			logger.Info("ws disconnected, stopped all agents (agents kept for hot-reconnect)", "agent_count", len(stopped))
 		}
 	})
 

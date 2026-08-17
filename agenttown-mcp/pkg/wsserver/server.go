@@ -579,8 +579,10 @@ func (s *Server) Call(ctx context.Context, agentID, cmd string, params map[strin
 		return nil, fmt.Errorf("send action_command: %w", err)
 	}
 
-	// ACK must arrive within 2s (约定8).
-	ackTimeout := 2 * time.Second
+	// ACK must arrive within 10s. Complex actions (pathfinding + state machine
+	// transitions) can take several seconds on UE side; 2s was too aggressive
+	// and caused frequent ACK timeouts + retry loops.
+	ackTimeout := 10 * time.Second
 	timer := time.NewTimer(ackTimeout)
 	defer timer.Stop()
 

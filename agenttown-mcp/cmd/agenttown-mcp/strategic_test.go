@@ -274,15 +274,17 @@ func TestBuildStrategicCapabilitySummary_WithRegistry(t *testing.T) {
 }
 
 func TestBuildStrategicCapabilitySummary_NoComposite(t *testing.T) {
-	// 只注册原子动作时，返回空串（无复合动作可列）。
+	// 只注册原子动作时，仅 SocialChat 兜底出现（它是 MCP-side composite）。
 	r := NewCapabilityRegistry(nil)
 	r.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
 		{Cmd: protocol.CmdMoveTo, Kind: "atomic", Description: "移动"},
 		{Cmd: protocol.CmdSpeak, Kind: "atomic", Description: "说话"},
 	})
 	got := prompt.StrategicCapabilitySummary(r.EffectiveActions("H-01"))
-	if got != "" {
-		t.Errorf("got %q, want empty string when no composite actions", got)
+	// SocialChat fallback is always injected as MCP-side composite,
+	// so the summary is never truly empty.
+	if !strings.Contains(got, "social_chat") {
+		t.Errorf("got %q, want social_chat in summary (MCP-side fallback)", got)
 	}
 }
 
