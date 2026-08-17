@@ -283,6 +283,36 @@ func TestMapTacticalAction_Composite(t *testing.T) {
 	}
 }
 
+// TestMapTacticalAction_SocialChat verifies the Phase 2 Module C dialogue
+// action maps to CmdSocialChat with target_agent_id + content params and
+// NO auto_queue (dialogue targets an NPC, not a queueable Smart Object).
+func TestMapTacticalAction_SocialChat(t *testing.T) {
+	kb := loadTestKB(t)
+	pa := plannedAction{Action: "social_chat", Params: map[string]any{
+		"target_agent_id": "H-02",
+		"content":         "最近怎么样？",
+	}}
+	cmd, params, err := mapTacticalAction(pa, "H-01", kb, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cmd != protocol.CmdSocialChat {
+		t.Errorf("cmd=%q, want %q", cmd, protocol.CmdSocialChat)
+	}
+	if params["target_agent_id"] != "H-02" {
+		t.Errorf("target_agent_id=%v, want H-02", params["target_agent_id"])
+	}
+	if params["content"] != "最近怎么样？" {
+		t.Errorf("content=%v", params["content"])
+	}
+	if _, has := params["auto_queue"]; has {
+		t.Errorf("social_chat must NOT carry auto_queue (dialogue is not a queueable Smart Object action): %+v", params)
+	}
+	if _, has := params["semantic_group"]; has {
+		t.Errorf("social_chat must NOT carry semantic_group: %+v", params)
+	}
+}
+
 func TestMapTacticalAction_MoveToPassthrough(t *testing.T) {
 	kb := loadTestKB(t)
 	pa := plannedAction{Action: "move_to", Params: map[string]any{"target_type": "zone", "target_id": "main_workshop"}}
@@ -433,7 +463,7 @@ func TestSelectCurrentGoal_PlanningWindowBoundary(t *testing.T) {
 
 func TestGenerateTacticalPlan_HTTPError(t *testing.T) {
 	tc := &fakeStrategicCaller{err: errors.New("network down")}
-	actions, err := generateTacticalPlan(context.Background(), tc, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", &protocol.PhysicalState{Energy: 80, Fatigue: 20, JointWear: 10}, nil, nil, slog.Default(), "", "", "", nil, nil, nil)
+	actions, err := generateTacticalPlan(context.Background(), tc, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", &protocol.PhysicalState{Energy: 80, Fatigue: 20, JointWear: 10}, nil, nil, slog.Default(), "", "", "", nil, nil, nil, nil)
 	if err == nil {
 		t.Fatal("expected error on HTTP failure")
 	}
@@ -450,7 +480,7 @@ func TestGenerateTacticalPlan_ValidResponse(t *testing.T) {
 		`{"action":"move_to","params":{"target_type":"zone","target_id":"main_workshop"}}` + "\n" +
 		`{"action":"work_shift","params":{"semantic_group":"workbench_01","interaction":"assemble"}}`
 	tc := &fakeStrategicCaller{resp: makeStrategicResponse(raw)}
-	actions, err := generateTacticalPlan(context.Background(), tc, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", &protocol.PhysicalState{Energy: 80, Fatigue: 20, JointWear: 10}, nil, nil, slog.Default(), "", "", "", nil, nil, nil)
+	actions, err := generateTacticalPlan(context.Background(), tc, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", &protocol.PhysicalState{Energy: 80, Fatigue: 20, JointWear: 10}, nil, nil, slog.Default(), "", "", "", nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -471,7 +501,7 @@ func TestGenerateTacticalPlan_ValidResponse(t *testing.T) {
 
 func TestGenerateTacticalPlan_ParseFail(t *testing.T) {
 	tc := &fakeStrategicCaller{resp: makeStrategicResponse("我今天打算去车间转转。")}
-	if _, err := generateTacticalPlan(context.Background(), tc, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", nil, nil, nil, slog.Default(), "", "", "", nil, nil, nil); err == nil {
+	if _, err := generateTacticalPlan(context.Background(), tc, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", nil, nil, nil, slog.Default(), "", "", "", nil, nil, nil, nil); err == nil {
 		t.Fatal("expected error on parse failure (no actions)")
 	}
 }
@@ -479,7 +509,7 @@ func TestGenerateTacticalPlan_ParseFail(t *testing.T) {
 func TestGenerateTacticalPlan_EmptyActions(t *testing.T) {
 	raw := `{"inner_thought":"不知道做什么"}`
 	tc := &fakeStrategicCaller{resp: makeStrategicResponse(raw)}
-	if _, err := generateTacticalPlan(context.Background(), tc, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", nil, nil, nil, slog.Default(), "", "", "", nil, nil, nil); err == nil {
+	if _, err := generateTacticalPlan(context.Background(), tc, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", nil, nil, nil, slog.Default(), "", "", "", nil, nil, nil, nil); err == nil {
 		t.Fatal("expected error when all actions filtered out")
 	}
 }
@@ -488,7 +518,7 @@ func TestGenerateTacticalPlan_ResetSessionCalled(t *testing.T) {
 	raw := `{"action":"speak","params":{"content":"开始"}}` + "\n" +
 		`{"action":"wait","params":{"duration_sec":30}}`
 	tc := &fakeStrategicCaller{resp: makeStrategicResponse(raw)}
-	_, _ = generateTacticalPlan(context.Background(), tc, "H-01", "等待", "main_workshop", "09:00", "09:00-12:00", nil, nil, nil, slog.Default(), "", "", "", nil, nil, nil)
+	_, _ = generateTacticalPlan(context.Background(), tc, "H-01", "等待", "main_workshop", "09:00", "09:00-12:00", nil, nil, nil, slog.Default(), "", "", "", nil, nil, nil, nil)
 	if !tc.resetCalled {
 		t.Error("ResetSession should be called after successful tactical generation")
 	}
@@ -1054,12 +1084,12 @@ func TestMapTacticalAction_NewCmdNilRegistryErrors(t *testing.T) {
 }
 
 // TestBuildTacticalToolEntries_NilRegistryBuiltinFullSet verifies the nil
-// registry fallback returns all 11 built-in tools (minus scan_area/stop/wait).
+// registry fallback returns all 12 built-in tools (minus scan_area/stop/wait).
 func TestBuildTacticalToolEntries_NilRegistryBuiltinFullSet(t *testing.T) {
 	entries := prompt.ToolEntries(nil)
-	// 14 built-in specs - scan_area - stop - wait = 11
-	if len(entries) != 11 {
-		t.Fatalf("nil registry entry count=%d, want 11 (all built-in minus scan_area/stop/wait)", len(entries))
+	// 15 built-in specs - scan_area - stop - wait = 12
+	if len(entries) != 12 {
+		t.Fatalf("nil registry entry count=%d, want 12 (all built-in minus scan_area/stop/wait)", len(entries))
 	}
 	seen := make(map[string]bool)
 	for _, e := range entries {
@@ -1072,7 +1102,7 @@ func TestBuildTacticalToolEntries_NilRegistryBuiltinFullSet(t *testing.T) {
 		"generic_act", "move_to", "turn_to",
 		"speak", "emote", "interact",
 		"work_shift", "charge_at_station", "self_maintenance",
-		"rest_at_residence", "surf_internet",
+		"rest_at_residence", "surf_internet", "social_chat",
 	} {
 		if !seen[name] {
 			t.Errorf("missing built-in tool %q in nil-registry fallback", name)
@@ -1086,7 +1116,7 @@ func TestBuildTacticalExample_ChargingStationFirst(t *testing.T) {
 	// 回归测试：当前 KB 第一个 object（按 ID 排序）是 bench-1（category=rest），
 	// 示例走 default 分支：move_to + interact。
 	kb := loadTestKB(t)
-	got := prompt.TacticalExample(kb, "")
+	got := prompt.TacticalExample(kb, "", "")
 	if !strings.Contains(got, "interact") {
 		t.Errorf("example should use interact for rest category: %q", got)
 	}
@@ -1107,7 +1137,7 @@ func TestBuildTacticalExample_WorkbenchOnly(t *testing.T) {
 			AvailableInteractions: []string{"assemble", "inspect"},
 		}},
 	}
-	got := prompt.TacticalExample(kb, "")
+	got := prompt.TacticalExample(kb, "", "")
 	if !strings.Contains(got, "work_shift") {
 		t.Errorf("example should use work_shift for workbench category: %q", got)
 	}
@@ -1128,7 +1158,7 @@ func TestBuildTacticalExample_RestBenchOnly(t *testing.T) {
 			AvailableInteractions: []string{"rest"},
 		}},
 	}
-	got := prompt.TacticalExample(kb, "")
+	got := prompt.TacticalExample(kb, "", "")
 	if !strings.Contains(got, `"action":"interact"`) {
 		t.Errorf("example should use interact for rest_bench category: %q", got)
 	}
@@ -1142,7 +1172,7 @@ func TestBuildTacticalExample_RestBenchOnly(t *testing.T) {
 
 func TestBuildTacticalExample_NilKB(t *testing.T) {
 	// nil KB 返回通用占位示例，不引用任何具体 id。
-	got := prompt.TacticalExample(nil, "")
+	got := prompt.TacticalExample(nil, "", "")
 	// 示例应包含 speak 作为首个 action（prompt 要求 NPC 执行动作前先 speak）
 	if !strings.Contains(got, `"action":"speak"`) {
 		t.Errorf("nil KB example should start with speak action: %q", got)
@@ -1186,7 +1216,7 @@ func TestBuildTacticalExample_ZoneObjectPairing(t *testing.T) {
 	if wantZone == "" {
 		t.Skip("first object has no ZoneID, cannot verify pairing")
 	}
-	got := prompt.TacticalExample(kb, "")
+	got := prompt.TacticalExample(kb, "", "")
 	// default 分支示例应包含 move_to 到 wantZone，且引用 firstObj.ID。
 	moveLine := fmt.Sprintf(`{"action":"move_to","params":{"target_type":"zone","target_id":"%s"}}`, wantZone)
 	if !strings.Contains(got, moveLine) {
@@ -1215,7 +1245,7 @@ func TestBuildTacticalExample_GoalAssembly(t *testing.T) {
 	// 注意：KB 中可能有多个 category=work 的物体（sortingconveyor、workbench），
 	// findObjectByCategory 取首个匹配，故任一出现都算通过。
 	kb := loadTestKB(t)
-	got := prompt.TacticalExample(kb, "前往主生产车间进行装配作业，严控工艺")
+	got := prompt.TacticalExample(kb, "前往主生产车间进行装配作业，严控工艺", "")
 	if !strings.Contains(got, "work_shift") {
 		t.Errorf("goal=装配 should pick work_shift example: %q", got)
 	}
@@ -1236,7 +1266,7 @@ func TestBuildTacticalExample_GoalAssembly(t *testing.T) {
 func TestBuildTacticalExample_GoalCharge(t *testing.T) {
 	// goal 含"充电"应选 charge_at_station 示例。
 	kb := loadTestKB(t)
-	got := prompt.TacticalExample(kb, "午间停工，前往充电站补电休息")
+	got := prompt.TacticalExample(kb, "午间停工，前往充电站补电休息", "")
 	if !strings.Contains(got, "charge_at_station") {
 		t.Errorf("goal=充电 should pick charge_at_station example: %q", got)
 	}
@@ -1256,7 +1286,7 @@ func TestBuildTacticalExample_GoalCharge(t *testing.T) {
 // rest_at_residence(bench/rest) 这种参数错配（bench 不是住所）。
 func TestBuildTacticalExample_GoalBenchRest(t *testing.T) {
 	kb := loadTestKB(t)
-	got := prompt.TacticalExample(kb, "午间到中央广场长椅短暂休息，缓解疲劳")
+	got := prompt.TacticalExample(kb, "午间到中央广场长椅短暂休息，缓解疲劳", "")
 	if !strings.Contains(got, `"action":"interact"`) {
 		t.Errorf("goal=长椅休息 should pick interact example: %q", got)
 	}
@@ -1275,7 +1305,7 @@ func TestBuildTacticalExample_GoalBenchRest(t *testing.T) {
 // 必须返回 rest_at_residence(sleep_pod/sleep) 示例，参数严格对应。
 func TestBuildTacticalExample_GoalSleepAtResidence(t *testing.T) {
 	kb := loadTestKB(t)
-	got := prompt.TacticalExample(kb, "夜间回休眠舱居住区睡眠，恢复体力迎接明天")
+	got := prompt.TacticalExample(kb, "夜间回休眠舱居住区睡眠，恢复体力迎接明天", "")
 	if !strings.Contains(got, "rest_at_residence") {
 		t.Errorf("goal=回休眠舱睡觉 should pick rest_at_residence example: %q", got)
 	}
@@ -1295,7 +1325,7 @@ func TestBuildTacticalExample_GoalPatrol(t *testing.T) {
 	// goal 含"巡视"应选 move_to + generic_act 示例，不引用任何 object。
 	// 新 12 cmd 体系无 patrol_zone，巡视用 generic_act(behavior=look_around) 兜底。
 	kb := loadTestKB(t)
-	got := prompt.TacticalExample(kb, "巡视主生产车间，记录设备运行日志")
+	got := prompt.TacticalExample(kb, "巡视主生产车间，记录设备运行日志", "")
 	if !strings.Contains(got, "generic_act") {
 		t.Errorf("goal=巡视 should pick generic_act example: %q", got)
 	}
@@ -1317,7 +1347,7 @@ func TestBuildTacticalExample_GoalInspect(t *testing.T) {
 			AvailableInteractions: []string{"assemble", "inspect"},
 		}},
 	}
-	got := prompt.TacticalExample(kb, "启动自检，检查关节磨损情况")
+	got := prompt.TacticalExample(kb, "启动自检，检查关节磨损情况", "")
 	if !strings.Contains(got, `"action":"interact"`) {
 		t.Errorf("goal=检查 should pick interact example: %q", got)
 	}
@@ -1338,7 +1368,7 @@ func TestBuildTacticalExample_GoalFallbackOnMissingObject(t *testing.T) {
 			AvailableInteractions: []string{"charge", "inspect"},
 		}},
 	}
-	got := prompt.TacticalExample(kb, "上午装配作业")
+	got := prompt.TacticalExample(kb, "上午装配作业", "")
 	// 应降级到 charge_at_station（首个 object 的 category）
 	if !strings.Contains(got, "charge_at_station") {
 		t.Errorf("assembly goal with no workbench should fall back to charge example: %q", got)
@@ -1348,7 +1378,7 @@ func TestBuildTacticalExample_GoalFallbackOnMissingObject(t *testing.T) {
 func TestBuildTacticalExample_GoalEmptyFallback(t *testing.T) {
 	// 空 goal 应降级到默认示例（首个 object 是 bench-1，走 default interact 分支）
 	kb := loadTestKB(t)
-	got := prompt.TacticalExample(kb, "")
+	got := prompt.TacticalExample(kb, "", "")
 	if !strings.Contains(got, "interact") {
 		t.Errorf("empty goal should fall back to first-object example: %q", got)
 	}

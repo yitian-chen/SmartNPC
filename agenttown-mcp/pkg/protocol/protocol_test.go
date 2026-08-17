@@ -304,3 +304,93 @@ func TestActionQueuedPayload(t *testing.T) {
 		}
 	}
 }
+
+// TestSocialChatCmdConstants verifies the Phase 2 Module C dialogue cmd
+// and message-type constants exist and IsCompositeCmd recognizes SocialChat.
+func TestSocialChatCmdConstants(t *testing.T) {
+	if CmdSocialChat != "SocialChat" {
+		t.Fatalf("CmdSocialChat = %q, want %q", CmdSocialChat, "SocialChat")
+	}
+	if !IsCompositeCmd(CmdSocialChat) {
+		t.Fatalf("IsCompositeCmd(%q) = false, want true", CmdSocialChat)
+	}
+	// Existing composites must still be recognized.
+	for _, c := range []string{CmdWorkShift, CmdChargeAtStation, CmdSelfMaintenance, CmdRestAtResidence, CmdSurfInternet} {
+		if !IsCompositeCmd(c) {
+			t.Fatalf("IsCompositeCmd(%q) = false, want true (regression)", c)
+		}
+	}
+	// Atomic cmds must NOT be composite.
+	for _, c := range []string{CmdMoveTo, CmdSpeak, CmdWait, CmdGenericAct, CmdTurnTo, CmdInteractSmartObject, CmdEmote} {
+		if IsCompositeCmd(c) {
+			t.Fatalf("IsCompositeCmd(%q) = true, want false (regression)", c)
+		}
+	}
+	// Message type constants for the dialogue protocol.
+	for _, tc := range []struct{ name, val string }{
+		{"TypeChatInvite", TypeChatInvite},
+		{"TypeChatInviteRsp", TypeChatInviteRsp},
+		{"TypeChatTurn", TypeChatTurn},
+	} {
+		if tc.val == "" {
+			t.Fatalf("%s is empty", tc.name)
+		}
+	}
+}
+
+// TestDialoguePayloadRoundTrip verifies the three dialogue payload structs
+// (chat_invite / chat_invite_rsp / chat_turn) round-trip with all fields,
+// and that optional flags are omitted when false.
+func TestDialoguePayloadRoundTrip(t *testing.T) {
+	// chat_invite
+	invite := ChatInvitePayload{ConvID: "conv_001", FromAgentID: "H-01", Content: "最近怎么样？"}
+	raw, _ := json.Marshal(invite)
+	var gotInvite ChatInvitePayload
+	if err := json.Unmarshal(raw, &gotInvite); err != nil {
+		t.Fatalf("chat_invite unmarshal: %v", err)
+	}
+	if gotInvite.ConvID != "conv_001" || gotInvite.FromAgentID != "H-01" || gotInvite.Content != "最近怎么样？" {
+		t.Fatalf("chat_invite fields lost: %+v", gotInvite)
+	}
+
+	// chat_invite_rsp — accept=true
+	rsp := ChatInviteRspPayload{ConvID: "conv_001", Accept: true}
+	raw, _ = json.Marshal(rsp)
+	var gotRsp ChatInviteRspPayload
+	if err := json.Unmarshal(raw, &gotRsp); err != nil || gotRsp.ConvID != "conv_001" || !gotRsp.Accept {
+		t.Fatalf("chat_invite_rsp accept=true round-trip failed: %+v err=%v", gotRsp, err)
+	}
+	// chat_invite_rsp — accept=false must marshal the field (not omitempty).
+	rspFalse := ChatInviteRspPayload{ConvID: "conv_002", Accept: false}
+	rawFalse, _ := json.Marshal(rspFalse)
+	if !strings.Contains(string(rawFalse), `"accept":false`) {
+		t.Fatalf("chat_invite_rsp accept=false must serialize the field: %s", rawFalse)
+	}
+
+	// chat_turn — normal mid-conversation (end/interrupted omitted).
+	turn := ChatTurnPayload{ConvID: "conv_001", Content: "还行，忙着装配呢"}
+	raw, _ = json.Marshal(turn)
+	if strings.Contains(string(raw), "end") || strings.Contains(string(raw), "interrupted") {
+		t.Fatalf("chat_turn should omit end/interrupted when false: %s", raw)
+	}
+	var gotTurn ChatTurnPayload
+	if err := json.Unmarshal(raw, &gotTurn); err != nil || gotTurn.Content != "还行，忙着装配呢" || gotTurn.End || gotTurn.Interrupted {
+		t.Fatalf("chat_turn normal round-trip failed: %+v err=%v", gotTurn, err)
+	}
+
+	// chat_turn — graceful end.
+	endTurn := ChatTurnPayload{ConvID: "conv_001", Content: "回头聊，我去忙了", End: true}
+	raw, _ = json.Marshal(endTurn)
+	var gotEnd ChatTurnPayload
+	if err := json.Unmarshal(raw, &gotEnd); err != nil || !gotEnd.End || gotEnd.Interrupted {
+		t.Fatalf("chat_turn end=true round-trip failed: %+v err=%v", gotEnd, err)
+	}
+
+	// chat_turn — interrupted fallback.
+	intTurn := ChatTurnPayload{ConvID: "conv_001", Content: "等等？", End: true, Interrupted: true}
+	raw, _ = json.Marshal(intTurn)
+	var gotInt ChatTurnPayload
+	if err := json.Unmarshal(raw, &gotInt); err != nil || !gotInt.End || !gotInt.Interrupted {
+		t.Fatalf("chat_turn interrupted round-trip failed: %+v err=%v", gotInt, err)
+	}
+}

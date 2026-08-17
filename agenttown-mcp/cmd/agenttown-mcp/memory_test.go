@@ -239,4 +239,10 @@ func (m *memoryFakeStore) LoadRelationships(_ context.Context, _ string, _ int) 
 func (m *memoryFakeStore) SeedRelationship(_ context.Context, _ string, _ string, _ int, _ int) error {
 	return nil
 }
+func (m *memoryFakeStore) SaveDialogue(_ context.Context, _ storage.Dialogue) error {
+	return nil
+}
+func (m *memoryFakeStore) LoadRecentDialogues(_ context.Context, _ string, _ int) ([]storage.Dialogue, error) {
+	return nil, nil
+}
 func (m *memoryFakeStore) Close() error { return nil }

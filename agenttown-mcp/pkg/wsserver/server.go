@@ -39,6 +39,11 @@ var discreteReplayTypes = map[string]bool{
 	protocol.TypeStopAction:        true,
 	protocol.TypeEventNotification: true,
 	protocol.TypeError:             true,
+	// Phase 2 Module C: outbound dialogue messages must survive reconnect
+	// so a dropped chat_invite_rsp / chat_turn is re-delivered rather than
+	// silently lost (the peer would otherwise hang in Inviting/Active).
+	protocol.TypeChatInviteRsp:     true,
+	protocol.TypeChatTurn:          true,
 }
 
 // MessageHandler receives inbound envelopes from Mock UE (UE → Agent).

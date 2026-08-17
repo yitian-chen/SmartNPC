@@ -73,8 +73,8 @@ type ToolSpec struct {
 	RequiredCmd string
 }
 
-// BuiltinToolSpecs is the static metadata table for all 14 built-in
-// tools (12 cmd-bound + stop + scan_area), mapping each tool name to
+// BuiltinToolSpecs is the static metadata table for all 15 built-in
+// tools (13 cmd-bound + stop + scan_area), mapping each tool name to
 // the UE cmd it translates to. Used by ReconcileTools to decide which
 // tools to keep/remove based on the capability registry.
 //
@@ -96,12 +96,13 @@ func BuiltinToolSpecs() []ToolSpec {
 		// scan_area has no UE cmd — it triggers an immediate
 		// perception_update via RequestScan, not an action_command.
 		{Name: "scan_area", RequiredCmd: ""},
-		// Composite tools (5) — each maps to its own Composite cmd.
+		// Composite tools (6) — each maps to its own Composite cmd.
 		{Name: "work_shift", RequiredCmd: protocol.CmdWorkShift},
 		{Name: "charge_at_station", RequiredCmd: protocol.CmdChargeAtStation},
 		{Name: "self_maintenance", RequiredCmd: protocol.CmdSelfMaintenance},
 		{Name: "rest_at_residence", RequiredCmd: protocol.CmdRestAtResidence},
 		{Name: "surf_internet", RequiredCmd: protocol.CmdSurfInternet},
+		{Name: "social_chat", RequiredCmd: protocol.CmdSocialChat},
 	}
 }
 
@@ -110,7 +111,7 @@ func BuiltinToolSpecs() []ToolSpec {
 // capability_registry message and is safe to call multiple times.
 //
 // Behavior:
-//  1. RegisterAll re-registers the 14 built-in tools (mcp.AddTool is
+//  1. RegisterAll re-registers the 15 built-in tools (mcp.AddTool is
 //     idempotent — same-name tools are replaced).
 //  2. Built-in tools whose RequiredCmd is no longer in effectiveActions
 //     are removed via s.RemoveTools.
@@ -234,7 +235,7 @@ func snakeToPascal(s string) string {
 }
 
 // registerGenericActionTool installs a generic passthrough tool for a
-// UE-declared cmd that is NOT one of the 12 built-in cmds. The tool's
+// UE-declared cmd that is NOT one of the 13 built-in cmds. The tool's
 // InputSchema is derived from the CapabilityAction.Params schema; the
 // handler unmarshals args into a map and passes them verbatim to
 // ex.SendAction. agent_id and decision_epoch are extracted from the args

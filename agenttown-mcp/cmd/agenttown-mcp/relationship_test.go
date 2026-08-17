@@ -124,6 +124,12 @@ func (s *relationshipFakeStore) SeedRelationship(_ context.Context, agentA, agen
 	})
 	return nil
 }
+func (s *relationshipFakeStore) SaveDialogue(_ context.Context, _ storage.Dialogue) error {
+	return nil
+}
+func (s *relationshipFakeStore) LoadRecentDialogues(_ context.Context, _ string, _ int) ([]storage.Dialogue, error) {
+	return nil, nil
+}
 func (s *relationshipFakeStore) Close() error { return nil }
 
 func TestSeedRelationshipsFromKB_NilStore(t *testing.T) {

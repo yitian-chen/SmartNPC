@@ -81,6 +81,64 @@ func TestSetPerception_InvalidJSON(t *testing.T) {
 	}
 }
 
+// TestSetPerception_VisibleAgents verifies that visible_agents from a
+// perception_update is stored and retrievable via LatestVisibleAgents
+// (Phase 2 Module C). Also verifies empty list → nil (prompt skips segment),
+// and that the returned slice is a deep copy (caller mutation is safe).
+func TestSetPerception_VisibleAgents(t *testing.T) {
+	a := New()
+	raw := []byte(`{
+		"environment":{"game_time_sec":25200,"time_of_day_sec":25200,"day_count":0,"time_scale":60},
+		"location":{"current_zone":"central_plaza"},
+		"visible_agents":[
+			{"id":"H-02","name":"老王","distance":4.2,"angle":12.5,"current_action":"idle"},
+			{"id":"H-05","name":"老张","distance":9.8,"angle":-30.0,"current_action":"inspect"}
+		]
+	}`)
+	if _, err := a.SetPerception(raw); err != nil {
+		t.Fatalf("SetPerception: %v", err)
+	}
+	agents := a.LatestVisibleAgents()
+	if len(agents) != 2 {
+		t.Fatalf("LatestVisibleAgents len=%d, want 2", len(agents))
+	}
+	if agents[0].ID != "H-02" || agents[0].Name != "老王" || agents[0].Distance != 4.2 {
+		t.Errorf("agents[0] mismatch: %+v", agents[0])
+	}
+	if agents[1].ID != "H-05" || agents[1].CurrentAction != "inspect" {
+		t.Errorf("agents[1] mismatch: %+v", agents[1])
+	}
+
+	// Deep-copy check: mutate the returned slice, re-fetch must be unaffected.
+	agents[0].ID = "MUTATED"
+	again := a.LatestVisibleAgents()
+	if again[0].ID != "H-02" {
+		t.Errorf("LatestVisibleAgents not a deep copy: got %q after mutation", again[0].ID)
+	}
+
+	// Empty visible_agents → nil (prompt should skip 【附近NPC】 segment).
+	rawEmpty := []byte(`{
+		"environment":{"game_time_sec":25200,"time_of_day_sec":25200,"day_count":0,"time_scale":60},
+		"location":{"current_zone":"central_plaza"},
+		"visible_agents":[]
+	}`)
+	if _, err := a.SetPerception(rawEmpty); err != nil {
+		t.Fatalf("SetPerception empty: %v", err)
+	}
+	if got := a.LatestVisibleAgents(); got != nil {
+		t.Errorf("LatestVisibleAgents empty = %v, want nil", got)
+	}
+
+	// Snapshot includes the field when repopulated.
+	if _, err := a.SetPerception(raw); err != nil {
+		t.Fatalf("SetPerception repopulate: %v", err)
+	}
+	snap := a.Snapshot()
+	if len(snap.LatestVisibleAgents) != 2 || snap.LatestVisibleAgents[0].ID != "H-02" {
+		t.Errorf("Snapshot.LatestVisibleAgents mismatch: %+v", snap.LatestVisibleAgents)
+	}
+}
+
 func TestRefillQueue_PopPeek(t *testing.T) {
 	a := New()
 	actions := []PlannedAction{
@@ -605,6 +663,14 @@ func (f *fakeStore) LoadRelationships(_ context.Context, _ string, _ int) ([]sto
 
 func (f *fakeStore) SeedRelationship(_ context.Context, _ string, _ string, _ int, _ int) error {
 	return nil
+}
+
+func (f *fakeStore) SaveDialogue(_ context.Context, _ storage.Dialogue) error {
+	return nil
+}
+
+func (f *fakeStore) LoadRecentDialogues(_ context.Context, _ string, _ int) ([]storage.Dialogue, error) {
+	return nil, nil
 }
 
 func (f *fakeStore) Close() error { return nil }

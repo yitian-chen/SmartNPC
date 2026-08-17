@@ -78,6 +78,22 @@ type Relationship struct {
 	LastInteractionAt time.Time
 }
 
+// Dialogue represents one chat_turn row in agent_dialogues (Phase 2 Module C).
+// One row per turn: speaker says content to listener within conv_id. The
+// runner writes a row per turn exchanged; memory generation loads recent
+// rows for an agent (either side) to summarize the conversation.
+// is_end marks the terminating turn (LLM decided no more topics or forced).
+type Dialogue struct {
+	ID         int64
+	ConvID     string
+	SpeakerID  string
+	ListenerID string
+	Content    string
+	TurnIndex  int
+	IsEnd      bool
+	CreatedAt  time.Time
+}
+
 // Store is the persistence interface consumed by pkg/agentstate.
 // Methods must be safe for concurrent use by multiple goroutines
 // (MySQLStore uses database/sql's connection pool, which is concurrency-safe).
@@ -119,6 +135,16 @@ type Store interface {
 	// (INSERT IGNORE). Used at cold start to import KB seed values without
 	// overwriting interaction counts accumulated in a previous run.
 	SeedRelationship(ctx context.Context, agentA, agentB string, familiarity, affection int) error
+
+	// SaveDialogue inserts one dialogue turn row (Phase 2 Module C). Called
+	// by the dialogue runner after each chat_turn is exchanged so memory
+	// generation can summarize recent conversations per agent.
+	SaveDialogue(ctx context.Context, d Dialogue) error
+
+	// LoadRecentDialogues returns the most recent N dialogue turns involving
+	// agentID (as speaker or listener), ordered by created_at DESC. Used by
+	// memory generation to summarize yesterday's conversations.
+	LoadRecentDialogues(ctx context.Context, agentID string, limit int) ([]Dialogue, error)
 
 	// Close releases the underlying resources (DB connection pool).
 	// It must be idempotent and safe to call on a NoopStore.
@@ -174,6 +200,16 @@ func (NoopStore) LoadRelationships(context.Context, string, int) ([]Relationship
 // SeedRelationship is a no-op.
 func (NoopStore) SeedRelationship(context.Context, string, string, int, int) error {
 	return nil
+}
+
+// SaveDialogue is a no-op.
+func (NoopStore) SaveDialogue(context.Context, Dialogue) error {
+	return nil
+}
+
+// LoadRecentDialogues returns nil (no dialogues in in-memory mode).
+func (NoopStore) LoadRecentDialogues(context.Context, string, int) ([]Dialogue, error) {
+	return nil, nil
 }
 
 // Close is a no-op.
