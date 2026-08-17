@@ -15,9 +15,11 @@ import (
 // composite behaviors for routine goals; atomic behaviors are for
 // reactions or cases the composite library doesn't cover.
 //
-// New 5 composite cmds (2026-08-11): WorkShift / ChargeAtStation /
-// SelfMaintenance / RestAtResidence / SurfInternet. All share the same
-// params schema: semantic_group + interaction.
+// 6 composite cmds (2026-08-11 + Phase 2 Module C): WorkShift /
+// ChargeAtStation / SelfMaintenance / RestAtResidence / SurfInternet /
+// SocialChat. The first 5 share the params schema semantic_group +
+// interaction; SocialChat uses target_agent_id + content (dialogue is
+// not a queueable Smart Object action).
 //
 // Parameter naming (2026-08-11 fix): MCP previously sent smart_object
 // as the param key, but real UE5's capability_registry declares the
@@ -31,7 +33,8 @@ import (
 // envelope level. UE5 expects a string "true"/"false" for
 // ChargeAtStation and a bool for InteractSmartObject. The envelope-level
 // AutoQueue field is deprecated (always omitted); params-level value is
-// the authoritative source for real UE5.
+// the authoritative source for real UE5. SocialChat does NOT carry
+// auto_queue — it targets another NPC, not a queueable Smart Object.
 
 // WorkShiftInput — composite: work at a specified facility.
 type WorkShiftInput struct {
@@ -71,6 +74,19 @@ type SurfInternetInput struct {
 	DecisionEpoch int64  `json:"decision_epoch" jsonschema:"required epoch from the current decision_context"`
 	SemanticGroup string `json:"semantic_group" jsonschema:"computer semantic group name, e.g. computer"`
 	Interaction   string `json:"interaction" jsonschema:"interaction type, fixed to surf_internet"`
+}
+
+// SocialChatInput — composite: proactively initiate dialogue with another NPC.
+// Per docs/AgentTown_Dialogue_Design.md §3.1, this is A's action_command that
+// opens a session. params are target_agent_id + content (NOT semantic_group/
+// interaction). No auto_queue — dialogue targets an NPC, not a queueable
+// Smart Object. UE opens a DialogueSession(Inviting), preempts B, and sends
+// chat_invite to B; MCP then handles chat_invite_rsp / chat_turn exchange.
+type SocialChatInput struct {
+	AgentID       string `json:"agent_id" jsonschema:"the NPC's id"`
+	DecisionEpoch int64  `json:"decision_epoch" jsonschema:"required epoch from the current decision_context"`
+	TargetAgentID string `json:"target_agent_id" jsonschema:"the target NPC's id to talk to"`
+	Content       string `json:"content" jsonschema:"opening line / 开场白"`
 }
 
 // registerComposite installs the composite-behavior tools.
@@ -171,6 +187,33 @@ func registerComposite(s *mcp.Server, ex Executor, logger *slog.Logger) {
 		})
 		if err != nil {
 			return nil, ackResult{}, fmt.Errorf("surf_internet: %w", err)
+		}
+		return nil, buildAckResult(ack, in.DecisionEpoch), nil
+	})
+
+	// social_chat — Phase 2 Module C: proactive NPC-to-NPC dialogue.
+	// Sends CmdSocialChat with target_agent_id + content. No auto_queue
+	// (dialogue is not a queueable Smart Object action). UE opens a
+	// DialogueSession, preempts B, and sends chat_invite to B; the
+	// subsequent chat_invite_rsp / chat_turn exchange is handled by the
+	// dialogue runner in cmd/agenttown-mcp/dialogue.go, not by this tool.
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "social_chat",
+		Description: "Proactively walk to another NPC and start a dialogue. Composite behavior — runs MoveTo+TurnTo+WaitDialogue until the conversation ends.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in SocialChatInput) (*mcp.CallToolResult, ackResult, error) {
+		if in.AgentID == "" || in.TargetAgentID == "" || in.Content == "" {
+			return nil, ackResult{}, fmt.Errorf("agent_id, target_agent_id and content are required")
+		}
+		if in.AgentID == in.TargetAgentID {
+			return nil, ackResult{}, fmt.Errorf("social_chat: target_agent_id must differ from agent_id")
+		}
+		logToolCall("social_chat", in.AgentID, in.DecisionEpoch, in)
+		ack, err := ex.SendAction(ctx, in.AgentID, in.DecisionEpoch, protocol.CmdSocialChat, map[string]any{
+			"target_agent_id": in.TargetAgentID,
+			"content":         in.Content,
+		})
+		if err != nil {
+			return nil, ackResult{}, fmt.Errorf("social_chat: %w", err)
 		}
 		return nil, buildAckResult(ack, in.DecisionEpoch), nil
 	})

@@ -406,6 +406,14 @@ func mapTacticalAction(pa plannedAction, agentID string, kb *worldkb.KB, registr
 			"interaction":    pa.Params["interaction"],
 			"auto_queue":     "true",
 		}, nil
+	case "social_chat":
+		// Phase 2 Module C: proactive dialogue. params are target_agent_id
+		// + content only — no semantic_group/interaction (target is an NPC,
+		// not a Smart Object) and no auto_queue (not queueable).
+		return protocol.CmdSocialChat, map[string]any{
+			"target_agent_id": pa.Params["target_agent_id"],
+			"content":         pa.Params["content"],
+		}, nil
 	// ─── Atomic tools ───
 	case "generic_act":
 		params := map[string]any{

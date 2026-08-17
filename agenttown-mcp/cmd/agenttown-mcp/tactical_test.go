@@ -283,6 +283,36 @@ func TestMapTacticalAction_Composite(t *testing.T) {
 	}
 }
 
+// TestMapTacticalAction_SocialChat verifies the Phase 2 Module C dialogue
+// action maps to CmdSocialChat with target_agent_id + content params and
+// NO auto_queue (dialogue targets an NPC, not a queueable Smart Object).
+func TestMapTacticalAction_SocialChat(t *testing.T) {
+	kb := loadTestKB(t)
+	pa := plannedAction{Action: "social_chat", Params: map[string]any{
+		"target_agent_id": "H-02",
+		"content":         "最近怎么样？",
+	}}
+	cmd, params, err := mapTacticalAction(pa, "H-01", kb, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cmd != protocol.CmdSocialChat {
+		t.Errorf("cmd=%q, want %q", cmd, protocol.CmdSocialChat)
+	}
+	if params["target_agent_id"] != "H-02" {
+		t.Errorf("target_agent_id=%v, want H-02", params["target_agent_id"])
+	}
+	if params["content"] != "最近怎么样？" {
+		t.Errorf("content=%v", params["content"])
+	}
+	if _, has := params["auto_queue"]; has {
+		t.Errorf("social_chat must NOT carry auto_queue (dialogue is not a queueable Smart Object action): %+v", params)
+	}
+	if _, has := params["semantic_group"]; has {
+		t.Errorf("social_chat must NOT carry semantic_group: %+v", params)
+	}
+}
+
 func TestMapTacticalAction_MoveToPassthrough(t *testing.T) {
 	kb := loadTestKB(t)
 	pa := plannedAction{Action: "move_to", Params: map[string]any{"target_type": "zone", "target_id": "main_workshop"}}
@@ -1054,12 +1084,12 @@ func TestMapTacticalAction_NewCmdNilRegistryErrors(t *testing.T) {
 }
 
 // TestBuildTacticalToolEntries_NilRegistryBuiltinFullSet verifies the nil
-// registry fallback returns all 11 built-in tools (minus scan_area/stop/wait).
+// registry fallback returns all 12 built-in tools (minus scan_area/stop/wait).
 func TestBuildTacticalToolEntries_NilRegistryBuiltinFullSet(t *testing.T) {
 	entries := prompt.ToolEntries(nil)
-	// 14 built-in specs - scan_area - stop - wait = 11
-	if len(entries) != 11 {
-		t.Fatalf("nil registry entry count=%d, want 11 (all built-in minus scan_area/stop/wait)", len(entries))
+	// 15 built-in specs - scan_area - stop - wait = 12
+	if len(entries) != 12 {
+		t.Fatalf("nil registry entry count=%d, want 12 (all built-in minus scan_area/stop/wait)", len(entries))
 	}
 	seen := make(map[string]bool)
 	for _, e := range entries {
@@ -1072,7 +1102,7 @@ func TestBuildTacticalToolEntries_NilRegistryBuiltinFullSet(t *testing.T) {
 		"generic_act", "move_to", "turn_to",
 		"speak", "emote", "interact",
 		"work_shift", "charge_at_station", "self_maintenance",
-		"rest_at_residence", "surf_internet",
+		"rest_at_residence", "surf_internet", "social_chat",
 	} {
 		if !seen[name] {
 			t.Errorf("missing built-in tool %q in nil-registry fallback", name)
