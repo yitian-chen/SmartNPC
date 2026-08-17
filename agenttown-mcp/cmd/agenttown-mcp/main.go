@@ -820,7 +820,7 @@ func (a *agentContext) armActionTimeout(
 	agentID string,
 	lookup func(string) *agentContext,
 ) {
-	timeout := 60 * time.Second // 默认
+	timeout := 300 * time.Second // 默认（长复合动作如 work_shift 可持续数分钟）
 	if estDurationSec != nil && *estDurationSec > 0 {
 		timeout = time.Duration(*estDurationSec * 1.5 * float64(time.Second))
 		// 设下限 5s 避免估算过短导致误超时
@@ -1821,6 +1821,21 @@ func main() {
 			if ac == nil {
 				logger.Warn("perception_update dropped for unregistered agent", "agent_id", agentID)
 				return
+			}
+			// 热重连恢复：断连时 ac.stop() cancel 了 workerCtx，worker 退出。
+			// UE 重连后不发 agent_registered，第一条 perception_update 到达时
+			// 检测 stopped 并自动重启 worker，恢复仿真。
+			ac.coordMu.Lock()
+			if ac.stopped {
+				ac.stopped = false
+				ac.online = true
+				workerCtx, cancel := context.WithCancel(ctx)
+				ac.cancel = cancel
+				ac.coordMu.Unlock()
+				logger.Info("agent hot-reconnected via perception, restarting worker", "agent_id", agentID)
+				go runPerceptionWorker(workerCtx, agentID, ac, ws, kb, profiles, weeklySched, logger)
+			} else {
+				ac.coordMu.Unlock()
 			}
 			trigger, detail, err := ac.observePerception(payload)
 			if err != nil {

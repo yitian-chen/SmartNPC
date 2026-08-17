@@ -82,7 +82,7 @@ const tacticalPromptBody = `[战术层/任务分解] 当前时段目标：%s
    - rest_at_residence → sleep_pod（仅休眠舱），interaction 用 sleep；长椅（bench）休息不属于"在住所休息"，必须改用 interact 原子动作（semantic_group=bench, interaction=rest）
    - self_maintenance → repair_table，interaction 用 repair
    - surf_internet → computer，interaction 用 surf_internet
-   - social_chat → target_agent_id 用上方【附近NPC】列出的 NPC id，content 为开场白；对话期间会自动走向对方并挂起直到对话结束
+   - social_chat → target_agent_id 必须严格使用上方【附近NPC】列出的 NPC id（格式如 H-01），禁止用显示名（如"老王"）、禁止编造未列出的 id；content 为开场白；对话期间会自动走向对方并挂起直到对话结束
 8. 每行一个 JSON 对象，不要输出 JSON 数组，不要输出 markdown 围栏，不要输出任何其他文字；不要输出 inner_thought 字段，内心独白直接用首个 speak 动作表达
 9. 若上方【物体实时占用】显示目标 semantic_group 全部占用，必须改用其他空闲 semantic_group 或先安排 generic_act(behavior=look_around) 短暂等待，禁止规划必然失败的占用动作
 
@@ -110,6 +110,11 @@ func BuildTactical(in TacticalInput) string {
 		relationshipsLine = "【人际关系】\n" + in.Relationships
 	}
 	nearbyLine := NearbyAgentsLine(in.VisibleAgents)
+	if nearbyLine == "" && in.KB != nil {
+		// 附近无可见 NPC 时 fallback 到 KB 静态花名册，让 LLM 始终能看到
+		// NPC id 列表（social_chat 的 target_agent_id 需要 id 而非显示名）。
+		nearbyLine = OtherAgentsLine(in.KB, in.AgentID)
+	}
 	hintLine := ""
 	if in.Hint != "" {
 		hintLine = "【上次中断原因】" + in.Hint + "（请据此调整本轮规划）"
