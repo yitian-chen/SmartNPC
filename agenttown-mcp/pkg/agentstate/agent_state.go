@@ -38,6 +38,12 @@ type AgentState struct {
 	online              bool
 	latestPhysical      *protocol.PhysicalState
 	latestPerception    json.RawMessage
+	// latestVisibleAgents is the visible-NPC list from the latest
+	// perception_update (Phase 2 Module C). UE pushes visible_agents on
+	// every perception; MCP injects this into the tactical prompt as
+	// 【附近NPC】 so the LLM can pick a social_chat target. Stored as a
+	// deep copy under mu; nil when no perception or no visible agents.
+	latestVisibleAgents []protocol.VisibleAgent
 	currentTask         *protocol.CurrentTaskProgress
 	currentActionID     string
 	currentActionCmd    string
@@ -254,6 +260,15 @@ func (a *AgentState) SetPerception(payload json.RawMessage) (PerceptionUpdate, e
 		curPhysical = newPhysical
 	}
 	a.latestPerception = cloneRawMessage(payload)
+	// Deep-copy visible agents so callers can't mutate the stored slice.
+	// nil when empty (latestVisibleAgents() returns nil → prompt skips
+	// the 【附近NPC】 segment).
+	if len(p.VisibleAgents) > 0 {
+		a.latestVisibleAgents = make([]protocol.VisibleAgent, len(p.VisibleAgents))
+		copy(a.latestVisibleAgents, p.VisibleAgents)
+	} else {
+		a.latestVisibleAgents = nil
+	}
 	a.prevZone = curZone
 	a.prevObjectIDs = curObjectIDs
 	a.perceptionCount++
@@ -1023,6 +1038,22 @@ func (a *AgentState) LatestNearbyObjects() []protocol.NearbyObject {
 	return out
 }
 
+// LatestVisibleAgents returns the visible-NPC list from the latest
+// perception_update (Phase 2 Module C). Returns nil if no perception has
+// arrived or no agents are visible. The returned slice is a deep copy;
+// callers may mutate it freely. Used to inject 【附近NPC】 into the tactical
+// prompt so the LLM can pick a social_chat target.
+func (a *AgentState) LatestVisibleAgents() []protocol.VisibleAgent {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if len(a.latestVisibleAgents) == 0 {
+		return nil
+	}
+	out := make([]protocol.VisibleAgent, len(a.latestVisibleAgents))
+	copy(out, a.latestVisibleAgents)
+	return out
+}
+
 // Snapshot returns an exported read-only copy of all business fields.
 // Slice and pointer fields are deep-copied so the caller can mutate the
 // snapshot without affecting the source state.
@@ -1033,6 +1064,7 @@ func (a *AgentState) Snapshot() Snapshot {
 		Online:              a.online,
 		LatestPhysical:      clonePhysical(a.latestPhysical),
 		LatestPerception:    cloneRawMessage(a.latestPerception),
+		LatestVisibleAgents: append([]protocol.VisibleAgent(nil), a.latestVisibleAgents...),
 		CurrentTask:         cloneTask(a.currentTask),
 		CurrentActionID:     a.currentActionID,
 		CurrentActionCmd:    a.currentActionCmd,

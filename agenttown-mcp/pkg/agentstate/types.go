@@ -39,6 +39,10 @@ type Snapshot struct {
 	Online              bool
 	LatestPhysical      *protocol.PhysicalState
 	LatestPerception    json.RawMessage
+	// LatestVisibleAgents is the visible-NPC list from the latest
+	// perception_update (Phase 2 Module C). nil when no agents are visible.
+	// Used to inject 【附近NPC】 into the tactical prompt.
+	LatestVisibleAgents []protocol.VisibleAgent
 	CurrentTask         *protocol.CurrentTaskProgress
 	CurrentActionID     string
 	CurrentActionCmd    string
