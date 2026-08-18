@@ -160,6 +160,21 @@ func TestStrategicSystemPrompt_SlotDurationRuleEmphasized(t *testing.T) {
 	}
 }
 
+func TestStrategicSystemPrompt_RecoveryDiversified(t *testing.T) {
+	// 规则 8：恢复时段方式多样化（休眠舱小憩/充电/长椅/上网），
+	// 避免全员同质化午间长椅休息。
+	for _, want := range []string{
+		"疲劳恢复时段（如午间）的方式应多样化",
+		"回休眠舱小憩（rest_at_residence",
+		"去充电桩充电兼休息（charge_at_station",
+		"不要固定去长椅休息",
+	} {
+		if !strings.Contains(StrategicSystemPrompt, want) {
+			t.Errorf("system prompt should contain recovery diversification guidance %q", want)
+		}
+	}
+}
+
 func TestBuildStrategic_InteractWorkGuidance(t *testing.T) {
 	// 【可用能力】段应告知：任何工种都可用 interact + 工作设备直接工作
 	// （process/debug/dismantle 等无复合动作的工种的规划依据）。
