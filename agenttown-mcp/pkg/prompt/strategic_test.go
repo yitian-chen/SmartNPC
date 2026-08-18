@@ -108,56 +108,23 @@ func TestOtherAgentsLine_OmitsProfessionWhenEmpty(t *testing.T) {
 	}
 }
 
-func TestBuildStrategic_InjectsOtherNPCsSegment(t *testing.T) {
+func TestBuildStrategic_OmitsOtherNPCsSegment(t *testing.T) {
+	// 【其他NPC】段暂时撤除：战略层暂不安排社交，花名册不再注入。
+	// 恢复社交安排时删掉本测试并把段加回 BuildStrategic。
 	kb := strategicRosterKB()
 	got := BuildStrategic(kb, nil, "H-01", nil, nil, "")
-	// 用 "【其他NPC】\n" 精确匹配段头，避免与【社交】段文案里的
-	// "与【其他NPC】中的某一位" 子串混淆。
-	npcHeader := "【其他NPC】\n"
-	npcIdx := strings.Index(got, npcHeader)
-	if npcIdx < 0 {
-		t.Fatalf("missing 【其他NPC】 segment header in:\n%s", got)
-	}
-	// 提取【其他NPC】段内容：从段头到下一个段头【可用能力】。
-	capIdx := strings.Index(got, "【可用能力】")
-	if capIdx < 0 {
-		t.Fatalf("missing 【可用能力】 segment for boundary check")
-	}
-	npcSection := got[npcIdx:capIdx]
-	if strings.Contains(npcSection, "H-01") {
-		t.Errorf("self id H-01 should not appear in 【其他NPC】 section:\n%s", npcSection)
-	}
-	if !strings.Contains(npcSection, "老王（id=H-02）") {
-		t.Errorf("peer 老王 should appear in 【其他NPC】:\n%s", npcSection)
-	}
-	if !(npcIdx < capIdx) {
-		t.Errorf("【其他NPC】 should precede 【可用能力】 (npc=%d cap=%d)", npcIdx, capIdx)
-	}
-}
-
-func TestBuildStrategic_OmitsOtherNPCsWhenNoPeers(t *testing.T) {
-	kb := &worldkb.KB{
-		Version: "1.0",
-		Agents:  []worldkb.Agent{{ID: "H-01", DisplayName: "老陈"}},
-	}
-	got := BuildStrategic(kb, nil, "H-01", nil, nil, "")
 	if strings.Contains(got, "【其他NPC】\n") {
-		t.Errorf("single-agent KB should not produce 【其他NPC】 segment in:\n%s", got)
+		t.Errorf("strategic prompt should not contain 【其他NPC】 segment while social planning is disabled:\n%s", got)
 	}
 }
 
-func TestBuildStrategic_ExampleContainsSocialChatSlot(t *testing.T) {
-	// StrategicSystemPrompt is a constant; verify the example demonstrates
-	// a social_chat slot so the LLM sees chatting as a legitimate plan item.
-	if !strings.Contains(StrategicSystemPrompt, "social_chat") {
-		t.Errorf("strategic system prompt example should mention social_chat to model it as a valid slot")
-	}
-}
-
-func TestStrategicSystemPrompt_SocialSegmentMentionsFrequency(t *testing.T) {
-	// 【社交】 advice moved to the system prompt (mechanism text).
-	if !strings.Contains(StrategicSystemPrompt, "每天安排 1 个社交时段") {
-		t.Errorf("system prompt 【社交】 segment should suggest daily frequency")
+func TestStrategicSystemPrompt_NoSocialWhileDisabled(t *testing.T) {
+	// 社交描述暂时撤除：system prompt 不应引导 LLM 安排 social_chat 时段。
+	// 恢复社交安排时删掉本测试。
+	for _, unwanted := range []string{"social_chat", "【社交】", "社交时段"} {
+		if strings.Contains(StrategicSystemPrompt, unwanted) {
+			t.Errorf("strategic system prompt should not mention %q while social planning is disabled", unwanted)
+		}
 	}
 }
 

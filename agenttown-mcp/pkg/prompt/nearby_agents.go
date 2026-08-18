@@ -34,14 +34,14 @@ func NearbyAgentsLine(agents []protocol.VisibleAgent) string {
 }
 
 // OtherAgentsLine formats the KB's static NPC roster (excluding self) as the
-// 【其他NPC】 segment for the strategic prompt. Each line shows display name,
-// id, and profession — enough for the LLM to pick a social_chat target when
-// planning the day at 07:00, before any runtime perception is available.
+// 【其他NPC】 segment. Currently used only by the tactical layer (strategic
+// layer temporarily has no social planning, so its roster segment is removed).
+// Each line shows display name, id, and profession.
 //
-// Differs from NearbyAgentsLine: the tactical layer uses runtime-visible
-// agents (UE perception, includes distance/current action), while the
-// strategic layer uses the static KB roster (all NPCs are valid targets
-// regardless of where they currently stand).
+// Differs from NearbyAgentsLine: the tactical fallback uses the static KB
+// roster (all NPCs are valid targets regardless of where they currently
+// stand), while the primary tactical view uses runtime-visible agents (UE
+// perception, includes distance/current action).
 //
 // Returns "" when kb is nil, has fewer than 2 agents, or self is the only
 // agent — caller skips the segment in those cases.
