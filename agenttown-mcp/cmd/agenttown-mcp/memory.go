@@ -99,7 +99,7 @@ func generateDailyMemories(
 	logger.Info("[MCP→LLM/MEMORY-PROMPT]", "agent_id", agentID,
 		"action_count", len(records), "text", promptText)
 
-	resp, err := sc.SendWithSummary(ctx, promptText, "")
+	resp, err := sc.SendWithSummary(ctx, "", promptText)
 	if err != nil {
 		logger.Warn("[记忆层] LLM 调用失败，跳过记忆生成",
 			"agent_id", agentID, "err", err)

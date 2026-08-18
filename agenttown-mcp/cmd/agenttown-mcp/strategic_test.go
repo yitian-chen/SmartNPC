@@ -21,8 +21,8 @@ type fakeStrategicCaller struct {
 	resetCalled   bool
 }
 
-func (f *fakeStrategicCaller) SendWithSummary(_ context.Context, input, _ string) (*llmtypes.Response, error) {
-	f.capturedInput = input
+func (f *fakeStrategicCaller) SendWithSummary(_ context.Context, _, user string) (*llmtypes.Response, error) {
+	f.capturedInput = user
 	return f.resp, f.err
 }
 

@@ -95,7 +95,7 @@ func TestChat_Success(t *testing.T) {
 	defer srv.Close()
 
 	c := New(Options{BaseURL: srv.URL, Model: "test-model"})
-	out, err := c.Chat(context.Background(), "test prompt")
+	out, err := c.Chat(context.Background(), "", "test prompt")
 	if err != nil {
 		t.Fatalf("Chat err: %v", err)
 	}
@@ -136,7 +136,7 @@ func TestChat_NumThreadOmit(t *testing.T) {
 	defer srv.Close()
 
 	c := New(Options{BaseURL: srv.URL, NumThread: -1})
-	if _, err := c.Chat(context.Background(), "x"); err != nil {
+	if _, err := c.Chat(context.Background(), "", "x"); err != nil {
 		t.Fatalf("Chat err: %v", err)
 	}
 	if gotReq.Options.NumThread != 0 {
@@ -154,7 +154,7 @@ func TestChat_Non200(t *testing.T) {
 	defer srv.Close()
 
 	c := New(Options{BaseURL: srv.URL})
-	_, err := c.Chat(context.Background(), "x")
+	_, err := c.Chat(context.Background(), "", "x")
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -175,7 +175,7 @@ func TestChat_MalformedJSON(t *testing.T) {
 	defer srv.Close()
 
 	c := New(Options{BaseURL: srv.URL})
-	_, err := c.Chat(context.Background(), "x")
+	_, err := c.Chat(context.Background(), "", "x")
 	if err == nil || !strings.Contains(err.Error(), "decode response") {
 		t.Errorf("expected decode error, got: %v", err)
 	}
@@ -195,7 +195,7 @@ func TestChat_ContextCanceled(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 
-	_, err := c.Chat(ctx, "x")
+	_, err := c.Chat(ctx, "", "x")
 	if err == nil {
 		t.Fatal("expected context deadline error, got nil")
 	}
@@ -210,7 +210,7 @@ func TestChat_ContextCanceled(t *testing.T) {
 func TestChat_ConnectionRefused(t *testing.T) {
 	// Use a port that's almost certainly closed.
 	c := New(Options{BaseURL: "http://127.0.0.1:1", Timeout: 200 * time.Millisecond})
-	_, err := c.Chat(context.Background(), "x")
+	_, err := c.Chat(context.Background(), "", "x")
 	if err == nil {
 		t.Fatal("expected connection error, got nil")
 	}

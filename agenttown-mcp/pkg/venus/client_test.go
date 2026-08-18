@@ -74,7 +74,7 @@ func TestSendWithSummary_NonStreaming(t *testing.T) {
 	defer server.Close()
 
 	c := newTestClient(t, server.URL)
-	resp, err := c.SendWithSummary(context.Background(), "hi", "")
+	resp, err := c.SendWithSummary(context.Background(), "", "hi")
 	if err != nil {
 		t.Fatalf("SendWithSummary: %v", err)
 	}
@@ -99,9 +99,9 @@ func TestSendWithSummary_NonStreaming(t *testing.T) {
 	}
 }
 
-// TestSendWithSummary_SummaryUnused verifies the summary parameter is accepted
-// but does not affect the request (signature compatibility with hermes.Client).
-func TestSendWithSummary_SummaryUnused(t *testing.T) {
+// TestSendWithSummary_SystemMessage verifies a non-empty system prompt is
+// sent as a leading role:"system" message before the user message.
+func TestSendWithSummary_SystemMessage(t *testing.T) {
 	var capturedRequest request
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewDecoder(r.Body).Decode(&capturedRequest)
@@ -111,12 +111,15 @@ func TestSendWithSummary_SummaryUnused(t *testing.T) {
 	defer server.Close()
 
 	c := newTestClient(t, server.URL)
-	_, _ = c.SendWithSummary(context.Background(), "input", "some summary")
-	if len(capturedRequest.Messages) != 1 {
-		t.Errorf("expected 1 message, got %d", len(capturedRequest.Messages))
+	_, _ = c.SendWithSummary(context.Background(), "you are an NPC", "input")
+	if len(capturedRequest.Messages) != 2 {
+		t.Fatalf("expected 2 messages, got %d", len(capturedRequest.Messages))
 	}
-	if capturedRequest.Messages[0].Content != "input" {
-		t.Errorf("content = %q, want input (summary should not modify)", capturedRequest.Messages[0].Content)
+	if capturedRequest.Messages[0].Role != "system" || capturedRequest.Messages[0].Content != "you are an NPC" {
+		t.Errorf("messages[0] = %+v, want system message", capturedRequest.Messages[0])
+	}
+	if capturedRequest.Messages[1].Role != "user" || capturedRequest.Messages[1].Content != "input" {
+		t.Errorf("messages[1] = %+v, want user message", capturedRequest.Messages[1])
 	}
 }
 
@@ -129,7 +132,7 @@ func TestSendWithSummary_HTTPError(t *testing.T) {
 	defer server.Close()
 
 	c := newTestClient(t, server.URL)
-	_, err := c.SendWithSummary(context.Background(), "hi", "")
+	_, err := c.SendWithSummary(context.Background(), "", "hi")
 	if err == nil {
 		t.Fatal("expected error for 401")
 	}
@@ -150,7 +153,7 @@ func TestSendWithSummary_ContextCanceled(t *testing.T) {
 	c := newTestClient(t, server.URL)
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
-	_, err := c.SendWithSummary(ctx, "hi", "")
+	_, err := c.SendWithSummary(ctx, "", "hi")
 	if err == nil {
 		t.Fatal("expected context deadline error")
 	}
@@ -197,7 +200,7 @@ func TestSendStreaming_SSE(t *testing.T) {
 
 	c := newTestClient(t, server.URL)
 	var deltas []string
-	resp, err := c.SendStreaming(context.Background(), "hi", func(d string) { deltas = append(deltas, d) })
+	resp, err := c.SendStreaming(context.Background(), "", "hi", func(d string) { deltas = append(deltas, d) })
 	if err != nil {
 		t.Fatalf("SendStreaming: %v", err)
 	}
@@ -232,7 +235,7 @@ func TestSendStreaming_WithUsage(t *testing.T) {
 	defer server.Close()
 
 	c := newTestClient(t, server.URL)
-	resp, err := c.SendStreaming(context.Background(), "hi", nil)
+	resp, err := c.SendStreaming(context.Background(), "", "hi", nil)
 	if err != nil {
 		t.Fatalf("SendStreaming: %v", err)
 	}
@@ -259,7 +262,7 @@ func TestSendStreaming_KeepaliveComment(t *testing.T) {
 	defer server.Close()
 
 	c := newTestClient(t, server.URL)
-	resp, err := c.SendStreaming(context.Background(), "hi", nil)
+	resp, err := c.SendStreaming(context.Background(), "", "hi", nil)
 	if err != nil {
 		t.Fatalf("SendStreaming: %v", err)
 	}
@@ -282,7 +285,7 @@ func TestSendStreaming_MissingDoneMarker(t *testing.T) {
 	defer server.Close()
 
 	c := newTestClient(t, server.URL)
-	resp, err := c.SendStreaming(context.Background(), "hi", nil)
+	resp, err := c.SendStreaming(context.Background(), "", "hi", nil)
 	if err != nil {
 		t.Fatalf("expected graceful partial response, got error: %v", err)
 	}
@@ -300,7 +303,7 @@ func TestSendStreaming_EmptyStream(t *testing.T) {
 	defer server.Close()
 
 	c := newTestClient(t, server.URL)
-	_, err := c.SendStreaming(context.Background(), "hi", nil)
+	_, err := c.SendStreaming(context.Background(), "", "hi", nil)
 	if err == nil {
 		t.Fatal("expected error for empty stream")
 	}
@@ -368,8 +371,8 @@ func TestOpenaiResponse_ToHermes(t *testing.T) {
 // *venus.Client satisfies the llmClient interface expected by main.go.
 func TestVenusClient_MatchesLLMClientSignatures(t *testing.T) {
 	var _ interface {
-		SendWithSummary(ctx context.Context, input, summary string) (*llmtypes.Response, error)
-		SendStreaming(ctx context.Context, input string, onDelta func(string)) (*llmtypes.Response, error)
+		SendWithSummary(ctx context.Context, system, user string) (*llmtypes.Response, error)
+		SendStreaming(ctx context.Context, system, user string, onDelta func(string)) (*llmtypes.Response, error)
 		ResetSession()
 	} = (*Client)(nil)
 }

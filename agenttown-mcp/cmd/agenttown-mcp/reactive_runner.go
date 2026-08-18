@@ -145,7 +145,7 @@ func (r *reactiveRunner) trigger(agentID string, ac *agentContext, trigger React
 	// 4. 调用 Ollama（8s 超时）
 	ctx, cancel := context.WithTimeout(context.Background(), reactiveCallTimeout)
 	defer cancel()
-	raw, err := r.ollama.Chat(ctx, promptText)
+	raw, err := r.ollama.Chat(ctx, "", promptText)
 	if err != nil {
 		r.logger.Warn("[反应层/失败]",
 			"agent_id", agentID, "trigger", trigger, "err", err)

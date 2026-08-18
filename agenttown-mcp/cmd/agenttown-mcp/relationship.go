@@ -38,7 +38,7 @@ func shouldUpdateRelationship(ctx context.Context, c *ollama.Client, cmd string,
 	}
 	paramsJSON, _ := json.Marshal(params)
 	promptText := fmt.Sprintf(relationshipJudgePromptTemplate, cmd, string(paramsJSON), target)
-	raw, err := c.Chat(ctx, promptText)
+	raw, err := c.Chat(ctx, "", promptText)
 	if err != nil {
 		slog.Default().Warn("[关系层] Ollama 判断调用失败，跳过更新",
 			"target", target, "cmd", cmd, "err", err)

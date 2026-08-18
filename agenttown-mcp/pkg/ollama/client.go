@@ -136,27 +136,31 @@ type chatResponse struct {
 }
 
 // Chat sends a single-turn prompt to the Ollama model and returns the
-// model's text output. The prompt is wrapped as a user message; no
-// system message is prepended (callers bake instructions into the prompt).
+// model's text output. system carries mechanism/instruction text (rules,
+// output format); when non-empty it is prepended as a system message.
+// prompt is sent as the user message.
 //
 // The caller's ctx is respected — if it cancels before the HTTP call
 // completes, Chat returns ctx.Err() promptly.
 //
 // On any error (network, non-200, malformed JSON), Chat returns an error
 // and the caller should treat it as "decision unavailable, fall back to continue".
-func (c *Client) Chat(ctx context.Context, prompt string) (string, error) {
+func (c *Client) Chat(ctx context.Context, system, prompt string) (string, error) {
 	// numThread: -1 → omit (let Ollama decide), >=0 → explicit
 	opts := chatOptions{NumPredict: c.numPredict}
 	if c.numThread >= 0 {
 		opts.NumThread = c.numThread
 	}
+	msgs := make([]chatMessage, 0, 2)
+	if system != "" {
+		msgs = append(msgs, chatMessage{Role: "system", Content: system})
+	}
+	msgs = append(msgs, chatMessage{Role: "user", Content: prompt})
 	reqBody := chatRequest{
-		Model: c.model,
-		Messages: []chatMessage{
-			{Role: "user", Content: prompt},
-		},
-		Stream:  false,
-		Options: opts,
+		Model:    c.model,
+		Messages: msgs,
+		Stream:   false,
+		Options:  opts,
 	}
 	bodyBytes, err := json.Marshal(reqBody)
 	if err != nil {

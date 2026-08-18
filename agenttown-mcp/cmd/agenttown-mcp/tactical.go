@@ -137,7 +137,7 @@ func generateTacticalPlan(
 		"agent_id", agentID, "goal", goal, "game_time", timeOfDay, "text", promptText,
 		"replan_hint", hint)
 
-	resp, err := tc.SendWithSummary(ctx, promptText, "")
+	resp, err := tc.SendWithSummary(ctx, "", promptText)
 	if err != nil {
 		return nil, fmt.Errorf("tactical llm: %w", err)
 	}
@@ -221,7 +221,7 @@ func generateTacticalPlanStreaming(
 		},
 	}
 
-	resp, err := tc.SendStreaming(ctx, promptText, func(delta string) {
+	resp, err := tc.SendStreaming(ctx, "", promptText, func(delta string) {
 		acc.feed(delta)
 	})
 	if err != nil {

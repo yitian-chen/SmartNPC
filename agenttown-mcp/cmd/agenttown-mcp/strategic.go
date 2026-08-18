@@ -33,7 +33,7 @@ type dailyPlanItem struct {
 
 // strategicCaller 是 LLM 客户端的窄接口，便于单测 mock。
 type strategicCaller interface {
-	SendWithSummary(ctx context.Context, input, summary string) (*llmtypes.Response, error)
+	SendWithSummary(ctx context.Context, system, user string) (*llmtypes.Response, error)
 	ResetSession()
 }
 
@@ -69,7 +69,7 @@ func generateDailyPlan(ctx context.Context, sc strategicCaller, agentID string, 
 		"昨日总结："+yesterdaySummary)
 	logger.Info("[MCP→LLM/STRATEGIC-PROMPT]", "agent_id", agentID, "text", promptText)
 
-	resp, err := sc.SendWithSummary(ctx, promptText, "")
+	resp, err := sc.SendWithSummary(ctx, "", promptText)
 	if err != nil {
 		fallback := prompt.DefaultDailyPlan(kb)
 		logger.Warn("[战略层] 计划生成失败，使用默认计划兜底",
