@@ -112,7 +112,8 @@ const tacticalUserBody = `[战术层/任务分解] 当前时段目标：%s
 // Mechanism text (tool-class explanation, rules 1-9) lives in
 // TacticalSystemPrompt; callers pass it as the system message.
 func BuildTactical(in TacticalInput) string {
-	physicalLine := PhysicalLine(in.Physical)
+	th := BandThresholdsFor(in.Profiles, in.AgentID)
+	physicalLine := PhysicalLine(in.Physical, th)
 	roleLine := ""
 	if role := AgentRole(in.KB, in.Profiles, in.AgentID); role != "" {
 		roleLine = "【你的角色】\n" + role
@@ -145,19 +146,19 @@ func BuildTactical(in TacticalInput) string {
 	//   - 高关节磨损 → self_maintenance 维修保养
 	if strings.Contains(in.Hint, "物理状态告警") && in.Physical != nil && !in.Physical.IsZero() {
 		var reqs, forbids []string
-		if in.Physical.Energy < EnergyAlertThreshold {
+		if in.Physical.Energy < th.EnergyAlert() {
 			reqs = append(reqs, "- 电量过低：必须优先 charge_at_station（充电）补能")
 		}
-		if in.Physical.Fatigue > FatigueAlertThreshold {
+		if in.Physical.Fatigue > th.FatigueAlert() {
 			reqs = append(reqs, "- 疲劳过高：优先 charge_at_station（充电）或 rest_at_residence（休息），充电后若仍疲劳追加 rest_at_residence")
 		}
-		if in.Physical.JointWear > JointWearAlertThreshold {
+		if in.Physical.JointWear > th.JointWearAlert() {
 			reqs = append(reqs, "- 关节磨损过高：必须优先 self_maintenance（维护保养），否则持续工作会加剧损耗")
 		}
 		// 禁止项：仅禁止与所有活跃告警冲突的消耗性动作
 		// 关节磨损告警时不禁 self_maintenance（那是需要的恢复动作）
-		fatigueAlert := in.Physical.Fatigue > FatigueAlertThreshold
-		jointWearAlert := in.Physical.JointWear > JointWearAlertThreshold
+		fatigueAlert := in.Physical.Fatigue > th.FatigueAlert()
+		jointWearAlert := in.Physical.JointWear > th.JointWearAlert()
 		if fatigueAlert {
 			forbids = append(forbids, "work_shift（消耗体力）")
 		}

@@ -9,8 +9,6 @@
 package prompt
 
 import (
-	"fmt"
-
 	"github.com/AgentTown/agenttown-mcp/pkg/protocol"
 )
 
@@ -25,7 +23,8 @@ var defaultPhysical = protocol.PhysicalState{
 	Money:     200,
 }
 
-// PhysicalLine renders the 物理状态 line for prompt injection.
+// PhysicalLine renders the 物理状态 line for prompt injection, using band
+// labels (see physical_bands.go) instead of raw numbers.
 //
 // When physical is nil or all-zero (UE5 perception_update not yet received),
 // falls back to defaultPhysical so the prompt always carries a valid
@@ -34,10 +33,10 @@ var defaultPhysical = protocol.PhysicalState{
 //
 // The trailing newline matches the existing tactical prompt convention
 // where physicalLine sits on its own line in the skeleton.
-func PhysicalLine(physical *protocol.PhysicalState) string {
+func PhysicalLine(physical *protocol.PhysicalState, th BandThresholds) string {
 	p := defaultPhysical
 	if physical != nil && !physical.IsZero() {
 		p = *physical
 	}
-	return fmt.Sprintf("物理状态：能量 %.0f、疲劳 %.0f、关节磨损 %.0f、余额 %.0f。", p.Energy, p.Fatigue, p.JointWear, p.Money)
+	return PhysicalLineActual(p, th)
 }

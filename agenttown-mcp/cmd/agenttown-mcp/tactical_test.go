@@ -531,12 +531,13 @@ func TestBuildTacticalPrompt_NilPhysical(t *testing.T) {
 	if promptText == "" {
 		t.Fatal("promptText should not be empty")
 	}
-	// nil physical 时注入默认物理状态（100/0/0/200），让 LLM 始终看到有效物理上下文
+	// nil physical 时注入默认物理状态（100/0/0/200 → 充足/精神饱满/良好），
+	// 让 LLM 始终看到有效物理上下文（分段标签，非原始数值）
 	if !strings.Contains(promptText, "物理状态") {
 		t.Errorf("prompt should contain '物理状态' with default values for nil physical, got: %s", promptText)
 	}
-	if !strings.Contains(promptText, "100") {
-		t.Errorf("prompt should contain default energy 100 for nil physical, got: %s", promptText)
+	if !strings.Contains(promptText, "能量 充足") {
+		t.Errorf("prompt should contain default band 能量 充足 for nil physical, got: %s", promptText)
 	}
 	// slot 为空时不应有时长提示行
 	if strings.Contains(promptText, "请让步骤总时长接近此时长") {
@@ -551,18 +552,19 @@ func TestBuildTacticalPrompt_ZeroPhysical(t *testing.T) {
 	if !strings.Contains(promptText, "物理状态") {
 		t.Errorf("prompt should contain '物理状态' with default values for all-zero physical, got: %s", promptText)
 	}
-	if !strings.Contains(promptText, "100") {
-		t.Errorf("prompt should contain default energy 100 for all-zero physical, got: %s", promptText)
+	if !strings.Contains(promptText, "能量 充足") {
+		t.Errorf("prompt should contain default band 能量 充足 for all-zero physical, got: %s", promptText)
 	}
 }
 
 func TestBuildTacticalPrompt_WithPhysical(t *testing.T) {
 	promptText := prompt.BuildTactical(prompt.TacticalInput{Goal: "装配", Zone: "main_workshop", TimeOfDay: "09:00", Slot: "09:00-12:00", Physical: &protocol.PhysicalState{Energy: 75, Fatigue: 30, JointWear: 5}, KB: nil, Hint: "", Actions: nil, AgentID: ""})
-	if !strings.Contains(promptText, "能量 75") {
-		t.Errorf("prompt should contain '能量 75', got: %s", promptText)
+	// 数值以分段标签呈现：75→中等、30→精神饱满、5→良好
+	if !strings.Contains(promptText, "能量 中等") {
+		t.Errorf("prompt should contain '能量 中等' (75), got: %s", promptText)
 	}
-	if !strings.Contains(promptText, "疲劳 30") {
-		t.Errorf("prompt should contain '疲劳 30'")
+	if !strings.Contains(promptText, "疲劳 精神饱满") {
+		t.Errorf("prompt should contain '疲劳 精神饱满' (30), got: %s", promptText)
 	}
 	// slot 有效时应包含时长提示
 	if !strings.Contains(promptText, "当前时段 09:00-12:00，约 180 分钟") {

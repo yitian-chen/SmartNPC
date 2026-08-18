@@ -81,8 +81,8 @@ const StrategicSystemPrompt = `你是小镇居民 NPC 的战略规划模块。�
    - 判断标准：goal 能否直接映射到【可用能力】中列出的某个 cmd？能 → 可以安排；不能 → 换一个
 4. goal 中提到的地点、人物、设备必须是用户信息中【你的角色】和【世界知识】里存在的，不得编造未提及的人物或设施
 5. 首段（07:00 起）必须是日间活动，不得安排休眠；末段跨午夜时结束时间表示次日时刻
-6. 充电仅在能量<40 或疲劳>80 时安排；维护仅在关节磨损>50 时安排；能量充足时优先产出性活动
-7. 综合考虑物理状态四项数值调整安排侧重点：能量低→多充电少工作；疲劳高→提前休眠；磨损高→安排维护；余额低→多工作少花钱
+6. 充电仅在能量为"低电量"或疲劳为"非常疲劳"时安排；维护仅在关节磨损达到"明显磨损"及以上时安排；能量充足时优先产出性活动
+7. 综合用户信息中【物理状态】的四项状态调整安排侧重点：能量偏低→多充电少工作；疲劳偏高→提前休眠；磨损偏高→安排维护；余额低→多工作少花钱
 8. 聊天时段只安排聊天一件事，不附带地点或其他动作（如"找老王聊聊装配进展"）
 
 示例：[{"time":"07:00-09:00","goal":"早晨去找老王聊聊天（social_chat）"},{"time":"09:00-12:00","goal":"上午车间装配作业"},{"time":"12:00-14:00","goal":"午间去长椅上坐坐"},{"time":"14:00-18:00","goal":"下午继续在车间装配"},{"time":"18:00-22:00","goal":"傍晚去充电站补电"},{"time":"22:00-07:00","goal":"夜间在休眠舱休息"}]`
@@ -134,7 +134,7 @@ func BuildStrategic(kb *worldkb.KB, profiles map[string]*profile.Profile, agentI
 		sb.WriteString(dayContext)
 		sb.WriteString("\n")
 	}
-	if line := PhysicalLine(physical); line != "" {
+	if line := PhysicalLine(physical, BandThresholdsFor(profiles, agentID)); line != "" {
 		sb.WriteString("【物理状态】\n")
 		sb.WriteString(line)
 		sb.WriteString("\n")
