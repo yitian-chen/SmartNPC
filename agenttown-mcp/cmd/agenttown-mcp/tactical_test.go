@@ -649,15 +649,16 @@ func TestBuildTacticalPrompt_InjectsObjectStatus(t *testing.T) {
 		t.Errorf("prompt should mention nearby WorkBench, got: %s", promptText)
 	}
 	// 应包含"避免直接重试"或"全部占用"相关的引导文本
-	if !strings.Contains(promptText, "禁止规划必然失败") {
-		t.Errorf("prompt should guide LLM to avoid doomed occupancy actions, got: %s", promptText)
+	// （该引导在 TacticalSystemPrompt 规则 9 中，机制文本已移入 system 消息）
+	if !strings.Contains(prompt.TacticalSystemPrompt, "禁止规划必然失败") {
+		t.Errorf("system prompt should guide LLM to avoid doomed occupancy actions")
 	}
 }
 
 // TestBuildTacticalPrompt_NilObjectStatusNoSection 验证 ObjectStatus 为空时
 // 【物体实时占用】段整体省略，不污染 prompt（兼容 UE 未推送 object_status 的场景）。
-// 注意：要求 #9 模板里固定提及"物体实时占用"字样，故不能 grep 该词；改用段体特征
-// "按 category 聚合"判断段是否实际渲染。
+// 注意：机制规则（提及"物体实时占用"字样）已移入 TacticalSystemPrompt，
+// 用户消息里该词只在段实际渲染时出现；仍改用段体特征 "按 category 聚合" 判断。
 func TestBuildTacticalPrompt_NilObjectStatusNoSection(t *testing.T) {
 	kb := loadTestKB(t)
 	promptText := prompt.BuildTactical(prompt.TacticalInput{

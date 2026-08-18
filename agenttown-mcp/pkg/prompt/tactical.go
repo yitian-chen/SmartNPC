@@ -46,12 +46,45 @@ var toolOverride = map[string]struct {
 	"social_chat":       {"主动去找另一个 NPC 聊天（走向对方+对话挂起，直到对话结束）", `{"target_agent_id":"<附近NPC的 id>","content":"开场白"}`},
 }
 
-// tacticalPromptBody is the prompt's fixed skeleton. %s placeholders are:
+// TacticalSystemPrompt is the tactical layer's system message: mechanism
+// text only (module role, tool-class explanation, decomposition rules,
+// output format). Fully static across agents and calls → cacheable.
+// Per-call data (goal, state, KB, tool list, example) goes in the user
+// message built by BuildTactical.
+//
+// Rules referencing dynamic segments say "用户信息中…" because those
+// segments (tool list, KB zones/objects, nearby NPCs, object occupancy)
+// live in the user message, not here.
+const TacticalSystemPrompt = `你是小镇居民 NPC 的战术规划模块。用户信息给出当前时段目标和你的实时上下文（位置、物理状态、世界知识、可用工具、周围 NPC 与物体占用等），请把目标分解为一个或多个 action，按顺序执行。
+
+用户信息中的可用工具分两类：
+- 复合动作（标记 [复合]）：长耗时、单步即可完成一段工作（如装配、充电、巡逻、聊天），会自动移动到对应位置，无需自己调用 move_to。若目标语义与某复合动作匹配，应优先使用复合动作。
+- 原子动作（标记 [原子]）：作为基本 building block。其中 move_to/speak/emote/turn_to/generic_act 是短耗时动作；interact（与智能物体交互）是长耗时动作——单次 interact 会持续执行直到时段切换（如在长椅上 rest、在工作台前 assemble），可作为队列收尾动作让 NPC 持续活动到下一 schedule 节点。
+仅当复合动作无法覆盖 schedule 要求时，才用原子动作组合实现；interact 因已是长动作，无需重复多次填充时段。
+
+要求：
+1. 队列首个动作必须是 speak（用一句话表达此刻内心想法或独白），然后才是其他动作
+2. 后续每行输出一个 {"action":"工具名","params":{...}}，按执行顺序排列。action 字段必须严格使用用户信息中"可用工具"列表给出的工具名（如 work_shift / charge_at_station / rest_at_residence / surf_internet / self_maintenance / social_chat / interact / move_to / speak / generic_act / emote / turn_to），禁止编造、禁止近形变换（如把 work_shift 写成 work_short、rest_at_residence 写成 rest_at_composite），否则动作会被丢弃导致队列提前耗尽
+3. 队列必须以长动作结尾（长复合动作 或 interact 原子动作均可）——长动作会持续执行直到时段切换，让 NPC 一直活动到下一 schedule 节点被 worker 主动打断
+4. 禁止输出 wait 动作；复合动作已包含自动移动到对应位置的逻辑，禁止在复合动作前加 move_to——直接输出单个长复合动作即可。
+5. 仅当目标确实没有匹配的长复合动作时，才用原子动作组合实现目标。长椅休息等场景用单个 interact 即可（interact 是长动作，会持续到时段切换），禁止把同一动作重复多次填充时段——队列提前耗尽会自动触发重分解生成新动作
+6. move_to/turn_to 的 target_id 用用户信息中【世界知识】"可前往区域"的 zone id；interact 和复合动作的 semantic_group 必须严格使用"可交互物体"给出的 semantic_group 值，禁止编造、禁止用实例 id（如 Charge-1）、禁止拼接 zone/interaction 信息
+7. 复合动作与 semantic_group 必须严格对应，禁止跨类别组合：
+   - work_shift → workbench（装配）/ sorting_conveyor（分拣）/ inspection_table（质检），interaction 用 assemble / sort_cargo / inspect
+   - charge_at_station → charger，interaction 用 charge
+   - rest_at_residence → sleep_pod（仅休眠舱），interaction 用 sleep；长椅（bench）休息不属于"在住所休息"，必须改用 interact 原子动作（semantic_group=bench, interaction=rest）
+   - self_maintenance → repair_table，interaction 用 repair
+   - surf_internet → computer，interaction 用 surf_internet
+   - social_chat → target_agent_id 必须严格使用用户信息中【附近NPC】列出的 NPC id（格式如 H-01），禁止用显示名（如"老王"）、禁止编造未列出的 id；content 为开场白；对话期间会自动走向对方并挂起直到对话结束
+8. 每行一个 JSON 对象，不要输出 JSON 数组，不要输出 markdown 围栏，不要输出任何其他文字；不要输出 inner_thought 字段，内心独白直接用首个 speak 动作表达
+9. 若用户信息中【物体实时占用】显示目标 semantic_group 全部占用，必须改用其他空闲 semantic_group 或先安排 generic_act(behavior=look_around) 短暂等待，禁止规划必然失败的占用动作`
+
+// tacticalUserBody is the user message's fixed skeleton. %s placeholders are:
 // goal / zone / timeOfDay /
 // physicalLine (physical state line, empty when all-0) / roleLine / memoriesLine /
 // relationshipsLine / nearbyLine (visible NPCs, empty when none) /
 // hintLine / slotDurationHint / kbContext / objectStatusLine / toolCount / toolList / exampleBlock.
-const tacticalPromptBody = `[战术层/任务分解] 当前时段目标：%s
+const tacticalUserBody = `[战术层/任务分解] 当前时段目标：%s
 你目前在：%s，游戏时间 %s。
 %s
 %s
@@ -63,38 +96,21 @@ const tacticalPromptBody = `[战术层/任务分解] 当前时段目标：%s
 %s
 %s
 %s
-可用工具（仅限以下 %d 个）。工具分两类：
-- 复合动作（标记 [复合]）：长耗时、单步即可完成一段工作（如装配、充电、巡逻、聊天），会自动移动到对应位置，无需自己调用 move_to。若目标语义与某复合动作匹配，应优先使用复合动作。
-- 原子动作（标记 [原子]）：作为基本 building block。其中 move_to/speak/emote/turn_to/generic_act 是短耗时动作；interact（与智能物体交互）是长耗时动作——单次 interact 会持续执行直到时段切换（如在长椅上 rest、在工作台前 assemble），可作为队列收尾动作让 NPC 持续活动到下一 schedule 节点。
-仅当复合动作无法覆盖 schedule 要求时，才用原子动作组合实现；interact 因已是长动作，无需重复多次填充时段。
+可用工具（仅限以下 %d 个）：
 %s
-
-要求：
-1. 队列首个动作必须是 speak（用一句话表达此刻内心想法或独白），然后才是其他动作
-2. 后续每行输出一个 {"action":"工具名","params":{...}}，按执行顺序排列。action 字段必须严格使用上方"可用工具"列表中给出的工具名（如 work_shift / charge_at_station / rest_at_residence / surf_internet / self_maintenance / social_chat / interact / move_to / speak / generic_act / emote / turn_to），禁止编造、禁止近形变换（如把 work_shift 写成 work_short、rest_at_residence 写成 rest_at_composite），否则动作会被丢弃导致队列提前耗尽
-3. 队列必须以长动作结尾（长复合动作 或 interact 原子动作均可）——长动作会持续执行直到时段切换，让 NPC 一直活动到下一 schedule 节点被 worker 主动打断
-4. 禁止输出 wait 动作；复合动作已包含自动移动到对应位置的逻辑，禁止在复合动作前加 move_to——直接输出单个长复合动作即可。
-5. 仅当目标确实没有匹配的长复合动作时，才用原子动作组合实现目标。长椅休息等场景用单个 interact_smart_object 即可（interact_smart_object 是长动作，会持续到时段切换），禁止把同一动作重复多次填充时段——队列提前耗尽会自动触发重分解生成新动作
-6. move_to/turn_to 的 target_id 用上方"可前往区域"的 zone id；interact 和复合动作的 semantic_group 必须严格使用上方"可交互物体"给出的 semantic_group 值，禁止编造、禁止用实例 id（如 Charge-1）、禁止拼接 zone/interaction 信息
-7. 复合动作与 semantic_group 必须严格对应，禁止跨类别组合：
-   - work_shift → workbench（装配）/ sorting_conveyor（分拣）/ inspection_table（质检），interaction 用 assemble / sort_cargo / inspect
-   - charge_at_station → charger，interaction 用 charge
-   - rest_at_residence → sleep_pod（仅休眠舱），interaction 用 sleep；长椅（bench）休息不属于"在住所休息"，必须改用 interact 原子动作（semantic_group=bench, interaction=rest）
-   - self_maintenance → repair_table，interaction 用 repair
-   - surf_internet → computer，interaction 用 surf_internet
-   - social_chat → target_agent_id 必须严格使用上方【附近NPC】列出的 NPC id（格式如 H-01），禁止用显示名（如"老王"）、禁止编造未列出的 id；content 为开场白；对话期间会自动走向对方并挂起直到对话结束
-8. 每行一个 JSON 对象，不要输出 JSON 数组，不要输出 markdown 围栏，不要输出任何其他文字；不要输出 inner_thought 字段，内心独白直接用首个 speak 动作表达
-9. 若上方【物体实时占用】显示目标 semantic_group 全部占用，必须改用其他空闲 semantic_group 或先安排 generic_act(behavior=look_around) 短暂等待，禁止规划必然失败的占用动作
 
 示例（id 来自上方可用列表，不可照抄示例中的 id）：
 %s`
 
-// BuildTactical fills the tactical layer prompt template.
+// BuildTactical fills the tactical layer user message template.
 // kb injects available zone/object lists + NPC role (AgentRole), preventing
 // the LLM from fabricating IDs and letting decomposition reflect personality.
 // slot ("HH:MM-HH:MM") is used to hint slot duration, guiding the LLM to
 // produce steps whose total duration approaches the slot length.
 // actions (from registry.EffectiveActions) drives the tool list; nil → builtin fallback.
+//
+// Mechanism text (tool-class explanation, rules 1-9) lives in
+// TacticalSystemPrompt; callers pass it as the system message.
 func BuildTactical(in TacticalInput) string {
 	physicalLine := PhysicalLine(in.Physical)
 	roleLine := ""
@@ -161,7 +177,7 @@ func BuildTactical(in TacticalInput) string {
 	}
 	toolList, toolCount := BuildTacticalToolList(in.Actions)
 	objectStatusLine := ObjectStatusContext(in.ObjectStatus, in.NearbyObjects, in.KB)
-	return fmt.Sprintf(tacticalPromptBody, in.Goal, in.Zone, in.TimeOfDay,
+	return fmt.Sprintf(tacticalUserBody, in.Goal, in.Zone, in.TimeOfDay,
 		physicalLine,
 		roleLine,
 		memoriesLine,
