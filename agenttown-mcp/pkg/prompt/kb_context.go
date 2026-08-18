@@ -37,7 +37,7 @@ func KBContext(kb *worldkb.KB) string {
 		lines = append(lines, "可前往区域（move_to 的 target_id 用 id）: "+strings.Join(parts, "、")+"。")
 	}
 	if os := kb.ListObjects(); len(os) > 0 {
-		lines = append(lines, "可交互物体（interact 和复合动作的 semantic_group 用下列 semantic_group 值，interact 的 interaction 用下列可用动词；复合动作会自动移动到对应位置，无需自己调用 move_to）:")
+		lines = append(lines, "可交互物体（InteractSmartObject 和复合动作的 semantic_group 用下列 semantic_group 值，interact 的 interaction 用下列可用动词；复合动作会自动移动到对应位置，无需自己调用 move_to）:")
 		for _, g := range groupObjectsBySemantic(os) {
 			lines = append(lines, formatObjectGroup(g))
 		}

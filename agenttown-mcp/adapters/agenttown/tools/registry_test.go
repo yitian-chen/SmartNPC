@@ -78,7 +78,7 @@ func TestSnakeToPascal(t *testing.T) {
 func TestCmdToToolName_Builtin(t *testing.T) {
 	cases := []struct{ cmd, want string }{
 		{protocol.CmdMoveTo, "move_to"},
-		{protocol.CmdInteractSmartObject, "interact"}, // shortened name
+		{protocol.CmdInteractSmartObject, "InteractSmartObject"}, // same as UE cmd name
 		{protocol.CmdChargeAtStation, "charge_at_station"},
 		{protocol.CmdSpeak, "speak"},
 	}

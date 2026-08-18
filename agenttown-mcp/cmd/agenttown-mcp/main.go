@@ -2073,6 +2073,11 @@ type debugScheduleResponse struct {
 // 优先匹配 raw cmd；若无再匹配 tool_name，避免歧义（理论上两者不会碰撞：
 // raw cmd 必含大写字母或为单词，tool_name 必含下划线或全小写）。
 func mapDebugCmd(cmd string, registry *CapabilityRegistry, agentID string) (protoCmd string, ok bool) {
+	// 旧工具名 interact 已改名 InteractSmartObject（与 UE 注册 cmd 同名）；
+	// 旧版 debug 下拉可能仍发送旧名，按新名处理。
+	if cmd == "interact" {
+		cmd = "InteractSmartObject"
+	}
 	if registry != nil {
 		for _, act := range registry.EffectiveActions(agentID) {
 			if act.Cmd == cmd {

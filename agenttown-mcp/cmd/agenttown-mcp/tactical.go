@@ -49,6 +49,11 @@ func tacticalActionAvailable(action, agentID string, registry *CapabilityRegistr
 	if action == "wait" {
 		return false
 	}
+	// 旧工具名 interact 已改名 InteractSmartObject（与 UE 注册 cmd 同名）；
+	// LLM 偶发输出旧名时按新名处理，避免动作被静默丢弃。
+	if action == "interact" {
+		action = "InteractSmartObject"
+	}
 	if registry == nil {
 		for _, spec := range tools.BuiltinToolSpecs() {
 			if spec.Name == action && spec.Name != "scan_area" && spec.Name != "stop" {
@@ -461,7 +466,7 @@ func mapTacticalAction(pa plannedAction, agentID string, kb *worldkb.KB, registr
 		return protocol.CmdEmote, map[string]any{
 			"emotion": pa.Params["emotion"],
 		}, nil
-	case "interact":
+	case "InteractSmartObject", "interact": // interact 为旧工具名，保留兼容 LLM 偶发输出
 		return protocol.CmdInteractSmartObject, map[string]any{
 			"semantic_group": pa.Params["semantic_group"],
 			"interaction":    pa.Params["interaction"],

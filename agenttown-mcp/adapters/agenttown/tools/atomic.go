@@ -213,22 +213,22 @@ func registerAtomic(s *mcp.Server, ex Executor, kb *worldkb.KB, logger *slog.Log
 		return nil, buildAckResult(ack, in.DecisionEpoch), nil
 	})
 
-	// interact → InteractSmartObject
+	// InteractSmartObject 工具（与 UE 注册的 cmd 同名）
 	mcp.AddTool(s, &mcp.Tool{
-		Name:        "interact",
+		Name:        "InteractSmartObject",
 		Description: "Interact with a smart object using a verb from its available_interactions.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in InteractInput) (*mcp.CallToolResult, ackResult, error) {
 		if in.AgentID == "" || in.SemanticGroup == "" || in.Interaction == "" {
 			return nil, ackResult{}, fmt.Errorf("agent_id, semantic_group and interaction are required")
 		}
-		logToolCall("interact", in.AgentID, in.DecisionEpoch, in)
+		logToolCall("InteractSmartObject", in.AgentID, in.DecisionEpoch, in)
 		ack, err := ex.SendAction(ctx, in.AgentID, in.DecisionEpoch, protocol.CmdInteractSmartObject, map[string]any{
 			"semantic_group": in.SemanticGroup,
 			"interaction":    in.Interaction,
 			"auto_queue":     true,
 		})
 		if err != nil {
-			return nil, ackResult{}, fmt.Errorf("interact: %w", err)
+			return nil, ackResult{}, fmt.Errorf("InteractSmartObject: %w", err)
 		}
 		return nil, buildAckResult(ack, in.DecisionEpoch), nil
 	})

@@ -219,7 +219,7 @@ func TestHandleDebugCap_ToolNameField(t *testing.T) {
 	}
 	wantTool := map[string]string{
 		"MoveTo":              "move_to",
-		"InteractSmartObject": "interact",
+		"InteractSmartObject": "InteractSmartObject",
 		"WaveHand":            "wave_hand",
 		"SocialChat":          "social_chat",
 		"Stop":                "stop",
