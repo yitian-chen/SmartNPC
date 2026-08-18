@@ -30,6 +30,10 @@ func (f *fakeDialogueLLM) SendStreaming(_ context.Context, _, _ string, _ func(s
 	return f.resp, f.err
 }
 
+func (f *fakeDialogueLLM) SendWithSchema(_ context.Context, _, _, _ string, _ []byte) (*llmtypes.Response, error) {
+	return f.resp, f.err
+}
+
 func (f *fakeDialogueLLM) ResetSession() { f.resetCount++ }
 
 // makeDialogueResponse builds an llmtypes.Response whose ExtractText returns

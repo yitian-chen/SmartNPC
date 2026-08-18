@@ -93,7 +93,7 @@ func (c *Client) SendWithSummary(ctx context.Context, system, user string) (*llm
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	return c.doSend(ctx, system, user, false, nil)
+	return c.doSend(ctx, system, user, false, nil, nil)
 }
 
 // SendStreaming POSTs a (system, user) message pair with stream:true and
@@ -106,7 +106,25 @@ func (c *Client) SendStreaming(ctx context.Context, system, user string, onDelta
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	return c.doSend(ctx, system, user, true, onDelta)
+	return c.doSend(ctx, system, user, true, onDelta, nil)
+}
+
+// SendWithSchema POSTs a (system, user) message pair with OpenAI
+// Structured Outputs constraints (response_format json_schema, strict).
+// The model is constrained at decoding time to emit only JSON matching
+// schema — field-type violations (e.g. a nested object where a string is
+// required) become impossible instead of merely discouraged.
+// schemaName labels the schema for the gateway; schema is the raw JSON
+// Schema document (root may be any type). Gateways that ignore
+// response_format still accept the request — the schema is best-effort.
+func (c *Client) SendWithSchema(ctx context.Context, system, user, schemaName string, schema []byte) (*llmtypes.Response, error) {
+	c.sendMu.Lock()
+	defer c.sendMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	def := &JSONSchemaDef{Name: schemaName, Strict: true, Schema: json.RawMessage(schema)}
+	return c.doSend(ctx, system, user, false, nil, def)
 }
 
 // ResetSession is a no-op for venus.Client. Venus has no session chain
@@ -118,8 +136,10 @@ func (c *Client) ResetSession() {
 }
 
 // doSend performs the HTTP POST and parses the response. For streaming
-// requests, onDelta is invoked for each text delta. Caller MUST hold sendMu.
-func (c *Client) doSend(ctx context.Context, system, user string, stream bool, onDelta func(string)) (*llmtypes.Response, error) {
+// requests, onDelta is invoked for each text delta. A non-nil schema adds
+// response_format (Structured Outputs) to the request body. Caller MUST
+// hold sendMu.
+func (c *Client) doSend(ctx context.Context, system, user string, stream bool, onDelta func(string), schema *JSONSchemaDef) (*llmtypes.Response, error) {
 	msgs := make([]message, 0, 2)
 	if system != "" {
 		msgs = append(msgs, message{Role: "system", Content: system})
@@ -130,6 +150,9 @@ func (c *Client) doSend(ctx context.Context, system, user string, stream bool, o
 		MaxTokens: c.cfg.MaxTokens,
 		Messages:  msgs,
 		Stream:    stream,
+	}
+	if schema != nil {
+		body.ResponseFormat = &ResponseFormat{Type: "json_schema", JSONSchema: schema}
 	}
 	payload, err := json.Marshal(body)
 	if err != nil {
@@ -301,10 +324,26 @@ func truncate(s string, maxLen int) string {
 
 // request is the body sent to /v1/chat/completions.
 type request struct {
-	Model     string    `json:"model"`
-	MaxTokens int       `json:"max_tokens"`
-	Messages  []message `json:"messages"`
-	Stream    bool      `json:"stream,omitempty"`
+	Model          string          `json:"model"`
+	MaxTokens      int             `json:"max_tokens"`
+	Messages       []message       `json:"messages"`
+	Stream         bool            `json:"stream,omitempty"`
+	ResponseFormat *ResponseFormat `json:"response_format,omitempty"`
+}
+
+// ResponseFormat is the OpenAI response_format field (Structured Outputs).
+// Type "json_schema" with a strict JSONSchemaDef constrains decoding so the
+// output is guaranteed to match the schema.
+type ResponseFormat struct {
+	Type       string         `json:"type"` // "json_schema"
+	JSONSchema *JSONSchemaDef `json:"json_schema,omitempty"`
+}
+
+// JSONSchemaDef is the named strict JSON Schema sent inside response_format.
+type JSONSchemaDef struct {
+	Name   string          `json:"name"`
+	Strict bool            `json:"strict"`
+	Schema json.RawMessage `json:"schema"`
 }
 
 // message is one entry in the Messages array.

@@ -36,10 +36,29 @@ type dailyPlanItem struct {
 }
 
 // strategicCaller 是 LLM 客户端的窄接口，便于单测 mock。
+// SendWithSchema 用于战略层（Structured Outputs 硬约束）；
+// SendWithSummary 用于记忆层等无 schema 的调用。
 type strategicCaller interface {
 	SendWithSummary(ctx context.Context, system, user string) (*llmtypes.Response, error)
+	SendWithSchema(ctx context.Context, system, user, schemaName string, schema []byte) (*llmtypes.Response, error)
 	ResetSession()
 }
+
+// dailyPlanSchema 是战略层输出的 JSON Schema（OpenAI Structured Outputs
+// strict 模式）。goal 强制为纯字符串——解码级杜绝 LLM 把 goal 写成
+// {"goal":"...","cmd":"..."} 之类的嵌套对象导致整包解析失败。
+const dailyPlanSchema = `{
+  "type": "array",
+  "items": {
+    "type": "object",
+    "properties": {
+      "time": {"type": "string"},
+      "goal": {"type": "string"}
+    },
+    "required": ["time", "goal"],
+    "additionalProperties": false
+  }
+}`
 
 // yesterdaySummaryForFirstDay 是首日启动时注入的"昨日总结"。
 //
@@ -73,7 +92,7 @@ func generateDailyPlan(ctx context.Context, sc strategicCaller, agentID string, 
 		"昨日总结："+yesterdaySummary)
 	logger.Info("[MCP→LLM/STRATEGIC-PROMPT]", "agent_id", agentID, "text", promptText)
 
-	resp, err := sc.SendWithSummary(ctx, prompt.StrategicSystemPrompt, promptText)
+	resp, err := sc.SendWithSchema(ctx, prompt.StrategicSystemPrompt, promptText, "daily_plan", []byte(dailyPlanSchema))
 	if err != nil {
 		fallback := jitterPlanString(prompt.DefaultDailyPlan(kb))
 		logger.Warn("[战略层] 计划生成失败，使用默认计划兜底",

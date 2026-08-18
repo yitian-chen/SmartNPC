@@ -1057,6 +1057,7 @@ var tacticalCallTimeout = 60 * time.Second
 type llmClient interface {
 	SendWithSummary(ctx context.Context, system, user string) (*llmtypes.Response, error)
 	SendStreaming(ctx context.Context, system, user string, onDelta func(string)) (*llmtypes.Response, error)
+	SendWithSchema(ctx context.Context, system, user, schemaName string, schema []byte) (*llmtypes.Response, error)
 	ResetSession()
 }
 

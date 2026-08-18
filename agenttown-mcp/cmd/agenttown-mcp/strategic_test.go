@@ -15,14 +15,21 @@ import (
 
 // fakeStrategicCaller 实现 strategicCaller 接口，用于单测。
 type fakeStrategicCaller struct {
-	resp          *llmtypes.Response
-	err           error
-	capturedInput string
-	resetCalled   bool
+	resp               *llmtypes.Response
+	err                error
+	capturedInput      string
+	capturedSchemaName string
+	resetCalled        bool
 }
 
 func (f *fakeStrategicCaller) SendWithSummary(_ context.Context, _, user string) (*llmtypes.Response, error) {
 	f.capturedInput = user
+	return f.resp, f.err
+}
+
+func (f *fakeStrategicCaller) SendWithSchema(_ context.Context, _, user, schemaName string, _ []byte) (*llmtypes.Response, error) {
+	f.capturedInput = user
+	f.capturedSchemaName = schemaName
 	return f.resp, f.err
 }
 
@@ -159,6 +166,10 @@ func TestGenerateDailyPlan_ValidResponse(t *testing.T) {
 	}
 	if !sc.resetCalled {
 		t.Error("ResetSession should be called after successful generation")
+	}
+	// 战略层必须走 Structured Outputs（json_schema strict）约束输出格式。
+	if sc.capturedSchemaName != "daily_plan" {
+		t.Errorf("generateDailyPlan should call SendWithSchema with schema name daily_plan, got %q", sc.capturedSchemaName)
 	}
 }
 
