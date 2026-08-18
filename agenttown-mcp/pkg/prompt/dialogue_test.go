@@ -29,12 +29,15 @@ func TestBuildDialogueInvite_ContainsCoreContext(t *testing.T) {
 		"昨天和老陈一起修过传送带",
 		"巡检设备",
 		"最近装配线怎么样？",
-		`{"accept": true/false, "reply":`,
 	}
 	for _, s := range checks {
 		if !strings.Contains(got, s) {
 			t.Errorf("invite prompt missing %q\n--- prompt ---\n%s", s, got)
 		}
+	}
+	// JSON 输出格式属机制文本，在 system prompt 中。
+	if !strings.Contains(DialogueInviteSystemPrompt, `{"accept": true/false, "reply":`) {
+		t.Errorf("DialogueInviteSystemPrompt should carry the JSON output format")
 	}
 }
 
@@ -129,12 +132,15 @@ func TestBuildDialogueTurn_ContainsShortTermContext(t *testing.T) {
 		"老王：还行，就是昨天传送带有点问题。",
 		"已聊 3 轮",
 		"建议上限约 6 轮",
-		`{"content": "你说的话", "end": true/false}`,
 	}
 	for _, s := range checks {
 		if !strings.Contains(got, s) {
 			t.Errorf("turn prompt missing %q\n--- prompt ---\n%s", s, got)
 		}
+	}
+	// JSON 输出格式属机制文本，在 system prompt 中。
+	if !strings.Contains(DialogueTurnSystemPrompt, `{"content": "你说的话", "end": true/false}`) {
+		t.Errorf("DialogueTurnSystemPrompt should carry the JSON output format")
 	}
 }
 
