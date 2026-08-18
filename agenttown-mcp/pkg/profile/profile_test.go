@@ -217,3 +217,71 @@ func TestLoadDir_NonexistentDir(t *testing.T) {
 		t.Fatal("expected error for nonexistent dir, got nil")
 	}
 }
+
+func TestLoadDir_AttrBands(t *testing.T) {
+	dir := t.TempDir()
+	writeProfile(t, dir, "H-01.md", "## 名字\n老陈\n\n## 属性分段\n疲劳: 40,70,90\n能量: 30,55,80\n")
+	profiles, err := LoadDir(dir)
+	if err != nil {
+		t.Fatalf("LoadDir: %v", err)
+	}
+	p := profiles["H-01"]
+	if p == nil {
+		t.Fatal("H-01 profile missing")
+	}
+	if got := p.AttrBands["疲劳"]; got != [3]float64{40, 70, 90} {
+		t.Errorf("疲劳 bands = %v, want [40 70 90]", got)
+	}
+	if got := p.AttrBands["能量"]; got != [3]float64{30, 55, 80} {
+		t.Errorf("能量 bands = %v, want [30 55 80]", got)
+	}
+	if _, ok := p.AttrBands["关节磨损"]; ok {
+		t.Errorf("关节磨损 should be absent (not declared), got %v", p.AttrBands["关节磨损"])
+	}
+}
+
+func TestLoadDir_AttrBandsAbsent(t *testing.T) {
+	dir := t.TempDir()
+	writeProfile(t, dir, "H-01.md", "## 名字\n老陈\n")
+	profiles, err := LoadDir(dir)
+	if err != nil {
+		t.Fatalf("LoadDir: %v", err)
+	}
+	if profiles["H-01"].AttrBands != nil {
+		t.Errorf("AttrBands should be nil when section absent, got %v", profiles["H-01"].AttrBands)
+	}
+}
+
+func TestLoadDir_AttrBandsBadLinesSkipped(t *testing.T) {
+	dir := t.TempDir()
+	writeProfile(t, dir, "H-01.md", "## 属性分段\n"+
+		"疲劳: 40,70,90\n"+ // valid
+		"能量: 80,30\n"+ // wrong value count
+		"关节磨损: 50,30,70\n"+ // non-ascending
+		"余额: 10,20,30\n"+ // unknown attribute (余额 bands not supported)
+		"疲劳x: 1,2,3\n"+ // unknown attribute
+		"能量: a,b,c\n") // non-numeric
+	profiles, err := LoadDir(dir)
+	if err != nil {
+		t.Fatalf("LoadDir: %v", err)
+	}
+	bands := profiles["H-01"].AttrBands
+	if len(bands) != 1 {
+		t.Fatalf("only 疲劳 should parse, got %v", bands)
+	}
+	if got := bands["疲劳"]; got != [3]float64{40, 70, 90} {
+		t.Errorf("疲劳 bands = %v, want [40 70 90]", got)
+	}
+}
+
+func TestLoadDir_AttrBandsChineseColon(t *testing.T) {
+	dir := t.TempDir()
+	writeProfile(t, dir, "H-01.md", "## 属性分段\n疲劳：40,70,90\n")
+	profiles, err := LoadDir(dir)
+	if err != nil {
+		t.Fatalf("LoadDir: %v", err)
+	}
+	if got := profiles["H-01"].AttrBands["疲劳"]; got != [3]float64{40, 70, 90} {
+		t.Errorf("疲劳 bands (Chinese colon) = %v, want [40 70 90]", got)
+	}
+}

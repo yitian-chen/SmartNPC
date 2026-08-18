@@ -75,6 +75,11 @@ type ReactiveInput struct {
 	JointWear         float64 // joint wear (0-100, higher = more worn); triggers maintenance alert above JointWearAlertThreshold
 	Money             float64 // NPC economic balance (working earns, charging/repair/sleep spends); injected into prompt alongside physical state
 	PhysicalAvailable bool    // whether physical state is usable (perception_update all-0 → false, skip physical segment)
+	// Bands is the per-NPC band thresholds (from profile ## 属性分段, else
+	// defaults) used to render the physical segment as range labels and to
+	// evaluate physical alerts in UpgradeIfPhysicalAlert. Zero value →
+	// DefaultBandThresholds (see BandThresholds.OrDefault).
+	Bands             BandThresholds
 	CurrentAction     string // readable description of in-flight action (e.g. "WorkShift(smart_object=workbench_01)"), empty = no in-flight
 	ElapsedSec        int    // seconds the current action has been running
 	ActionSrc         string // in-flight action source: tactical / mcp_tool / empty

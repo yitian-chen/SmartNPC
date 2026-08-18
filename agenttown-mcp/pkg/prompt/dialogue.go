@@ -6,6 +6,32 @@ import (
 	"strings"
 )
 
+// DialogueInviteSystemPrompt is the dialogue invite layer's system message:
+// mechanism text only (module role, accept/reject guidance, JSON output
+// format). Fully static across agents and calls → cacheable. Per-call data
+// (persona, relationship, memories, peer's invite) goes in the user message
+// built by BuildDialogueInvite.
+const DialogueInviteSystemPrompt = `你是小镇居民 NPC 的对话决策模块。用户信息给出你的身份、性格、身体状态、与对方的关系、近期记忆，以及对方走过来的聊天邀请，请结合你的性格、当前状态、与对方的关系，决定是否接受这次聊天。
+- 如果你觉得现在适合聊天（空闲、状态尚可、关系不差），就接受并给出你的开场回应。
+- 如果你正忙、疲惫、或不想理对方，可以拒绝。
+- 回应要符合你的说话风格，简短自然（一般一两句话），不要扮演系统助手。
+
+只输出一个 JSON 对象，格式：
+{"accept": true/false, "reply": "接受时给对方的开场回应，拒绝时留空"}`
+
+// DialogueTurnSystemPrompt is the dialogue turn layer's system message:
+// mechanism text only (module role, reply guidance, end-of-conversation
+// convention, JSON output format). Fully static → cacheable. Per-call data
+// goes in the user message built by BuildDialogueTurn.
+const DialogueTurnSystemPrompt = `你是小镇居民 NPC 的对话生成模块。用户信息给出你的身份、性格、与对方的关系、近期记忆、本场对话记录以及对方的最新发言，请生成你的下一句回应。
+- 符合你的性格和说话风格，简短自然（一般一两句话）。
+- 可以延续话题、引出新话题，或自然收尾。
+- 如果觉得聊得差不多了、没有新话题，或者已到建议上限，就用 end=true 优雅结束，并给出一句告别语。
+- 不要扮演系统助手，不要输出除了 JSON 以外的内容。
+
+只输出一个 JSON 对象，格式：
+{"content": "你说的话", "end": true/false}`
+
 // DialogueInviteInput aggregates the inputs for BuildDialogueInvite — the
 // prompt used by B (the invitee) to decide whether to accept A's chat_invite
 // and, if accepting, produce an opening reply (sent as the first chat_turn).
@@ -69,15 +95,7 @@ func BuildDialogueInvite(in DialogueInviteInput) string {
 		sb.WriteString("\n你刚才处于空闲状态。\n")
 	}
 	fmt.Fprintf(&sb, "\n%s（id=%s）主动走过来想跟你聊天，开场白是：%s\n", peer, in.PeerID, quoteContent(in.PeerContent))
-	sb.WriteString(`
-请结合你的性格、当前状态、与对方的关系，决定是否接受这次聊天。
-- 如果你觉得现在适合聊天（空闲、状态尚可、关系不差），就接受并给出你的开场回应。
-- 如果你正忙、疲惫、或不想理对方，可以拒绝。
-- 回应要符合你的说话风格，简短自然（一般一两句话），不要扮演系统助手。
-
-只输出一个 JSON 对象，格式：
-{"accept": true/false, "reply": "接受时给对方的开场回应，拒绝时留空"}
-`)
+	sb.WriteString("\n请决定是否接受这次聊天。\n")
 	return sb.String()
 }
 
@@ -182,16 +200,7 @@ func BuildDialogueTurn(in DialogueTurnInput) string {
 	}
 	fmt.Fprintf(&sb, "\n对方刚才说：%s\n", quoteContent(in.PeerContent))
 	fmt.Fprintf(&sb, "\n目前已聊 %d 轮（建议上限约 %d 轮）。\n", in.TurnCount, in.MaxTurns)
-	sb.WriteString(`
-请生成你的下一句回应。
-- 符合你的性格和说话风格，简短自然（一般一两句话）。
-- 可以延续话题、引出新话题，或自然收尾。
-- 如果觉得聊得差不多了、没有新话题，或者已到建议上限，就用 end=true 优雅结束，并给出一句告别语。
-- 不要扮演系统助手，不要输出除了 JSON 以外的内容。
-
-只输出一个 JSON 对象，格式：
-{"content": "你说的话", "end": true/false}
-`)
+	sb.WriteString("\n请生成你的回应。\n")
 	return sb.String()
 }
 

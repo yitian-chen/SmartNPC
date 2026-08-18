@@ -8,6 +8,11 @@
 //	## 背景
 //	## 性格特质
 //	## 说话风格
+//	## 属性分段
+//
+// The optional ## 属性分段 section declares per-attribute band boundaries
+// (e.g. "疲劳: 40,70,90") used to render physical state as range labels
+// instead of raw numbers, with per-NPC thresholds.
 //
 // Unknown sections are ignored. The parsed Profile is merged with the
 // world_kb Agent entry and the hardcoded fallback by prompt.AgentRole
@@ -18,6 +23,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -31,6 +37,12 @@ type Profile struct {
 	Description string   // ## 背景
 	Traits      []string // ## 性格特质 (split by 、 or newline)
 	SpeechStyle string   // ## 说话风格
+	// AttrBands holds per-attribute band boundaries from ## 属性分段, keyed
+	// by attribute name (能量/疲劳/关节磨损). Each value is 3 ascending
+	// thresholds splitting the 0-100 range into 4 bands. Only attributes
+	// explicitly listed in the profile are present; consumers fall back to
+	// global defaults for the rest. nil when the section is absent.
+	AttrBands map[string][3]float64
 }
 
 // Section titles recognized in profile.md. Unknown `## xxx` sections are
@@ -41,7 +53,15 @@ const (
 	sectionDescription = "背景"
 	sectionTraits      = "性格特质"
 	sectionSpeechStyle = "说话风格"
+	sectionAttrBands   = "属性分段"
 )
+
+// bandAttrNames are the attribute names allowed in ## 属性分段.
+var bandAttrNames = map[string]struct{}{
+	"能量":   {},
+	"疲劳":   {},
+	"关节磨损": {},
+}
 
 // LoadDir scans dir for *.md files and maps agentID (filename without
 // extension) → *Profile. Empty dir returns an empty map + nil error.
@@ -72,6 +92,7 @@ func LoadDir(dir string) (map[string]*Profile, error) {
 		p.Description = strings.TrimSpace(sections[sectionDescription])
 		p.Traits = parseTraits(sections[sectionTraits])
 		p.SpeechStyle = strings.TrimSpace(sections[sectionSpeechStyle])
+		p.AttrBands = parseAttrBands(sections[sectionAttrBands])
 		out[agentID] = p
 	}
 	return out, nil
@@ -107,6 +128,54 @@ func parseMarkdown(content string) map[string]string {
 		}
 	}
 	flush()
+	return out
+}
+
+// parseAttrBands parses the ## 属性分段 body into per-attribute band
+// boundaries. Each line is `属性名: t1,t2,t3` (3 ascending thresholds).
+// Lines with unknown attribute names, wrong value counts, non-numeric
+// values, or non-ascending thresholds are skipped (consistent with the
+// package's tolerant parsing style). Returns nil when no valid line exists.
+func parseAttrBands(body string) map[string][3]float64 {
+	var out map[string][3]float64
+	for _, line := range strings.Split(body, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		name, rest, ok := strings.Cut(line, ":")
+		if !ok {
+			name, rest, ok = strings.Cut(line, "：")
+		}
+		if !ok {
+			continue
+		}
+		name = strings.TrimSpace(name)
+		if _, known := bandAttrNames[name]; !known {
+			continue
+		}
+		parts := strings.Split(rest, ",")
+		if len(parts) != 3 {
+			continue
+		}
+		var th [3]float64
+		valid := true
+		for i, p := range parts {
+			v, err := strconv.ParseFloat(strings.TrimSpace(p), 64)
+			if err != nil {
+				valid = false
+				break
+			}
+			th[i] = v
+		}
+		if !valid || !(th[0] < th[1] && th[1] < th[2]) {
+			continue
+		}
+		if out == nil {
+			out = make(map[string][3]float64)
+		}
+		out[name] = th
+	}
 	return out
 }
 

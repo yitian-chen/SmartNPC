@@ -16,7 +16,7 @@
 //	  Authorization: Bearer {APIKey}
 //	  Venus-Sticky-Routing: token
 //	  Content-Type: application/json
-//	  body: {"model":..., "max_tokens":..., "messages":[{"role":"user","content":...}]}
+//	  body: {"model":..., "max_tokens":..., "messages":[{"role":"system",...},{"role":"user",...}]}
 //
 // Streaming adds "stream":true; the SSE response is a sequence of
 // "data: {json chunk}" lines terminated by "data: [DONE]".
@@ -83,32 +83,30 @@ func New(cfg Config) *Client {
 	}
 }
 
-// SendWithSummary POSTs input to Venus and returns the response.
-//
-// The summary parameter is accepted for interface compatibility but is
-// currently unused: both strategic and tactical layers pass "" and rely
-// on independent per-call sessions (no cross-call state to preserve).
-func (c *Client) SendWithSummary(ctx context.Context, input, summary string) (*llmtypes.Response, error) {
+// SendWithSummary POSTs a (system, user) message pair to Venus and returns
+// the response. system carries mechanism/instruction text (rules, output
+// format); user carries the per-call context/data. system == "" sends a
+// single user message (backward compatible).
+func (c *Client) SendWithSummary(ctx context.Context, system, user string) (*llmtypes.Response, error) {
 	c.sendMu.Lock()
 	defer c.sendMu.Unlock()
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	_ = summary // unused (see doc comment)
-	return c.doSend(ctx, input, false, nil)
+	return c.doSend(ctx, system, user, false, nil)
 }
 
-// SendStreaming POSTs input with stream:true and invokes onDelta for each
-// text delta received. It blocks until the stream terminates (data: [DONE]
-// or error) and returns the final Response assembled from the accumulated
-// deltas.
-func (c *Client) SendStreaming(ctx context.Context, input string, onDelta func(delta string)) (*llmtypes.Response, error) {
+// SendStreaming POSTs a (system, user) message pair with stream:true and
+// invokes onDelta for each text delta received. It blocks until the stream
+// terminates (data: [DONE] or error) and returns the final Response
+// assembled from the accumulated deltas.
+func (c *Client) SendStreaming(ctx context.Context, system, user string, onDelta func(delta string)) (*llmtypes.Response, error) {
 	c.sendMu.Lock()
 	defer c.sendMu.Unlock()
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	return c.doSend(ctx, input, true, onDelta)
+	return c.doSend(ctx, system, user, true, onDelta)
 }
 
 // ResetSession is a no-op for venus.Client. Venus has no session chain
@@ -121,14 +119,17 @@ func (c *Client) ResetSession() {
 
 // doSend performs the HTTP POST and parses the response. For streaming
 // requests, onDelta is invoked for each text delta. Caller MUST hold sendMu.
-func (c *Client) doSend(ctx context.Context, input string, stream bool, onDelta func(string)) (*llmtypes.Response, error) {
+func (c *Client) doSend(ctx context.Context, system, user string, stream bool, onDelta func(string)) (*llmtypes.Response, error) {
+	msgs := make([]message, 0, 2)
+	if system != "" {
+		msgs = append(msgs, message{Role: "system", Content: system})
+	}
+	msgs = append(msgs, message{Role: "user", Content: user})
 	body := request{
 		Model:     c.cfg.Model,
 		MaxTokens: c.cfg.MaxTokens,
-		Messages: []message{
-			{Role: "user", Content: input},
-		},
-		Stream: stream,
+		Messages:  msgs,
+		Stream:    stream,
 	}
 	payload, err := json.Marshal(body)
 	if err != nil {

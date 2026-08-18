@@ -376,7 +376,7 @@ func (d *dialogueRunner) generateInviteDecision(snap agentstate.Snapshot, peerID
 		PeerContent:    peerContent,
 		Persona:        d.persona(agentID),
 		CurrentAction:  describeAction(snap.CurrentActionCmd, snap.CurrentActionParams),
-		Physical:       prompt.PhysicalLine(snap.LatestPhysical),
+		Physical:       prompt.PhysicalLine(snap.LatestPhysical, prompt.BandThresholdsFor(d.profiles, agentID)),
 		TimeOfDay:      snap.LatestTimeOfDay(),
 		Relationship:   d.relationshipLine(peerID),
 		RecentMemories: d.recentMemories(),
@@ -388,7 +388,7 @@ func (d *dialogueRunner) generateInviteDecision(snap agentstate.Snapshot, peerID
 	if hc == nil {
 		return prompt.DialogueInviteDecision{}, fmt.Errorf("no LLM client")
 	}
-	resp, err := hc.SendWithSummary(ctx, promptText, "")
+	resp, err := hc.SendWithSummary(ctx, prompt.DialogueInviteSystemPrompt, promptText)
 	if err != nil {
 		return prompt.DialogueInviteDecision{}, fmt.Errorf("llm call: %w", err)
 	}
@@ -414,7 +414,7 @@ func (d *dialogueRunner) generateTurn(snap agentstate.Snapshot, peerID, peerCont
 		ShortTermContext: ctx,
 		RecentMemories:   d.recentMemories(),
 		Relationship:     d.relationshipLine(peerID),
-		Physical:         prompt.PhysicalLine(snap.LatestPhysical),
+		Physical:         prompt.PhysicalLine(snap.LatestPhysical, prompt.BandThresholdsFor(d.profiles, agentID)),
 		TimeOfDay:        snap.LatestTimeOfDay(),
 		TurnCount:        turnCount,
 		MaxTurns:         dialogueMaxTurns,
@@ -426,7 +426,7 @@ func (d *dialogueRunner) generateTurn(snap agentstate.Snapshot, peerID, peerCont
 	if hc == nil {
 		return prompt.DialogueTurnResult{}, fmt.Errorf("no LLM client")
 	}
-	resp, err := hc.SendWithSummary(callCtx, promptText, "")
+	resp, err := hc.SendWithSummary(callCtx, prompt.DialogueTurnSystemPrompt, promptText)
 	if err != nil {
 		return prompt.DialogueTurnResult{}, fmt.Errorf("llm call: %w", err)
 	}

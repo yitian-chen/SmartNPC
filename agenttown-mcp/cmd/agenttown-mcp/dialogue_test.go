@@ -26,7 +26,7 @@ func (f *fakeDialogueLLM) SendWithSummary(_ context.Context, _, _ string) (*llmt
 	return f.resp, f.err
 }
 
-func (f *fakeDialogueLLM) SendStreaming(_ context.Context, _ string, _ func(string)) (*llmtypes.Response, error) {
+func (f *fakeDialogueLLM) SendStreaming(_ context.Context, _, _ string, _ func(string)) (*llmtypes.Response, error) {
 	return f.resp, f.err
 }
 

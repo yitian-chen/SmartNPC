@@ -531,12 +531,13 @@ func TestBuildTacticalPrompt_NilPhysical(t *testing.T) {
 	if promptText == "" {
 		t.Fatal("promptText should not be empty")
 	}
-	// nil physical 时注入默认物理状态（100/0/0/200），让 LLM 始终看到有效物理上下文
+	// nil physical 时注入默认物理状态（100/0/0/200 → 充足/精神饱满/良好），
+	// 让 LLM 始终看到有效物理上下文（分段标签，非原始数值）
 	if !strings.Contains(promptText, "物理状态") {
 		t.Errorf("prompt should contain '物理状态' with default values for nil physical, got: %s", promptText)
 	}
-	if !strings.Contains(promptText, "100") {
-		t.Errorf("prompt should contain default energy 100 for nil physical, got: %s", promptText)
+	if !strings.Contains(promptText, "能量 充足") {
+		t.Errorf("prompt should contain default band 能量 充足 for nil physical, got: %s", promptText)
 	}
 	// slot 为空时不应有时长提示行
 	if strings.Contains(promptText, "请让步骤总时长接近此时长") {
@@ -551,18 +552,19 @@ func TestBuildTacticalPrompt_ZeroPhysical(t *testing.T) {
 	if !strings.Contains(promptText, "物理状态") {
 		t.Errorf("prompt should contain '物理状态' with default values for all-zero physical, got: %s", promptText)
 	}
-	if !strings.Contains(promptText, "100") {
-		t.Errorf("prompt should contain default energy 100 for all-zero physical, got: %s", promptText)
+	if !strings.Contains(promptText, "能量 充足") {
+		t.Errorf("prompt should contain default band 能量 充足 for all-zero physical, got: %s", promptText)
 	}
 }
 
 func TestBuildTacticalPrompt_WithPhysical(t *testing.T) {
 	promptText := prompt.BuildTactical(prompt.TacticalInput{Goal: "装配", Zone: "main_workshop", TimeOfDay: "09:00", Slot: "09:00-12:00", Physical: &protocol.PhysicalState{Energy: 75, Fatigue: 30, JointWear: 5}, KB: nil, Hint: "", Actions: nil, AgentID: ""})
-	if !strings.Contains(promptText, "能量 75") {
-		t.Errorf("prompt should contain '能量 75', got: %s", promptText)
+	// 数值以分段标签呈现：75→中等、30→精神饱满、5→良好
+	if !strings.Contains(promptText, "能量 中等") {
+		t.Errorf("prompt should contain '能量 中等' (75), got: %s", promptText)
 	}
-	if !strings.Contains(promptText, "疲劳 30") {
-		t.Errorf("prompt should contain '疲劳 30'")
+	if !strings.Contains(promptText, "疲劳 精神饱满") {
+		t.Errorf("prompt should contain '疲劳 精神饱满' (30), got: %s", promptText)
 	}
 	// slot 有效时应包含时长提示
 	if !strings.Contains(promptText, "当前时段 09:00-12:00，约 180 分钟") {
@@ -649,15 +651,16 @@ func TestBuildTacticalPrompt_InjectsObjectStatus(t *testing.T) {
 		t.Errorf("prompt should mention nearby WorkBench, got: %s", promptText)
 	}
 	// 应包含"避免直接重试"或"全部占用"相关的引导文本
-	if !strings.Contains(promptText, "禁止规划必然失败") {
-		t.Errorf("prompt should guide LLM to avoid doomed occupancy actions, got: %s", promptText)
+	// （该引导在 TacticalSystemPrompt 规则 9 中，机制文本已移入 system 消息）
+	if !strings.Contains(prompt.TacticalSystemPrompt, "禁止规划必然失败") {
+		t.Errorf("system prompt should guide LLM to avoid doomed occupancy actions")
 	}
 }
 
 // TestBuildTacticalPrompt_NilObjectStatusNoSection 验证 ObjectStatus 为空时
 // 【物体实时占用】段整体省略，不污染 prompt（兼容 UE 未推送 object_status 的场景）。
-// 注意：要求 #9 模板里固定提及"物体实时占用"字样，故不能 grep 该词；改用段体特征
-// "按 category 聚合"判断段是否实际渲染。
+// 注意：机制规则（提及"物体实时占用"字样）已移入 TacticalSystemPrompt，
+// 用户消息里该词只在段实际渲染时出现；仍改用段体特征 "按 category 聚合" 判断。
 func TestBuildTacticalPrompt_NilObjectStatusNoSection(t *testing.T) {
 	kb := loadTestKB(t)
 	promptText := prompt.BuildTactical(prompt.TacticalInput{
@@ -1393,7 +1396,7 @@ func TestBuildTacticalExample_GoalEmptyFallback(t *testing.T) {
 func TestPhysicalAlertOverrideGoal_NoAlert(t *testing.T) {
 	origGoal := "车间装配作业"
 	// hint 不含"物理状态告警"标记 → 不 override
-	got, ok := physicalAlertOverrideGoal("上次中断原因：疲劳过高", origGoal, &protocol.PhysicalState{Fatigue: 80})
+	got, ok := physicalAlertOverrideGoal("上次中断原因：疲劳过高", origGoal, &protocol.PhysicalState{Fatigue: 80}, prompt.BandThresholds{})
 	if ok {
 		t.Errorf("non-alert hint should not override, got goal=%q override=true", got)
 	}
@@ -1404,7 +1407,7 @@ func TestPhysicalAlertOverrideGoal_NoAlert(t *testing.T) {
 
 func TestPhysicalAlertOverrideGoal_NilPhysical(t *testing.T) {
 	origGoal := "车间装配作业"
-	got, ok := physicalAlertOverrideGoal("物理状态告警自动升级(疲劳=62超过60)", origGoal, nil)
+	got, ok := physicalAlertOverrideGoal("物理状态告警自动升级(疲劳=62超过60)", origGoal, nil, prompt.BandThresholds{})
 	if ok {
 		t.Errorf("nil physical should not override, got goal=%q override=true", got)
 	}
@@ -1419,6 +1422,7 @@ func TestPhysicalAlertOverrideGoal_FatigueAlert(t *testing.T) {
 		"物理状态告警自动升级(疲劳=82超过80)；原决策=observe/...",
 		origGoal,
 		&protocol.PhysicalState{Fatigue: 82, Energy: 80},
+		prompt.BandThresholds{},
 	)
 	if !ok {
 		t.Errorf("fatigue>80 should trigger override")
@@ -1434,6 +1438,7 @@ func TestPhysicalAlertOverrideGoal_EnergyAlert(t *testing.T) {
 		"物理状态告警自动升级(体力=35低于40)",
 		origGoal,
 		&protocol.PhysicalState{Fatigue: 30, Energy: 35},
+		prompt.BandThresholds{},
 	)
 	if !ok {
 		t.Errorf("energy<40 should trigger override")
@@ -1449,6 +1454,7 @@ func TestPhysicalAlertOverrideGoal_JointWearAlert(t *testing.T) {
 		"物理状态告警自动升级(关节磨损=75超过70)",
 		origGoal,
 		&protocol.PhysicalState{Fatigue: 30, Energy: 80, JointWear: 75},
+		prompt.BandThresholds{},
 	)
 	if !ok {
 		t.Errorf("joint_wear>70 should trigger override")
@@ -1464,6 +1470,7 @@ func TestPhysicalAlertOverrideGoal_FatigueTakesPrecedence(t *testing.T) {
 		"物理状态告警",
 		"工作",
 		&protocol.PhysicalState{Fatigue: 85, Energy: 30},
+		prompt.BandThresholds{},
 	)
 	if !ok {
 		t.Errorf("should trigger override")

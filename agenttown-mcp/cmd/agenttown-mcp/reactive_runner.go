@@ -145,7 +145,7 @@ func (r *reactiveRunner) trigger(agentID string, ac *agentContext, trigger React
 	// 4. 调用 Ollama（8s 超时）
 	ctx, cancel := context.WithTimeout(context.Background(), reactiveCallTimeout)
 	defer cancel()
-	raw, err := r.ollama.Chat(ctx, promptText)
+	raw, err := r.ollama.Chat(ctx, prompt.ReactiveSystemPrompt, promptText)
 	if err != nil {
 		r.logger.Warn("[反应层/失败]",
 			"agent_id", agentID, "trigger", trigger, "err", err)
@@ -258,6 +258,7 @@ func (r *reactiveRunner) buildInput(agentID string, ac *agentContext, trigger Re
 		JointWear:         jointWear,
 		Money:             money,
 		PhysicalAvailable: snap.LatestPhysical != nil && !snap.LatestPhysical.IsZero(),
+		Bands:             prompt.BandThresholdsFor(r.profiles, agentID),
 		CurrentAction:     currentAction,
 		ElapsedSec:        elapsedSec,
 		ActionSrc:         actionSrc,

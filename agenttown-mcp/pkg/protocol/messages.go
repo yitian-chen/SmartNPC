@@ -305,7 +305,7 @@ type WorldKBPayload struct {
 // content A sent in the social_chat action_command params).
 type ChatInvitePayload struct {
 	ConvID      string `json:"conv_id"`
-	FromAgentID string `json:"from_agent_id"`
+	FromAgentID string `json:"from"` // UE sends "from", not "from_agent_id"
 	Content     string `json:"content"`
 }
 

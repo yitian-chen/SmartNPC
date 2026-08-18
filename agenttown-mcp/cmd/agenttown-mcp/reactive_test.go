@@ -33,8 +33,9 @@ func TestBuildReactivePrompt_Defaults(t *testing.T) {
 	}
 	promptText := prompt.BuildReactive(in)
 	for _, want := range []string{
-		"14:30", "main_workshop", "45", "30", "15", "0",
-		"关节磨损",
+		"14:30", "main_workshop",
+		// 物理状态以分段标签呈现（45→偏低、30→精神饱满、15→良好），余额保留数值
+		"能量 偏低", "疲劳 精神饱满", "关节磨损 良好", "余额 0",
 		"WorkShift(smart_object=workbench_01, interaction=assemble)",
 		"tactical", "14:00-18:00", "14:00-18:00 工作组装",
 		"zone rest_area→main_workshop",
@@ -243,7 +244,7 @@ func TestParseReactiveDecision_LegacyEnumsDowngrade(t *testing.T) {
 
 // TestShouldTriggerReactive_ZoneChange verifies zone change detection.
 func TestShouldTriggerReactive_ZoneChange(t *testing.T) {
-	trig, detail := prompt.ShouldTriggerReactive("rest_area", "main_workshop", nil, nil, nil, nil)
+	trig, detail := prompt.ShouldTriggerReactive("rest_area", "main_workshop", nil, nil, nil, nil, prompt.BandThresholds{})
 	if trig != TriggerZoneChange {
 		t.Errorf("trigger: got %q, want zone_change", trig)
 	}
@@ -254,7 +255,7 @@ func TestShouldTriggerReactive_ZoneChange(t *testing.T) {
 
 // TestShouldTriggerReactive_SameZone verifies no trigger when zone unchanged.
 func TestShouldTriggerReactive_SameZone(t *testing.T) {
-	trig, _ := prompt.ShouldTriggerReactive("main_workshop", "main_workshop", nil, nil, nil, nil)
+	trig, _ := prompt.ShouldTriggerReactive("main_workshop", "main_workshop", nil, nil, nil, nil, prompt.BandThresholds{})
 	if trig != "" {
 		t.Errorf("trigger: got %q, want empty (same zone)", trig)
 	}
@@ -267,6 +268,7 @@ func TestShouldTriggerReactive_NewObject(t *testing.T) {
 		[]string{"workbench_01"},
 		[]string{"workbench_01", "charging_station_01"},
 		nil, nil,
+		prompt.BandThresholds{},
 	)
 	if trig != TriggerNewObject {
 		t.Errorf("trigger: got %q, want new_object", trig)
@@ -280,7 +282,7 @@ func TestShouldTriggerReactive_NewObject(t *testing.T) {
 func TestShouldTriggerReactive_EnergyAlert(t *testing.T) {
 	prev := &protocol.PhysicalState{Energy: 45, Fatigue: 30}
 	cur := &protocol.PhysicalState{Energy: 38, Fatigue: 30}
-	trig, detail := prompt.ShouldTriggerReactive("z", "z", nil, nil, prev, cur)
+	trig, detail := prompt.ShouldTriggerReactive("z", "z", nil, nil, prev, cur, prompt.BandThresholds{})
 	if trig != TriggerPhysicalAlert {
 		t.Errorf("trigger: got %q, want physical_alert", trig)
 	}
@@ -294,7 +296,7 @@ func TestShouldTriggerReactive_EnergyAlert(t *testing.T) {
 func TestShouldTriggerReactive_EnergyStaysLow(t *testing.T) {
 	prev := &protocol.PhysicalState{Energy: 38, Fatigue: 30}
 	cur := &protocol.PhysicalState{Energy: 35, Fatigue: 30}
-	trig, _ := prompt.ShouldTriggerReactive("z", "z", nil, nil, prev, cur)
+	trig, _ := prompt.ShouldTriggerReactive("z", "z", nil, nil, prev, cur, prompt.BandThresholds{})
 	if trig != "" {
 		t.Errorf("trigger: got %q, want empty (already in alert)", trig)
 	}
@@ -304,7 +306,7 @@ func TestShouldTriggerReactive_EnergyStaysLow(t *testing.T) {
 func TestShouldTriggerReactive_FatigueAlert(t *testing.T) {
 	prev := &protocol.PhysicalState{Energy: 50, Fatigue: 75}
 	cur := &protocol.PhysicalState{Energy: 50, Fatigue: 82}
-	trig, detail := prompt.ShouldTriggerReactive("z", "z", nil, nil, prev, cur)
+	trig, detail := prompt.ShouldTriggerReactive("z", "z", nil, nil, prev, cur, prompt.BandThresholds{})
 	if trig != TriggerPhysicalAlert {
 		t.Errorf("trigger: got %q, want physical_alert", trig)
 	}
@@ -317,7 +319,7 @@ func TestShouldTriggerReactive_FatigueAlert(t *testing.T) {
 func TestShouldTriggerReactive_JointWearAlert(t *testing.T) {
 	prev := &protocol.PhysicalState{Energy: 50, Fatigue: 30, JointWear: 65}
 	cur := &protocol.PhysicalState{Energy: 50, Fatigue: 30, JointWear: 72}
-	trig, detail := prompt.ShouldTriggerReactive("z", "z", nil, nil, prev, cur)
+	trig, detail := prompt.ShouldTriggerReactive("z", "z", nil, nil, prev, cur, prompt.BandThresholds{})
 	if trig != TriggerPhysicalAlert {
 		t.Errorf("trigger: got %q, want physical_alert", trig)
 	}
@@ -331,7 +333,7 @@ func TestShouldTriggerReactive_JointWearAlert(t *testing.T) {
 func TestShouldTriggerReactive_JointWearStaysHigh(t *testing.T) {
 	prev := &protocol.PhysicalState{Energy: 50, Fatigue: 30, JointWear: 72}
 	cur := &protocol.PhysicalState{Energy: 50, Fatigue: 30, JointWear: 75}
-	trig, _ := prompt.ShouldTriggerReactive("z", "z", nil, nil, prev, cur)
+	trig, _ := prompt.ShouldTriggerReactive("z", "z", nil, nil, prev, cur, prompt.BandThresholds{})
 	if trig != "" {
 		t.Errorf("trigger: got %q, want empty (already in alert)", trig)
 	}
@@ -340,7 +342,7 @@ func TestShouldTriggerReactive_JointWearStaysHigh(t *testing.T) {
 // TestShouldTriggerReactive_NoPhysical verifies no trigger when physical
 // states are nil.
 func TestShouldTriggerReactive_NoPhysical(t *testing.T) {
-	trig, _ := prompt.ShouldTriggerReactive("z", "z", nil, nil, nil, nil)
+	trig, _ := prompt.ShouldTriggerReactive("z", "z", nil, nil, nil, nil, prompt.BandThresholds{})
 	if trig != "" {
 		t.Errorf("trigger: got %q, want empty", trig)
 	}
