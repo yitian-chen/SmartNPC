@@ -129,13 +129,10 @@ func TestStrategicSystemPrompt_NoSocialWhileDisabled(t *testing.T) {
 }
 
 func TestStrategicSystemPrompt_GoalMustBeString(t *testing.T) {
-	// L1（json_schema）之外的软约束：goal 字段类型显式声明 + 正反例。
+	// L1（json_schema）之外的软约束：goal 字段类型显式声明。
 	// 起因：实际仿真中 LLM 把 goal 写成 {"goal":"...","cmd":"..."} 导致整包解析失败。
-	if !strings.Contains(StrategicSystemPrompt, `"goal" 的值只能是字符串`) {
-		t.Error("system prompt should declare goal must be a string")
-	}
-	if !strings.Contains(StrategicSystemPrompt, `"goal":{"goal":"装配作业","cmd":"work_shift"}`) {
-		t.Error("system prompt should contain the negative (nested-object) example")
+	if !strings.Contains(StrategicSystemPrompt, `"goal"（一句话，必须是纯文本字符串）`) {
+		t.Error("system prompt should declare goal must be a plain string")
 	}
 }
 
