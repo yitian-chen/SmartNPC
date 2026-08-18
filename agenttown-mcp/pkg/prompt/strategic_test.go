@@ -128,6 +128,24 @@ func TestStrategicSystemPrompt_NoSocialWhileDisabled(t *testing.T) {
 	}
 }
 
+func TestStrategicSystemPrompt_GoalMustBeString(t *testing.T) {
+	// L1（json_schema）之外的软约束：goal 字段类型显式声明 + 正反例。
+	// 起因：实际仿真中 LLM 把 goal 写成 {"goal":"...","cmd":"..."} 导致整包解析失败。
+	if !strings.Contains(StrategicSystemPrompt, `"goal" 的值只能是字符串`) {
+		t.Error("system prompt should declare goal must be a string")
+	}
+	if !strings.Contains(StrategicSystemPrompt, `"goal":{"goal":"装配作业","cmd":"work_shift"}`) {
+		t.Error("system prompt should contain the negative (nested-object) example")
+	}
+}
+
+func TestStrategicUserTemplate_EndsWithFormatReminder(t *testing.T) {
+	// user 消息末尾的格式提醒（recency effect：越靠后的指令遵从率越高）。
+	if !strings.Contains(StrategicUserTemplate, `"goal" 必须是字符串`) {
+		t.Error("user template should end with the JSON format reminder")
+	}
+}
+
 func TestBuildStrategic_ExcludesMechanismSegments(t *testing.T) {
 	// Mechanism segments (【动作对状态的影响】/【社交】) live in
 	// StrategicSystemPrompt; BuildStrategic returns data segments only.

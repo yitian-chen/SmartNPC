@@ -70,7 +70,10 @@ const StrategicSystemPrompt = `你是小镇居民 NPC 的战略规划模块。�
 规划时请综合权衡：产出性活动（工作）赚取余额但消耗体力、缓慢积攒关节磨损；恢复性活动（充电/维护/休息）花余额但延续工作能力。避免长时间连续工作导致体力耗尽，也避免频繁恢复导致余额入不敷出。
 
 要求：
-1. 输出 JSON 数组（6-8 条），每条含 "time"（"HH:MM-HH:MM"）和 "goal"（一句话），以 [ 开头 ] 结尾，不要其他文字
+1. 输出 JSON 数组（6-8 条），每条只含 "time"（"HH:MM-HH:MM"）和 "goal"（一句话，必须是纯文本字符串），以 [ 开头 ] 结尾，不要其他文字
+   - "goal" 的值只能是字符串，禁止写成对象或嵌套结构
+   - 错误：{"time":"07:00-12:00","goal":{"goal":"装配作业","cmd":"work_shift"}}
+   - 正确：{"time":"07:00-12:00","goal":"装配作业"}
 2. 每个时段 ≥120 分钟，仅安排一项主要任务；连续两个任务相同的时段合并为一个长时段（如 "07:00-12:00: 车间装配作业"）
 3. 规划每个时段时，先想清楚这个时段的活动要用用户信息中【可用能力】里哪个 cmd 实现：
    - 有对应 cmd 的活动（如装配→work_shift、充电→charge_at_station）→ 可以安排
@@ -81,7 +84,7 @@ const StrategicSystemPrompt = `你是小镇居民 NPC 的战略规划模块。�
 6. 充电仅在能量为"低电量"或疲劳为"非常疲劳"时安排；维护仅在关节磨损达到"明显磨损"及以上时安排；能量充足时优先产出性活动
 7. 综合用户信息中【物理状态】的四项状态调整安排侧重点：能量偏低→多充电少工作；疲劳偏高→提前休眠；磨损偏高→安排维护；余额低→多工作少花钱
 
-示例：[{"time":"07:00-09:00","goal":"早晨上网浏览新闻（surf_internet）"},{"time":"09:00-12:00","goal":"上午车间装配作业"},{"time":"12:00-14:00","goal":"午间去长椅上坐坐"},{"time":"14:00-18:00","goal":"下午继续在车间装配"},{"time":"18:00-22:00","goal":"傍晚去充电站补电"},{"time":"22:00-07:00","goal":"夜间在休眠舱休息"}]`
+格式示例：[{"time":"07:00-09:00","goal":"xxx"},{"time":"09:00-12:00","goal":"xxx"}]`
 
 // StrategicUserTemplate is the strategic layer's user message template.
 // Placeholders: %s = strategic context (BuildStrategic output: role +
@@ -94,7 +97,8 @@ const StrategicUserTemplate = `[战略层/每日规划] 现在是仿真时间 07
 
 %s
 
-请基于你的角色身份和性格，规划今天一天的活动安排。一天从 07:00 到次日 07:00，你从 07:00 开始活动，夜间活动可持续到次日清晨。`
+请基于你的角色身份和性格，规划今天一天的活动安排。一天从 07:00 到次日 07:00，你从 07:00 开始活动。
+只输出 JSON 数组，每条形如 {"time":"HH:MM-HH:MM","goal":"纯文本一句话"}，"goal" 必须是字符串，不要输出任何其他文字。`
 
 // BuildStrategic constructs the strategic layer user message's context
 // segment, containing five parts:
