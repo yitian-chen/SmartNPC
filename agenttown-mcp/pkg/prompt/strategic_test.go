@@ -141,8 +141,22 @@ func TestStrategicSystemPrompt_GoalMustBeString(t *testing.T) {
 
 func TestStrategicUserTemplate_EndsWithFormatReminder(t *testing.T) {
 	// user 消息末尾的格式提醒（recency effect：越靠后的指令遵从率越高）。
+	// 含 ≥120 分钟硬性约束的重复强调。
 	if !strings.Contains(StrategicUserTemplate, `"goal" 必须是字符串`) {
 		t.Error("user template should end with the JSON format reminder")
+	}
+	if !strings.Contains(StrategicUserTemplate, "每个时段必须 ≥120 分钟") {
+		t.Error("user template should reiterate the ≥120-minute slot rule")
+	}
+}
+
+func TestStrategicSystemPrompt_SlotDurationRuleEmphasized(t *testing.T) {
+	// 规则 2 标记为硬性要求，且说明不足 120 分钟时的处理方式（并入/不安排）。
+	if !strings.Contains(StrategicSystemPrompt, "【硬性要求】每个时段的结束时间减去开始时间必须 ≥120 分钟") {
+		t.Error("system prompt rule 2 should be marked as a hard ≥120-minute requirement")
+	}
+	if !strings.Contains(StrategicSystemPrompt, "并入相邻时段") {
+		t.Error("system prompt should say short activities merge into adjacent slots")
 	}
 }
 
