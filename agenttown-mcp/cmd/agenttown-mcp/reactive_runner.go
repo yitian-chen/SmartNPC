@@ -258,6 +258,7 @@ func (r *reactiveRunner) buildInput(agentID string, ac *agentContext, trigger Re
 		JointWear:         jointWear,
 		Money:             money,
 		PhysicalAvailable: snap.LatestPhysical != nil && !snap.LatestPhysical.IsZero(),
+		Bands:             prompt.BandThresholdsFor(r.profiles, agentID),
 		CurrentAction:     currentAction,
 		ElapsedSec:        elapsedSec,
 		ActionSrc:         actionSrc,

@@ -3,6 +3,8 @@ package prompt
 import (
 	"strings"
 	"testing"
+
+	"github.com/AgentTown/agenttown-mcp/pkg/protocol"
 )
 
 // TestBuildReactive_QueueStateSegment verifies the 【排队状态】 segment
@@ -70,5 +72,71 @@ func TestBuildReactive_QueueStateTemplateStability(t *testing.T) {
 		if !strings.Contains(prompt, s) {
 			t.Errorf("prompt missing %q:\n%s", s, prompt)
 		}
+	}
+}
+
+// TestShouldTriggerReactive_PerNPCThresholds verifies the physical alert
+// crossing detection uses the per-NPC band thresholds: 老陈（疲劳 t3=90）
+// 在疲劳 85 时不触发告警，默认 NPC（t3=80）触发。
+func TestShouldTriggerReactive_PerNPCThresholds(t *testing.T) {
+	prev := &protocol.PhysicalState{Energy: 90, Fatigue: 75}
+	cur := &protocol.PhysicalState{Energy: 90, Fatigue: 85}
+
+	laochen := DefaultBandThresholds()
+	laochen.Fatigue = [3]float64{40, 70, 90}
+	trig, _ := ShouldTriggerReactive("z", "z", nil, nil, prev, cur, laochen)
+	if trig != "" {
+		t.Errorf("老陈 fatigue 75→85 should NOT trigger (t3=90), got %q", trig)
+	}
+
+	trig, detail := ShouldTriggerReactive("z", "z", nil, nil, prev, cur, DefaultBandThresholds())
+	if trig != TriggerPhysicalAlert {
+		t.Errorf("默认 NPC fatigue 75→85 should trigger (t3=80), got %q", trig)
+	}
+	if !strings.Contains(detail, "80") {
+		t.Errorf("detail should reference the effective threshold 80, got %q", detail)
+	}
+}
+
+// TestUpgradeIfPhysicalAlert_PerNPCThresholds verifies the code-level
+// forced replan respects per-NPC thresholds: 老陈 fatigue 85 → no upgrade;
+// 默认 NPC fatigue 85 → upgrade to replan.
+func TestUpgradeIfPhysicalAlert_PerNPCThresholds(t *testing.T) {
+	base := ReactiveInput{
+		AgentID:           "H-01",
+		Fatigue:           85,
+		Energy:            90,
+		PhysicalAvailable: true,
+	}
+	dec := ReactiveDecision{Reaction: ReactionContinue, Reason: "ok"}
+
+	laochen := base
+	laochen.Bands = DefaultBandThresholds()
+	laochen.Bands.Fatigue = [3]float64{40, 70, 90}
+	if got := UpgradeIfPhysicalAlert(laochen, dec); got.Reaction != ReactionContinue {
+		t.Errorf("老陈 fatigue 85 should NOT upgrade (t3=90), got %q", got.Reaction)
+	}
+
+	other := base
+	other.Bands = DefaultBandThresholds()
+	if got := UpgradeIfPhysicalAlert(other, dec); got.Reaction != ReactionReplan {
+		t.Errorf("默认 NPC fatigue 85 should upgrade to replan (t3=80), got %q", got.Reaction)
+	}
+}
+
+// TestUpgradeIfPhysicalAlert_ZeroBandsFallBack verifies a zero Bands value
+// (caller did not resolve per-NPC thresholds) falls back to defaults
+// instead of alerting on every state.
+func TestUpgradeIfPhysicalAlert_ZeroBandsFallBack(t *testing.T) {
+	in := ReactiveInput{
+		AgentID:           "H-01",
+		Fatigue:           50, // below default 80 — must not alert
+		Energy:            90,
+		PhysicalAvailable: true,
+		// Bands zero value
+	}
+	dec := ReactiveDecision{Reaction: ReactionContinue, Reason: "ok"}
+	if got := UpgradeIfPhysicalAlert(in, dec); got.Reaction != ReactionContinue {
+		t.Errorf("zero Bands should fall back to defaults (no alert at fatigue 50), got %q", got.Reaction)
 	}
 }

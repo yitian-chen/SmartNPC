@@ -65,6 +65,15 @@ func BandThresholdsFor(profiles map[string]*profile.Profile, agentID string) Ban
 // "低电量" and triggers low-battery alerts.
 func (b BandThresholds) EnergyAlert() float64 { return b.Energy[0] }
 
+// OrDefault returns DefaultBandThresholds when b is the zero value (caller
+// did not resolve per-NPC thresholds). Guards against zero thresholds
+// making every state look like an alert (e.g. fatigue > 0 always true).
+func (b BandThresholds) OrDefault() BandThresholds {
+	if b == (BandThresholds{}) {
+		return DefaultBandThresholds()
+	}
+	return b
+}
 // FatigueAlert returns the fatigue alert boundary: fatigue at or above
 // this is "非常疲劳" and triggers fatigue alerts.
 func (b BandThresholds) FatigueAlert() float64 { return b.Fatigue[2] }

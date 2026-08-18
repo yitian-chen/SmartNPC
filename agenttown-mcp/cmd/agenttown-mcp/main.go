@@ -93,6 +93,12 @@ type agentContext struct {
 	// Immutable after construction.
 	ollama *ollama.Client
 
+	// physBands is the per-NPC physical band thresholds resolved from
+	// profile ## 属性分段 at registration (defaults when unconfigured).
+	// Used by observePerception/updateState physical alert detection.
+	// Immutable after construction.
+	physBands prompt.BandThresholds
+
 	// dialogue is the per-agent conversation runner (Phase 2 Module C).
 	// nil when dialogue is disabled (no ws). Immutable after construction;
 	// the runner protects its own conversation state with an internal mutex.
@@ -172,7 +178,7 @@ func (a *agentContext) observePerception(payload json.RawMessage) (ReactiveTrigg
 	// 携带全量 3 项（energy/fatigue/joint_wear）上传，SetPerception 写入
 	// latestPhysical 并返回 PrevPhysical/CurPhysical 供此处警戒带检测。
 	// state_report 路径（updateState）作为兜底，在 perception 未带物理状态时补写。
-	trigger, detail := prompt.ShouldTriggerReactive(upd.PrevZone, upd.CurZone, upd.PrevObjectIDs, upd.CurObjectIDs, upd.PrevPhysical, upd.CurPhysical)
+	trigger, detail := prompt.ShouldTriggerReactive(upd.PrevZone, upd.CurZone, upd.PrevObjectIDs, upd.CurObjectIDs, upd.PrevPhysical, upd.CurPhysical, a.physBands)
 	// 事件类触发优先；无事件时检查周期性触发
 	if trigger == "" {
 		trigger, detail = prompt.ShouldTriggerPeriodic(pCount)
@@ -201,7 +207,7 @@ func (a *agentContext) updateState(report protocol.StateReportPayload) (Reactive
 	prevPhysical := a.as.SetPhysicalState(&physical, cloneTask(report.CurrentTaskProgress))
 
 	// 检测物理警戒带突破（zone/objects 不在此检测，由 observePerception 负责）
-	return prompt.ShouldTriggerReactive("", "", nil, nil, prevPhysical, &physical)
+	return prompt.ShouldTriggerReactive("", "", nil, nil, prevPhysical, &physical, a.physBands)
 }
 
 // recordActionCompletion 处理 action_completed。所有来源的 completion 都清
@@ -1234,7 +1240,7 @@ func (a *agentContext) tacticalRefillForReplan(
 	// 物理告警 goal override：反应层 upgradeIfPhysicalAlert 触发的 replan
 	// 含"物理状态告警"标记，此时原 goal（如"车间装配"）应被替换为恢复类
 	// goal（如"前往充电站休息"），否则 LLM 仍按原 goal 规划工作动作。
-	overrideGoal, isOverride := physicalAlertOverrideGoal(hint, goal, physical)
+	overrideGoal, isOverride := physicalAlertOverrideGoal(hint, goal, physical, prompt.BandThresholdsFor(profiles, agentID))
 	if isOverride {
 		logger.Info("[战术层/replan] 物理告警 goal override",
 			"agent_id", agentID, "orig_goal", goal, "override_goal", overrideGoal, "hint", hint)
@@ -1554,6 +1560,9 @@ func main() {
 		// store==nil（内存模式）时 SetIdentity 仍记录 agentID 但持久化调用跳过；
 		// LoadPersistent 在 NoopStore 下返回 ErrNotFound→保持默认值（cold start）。
 		ac.as.SetIdentity(id, store)
+	// per-NPC 物理属性分段阈值（profile ## 属性分段）：反应层告警跨越检测、
+	// 强制 replan、战术层恢复约束共用，保证 LLM 文本与代码行为一致。
+	ac.physBands = prompt.BandThresholdsFor(profiles, id)
 		if err := ac.as.LoadPersistent(ctx); err != nil {
 			logger.Warn("[main] load persistent state failed, continuing with cold start",
 				"agent_id", id, "err", err)

@@ -166,11 +166,15 @@ func BuildReactive(in ReactiveInput) string {
 	// segment and the physical-alert rule line (avoid LLM misjudging an
 	// empty physical segment). The rule line is mechanism-ish but
 	// conditional, so it stays in the user message as 【物理告警补充规则】.
+	// Values are rendered as band labels (per-NPC thresholds via in.Bands).
+	th := in.Bands.OrDefault()
 	physicalLine := ""
 	physicalRuleLine := ""
 	if in.PhysicalAvailable {
-		physicalLine = fmt.Sprintf("物理：体力=%.0f/100, 疲劳=%.0f/100, 关节磨损=%.0f/100, 余额=%.0f\n", in.Energy, in.Fatigue, in.JointWear, in.Money)
-		physicalRuleLine = "【物理告警补充规则】物理状态告警时（体力<40 需充电、疲劳>80 需休息、关节磨损>70 需维修）原则上需要输出 replan 让 NPC 优先处理物理需求、不可输出 continue/observe\n"
+		physicalLine = PhysicalLineActual(protocol.PhysicalState{
+			Energy: in.Energy, Fatigue: in.Fatigue, JointWear: in.JointWear, Money: in.Money,
+		}, th) + "\n"
+		physicalRuleLine = "【物理告警补充规则】当【当前状态】中能量为\"低电量\"、疲劳为\"非常疲劳\"或关节磨损为\"严重磨损\"时，原则上需要输出 replan 让 NPC 优先处理物理需求、不可输出 continue/observe\n"
 	}
 	// Queue segment (约定21): empty when not queued → entire segment
 	// collapses to a single blank line. When queued, show what the agent
@@ -253,12 +257,17 @@ func truncate(s string, maxLen int) string {
 // perception_update. Local model cost is tolerable but meaningless high-frequency
 // calls (most decisions would be continue) should still be avoided.
 //
+// th carries the per-NPC band thresholds (profile ## 属性分段); zero value
+// falls back to DefaultBandThresholds.
+//
 // Returns (trigger, detail) — trigger is empty string if not significant.
 func ShouldTriggerReactive(
 	prevZone, curZone string,
 	prevObjectIDs, curObjectIDs []string,
 	prevPhysical, curPhysical *protocol.PhysicalState,
+	th BandThresholds,
 ) (ReactiveTrigger, string) {
+	th = th.OrDefault()
 	// 1. zone change
 	if prevZone != curZone && curZone != "" {
 		return TriggerZoneChange, fmt.Sprintf("zone %s→%s", prevZone, curZone)
@@ -272,14 +281,14 @@ func ShouldTriggerReactive(
 	//    When UE hasn't implemented physical state, prev/cur are all 0; IsZero guard skips to avoid false triggers.
 	if prevPhysical != nil && curPhysical != nil &&
 		!prevPhysical.IsZero() && !curPhysical.IsZero() {
-		if !belowThreshold(prevPhysical.Energy, EnergyAlertThreshold) && belowThreshold(curPhysical.Energy, EnergyAlertThreshold) {
-			return TriggerPhysicalAlert, fmt.Sprintf("energy %.0f→%.0f 跌破警戒带 %.0f", prevPhysical.Energy, curPhysical.Energy, EnergyAlertThreshold)
+		if !belowThreshold(prevPhysical.Energy, th.EnergyAlert()) && belowThreshold(curPhysical.Energy, th.EnergyAlert()) {
+			return TriggerPhysicalAlert, fmt.Sprintf("energy %.0f→%.0f 跌破警戒带 %.0f", prevPhysical.Energy, curPhysical.Energy, th.EnergyAlert())
 		}
-		if !aboveThreshold(prevPhysical.Fatigue, FatigueAlertThreshold) && aboveThreshold(curPhysical.Fatigue, FatigueAlertThreshold) {
-			return TriggerPhysicalAlert, fmt.Sprintf("fatigue %.0f→%.0f 突破警戒带 %.0f", prevPhysical.Fatigue, curPhysical.Fatigue, FatigueAlertThreshold)
+		if !aboveThreshold(prevPhysical.Fatigue, th.FatigueAlert()) && aboveThreshold(curPhysical.Fatigue, th.FatigueAlert()) {
+			return TriggerPhysicalAlert, fmt.Sprintf("fatigue %.0f→%.0f 突破警戒带 %.0f", prevPhysical.Fatigue, curPhysical.Fatigue, th.FatigueAlert())
 		}
-		if !aboveThreshold(prevPhysical.JointWear, JointWearAlertThreshold) && aboveThreshold(curPhysical.JointWear, JointWearAlertThreshold) {
-			return TriggerPhysicalAlert, fmt.Sprintf("joint_wear %.0f→%.0f 突破警戒带 %.0f", prevPhysical.JointWear, curPhysical.JointWear, JointWearAlertThreshold)
+		if !aboveThreshold(prevPhysical.JointWear, th.JointWearAlert()) && aboveThreshold(curPhysical.JointWear, th.JointWearAlert()) {
+			return TriggerPhysicalAlert, fmt.Sprintf("joint_wear %.0f→%.0f 突破警戒带 %.0f", prevPhysical.JointWear, curPhysical.JointWear, th.JointWearAlert())
 		}
 	}
 	return "", ""
@@ -370,14 +379,15 @@ func UpgradeIfPhysicalAlert(input ReactiveInput, dec ReactiveDecision) ReactiveD
 	if !input.PhysicalAvailable {
 		return dec
 	}
+	th := input.Bands.OrDefault()
 	alert := ""
 	switch {
-	case input.Fatigue > FatigueAlertThreshold:
-		alert = fmt.Sprintf("疲劳=%.0f超过%.0f", input.Fatigue, FatigueAlertThreshold)
-	case input.Energy < EnergyAlertThreshold:
-		alert = fmt.Sprintf("体力=%.0f低于%.0f", input.Energy, EnergyAlertThreshold)
-	case input.JointWear > JointWearAlertThreshold:
-		alert = fmt.Sprintf("关节磨损=%.0f超过%.0f", input.JointWear, JointWearAlertThreshold)
+	case input.Fatigue > th.FatigueAlert():
+		alert = fmt.Sprintf("疲劳=%.0f超过%.0f", input.Fatigue, th.FatigueAlert())
+	case input.Energy < th.EnergyAlert():
+		alert = fmt.Sprintf("体力=%.0f低于%.0f", input.Energy, th.EnergyAlert())
+	case input.JointWear > th.JointWearAlert():
+		alert = fmt.Sprintf("关节磨损=%.0f超过%.0f", input.JointWear, th.JointWearAlert())
 	default:
 		return dec
 	}

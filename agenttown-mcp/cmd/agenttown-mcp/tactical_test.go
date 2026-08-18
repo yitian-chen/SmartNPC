@@ -1396,7 +1396,7 @@ func TestBuildTacticalExample_GoalEmptyFallback(t *testing.T) {
 func TestPhysicalAlertOverrideGoal_NoAlert(t *testing.T) {
 	origGoal := "车间装配作业"
 	// hint 不含"物理状态告警"标记 → 不 override
-	got, ok := physicalAlertOverrideGoal("上次中断原因：疲劳过高", origGoal, &protocol.PhysicalState{Fatigue: 80})
+	got, ok := physicalAlertOverrideGoal("上次中断原因：疲劳过高", origGoal, &protocol.PhysicalState{Fatigue: 80}, prompt.BandThresholds{})
 	if ok {
 		t.Errorf("non-alert hint should not override, got goal=%q override=true", got)
 	}
@@ -1407,7 +1407,7 @@ func TestPhysicalAlertOverrideGoal_NoAlert(t *testing.T) {
 
 func TestPhysicalAlertOverrideGoal_NilPhysical(t *testing.T) {
 	origGoal := "车间装配作业"
-	got, ok := physicalAlertOverrideGoal("物理状态告警自动升级(疲劳=62超过60)", origGoal, nil)
+	got, ok := physicalAlertOverrideGoal("物理状态告警自动升级(疲劳=62超过60)", origGoal, nil, prompt.BandThresholds{})
 	if ok {
 		t.Errorf("nil physical should not override, got goal=%q override=true", got)
 	}
@@ -1422,6 +1422,7 @@ func TestPhysicalAlertOverrideGoal_FatigueAlert(t *testing.T) {
 		"物理状态告警自动升级(疲劳=82超过80)；原决策=observe/...",
 		origGoal,
 		&protocol.PhysicalState{Fatigue: 82, Energy: 80},
+		prompt.BandThresholds{},
 	)
 	if !ok {
 		t.Errorf("fatigue>80 should trigger override")
@@ -1437,6 +1438,7 @@ func TestPhysicalAlertOverrideGoal_EnergyAlert(t *testing.T) {
 		"物理状态告警自动升级(体力=35低于40)",
 		origGoal,
 		&protocol.PhysicalState{Fatigue: 30, Energy: 35},
+		prompt.BandThresholds{},
 	)
 	if !ok {
 		t.Errorf("energy<40 should trigger override")
@@ -1452,6 +1454,7 @@ func TestPhysicalAlertOverrideGoal_JointWearAlert(t *testing.T) {
 		"物理状态告警自动升级(关节磨损=75超过70)",
 		origGoal,
 		&protocol.PhysicalState{Fatigue: 30, Energy: 80, JointWear: 75},
+		prompt.BandThresholds{},
 	)
 	if !ok {
 		t.Errorf("joint_wear>70 should trigger override")
@@ -1467,6 +1470,7 @@ func TestPhysicalAlertOverrideGoal_FatigueTakesPrecedence(t *testing.T) {
 		"物理状态告警",
 		"工作",
 		&protocol.PhysicalState{Fatigue: 85, Energy: 30},
+		prompt.BandThresholds{},
 	)
 	if !ok {
 		t.Errorf("should trigger override")

@@ -74,17 +74,19 @@ func tacticalActionAvailable(action, agentID string, registry *CapabilityRegistr
 // 此函数在代码层强制把 goal 改为恢复类 goal，配合 prompt 强约束段双保险。
 //
 // 返回 (overrideGoal, true) 当 hint 含"物理状态告警"且 physical 确有告警；
-// 否则返回 (origGoal, false)。
-func physicalAlertOverrideGoal(hint, origGoal string, physical *protocol.PhysicalState) (string, bool) {
+// 否则返回 (origGoal, false)。th 为该 NPC 的 per-NPC 分段阈值（profile
+// ## 属性分段），零值回退全局默认。
+func physicalAlertOverrideGoal(hint, origGoal string, physical *protocol.PhysicalState, th prompt.BandThresholds) (string, bool) {
 	if !strings.Contains(hint, "物理状态告警") || physical == nil || physical.IsZero() {
 		return origGoal, false
 	}
+	th = th.OrDefault()
 	switch {
-	case physical.Fatigue > prompt.FatigueAlertThreshold:
+	case physical.Fatigue > th.FatigueAlert():
 		return "前往充电站休息补能（疲劳过高，停止工作）", true
-	case physical.Energy < prompt.EnergyAlertThreshold:
+	case physical.Energy < th.EnergyAlert():
 		return "前往充电站补能（体力过低）", true
-	case physical.JointWear > prompt.JointWearAlertThreshold:
+	case physical.JointWear > th.JointWearAlert():
 		return "前往维护点进行保养检修（关节磨损过高）", true
 	default:
 		return origGoal, false
