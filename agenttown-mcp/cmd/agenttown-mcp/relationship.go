@@ -13,19 +13,20 @@ import (
 	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
 )
 
-// relationshipJudgePromptTemplate is the prompt sent to Ollama to decide
-// whether a completed action should bump the relationship with the target
-// agent. Placeholders: %s = cmd, %s = params JSON, %s = target agent id.
+// relationshipJudgeSystemPrompt is the relationship judge's system message:
+// mechanism text only (task + yes/no output convention).
 //
 // The prompt is deliberately short (~80 tokens) because Ollama runs locally
 // on CPU and the decision is a simple yes/no classification. The 5s caller
 // timeout is tighter than the reactive layer's 20s — relationship updates
 // are best-effort and must not block the decision pipeline.
-const relationshipJudgePromptTemplate = `[关系判断] 机器人刚完成一个动作，判断是否构成与 target_agent 的直接社交互动。
-动作 cmd: %s
+const relationshipJudgeSystemPrompt = `你是关系判断模块。用户信息给出一个刚完成的动作及其目标 agent，判断是否构成与该 agent 的直接社交互动。仅输出 yes 或 no。yes=面向该 agent 的直接互动(聊天/维修/对话/转身面向); no=仅路过定位或 target 实为物体/区域。`
+
+// relationshipJudgeUserTemplate is the relationship judge's user message
+// template. Placeholders: %s = cmd, %s = params JSON, %s = target agent id.
+const relationshipJudgeUserTemplate = `动作 cmd: %s
 动作 params: %s
-目标 agent: %s
-仅输出 yes 或 no。yes=面向该 agent 的直接互动(聊天/维修/对话/转身面向); no=仅路过定位或 target 实为物体/区域。`
+目标 agent: %s`
 
 // shouldUpdateRelationship asks Ollama whether the completed action warrants
 // a relationship bump with the target agent. Returns false on any error,
@@ -37,8 +38,8 @@ func shouldUpdateRelationship(ctx context.Context, c *ollama.Client, cmd string,
 		return false
 	}
 	paramsJSON, _ := json.Marshal(params)
-	promptText := fmt.Sprintf(relationshipJudgePromptTemplate, cmd, string(paramsJSON), target)
-	raw, err := c.Chat(ctx, "", promptText)
+	promptText := fmt.Sprintf(relationshipJudgeUserTemplate, cmd, string(paramsJSON), target)
+	raw, err := c.Chat(ctx, relationshipJudgeSystemPrompt, promptText)
 	if err != nil {
 		slog.Default().Warn("[关系层] Ollama 判断调用失败，跳过更新",
 			"target", target, "cmd", cmd, "err", err)

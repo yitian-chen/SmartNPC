@@ -29,14 +29,9 @@ type memoryGenerationResult struct {
 	} `json:"memories"`
 }
 
-// memoryPromptTemplate is the prompt for daily memory consolidation.
-// Placeholders: %s = agent role context, %s = chronological action list.
-const memoryPromptTemplate = `[记忆层/日终总结] 你刚结束一天的活动，请回顾今天的行动记录，总结经验。
-
-%s
-
-【今日行动记录】（按时间顺序）
-%s
+// memorySystemPrompt is the memory layer's system message: mechanism text
+// only (task, JSON schema, rules). Fully static → cacheable.
+const memorySystemPrompt = `你是小镇居民 NPC 的记忆总结模块。用户信息给出 NPC 的角色与今日行动记录（按时间顺序），请回顾行动记录，总结经验。
 
 请输出一个 JSON 对象（不要 markdown 围栏，不要其他文字）：
 {
@@ -51,9 +46,20 @@ const memoryPromptTemplate = `[记忆层/日终总结] 你刚结束一天的活�
 2. type 取值: event（事件）/ skill（技能经验）/ relationship（社交关系）/ daily_summary（日常总结）
 3. content: 一句话描述这条记忆的内容（第一人称）
 4. importance: 0-100，越重要越高（默认 50）
-5. related_*_id: 若记忆关联特定 agent/object/zone，填对应 id（来自上方世界知识），无关联则省略
+5. related_*_id: 若记忆关联特定 agent/object/zone，填对应 id（来自用户信息中的世界知识），无关联则省略
 6. narrative 应包含对今天工作节奏、身体状况、社交互动的简要反思
 7. 必须以字符 { 开头，以字符 } 结尾`
+
+// memoryUserTemplate is the memory layer's user message template.
+// Placeholders: %s = agent role context, %s = chronological action list.
+const memoryUserTemplate = `[记忆层/日终总结] 你刚结束一天的活动。
+
+%s
+
+【今日行动记录】（按时间顺序）
+%s
+
+请回顾今天的行动记录，总结经验。`
 
 // generateDailyMemories summarizes yesterday's action_history into 3-5
 // structured memories via a single LLM call. Returns the narrative string
@@ -94,12 +100,12 @@ func generateDailyMemories(
 		roleCtx = "【你的角色】\n" + role
 	}
 	actionList := formatActionHistoryForPrompt(records)
-	promptText := fmt.Sprintf(memoryPromptTemplate, roleCtx, actionList)
+	promptText := fmt.Sprintf(memoryUserTemplate, roleCtx, actionList)
 
 	logger.Info("[MCP→LLM/MEMORY-PROMPT]", "agent_id", agentID,
 		"action_count", len(records), "text", promptText)
 
-	resp, err := sc.SendWithSummary(ctx, "", promptText)
+	resp, err := sc.SendWithSummary(ctx, memorySystemPrompt, promptText)
 	if err != nil {
 		logger.Warn("[记忆层] LLM 调用失败，跳过记忆生成",
 			"agent_id", agentID, "err", err)
