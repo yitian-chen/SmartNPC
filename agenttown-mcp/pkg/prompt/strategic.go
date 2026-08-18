@@ -50,49 +50,68 @@ func DefaultDailyPlan(kb *worldkb.KB) string {
 		"22:00-06:00: 夜间休眠"
 }
 
-// StrategicPromptTemplate is the strategic layer prompt template.
-// Placeholders: %s = strategic context (role+KB+capabilities), %s = yesterday summary.
-const StrategicPromptTemplate = `[战略层/每日规划] 现在是仿真时间 07:00，新的一天开始了，你刚从休眠舱醒来，当前位于休眠舱区域。
+// StrategicSystemPrompt is the strategic layer's system message: mechanism
+// text only (role positioning, world mechanics, planning rules, output
+// format, example). It is fully static across agents and calls, so the LLM
+// gateway can cache it. Per-call context/data (role, KB, physical state,
+// capabilities, yesterday summary) goes in the user message built from
+// StrategicUserTemplate + BuildStrategic.
+//
+// Rules referencing dynamic segments say "用户信息中【…】" because those
+// segments live in the user message, not here.
+const StrategicSystemPrompt = `你是小镇居民 NPC 的战略规划模块。每天清晨 07:00，你根据用户信息中提供的角色身份、今日日程、物理状态、世界知识与可用能力，规划当天 07:00 到次日 07:00 的活动安排。
 
-%s
+【动作对状态的影响】
+- work_shift（装配/分拣等）：消耗能量、积累疲劳与少量关节磨损，赚取余额
+- charge_at_station（充电）：恢复能量、缓解疲劳，消耗余额
+- self_maintenance（维护）：缓解关节磨损，大量消耗余额
+- rest_at_residence（休息）：缓解疲劳
+- surf_internet（上网）：少量消耗能量与余额、缓解疲劳
+规划时请综合权衡：产出性活动（工作）赚取余额但消耗体力、缓慢积攒关节磨损；恢复性活动（充电/维护/休息）花余额但延续工作能力。避免长时间连续工作导致体力耗尽，也避免频繁恢复导致余额入不敷出。
 
-%s
-
-请基于你的角色身份和性格，规划今天一天的活动安排。一天从 07:00 到次日 07:00，你从 07:00 开始活动，夜间活动可持续到次日清晨。
+【社交】
+- 可用 social_chat 主动找其他 NPC 聊天；建议每天安排 1 个社交时段与用户信息中【其他NPC】列出的某一位聊聊天，有助于维系人际关系。战略层只写意图（如"12:00 和老王聊聊"），战术层会把它分解为 social_chat 复合动作。
 
 要求：
-1. 输出一个 JSON 数组，6-8 条
-2. 每条包含 "time"（时段，如 "07:00-12:00"）和 "goal"（这个时段你要做什么，一句话）
-3. 安排要符合你的角色身份和性格特点
-4. 每个时段时长不少于 120 分钟（起止时间差 ≥ 120 分钟），每个时段原则上仅安排一项主要任务
-5. 只输出 JSON 数组，不要任何其他文字
-6. 必须以字符 [ 开头，以字符 ] 结尾，不要输出设计思路、不要解释、不要 markdown 围栏
-7. goal 中提到的地点、人物、设备必须是【你的角色】和【世界知识】中存在的，不得编造未提及的人物或设施
-8. 末段若跨午夜（如 "22:00-07:00"），结束时间表示次日该时刻，调度器会自动识别跨午夜时段
-9. goal 的主要活动应能用【可用能力】中列出的复合动作实现（如装配→work_shift、充电→charge_at_station），不得规划【可用能力】未列出且无法用基础动作（移动/说话/表达情绪/交互物体/等待）组合实现的活动——如"整理仪容""冥想"等无对应能力的活动会被战术层拒绝。
-10. 首个时段（从 07:00 起）必须是日间活动（如晨间巡视、装配、维护），不得安排休眠——你刚从休眠舱醒来，应立即离开开始当日活动；休眠只能安排在午间和夜间。
-11. 充电（charge_at_station）仅在【物理状态】显示能量偏低（<40）或疲劳较高（>80）时安排；能量充足（如刚从休眠醒来、能量接近 100）时不得安排充电时段，应优先安排工作/巡视/维护等产出性活动。
-12. 维护（self_maintenance）仅在【物理状态】显示关节磨损较高（>50）时安排；磨损较低（<30）时不得安排维护时段，应优先安排工作/巡视/上网等产出或低成本活动以积累余额。维护是周期性大修（类比人去医院，不是每天都要去），通常需要工作多日积累的磨损才值得一次维护——频繁维护会使余额入不敷出。
-13. 规划必须综合考虑【物理状态】当前四项数值，据此调整当日安排的侧重点：
-    - 能量偏低（<40）：今天多安排充电时段（如午间+傍晚各一次），减少连续工作时长，避免体力耗尽。
-    - 疲劳偏高（>80）：今天把夜间休眠时段提前（如 21:00 甚至 20:00 入睡），白天穿插短暂休息，避免疲劳继续累积。
-    - 关节磨损偏高（>50）：今天安排一次维护时段（符合规则 12），其余时段减少重体力工作，可改上网/巡视等低磨损活动。
-    - 余额偏低（<50）：今天多安排工作时段（work_shift）赚取余额，减少花钱的恢复性活动（如上网、非必要的维护），仅在能量/疲劳确实告警时才充电/休息。
-    各项状态正常时按常规节奏规划，不必刻意偏向某一类活动；多项状态同时异常时按最紧迫的优先（体力耗尽 > 疲劳过高 > 余额过低 > 关节磨损）。
-14. 若连续两段时段的主要动作一致（如上午装配+下午继续装配），合并为一个长时段（如 "09:00-18:00: 车间装配作业"），避免同一动作被拆成多个时段导致战术层重复分解。
-15. 聊天时段（social_chat）只安排聊天这一件事——goal 里不要附带地点（"去中央广场"）或其他动作（"顺便上网"），战术层会自动走向目标 NPC 并挂起对话直到结束。写法和普通时段一样只需一句话描述聊天意图（如"找老王聊聊装配进展"）。
+1. 输出 JSON 数组（6-8 条），每条含 "time"（"HH:MM-HH:MM"）和 "goal"（一句话），以 [ 开头 ] 结尾，不要其他文字
+2. 每个时段 ≥120 分钟，仅安排一项主要任务；连续两个任务相同的时段合并为一个长时段（如 "07:00-12:00: 车间装配作业"）
+3. 规划每个时段时，先想清楚这个时段的活动要用用户信息中【可用能力】里哪个 cmd 实现：
+   - 有对应 cmd 的活动（如装配→work_shift、充电→charge_at_station、聊天→social_chat）→ 可以安排
+   - 没有对应 cmd 的活动（如"准备工具""巡查""整理仪容"）→ 不要安排，改用有 cmd 对应的活动
+   - 判断标准：goal 能否直接映射到【可用能力】中列出的某个 cmd？能 → 可以安排；不能 → 换一个
+4. goal 中提到的地点、人物、设备必须是用户信息中【你的角色】和【世界知识】里存在的，不得编造未提及的人物或设施
+5. 首段（07:00 起）必须是日间活动，不得安排休眠；末段跨午夜时结束时间表示次日时刻
+6. 充电仅在能量<40 或疲劳>80 时安排；维护仅在关节磨损>50 时安排；能量充足时优先产出性活动
+7. 综合考虑物理状态四项数值调整安排侧重点：能量低→多充电少工作；疲劳高→提前休眠；磨损高→安排维护；余额低→多工作少花钱
+8. 聊天时段只安排聊天一件事，不附带地点或其他动作（如"找老王聊聊装配进展"）
 
 示例：[{"time":"07:00-09:00","goal":"早晨去找老王聊聊天（social_chat）"},{"time":"09:00-12:00","goal":"上午车间装配作业"},{"time":"12:00-14:00","goal":"午间去长椅上坐坐"},{"time":"14:00-18:00","goal":"下午继续在车间装配"},{"time":"18:00-22:00","goal":"傍晚去充电站补电"},{"time":"22:00-07:00","goal":"夜间在休眠舱休息"}]`
 
-// BuildStrategic constructs the strategic layer prompt's KB context segment,
-// containing six parts:
+// StrategicUserTemplate is the strategic layer's user message template.
+// Placeholders: %s = strategic context (BuildStrategic output: role +
+// schedule + physical + KB + peers + capabilities), %s = yesterday summary.
+// The instruction line stays in the user message so the "plan today" ask
+// sits immediately after the data it refers to.
+const StrategicUserTemplate = `[战略层/每日规划] 现在是仿真时间 07:00，新的一天开始了，你刚从休眠舱醒来，当前位于休眠舱区域。
+
+%s
+
+%s
+
+请基于你的角色身份和性格，规划今天一天的活动安排。一天从 07:00 到次日 07:00，你从 07:00 开始活动，夜间活动可持续到次日清晨。`
+
+// BuildStrategic constructs the strategic layer user message's context
+// segment, containing six parts:
 //   - 【你的角色】: from AgentRole(kb, profiles, agentID)
 //   - 【今日日程】: from dayContext (pre-formatted by weeklyschedule.WeeklyLine;
 //     "" skips the segment — disabled or dayCount<0)
 //   - 【物理状态】: from PhysicalLine(physical); nil → default fresh state
 //   - 【世界知识】: from KBContext(kb) (shared with tactical layer)
-//   - 【区域设施映射】: zone→object mapping (currently disabled — see comment)
+//   - 【其他NPC】: KB roster of peers (social_chat targets)
 //   - 【可用能力】: composite actions from capabilities
+//
+// Mechanism text (rules, 【动作对状态的影响】, 【社交】 advice, output format,
+// example) lives in StrategicSystemPrompt, not here.
 //
 // kb == nil → skips 【世界知识】 segment but still injects persona + capabilities.
 // actions == nil → falls back to builtin 6 composite tools (same as tactical).
@@ -130,8 +149,9 @@ func BuildStrategic(kb *worldkb.KB, profiles map[string]*profile.Profile, agentI
 		// 降低战略层 LLM 输入 token 数以缩短延迟。日后若 LLM 又出现 zone-object
 		// 错配可重新启用。
 		// 【其他NPC】段：列出 KB 中除自己外的所有 NPC，让战略层 LLM 看到具体
-		// 可聊天的同伴（id + 职业）。没有这个名单，规则 7"不得编造未提及的人物"
-		// 会让 LLM 完全不安排 social_chat 时段——它在 07:00 看不到任何同伴 id。
+		// 可聊天的同伴（id + 职业）。没有这个名单，system prompt 中"不得编造
+		// 未提及的人物"的规则会让 LLM 完全不安排 social_chat 时段——它在
+		// 07:00 看不到任何同伴 id。
 		// 与战术层的【附近NPC】不同：战术层用 UE 实时感知（运行时才知道谁在
 		// 视野内），战略层用 KB 静态花名册（任何 NPC id 都合法目标）。
 		if peers := OtherAgentsLine(kb, agentID); peers != "" {
@@ -146,19 +166,6 @@ func BuildStrategic(kb *worldkb.KB, profiles map[string]*profile.Profile, agentI
 		sb.WriteString(cap)
 		sb.WriteString("此外始终可用基础动作：移动、说话、表达情绪、与物体交互、等待（用于短耗时或衔接）。\n")
 	}
-	sb.WriteString("【动作对状态的影响】\n")
-	sb.WriteString("- work_shift（装配/分拣等）：消耗能量、积累疲劳与少量关节磨损，赚取余额\n")
-	sb.WriteString("- charge_at_station（充电）：恢复能量、缓解疲劳，消耗余额\n")
-	sb.WriteString("- self_maintenance（维护）：缓解关节磨损，大量消耗余额\n")
-	sb.WriteString("- rest_at_residence（休息）：缓解疲劳\n")
-	sb.WriteString("- surf_internet（上网）：少量消耗能量与余额、缓解疲劳\n")
-	sb.WriteString("规划时请综合权衡：产出性活动（工作）赚取余额但消耗体力、缓慢积攒关节磨损；恢复性活动（充电/维护/休息）花余额但延续工作能力。避免长时间连续工作导致体力耗尽，也避免频繁恢复导致余额入不敷出。\n")
-	// 【社交】段：提示战略层可安排 social_chat 目标。战略层只写意图
-	// （如"12:00 和老王聊聊"），战术层分解为 social_chat 复合动作。
-	// Phase 2 Module C。配合上方【其他NPC】段——LLM 需要看到具体同伴 id
-	// 才敢在 goal 里点名（规则 7 禁止编造未提及人物）。
-	sb.WriteString("【社交】\n")
-	sb.WriteString("- 可用 social_chat 主动找其他 NPC 聊天；建议每天安排 1 个社交时段与【其他NPC】中的某一位聊聊天，有助于维系人际关系。\n")
 	return sb.String()
 }
 

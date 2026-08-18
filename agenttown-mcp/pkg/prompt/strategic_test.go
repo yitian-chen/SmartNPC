@@ -147,17 +147,28 @@ func TestBuildStrategic_OmitsOtherNPCsWhenNoPeers(t *testing.T) {
 }
 
 func TestBuildStrategic_ExampleContainsSocialChatSlot(t *testing.T) {
-	// StrategicPromptTemplate is a constant; verify the example demonstrates
+	// StrategicSystemPrompt is a constant; verify the example demonstrates
 	// a social_chat slot so the LLM sees chatting as a legitimate plan item.
-	if !strings.Contains(StrategicPromptTemplate, "social_chat") {
-		t.Errorf("strategic prompt example should mention social_chat to model it as a valid slot")
+	if !strings.Contains(StrategicSystemPrompt, "social_chat") {
+		t.Errorf("strategic system prompt example should mention social_chat to model it as a valid slot")
 	}
 }
 
-func TestBuildStrategic_SocialSegmentMentionsFrequency(t *testing.T) {
+func TestStrategicSystemPrompt_SocialSegmentMentionsFrequency(t *testing.T) {
+	// 【社交】 advice moved to the system prompt (mechanism text).
+	if !strings.Contains(StrategicSystemPrompt, "每天安排 1 个社交时段") {
+		t.Errorf("system prompt 【社交】 segment should suggest daily frequency")
+	}
+}
+
+func TestBuildStrategic_ExcludesMechanismSegments(t *testing.T) {
+	// Mechanism segments (【动作对状态的影响】/【社交】) live in
+	// StrategicSystemPrompt; BuildStrategic returns data segments only.
 	kb := strategicRosterKB()
 	got := BuildStrategic(kb, nil, "H-01", nil, nil, "")
-	if !strings.Contains(got, "每天安排 1 个社交时段") {
-		t.Errorf("【社交】 segment should suggest daily frequency in:\n%s", got)
+	for _, seg := range []string{"【动作对状态的影响】", "【社交】", "要求："} {
+		if strings.Contains(got, seg) {
+			t.Errorf("BuildStrategic should not contain mechanism segment %q in:\n%s", seg, got)
+		}
 	}
 }
