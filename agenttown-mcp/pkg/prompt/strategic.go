@@ -71,6 +71,8 @@ const StrategicSystemPrompt = `你是小镇居民 NPC 的战略规划模块。�
 
 要求：
 1. 输出 JSON 数组（6-8 条），每条只含 "time"（"HH:MM-HH:MM"）和 "goal"（一句话，必须是纯文本字符串），以 [ 开头 ] 结尾，不要其他文字
+   - goal 用干练简洁的客观描述，只写"做什么 + 在哪"（如"主生产车间工作台装配""中央广场充电桩充电"），不带语气词、口头禅、内心独白或人设腔调
+   - 人设只影响选择什么活动、如何安排时段，不影响 goal 的文字风格；说话语气留给执行时的 speak 动作表达
 2. 【硬性要求】每个时段的结束时间减去开始时间必须 ≥120 分钟（不足 120 分钟的活动要么并入相邻时段，要么不安排；午休等短暂休息也至少120分钟）；仅安排一项主要任务；连续两个时段不得任务相同
 3. 规划每个时段时，先想清楚这个时段的活动要用用户信息中【可用能力】里哪个 cmd 实现：
    - 有对应 cmd 的活动（如装配→work_shift、充电→charge_at_station、加工/调试/拆解→InteractSmartObject 填工作设备）→ 可以安排
@@ -87,7 +89,7 @@ const StrategicSystemPrompt = `你是小镇居民 NPC 的战略规划模块。�
    - 去档案馆上网放松（surf_internet）
    仅两个强制例外：能量为"低电量"时必须选充电；疲劳为"非常疲劳"时必须回舱小憩。其余情况一律按性格倾向自由选择：慵懒型回舱小憩，省电耐久型充电恢复，好动型长椅或上网
 
-格式示例：[{"time":"07:00-09:00","goal":"xxx"},{"time":"09:00-12:00","goal":"xxx"}]`
+格式示例：[{"time":"07:00-12:00","goal":"主生产车间工作台装配"},{"time":"12:00-14:00","goal":"中央广场长椅休息"},{"time":"14:00-18:00","goal":"主生产车间工作台装配"},{"time":"18:00-22:00","goal":"休眠舱居住区睡眠舱休息"}]`
 
 // StrategicUserTemplate is the strategic layer's user message template.
 // Placeholders: %s = strategic context (BuildStrategic output: role +
@@ -100,7 +102,7 @@ const StrategicUserTemplate = `[战略层/每日规划] 现在是仿真时间 07
 
 %s
 
-请基于你的角色身份和性格，规划今天一天的活动安排。一天从 07:00 到次日 07:00，你从 07:00 开始活动。
+请基于你的角色身份和性格，规划今天一天的活动安排（人设只影响选什么活动、怎么安排时段；goal 文字一律干练简洁，不带人设语气）。一天从 07:00 到次日 07:00，你从 07:00 开始活动。
 只输出 JSON 数组，每条形如 {"time":"HH:MM-HH:MM","goal":"纯文本一句话"}，"goal" 必须是字符串；每个时段必须 ≥120 分钟；不要输出任何其他文字。`
 
 // BuildStrategic constructs the strategic layer user message's context
