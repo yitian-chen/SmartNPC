@@ -76,7 +76,7 @@ const StrategicSystemPrompt = `你是小镇居民 NPC 的战略规划模块。�
    - 正确：{"time":"07:00-12:00","goal":"装配作业"}
 2. 【硬性要求】每个时段的结束时间减去开始时间必须 ≥120 分钟（不足 120 分钟的活动要么并入相邻时段，要么不安排；午休等短暂休息也并入前后的长时段）；仅安排一项主要任务；连续两个任务相同的时段合并为一个长时段（如 "07:00-12:00: 车间装配作业"）
 3. 规划每个时段时，先想清楚这个时段的活动要用用户信息中【可用能力】里哪个 cmd 实现：
-   - 有对应 cmd 的活动（如装配→work_shift、充电→charge_at_station）→ 可以安排
+   - 有对应 cmd 的活动（如装配→work_shift、充电→charge_at_station、加工/调试/拆解→InteractSmartObject 填工作设备）→ 可以安排
    - 没有对应 cmd 的活动（如"准备工具""巡查""整理仪容"）→ 不要安排，改用有 cmd 对应的活动
    - 判断标准：goal 能否直接映射到【可用能力】中列出的某个 cmd？能 → 可以安排；不能 → 换一个
 4. goal 中提到的地点、人物、设备必须是用户信息中【你的角色】和【世界知识】里存在的，不得编造未提及的人物或设施
@@ -162,7 +162,8 @@ func BuildStrategic(kb *worldkb.KB, profiles map[string]*profile.Profile, agentI
 		sb.WriteString("【可用能力】\n")
 		sb.WriteString("长时段活动用以下复合动作（自动移动到对应位置，覆盖整段工作时间）：\n")
 		sb.WriteString(cap)
-		sb.WriteString("此外始终可用基础动作：移动、说话、表达情绪、与物体交互、等待（用于短耗时或衔接）。\n")
+		sb.WriteString("此外始终可用基础动作：移动、说话、表达情绪、与物体交互（InteractSmartObject）、等待（用于短耗时或衔接）。\n")
+		sb.WriteString("与物体交互（InteractSmartObject）也可直接用于任何工种：semantic_group 填工作设备即可——如加工机（process）、调试台（debug）、拆解台（dismantle）、工作台（assemble）、分拣传送带（sort_cargo）、质检台（inspect），战术层会据此分解为在工作设备上的长时段作业。\n")
 	}
 	return sb.String()
 }

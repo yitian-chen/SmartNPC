@@ -160,6 +160,18 @@ func TestStrategicSystemPrompt_SlotDurationRuleEmphasized(t *testing.T) {
 	}
 }
 
+func TestBuildStrategic_InteractWorkGuidance(t *testing.T) {
+	// 【可用能力】段应告知：任何工种都可用 interact + 工作设备直接工作
+	// （process/debug/dismantle 等无复合动作的工种的规划依据）。
+	kb := strategicRosterKB()
+	got := BuildStrategic(kb, nil, "H-01", nil, nil, "")
+	for _, want := range []string{"任何工种", "加工机（process）", "拆解台（dismantle）"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("BuildStrategic 可用能力 should mention %q:\n%s", want, got)
+		}
+	}
+}
+
 func TestBuildStrategic_ExcludesMechanismSegments(t *testing.T) {
 	// Mechanism segments (【动作对状态的影响】/【社交】) live in
 	// StrategicSystemPrompt; BuildStrategic returns data segments only.

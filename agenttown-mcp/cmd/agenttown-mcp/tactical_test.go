@@ -655,6 +655,14 @@ func TestBuildTacticalPrompt_InjectsObjectStatus(t *testing.T) {
 	if !strings.Contains(prompt.TacticalSystemPrompt, "禁止规划必然失败") {
 		t.Errorf("system prompt should guide LLM to avoid doomed occupancy actions")
 	}
+	// 所有工种设备都可用 InteractSmartObject 直接工作（process/debug/dismantle
+	// 等无复合动作的工种依据）；同时锚定 action 字段名 interact 防止 LLM 写错工具名。
+	if !strings.Contains(prompt.TacticalSystemPrompt, "所有工种设备都可用 InteractSmartObject") {
+		t.Error("system prompt should say InteractSmartObject works for any work device")
+	}
+	if !strings.Contains(prompt.TacticalSystemPrompt, "action 字段写 interact") {
+		t.Error("system prompt should anchor the action field name as interact")
+	}
 }
 
 // TestBuildTacticalPrompt_NilObjectStatusNoSection 验证 ObjectStatus 为空时
