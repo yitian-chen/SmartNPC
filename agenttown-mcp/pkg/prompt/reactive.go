@@ -69,9 +69,29 @@ const ReactivePeriodicDedupeWindow = 45 * time.Second
 // decision, not a single trigger event.
 const ReplanDedupeGameMinutes = 60
 
-// ReactivePromptTemplate is the reactive layer prompt template.
-// Filled via fmt.Sprintf. Chinese prompt (qwen2.5 performs better in Chinese),
-// strict JSON output constraint.
+// ReactiveSystemPrompt is the reactive layer's system message: mechanism
+// text only (module role, reaction enum, judgment points, strict JSON
+// output format). Fully static across agents and calls → cacheable.
+// Per-call data (role, state, in-flight action, tactical context, trigger)
+// goes in the user message built by BuildReactive.
+const ReactiveSystemPrompt = `你是小镇居民 NPC 的反应决策模块。用户信息给出 NPC 的角色、当前状态、在途动作、战术层上下文与触发原因，请判断是否打断当前行动进行重规划。
+
+【可选反应】
+- continue：不打断，让当前行动继续
+- observe：不打断，记录这个事件供后续参考
+- replan：当前时段的整个战术规划已不合理（如物理状态无法支撑剩余 action、感知到新的 object / agent 希望改变原来的计划转而与之互动），请求战术层基于当前状态重新分解本时段 goal
+
+判断要点：
+- 战术层规划的动作通常是合理的，除非有明确理由，否则 continue
+- replan 是"重大"决策：当你认为整个 action 队列都应作废、重新规划时使用。
+
+请输出 JSON，格式严格如下，不要输出 JSON 以外的任何内容：
+{"reaction": "continue|observe|replan", "reason": "简短理由"}
+
+不要输出 JSON 以外的任何内容。`
+
+// ReactiveUserTemplate is the reactive layer's user message template.
+// Filled via fmt.Sprintf. Chinese prompt (qwen2.5 performs better in Chinese).
 //
 // agentName is injected by the caller to avoid hardcoding "老陈" or other
 // specific NPC names — the reactive layer should serve any agent.
@@ -81,9 +101,11 @@ const ReplanDedupeGameMinutes = 60
 // physicalLine is injected by the caller: empty when UE hasn't implemented
 // physical state (prompt omits physical segment); non-empty looks like
 // "物理：体力=X/100, 疲劳=Y/100, 关节磨损=Z/100".
-// physicalRuleLine is injected by the caller: physical alert judgment points
-// when physical state is available; empty skips.
-const ReactivePromptTemplate = `你是 NPC %s 的反应决策模块。当前情况需要你判断是否打断当前行动进行重规划。
+// physicalRuleLine is injected by the caller: physical alert judgment rule
+// when physical state is available; empty skips. It is conditional (depends
+// on PhysicalAvailable), so it stays in the user message even though it is
+// mechanism-ish.
+const ReactiveUserTemplate = `你是 NPC %s。当前情况如下：
 
 【你的角色】
 %s
@@ -103,20 +125,8 @@ const ReactivePromptTemplate = `你是 NPC %s 的反应决策模块。当前情�
 
 【触发原因】
 %s
-
-【可选反应】
-- continue：不打断，让当前行动继续
-- observe：不打断，记录这个事件供后续参考
-- replan：当前时段的整个战术规划已不合理（如物理状态无法支撑剩余 action、感知到新的 object / agent 希望改变原来的计划转而与之互动），请求战术层基于当前状态重新分解本时段 goal
-
-判断要点：
-- 战术层规划的动作通常是合理的，除非有明确理由，否则 continue
-%s- replan 是"重大"决策：当你认为整个 action 队列都应作废、重新规划时使用。
-
-请输出 JSON，格式严格如下，不要输出 JSON 以外的任何内容：
-{"reaction": "continue|observe|replan", "reason": "简短理由"}
-
-不要输出 JSON 以外的任何内容。`
+%s
+请根据上述情况，给出你的反应决策。`
 
 // BuildReactive constructs the reactive layer prompt. Pure function.
 func BuildReactive(in ReactiveInput) string {
@@ -153,13 +163,14 @@ func BuildReactive(in ReactiveInput) string {
 		agentRole = "（无角色信息）"
 	}
 	// Physical segment: when PhysicalAvailable=false, prompt omits physical
-	// segment and the "physical alert → replan" judgment point (avoid LLM
-	// misjudging an empty physical segment).
+	// segment and the physical-alert rule line (avoid LLM misjudging an
+	// empty physical segment). The rule line is mechanism-ish but
+	// conditional, so it stays in the user message as 【物理告警补充规则】.
 	physicalLine := ""
 	physicalRuleLine := ""
 	if in.PhysicalAvailable {
 		physicalLine = fmt.Sprintf("物理：体力=%.0f/100, 疲劳=%.0f/100, 关节磨损=%.0f/100, 余额=%.0f\n", in.Energy, in.Fatigue, in.JointWear, in.Money)
-		physicalRuleLine = "- 物理状态告警时（体力<40 需充电、疲劳>80 需休息、关节磨损>70 需维修）原则上需要输出 replan 让 NPC 优先处理物理需求、不可输出 continue/observe\n"
+		physicalRuleLine = "【物理告警补充规则】物理状态告警时（体力<40 需充电、疲劳>80 需休息、关节磨损>70 需维修）原则上需要输出 replan 让 NPC 优先处理物理需求、不可输出 continue/observe\n"
 	}
 	// Queue segment (约定21): empty when not queued → entire segment
 	// collapses to a single blank line. When queued, show what the agent
@@ -170,7 +181,7 @@ func BuildReactive(in ReactiveInput) string {
 	if in.QueuedFor != "" {
 		queuedLine = fmt.Sprintf("\n【排队状态】\n%s\n", in.QueuedFor)
 	}
-	return fmt.Sprintf(ReactivePromptTemplate,
+	return fmt.Sprintf(ReactiveUserTemplate,
 		agentName,
 		agentRole,
 		in.TimeOfDay, in.Zone,
