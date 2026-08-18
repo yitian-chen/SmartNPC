@@ -15,14 +15,21 @@ import (
 
 // fakeStrategicCaller 实现 strategicCaller 接口，用于单测。
 type fakeStrategicCaller struct {
-	resp          *llmtypes.Response
-	err           error
-	capturedInput string
-	resetCalled   bool
+	resp               *llmtypes.Response
+	err                error
+	capturedInput      string
+	capturedSchemaName string
+	resetCalled        bool
 }
 
 func (f *fakeStrategicCaller) SendWithSummary(_ context.Context, _, user string) (*llmtypes.Response, error) {
 	f.capturedInput = user
+	return f.resp, f.err
+}
+
+func (f *fakeStrategicCaller) SendWithSchema(_ context.Context, _, user, schemaName string, _ []byte) (*llmtypes.Response, error) {
+	f.capturedInput = user
+	f.capturedSchemaName = schemaName
 	return f.resp, f.err
 }
 
@@ -136,10 +143,11 @@ func TestFormatDailyPlan_MultipleItems(t *testing.T) {
 func TestGenerateDailyPlan_HTTPError(t *testing.T) {
 	sc := &fakeStrategicCaller{err: errors.New("network down")}
 	plan := generateDailyPlan(context.Background(), sc, "H-01", nil, nil, nil, slog.Default(), "", nil, "")
-	// HTTP 错误现在回退到 prompt.DefaultDailyPlan(nil) 而不是空字符串，
+	// HTTP 错误现在回退到 prompt.DefaultDailyPlan(nil) 的扰动版本
+	// （时间节点 ±planJitterMinutes 错峰），而不是空字符串，
 	// 保证战术层有目标可分解、仿真不瘫痪。
-	if plan != prompt.DefaultDailyPlan(nil) {
-		t.Errorf("got %q, want defaultDailyPlan on error", plan)
+	if !isJitteredDefaultPlan(t, plan) {
+		t.Errorf("got %q, want jittered defaultDailyPlan on error", plan)
 	}
 	if sc.resetCalled {
 		t.Error("ResetSession should not be called when SendWithSummary fails")
@@ -159,16 +167,40 @@ func TestGenerateDailyPlan_ValidResponse(t *testing.T) {
 	if !sc.resetCalled {
 		t.Error("ResetSession should be called after successful generation")
 	}
+	// 战略层必须走 Structured Outputs（json_schema strict）约束输出格式。
+	if sc.capturedSchemaName != "daily_plan" {
+		t.Errorf("generateDailyPlan should call SendWithSchema with schema name daily_plan, got %q", sc.capturedSchemaName)
+	}
 }
 
 func TestGenerateDailyPlan_ParseFail(t *testing.T) {
 	sc := &fakeStrategicCaller{resp: makeStrategicResponse("今天天气不错，我打算去车间转转。")}
 	plan := generateDailyPlan(context.Background(), sc, "H-01", nil, nil, nil, slog.Default(), "", nil, "")
-	// 解析失败现在回退到 prompt.DefaultDailyPlan(nil) 而不是空字符串，
+	// 解析失败现在回退到 prompt.DefaultDailyPlan(nil) 的扰动版本，
 	// 避免整天 Wait(60s) 瘫痪。
-	if plan != prompt.DefaultDailyPlan(nil) {
-		t.Errorf("got %q, want defaultDailyPlan on parse failure", plan)
+	if !isJitteredDefaultPlan(t, plan) {
+		t.Errorf("got %q, want jittered defaultDailyPlan on parse failure", plan)
 	}
+}
+
+// isJitteredDefaultPlan 校验 plan 是 DefaultDailyPlan(nil) 的合法扰动结果：
+// 行数一致、每条 goal 一致、时间可解析且为 "HH:MM-HH:MM" 格式。
+func isJitteredDefaultPlan(t *testing.T, plan string) bool {
+	t.Helper()
+	want := parseFormattedPlan(prompt.DefaultDailyPlan(nil))
+	got := parseFormattedPlan(plan)
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range want {
+		if got[i].Goal != want[i].Goal {
+			return false
+		}
+		if _, _, ok := prompt.SplitPlanRange(got[i].Time); !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // ─── buildStrategicContext ───────────────────────────────────
@@ -543,6 +575,102 @@ func TestNormalizeDailyPlan_AlreadyValid(t *testing.T) {
 	}
 	if got[0].Time != "06:00-12:00" || got[1].Time != "12:00-22:00" || got[2].Time != "22:00-06:00" {
 		t.Errorf("already-valid plan should be unchanged: got %+v", got)
+	}
+}
+
+// jitterPlanNodes 的性质是随机的，单测用多轮迭代验证不变量而非精确值。
+func jitterTestPlan() []dailyPlanItem {
+	return []dailyPlanItem{
+		{Time: "07:00-12:00", Goal: "上午装配"},
+		{Time: "12:00-14:00", Goal: "午间休息"},
+		{Time: "14:00-18:00", Goal: "下午装配"},
+		{Time: "18:00-22:00", Goal: "傍晚充电"},
+		{Time: "22:00-06:00", Goal: "夜间休眠"},
+	}
+}
+
+func TestJitterPlanNodes_ZeroJitterNoop(t *testing.T) {
+	items := jitterTestPlan()
+	got := jitterPlanNodes(items, 0)
+	for i := range items {
+		if got[i].Time != items[i].Time {
+			t.Errorf("maxJitter=0 should be a no-op: got[%d]=%q want %q", i, got[i].Time, items[i].Time)
+		}
+	}
+}
+
+func TestJitterPlanNodes_OffsetsWithinRange(t *testing.T) {
+	orig := jitterTestPlan()
+	for round := 0; round < 100; round++ {
+		got := jitterPlanNodes(orig, planJitterMinutes)
+		for i := range orig {
+			os, oe, _ := prompt.SplitPlanRange(orig[i].Time)
+			gs, ge, _ := prompt.SplitPlanRange(got[i].Time)
+			// 跨午夜段 end 用归一化坐标比较。
+			if oe <= os {
+				oe += 1440
+			}
+			if ge <= gs {
+				ge += 1440
+			}
+			for _, d := range []int{gs - os, ge - oe} {
+				if d < -planJitterMinutes || d > planJitterMinutes {
+					t.Fatalf("round %d slot %d: offset %d out of ±%d (orig %q got %q)",
+						round, i, d, planJitterMinutes, orig[i].Time, got[i].Time)
+				}
+			}
+		}
+	}
+}
+
+func TestJitterPlanNodes_ContiguityAndMinDuration(t *testing.T) {
+	orig := jitterTestPlan()
+	for round := 0; round < 100; round++ {
+		got := jitterPlanNodes(orig, planJitterMinutes)
+		for i := range got {
+			if i < len(got)-1 {
+				// 共享边界：前段（非跨午夜）扰动后的 end 必须等于后段 start。
+				es := strings.SplitN(got[i].Time, "-", 2)[1]
+				ss := strings.SplitN(got[i+1].Time, "-", 2)[0]
+				if es != ss {
+					t.Fatalf("round %d: shared boundary broken between %q and %q",
+						round, got[i].Time, got[i+1].Time)
+				}
+			}
+			if d := prompt.SlotDurationMinute(got[i].Time); d < planJitterMinGap {
+				t.Fatalf("round %d slot %d: duration %d < min gap %d (%q)",
+					round, i, d, planJitterMinGap, got[i].Time)
+			}
+		}
+	}
+}
+
+func TestJitterPlanNodes_OvernightSlotStaysOvernight(t *testing.T) {
+	orig := jitterTestPlan()
+	for round := 0; round < 100; round++ {
+		got := jitterPlanNodes(orig, planJitterMinutes)
+		last := got[len(got)-1]
+		s, e, ok := prompt.SplitPlanRange(last.Time)
+		if !ok || e > s {
+			t.Fatalf("round %d: overnight slot should stay cross-midnight, got %q", round, last.Time)
+		}
+	}
+}
+
+func TestJitterPlanNodes_GoalsPreserved(t *testing.T) {
+	orig := jitterTestPlan()
+	got := jitterPlanNodes(orig, planJitterMinutes)
+	for i := range orig {
+		if got[i].Goal != orig[i].Goal {
+			t.Errorf("slot %d goal changed: got %q want %q", i, got[i].Goal, orig[i].Goal)
+		}
+	}
+}
+
+func TestJitterPlanString_UnparseableNoop(t *testing.T) {
+	in := "not a plan"
+	if got := jitterPlanString(in); got != in {
+		t.Errorf("unparseable plan should be returned unchanged, got %q", got)
 	}
 }
 

@@ -199,7 +199,7 @@ func TestStreamAccumulator_Feed(t *testing.T) {
 	}
 
 	// 第三行不完整（无 \n），不应触发 onComplete
-	acc.feed(`{"action":"interact","params":{"semantic_group":"workbench_01","interaction":"assemble"}}`)
+	acc.feed(`{"action":"InteractSmartObject","params":{"semantic_group":"workbench_01","interaction":"assemble"}}`)
 	if len(collected) != 2 {
 		t.Errorf("incomplete line should not trigger: collected=%d, want 2", len(collected))
 	}
@@ -209,7 +209,7 @@ func TestStreamAccumulator_Feed(t *testing.T) {
 	if len(collected) != 3 {
 		t.Fatalf("after flush: collected=%d, want 3 (speak + move + interact)", len(collected))
 	}
-	if collected[2].Action != "interact" {
+	if collected[2].Action != "InteractSmartObject" {
 		t.Errorf("collected[2]=%q, want interact", collected[2].Action)
 	}
 }
@@ -654,6 +654,11 @@ func TestBuildTacticalPrompt_InjectsObjectStatus(t *testing.T) {
 	// （该引导在 TacticalSystemPrompt 规则 9 中，机制文本已移入 system 消息）
 	if !strings.Contains(prompt.TacticalSystemPrompt, "禁止规划必然失败") {
 		t.Errorf("system prompt should guide LLM to avoid doomed occupancy actions")
+	}
+	// 所有工种设备都可用 InteractSmartObject 直接工作（process/debug/dismantle
+	// 等无复合动作的工种依据）；同时锚定 action 字段名 interact 防止 LLM 写错工具名。
+	if !strings.Contains(prompt.TacticalSystemPrompt, "所有工种设备都可用 InteractSmartObject") {
+		t.Error("system prompt should say InteractSmartObject works for any work device")
 	}
 }
 
@@ -1104,7 +1109,7 @@ func TestBuildTacticalToolEntries_NilRegistryBuiltinFullSet(t *testing.T) {
 	}
 	for _, name := range []string{
 		"generic_act", "move_to", "turn_to",
-		"speak", "emote", "interact",
+		"speak", "emote", "InteractSmartObject",
 		"work_shift", "charge_at_station", "self_maintenance",
 		"rest_at_residence", "surf_internet", "social_chat",
 	} {
@@ -1121,7 +1126,7 @@ func TestBuildTacticalExample_ChargingStationFirst(t *testing.T) {
 	// 示例走 default 分支：move_to + interact。
 	kb := loadTestKB(t)
 	got := prompt.TacticalExample(kb, "", "")
-	if !strings.Contains(got, "interact") {
+	if !strings.Contains(got, "InteractSmartObject") {
 		t.Errorf("example should use interact for rest category: %q", got)
 	}
 	if !strings.Contains(got, "bench") {
@@ -1163,7 +1168,7 @@ func TestBuildTacticalExample_RestBenchOnly(t *testing.T) {
 		}},
 	}
 	got := prompt.TacticalExample(kb, "", "")
-	if !strings.Contains(got, `"action":"interact"`) {
+	if !strings.Contains(got, `"action":"InteractSmartObject"`) {
 		t.Errorf("example should use interact for rest_bench category: %q", got)
 	}
 	if !strings.Contains(got, `"interaction":"rest"`) {
@@ -1291,7 +1296,7 @@ func TestBuildTacticalExample_GoalCharge(t *testing.T) {
 func TestBuildTacticalExample_GoalBenchRest(t *testing.T) {
 	kb := loadTestKB(t)
 	got := prompt.TacticalExample(kb, "午间到中央广场长椅短暂休息，缓解疲劳", "")
-	if !strings.Contains(got, `"action":"interact"`) {
+	if !strings.Contains(got, `"action":"InteractSmartObject"`) {
 		t.Errorf("goal=长椅休息 should pick interact example: %q", got)
 	}
 	if !strings.Contains(got, `"semantic_group":"bench"`) || !strings.Contains(got, `"interaction":"rest"`) {
@@ -1352,7 +1357,7 @@ func TestBuildTacticalExample_GoalInspect(t *testing.T) {
 		}},
 	}
 	got := prompt.TacticalExample(kb, "启动自检，检查关节磨损情况", "")
-	if !strings.Contains(got, `"action":"interact"`) {
+	if !strings.Contains(got, `"action":"InteractSmartObject"`) {
 		t.Errorf("goal=检查 should pick interact example: %q", got)
 	}
 	if !strings.Contains(got, `"interaction":"inspect"`) {
@@ -1383,7 +1388,7 @@ func TestBuildTacticalExample_GoalEmptyFallback(t *testing.T) {
 	// 空 goal 应降级到默认示例（首个 object 是 bench-1，走 default interact 分支）
 	kb := loadTestKB(t)
 	got := prompt.TacticalExample(kb, "", "")
-	if !strings.Contains(got, "interact") {
+	if !strings.Contains(got, "InteractSmartObject") {
 		t.Errorf("empty goal should fall back to first-object example: %q", got)
 	}
 	if !strings.Contains(got, "bench") {

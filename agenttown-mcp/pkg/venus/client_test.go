@@ -312,6 +312,61 @@ func TestSendStreaming_EmptyStream(t *testing.T) {
 	}
 }
 
+// TestSendWithSchema_RequestIncludesResponseFormat verifies SendWithSchema
+// adds response_format (json_schema, strict) to the request body and the
+// schema document round-trips.
+func TestSendWithSchema_RequestIncludesResponseFormat(t *testing.T) {
+	var capturedRequest request
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&capturedRequest)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"x","choices":[{"message":{"role":"assistant","content":"[]"}}],"usage":{}}`))
+	}))
+	defer server.Close()
+
+	c := newTestClient(t, server.URL)
+	schema := []byte(`{"type":"array","items":{"type":"object","properties":{"goal":{"type":"string"}}}}`)
+	if _, err := c.SendWithSchema(context.Background(), "sys", "user", "daily_plan", schema); err != nil {
+		t.Fatalf("SendWithSchema: %v", err)
+	}
+	if capturedRequest.ResponseFormat == nil {
+		t.Fatal("response_format should be present for SendWithSchema")
+	}
+	if capturedRequest.ResponseFormat.Type != "json_schema" {
+		t.Errorf("response_format.type = %q, want json_schema", capturedRequest.ResponseFormat.Type)
+	}
+	js := capturedRequest.ResponseFormat.JSONSchema
+	if js == nil {
+		t.Fatal("json_schema should be present")
+	}
+	if js.Name != "daily_plan" || !js.Strict {
+		t.Errorf("json_schema name/strict = %q/%v", js.Name, js.Strict)
+	}
+	if string(js.Schema) != string(schema) {
+		t.Errorf("schema = %s, want %s", js.Schema, schema)
+	}
+}
+
+// TestSendWithSummary_NoResponseFormat verifies plain SendWithSummary does
+// not attach response_format (schema mode is opt-in per call).
+func TestSendWithSummary_NoResponseFormat(t *testing.T) {
+	var capturedRequest request
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&capturedRequest)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"x","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{}}`))
+	}))
+	defer server.Close()
+
+	c := newTestClient(t, server.URL)
+	if _, err := c.SendWithSummary(context.Background(), "", "hi"); err != nil {
+		t.Fatalf("SendWithSummary: %v", err)
+	}
+	if capturedRequest.ResponseFormat != nil {
+		t.Errorf("response_format should be absent, got %+v", capturedRequest.ResponseFormat)
+	}
+}
+
 // TestResetSession_NoOp verifies ResetSession is a safe no-op.
 func TestResetSession_NoOp(t *testing.T) {
 	c := newTestClient(t, "http://example.invalid")
@@ -373,6 +428,7 @@ func TestVenusClient_MatchesLLMClientSignatures(t *testing.T) {
 	var _ interface {
 		SendWithSummary(ctx context.Context, system, user string) (*llmtypes.Response, error)
 		SendStreaming(ctx context.Context, system, user string, onDelta func(string)) (*llmtypes.Response, error)
+		SendWithSchema(ctx context.Context, system, user, schemaName string, schema []byte) (*llmtypes.Response, error)
 		ResetSession()
 	} = (*Client)(nil)
 }

@@ -87,7 +87,7 @@ func BuiltinToolSpecs() []ToolSpec {
 		{Name: "turn_to", RequiredCmd: protocol.CmdTurnTo},
 		{Name: "speak", RequiredCmd: protocol.CmdSpeak},
 		{Name: "emote", RequiredCmd: protocol.CmdEmote},
-		{Name: "interact", RequiredCmd: protocol.CmdInteractSmartObject},
+		{Name: "InteractSmartObject", RequiredCmd: protocol.CmdInteractSmartObject},
 		{Name: "wait", RequiredCmd: protocol.CmdWait},
 		// stop has no UE cmd dependency — it sends the stop_action control
 		// message (TypeStopAction), not an action_command. RequiredCmd is

@@ -34,14 +34,14 @@ var toolOverride = map[string]struct {
 	"turn_to":     {"转向目标", `{"target_type":"agent|smart_object|zone|position","target_id":"...","target_position":[x,y,z]}`},
 	"speak":       {"说话", `{"content":"..."}`},
 	"emote":       {"表达情绪", `{"emotion":"happy|sad|..."}`},
-	"interact":    {"与智能物体交互（长耗时动作，单次持续到时段切换，可作队列收尾）", `{"semantic_group":"...","interaction":"动词"}`},
+	"InteractSmartObject": {"与智能物体交互（长耗时动作，单次持续到时段切换，可作队列收尾）", `{"semantic_group":"...","interaction":"动词"}`},
 	// wait intentionally not in override and not shown in prompt tool list.
 	// 复合动作 params 给出具体合法值示例（来自当前 world_kb.yaml），
 	// LLM 模仿时直接套用即可，避免编造 semantic_group 或 interaction。
 	"work_shift":        {"工作班次（装配/作业）", `{"semantic_group":"workbench|sorting_conveyor|inspection_table","interaction":"assemble|sort_cargo|inspect"}`},
 	"charge_at_station": {"在充电站充电", `{"semantic_group":"charger","interaction":"charge"}`},
 	"self_maintenance":  {"自我维护保养", `{"semantic_group":"repair_table","interaction":"repair"}`},
-	"rest_at_residence": {"在住所休息（仅搭配 sleep_pod/sleep；长椅休息用 interact）", `{"semantic_group":"sleep_pod","interaction":"sleep"}`},
+	"rest_at_residence": {"在住所休息（仅搭配 sleep_pod/sleep；长椅休息用 InteractSmartObject）", `{"semantic_group":"sleep_pod","interaction":"sleep"}`},
 	"surf_internet":     {"上网浏览", `{"semantic_group":"computer","interaction":"surf_internet"}`},
 	"social_chat":       {"主动去找另一个 NPC 聊天（走向对方+对话挂起，直到对话结束）", `{"target_agent_id":"<附近NPC的 id>","content":"开场白"}`},
 }
@@ -59,23 +59,24 @@ const TacticalSystemPrompt = `你是小镇居民 NPC 的战术规划模块。用
 
 用户信息中的可用工具分两类：
 - 复合动作（标记 [复合]）：长耗时、单步即可完成一段工作（如装配、充电、巡逻、聊天），会自动移动到对应位置，无需自己调用 move_to。若目标语义与某复合动作匹配，应优先使用复合动作。
-- 原子动作（标记 [原子]）：作为基本 building block。其中 move_to/speak/emote/turn_to/generic_act 是短耗时动作；interact（与智能物体交互）是长耗时动作——单次 interact 会持续执行直到时段切换（如在长椅上 rest、在工作台前 assemble），可作为队列收尾动作让 NPC 持续活动到下一 schedule 节点。
-仅当复合动作无法覆盖 schedule 要求时，才用原子动作组合实现；interact 因已是长动作，无需重复多次填充时段。
+- 原子动作（标记 [原子]）：作为基本 building block。其中 move_to/speak/emote/turn_to/generic_act 是短耗时动作；InteractSmartObject（与智能物体交互）是长耗时动作——单次 interact 会持续执行直到时段切换（如在长椅上 rest、在工作台前 assemble），可作为队列收尾动作让 NPC 持续活动到下一 schedule 节点。
+仅当复合动作无法覆盖 schedule 要求时，才用原子动作组合实现；InteractSmartObject 因已是长动作，无需重复多次填充时段。
 
 要求：
 1. 队列首个动作必须是 speak（用一句话表达此刻内心想法或独白），然后才是其他动作
-2. 后续每行输出一个 {"action":"工具名","params":{...}}，按执行顺序排列。action 字段必须严格使用用户信息中"可用工具"列表给出的工具名（如 work_shift / charge_at_station / rest_at_residence / surf_internet / self_maintenance / social_chat / interact / move_to / speak / generic_act / emote / turn_to），禁止编造、禁止近形变换（如把 work_shift 写成 work_short、rest_at_residence 写成 rest_at_composite），否则动作会被丢弃导致队列提前耗尽
-3. 队列必须以长动作结尾（长复合动作 或 interact 原子动作均可）——长动作会持续执行直到时段切换，让 NPC 一直活动到下一 schedule 节点被 worker 主动打断
+2. 后续每行输出一个 {"action":"工具名","params":{...}}，按执行顺序排列。action 字段必须严格使用用户信息中"可用工具"列表给出的工具名（如 work_shift / charge_at_station / rest_at_residence / surf_internet / self_maintenance / social_chat / InteractSmartObject / move_to / speak / generic_act / emote / turn_to），禁止编造、禁止近形变换（如把 work_shift 写成 work_short、rest_at_residence 写成 rest_at_composite），否则动作会被丢弃导致队列提前耗尽
+3. 队列必须以长动作结尾（长复合动作 或 InteractSmartObject 原子动作均可）——长动作会持续执行直到时段切换，让 NPC 一直活动到下一 schedule 节点被 worker 主动打断
 4. 禁止输出 wait 动作；复合动作已包含自动移动到对应位置的逻辑，禁止在复合动作前加 move_to——直接输出单个长复合动作即可。
-5. 仅当目标确实没有匹配的长复合动作时，才用原子动作组合实现目标。长椅休息等场景用单个 interact 即可（interact 是长动作，会持续到时段切换），禁止把同一动作重复多次填充时段——队列提前耗尽会自动触发重分解生成新动作
-6. move_to/turn_to 的 target_id 用用户信息中【世界知识】"可前往区域"的 zone id；interact 和复合动作的 semantic_group 必须严格使用"可交互物体"给出的 semantic_group 值，禁止编造、禁止用实例 id（如 Charge-1）、禁止拼接 zone/interaction 信息
+5. 仅当目标确实没有匹配的长复合动作时，才用原子动作组合实现目标。长椅休息等场景用单个 InteractSmartObject 即可（InteractSmartObject 是长动作，会持续到时段切换），禁止把同一动作重复多次填充时段——队列提前耗尽会自动触发重分解生成新动作
+6. move_to/turn_to 的 target_id 用用户信息中【世界知识】"可前往区域"的 zone id；InteractSmartObject 和复合动作的 semantic_group 必须严格使用"可交互物体"给出的 semantic_group 值，禁止编造、禁止用实例 id（如 Charge-1）、禁止拼接 zone/interaction 信息
 7. 复合动作与 semantic_group 必须严格对应，禁止跨类别组合：
    - work_shift → workbench（装配）/ sorting_conveyor（分拣）/ inspection_table（质检），interaction 用 assemble / sort_cargo / inspect
    - charge_at_station → charger，interaction 用 charge
-   - rest_at_residence → sleep_pod（仅休眠舱），interaction 用 sleep；长椅（bench）休息不属于"在住所休息"，必须改用 interact 原子动作（semantic_group=bench, interaction=rest）
+   - rest_at_residence → sleep_pod（仅休眠舱），interaction 用 sleep；长椅（bench）休息不属于"在住所休息"，必须改用 InteractSmartObject 原子动作（semantic_group=bench, interaction=rest）
    - self_maintenance → repair_table，interaction 用 repair
    - surf_internet → computer，interaction 用 surf_internet
    - social_chat → target_agent_id 必须严格使用用户信息中【附近NPC】列出的 NPC id（格式如 H-01），禁止用显示名（如"老王"）、禁止编造未列出的 id；content 为开场白；对话期间会自动走向对方并挂起直到对话结束
+   - 补充：所有工种设备都可用 InteractSmartObject 原子动作直接工作——semantic_group 填工作设备、interaction 填对应动词即可（如 加工机 process、调试台 debug、拆解台 dismantle，以及 workbench/assemble、sorting_conveyor/sort_cargo、inspection_table/inspect）；work_shift 只是其中三类工种设备的快捷复合动作，没有复合动作的工种一律用 InteractSmartObject
 8. 每行一个 JSON 对象，不要输出 JSON 数组，不要输出 markdown 围栏，不要输出任何其他文字；不要输出 inner_thought 字段，内心独白直接用首个 speak 动作表达
 9. 若用户信息中【物体实时占用】显示目标 semantic_group 全部占用，必须改用其他空闲 semantic_group 或先安排 generic_act(behavior=look_around) 短暂等待，禁止规划必然失败的占用动作`
 
@@ -342,18 +343,18 @@ func paramPlaceholder(p protocol.CapabilityParam) string {
 //   - 充电/补能/休息/恢复  → charge_at_station example (find charging object)
 //   - 装配/工作/作业/打磨  → work_shift example (find workbench object)
 //   - 聊天/社交/对话       → move_to agent + speak example (needs ≥2 agents)
-//   - 检查/自检/inspect    → interact inspect example
+//   - 检查/自检/inspect    → InteractSmartObject inspect example
 //
 // No keyword match or required resource missing → degrade to default:
 // pick first object by category. KB empty → generic example with no concrete IDs.
 //
 // Key constraint: example's move_to target_id must match the example
 // object's ZoneID — otherwise the example itself violates the prompt's
-// "interact must be called in object's zone" constraint #5.
+// "InteractSmartObject must be called in object's zone" constraint #5.
 func TacticalExample(kb *worldkb.KB, goal, agentID string) string {
 	const genericExample = `{"action":"speak","params":{"content":"先去目标区域再开始作业"}}
 {"action":"move_to","params":{"target_type":"zone","target_id":"<上方可前往区域的 id>"}}
-{"action":"interact","params":{"semantic_group":"<上方可交互物体的 semantic_group>","interaction":"<可用 interaction>"}}`
+{"action":"InteractSmartObject","params":{"semantic_group":"<上方可交互物体的 semantic_group>","interaction":"<可用 interaction>"}}`
 	if kb == nil {
 		return genericExample
 	}
@@ -378,7 +379,7 @@ func TacticalExample(kb *worldkb.KB, goal, agentID string) string {
 		}
 		return fmt.Sprintf(`{"action":"speak","params":{"content":"先去目标区域再开始作业"}}
 {"action":"move_to","params":{"target_type":"zone","target_id":"%s"}}
-{"action":"interact","params":{"semantic_group":"<上方可交互物体的 semantic_group>","interaction":"<可用 interaction>"}}`, exZone)
+{"action":"InteractSmartObject","params":{"semantic_group":"<上方可交互物体的 semantic_group>","interaction":"<可用 interaction>"}}`, exZone)
 	}
 	obj := objs[0]
 	exObj := semanticGroupOf(obj)
@@ -408,7 +409,7 @@ func TacticalExample(kb *worldkb.KB, goal, agentID string) string {
 		}
 		return fmt.Sprintf(`{"action":"speak","params":{"content":"先去目标区域再开始作业"}}
 {"action":"move_to","params":{"target_type":"zone","target_id":"%s"}}
-{"action":"interact","params":{"semantic_group":"%s","interaction":"%s"}}`, exZone, exObj, verb)
+{"action":"InteractSmartObject","params":{"semantic_group":"%s","interaction":"%s"}}`, exZone, exObj, verb)
 	}
 }
 
@@ -454,13 +455,13 @@ func exampleForGoal(kb *worldkb.KB, goal, agentID string, zones []worldkb.ZoneIn
 		}
 	}
 
-	// 2c. 长椅/广场休息 → speak + interact(bench/rest)
-	//     长椅休息不是"在住所休息"，必须用 interact 原子动作，禁止套用 rest_at_residence。
+	// 2c. 长椅/广场休息 → speak + InteractSmartObject(bench/rest)
+	//     长椅休息不是"在住所休息"，必须用 InteractSmartObject 原子动作，禁止套用 rest_at_residence。
 	if containsAny(gl, "长椅", "广场休息", "短暂休息", "歇会儿", "歇会", "休息", "rest") {
 		if obj := findObjectBySemanticGroup(objs, "bench"); obj != nil {
 			return fmt.Sprintf(`{"action":"speak","params":{"content":"去中央广场长椅坐会儿"}}
 {"action":"move_to","params":{"target_type":"zone","target_id":"central_plaza"}}
-{"action":"interact","params":{"semantic_group":"bench","interaction":"rest"}}`)
+{"action":"InteractSmartObject","params":{"semantic_group":"bench","interaction":"rest"}}`)
 		}
 	}
 
@@ -484,7 +485,7 @@ func exampleForGoal(kb *worldkb.KB, goal, agentID string, zones []worldkb.ZoneIn
 {"action":"social_chat","params":{"target_agent_id":"%s","content":"最近怎么样？"}}`, peer)
 	}
 
-	// 5. 检查/自检/inspect → speak + move_to + interact inspect
+	// 5. 检查/自检/inspect → speak + move_to + InteractSmartObject inspect
 	if containsAny(gl, "检查", "自检", "inspect", "examine") {
 		for i := range objs {
 			for _, v := range objs[i].AvailableInteractions {
@@ -495,7 +496,7 @@ func exampleForGoal(kb *worldkb.KB, goal, agentID string, zones []worldkb.ZoneIn
 					}
 					return fmt.Sprintf(`{"action":"speak","params":{"content":"先去目标区域检查设备"}}
 {"action":"move_to","params":{"target_type":"zone","target_id":"%s"}}
-{"action":"interact","params":{"semantic_group":"%s","interaction":"inspect"}}`, exZone, semanticGroupOf(objs[i]))
+{"action":"InteractSmartObject","params":{"semantic_group":"%s","interaction":"inspect"}}`, exZone, semanticGroupOf(objs[i]))
 				}
 			}
 		}

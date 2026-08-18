@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"math/rand/v2"
 	"sort"
 	"strings"
 
@@ -23,6 +24,9 @@ const (
 	dayStartMinute = 7 * 60  // 07:00（活动开始；06:00-07:00 为规划时间不覆盖）
 	dayEndMinute   = 30 * 60 // 次日 06:00（= 1440 + 360，归一化坐标）
 	minSlotMinutes = 60      // 时段最短时长，短于此会被丢弃
+
+	planJitterMinutes = 30 // 时间节点随机波动幅度（±分钟），用于错开各 NPC 的活动开始时间
+	planJitterMinGap  = 30 // 扰动后相邻节点最小间隔，保证时段不会被压扁成零/负时长
 )
 
 // dailyPlanItem 是战略层输出的单条计划。
@@ -32,10 +36,29 @@ type dailyPlanItem struct {
 }
 
 // strategicCaller 是 LLM 客户端的窄接口，便于单测 mock。
+// SendWithSchema 用于战略层（Structured Outputs 硬约束）；
+// SendWithSummary 用于记忆层等无 schema 的调用。
 type strategicCaller interface {
 	SendWithSummary(ctx context.Context, system, user string) (*llmtypes.Response, error)
+	SendWithSchema(ctx context.Context, system, user, schemaName string, schema []byte) (*llmtypes.Response, error)
 	ResetSession()
 }
+
+// dailyPlanSchema 是战略层输出的 JSON Schema（OpenAI Structured Outputs
+// strict 模式）。goal 强制为纯字符串——解码级杜绝 LLM 把 goal 写成
+// {"goal":"...","cmd":"..."} 之类的嵌套对象导致整包解析失败。
+const dailyPlanSchema = `{
+  "type": "array",
+  "items": {
+    "type": "object",
+    "properties": {
+      "time": {"type": "string"},
+      "goal": {"type": "string"}
+    },
+    "required": ["time", "goal"],
+    "additionalProperties": false
+  }
+}`
 
 // yesterdaySummaryForFirstDay 是首日启动时注入的"昨日总结"。
 //
@@ -69,9 +92,9 @@ func generateDailyPlan(ctx context.Context, sc strategicCaller, agentID string, 
 		"昨日总结："+yesterdaySummary)
 	logger.Info("[MCP→LLM/STRATEGIC-PROMPT]", "agent_id", agentID, "text", promptText)
 
-	resp, err := sc.SendWithSummary(ctx, prompt.StrategicSystemPrompt, promptText)
+	resp, err := sc.SendWithSchema(ctx, prompt.StrategicSystemPrompt, promptText, "daily_plan", []byte(dailyPlanSchema))
 	if err != nil {
-		fallback := prompt.DefaultDailyPlan(kb)
+		fallback := jitterPlanString(prompt.DefaultDailyPlan(kb))
 		logger.Warn("[战略层] 计划生成失败，使用默认计划兜底",
 			"agent_id", agentID, "err", err, "fallback", fallback)
 		return fallback
@@ -84,7 +107,7 @@ func generateDailyPlan(ctx context.Context, sc strategicCaller, agentID string, 
 
 	items, err := parseDailyPlan(raw)
 	if err != nil {
-		fallback := prompt.DefaultDailyPlan(kb)
+		fallback := jitterPlanString(prompt.DefaultDailyPlan(kb))
 		logger.Warn("[战略层] 计划解析失败，使用默认计划兜底",
 			"agent_id", agentID, "raw", truncateText(raw, 200), "err", err, "fallback", fallback)
 		return fallback
@@ -92,8 +115,11 @@ func generateDailyPlan(ctx context.Context, sc strategicCaller, agentID string, 
 	items = normalizeDailyPlan(items)
 	if len(items) == 0 {
 		logger.Warn("[战略层] 计划校验后为空，使用默认计划兜底", "agent_id", agentID)
-		return prompt.DefaultDailyPlan(kb)
+		return jitterPlanString(prompt.DefaultDailyPlan(kb))
 	}
+	// 时间节点 ±planJitterMinutes 随机扰动：错开各 NPC 的活动开始时间，
+	// 时段切换（战术层分解触发点）随之落在扰动后的时间点上。
+	items = jitterPlanNodes(items, planJitterMinutes)
 	plan := formatDailyPlan(items)
 	logger.Info("[战略层] 每日计划生成成功", "agent_id", agentID, "items", len(items), "plan", plan)
 	return plan
@@ -201,6 +227,86 @@ func normalizeDailyPlan(items []dailyPlanItem) []dailyPlanItem {
 		}
 	}
 	return valid
+}
+
+// jitterPlanNodes 对计划的每个时间节点施加 ±maxJitter 分钟的随机扰动，
+// 让各 NPC 的活动开始时间错开（每次生成计划扰动一次，当天内保持稳定）。
+//
+// 节点模型：相邻时段共享的边界（前段 end == 后段 start）视为同一节点，
+// 扰动一次，保证扰动后时段仍然连续无缝、不重叠。
+//
+// 保证：
+//   - 每个节点偏移量 ∈ [-maxJitter, +maxJitter]
+//   - 相邻节点保持升序且间隔 ≥ planJitterMinGap（钳位实现），时段不会被压扁
+//   - 跨午夜时段（如 "22:00-06:00"）扰动后仍是合法跨午夜时段
+//     （跨午夜 end 用 SlotRangeMinute 归一化 +1440 后参与排序）
+//
+// 下游无需改动：扰动写进计划字符串本身，SlotExpired / matchPlanSlot /
+// prompt 展示都会自然使用新的时间点触发战术层分解。
+func jitterPlanNodes(items []dailyPlanItem, maxJitter int) []dailyPlanItem {
+	if len(items) == 0 || maxJitter <= 0 {
+		return items
+	}
+	// 1. 收集去重节点。SlotRangeMinute 已把跨午夜 end 归一化到 +1440 坐标。
+	nodeSet := map[int]bool{}
+	for _, it := range items {
+		s, e := prompt.SlotRangeMinute(it.Time)
+		if s < 0 {
+			continue
+		}
+		nodeSet[s] = true
+		nodeSet[e] = true
+	}
+	nodes := make([]int, 0, len(nodeSet))
+	for n := range nodeSet {
+		nodes = append(nodes, n)
+	}
+	sort.Ints(nodes)
+	// 2. 逐节点随机扰动，向下钳位保证升序 + 最小间隔。
+	offset := make(map[int]int, len(nodes))
+	prev := -1 << 30
+	for _, n := range nodes {
+		j := n + rand.IntN(2*maxJitter+1) - maxJitter
+		if j < prev+planJitterMinGap {
+			j = prev + planJitterMinGap
+		}
+		offset[n] = j
+		prev = j
+	}
+	// 3. 重建 Time 字符串。FmtMinute 对 ≥1440 的值自动 mod 回当天坐标。
+	out := make([]dailyPlanItem, len(items))
+	for i, it := range items {
+		rawS, rawE, ok := prompt.SplitPlanRange(it.Time)
+		if !ok {
+			out[i] = it
+			continue
+		}
+		lookupE := rawE
+		if rawE <= rawS { // 跨午夜：与步骤 1 的归一化坐标对齐
+			lookupE = rawE + 1440
+		}
+		js, okS := offset[rawS]
+		je, okE := offset[lookupE]
+		if !okS || !okE {
+			out[i] = it
+			continue
+		}
+		out[i] = dailyPlanItem{
+			Time: prompt.FmtMinute(js) + "-" + prompt.FmtMinute(je),
+			Goal: it.Goal,
+		}
+	}
+	return out
+}
+
+// jitterPlanString 对格式化计划字符串（兜底计划）施加同样的节点扰动。
+// 解析失败时原样返回。
+func jitterPlanString(s string) string {
+	items := parseFormattedPlan(s)
+	if len(items) == 0 {
+		return s
+	}
+	return formatDailyPlan(jitterPlanNodes(items, planJitterMinutes))
 }
 
 // formatDailyPlan 把计划格式化为多行字符串。

@@ -584,7 +584,7 @@ func TestMapDebugCmd(t *testing.T) {
 		{"turn_to", protocol.CmdTurnTo, true},
 		{"speak", protocol.CmdSpeak, true},
 		{"emote", protocol.CmdEmote, true},
-		{"interact", protocol.CmdInteractSmartObject, true},
+		{"InteractSmartObject", protocol.CmdInteractSmartObject, true},
 		{"wait", protocol.CmdWait, true},
 		{"work_shift", protocol.CmdWorkShift, true},
 		{"charge_at_station", protocol.CmdChargeAtStation, true},
