@@ -272,13 +272,26 @@ func TestBuildStrategic_InteractWorkGuidance(t *testing.T) {
 }
 
 func TestBuildStrategic_ExcludesMechanismSegments(t *testing.T) {
-	// Mechanism segments (【动作对状态的影响】/【社交】) live in
-	// StrategicSystemPrompt; BuildStrategic returns data segments only.
+	// Mechanism segments (【社交】/【要求】) live in StrategicSystemPrompt;
+	// BuildStrategic returns data segments only. 【动作对状态的影响】已删除
+	// ——属性影响统一由 user 消息的【动作对属性的影响】段（脚本生成）提供。
 	kb := strategicRosterKB()
 	got := BuildStrategic(kb, nil, "H-01", nil, nil, "")
 	for _, seg := range []string{"【动作对状态的影响】", "【社交】", "要求："} {
 		if strings.Contains(got, seg) {
 			t.Errorf("BuildStrategic should not contain mechanism segment %q in:\n%s", seg, got)
 		}
+	}
+}
+
+// TestStrategicSystemPrompt_NoHardcodedEffects 验证 system prompt 不再硬编码
+// 动作属性影响——统一由 cmd_effect_summary.py 生成的【动作对属性的影响】
+// 段（user 消息，SetCmdEffects 注入）提供，避免两份内容漂移。
+func TestStrategicSystemPrompt_NoHardcodedEffects(t *testing.T) {
+	if strings.Contains(StrategicSystemPrompt, "【动作对状态的影响】") {
+		t.Error("StrategicSystemPrompt should not hardcode the effect table (use the script-generated segment)")
+	}
+	if !strings.Contains(StrategicSystemPrompt, "【动作对属性的影响】") {
+		t.Error("StrategicSystemPrompt should reference the script-generated effect segment")
 	}
 }
