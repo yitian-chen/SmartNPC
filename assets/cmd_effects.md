@@ -1,0 +1,12 @@
+各活动对属性的影响（每游戏小时平均变化，由仿真日志统计）：
+- work_shift（assemble）：能量少量下降、疲劳度中等提升、余额明显增加
+- InteractSmartObject（process）：能量少量下降、疲劳度中等提升、余额明显增加
+- InteractSmartObject（debug）：能量少量下降、疲劳度明显提升、余额快速增加
+- InteractSmartObject（rest）：疲劳度中等缓解
+- charge_at_station（charge）：能量少量恢复、疲劳度少量缓解、余额快速消耗
+- surf_internet（surf_internet）：疲劳度少量缓解、余额少量消耗
+- InteractSmartObject（dismantle）：能量中等下降、疲劳度明显提升、关节磨损少量累积、余额快速增加
+- InteractSmartObject（sort_cargo）：能量少量下降、疲劳度中等提升、余额快速增加
+- work_shift（sort_cargo）：能量少量下降、疲劳度中等提升、余额快速增加
+- work_shift（inspect）：疲劳度少量提升、余额中等增加
+- InteractSmartObject（inspect）：疲劳度少量提升、余额中等增加
