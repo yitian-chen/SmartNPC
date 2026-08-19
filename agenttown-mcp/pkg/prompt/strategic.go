@@ -170,8 +170,33 @@ func BuildStrategic(kb *worldkb.KB, profiles map[string]*profile.Profile, agentI
 		sb.WriteString("此外始终可用基础动作：移动、说话、表达情绪、与物体交互（InteractSmartObject）、等待（用于短耗时或衔接）。\n")
 		sb.WriteString("与物体交互（InteractSmartObject）也可直接用于任何工种：semantic_group 填工作设备即可——如加工机（process）、调试台（debug）、拆解台（dismantle）、工作台（assemble）、分拣传送带（sort_cargo）、质检台（inspect），战术层会据此分解为在工作设备上的长时段作业。\n")
 	}
+	// 【动作对属性的影响】段：由 scripts/cmd_effect_summary.py 从仿真日志
+	// 统计生成（assets/cmd_effects.md），main 启动时经 SetCmdEffects 注入。
+	// 与 KB/能力列表独立——空串（文件缺失或未生成）时整段跳过。
+	if cmdEffectsText != "" {
+		sb.WriteString("【动作对属性的影响】\n")
+		sb.WriteString(cmdEffectsText)
+		if !strings.HasSuffix(cmdEffectsText, "\n") {
+			sb.WriteString("\n")
+		}
+	}
 	return sb.String()
 }
+
+// cmdEffectsText is the natural-language cmd→attribute-effect summary
+// ("各活动对属性的影响（每游戏小时平均变化…）: - work_shift（assemble）：…").
+// Derived offline by scripts/cmd_effect_summary.py from sim logs (the world KB
+// itself carries no numeric effect table); loaded once at startup by main and
+// injected into every strategic prompt as the 【动作对属性的影响】 segment.
+// Empty (default) = disabled, segment skipped.
+var cmdEffectsText string
+
+// SetCmdEffects installs the cmd attribute-effect summary text. Call once at
+// startup (before any BuildStrategic call); empty string disables the segment.
+func SetCmdEffects(s string) { cmdEffectsText = s }
+
+// CmdEffects returns the currently installed summary (empty = disabled).
+func CmdEffects() string { return cmdEffectsText }
 
 // StrategicCapabilitySummary constructs the 【可用能力】 segment's composite
 // action bullet list. Reuses toolEntries derivation (same source, ensuring

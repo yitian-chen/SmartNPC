@@ -46,6 +46,40 @@ func TestBuildStrategic_EmptyDayContext(t *testing.T) {
 	}
 }
 
+// TestBuildStrategic_CmdEffectsSegment verifies the 【动作对属性的影响】
+// segment appears when SetCmdEffects installed text (and appears after the
+// 【可用能力】 segment), and is skipped entirely when the summary is empty.
+func TestBuildStrategic_CmdEffectsSegment(t *testing.T) {
+	kb := &worldkb.KB{
+		Version:   "1.0",
+		Narrative: worldkb.Narrative{Setting: "测试"},
+	}
+	text := "各活动对属性的影响（每游戏小时平均变化，由仿真日志统计）：\n" +
+		"- work_shift（assemble）：能量少量下降、疲劳度中等提升、余额明显增加\n"
+	SetCmdEffects(text)
+	defer SetCmdEffects("")
+
+	got := BuildStrategic(kb, nil, "H-01", nil, nil, "")
+	if !strings.Contains(got, "【动作对属性的影响】") {
+		t.Errorf("missing 【动作对属性的影响】 segment in:\n%s", got)
+	}
+	if !strings.Contains(got, "疲劳度中等提升") {
+		t.Errorf("cmd effects text not injected in:\n%s", got)
+	}
+	capIdx := strings.Index(got, "【可用能力】")
+	effIdx := strings.Index(got, "【动作对属性的影响】")
+	if capIdx < 0 || effIdx < 0 || capIdx > effIdx {
+		t.Errorf("segment order wrong: cap=%d effects=%d (want effects after cap)", capIdx, effIdx)
+	}
+
+	// 禁用（空串）时整段消失。
+	SetCmdEffects("")
+	got = BuildStrategic(kb, nil, "H-01", nil, nil, "")
+	if strings.Contains(got, "【动作对属性的影响】") {
+		t.Errorf("empty cmd effects should not produce segment in:\n%s", got)
+	}
+}
+
 // strategicRosterKB builds a minimal KB with 3 agents for roster-segment tests.
 func strategicRosterKB() *worldkb.KB {
 	return &worldkb.KB{
