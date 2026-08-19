@@ -53,6 +53,7 @@ func KBContext(kb *worldkb.KB) string {
 type objectGroup struct {
 	SemanticGroup         string
 	DisplayName           string
+	Description           string
 	ZoneID                string
 	AvailableInteractions []string
 	InstanceCount         int
@@ -84,6 +85,7 @@ func groupObjectsBySemantic(objs []worldkb.ObjectInfo) []objectGroup {
 		g := &objectGroup{
 			SemanticGroup:         key,
 			DisplayName:           o.DisplayName,
+			Description:           o.Description,
 			ZoneID:                o.ZoneID,
 			AvailableInteractions: append([]string(nil), o.AvailableInteractions...),
 			InstanceCount:         1,
@@ -100,6 +102,8 @@ func groupObjectsBySemantic(objs []worldkb.ObjectInfo) []objectGroup {
 }
 
 // formatObjectGroup renders one object group line for the prompt.
+// Trailing description (authored one-liner like "坐一坐，恢复少量疲劳")
+// helps the LLM understand what the object is for beyond bare verb names.
 func formatObjectGroup(g objectGroup) string {
 	label := g.SemanticGroup
 	if g.DisplayName != "" {
@@ -119,7 +123,11 @@ func formatObjectGroup(g objectGroup) string {
 	if g.InstanceCount > 1 {
 		countInfo = fmt.Sprintf("，%d 个实例", g.InstanceCount)
 	}
-	return "  - " + label + zoneInfo + interactionInfo + countInfo
+	descInfo := ""
+	if d := strings.TrimRight(strings.TrimSpace(g.Description), "。"); d != "" {
+		descInfo = "，" + d
+	}
+	return "  - " + label + zoneInfo + interactionInfo + countInfo + descInfo
 }
 
 // contains reports whether s contains v. Tiny helper to avoid importing

@@ -23,17 +23,21 @@ func effectKB() *worldkb.KB {
 	return &worldkb.KB{Objects: []worldkb.Object{
 		mk("workbench", "工作台", map[string]any{
 			"name": "assemble",
-			"energy_delta_per_hour": -4.0, "fatigue_delta_per_hour": 12.0,
+			"description":              "在工作台上进行零件装配，产出成品",
+			"energy_delta_per_hour":    -4.0, "fatigue_delta_per_hour": 12.0,
 			"joint_wear_delta_per_hour": 1.4, "money_delta_per_hour": 30.0,
+			"min_energy_to_use": 10.0, "max_fatigue_to_use": 80.0, "max_joint_wear_to_use": 80.0,
 		}),
 		mk("charger", "充电桩", map[string]any{
 			"name": "charge",
+			"description":           "连接到充电桩补充能量。能量低时前往，可恢复能量值",
 			"energy_delta_per_hour": 80.0, "fatigue_delta_per_hour": -5.0,
 			"money_delta_per_hour": -20.0, "money_one_shot": -30.0,
+			"min_money_to_use": 40.0,
 		}),
 		mk("sleep_pod", "睡眠舱",
-			map[string]any{"name": "sleep", "fatigue_delta_per_hour": -25.0},
-			map[string]any{"name": "tidy_up"},
+			map[string]any{"name": "sleep", "description": "进入休眠舱休息，恢复精力和状态", "fatigue_delta_per_hour": -25.0},
+			map[string]any{"name": "tidy_up", "description": "整理内务：整理自己的私人物品和床铺，保持整洁"},
 		),
 		mk("bench", "长椅", map[string]any{
 			"name": "rest", "fatigue_delta_per_hour": -10.0,
@@ -80,10 +84,12 @@ func TestBuildCmdEffectsText(t *testing.T) {
 	text := BuildCmdEffectsText(InteractionEffectsFromKB(effectKB()))
 	for _, want := range []string{
 		"各活动对属性的影响（每游戏小时变化率，来自 world KB 声明）：",
-		"工作台（workbench/assemble）：能量中等下降、疲劳度明显提升、关节磨损少量累积、余额快速增加",
-		"充电桩（charger/charge）：能量快速恢复、疲劳度中等缓解、余额快速消耗、一次性消耗余额 30 点",
-		"睡眠舱（sleep_pod/sleep）：疲劳度快速缓解",
-		"睡眠舱（sleep_pod/tidy_up）：无属性影响",
+		// 描述在前、属性效果居中、使用门槛收尾。
+		"工作台（workbench/assemble）：在工作台上进行零件装配，产出成品。能量中等下降、疲劳度明显提升、关节磨损少量累积、余额快速增加。使用门槛：能量≥10、疲劳≤80、磨损≤80",
+		"充电桩（charger/charge）：连接到充电桩补充能量。能量低时前往，可恢复能量值。能量快速恢复、疲劳度中等缓解、余额快速消耗、一次性消耗余额 30 点。使用门槛：余额≥40",
+		"睡眠舱（sleep_pod/sleep）：进入休眠舱休息，恢复精力和状态。疲劳度快速缓解",
+		"睡眠舱（sleep_pod/tidy_up）：整理内务：整理自己的私人物品和床铺，保持整洁。无属性影响",
+		// 无描述、无门槛的条目保持原样。
 		"长椅（bench/rest）：疲劳度明显缓解",
 	} {
 		if !strings.Contains(text, want) {

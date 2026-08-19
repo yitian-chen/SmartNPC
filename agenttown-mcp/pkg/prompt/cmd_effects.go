@@ -22,6 +22,9 @@ type InteractionEffect struct {
 	SemanticGroup string
 	DisplayName   string // 物体显示名（如"睡眠舱"），缺省用 semantic_group
 	Interaction   string
+	// Description 是互动的一句话描述（world_kb 声明，如"整理内务：
+	// 整理自己的私人物品和床铺，保持整洁"）。让 LLM 理解裸动词的含义。
+	Description string
 	// 每游戏小时变化率（正=上升，负=下降）
 	Energy    float64
 	Fatigue   float64
@@ -29,6 +32,11 @@ type InteractionEffect struct {
 	Money     float64
 	// MoneyOneShot 是使用时的一次性余额变动（充电 -30、维修 -50）。
 	MoneyOneShot float64
+	// 使用门槛（UE 侧校验，不满足则互动被拒绝；0/100 为"无限制"默认值）。
+	MinEnergy    float64 // min_energy_to_use，能量需 ≥ 此值
+	MaxFatigue   float64 // max_fatigue_to_use，疲劳需 ≤ 此值
+	MinMoney     float64 // min_money_to_use，余额需 ≥ 此值
+	MaxJointWear float64 // max_joint_wear_to_use，磨损需 ≤ 此值
 }
 
 // magnitude 分档（每游戏小时 |速率|）：<1 忽略；1-4 少量；4-10 中等；
@@ -89,15 +97,21 @@ func InteractionEffectsFromKB(kb *worldkb.KB) []InteractionEffect {
 				continue
 			}
 			seen[key] = true
+			desc, _ := m["description"].(string)
 			out = append(out, InteractionEffect{
 				SemanticGroup: sg,
 				DisplayName:   display,
 				Interaction:   name,
+				Description:   desc,
 				Energy:        effectFloat(m, "energy_delta_per_hour"),
 				Fatigue:       effectFloat(m, "fatigue_delta_per_hour"),
 				JointWear:     effectFloat(m, "joint_wear_delta_per_hour"),
 				Money:         effectFloat(m, "money_delta_per_hour"),
 				MoneyOneShot:  effectFloat(m, "money_one_shot"),
+				MinEnergy:     effectFloat(m, "min_energy_to_use"),
+				MaxFatigue:    effectFloat(m, "max_fatigue_to_use"),
+				MinMoney:      effectFloat(m, "min_money_to_use"),
+				MaxJointWear:  effectFloat(m, "max_joint_wear_to_use"),
 			})
 		}
 	}
@@ -135,9 +149,48 @@ func BuildCmdEffectsText(effects []InteractionEffect) string {
 	return strings.TrimSuffix(sb.String(), "\n")
 }
 
-// describeEffect 把单个互动的速率转成自然语言短语（顿号分隔）。
-// 无显著变化（所有 |速率| <1 且无一次性变动）时返回"无属性影响"。
+// describeEffect 把单个互动的描述、速率与使用门槛转成自然语言。
+// 组成：{描述}。{属性效果}。使用门槛：{门槛}—— 各部分缺失时省略。
 func describeEffect(e InteractionEffect) string {
+	var parts []string
+	if d := strings.TrimRight(strings.TrimSpace(e.Description), "。"); d != "" {
+		parts = append(parts, d)
+	}
+	if fx := describeRates(e); fx != "" {
+		parts = append(parts, fx)
+	}
+	out := strings.Join(parts, "。")
+	if gates := describeGates(e); gates != "" {
+		if out != "" {
+			out += "。"
+		}
+		out += "使用门槛：" + gates
+	}
+	return out
+}
+
+// describeGates 把使用门槛转成自然语言（顿号分隔），全为无限制默认值
+// （能量/余额下限 0、疲劳/磨损上限 100）时返回空串。
+func describeGates(e InteractionEffect) string {
+	var gates []string
+	if e.MinEnergy > 0 {
+		gates = append(gates, fmt.Sprintf("能量≥%g", e.MinEnergy))
+	}
+	if e.MaxFatigue > 0 && e.MaxFatigue < 100 {
+		gates = append(gates, fmt.Sprintf("疲劳≤%g", e.MaxFatigue))
+	}
+	if e.MinMoney > 0 {
+		gates = append(gates, fmt.Sprintf("余额≥%g", e.MinMoney))
+	}
+	if e.MaxJointWear > 0 && e.MaxJointWear < 100 {
+		gates = append(gates, fmt.Sprintf("磨损≤%g", e.MaxJointWear))
+	}
+	return strings.Join(gates, "、")
+}
+
+// describeRates 把每游戏小时速率 + 一次性变动转成自然语言短语（顿号分隔）。
+// 无显著变化（所有 |速率| <1 且无一次性变动）时返回"无属性影响"。
+func describeRates(e InteractionEffect) string {
 	var parts []string
 	for _, attr := range []string{"energy", "fatigue", "joint_wear", "money"} {
 		var r float64

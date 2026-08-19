@@ -134,9 +134,12 @@ type ZoneInfo struct {
 // SemanticGroup is the UE5-facing group name (e.g. "charger", "workbench")
 // used as the `semantic_group` parameter value for InteractSmartObject and
 // composite actions — distinct from the instance ID (e.g. "Charge-1").
+// Description is the authored one-line object description (e.g.
+// "坐一坐，恢复少量疲劳"), surfaced in prompt object listings.
 type ObjectInfo struct {
 	ID                    string
 	DisplayName           string
+	Description           string
 	Category              string
 	SemanticGroup         string
 	ZoneID                string
@@ -172,6 +175,7 @@ func (k *KB) ListObjects() []ObjectInfo {
 		out = append(out, ObjectInfo{
 			ID:                    o.ID,
 			DisplayName:           o.DisplayName,
+			Description:           o.Description,
 			Category:              o.Category,
 			SemanticGroup:         o.SemanticGroup,
 			ZoneID:                o.ZoneID,
