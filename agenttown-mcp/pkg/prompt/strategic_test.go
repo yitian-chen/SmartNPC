@@ -223,6 +223,21 @@ func TestStrategicSystemPrompt_PlanStartsAtSeven(t *testing.T) {
 	}
 }
 
+// TestStrategicSystemPrompt_NightSleepContinuous 验证规则 5 约束夜间睡眠
+// 为单一连续跨午夜时段（不拆分、不提前结束）——防止 currentSlot 半夜到期
+// 打断睡眠重新分解（"睡着睡着爬起来重睡"）。
+func TestStrategicSystemPrompt_NightSleepContinuous(t *testing.T) {
+	for _, want := range []string{
+		"夜间睡眠必须是一个连续的跨午夜时段",
+		"不得拆成多个睡眠时段",
+		"不得在凌晨提前结束",
+	} {
+		if !strings.Contains(StrategicSystemPrompt, want) {
+			t.Errorf("system prompt missing %q", want)
+		}
+	}
+}
+
 func TestStrategicSystemPrompt_RecoveryDiversified(t *testing.T) {
 	// 规则 8：恢复时段方式多样化（休眠舱小憩/充电/长椅/上网），
 	// 性格为主依据；仅低电量必充、非常疲劳必休两个强制例外。

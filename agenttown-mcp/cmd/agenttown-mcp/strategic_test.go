@@ -578,6 +578,102 @@ func TestNormalizeDailyPlan_AlreadyValid(t *testing.T) {
 	}
 }
 
+// TestNormalizeDailyPlan_ExtendsCrossMidnightLastSlot 验证跨午夜末段结束
+// 早于 06:00（如实测的 23:29-00:54）时被后延到 06:00，避免凌晨空洞导致
+// 睡眠段半夜到期被打断重睡。
+func TestNormalizeDailyPlan_ExtendsCrossMidnightLastSlot(t *testing.T) {
+	items := []dailyPlanItem{
+		{Time: "07:00-12:00", Goal: "上午"},
+		{Time: "12:00-22:00", Goal: "傍晚"},
+		{Time: "23:29-00:54", Goal: "休眠"}, // 跨午夜，只睡到 00:54
+	}
+	got := normalizeDailyPlan(items)
+	if len(got) != 3 {
+		t.Fatalf("got %d items, want 3", len(got))
+	}
+	if got[2].Time != "23:29-06:00" {
+		t.Errorf("cross-midnight last slot should extend to 06:00: got %q, want 23:29-06:00", got[2].Time)
+	}
+}
+
+// TestNormalizeDailyPlan_MergesAdjacentSameGoal 验证相邻同时段被合并
+// （实测 LLM 输出连续两段睡眠 20:30-22:58 + 22:58-07:16，边界到期会打断
+// 睡眠重新分解）。
+func TestNormalizeDailyPlan_MergesAdjacentSameGoal(t *testing.T) {
+	items := []dailyPlanItem{
+		{Time: "07:00-20:30", Goal: "白天活动"},
+		{Time: "20:30-22:58", Goal: "睡觉"},
+		{Time: "22:58-07:16", Goal: "睡觉"},
+	}
+	got := normalizeDailyPlan(items)
+	if len(got) != 2 {
+		t.Fatalf("got %d items, want 2 (same-goal slots merged): %+v", len(got), got)
+	}
+	if got[1].Time != "20:30-07:16" {
+		t.Errorf("merged sleep slot should be 20:30-07:16: got %q", got[1].Time)
+	}
+	if got[1].Goal != "睡觉" {
+		t.Errorf("merged slot goal = %q, want 睡觉", got[1].Goal)
+	}
+}
+
+// TestNormalizeDailyPlan_NoMergeDifferentGoals 验证相邻时段 goal 不同时
+// 不合并。
+func TestNormalizeDailyPlan_NoMergeDifferentGoals(t *testing.T) {
+	items := []dailyPlanItem{
+		{Time: "07:00-12:00", Goal: "上午工作"},
+		{Time: "12:00-18:00", Goal: "下午工作"},
+	}
+	got := normalizeDailyPlan(items)
+	if len(got) != 2 {
+		t.Fatalf("got %d items, want 2 (different goals must not merge)", len(got))
+	}
+}
+
+// TestClampNightEnd 验证跨午夜末段结束时间的 06:00 钳位：
+// 早于 06:00 → 钳到 06:00；已达 06:00 及以后 / 非跨午夜 → 不变。
+func TestClampNightEnd(t *testing.T) {
+	cases := []struct {
+		last, want string
+	}{
+		{"22:00-05:50", "22:00-06:00"}, // 被 jitter 拉早的夜间结束 → 钳回
+		{"23:29-00:54", "23:29-06:00"}, // 凌晨短睡眠 → 钳回
+		{"22:00-06:00", "22:00-06:00"}, // 恰好 06:00 → 不变
+		{"22:38-06:58", "22:38-06:58"}, // 覆盖过 06:00 → 不变
+		{"12:00-22:00", "12:00-22:00"}, // 非跨午夜 → 不变（由规则 5 处理）
+	}
+	for _, c := range cases {
+		items := []dailyPlanItem{
+			{Time: "07:00-12:00", Goal: "白天"},
+			{Time: c.last, Goal: "休眠"},
+		}
+		got := clampNightEnd(items)
+		if got[len(got)-1].Time != c.want {
+			t.Errorf("clampNightEnd(last=%q) = %q, want %q", c.last, got[len(got)-1].Time, c.want)
+		}
+	}
+}
+
+// TestJitterPlanNodes_NightEndNotBeforeSix 验证 jitter + clampNightEnd 后
+// 跨午夜末段的结束时间始终 ≥ 06:00（随机扰动多轮迭代验证不变量）。
+func TestJitterPlanNodes_NightEndNotBeforeSix(t *testing.T) {
+	base := []dailyPlanItem{
+		{Time: "07:00-12:00", Goal: "上午"},
+		{Time: "12:00-22:00", Goal: "下午"},
+		{Time: "22:00-06:20", Goal: "夜间休息"},
+	}
+	for i := 0; i < 200; i++ {
+		got := clampNightEnd(jitterPlanNodes(base, planJitterMinutes))
+		_, e, ok := prompt.SplitPlanRange(got[len(got)-1].Time)
+		if !ok {
+			t.Fatalf("iteration %d: unparseable last slot %q", i, got[len(got)-1].Time)
+		}
+		if e < 6*60 {
+			t.Fatalf("iteration %d: night end %q before 06:00 (e=%d)", i, got[len(got)-1].Time, e)
+		}
+	}
+}
+
 // jitterPlanNodes 的性质是随机的，单测用多轮迭代验证不变量而非精确值。
 func jitterTestPlan() []dailyPlanItem {
 	return []dailyPlanItem{

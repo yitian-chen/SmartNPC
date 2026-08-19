@@ -119,7 +119,8 @@ func generateDailyPlan(ctx context.Context, sc strategicCaller, agentID string, 
 	}
 	// 时间节点 ±planJitterMinutes 随机扰动：错开各 NPC 的活动开始时间，
 	// 时段切换（战术层分解触发点）随之落在扰动后的时间点上。
-	items = jitterPlanNodes(items, planJitterMinutes)
+	// 扰动后钳位夜间结束节点：不得早于 06:00（见 clampNightEnd 注释）。
+	items = clampNightEnd(jitterPlanNodes(items, planJitterMinutes))
 	plan := formatDailyPlan(items)
 	logger.Info("[战略层] 每日计划生成成功", "agent_id", agentID, "items", len(items), "plan", plan)
 	return plan
@@ -162,12 +163,17 @@ func parseDailyPlan(raw string) ([]dailyPlanItem, error) {
 // normalizeDailyPlan 校验并补全解析后的每日计划：
 //  1. 丢弃时长 <60min 的时段（调度器按 60min 采样，短时段大概率不被命中）
 //  2. 按起始时间排序
+//  2.5 合并相邻同时段：LLM 偶发输出连续两个同名时段（实测连续两段睡眠
+//     20:30-22:58 + 22:58-07:16），每次边界到期都会打断睡眠重新分解，
+//     合并后由后续规则统一填补/后延
 //  3. 首段前伸到 07:00（dayStartMinute；06:00-07:00 是规划时间，不覆盖）
 //  4. 填补中间空白：前段 end < 后段 start 时延长前段
-//  5. 末段后延到次日 06:00（若 LLM 只规划到 18:00，18:00-22:00 会触发 idle wait 瘫痪）
+//  5. 末段后延到次日 06:00（若 LLM 只规划到 18:00，18:00-22:00 会触发 idle wait 瘫痪）；
+//     跨午夜末段结束早于 06:00 的（如 23:29-00:54）同样后延——否则凌晨出现
+//     空洞，睡眠段半夜到期被打断重睡
 //
 // 支持跨午夜 slot（如 "22:00-06:00"）：跨午夜时段时长按 end+1440-start 计算，
-// 末段若已跨午夜则不后延。
+// 末段若已跨午夜且覆盖到 06:00 及以后则不后延。
 // 全部被丢弃时返回 nil，调用方走 prompt.DefaultDailyPlan(kb) 兜底。
 func normalizeDailyPlan(items []dailyPlanItem) []dailyPlanItem {
 	// 1. 过滤短时段。跨午夜 slot（end <= start）时长按 end+1440-start 计算。
@@ -195,6 +201,18 @@ func normalizeDailyPlan(items []dailyPlanItem) []dailyPlanItem {
 		sj, _, _ := prompt.SplitPlanRange(valid[j].Time)
 		return si < sj
 	})
+	// 2.5 合并相邻同 goal 时段（含跨午夜边界两侧的连续睡眠）。
+	merged := make([]dailyPlanItem, 0, len(valid))
+	for _, it := range valid {
+		if n := len(merged); n > 0 && merged[n-1].Goal == it.Goal {
+			s, _, _ := prompt.SplitPlanRange(merged[n-1].Time)
+			_, e, _ := prompt.SplitPlanRange(it.Time)
+			merged[n-1].Time = prompt.FmtMinute(s) + "-" + prompt.FmtMinute(e)
+			continue
+		}
+		merged = append(merged, it)
+	}
+	valid = merged
 	// 3. 首段前伸到 dayStart。
 	if s, e, ok := prompt.SplitPlanRange(valid[0].Time); ok && s > dayStartMinute {
 		valid[0].Time = prompt.FmtMinute(dayStartMinute) + "-" + prompt.FmtMinute(e)
@@ -210,7 +228,7 @@ func normalizeDailyPlan(items []dailyPlanItem) []dailyPlanItem {
 		}
 	}
 	// 5. 末段后延到 dayEnd（次日 06:00）。
-	// 跨午夜末段（end <= start）已覆盖到次日，不后延。
+	// 跨午夜末段（end <= start）若已覆盖到 06:00 及以后则不后延。
 	// 非跨午夜末段：若 end < 22:00，后延到 22:00（夜间开始，避免日间 goal
 	// 被拉到次日清晨）；若 22:00 <= end < 06:00（次日），后延到 06:00。
 	// 这样无论 LLM 规划到几点都不会出现尾部空白瘫痪。
@@ -226,7 +244,35 @@ func normalizeDailyPlan(items []dailyPlanItem) []dailyPlanItem {
 			valid[len(valid)-1].Time = prompt.FmtMinute(s) + "-" + prompt.FmtMinute(dayEndMinute)
 		}
 	}
+	// 跨午夜末段：结束早于 06:00（如 23:29-00:54）→ 后延到 06:00，
+	// 避免 00:54 起的凌晨空洞导致睡眠段半夜到期（见 clampNightEnd 注释）。
+	valid = clampNightEnd(valid)
 	return valid
+}
+
+// clampNightEnd 保证跨午夜末段的结束时间不早于 06:00（dayEndMinute 当日
+// 坐标 = dayEndMinute-1440）。两处调用：
+//   - normalizeDailyPlan 规则 5：LLM 生成的末段睡眠只到凌晨（如 23:29-00:54）；
+//   - jitterPlanNodes 之后：扰动可能把夜间结束节点抖到 06:00 前（实测
+//     22:00-06:20 被抖成 21:26-05:50）。
+//
+// 不满足条件（非跨午夜 / 已覆盖到 06:00 及以后）时原样返回。夜间睡眠段
+// 在 06:00 前到期会触发 advanceSlotIfNeeded 打断睡眠——而 05:50-06:00 不在
+// 06:00-07:00 规划屏蔽窗口内，战术层立即重新分解睡眠，表现为"睡着睡着
+// 爬起来说句话再睡"。
+func clampNightEnd(items []dailyPlanItem) []dailyPlanItem {
+	if len(items) == 0 {
+		return items
+	}
+	last := items[len(items)-1]
+	s, e, ok := prompt.SplitPlanRange(last.Time)
+	if !ok || e > s || e >= dayEndMinute-1440 {
+		return items
+	}
+	out := make([]dailyPlanItem, len(items))
+	copy(out, items)
+	out[len(out)-1].Time = prompt.FmtMinute(s) + "-" + prompt.FmtMinute(dayEndMinute-1440)
+	return out
 }
 
 // jitterPlanNodes 对计划的每个时间节点施加 ±maxJitter 分钟的随机扰动，
@@ -306,7 +352,7 @@ func jitterPlanString(s string) string {
 	if len(items) == 0 {
 		return s
 	}
-	return formatDailyPlan(jitterPlanNodes(items, planJitterMinutes))
+	return formatDailyPlan(clampNightEnd(jitterPlanNodes(items, planJitterMinutes)))
 }
 
 // formatDailyPlan 把计划格式化为多行字符串。
