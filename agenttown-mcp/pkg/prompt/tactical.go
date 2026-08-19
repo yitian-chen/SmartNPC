@@ -181,6 +181,12 @@ func BuildTactical(in TacticalInput) string {
 		}
 	}
 	toolList, toolCount := BuildTacticalToolList(in.Actions)
+	// 【动作对属性的影响】段与战略层共用同一份摘要（SetCmdEffects 注入，
+	// world_kb 推送时生成）。帮助战术层在恢复类 goal 下选择合适的互动
+	// （如 meditate 轻缓解 vs sleep 深度恢复）。空串=未生成，跳过。
+	if cmdEffectsText != "" {
+		toolList += "\n\n【动作对属性的影响】\n" + cmdEffectsText
+	}
 	objectStatusLine := ObjectStatusContext(in.ObjectStatus, in.NearbyObjects, in.KB)
 	return fmt.Sprintf(tacticalUserBody, in.Goal, in.Zone, in.TimeOfDay,
 		physicalLine,
