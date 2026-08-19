@@ -223,6 +223,9 @@ func TestTacticalExample_ExerciseGoal(t *testing.T) {
 	if strings.Index(got, `"action":"move_to"`) > strings.Index(got, `"action":"exercise"`) {
 		t.Errorf("move_to must precede exercise (in-place action), got:\n%s", got)
 	}
+	if !strings.Contains(got, `"exercise_type":"stretch"`) {
+		t.Errorf("exercise action must fill required exercise_type param, got:\n%s", got)
+	}
 }
 
 // TestTacticalExample_ExerciseZoneFallback verifies exerciseZone falls back

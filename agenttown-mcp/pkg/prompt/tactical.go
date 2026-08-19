@@ -44,6 +44,10 @@ var toolOverride = map[string]struct {
 	"rest_at_residence": {"在住所休息（仅搭配 sleep_pod/sleep；长椅休息用 InteractSmartObject）", `{"semantic_group":"sleep_pod","interaction":"sleep"}`},
 	"surf_internet":     {"上网浏览", `{"semantic_group":"computer","interaction":"surf_internet"}`},
 	"social_chat":       {"主动去找另一个 NPC 聊天（走向对方+对话挂起，直到对话结束）", `{"target_agent_id":"<附近NPC的 id>","content":"开场白"}`},
+	// Exercise 是 UE 动态注册的新 composite cmd（2026-08-19），原地执行、
+	// 不自动移动——与 5 个内置复合动作不同，目标地点非当前位置时需要先
+	// move_to（规则 4 有对应说明）。params 的 enum 值来自 capability_registry。
+	"exercise": {"原地锻炼（拉伸/散步/做操），不会自动移动；目标在别处时先 move_to 过去", `{"exercise_type":"stretch|walk|gymnastics"}`},
 }
 
 // TacticalSystemPrompt is the tactical layer's system message: mechanism
@@ -472,7 +476,7 @@ func exampleForGoal(kb *worldkb.KB, goal, agentID string, zones []worldkb.ZoneIn
 		exZone := exerciseZone(zones)
 		return fmt.Sprintf(`{"action":"speak","params":{"content":"去目标区域活动一下身体"}}
 {"action":"move_to","params":{"target_type":"zone","target_id":"%s"}}
-{"action":"exercise","params":{}}`, exZone)
+{"action":"exercise","params":{"exercise_type":"stretch"}}`, exZone)
 	}
 
 	// 3. 装配/工作/作业/打磨/加工 → speak + work_shift
