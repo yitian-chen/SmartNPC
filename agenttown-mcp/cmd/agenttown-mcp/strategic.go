@@ -396,8 +396,15 @@ func matchPlanSlot(items []dailyPlanItem, timeOfDay string) string {
 			continue
 		}
 		if end <= start {
-			// 跨日时段（如 "17:30-06:00"）：cur 在 [start,24:00) 或 [0,end) 内都算匹配。
-			if cur >= start || cur < end {
+			// 跨日时段（如 "17:30-06:00"）：
+			// - 晚间半段 [start,24:00)：当天晚上命中，正常匹配；
+			// - 凌晨半段 [0,end)：仅当 cur 仍早于 dayStartMinute(07:00) 才匹配——
+			//   此时生效的是前一天的旧计划，夜间时段确实在进行中。07:00 之后生效的
+			//   必为当天新生成的计划（跨日在 06:00-07:00 规划窗口内重生成），其中的
+			//   跨午夜时段属于今晚而非昨夜，凌晨半段不得命中——否则清晨会把今晚的
+			//   睡觉时段当作当前时段分解下发（首段被扰动推迟时尤甚：如末段
+			//   22:21-07:25 在 07:02 命中，NPC 一早又回去睡觉）。
+			if cur >= start || (cur < end && cur < dayStartMinute) {
 				return item.Time
 			}
 		} else if cur >= start && cur < end {

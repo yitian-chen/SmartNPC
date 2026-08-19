@@ -787,6 +787,50 @@ func TestSelectPlanInjection_OvernightSlot(t *testing.T) {
 	}
 }
 
+// TestMatchPlanSlot_OvernightMorningHalfAfterDayStart 验证跨午夜时段的
+// 凌晨半段在 07:00（dayStartMinute）之后不再命中：07:00 后生效的必为当天
+// 新生成的计划，其中的跨午夜时段属于今晚——清晨命中它会把今晚的睡觉当作
+// 当前时段分解下发（实测：末段 22:21-07:25 在 07:02 命中，NPC 一早回舱睡觉）。
+// 07:00 前的凌晨时间仍应命中（此时生效的是前一天的旧计划，夜间时段在进行中）。
+func TestMatchPlanSlot_OvernightMorningHalfAfterDayStart(t *testing.T) {
+	items := []dailyPlanItem{
+		{Time: "07:22-09:45", Goal: "装配"},
+		{Time: "09:45-11:48", Goal: "拆解"},
+		{Time: "22:21-07:25", Goal: "休眠"},
+	}
+	cases := []struct {
+		tod  string
+		want string
+	}{
+		{"03:00", "22:21-07:25"}, // 凌晨：旧计划夜间时段进行中 → 命中
+		{"06:30", "22:21-07:25"}, // 06:00-07:00 规划窗口（matchPlanSlot 层面仍命中，selectCurrentGoal 另有屏蔽）
+		{"07:02", ""},            // 07:00 后：今晚的睡觉段不得命中（首段 07:22 尚未开始）
+		{"07:23", "07:22-09:45"}, // 首段开始后正常命中
+		{"23:00", "22:21-07:25"}, // 晚间半段正常命中
+	}
+	for _, c := range cases {
+		if got := matchPlanSlot(items, c.tod); got != c.want {
+			t.Errorf("matchPlanSlot(items, %q) = %q, want %q", c.tod, got, c.want)
+		}
+	}
+}
+
+// TestSelectCurrentGoal_OvernightSleepNotDispatchedMorning 验证 07:00 后
+// selectCurrentGoal 不会选中当天新计划的跨午夜睡觉段（不下发凌晨睡眠）。
+func TestSelectCurrentGoal_OvernightSleepNotDispatchedMorning(t *testing.T) {
+	plan := "07:22-09:45: 装配\n09:45-11:48: 拆解\n22:21-07:25: 休眠"
+	// 07:02：首段未开始、夜间段不得命中 → 无当前 goal，本轮 idle 等待
+	goal, slot, idx := selectCurrentGoal(plan, "07:02")
+	if goal != "" || slot != "" || idx != -1 {
+		t.Errorf("selectCurrentGoal(plan, 07:02) = (%q, %q, %d), want empty", goal, slot, idx)
+	}
+	// 凌晨 03:00（旧计划语义）：命中夜间段（selectCurrentGoal 不屏蔽 06:00 前）
+	goal, slot, _ = selectCurrentGoal(plan, "03:00")
+	if goal != "休眠" || slot != "22:21-07:25" {
+		t.Errorf("selectCurrentGoal(plan, 03:00) = (%q, %q), want 休眠/22:21-07:25", goal, slot)
+	}
+}
+
 func TestSelectPlanInjection_OvernightSlotEarlyMorning(t *testing.T) {
 	plan := "17:30-06:00: 充电休息"
 	// 03:00 在 17:30-06:00 的跨日部分（[0,360)）内
