@@ -239,14 +239,38 @@ func TestStrategicSystemPrompt_NightSleepContinuous(t *testing.T) {
 }
 
 func TestBuildStrategic_InteractWorkGuidance(t *testing.T) {
-	// 【可用能力】段应告知：任何工种都可用 interact + 工作设备直接工作
-	// （process/debug/dismantle 等无复合动作的工种的规划依据）。
+	// 【可用能力】段应告知：InteractSmartObject 可用于任何可交互物体——
+	// 工种设备（process/debug/dismantle 等无复合动作工种的规划依据）
+	// 与非工种互动（睡眠舱 sleep/meditate/tidy_up、长椅 rest）。
 	kb := strategicRosterKB()
 	got := BuildStrategic(kb, nil, "H-01", nil, nil, "")
-	for _, want := range []string{"任何工种", "加工机（process）", "拆解台（dismantle）"} {
+	for _, want := range []string{
+		"任何可交互物体",
+		"加工机（process）", "拆解台（dismantle）",
+		"睡眠舱（sleep/meditate/tidy_up）", "长椅（rest）",
+	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("BuildStrategic 可用能力 should mention %q:\n%s", want, got)
 		}
+	}
+}
+
+// TestStrategicSystemPrompt_Rule3AtomicInteractionGate 验证规则 3 把
+// (semantic_group, interaction) 组合列为合法映射——新动态互动（如
+// meditate/tidy_up）由此获得准入，不再被"无 cmd 对应→换一个"拦下。
+func TestStrategicSystemPrompt_Rule3AtomicInteractionGate(t *testing.T) {
+	for _, want := range []string{
+		"两类都合法",
+		"(semantic_group, interaction) 组合",
+		"睡眠舱的 sleep/meditate/tidy_up",
+	} {
+		if !strings.Contains(StrategicSystemPrompt, want) {
+			t.Errorf("system prompt rule 3 missing %q", want)
+		}
+	}
+	// 规则 5 早间露出。
+	if !strings.Contains(StrategicSystemPrompt, "冥想醒神、整理舱位") {
+		t.Error("system prompt rule 5 should expose 冥想醒神/整理舱位 as morning options")
 	}
 }
 

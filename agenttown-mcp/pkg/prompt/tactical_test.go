@@ -201,6 +201,64 @@ func TestTacticalExample_SocialChatGoal(t *testing.T) {
 	}
 }
 
+// TestTacticalExample_MeditateGoal verifies a meditate goal (even when the
+// text mentions 睡眠舱, which would otherwise be routed to the sleep branch)
+// emits InteractSmartObject(sleep_pod/meditate) instead of rest_at_residence.
+func TestTacticalExample_MeditateGoal(t *testing.T) {
+	kb := worldkb.NewKB(
+		[]worldkb.Zone{{ID: "residential_quarters", DisplayName: "休眠舱居住区"}},
+		[]worldkb.Object{{ID: "SleepPod-1", DisplayName: "睡眠舱",
+			SemanticGroup: "sleep_pod", ZoneID: "residential_quarters",
+			AvailableInteractions: []string{"sleep", "meditate", "tidy_up"}}},
+		[]worldkb.Agent{{ID: "H-01", DisplayName: "老陈"}},
+	)
+	got := TacticalExample(kb, "休眠舱居住区睡眠舱冥想放松", "H-01")
+	if !strings.Contains(got, `"action":"InteractSmartObject"`) {
+		t.Errorf("meditate goal should emit InteractSmartObject, got:\n%s", got)
+	}
+	if !strings.Contains(got, `"semantic_group":"sleep_pod"`) || !strings.Contains(got, `"interaction":"meditate"`) {
+		t.Errorf("meditate goal should use sleep_pod/meditate, got:\n%s", got)
+	}
+	if strings.Contains(got, `"action":"rest_at_residence"`) || strings.Contains(got, `"interaction":"sleep"`) {
+		t.Errorf("meditate goal must NOT be routed to rest_at_residence/sleep, got:\n%s", got)
+	}
+}
+
+// TestTacticalExample_TidyUpGoal verifies a tidy-up goal emits
+// InteractSmartObject(sleep_pod/tidy_up).
+func TestTacticalExample_TidyUpGoal(t *testing.T) {
+	kb := worldkb.NewKB(
+		[]worldkb.Zone{{ID: "residential_quarters", DisplayName: "休眠舱居住区"}},
+		[]worldkb.Object{{ID: "SleepPod-1", DisplayName: "睡眠舱",
+			SemanticGroup: "sleep_pod", ZoneID: "residential_quarters",
+			AvailableInteractions: []string{"sleep", "meditate", "tidy_up"}}},
+		[]worldkb.Agent{{ID: "H-01", DisplayName: "老陈"}},
+	)
+	got := TacticalExample(kb, "早起整理床铺和舱位", "H-01")
+	if !strings.Contains(got, `"interaction":"tidy_up"`) {
+		t.Errorf("tidy-up goal should emit tidy_up interaction, got:\n%s", got)
+	}
+	if strings.Contains(got, `"action":"rest_at_residence"`) {
+		t.Errorf("tidy-up goal must NOT be routed to rest_at_residence, got:\n%s", got)
+	}
+}
+
+// TestTacticalExample_SleepGoalStillRoutesToResidence verifies the plain
+// sleep goal is unaffected by the new branches (regression guard).
+func TestTacticalExample_SleepGoalStillRoutesToResidence(t *testing.T) {
+	kb := worldkb.NewKB(
+		[]worldkb.Zone{{ID: "residential_quarters", DisplayName: "休眠舱居住区"}},
+		[]worldkb.Object{{ID: "SleepPod-1", DisplayName: "睡眠舱",
+			SemanticGroup: "sleep_pod", ZoneID: "residential_quarters",
+			AvailableInteractions: []string{"sleep", "meditate", "tidy_up"}}},
+		[]worldkb.Agent{{ID: "H-01", DisplayName: "老陈"}},
+	)
+	got := TacticalExample(kb, "回休眠舱睡觉", "H-01")
+	if !strings.Contains(got, `"action":"rest_at_residence"`) || !strings.Contains(got, `"interaction":"sleep"`) {
+		t.Errorf("plain sleep goal should still route to rest_at_residence/sleep, got:\n%s", got)
+	}
+}
+
 // TestPickChatPeer_PrefersRelationship verifies pickChatPeer prefers the
 // KB-declared relationship peer with the highest familiarity over the
 // declaration-order fallback.

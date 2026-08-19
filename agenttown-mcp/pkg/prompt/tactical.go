@@ -455,6 +455,25 @@ func exampleForGoal(kb *worldkb.KB, goal, agentID string, zones []worldkb.ZoneIn
 		}
 	}
 
+	// 2a-2. 冥想 → speak + InteractSmartObject(sleep_pod/meditate)
+	//     必须先于 2b（回住所/休眠舱/睡觉）判断：冥想 goal 常含"睡眠舱"
+	//     字样，若 2b 先命中会被错误引向 rest_at_residence/sleep。
+	//     InteractSmartObject 自带"前往物体+执行互动"，无需 move_to。
+	if containsAny(gl, "冥想", "meditate") {
+		if obj := findObjectBySemanticGroup(objs, "sleep_pod"); obj != nil {
+			return `{"action":"speak","params":{"content":"去舱里静坐一会儿"}}
+{"action":"InteractSmartObject","params":{"semantic_group":"sleep_pod","interaction":"meditate"}}`
+		}
+	}
+
+	// 2a-3. 整理床铺/舱位 → speak + InteractSmartObject(sleep_pod/tidy_up)
+	if containsAny(gl, "整理床铺", "整理舱", "整理内务", "tidy") {
+		if obj := findObjectBySemanticGroup(objs, "sleep_pod"); obj != nil {
+			return `{"action":"speak","params":{"content":"把舱位收拾整齐"}}
+{"action":"InteractSmartObject","params":{"semantic_group":"sleep_pod","interaction":"tidy_up"}}`
+		}
+	}
+
 	// 2b. 回住所/休眠/睡觉 → speak + rest_at_residence(sleep_pod/sleep)
 	//     仅匹配"回舱/休眠/睡觉"语义，rest_at_residence 只能搭配 sleep_pod。
 	if containsAny(gl, "回住所", "回休眠", "休眠舱", "睡觉", "睡个", "睡眠", "回舱", "rest_at_residence", "sleep") {
