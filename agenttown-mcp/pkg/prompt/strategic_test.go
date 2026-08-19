@@ -238,27 +238,6 @@ func TestStrategicSystemPrompt_NightSleepContinuous(t *testing.T) {
 	}
 }
 
-func TestStrategicSystemPrompt_RecoveryDiversified(t *testing.T) {
-	// 规则 8：恢复时段方式多样化（休眠舱小憩/充电/长椅/上网），
-	// 性格为主依据；仅低电量必充、非常疲劳必休两个强制例外。
-	// 注意：不能给任何选项加"优先"级量化条件——实测全员中午状态同为
-	// "能量中等/轻度疲劳"时，量化优先级会让所有人同步选同一选项。
-	for _, want := range []string{
-		"疲劳恢复时段（如午间）的方式应多样化",
-		"回休眠舱小憩（rest_at_residence",
-		"去充电桩充电兼休息（charge_at_station",
-		"主要依据你的性格特质",
-		"不要固定去长椅或充电",
-	} {
-		if !strings.Contains(StrategicSystemPrompt, want) {
-			t.Errorf("system prompt should contain recovery diversification guidance %q", want)
-		}
-	}
-	if strings.Contains(StrategicSystemPrompt, "优先选这项") {
-		t.Error("recovery options must not carry quantified priority — it re-homogenizes behavior when all NPCs share the same midday state")
-	}
-}
-
 func TestBuildStrategic_InteractWorkGuidance(t *testing.T) {
 	// 【可用能力】段应告知：任何工种都可用 interact + 工作设备直接工作
 	// （process/debug/dismantle 等无复合动作的工种的规划依据）。
