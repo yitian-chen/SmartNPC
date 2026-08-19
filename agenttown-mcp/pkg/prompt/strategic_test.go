@@ -205,6 +205,24 @@ func TestStrategicSystemPrompt_SlotDurationRuleEmphasized(t *testing.T) {
 	}
 }
 
+func TestStrategicSystemPrompt_PlanStartsAtSeven(t *testing.T) {
+	// 规则 5：第一个时段从 07:00 开始，任何时段开始不得早于 07:00，
+	// 禁止 0:00-7:00 这类凌晨睡觉时段（凌晨睡眠由跨午夜末段覆盖）。
+	for _, want := range []string{
+		"第一个时段必须从 07:00 开始",
+		"任何时段的开始时间不得早于 07:00",
+		"禁止输出 0:00-7:00",
+	} {
+		if !strings.Contains(StrategicSystemPrompt, want) {
+			t.Errorf("system prompt missing %q", want)
+		}
+	}
+	// user 模板收尾指令同样强调。
+	if !strings.Contains(StrategicUserTemplate, "任何时段的开始时间不得早于 07:00") {
+		t.Error("user template should reiterate the no-early-start rule")
+	}
+}
+
 func TestStrategicSystemPrompt_RecoveryDiversified(t *testing.T) {
 	// 规则 8：恢复时段方式多样化（休眠舱小憩/充电/长椅/上网），
 	// 性格为主依据；仅低电量必充、非常疲劳必休两个强制例外。
