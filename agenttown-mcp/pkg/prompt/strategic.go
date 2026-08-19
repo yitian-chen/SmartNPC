@@ -164,9 +164,10 @@ func BuildStrategic(kb *worldkb.KB, profiles map[string]*profile.Profile, agentI
 		sb.WriteString("此外始终可用基础动作：移动、说话、表达情绪、与物体交互（InteractSmartObject）、等待（用于短耗时或衔接）。\n")
 		sb.WriteString("与物体交互（InteractSmartObject）也可直接用于任何工种：semantic_group 填工作设备即可——如加工机（process）、调试台（debug）、拆解台（dismantle）、工作台（assemble）、分拣传送带（sort_cargo）、质检台（inspect），战术层会据此分解为在工作设备上的长时段作业。\n")
 	}
-	// 【动作对属性的影响】段：由 scripts/cmd_effect_summary.py 从仿真日志
-	// 统计生成（assets/cmd_effects.md），main 启动时经 SetCmdEffects 注入。
-	// 与 KB/能力列表独立——空串（文件缺失或未生成）时整段跳过。
+	// 【动作对属性的影响】段：Go 运行时从 world_kb 推送的互动速率声明
+	// 生成（InteractionEffectsFromKB + BuildCmdEffectsText，main 的
+	// world_kb handler 在合并后经 SetCmdEffects 注入）。
+	// 与 KB/能力列表独立——空串（UE 未推送速率）时整段跳过。
 	if cmdEffectsText != "" {
 		sb.WriteString("【动作对属性的影响】\n")
 		sb.WriteString(cmdEffectsText)
