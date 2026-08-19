@@ -1,12 +1,14 @@
-各活动对属性的影响（每游戏小时平均变化，由仿真日志统计）：
-- work_shift（assemble）：能量少量下降、疲劳度中等提升、余额明显增加
-- InteractSmartObject（process）：能量少量下降、疲劳度中等提升、余额明显增加
-- InteractSmartObject（debug）：能量少量下降、疲劳度明显提升、余额快速增加
-- InteractSmartObject（rest）：疲劳度中等缓解
-- charge_at_station（charge）：能量少量恢复、疲劳度少量缓解、余额快速消耗
-- surf_internet（surf_internet）：疲劳度少量缓解、余额少量消耗
-- InteractSmartObject（dismantle）：能量中等下降、疲劳度明显提升、关节磨损少量累积、余额快速增加
-- InteractSmartObject（sort_cargo）：能量少量下降、疲劳度中等提升、余额快速增加
-- work_shift（sort_cargo）：能量少量下降、疲劳度中等提升、余额快速增加
-- work_shift（inspect）：疲劳度少量提升、余额中等增加
-- InteractSmartObject（inspect）：疲劳度少量提升、余额中等增加
+各活动对属性的影响（每游戏小时变化率，来自 world KB 声明）：
+- 长椅（bench/rest）：疲劳度明显缓解
+- 充电桩（charger/charge）：能量快速恢复、疲劳度中等缓解、余额快速消耗、一次性消耗余额 30 点
+- 电脑（computer/surf_internet）：能量少量下降、疲劳度中等缓解、余额中等消耗
+- 调试台（debug_station/debug）：能量中等下降、疲劳度明显提升、关节磨损少量累积、余额快速增加
+- 拆解台（dismantle_table/dismantle）：能量中等下降、疲劳度快速提升、关节磨损少量累积、余额快速增加
+- 质检台（inspection_table/inspect）：能量少量下降、疲劳度中等提升、余额快速增加
+- 加工机（process_machine/process）：能量少量下降、疲劳度中等提升、余额快速增加
+- 修理台（repair_table/repair）：疲劳度中等缓解、关节磨损快速修复、余额快速消耗、一次性消耗余额 50 点
+- 睡眠舱（sleep_pod/meditate）：疲劳度明显缓解
+- 睡眠舱（sleep_pod/sleep）：疲劳度快速缓解
+- 睡眠舱（sleep_pod/tidy_up）：无属性影响
+- 分拣传送带（sorting_conveyor/sort_cargo）：能量少量下降、疲劳度明显提升、关节磨损少量累积、余额快速增加
+- 工作台（workbench/assemble）：能量中等下降、疲劳度明显提升、关节磨损少量累积、余额快速增加
