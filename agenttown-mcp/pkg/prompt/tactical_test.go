@@ -201,6 +201,59 @@ func TestTacticalExample_SocialChatGoal(t *testing.T) {
 	}
 }
 
+// TestTacticalExample_ExerciseGoal verifies the exercise/stretch goal branch
+// emits move_to BEFORE exercise (exercise is in-place, UE does not auto-move),
+// and prefers a plaza-like zone.
+func TestTacticalExample_ExerciseGoal(t *testing.T) {
+	kb := worldkb.NewKB(
+		[]worldkb.Zone{
+			{ID: "main_workshop", DisplayName: "主车间"},
+			{ID: "central_plaza", DisplayName: "中央广场"},
+		},
+		nil,
+		[]worldkb.Agent{{ID: "H-01", DisplayName: "老陈"}},
+	)
+	got := TacticalExample(kb, "前往中央广场拉伸放松一下", "H-01")
+	if !strings.Contains(got, `"action":"move_to"`) {
+		t.Errorf("exercise goal must emit move_to first, got:\n%s", got)
+	}
+	if !strings.Contains(got, `"action":"exercise"`) {
+		t.Errorf("exercise goal should emit exercise action, got:\n%s", got)
+	}
+	if strings.Index(got, `"action":"move_to"`) > strings.Index(got, `"action":"exercise"`) {
+		t.Errorf("move_to must precede exercise (in-place action), got:\n%s", got)
+	}
+}
+
+// TestTacticalExample_ExerciseZoneFallback verifies exerciseZone falls back
+// to the first zone when no plaza-like zone exists.
+func TestTacticalExample_ExerciseZoneFallback(t *testing.T) {
+	kb := worldkb.NewKB(
+		[]worldkb.Zone{
+			{ID: "main_workshop", DisplayName: "主车间"},
+			{ID: "archive_room", DisplayName: "档案馆"},
+		},
+		nil,
+		[]worldkb.Agent{{ID: "H-01", DisplayName: "老陈"}},
+	)
+	got := TacticalExample(kb, "去锻炼身体", "H-01")
+	if !strings.Contains(got, `"target_id":"main_workshop"`) {
+		t.Errorf("exercise example should fall back to first zone, got:\n%s", got)
+	}
+}
+
+// TestTacticalSystemPrompt_ExerciseInPlaceRule verifies the system prompt
+// tells the LLM exercise is in-place and requires a preceding move_to when
+// the goal mentions going somewhere to exercise.
+func TestTacticalSystemPrompt_ExerciseInPlaceRule(t *testing.T) {
+	if !strings.Contains(TacticalSystemPrompt, "exercise（原地锻炼/拉伸）是原地动作") {
+		t.Error("missing exercise in-place rule in TacticalSystemPrompt")
+	}
+	if !strings.Contains(TacticalSystemPrompt, "必须先 move_to 到目标 zone，再输出 exercise") {
+		t.Error("missing move_to-before-exercise requirement in TacticalSystemPrompt")
+	}
+}
+
 // TestPickChatPeer_PrefersRelationship verifies pickChatPeer prefers the
 // KB-declared relationship peer with the highest familiarity over the
 // declaration-order fallback.

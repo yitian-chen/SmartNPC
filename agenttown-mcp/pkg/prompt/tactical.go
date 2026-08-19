@@ -66,7 +66,7 @@ const TacticalSystemPrompt = `你是小镇居民 NPC 的战术规划模块。用
 1. 队列首个动作必须是 speak（用一句话表达此刻内心想法或独白），然后才是其他动作
 2. 后续每行输出一个 {"action":"工具名","params":{...}}，按执行顺序排列。action 字段必须严格使用用户信息中"可用工具"列表给出的工具名（如 work_shift / charge_at_station / rest_at_residence / surf_internet / self_maintenance / social_chat / InteractSmartObject / move_to / speak / generic_act / emote / turn_to），禁止编造、禁止近形变换（如把 work_shift 写成 work_short、rest_at_residence 写成 rest_at_composite），否则动作会被丢弃导致队列提前耗尽
 3. 队列必须以长动作结尾（长复合动作 或 InteractSmartObject 原子动作均可）——长动作会持续执行直到时段切换，让 NPC 一直活动到下一 schedule 节点被 worker 主动打断
-4. 禁止输出 wait 动作；复合动作已包含自动移动到对应位置的逻辑，禁止在复合动作前加 move_to——直接输出单个长复合动作即可。
+4. 禁止输出 wait 动作；复合动作已包含自动移动到对应位置的逻辑，禁止在复合动作前加 move_to——直接输出单个长复合动作即可。但 exercise（原地锻炼/拉伸）是原地动作、不会自动移动：若时段目标要求前往某处锻炼（如"前往中央广场拉伸放松"），必须先 move_to 到目标 zone，再输出 exercise。
 5. 仅当目标确实没有匹配的长复合动作时，才用原子动作组合实现目标。长椅休息等场景用单个 InteractSmartObject 即可（InteractSmartObject 是长动作，会持续到时段切换），禁止把同一动作重复多次填充时段——队列提前耗尽会自动触发重分解生成新动作
 6. move_to/turn_to 的 target_id 用用户信息中【世界知识】"可前往区域"的 zone id；InteractSmartObject 和复合动作的 semantic_group 必须严格使用"可交互物体"给出的 semantic_group 值，禁止编造、禁止用实例 id（如 Charge-1）、禁止拼接 zone/interaction 信息
 7. 复合动作与 semantic_group 必须严格对应，禁止跨类别组合：
@@ -465,6 +465,16 @@ func exampleForGoal(kb *worldkb.KB, goal, agentID string, zones []worldkb.ZoneIn
 		}
 	}
 
+	// 2d. 锻炼/拉伸/运动 → speak + move_to zone + exercise
+	//     exercise 是原地动作（UE 侧不会自动移动），目标地点非当前位置时
+	//     必须先 move_to 过去再锻炼。
+	if containsAny(gl, "锻炼", "拉伸", "运动", "健身", "exercise") {
+		exZone := exerciseZone(zones)
+		return fmt.Sprintf(`{"action":"speak","params":{"content":"去目标区域活动一下身体"}}
+{"action":"move_to","params":{"target_type":"zone","target_id":"%s"}}
+{"action":"exercise","params":{}}`, exZone)
+	}
+
 	// 3. 装配/工作/作业/打磨/加工 → speak + work_shift
 	if containsAny(gl, "装配", "工作", "作业", "打磨", "加工", "assemble", "craft") {
 		if obj := findObjectByCategory(objs, "workbench", "work"); obj != nil {
@@ -503,6 +513,21 @@ func exampleForGoal(kb *worldkb.KB, goal, agentID string, zones []worldkb.ZoneIn
 	}
 
 	return ""
+}
+
+// exerciseZone picks the zone for the exercise example: prefers a plaza-like
+// zone (id or display name mentions plaza/广场), falls back to the first zone.
+func exerciseZone(zones []worldkb.ZoneInfo) string {
+	for _, z := range zones {
+		if containsAny(strings.ToLower(z.ID), "plaza", "广场") ||
+			containsAny(z.DisplayName, "广场") {
+			return z.ID
+		}
+	}
+	if len(zones) > 0 {
+		return zones[0].ID
+	}
+	return "<上方可前往区域的 id>"
 }
 
 // pickChatPeer chooses a social_chat target for the example prompt. Prefers
