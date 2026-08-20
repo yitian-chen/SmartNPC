@@ -50,29 +50,206 @@ func DefaultDailyPlan(kb *worldkb.KB) string {
 		"22:00-06:00: 夜间休眠"
 }
 
-// StrategicSystemPrompt is the strategic layer's system message: mechanism
-// text only (role positioning, world mechanics, planning rules, output
-// format, example). It is fully static across agents and calls, so the LLM
-// gateway can cache it. Per-call context/data (role, KB, physical state,
-// capabilities, yesterday summary) goes in the user message built from
-// StrategicUserTemplate + BuildStrategic.
+// BuildStrategicSystemPrompt constructs the strategic layer's system message,
+// four modules (world KB + cmd derived, stable within a session):
+//  1. 【世界背景】 — world overview registered from the world KB: narrative
+//     setting/theme, zone roster, smart-object group roster, NPC roster.
+//  2. 【人物背景】 — the current agent's profile (AgentRole).
+//  3. 【世界详细信息】 — per-zone descriptions; smart objects grouped by
+//     semantic_group with per-interaction description, per-hour attribute
+//     effects and usage gates (from the KB's declared rates); composite cmd
+//     list from the capability registry.
+//  4. 规划要求 — the seven planning rules (strategicRules).
 //
-// Rules referencing dynamic segments say "用户信息中【…】" because those
-// segments live in the user message, not here.
-const StrategicSystemPrompt = `你是小镇居民 NPC 的战略规划模块。每天清晨 07:00，你根据用户信息中提供的角色身份、今日日程、物理状态、世界知识与可用能力，规划当天 07:00 到次日 07:00 的活动安排。
+// Per-call dynamic data (physical state, today's weekly-schedule context,
+// yesterday summary) lives in the user message (BuildStrategicUserContext +
+// StrategicUserTemplate). The system prompt text is identical across calls
+// within a session (per agent), keeping it cacheable.
+//
+// kb == nil → modules 1/3 degrade to empty; actions == nil → composite list
+// falls back to the builtin tools; profiles == nil → persona falls back to
+// the hardcoded fallback fields.
+func BuildStrategicSystemPrompt(kb *worldkb.KB, profiles map[string]*profile.Profile, agentID string, actions []protocol.CapabilityAction) string {
+	var sb strings.Builder
+	sb.WriteString(`你是小镇居民 NPC 的战略规划模块。每天清晨 07:00，你根据系统信息中的【世界背景】【人物背景】【世界详细信息】，以及用户信息中的今日日程、物理状态与昨日总结，规划当天 07:00 到次日 07:00 的活动安排。
 
-各活动对属性的每小时影响幅度见用户信息中【动作对属性的影响】段（由 world KB 声明生成）。规划时请综合权衡：产出性活动（工作）赚取余额但消耗体力、缓慢积攒关节磨损；恢复性活动（充电/维护/休息）花余额但延续工作能力。避免长时间连续工作导致体力耗尽，也避免频繁恢复导致余额入不敷出。
+各活动对属性的每小时影响幅度见系统信息【世界详细信息】各设施的属性变动说明（由 world KB 声明生成）。规划时请综合权衡：产出性活动（工作）赚取余额但消耗体力、缓慢积攒关节磨损；恢复性活动（充电/维护/休息）花余额但延续工作能力。避免长时间连续工作导致体力耗尽，也避免频繁恢复导致余额入不敷出。
 
-要求：
-1. 输出 JSON 数组（6-8 条），每条只含 "time"（"HH:MM-HH:MM"）和 "goal"（一句话，必须是纯文本字符串），以 [ 开头 ] 结尾，不要其他文字
+`)
+	if m1 := strategicWorldOverview(kb); m1 != "" {
+		sb.WriteString("【世界背景】\n")
+		sb.WriteString(m1)
+	}
+	if role := AgentRole(kb, profiles, agentID); role != "" {
+		sb.WriteString("\n【人物背景】\n")
+		sb.WriteString(role)
+	}
+	if m3 := strategicDetailedWorld(kb, actions); m3 != "" {
+		sb.WriteString("\n【世界详细信息】\n")
+		sb.WriteString(m3)
+	}
+	sb.WriteString("\n规划要求：\n")
+	sb.WriteString(strategicRules)
+	return sb.String()
+}
+
+// strategicWorldOverview renders module 1: the world's basic situation —
+// narrative setting/theme, zone roster, smart-object group roster, and NPC
+// roster (compact inventories only; details live in module 3).
+func strategicWorldOverview(kb *worldkb.KB) string {
+	if kb == nil {
+		return ""
+	}
+	var lines []string
+	if kb.Narrative.Setting != "" {
+		lines = append(lines, "设定："+kb.Narrative.Setting)
+	}
+	if kb.Narrative.Theme != "" {
+		lines = append(lines, "主题："+kb.Narrative.Theme)
+	}
+	if zs := kb.ListZones(); len(zs) > 0 {
+		parts := make([]string, 0, len(zs))
+		for _, z := range zs {
+			if z.DisplayName != "" && z.DisplayName != z.ID {
+				parts = append(parts, fmt.Sprintf("%s（%s）", z.DisplayName, z.ID))
+			} else {
+				parts = append(parts, z.ID)
+			}
+		}
+		lines = append(lines, fmt.Sprintf("区域（%d 个）：%s。", len(zs), strings.Join(parts, "、")))
+	}
+	if os := kb.ListObjects(); len(os) > 0 {
+		parts := make([]string, 0)
+		for _, g := range groupObjectsBySemantic(os) {
+			label := g.SemanticGroup
+			if g.DisplayName != "" && g.DisplayName != g.SemanticGroup {
+				label = fmt.Sprintf("%s（%s）", g.DisplayName, g.SemanticGroup)
+			}
+			if g.InstanceCount > 1 {
+				label += fmt.Sprintf("，%d 个实例", g.InstanceCount)
+			}
+			parts = append(parts, label)
+		}
+		lines = append(lines, fmt.Sprintf("可交互设施类别（%d 类）：%s。", len(parts), strings.Join(parts, "、")))
+	}
+	if ags := kb.Agents; len(ags) > 0 {
+		parts := make([]string, 0, len(ags))
+		for _, a := range ags {
+			if a.DisplayName != "" && a.DisplayName != a.ID {
+				parts = append(parts, fmt.Sprintf("%s（%s）", a.DisplayName, a.ID))
+			} else {
+				parts = append(parts, a.ID)
+			}
+		}
+		lines = append(lines, fmt.Sprintf("居民（%d 位）：%s。", len(ags), strings.Join(parts, "、")))
+	}
+	if len(lines) == 0 {
+		return ""
+	}
+	return strings.Join(lines, "\n") + "\n"
+}
+
+// strategicDetailedWorld renders module 3: per-zone descriptions, smart
+// objects grouped by semantic_group with per-interaction description +
+// per-hour attribute effects + usage gates (from the KB's declared rates),
+// and the composite cmd list from the capability registry.
+func strategicDetailedWorld(kb *worldkb.KB, actions []protocol.CapabilityAction) string {
+	var sb strings.Builder
+	wroteZone := false
+	if kb != nil {
+		if zs := kb.ListZones(); len(zs) > 0 {
+			sb.WriteString("各区域详情：\n")
+			wroteZone = true
+			for _, z := range zs {
+				label := z.ID
+				if z.DisplayName != "" && z.DisplayName != z.ID {
+					label = fmt.Sprintf("%s（%s）", z.DisplayName, z.ID)
+				}
+				if d := strings.TrimSpace(z.Description); d != "" {
+					sb.WriteString("- " + label + "：" + d + "\n")
+				} else {
+					sb.WriteString("- " + label + "\n")
+				}
+			}
+		}
+	}
+	// 设施详情：按 semantic_group 分组，交互行内联 KB 声明的描述与属性变动。
+	if kb != nil {
+		if os := kb.ListObjects(); len(os) > 0 {
+			if wroteZone {
+				sb.WriteString("\n")
+			}
+			sb.WriteString("设施详情（按 semantic_group 分类，含交互功能与每游戏小时属性变动，来自 world KB 声明）：\n")
+			effects := effectLookup(kb)
+			for _, g := range groupObjectsBySemantic(os) {
+				label := g.SemanticGroup
+				if g.DisplayName != "" && g.DisplayName != g.SemanticGroup {
+					label = fmt.Sprintf("%s（%s）", g.DisplayName, g.SemanticGroup)
+				} else {
+					label = fmt.Sprintf("semantic_group=%s", g.SemanticGroup)
+				}
+				meta := ""
+				if g.ZoneID != "" {
+					meta += "，位于 " + g.ZoneID
+				}
+				if g.InstanceCount > 1 {
+					meta += fmt.Sprintf("，%d 个实例", g.InstanceCount)
+				}
+				sb.WriteString("- " + label + meta + "：\n")
+				// 无速率声明的交互只列动词；有声明的带描述+属性变动+门槛。
+				if len(g.AvailableInteractions) == 0 {
+					if d := strings.TrimRight(strings.TrimSpace(g.Description), "。"); d != "" {
+						sb.WriteString("  " + d + "。\n")
+					}
+					continue
+				}
+				for _, itx := range g.AvailableInteractions {
+					if e, ok := effects[g.SemanticGroup+"/"+itx]; ok {
+						sb.WriteString("  - " + itx + "：" + describeEffect(e) + "\n")
+					} else {
+						sb.WriteString("  - " + itx + "\n")
+					}
+				}
+			}
+			sb.WriteString("\n")
+		}
+	}
+	// 复合动作清单（来自 capability registry；nil → 内置兜底）。
+	if cap := StrategicCapabilitySummary(actions); cap != "" {
+		sb.WriteString("复合动作（长时段活动用，自动移动到对应位置，覆盖整段工作时间）：\n")
+		sb.WriteString(cap)
+		sb.WriteString("此外始终可用基础动作：移动、说话、表达情绪、与物体交互（InteractSmartObject）、等待（用于短耗时或衔接）。\n")
+		sb.WriteString("与物体交互（InteractSmartObject）可直接用于上方设施详情中列出的任意 semantic_group + interaction 组合，战术层会据此分解为对应的长时段互动。\n")
+	}
+	return sb.String()
+}
+
+// effectLookup builds a (semantic_group, interaction) → InteractionEffect map
+// from the merged KB's declared interaction rates.
+func effectLookup(kb *worldkb.KB) map[string]InteractionEffect {
+	effects := InteractionEffectsFromKB(kb)
+	if len(effects) == 0 {
+		return nil
+	}
+	m := make(map[string]InteractionEffect, len(effects))
+	for _, e := range effects {
+		m[e.SemanticGroup+"/"+e.Interaction] = e
+	}
+	return m
+}
+
+// strategicRules is module 4: the seven planning rules. References to
+// 【世界背景】/【人物背景】/【世界详细信息】 point at this system message;
+// references to 【物理状态】 point at the user message's dynamic segments.
+const strategicRules = `1. 输出 JSON 数组（6-8 条），每条只含 "time"（"HH:MM-HH:MM"）和 "goal"（一句话，必须是纯文本字符串），以 [ 开头 ] 结尾，不要其他文字
    - goal 用干练简洁的客观描述，只写"做什么 + 在哪"（如"主生产车间工作台装配""中央广场充电桩充电"），不带语气词、口头禅、内心独白或人设腔调
    - 人设只影响选择什么活动、如何安排时段，不影响 goal 的文字风格；说话语气留给执行时的 speak 动作表达
 2. 【硬性要求】每个时段的结束时间减去开始时间必须 ≥120 分钟（不足 120 分钟的活动要么并入相邻时段，要么不安排；午休等短暂休息也至少120分钟）；仅安排一项主要任务；连续两个时段不得任务相同
 3. 规划每个时段时，先想清楚这个时段的活动用什么实现，以下两类都合法：
-   - 复合动作：【可用能力】中列出的 cmd（如 装配→work_shift、充电→charge_at_station）
-   - 原子交互：InteractSmartObject + 【世界知识】可交互物体中列出的任意动词（semantic_group + interaction）——不限于工种设备，睡眠舱的 sleep/meditate/tidy_up、长椅的 rest 都是合法活动
+   - 复合动作：【世界详细信息】复合动作清单中列出的 cmd（如 装配→work_shift、充电→charge_at_station）
+   - 原子交互：InteractSmartObject + 【世界详细信息】设施详情中列出的任意动词（semantic_group + interaction）——不限于工种设备，睡眠舱的 sleep/meditate/tidy_up、长椅的 rest 都是合法活动
    判断标准：goal 能映射到某个复合 cmd，或某个 (semantic_group, interaction) 组合 → 可以安排；两者都映射不上（如"准备工具""巡查"）→ 换一个
-4. goal 中提到的地点、人物、设备必须是用户信息中【你的角色】和【世界知识】里存在的，不得编造未提及的人物或设施
+4. goal 中提到的地点、人物、设备必须是系统信息中【人物背景】和【世界详细信息】里存在的，不得编造未提及的人物或设施
 5. 第一个时段必须从 07:00 开始，且任何时段的开始时间不得早于 07:00——禁止输出 0:00-7:00 这类凌晨睡觉时段（凌晨睡眠已由前一晚的跨午夜末段覆盖，不要重复安排）。首段必须是日间活动，不得安排休眠；首段不一定是工作——早间也可以安排晨练拉伸（原地锻炼，不需要特定设施）、上网、长椅放松、充电、冥想醒神、整理舱位等非工作活动，按性格与状态选择。夜间睡眠必须是一个连续的跨午夜时段：约 22:00 前后开始、次日 06:00-07:00 结束；不得拆成多个睡眠时段（禁止 20:30-22:58 睡觉 + 22:58-07:16 睡觉这样的连续两段），也不得在凌晨提前结束（禁止 23:00-01:00 这样的短睡眠段）。末段跨午夜时结束时间表示次日时刻
 6. 充电原则上仅在能量为"低电量"或疲劳为"非常疲劳"时安排；维护仅在关节磨损达到"明显磨损"及以上时安排；能量充足时优先产出性活动
 7. 综合用户信息中【物理状态】的四项状态调整安排侧重点：能量偏低→多充电少工作；疲劳偏高→提前休眠；磨损偏高→安排维护；余额低→多工作少花钱
@@ -80,8 +257,8 @@ const StrategicSystemPrompt = `你是小镇居民 NPC 的战略规划模块。�
 格式示例：[{"time":"07:00-9:00","goal":"xxx"},{"time":"9:00-12:00","goal":"xxx"}]`
 
 // StrategicUserTemplate is the strategic layer's user message template.
-// Placeholders: %s = strategic context (BuildStrategic output: role +
-// schedule + physical + KB + peers + capabilities), %s = yesterday summary.
+// Placeholders: %s = dynamic context (BuildStrategicUserContext output:
+// today's weekly-schedule context + physical state), %s = yesterday summary.
 // The instruction line stays in the user message so the "plan today" ask
 // sits immediately after the data it refers to.
 const StrategicUserTemplate = `[战略层/每日规划] 现在是仿真时间 07:00，新的一天开始了，你刚从休眠舱醒来，当前位于休眠舱区域。
@@ -93,33 +270,11 @@ const StrategicUserTemplate = `[战略层/每日规划] 现在是仿真时间 07
 请基于你的角色身份和性格，规划今天一天的活动安排（人设只影响选什么活动、怎么安排时段；goal 文字一律干练简洁，不带人设语气）。一天从 07:00 到次日 07:00，你从 07:00 开始活动。
 只输出 JSON 数组，每条形如 {"time":"HH:MM-HH:MM","goal":"纯文本一句话"}，"goal" 必须是字符串；第一个时段从 07:00 开始，任何时段的开始时间不得早于 07:00；每个时段必须 ≥120 分钟；不要输出任何其他文字。`
 
-// BuildStrategic constructs the strategic layer user message's context
-// segment, containing five parts:
-//   - 【你的角色】: from AgentRole(kb, profiles, agentID)
-//   - 【今日日程】: from dayContext (pre-formatted by weeklyschedule.WeeklyLine;
-//     "" skips the segment — disabled or dayCount<0)
-//   - 【物理状态】: from PhysicalLine(physical); nil → default fresh state
-//   - 【世界知识】: from KBContext(kb) (shared with tactical layer)
-//   - 【可用能力】: composite actions from capabilities
-//
-// Mechanism text (rules, 【动作对状态的影响】, output format, example) lives
-// in StrategicSystemPrompt, not here. The 【其他NPC】 roster segment is
-// temporarily removed — the strategic layer no longer arranges social slots;
-// restore it when social planning comes back.
-//
-// kb == nil → skips 【世界知识】 segment but still injects persona + capabilities.
-// actions == nil → falls back to builtin 6 composite tools (same as tactical).
-// profiles == nil → AgentRole falls back to hardcoded fallback (KB persona ignored).
-// physical == nil → PhysicalLine falls back to default fresh state (100/0/0/100).
-// dayContext == "" → skips 【今日日程】 segment (weekly schedule disabled or
-// dayCount < 0 before first perception).
-func BuildStrategic(kb *worldkb.KB, profiles map[string]*profile.Profile, agentID string, actions []protocol.CapabilityAction, physical *protocol.PhysicalState, dayContext string) string {
+// BuildStrategicUserContext constructs the strategic layer user message's
+// dynamic context segment: 【今日日程】 (weekly schedule context, skipped
+// when empty) + 【物理状态】 (nil physical → default fresh state).
+func BuildStrategicUserContext(agentID string, profiles map[string]*profile.Profile, physical *protocol.PhysicalState, dayContext string) string {
 	var sb strings.Builder
-	// 【你的角色】段仅依赖 profile + fallback，与 KB 可用性解耦。
-	if role := AgentRole(kb, profiles, agentID); role != "" {
-		sb.WriteString("【你的角色】\n")
-		sb.WriteString(role)
-	}
 	// 【今日日程】段：每周日程上下文（星期几 + 工作日/休息日 + 当日提示）。
 	// dayContext 由调用方通过 weeklyschedule.WeeklyLine(dayCount, sched) 预格式化，
 	// pkg/prompt 不依赖 weeklyschedule 包（解耦）。空串=禁用或 dayCount<0，跳过。
@@ -133,64 +288,29 @@ func BuildStrategic(kb *worldkb.KB, profiles map[string]*profile.Profile, agentI
 		sb.WriteString(line)
 		sb.WriteString("\n")
 	}
-	if kb != nil {
-		if kbCtx := KBContext(kb); kbCtx != "" {
-			sb.WriteString("【世界知识】\n")
-			sb.WriteString(kbCtx)
-		}
-		// 【区域设施映射】段暂时移除——【世界知识】已逐 object 列出所在 zone
-		// 与可用 interaction，信息冗余；移除后 prompt 从 ~2000 字降到 ~1400 字，
-		// 降低战略层 LLM 输入 token 数以缩短延迟。日后若 LLM 又出现 zone-object
-		// 错配可重新启用。
-		// 【其他NPC】段暂时移除——战略层暂不安排社交（social_chat）时段，
-		// 花名册仅为社交目标服务；战术层的【附近NPC】仍用 OtherAgentsLine。
-		// 日后战略层恢复社交安排时，把下面的段加回来即可：
-		// if peers := OtherAgentsLine(kb, agentID); peers != "" {
-		// 	sb.WriteString("【其他NPC】\n")
-		// 	sb.WriteString(peers)
-		// 	sb.WriteString("\n")
-		// }
-	}
-	if cap := StrategicCapabilitySummary(actions); cap != "" {
-		sb.WriteString("【可用能力】\n")
-		sb.WriteString("长时段活动用以下复合动作（自动移动到对应位置，覆盖整段工作时间）：\n")
-		sb.WriteString(cap)
-		sb.WriteString("此外始终可用基础动作：移动、说话、表达情绪、与物体交互（InteractSmartObject）、等待（用于短耗时或衔接）。\n")
-		sb.WriteString("与物体交互（InteractSmartObject）可直接用于任何可交互物体：semantic_group 和 interaction 填【世界知识】可交互物体中列出的值即可——工种设备如加工机（process）、调试台（debug）、拆解台（dismantle）、工作台（assemble）、分拣传送带（sort_cargo）、质检台（inspect）；其他互动如睡眠舱（sleep/meditate/tidy_up）、长椅（rest）。战术层会据此分解为对应的长时段互动。\n")
-	}
-	// 【动作对属性的影响】段：Go 运行时从 world_kb 推送的互动速率声明
-	// 生成（InteractionEffectsFromKB + BuildCmdEffectsText，main 的
-	// world_kb handler 在合并后经 SetCmdEffects 注入）。
-	// 与 KB/能力列表独立——空串（UE 未推送速率）时整段跳过。
-	if cmdEffectsText != "" {
-		sb.WriteString("【动作对属性的影响】\n")
-		sb.WriteString(cmdEffectsText)
-		if !strings.HasSuffix(cmdEffectsText, "\n") {
-			sb.WriteString("\n")
-		}
-	}
 	return sb.String()
 }
 
 // cmdEffectsText is the natural-language cmd→attribute-effect summary
-// ("各活动对属性的影响（每游戏小时平均变化…）: - work_shift（assemble）：…").
-// Derived offline by scripts/cmd_effect_summary.py from sim logs (the world KB
-// itself carries no numeric effect table); loaded once at startup by main and
-// injected into every strategic prompt as the 【动作对属性的影响】 segment.
+// injected into the TACTICAL layer prompt (after the tool list). Generated
+// at runtime from the world KB push (InteractionEffectsFromKB +
+// BuildCmdEffectsText, installed by main's world_kb handler via SetCmdEffects).
+// The strategic layer no longer uses this global — its system prompt renders
+// effects inline per object group (strategicDetailedWorld).
 // Empty (default) = disabled, segment skipped.
 var cmdEffectsText string
 
 // SetCmdEffects installs the cmd attribute-effect summary text. Call once at
-// startup (before any BuildStrategic call); empty string disables the segment.
+// startup (before any BuildTactical call); empty string disables the segment.
 func SetCmdEffects(s string) { cmdEffectsText = s }
 
 // CmdEffects returns the currently installed summary (empty = disabled).
 func CmdEffects() string { return cmdEffectsText }
 
-// StrategicCapabilitySummary constructs the 【可用能力】 segment's composite
-// action bullet list. Reuses toolEntries derivation (same source, ensuring
-// strategic/tactical capability views match), keeping only Kind=="composite"
-// entries formatted as "- 描述（tool_name）".
+// StrategicCapabilitySummary constructs the composite action bullet list.
+// Reuses toolEntries derivation (same source, ensuring strategic/tactical
+// capability views match), keeping only Kind=="composite" entries formatted
+// as "- 描述（tool_name）".
 // actions == nil → falls back to builtin tools.
 func StrategicCapabilitySummary(actions []protocol.CapabilityAction) string {
 	entries := ToolEntries(actions)

@@ -125,6 +125,10 @@ func (k *KB) ResolveTarget(desc string) (id string, kind string, err error) {
 type ZoneInfo struct {
 	ID          string
 	DisplayName string
+	// Description is the authored one-line zone description (e.g. "小镇的
+	// 生产核心，机器人居民在这里完成装配、质检和设备调试"), surfaced in
+	// the strategic layer's detailed-world module.
+	Description string
 }
 
 // ObjectInfo is a compact object summary for prompt injection. Includes
@@ -155,7 +159,7 @@ func (k *KB) ListZones() []ZoneInfo {
 	}
 	out := make([]ZoneInfo, 0, len(k.Zones))
 	for _, z := range k.Zones {
-		out = append(out, ZoneInfo{ID: z.ID, DisplayName: z.DisplayName})
+		out = append(out, ZoneInfo{ID: z.ID, DisplayName: z.DisplayName, Description: z.Description})
 	}
 	return out
 }

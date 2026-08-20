@@ -10,7 +10,6 @@ import (
 	"github.com/AgentTown/agenttown-mcp/pkg/llmtypes"
 	"github.com/AgentTown/agenttown-mcp/pkg/prompt"
 	"github.com/AgentTown/agenttown-mcp/pkg/protocol"
-	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
 )
 
 // fakeStrategicCaller 实现 strategicCaller 接口，用于单测。
@@ -18,6 +17,7 @@ type fakeStrategicCaller struct {
 	resp               *llmtypes.Response
 	err                error
 	capturedInput      string
+	capturedSystem     string
 	capturedSchemaName string
 	resetCalled        bool
 }
@@ -27,7 +27,8 @@ func (f *fakeStrategicCaller) SendWithSummary(_ context.Context, _, user string)
 	return f.resp, f.err
 }
 
-func (f *fakeStrategicCaller) SendWithSchema(_ context.Context, _, user, schemaName string, _ []byte) (*llmtypes.Response, error) {
+func (f *fakeStrategicCaller) SendWithSchema(_ context.Context, system, user, schemaName string, _ []byte) (*llmtypes.Response, error) {
+	f.capturedSystem = system
 	f.capturedInput = user
 	f.capturedSchemaName = schemaName
 	return f.resp, f.err
@@ -203,58 +204,65 @@ func isJitteredDefaultPlan(t *testing.T, plan string) bool {
 	return true
 }
 
-// ─── buildStrategicContext ───────────────────────────────────
+// ─── buildStrategicSystemPrompt ───────────────────────────────
 
-func TestBuildStrategicContext_WithKB(t *testing.T) {
+func TestBuildStrategicSystemPrompt_WithKB(t *testing.T) {
 	kb := loadTestKB(t)
-	got := prompt.BuildStrategic(kb, nil, "H-01", nil, nil, "")
+	got := prompt.BuildStrategicSystemPrompt(kb, nil, "H-01", nil)
 	if got == "" {
-		t.Fatal("got empty context, want non-empty for valid KB")
+		t.Fatal("got empty system prompt, want non-empty for valid KB")
 	}
-	// 角色段：包含 agent 显示名和职业
+	// 人物背景段：包含 agent 显示名和职业
 	if !strings.Contains(got, "老陈") {
-		t.Errorf("context missing agent display name '老陈': %q", got)
+		t.Errorf("system prompt missing agent display name '老陈': %q", got)
 	}
 	// 新 fallback 用 "装配工人（专做工作台装配作业）"
 	if !strings.Contains(got, "装配工人（专做工作台装配作业）") {
-		t.Errorf("context missing agent profession '装配工人（专做工作台装配作业）': %q", got)
+		t.Errorf("system prompt missing agent profession '装配工人（专做工作台装配作业）': %q", got)
 	}
-	if !strings.Contains(got, "【你的角色】") {
-		t.Errorf("context missing '【你的角色】' header: %q", got)
+	if !strings.Contains(got, "【人物背景】") {
+		t.Errorf("system prompt missing '【人物背景】' header: %q", got)
 	}
-	// 世界知识段：包含 zone id 和 object id
+	// 世界信息：包含 zone id 和 object semantic_group
 	if !strings.Contains(got, "main_workshop") {
-		t.Errorf("context missing zone id 'main_workshop': %q", got)
+		t.Errorf("system prompt missing zone id 'main_workshop': %q", got)
 	}
 	if !strings.Contains(got, "workbench") {
-		t.Errorf("context missing object id 'workbench': %q", got)
+		t.Errorf("system prompt missing object semantic_group 'workbench': %q", got)
 	}
-	if !strings.Contains(got, "【世界知识】") {
-		t.Errorf("context missing '【世界知识】' header: %q", got)
+	if !strings.Contains(got, "【世界背景】") || !strings.Contains(got, "【世界详细信息】") {
+		t.Errorf("system prompt missing world module headers: %q", got)
 	}
 }
 
-func TestBuildStrategicContext_NilKB(t *testing.T) {
-	// kb == nil 且 registry == nil：【可用能力】段降级为内置 6 个复合工具，
+func TestBuildStrategicSystemPrompt_NilKB(t *testing.T) {
+	// kb == nil 且 registry == nil：复合动作段降级为内置 6 个复合工具，
 	// 让 AI 即使无 KB 上下文也知能力边界（不规划无对应动作的活动）。
-	got := prompt.BuildStrategic(nil, nil, "H-01", nil, nil, "")
-	if !strings.Contains(got, "【可用能力】") {
+	got := prompt.BuildStrategicSystemPrompt(nil, nil, "H-01", nil)
+	if !strings.Contains(got, "复合动作（长时段活动用") {
 		t.Errorf("nil KB should still include builtin composite capability section: %q", got)
 	}
 	if !strings.Contains(got, "work_shift") {
 		t.Errorf("nil KB should list builtin composite tool 'work_shift': %q", got)
 	}
+	// kb == nil 时世界背景模块跳过（前言提及模块名不算），但规则模块仍在。
+	if strings.Contains(got, "【世界背景】\n") {
+		t.Errorf("nil KB should not produce 世界背景 module: %q", got)
+	}
+	if !strings.Contains(got, "规划要求：") {
+		t.Errorf("nil KB should still include rules module: %q", got)
+	}
 }
 
-func TestBuildStrategicContext_AgentNotFound(t *testing.T) {
-	// KB 存在但 agentID 不在 KB 中：跳过角色段，仍注入世界知识段。
+func TestBuildStrategicSystemPrompt_AgentNotFound(t *testing.T) {
+	// KB 存在但 agentID 不在 KB 中：跳过人物背景段，仍注入世界模块。
 	kb := loadTestKB(t)
-	got := prompt.BuildStrategic(kb, nil, "NONEXISTENT-99", nil, nil, "")
-	if strings.Contains(got, "【你的角色】") {
-		t.Errorf("should not include persona section for unknown agent: %q", got)
+	got := prompt.BuildStrategicSystemPrompt(kb, nil, "NONEXISTENT-99", nil)
+	if strings.Contains(got, "【人物背景】\n") {
+		t.Errorf("should not include persona module for unknown agent: %q", got)
 	}
-	if !strings.Contains(got, "【世界知识】") {
-		t.Errorf("should still include world KB section even if agent unknown: %q", got)
+	if !strings.Contains(got, "【世界背景】\n") {
+		t.Errorf("should still include world overview module even if agent unknown: %q", got)
 	}
 }
 
@@ -340,37 +348,37 @@ func TestBuildStrategicCapabilitySummary_NewCompositeFromUE(t *testing.T) {
 
 // ─── buildStrategicContext capability injection ──────────────
 
-func TestBuildStrategicContext_IncludesCapabilitySection(t *testing.T) {
-	// 有 KB + registry 时，【可用能力】段应出现在 context 中。
+func TestBuildStrategicSystemPrompt_IncludesCapabilitySection(t *testing.T) {
+	// 有 KB + registry 时，复合动作段应出现在 system prompt 模块 3 中。
 	kb := loadTestKB(t)
 	r := NewCapabilityRegistry(nil)
 	r.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
 		{Cmd: protocol.CmdWorkShift, Kind: "composite", Description: "装配"},
 	})
-	got := prompt.BuildStrategic(kb, nil, "H-01", r.EffectiveActions("H-01"), nil, "")
-	if !strings.Contains(got, "【可用能力】") {
-		t.Errorf("context missing '【可用能力】' header: %q", got)
+	got := prompt.BuildStrategicSystemPrompt(kb, nil, "H-01", r.EffectiveActions("H-01"))
+	if !strings.Contains(got, "复合动作（长时段活动用") {
+		t.Errorf("system prompt missing composite cmd section: %q", got)
 	}
 	if !strings.Contains(got, "装配") {
-		t.Errorf("context missing composite action desc '装配': %q", got)
+		t.Errorf("system prompt missing composite action desc '装配': %q", got)
 	}
 	if !strings.Contains(got, "基础动作") {
-		t.Errorf("context missing atomic action note '基础动作': %q", got)
+		t.Errorf("system prompt missing atomic action note '基础动作': %q", got)
 	}
 }
 
-func TestBuildStrategicContext_NilKBWithRegistry(t *testing.T) {
-	// kb == nil 但 registry != nil：【可用能力】段仍注入（不依赖 KB）。
+func TestBuildStrategicSystemPrompt_NilKBWithRegistry(t *testing.T) {
+	// kb == nil 但 registry != nil：复合动作段仍注入（不依赖 KB）。
 	r := NewCapabilityRegistry(nil)
 	r.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
 		{Cmd: protocol.CmdWorkShift, Kind: "composite", Description: "装配"},
 	})
-	got := prompt.BuildStrategic(nil, nil, "H-01", r.EffectiveActions("H-01"), nil, "")
-	if !strings.Contains(got, "【可用能力】") {
-		t.Errorf("context should include capability section even with nil KB: %q", got)
+	got := prompt.BuildStrategicSystemPrompt(nil, nil, "H-01", r.EffectiveActions("H-01"))
+	if !strings.Contains(got, "复合动作（长时段活动用") {
+		t.Errorf("system prompt should include capability section even with nil KB: %q", got)
 	}
 	if !strings.Contains(got, "装配") {
-		t.Errorf("context missing composite action desc: %q", got)
+		t.Errorf("system prompt missing composite action desc: %q", got)
 	}
 }
 
@@ -434,24 +442,43 @@ func TestBuildAgentRoleContext_AgentNotFound(t *testing.T) {
 // ─── generateDailyPlan KB injection ──────────────────────────
 
 func TestGenerateDailyPlan_KBInjectedIntoPrompt(t *testing.T) {
-	// 验证 generateDailyPlan 把 KB 内容注入 prompt：用 fake caller 捕获
-	// input，检查包含 agent 显示名和 zone id（证明 KB 上下文已进入 prompt）。
+	// 验证 generateDailyPlan 的 system/user 拆分：KB 世界信息 + 人物背景
+	// 进入 system prompt；动态段（物理状态兜底 + 昨日总结）进入 user prompt。
 	kb := loadTestKB(t)
 	raw := `[{"time":"06:00-07:00","goal":"起床晨检"}]`
 	sc := &fakeStrategicCaller{resp: makeStrategicResponse(raw)}
 	_ = generateDailyPlan(context.Background(), sc, "H-01", kb, nil, nil, slog.Default(), "", nil, "")
-	prompt := sc.capturedInput
-	if prompt == "" {
-		t.Fatal("captured prompt is empty")
+
+	sys := sc.capturedSystem
+	if sys == "" {
+		t.Fatal("captured system prompt is empty")
 	}
-	if !strings.Contains(prompt, "老陈") {
-		t.Errorf("prompt missing agent display name '老陈': %q", prompt)
+	if !strings.Contains(sys, "老陈") {
+		t.Errorf("system prompt missing agent display name '老陈': %q", sys)
 	}
-	if !strings.Contains(prompt, "main_workshop") {
-		t.Errorf("prompt missing zone id 'main_workshop': %q", prompt)
+	if !strings.Contains(sys, "main_workshop") {
+		t.Errorf("system prompt missing zone id 'main_workshop': %q", sys)
 	}
-	if !strings.Contains(prompt, "【你的角色】") {
-		t.Errorf("prompt missing '【你的角色】' section header: %q", prompt)
+	if !strings.Contains(sys, "【人物背景】") {
+		t.Errorf("system prompt missing '【人物背景】' header: %q", sys)
+	}
+	if !strings.Contains(sys, "【世界背景】") || !strings.Contains(sys, "【世界详细信息】") {
+		t.Errorf("system prompt missing world module headers: %q", sys)
+	}
+
+	user := sc.capturedInput
+	if user == "" {
+		t.Fatal("captured user prompt is empty")
+	}
+	if !strings.Contains(user, "昨日总结：") {
+		t.Errorf("user prompt missing yesterday summary: %q", user)
+	}
+	if !strings.Contains(user, "【物理状态】") {
+		t.Errorf("user prompt missing physical state segment: %q", user)
+	}
+	// KB 内容不应重复出现在 user prompt。
+	if strings.Contains(user, "【世界详细信息】") {
+		t.Errorf("user prompt should not contain world detail module: %q", user)
 	}
 }
 
@@ -996,60 +1023,13 @@ func TestSelectPlanInjection_OvernightSlotEarlyMorning(t *testing.T) {
 	}
 }
 
-// ─── buildStrategicZoneObjectMap ─────────────────────────────
-
-func TestBuildStrategicZoneObjectMap_RealKB(t *testing.T) {
-	// 真实 KB：7 个 zone，4 个 object（分别在 central_plaza/repair_bay/
-	// residential_quarters/main_workshop）。映射应列出全部 7 个 zone，有 object
-	// 的标注 object，无 object 的显式标注"无可交互物体"。
+// TestBuildStrategicSystemPrompt_NoZoneObjectMapHeader 【区域设施映射】段
+// 已移除（模块 3 设施详情逐组标注所在 zone，信息不冗余）。
+// 日后若 LLM 又出现 zone-object 错配可重新启用并恢复此断言。
+func TestBuildStrategicSystemPrompt_NoZoneObjectMapHeader(t *testing.T) {
 	kb := loadTestKB(t)
-	got := prompt.StrategicZoneObjectMap(kb)
-	if got == "" {
-		t.Fatal("got empty map for valid KB")
-	}
-	// 有 object 的 zone 应出现其 object id。
-	if !strings.Contains(got, "charge") {
-		t.Errorf("map should list charge under central_plaza: %q", got)
-	}
-	if !strings.Contains(got, "workbench") {
-		t.Errorf("map should list workbench under main_workshop: %q", got)
-	}
-	if !strings.Contains(got, "sleep_pod") {
-		t.Errorf("map should list sleep_pod under residential_quarters: %q", got)
-	}
-	// 无 object 的 zone 应显式标注（让战略层 LLM 知道这些 zone 不能做 interact）。
-	if !strings.Contains(got, "无可交互物体") {
-		t.Errorf("map should explicitly mark empty zones: %q", got)
-	}
-	// archive_station 在真实 KB 中无 object，应被标注为空。
-	if !strings.Contains(got, "archive_station") {
-		t.Errorf("map should list archive_station: %q", got)
-	}
-}
-
-func TestBuildStrategicZoneObjectMap_NilKB(t *testing.T) {
-	got := prompt.StrategicZoneObjectMap(nil)
-	if got != "" {
-		t.Errorf("nil KB should return empty map, got %q", got)
-	}
-}
-
-func TestBuildStrategicZoneObjectMap_EmptyZones(t *testing.T) {
-	// KB 无 zone 时返回空串（降级路径）。
-	kb := &worldkb.KB{}
-	got := prompt.StrategicZoneObjectMap(kb)
-	if got != "" {
-		t.Errorf("KB with no zones should return empty map, got %q", got)
-	}
-}
-
-func TestBuildStrategicContext_ZoneObjectMapRemoved(t *testing.T) {
-	// 【区域设施映射】段暂时移除以降低 prompt token 数。
-	// buildStrategicContext 不应再包含该段；日后若 LLM 又出现 zone-object
-	// 错配可重新启用并恢复此断言。
-	kb := loadTestKB(t)
-	got := prompt.BuildStrategic(kb, nil, "H-01", nil, nil, "")
+	got := prompt.BuildStrategicSystemPrompt(kb, nil, "H-01", nil)
 	if strings.Contains(got, "【区域设施映射】") {
-		t.Errorf("context should NOT include '【区域设施映射】' section (temporarily removed): %q", got)
+		t.Errorf("system prompt should NOT include '【区域设施映射】' section (superseded by module 3): %q", got)
 	}
 }

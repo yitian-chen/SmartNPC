@@ -87,12 +87,16 @@ func generateDailyPlan(ctx context.Context, sc strategicCaller, agentID string, 
 	if yesterdaySummary == "" {
 		yesterdaySummary = yesterdaySummaryForFirstDay
 	}
+	// System prompt：四模块结构（世界背景/人物背景/世界详细信息/规则），
+	// 由 world KB + capability registry 派生，会话内稳定可缓存。
+	// User prompt：动态段（今日日程+物理状态+昨日总结）+ 规划指令。
+	system := prompt.BuildStrategicSystemPrompt(kb, profiles, agentID, actions)
 	promptText := fmt.Sprintf(prompt.StrategicUserTemplate,
-		prompt.BuildStrategic(kb, profiles, agentID, actions, physical, dayContext),
+		prompt.BuildStrategicUserContext(agentID, profiles, physical, dayContext),
 		"昨日总结："+yesterdaySummary)
 	logger.Info("[MCP→LLM/STRATEGIC-PROMPT]", "agent_id", agentID, "text", promptText)
 
-	resp, err := sc.SendWithSchema(ctx, prompt.StrategicSystemPrompt, promptText, "daily_plan", []byte(dailyPlanSchema))
+	resp, err := sc.SendWithSchema(ctx, system, promptText, "daily_plan", []byte(dailyPlanSchema))
 	if err != nil {
 		fallback := jitterPlanString(prompt.DefaultDailyPlan(kb))
 		logger.Warn("[战略层] 计划生成失败，使用默认计划兜底",
@@ -163,7 +167,7 @@ func parseDailyPlan(raw string) ([]dailyPlanItem, error) {
 // normalizeDailyPlan 校验并补全解析后的每日计划：
 //  1. 丢弃时长 <60min 的时段（调度器按 60min 采样，短时段大概率不被命中）
 //  2. 按起始时间排序
-//  2.5 合并相邻同时段：LLM 偶发输出连续两个同名时段（实测连续两段睡眠
+//     2.5 合并相邻同时段：LLM 偶发输出连续两个同名时段（实测连续两段睡眠
 //     20:30-22:58 + 22:58-07:16），每次边界到期都会打断睡眠重新分解，
 //     合并后由后续规则统一填补/后延
 //  3. 首段前伸到 07:00（dayStartMinute；06:00-07:00 是规划时间，不覆盖）
@@ -497,4 +501,3 @@ func matchPlanSlot(items []dailyPlanItem, timeOfDay string) string {
 	}
 	return ""
 }
-

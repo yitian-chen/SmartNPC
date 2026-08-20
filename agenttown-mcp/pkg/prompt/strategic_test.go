@@ -7,76 +7,180 @@ import (
 	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
 )
 
-func TestBuildStrategic_WithDayContext(t *testing.T) {
-	kb := &worldkb.KB{
+// sysPrompt renders the strategic system prompt with a nil KB / nil profiles
+// (fallback persona) — the pure-rules view used by rule-text guard tests.
+func sysPrompt() string {
+	return BuildStrategicSystemPrompt(nil, nil, "H-01", nil)
+}
+
+// strategicDetailKB builds a KB with narrative, zone descriptions, and objects
+// carrying both verb lists (AvailableInteractions) and rate declarations
+// (Extra) — the in-memory shape after a world_kb push merge.
+func strategicDetailKB() *worldkb.KB {
+	mk := func(sg, display, zone string, verbs []string, itxs ...map[string]any) worldkb.Object {
+		arr := make([]any, len(itxs))
+		for i, m := range itxs {
+			arr[i] = m
+		}
+		return worldkb.Object{
+			ID: sg + "-1", DisplayName: display, SemanticGroup: sg, ZoneID: zone,
+			AvailableInteractions: verbs,
+			Extra:                 map[string]any{"available_interactions": arr},
+		}
+	}
+	return &worldkb.KB{
 		Version: "1.0",
 		Narrative: worldkb.Narrative{
-			Setting: "测试车间",
-			Theme:   "测试",
+			Setting: "工业机器人小镇",
+			Theme:   "一座由机器人居民维持生产和日常生活的封闭工业园区。",
 		},
-	}
-	dayContext := "今天是周二（工作日）。下班后适合上网休闲放松。"
-	got := BuildStrategic(kb, nil, "H-01", nil, nil, dayContext)
-	if !strings.Contains(got, "【今日日程】") {
-		t.Errorf("missing 【今日日程】 segment in:\n%s", got)
-	}
-	if !strings.Contains(got, dayContext) {
-		t.Errorf("dayContext text not injected in:\n%s", got)
-	}
-	// 【今日日程】 should appear after 【你的角色】 and before 【物理状态】
-	roleIdx := strings.Index(got, "【你的角色】")
-	dayIdx := strings.Index(got, "【今日日程】")
-	physIdx := strings.Index(got, "【物理状态】")
-	if roleIdx < 0 || dayIdx < 0 || physIdx < 0 {
-		t.Fatalf("missing expected segments (role=%d day=%d phys=%d)", roleIdx, dayIdx, physIdx)
-	}
-	if !(roleIdx < dayIdx && dayIdx < physIdx) {
-		t.Errorf("segment order wrong: role=%d day=%d phys=%d (want role<day<phys)", roleIdx, dayIdx, physIdx)
+		Zones: []worldkb.Zone{
+			{ID: "main_workshop", DisplayName: "主生产车间", Description: "小镇的生产核心，机器人居民在这里完成装配、质检和设备调试。"},
+			{ID: "central_plaza", DisplayName: "中央广场", Description: "小镇的公共交通、社交和充能中心。"},
+		},
+		Objects: []worldkb.Object{
+			mk("workbench", "工作台", "main_workshop", []string{"assemble"}, map[string]any{
+				"name":                  "assemble",
+				"description":           "在工作台上进行零件装配，产出成品",
+				"energy_delta_per_hour": -4.0, "fatigue_delta_per_hour": 12.0,
+				"joint_wear_delta_per_hour": 1.4, "money_delta_per_hour": 30.0,
+				"min_energy_to_use": 10.0, "max_fatigue_to_use": 80.0,
+			}),
+			mk("sleep_pod", "睡眠舱", "residential_quarters", []string{"sleep", "meditate", "tidy_up"},
+				map[string]any{"name": "sleep", "description": "进入休眠舱休息，恢复精力和状态", "fatigue_delta_per_hour": -25.0},
+				map[string]any{"name": "meditate", "description": "坐在床上冥想，时间不宜太长", "fatigue_delta_per_hour": -10.0},
+				map[string]any{"name": "tidy_up", "description": "整理内务：整理自己的私人物品和床铺，保持整洁"},
+			),
+			// 无速率声明（仅动词列表）：交互行只列动词。
+			{ID: "legacy-1", DisplayName: "旧装置", SemanticGroup: "legacy", ZoneID: "main_workshop",
+				AvailableInteractions: []string{"poke"}},
+		},
+		Agents: []worldkb.Agent{
+			{ID: "H-01", DisplayName: "老陈"},
+			{ID: "H-02", DisplayName: "老王"},
+		},
 	}
 }
 
-func TestBuildStrategic_EmptyDayContext(t *testing.T) {
-	kb := &worldkb.KB{
-		Version:   "1.0",
-		Narrative: worldkb.Narrative{Setting: "测试"},
+// TestBuildStrategicSystemPrompt_FourModules verifies the four-module
+// structure: 【世界背景】(overview) → 【人物背景】(profile) →
+// 【世界详细信息】(details) → 规划要求 (rules + format example).
+func TestBuildStrategicSystemPrompt_FourModules(t *testing.T) {
+	got := BuildStrategicSystemPrompt(strategicDetailKB(), nil, "H-01", nil)
+	overIdx := strings.Index(got, "【世界背景】")
+	roleIdx := strings.Index(got, "【人物背景】")
+	detailIdx := strings.Index(got, "【世界详细信息】")
+	ruleIdx := strings.Index(got, "规划要求：")
+	if overIdx < 0 || roleIdx < 0 || detailIdx < 0 || ruleIdx < 0 {
+		t.Fatalf("missing modules (bg=%d role=%d detail=%d rules=%d):\n%s", overIdx, roleIdx, detailIdx, ruleIdx, got)
 	}
-	got := BuildStrategic(kb, nil, "H-01", nil, nil, "")
+	if !(overIdx < roleIdx && roleIdx < detailIdx && detailIdx < ruleIdx) {
+		t.Errorf("module order wrong: bg=%d role=%d detail=%d rules=%d", overIdx, roleIdx, detailIdx, ruleIdx)
+	}
+	// 模块 1 世界背景：narrative + 三份名册。
+	for _, want := range []string{
+		"设定：工业机器人小镇",
+		"主题：",
+		"区域（2 个）：主生产车间（main_workshop）、中央广场（central_plaza）",
+		"可交互设施类别",
+		"居民（2 位）：老陈（H-01）、老王（H-02）",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("module 1 missing %q:\n%s", want, got)
+		}
+	}
+	// 模块 2 人物背景：fallback persona。
+	if !strings.Contains(got, "名字：老陈") {
+		t.Errorf("module 2 missing fallback persona name:\n%s", got)
+	}
+	// 模块 4：七条规则 + 格式示例。
+	if !strings.Contains(got, "格式示例：[{\"time\":\"07:00-9:00\"") {
+		t.Errorf("rules module missing format example:\n%s", got)
+	}
+}
+
+// TestBuildStrategicSystemPrompt_Module3Details verifies module 3 renders
+// zone descriptions, per-group facilities with inline per-interaction
+// description + per-hour effects + gates, and the composite cmd list.
+func TestBuildStrategicSystemPrompt_Module3Details(t *testing.T) {
+	got := BuildStrategicSystemPrompt(strategicDetailKB(), nil, "H-01", nil)
+	// zone 描述。
+	if !strings.Contains(got, "主生产车间（main_workshop）：小镇的生产核心") {
+		t.Errorf("module 3 missing zone description:\n%s", got)
+	}
+	// 设施组 + 内联交互效果。
+	if !strings.Contains(got, "工作台（workbench），位于 main_workshop") {
+		t.Errorf("module 3 missing workbench group:\n%s", got)
+	}
+	if !strings.Contains(got, "  - assemble：在工作台上进行零件装配，产出成品。能量中等下降、疲劳度明显提升、关节磨损少量累积、余额快速增加。使用门槛：能量≥10、疲劳≤80") {
+		t.Errorf("module 3 missing inline effect line for assemble:\n%s", got)
+	}
+	if !strings.Contains(got, "  - meditate：坐在床上冥想，时间不宜太长。疲劳度明显缓解") {
+		t.Errorf("module 3 missing inline effect line for meditate:\n%s", got)
+	}
+	// 无速率声明的交互只列动词。
+	if !strings.Contains(got, "  - poke") {
+		t.Errorf("module 3 should still list rate-less interaction verb poke:\n%s", got)
+	}
+	// 复合动作清单 + 尾注（nil registry → 内置兜底）。
+	if !strings.Contains(got, "复合动作（长时段活动用") {
+		t.Errorf("module 3 missing composite cmd section:\n%s", got)
+	}
+	if !strings.Contains(got, "work_shift") {
+		t.Errorf("module 3 missing builtin composite work_shift:\n%s", got)
+	}
+	if !strings.Contains(got, "任意 semantic_group + interaction 组合") {
+		t.Errorf("module 3 missing InteractSmartObject tail note:\n%s", got)
+	}
+}
+
+// TestBuildStrategicUserContext_DynamicSegments verifies the user context
+// carries only the dynamic segments (今日日程 + 物理状态) — world/KB/persona
+// content lives in the system prompt.
+func TestBuildStrategicUserContext_DynamicSegments(t *testing.T) {
+	dayContext := "今天是周二（工作日）。下班后适合上网休闲放松。"
+	got := BuildStrategicUserContext("H-01", nil, nil, dayContext)
+	if !strings.Contains(got, "【今日日程】") || !strings.Contains(got, dayContext) {
+		t.Errorf("missing 【今日日程】 segment in:\n%s", got)
+	}
+	if !strings.Contains(got, "【物理状态】") {
+		t.Errorf("missing 【物理状态】 segment in:\n%s", got)
+	}
+	dayIdx := strings.Index(got, "【今日日程】")
+	physIdx := strings.Index(got, "【物理状态】")
+	if dayIdx > physIdx {
+		t.Errorf("segment order wrong: day=%d phys=%d (want day<phys)", dayIdx, physIdx)
+	}
+	// KB/世界内容不得出现在 user context。
+	for _, unwanted := range []string{"【世界背景】", "【人物背景】", "【世界详细信息】", "workbench", "复合动作"} {
+		if strings.Contains(got, unwanted) {
+			t.Errorf("user context should not contain %q:\n%s", unwanted, got)
+		}
+	}
+}
+
+func TestBuildStrategicUserContext_EmptyDayContext(t *testing.T) {
+	got := BuildStrategicUserContext("H-01", nil, nil, "")
 	if strings.Contains(got, "【今日日程】") {
 		t.Errorf("empty dayContext should not produce 【今日日程】 segment in:\n%s", got)
 	}
 }
 
-// TestBuildStrategic_CmdEffectsSegment verifies the 【动作对属性的影响】
-// segment appears when SetCmdEffects installed text (and appears after the
-// 【可用能力】 segment), and is skipped entirely when the summary is empty.
-func TestBuildStrategic_CmdEffectsSegment(t *testing.T) {
-	kb := &worldkb.KB{
-		Version:   "1.0",
-		Narrative: worldkb.Narrative{Setting: "测试"},
-	}
-	text := "各活动对属性的影响（每游戏小时平均变化，由仿真日志统计）：\n" +
-		"- work_shift（assemble）：能量少量下降、疲劳度中等提升、余额明显增加\n"
-	SetCmdEffects(text)
+// TestBuildStrategic_CmdEffectsGlobalNotUsedByStrategic verifies the
+// SetCmdEffects global (tactical-layer injection) no longer affects the
+// strategic prompt — strategic effects render inline from the KB instead.
+func TestBuildStrategic_CmdEffectsGlobalNotUsedByStrategic(t *testing.T) {
+	kb := strategicDetailKB()
+	SetCmdEffects("全局效果段：疲劳度中等提升")
 	defer SetCmdEffects("")
-
-	got := BuildStrategic(kb, nil, "H-01", nil, nil, "")
-	if !strings.Contains(got, "【动作对属性的影响】") {
-		t.Errorf("missing 【动作对属性的影响】 segment in:\n%s", got)
+	got := BuildStrategicSystemPrompt(kb, nil, "H-01", nil)
+	if strings.Contains(got, "全局效果段") {
+		t.Errorf("strategic system prompt should not consume the tactical cmdEffects global:\n%s", got)
 	}
-	if !strings.Contains(got, "疲劳度中等提升") {
-		t.Errorf("cmd effects text not injected in:\n%s", got)
-	}
-	capIdx := strings.Index(got, "【可用能力】")
-	effIdx := strings.Index(got, "【动作对属性的影响】")
-	if capIdx < 0 || effIdx < 0 || capIdx > effIdx {
-		t.Errorf("segment order wrong: cap=%d effects=%d (want effects after cap)", capIdx, effIdx)
-	}
-
-	// 禁用（空串）时整段消失。
-	SetCmdEffects("")
-	got = BuildStrategic(kb, nil, "H-01", nil, nil, "")
-	if strings.Contains(got, "【动作对属性的影响】") {
-		t.Errorf("empty cmd effects should not produce segment in:\n%s", got)
+	if !strings.Contains(got, "疲劳度明显提升") {
+		// 该短语来自 KB 声明的内联渲染（workbench/assemble +12/h → 明显档），
+		// 而非全局段。
+		t.Errorf("strategic system prompt should render inline effects from KB:\n%s", got)
 	}
 }
 
@@ -142,11 +246,12 @@ func TestOtherAgentsLine_OmitsProfessionWhenEmpty(t *testing.T) {
 	}
 }
 
-func TestBuildStrategic_OmitsOtherNPCsSegment(t *testing.T) {
-	// 【其他NPC】段暂时撤除：战略层暂不安排社交，花名册不再注入。
-	// 恢复社交安排时删掉本测试并把段加回 BuildStrategic。
+// TestBuildStrategicSystemPrompt_OmitsOtherNPCsSegment 战略层暂不安排社交：
+// 【其他NPC】段不出现（世界背景的居民名册仅为概况列表）。
+// 恢复社交安排时删掉本测试并把段加回。
+func TestBuildStrategicSystemPrompt_OmitsOtherNPCsSegment(t *testing.T) {
 	kb := strategicRosterKB()
-	got := BuildStrategic(kb, nil, "H-01", nil, nil, "")
+	got := BuildStrategicSystemPrompt(kb, nil, "H-01", nil)
 	if strings.Contains(got, "【其他NPC】\n") {
 		t.Errorf("strategic prompt should not contain 【其他NPC】 segment while social planning is disabled:\n%s", got)
 	}
@@ -154,9 +259,10 @@ func TestBuildStrategic_OmitsOtherNPCsSegment(t *testing.T) {
 
 func TestStrategicSystemPrompt_NoSocialWhileDisabled(t *testing.T) {
 	// 社交描述暂时撤除：system prompt 不应引导 LLM 安排 social_chat 时段。
-	// 恢复社交安排时删掉本测试。
-	for _, unwanted := range []string{"social_chat", "【社交】", "社交时段"} {
-		if strings.Contains(StrategicSystemPrompt, unwanted) {
+	// 注意：复合动作清单（模块 3）仍会列出 social_chat cmd 本身（能力事实），
+	// 这里只守卫机制文本不出现社交引导。恢复社交安排时删掉本测试。
+	for _, unwanted := range []string{"【社交】", "社交时段"} {
+		if strings.Contains(sysPrompt(), unwanted) {
 			t.Errorf("strategic system prompt should not mention %q while social planning is disabled", unwanted)
 		}
 	}
@@ -165,7 +271,7 @@ func TestStrategicSystemPrompt_NoSocialWhileDisabled(t *testing.T) {
 func TestStrategicSystemPrompt_GoalMustBeString(t *testing.T) {
 	// L1（json_schema）之外的软约束：goal 字段类型显式声明。
 	// 起因：实际仿真中 LLM 把 goal 写成 {"goal":"...","cmd":"..."} 导致整包解析失败。
-	if !strings.Contains(StrategicSystemPrompt, `"goal"（一句话，必须是纯文本字符串）`) {
+	if !strings.Contains(sysPrompt(), `"goal"（一句话，必须是纯文本字符串）`) {
 		t.Error("system prompt should declare goal must be a plain string")
 	}
 }
@@ -173,10 +279,10 @@ func TestStrategicSystemPrompt_GoalMustBeString(t *testing.T) {
 func TestStrategicSystemPrompt_GoalStyleTerse(t *testing.T) {
 	// goal 文案干练简洁（做什么+在哪），人设语气不得进入 schedule 文字
 	// ——语气只属于战术层的 speak 动作。
-	if !strings.Contains(StrategicSystemPrompt, "goal 用干练简洁的客观描述") {
+	if !strings.Contains(sysPrompt(), "goal 用干练简洁的客观描述") {
 		t.Error("system prompt should require terse objective goal text")
 	}
-	if !strings.Contains(StrategicSystemPrompt, "不带语气词、口头禅、内心独白或人设腔调") {
+	if !strings.Contains(sysPrompt(), "不带语气词、口头禅、内心独白或人设腔调") {
 		t.Error("system prompt should ban persona tone in goal text")
 	}
 	if !strings.Contains(StrategicUserTemplate, "goal 文字一律干练简洁，不带人设语气") {
@@ -197,10 +303,10 @@ func TestStrategicUserTemplate_EndsWithFormatReminder(t *testing.T) {
 
 func TestStrategicSystemPrompt_SlotDurationRuleEmphasized(t *testing.T) {
 	// 规则 2 标记为硬性要求，且说明不足 120 分钟时的处理方式（并入/不安排）。
-	if !strings.Contains(StrategicSystemPrompt, "【硬性要求】每个时段的结束时间减去开始时间必须 ≥120 分钟") {
+	if !strings.Contains(sysPrompt(), "【硬性要求】每个时段的结束时间减去开始时间必须 ≥120 分钟") {
 		t.Error("system prompt rule 2 should be marked as a hard ≥120-minute requirement")
 	}
-	if !strings.Contains(StrategicSystemPrompt, "并入相邻时段") {
+	if !strings.Contains(sysPrompt(), "并入相邻时段") {
 		t.Error("system prompt should say short activities merge into adjacent slots")
 	}
 }
@@ -213,7 +319,7 @@ func TestStrategicSystemPrompt_PlanStartsAtSeven(t *testing.T) {
 		"任何时段的开始时间不得早于 07:00",
 		"禁止输出 0:00-7:00",
 	} {
-		if !strings.Contains(StrategicSystemPrompt, want) {
+		if !strings.Contains(sysPrompt(), want) {
 			t.Errorf("system prompt missing %q", want)
 		}
 	}
@@ -232,25 +338,23 @@ func TestStrategicSystemPrompt_NightSleepContinuous(t *testing.T) {
 		"不得拆成多个睡眠时段",
 		"不得在凌晨提前结束",
 	} {
-		if !strings.Contains(StrategicSystemPrompt, want) {
+		if !strings.Contains(sysPrompt(), want) {
 			t.Errorf("system prompt missing %q", want)
 		}
 	}
 }
 
-func TestBuildStrategic_InteractWorkGuidance(t *testing.T) {
-	// 【可用能力】段应告知：InteractSmartObject 可用于任何可交互物体——
-	// 工种设备（process/debug/dismantle 等无复合动作工种的规划依据）
-	// 与非工种互动（睡眠舱 sleep/meditate/tidy_up、长椅 rest）。
-	kb := strategicRosterKB()
-	got := BuildStrategic(kb, nil, "H-01", nil, nil, "")
+// TestStrategicSystemPrompt_InteractWorkGuidance 验证模块 3 尾注告知
+// InteractSmartObject 可用于设施详情中列出的任意组合（无复合动作工种
+// 的规划依据）。
+func TestStrategicSystemPrompt_InteractWorkGuidance(t *testing.T) {
+	got := BuildStrategicSystemPrompt(strategicDetailKB(), nil, "H-01", nil)
 	for _, want := range []string{
-		"任何可交互物体",
-		"加工机（process）", "拆解台（dismantle）",
-		"睡眠舱（sleep/meditate/tidy_up）", "长椅（rest）",
+		"与物体交互（InteractSmartObject）可直接用于上方设施详情中列出的任意 semantic_group + interaction 组合",
+		"战术层会据此分解为对应的长时段互动",
 	} {
 		if !strings.Contains(got, want) {
-			t.Errorf("BuildStrategic 可用能力 should mention %q:\n%s", want, got)
+			t.Errorf("module 3 tail note should mention %q:\n%s", want, got)
 		}
 	}
 }
@@ -264,40 +368,27 @@ func TestStrategicSystemPrompt_Rule3AtomicInteractionGate(t *testing.T) {
 		"(semantic_group, interaction) 组合",
 		"睡眠舱的 sleep/meditate/tidy_up",
 	} {
-		if !strings.Contains(StrategicSystemPrompt, want) {
+		if !strings.Contains(sysPrompt(), want) {
 			t.Errorf("system prompt rule 3 missing %q", want)
 		}
 	}
 	// 规则 5 早间露出。
-	if !strings.Contains(StrategicSystemPrompt, "冥想醒神、整理舱位") {
+	if !strings.Contains(sysPrompt(), "冥想醒神、整理舱位") {
 		t.Error("system prompt rule 5 should expose 冥想醒神/整理舱位 as morning options")
 	}
-	if !strings.Contains(StrategicSystemPrompt, "晨练拉伸") {
+	if !strings.Contains(sysPrompt(), "晨练拉伸") {
 		t.Error("system prompt rule 5 should expose 晨练拉伸 (exercise) as a morning option")
 	}
 }
 
-func TestBuildStrategic_ExcludesMechanismSegments(t *testing.T) {
-	// Mechanism segments (【社交】/【要求】) live in StrategicSystemPrompt;
-	// BuildStrategic returns data segments only. 【动作对状态的影响】已删除
-	// ——属性影响统一由 user 消息的【动作对属性的影响】段（脚本生成）提供。
-	kb := strategicRosterKB()
-	got := BuildStrategic(kb, nil, "H-01", nil, nil, "")
-	for _, seg := range []string{"【动作对状态的影响】", "【社交】", "要求："} {
-		if strings.Contains(got, seg) {
-			t.Errorf("BuildStrategic should not contain mechanism segment %q in:\n%s", seg, got)
-		}
-	}
-}
-
 // TestStrategicSystemPrompt_NoHardcodedEffects 验证 system prompt 不再硬编码
-// 动作属性影响——统一由 cmd_effect_summary.py 生成的【动作对属性的影响】
-// 段（user 消息，SetCmdEffects 注入）提供，避免两份内容漂移。
+// 动作属性影响表——属性变动统一由模块 3 的设施详情内联渲染（world KB
+// 声明），避免两份内容漂移。
 func TestStrategicSystemPrompt_NoHardcodedEffects(t *testing.T) {
-	if strings.Contains(StrategicSystemPrompt, "【动作对状态的影响】") {
-		t.Error("StrategicSystemPrompt should not hardcode the effect table (use the script-generated segment)")
+	if strings.Contains(sysPrompt(), "【动作对状态的影响】") {
+		t.Error("StrategicSystemPrompt should not hardcode the effect table")
 	}
-	if !strings.Contains(StrategicSystemPrompt, "【动作对属性的影响】") {
-		t.Error("StrategicSystemPrompt should reference the script-generated effect segment")
+	if !strings.Contains(sysPrompt(), "属性变动") {
+		t.Error("StrategicSystemPrompt preamble should reference the effect info in module 3")
 	}
 }
