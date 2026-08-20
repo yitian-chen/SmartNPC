@@ -575,7 +575,7 @@ func TestBuildTacticalPrompt_WithPhysical(t *testing.T) {
 func TestBuildTacticalPrompt_InjectsKBContext(t *testing.T) {
 	kb := loadTestKB(t)
 	// KB 世界信息已迁至 system prompt（与战略层共享三模块）。
-	promptText := prompt.BuildTacticalSystemPrompt(kb, nil, "", nil)
+	promptText := prompt.BuildTacticalSystemPrompt(kb, nil, "")
 	// 应包含 KB 中所有 zone（assets/world_kb.yaml 当前是 7-zone 工业园区）
 	for _, zID := range []string{"main_workshop", "central_plaza", "logistics_hub", "repair_bay", "residential_quarters", "archive_station", "recycling_yard"} {
 		if !strings.Contains(promptText, zID) {
@@ -595,9 +595,9 @@ func TestBuildTacticalPrompt_InjectsKBContext(t *testing.T) {
 	if !strings.Contains(promptText, "assemble") || !strings.Contains(promptText, "charge") || !strings.Contains(promptText, "sleep") {
 		t.Errorf("system prompt should list available interactions on objects, got: %s", promptText)
 	}
-	// 应包含工具清单（战术层特有）
-	if !strings.Contains(promptText, "可用工具（仅限以下") {
-		t.Errorf("system prompt should contain the tool list, got: %s", promptText)
+	// 工具清单已迁至 user prompt 且仅从 registry 派生：nil actions 不出现。
+	if strings.Contains(promptText, "（仅限以下") {
+		t.Errorf("system prompt should not carry the tool list, got: %s", promptText)
 	}
 }
 
@@ -703,7 +703,7 @@ func TestBuildTacticalPrompt_NilKB(t *testing.T) {
 func TestBuildTacticalPrompt_InjectsAgentRole(t *testing.T) {
 	kb := loadTestKB(t)
 	// 角色画像已迁至 system prompt 的【人物背景】模块。
-	promptText := prompt.BuildTacticalSystemPrompt(kb, nil, "H-01", nil)
+	promptText := prompt.BuildTacticalSystemPrompt(kb, nil, "H-01")
 	if !strings.Contains(promptText, "【人物背景】") {
 		t.Errorf("prompt missing '【人物背景】' section header, got: %s", promptText)
 	}
@@ -717,7 +717,7 @@ func TestBuildTacticalPrompt_InjectsAgentRole(t *testing.T) {
 // TestBuildTacticalPrompt_NilKBNoRole 验证 kb==nil 时 prompt 不含
 // 【你的角色】段（roleLine 降级为空串，prompt 中仅留空行）。
 func TestBuildTacticalPrompt_NilKBNoRole(t *testing.T) {
-	promptText := prompt.BuildTacticalSystemPrompt(nil, nil, "", nil)
+	promptText := prompt.BuildTacticalSystemPrompt(nil, nil, "")
 	if strings.Contains(promptText, "【人物背景】\n") {
 		t.Errorf("prompt should not contain '【人物背景】' when KB is nil, got: %s", promptText)
 	}
@@ -765,8 +765,8 @@ func TestBuildTacticalPrompt_RegistryFiltersTools(t *testing.T) {
 		{Cmd: protocol.CmdMoveTo, Kind: "atomic"},
 		{Cmd: protocol.CmdWait, Kind: "atomic"},
 	})
-	// 工具清单已迁至 system prompt。
-	promptText := prompt.BuildTacticalSystemPrompt(nil, nil, "H-01", reg.EffectiveActions("H-01"))
+	// 工具清单在 user prompt（仅从 registry 派生）。
+	promptText := prompt.BuildTactical(prompt.TacticalInput{Goal: "装配", Zone: "main_workshop", TimeOfDay: "09:00", Slot: "09:00-12:00", Actions: reg.EffectiveActions("H-01"), AgentID: "H-01"})
 	// Tool bullet list should contain move_to.
 	if !strings.Contains(promptText, "- move_to [原子]:") {
 		t.Errorf("prompt should list move_to as [原子] bullet, got: %s", promptText)
@@ -798,9 +798,9 @@ func TestBuildTacticalPrompt_PerAgentOverride(t *testing.T) {
 	reg.Register("H-02", []protocol.CapabilityAction{
 		{Cmd: protocol.CmdMoveTo, Kind: "atomic"},
 	})
-	// 工具清单已迁至 system prompt。
-	promptH01 := prompt.BuildTacticalSystemPrompt(nil, nil, "H-01", reg.EffectiveActions("H-01"))
-	promptH02 := prompt.BuildTacticalSystemPrompt(nil, nil, "H-02", reg.EffectiveActions("H-02"))
+	// 工具清单在 user prompt（仅从 registry 派生）。
+	promptH01 := prompt.BuildTactical(prompt.TacticalInput{Goal: "装配", Zone: "main_workshop", TimeOfDay: "09:00", Slot: "09:00-12:00", Actions: reg.EffectiveActions("H-01"), AgentID: "H-01"})
+	promptH02 := prompt.BuildTactical(prompt.TacticalInput{Goal: "装配", Zone: "main_workshop", TimeOfDay: "09:00", Slot: "09:00-12:00", Actions: reg.EffectiveActions("H-02"), AgentID: "H-02"})
 	// Check bullet prefix — example section is hardcoded and not registry-aware.
 	if !strings.Contains(promptH01, "- work_shift [复合]:") {
 		t.Errorf("H-01 prompt should list composite tools as [复合] bullets (global default), got: %s", promptH01)
@@ -1088,30 +1088,12 @@ func TestMapTacticalAction_NewCmdNilRegistryErrors(t *testing.T) {
 	}
 }
 
-// TestBuildTacticalToolEntries_NilRegistryBuiltinFullSet verifies the nil
-// registry fallback returns all 12 built-in tools (minus scan_area/stop/wait).
-func TestBuildTacticalToolEntries_NilRegistryBuiltinFullSet(t *testing.T) {
-	entries := prompt.ToolEntries(nil)
-	// 15 built-in specs - scan_area - stop - wait = 12
-	if len(entries) != 12 {
-		t.Fatalf("nil registry entry count=%d, want 12 (all built-in minus scan_area/stop/wait)", len(entries))
-	}
-	seen := make(map[string]bool)
-	for _, e := range entries {
-		seen[e.Name] = true
-	}
-	if seen["scan_area"] || seen["stop"] || seen["wait"] {
-		t.Errorf("scan_area/stop/wait should not appear in tactical tool list")
-	}
-	for _, name := range []string{
-		"generic_act", "move_to", "turn_to",
-		"speak", "emote", "InteractSmartObject",
-		"work_shift", "charge_at_station", "self_maintenance",
-		"rest_at_residence", "surf_internet", "social_chat",
-	} {
-		if !seen[name] {
-			t.Errorf("missing built-in tool %q in nil-registry fallback", name)
-		}
+// TestBuildTacticalToolEntries_NilRegistryEmpty verifies tools come solely
+// from the cmd registry: nil actions produce an empty list (no builtin
+// fallback, no hardcoded availability).
+func TestBuildTacticalToolEntries_NilRegistryEmpty(t *testing.T) {
+	if entries := prompt.ToolEntries(nil); len(entries) != 0 {
+		t.Fatalf("nil registry entry count=%d, want 0 (no builtin fallback)", len(entries))
 	}
 }
 

@@ -354,7 +354,7 @@ func TestPickChatPeer_SingleAgent(t *testing.T) {
 // plus the full tool list — and does NOT carry the decomposition rules
 // (they live in the user message).
 func TestBuildTacticalSystemPrompt_Structure(t *testing.T) {
-	got := BuildTacticalSystemPrompt(strategicDetailKB(), nil, "H-01", nil)
+	got := BuildTacticalSystemPrompt(strategicDetailKB(), nil, "H-01")
 	overIdx := strings.Index(got, "【世界背景】")
 	roleIdx := strings.Index(got, "【人物背景】")
 	detailIdx := strings.Index(got, "【世界详细信息】")
@@ -364,12 +364,10 @@ func TestBuildTacticalSystemPrompt_Structure(t *testing.T) {
 	if !(overIdx < roleIdx && roleIdx < detailIdx) {
 		t.Errorf("module order wrong: bg=%d role=%d detail=%d", overIdx, roleIdx, detailIdx)
 	}
-	// 战术层特有：完整工具清单（带 params 与 [复合]/[原子] 标签）。
-	if !strings.Contains(got, "可用工具（仅限以下") {
-		t.Errorf("system prompt missing the tool list:\n%s", got)
-	}
-	if !strings.Contains(got, "[复合]") || !strings.Contains(got, "[原子]") {
-		t.Errorf("tool list should carry kind labels:\n%s", got)
+	// 工具清单已迁至 user prompt（仅从 registry 派生），system prompt
+	// 不包含（前言/规则中的模块名引用不算）。
+	if strings.Contains(got, "（仅限以下") {
+		t.Errorf("system prompt should not carry the tool list (moved to user prompt, registry-derived):\n%s", got)
 	}
 	// 分解规则已迁至 user prompt。
 	if strings.Contains(got, "队列首个动作必须是 speak") {
@@ -417,9 +415,34 @@ func TestBuildTactical_FourParts(t *testing.T) {
 	if !strings.Contains(out, "请把【当前时段目标】分解为一个或多个 action") {
 		t.Errorf("part 4 missing the ask:\n%s", out)
 	}
-	// KB/工具清单不重复出现在 user prompt（规则文本引用模块名不算）。
-	if strings.Contains(out, "可用工具（仅限以下") {
-		t.Errorf("user prompt should not carry the tool list (system prompt's job):\n%s", out)
+	// 工具清单仅从 registry（cmd）派生：Actions 为空时不出现，杜绝
+	// 硬编码兜底（规则文本中的模块名引用不算）。
+	if strings.Contains(out, "【可用工具】（仅限以下") {
+		t.Errorf("empty Actions should not produce a tool list:\n%s", out)
+	}
+}
+
+// TestBuildTactical_ToolListFromRegistryOnly verifies the 【可用工具】
+// segment appears in the user prompt (part 2) when Actions come from the
+// registry, with kind labels and registry-derived descriptions.
+func TestBuildTactical_ToolListFromRegistryOnly(t *testing.T) {
+	actions := []protocol.CapabilityAction{
+		{Cmd: "WorkShift", Kind: "composite", Description: "工作班次（装配/作业）",
+			Params: []protocol.CapabilityParam{{Name: "semantic_group", Type: "string", Required: true}}},
+		{Cmd: "MoveTo", Kind: "atomic", Description: "移动到指定位置或Actor"},
+	}
+	out := BuildTactical(TacticalInput{
+		Goal: "车间装配", Zone: "main_workshop", TimeOfDay: "08:00",
+		Slot: "07:00-12:00", Actions: actions, AgentID: "H-01",
+	})
+	if !strings.Contains(out, "【可用工具】（仅限以下 2 个）") {
+		t.Errorf("user prompt should carry the registry-derived tool list:\n%s", out)
+	}
+	if !strings.Contains(out, "- work_shift [复合]: 工作班次（装配/作业）") {
+		t.Errorf("tool bullet should use registry cmd description:\n%s", out)
+	}
+	if !strings.Contains(out, "- move_to [原子]: 移动到指定位置或Actor") {
+		t.Errorf("tool bullet should use registry cmd description:\n%s", out)
 	}
 }
 

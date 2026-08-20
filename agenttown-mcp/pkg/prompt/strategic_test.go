@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/AgentTown/agenttown-mcp/pkg/protocol"
 	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
 )
 
@@ -67,7 +68,7 @@ func strategicDetailKB() *worldkb.KB {
 // 【世界详细信息】(details). The seven rules live in the user message
 // (StrategicRules + StrategicUserTemplate), not here.
 func TestBuildStrategicSystemPrompt_ThreeModules(t *testing.T) {
-	got := BuildStrategicSystemPrompt(strategicDetailKB(), nil, "H-01", nil)
+	got := BuildStrategicSystemPrompt(strategicDetailKB(), nil, "H-01", strategicCapActions())
 	overIdx := strings.Index(got, "【世界背景】")
 	roleIdx := strings.Index(got, "【人物背景】")
 	detailIdx := strings.Index(got, "【世界详细信息】")
@@ -111,7 +112,7 @@ func TestBuildStrategicSystemPrompt_ThreeModules(t *testing.T) {
 // zone descriptions, per-group facilities with inline per-interaction
 // description + per-hour effects + gates, and the composite cmd list.
 func TestBuildStrategicSystemPrompt_Module3Details(t *testing.T) {
-	got := BuildStrategicSystemPrompt(strategicDetailKB(), nil, "H-01", nil)
+	got := BuildStrategicSystemPrompt(strategicDetailKB(), nil, "H-01", strategicCapActions())
 	// zone 描述。
 	if !strings.Contains(got, "主生产车间（main_workshop）：小镇的生产核心") {
 		t.Errorf("module 3 missing zone description:\n%s", got)
@@ -171,6 +172,19 @@ func TestBuildStrategicUserContext_EmptyDayContext(t *testing.T) {
 	got := BuildStrategicUserContext("H-01", nil, nil, "")
 	if strings.Contains(got, "【今日日程】") {
 		t.Errorf("empty dayContext should not produce 【今日日程】 segment in:\n%s", got)
+	}
+}
+
+// strategicCapActions is a minimal registry fixture (composite cmds) for
+// tests that assert the composite summary section — tools come solely from
+// the cmd registry now, no builtin fallback.
+func strategicCapActions() []protocol.CapabilityAction {
+	return []protocol.CapabilityAction{
+		{Cmd: "WorkShift", Kind: "composite", Description: "工作班次（装配/作业）",
+			Params: []protocol.CapabilityParam{
+				{Name: "semantic_group", Type: "string", Required: true},
+				{Name: "interaction", Type: "string", Required: true},
+			}},
 	}
 }
 
@@ -338,7 +352,7 @@ func TestStrategicSystemPrompt_NightSleepContinuous(t *testing.T) {
 // InteractSmartObject 可用于设施详情中列出的任意组合（无复合动作工种
 // 的规划依据）。
 func TestStrategicSystemPrompt_InteractWorkGuidance(t *testing.T) {
-	got := BuildStrategicSystemPrompt(strategicDetailKB(), nil, "H-01", nil)
+	got := BuildStrategicSystemPrompt(strategicDetailKB(), nil, "H-01", strategicCapActions())
 	for _, want := range []string{
 		"与物体交互（InteractSmartObject）可直接用于上方设施详情中列出的任意 semantic_group + interaction 组合",
 		"战术层会据此分解为对应的长时段互动",

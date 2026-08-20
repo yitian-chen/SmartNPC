@@ -11,45 +11,6 @@ import (
 	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
 )
 
-// toolOverride is the hand-tuned Chinese prompt text for the 13 builtin tools.
-// Keys are tool_name (snake_case). New cmds pushed via capability_registry
-// derive Desc/Params from CapabilityAction.Description and param schema
-// (see toolEntries).
-//
-// 新 13 cmd 体系（2026-08-11 + Phase 2 Module C）：MoveTo 统一替换
-// MoveToLocation+MoveToAgent，用 target_type+target_id/target_position；
-// InteractSmartObject 和 5 个复合动作共享 semantic_group+interaction（按真实
-// UE5 capability_registry 声明的参数名，2026-08-11 修正：原 smart_object 字段
-// UE5 不识别，导致复合动作瞬时返回不执行工作阶段）。SocialChat 用
-// target_agent_id+content（对话目标为 NPC，非 Smart Object）。
-//
-// 2026-08-14 P0-2 修复：5 个复合动作的 params 占位符从抽象中文（"休眠舱组名"/"动词"）
-// 改为具体的合法值示例（sleep_pod/sleep 等），让 LLM 看到明确的合法参数，
-// 避免把"长椅休息"goal 错配到 rest_at_residence 复合动作上。
-var toolOverride = map[string]struct {
-	Desc   string
-	Params string
-}{
-	"generic_act":         {"兜底通用动作（带内心独白，无匹配复合动作时用）", `{"thought":"...","behavior":"idle|wave_hand|look_around"}`},
-	"move_to":             {"移动到目标", `{"target_type":"agent|smart_object|zone|position","target_id":"...","target_position":[x,y,z]}`},
-	"turn_to":             {"转向目标", `{"target_type":"agent|smart_object|zone|position","target_id":"...","target_position":[x,y,z]}`},
-	"speak":               {"说话", `{"content":"..."}`},
-	"emote":               {"表达情绪", `{"emotion":"happy|sad|..."}`},
-	"InteractSmartObject": {"与智能物体交互（长耗时动作，单次持续到时段切换，可作队列收尾）", `{"semantic_group":"...","interaction":"动词"}`},
-	// wait intentionally not in override and not shown in prompt tool list.
-	// 复合动作 params 给出具体合法值示例（来自当前 world_kb.yaml），
-	// LLM 模仿时直接套用即可，避免编造 semantic_group 或 interaction。
-	"work_shift":        {"工作班次（装配/作业）", `{"semantic_group":"workbench|sorting_conveyor|inspection_table","interaction":"assemble|sort_cargo|inspect"}`},
-	"charge_at_station": {"在充电站充电", `{"semantic_group":"charger","interaction":"charge"}`},
-	"self_maintenance":  {"自我维护保养", `{"semantic_group":"repair_table","interaction":"repair"}`},
-	"rest_at_residence": {"在住所休息（仅搭配 sleep_pod/sleep；长椅休息用 InteractSmartObject）", `{"semantic_group":"sleep_pod","interaction":"sleep"}`},
-	"surf_internet":     {"上网浏览", `{"semantic_group":"computer","interaction":"surf_internet"}`},
-	"social_chat":       {"主动去找另一个 NPC 聊天（走向对方+对话挂起，直到对话结束）", `{"target_agent_id":"<附近NPC的 id>","content":"开场白"}`},
-	// Exercise 是 UE 动态注册的新 cmd（2026-08-19 注册为 composite，
-	// 后调整为 atomic）。params 的 enum 值来自 capability_registry 声明。
-	"exercise": {"锻炼（拉伸/散步/做操），放松身体", `{"exercise_type":"stretch|walk|gymnastics"}`},
-}
-
 // BuildTacticalSystemPrompt constructs the tactical layer's system message.
 // It shares the strategic layer's KB/cmd-derived modules ("绝大部分相同"),
 // stable within a session (per agent) and thus cacheable:
@@ -63,11 +24,11 @@ var toolOverride = map[string]struct {
 // sit adjacent to the decomposition ask. Per-call data (full-day plan,
 // current slot goal, realtime state, example) also lives in the user
 // message (BuildTactical).
-func BuildTacticalSystemPrompt(kb *worldkb.KB, profiles map[string]*profile.Profile, agentID string, actions []protocol.CapabilityAction) string {
+func BuildTacticalSystemPrompt(kb *worldkb.KB, profiles map[string]*profile.Profile, agentID string) string {
 	var sb strings.Builder
-	sb.WriteString(`你是小镇居民 NPC 的战术规划模块。你根据系统信息中的【世界背景】【人物背景】【世界详细信息】（含可用工具清单），以及用户信息中的全天任务与当前时段任务、NPC与环境实时状态、分解规则，把当前时段目标分解为一个或多个 action，按顺序执行。
+	sb.WriteString(`你是小镇居民 NPC 的战术规划模块。你根据系统信息中的【世界背景】【人物背景】【世界详细信息】，以及用户信息中的全天任务与当前时段任务、NPC与环境实时状态（含可用工具清单）、分解规则，把当前时段目标分解为一个或多个 action，按顺序执行。
 
-【世界详细信息】中的可用工具分两类：
+用户信息【可用工具】列表中的工具分两类：
 - 复合动作（标记 [复合]）：长耗时、单步即可完成一段工作（如装配、充电、巡逻、聊天），会自动移动到对应位置，无需自己调用 move_to。若目标语义与某复合动作匹配，应优先使用复合动作。
 - 原子动作（标记 [原子]）：作为基本 building block。其中 move_to/speak/emote/turn_to/generic_act 是短耗时动作；InteractSmartObject（与智能物体交互）是长耗时动作——单次 interact 会持续执行直到时段切换（如在长椅上 rest、在工作台前 assemble），可作为队列收尾动作让 NPC 持续活动到下一 schedule 节点。
 仅当复合动作无法覆盖 schedule 要求时，才用原子动作组合实现；InteractSmartObject 因已是长动作，无需重复多次填充时段。
@@ -83,23 +44,16 @@ func BuildTacticalSystemPrompt(kb *worldkb.KB, profiles map[string]*profile.Prof
 	}
 	sb.WriteString("\n【世界详细信息】\n")
 	sb.WriteString(worldDetailCore(kb))
-	// 完整工具清单（原子+复合，带 params；nil registry → 内置兜底）。
-	toolList, toolCount := BuildTacticalToolList(actions)
-	if toolCount > 0 {
-		sb.WriteString(fmt.Sprintf("可用工具（仅限以下 %d 个）：\n", toolCount))
-		sb.WriteString(toolList)
-		sb.WriteString("\n")
-	}
 	return sb.String()
 }
 
 // TacticalRules is the tactical decomposition rules, injected into the user
 // message (recency effect: instructions closer to the ask are followed more
 // reliably). References to 【世界背景】/【人物背景】/【世界详细信息】 point
-// at the system message's modules; references to 【物理状态】/【附近NPC】/
-// 【物体实时占用】 point at the user message's dynamic segments.
+// at the system message's modules; references to 【物理状态】/【可用工具】/
+// 【附近NPC】/【物体实时占用】 point at the user message's dynamic segments.
 const TacticalRules = `1. 队列首个动作必须是 speak（用一句话表达此刻内心想法或独白），然后才是其他动作
-2. 后续每行输出一个 {"action":"工具名","params":{...}}，按执行顺序排列。action 字段必须严格使用系统信息【世界详细信息】可用工具列表给出的工具名（如 work_shift / charge_at_station / rest_at_residence / surf_internet / self_maintenance / social_chat / InteractSmartObject / move_to / speak / generic_act / emote / turn_to），禁止编造、禁止近形变换（如把 work_shift 写成 work_short、rest_at_residence 写成 rest_at_composite），否则动作会被丢弃导致队列提前耗尽
+2. 后续每行输出一个 {"action":"工具名","params":{...}}，按执行顺序排列。action 字段必须严格使用用户信息【可用工具】列表给出的工具名（如 work_shift / charge_at_station / rest_at_residence / surf_internet / self_maintenance / social_chat / InteractSmartObject / move_to / speak / generic_act / emote / turn_to），禁止编造、禁止近形变换（如把 work_shift 写成 work_short、rest_at_residence 写成 rest_at_composite），否则动作会被丢弃导致队列提前耗尽
 3. 队列必须以长动作结尾（长复合动作 或 InteractSmartObject 原子动作均可）——长动作会持续执行直到时段切换，让 NPC 一直活动到下一 schedule 节点被 worker 主动打断
 4. 禁止输出 wait 动作；复合动作已包含自动移动到对应位置的逻辑，禁止在复合动作前加 move_to——直接输出单个长复合动作即可。
 5. 仅当目标确实没有匹配的长复合动作时，才用原子动作组合实现目标。长椅休息等场景用单个 InteractSmartObject 即可（InteractSmartObject 是长动作，会持续到时段切换），禁止把同一动作重复多次填充时段——队列提前耗尽会自动触发重分解生成新动作
@@ -121,12 +75,12 @@ const TacticalRules = `1. 队列首个动作必须是 speak（用一句话表达
 //  2. NPC与环境实时状态 — realtime state from the latest perception_update:
 //     zone, game time, physical state, recent memories, relationships,
 //     nearby NPCs, object occupancy, replan hint (incl. physical-alert
-//     constraints).
+//     constraints), plus the 【可用工具】 list derived solely from the
+//     capability registry (nil/empty Actions → segment skipped).
 //  3. 分解规则 — TacticalRules (injected adjacent to the ask).
 //  4. 任务 — the decomposition ask + goal-specific example.
 //
-// KB/world/persona/tool list live in the system message
-// (BuildTacticalSystemPrompt), not here.
+// KB/world/persona live in the system message (BuildTacticalSystemPrompt).
 func BuildTactical(in TacticalInput) string {
 	th := BandThresholdsFor(in.Profiles, in.AgentID)
 
@@ -186,6 +140,15 @@ func BuildTactical(in TacticalInput) string {
 			sb.WriteString("\n")
 		}
 	}
+	// 【可用工具】：仅从 capability registry（cmd 声明）派生，紧邻规则
+	// 与 ask，让 action 名和 params 就在 LLM 输出之前。无 registry
+	// （UE 未连接）时整段跳过。
+	toolList, toolCount := BuildTacticalToolList(in.Actions)
+	if toolCount > 0 {
+		sb.WriteString(fmt.Sprintf("【可用工具】（仅限以下 %d 个）：\n", toolCount))
+		sb.WriteString(toolList)
+		sb.WriteString("\n")
+	}
 
 	// ── 三、分解规则 ──
 	sb.WriteString("\n三、分解规则\n")
@@ -196,7 +159,7 @@ func BuildTactical(in TacticalInput) string {
 	sb.WriteString("\n四、任务\n")
 	sb.WriteString("请把【当前时段目标】分解为一个或多个 action，按顺序执行。\n")
 	if ex := TacticalExample(in.KB, in.Goal, in.AgentID); ex != "" {
-		sb.WriteString("示例（id 来自系统信息【世界详细信息】可用工具列表，不可照抄示例中的 id）：\n")
+		sb.WriteString("示例（id 来自用户信息【可用工具】列表与系统信息【世界详细信息】，不可照抄示例中的 id）：\n")
 		sb.WriteString(ex)
 		sb.WriteString("\n")
 	}
@@ -301,18 +264,6 @@ func kindLabel(kind string) string {
 	return "原子"
 }
 
-// builtinToolKind returns the Kind ("atomic" | "composite") for builtin tools.
-// Used when actions == nil (backward-compat scenario) to infer Kind from name.
-func builtinToolKind(name string) string {
-	switch name {
-	case "work_shift", "charge_at_station", "self_maintenance",
-		"rest_at_residence", "surf_internet", "social_chat":
-		return "composite"
-	default:
-		return "atomic"
-	}
-}
-
 // ToolEntries constructs the intermediate tool list representation.
 //
 // actions != nil: derives from EffectiveActions. Builtin tools' Desc/Params
@@ -322,43 +273,21 @@ func builtinToolKind(name string) string {
 // actions == nil: falls back to BuiltinToolSpecs (minus scan_area/stop/wait),
 // all using toolOverride text.
 func ToolEntries(actions []protocol.CapabilityAction) []ToolEntry {
-	if actions == nil {
-		specs := tools.BuiltinToolSpecs()
-		out := make([]ToolEntry, 0, len(specs))
-		for _, spec := range specs {
-			if spec.Name == "scan_area" || spec.Name == "stop" || spec.Name == "wait" {
-				continue
-			}
-			entry := ToolEntry{Name: spec.Name, RequiredCmd: spec.RequiredCmd, Kind: builtinToolKind(spec.Name)}
-			if ov, ok := toolOverride[spec.Name]; ok {
-				entry.Desc, entry.Params = ov.Desc, ov.Params
-			} else {
-				entry.Desc, entry.Params = spec.Name, "{}"
-			}
-			out = append(out, entry)
-		}
-		return out
-	}
+	// 可用工具仅从 capability registry（cmd 声明）派生，不做内置兜底、
+	// 不硬编码描述——registry 缺席（UE 未连接）时返回空列表，调用方
+	// 跳过工具清单段。
 	out := make([]ToolEntry, 0, len(actions))
 	for _, act := range actions {
 		name := tools.CmdToToolName(act.Cmd)
 		if name == "scan_area" || name == "stop" || name == "wait" {
 			continue
 		}
-		kind := act.Kind
-		if kind == "" {
-			kind = builtinToolKind(name)
+		entry := ToolEntry{Name: name, RequiredCmd: act.Cmd, Kind: act.Kind}
+		entry.Desc = act.Description
+		if entry.Desc == "" {
+			entry.Desc = name
 		}
-		entry := ToolEntry{Name: name, RequiredCmd: act.Cmd, Kind: kind}
-		if ov, ok := toolOverride[name]; ok {
-			entry.Desc, entry.Params = ov.Desc, ov.Params
-		} else {
-			entry.Desc = act.Description
-			if entry.Desc == "" {
-				entry.Desc = name
-			}
-			entry.Params = toolParamHint(act.Params)
-		}
+		entry.Params = toolParamHint(act.Params)
 		out = append(out, entry)
 	}
 	return out

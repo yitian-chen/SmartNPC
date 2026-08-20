@@ -236,14 +236,14 @@ func TestBuildStrategicSystemPrompt_WithKB(t *testing.T) {
 }
 
 func TestBuildStrategicSystemPrompt_NilKB(t *testing.T) {
-	// kb == nil 且 registry == nil：复合动作段降级为内置 6 个复合工具，
-	// 让 AI 即使无 KB 上下文也知能力边界（不规划无对应动作的活动）。
+	// kb == nil 且 actions == nil：复合动作段为空（可用工具仅从 cmd 派生，
+	// 无内置兜底——UE 未连接时 LLM 不获知任何工具）。
 	got := prompt.BuildStrategicSystemPrompt(nil, nil, "H-01", nil)
-	if !strings.Contains(got, "复合动作（长时段活动用") {
-		t.Errorf("nil KB should still include builtin composite capability section: %q", got)
+	if strings.Contains(got, "复合动作（长时段活动用") {
+		t.Errorf("nil actions should not produce composite capability section: %q", got)
 	}
-	if !strings.Contains(got, "work_shift") {
-		t.Errorf("nil KB should list builtin composite tool 'work_shift': %q", got)
+	if strings.Contains(got, "work_shift") {
+		t.Errorf("nil actions should not list any tool: %q", got)
 	}
 	// kb == nil 时世界背景模块跳过（前言提及模块名不算）；规则已迁至
 	// user prompt，system prompt 不包含。
@@ -270,27 +270,16 @@ func TestBuildStrategicSystemPrompt_AgentNotFound(t *testing.T) {
 // ─── buildStrategicCapabilitySummary ─────────────────────────
 
 func TestBuildStrategicCapabilitySummary_NilRegistry(t *testing.T) {
-	// registry == nil 降级为内置 6 个复合工具，与战术层降级一致。
-	got := prompt.StrategicCapabilitySummary(nil)
-	if got == "" {
-		t.Fatal("got empty summary for nil registry, want builtin composite tools")
-	}
-	// 内置复合工具应在列表中
-	for _, name := range []string{"work_shift", "charge_at_station", "self_maintenance", "rest_at_residence", "surf_internet"} {
-		if !strings.Contains(got, name) {
-			t.Errorf("summary missing builtin composite tool %q: %q", name, got)
-		}
-	}
-	// 不应包含原子动作
-	if strings.Contains(got, "move_to") {
-		t.Errorf("summary should not include atomic tools: %q", got)
+	// 可用工具仅从 cmd（registry）派生，不做内置兜底：registry 缺席时
+	// 能力清单为空（UE 未连接场景）。
+	if got := prompt.StrategicCapabilitySummary(nil); got != "" {
+		t.Errorf("nil registry should produce empty summary (no builtin fallback), got %q", got)
 	}
 }
 
 func TestBuildStrategicCapabilitySummary_WithRegistry(t *testing.T) {
 	// 注册 2 个复合 + 1 个原子，验证只列出复合动作。
-	// 内置工具（work_shift/charge_at_station）的 desc 来自 tacticalToolOverride
-	// 覆盖表（"工作班次（装配/作业）"），registry 的 Description 字段仅对非内置 cmd 生效。
+	// 工具描述一律来自 registry 的 Description 字段（不再有 override 表）。
 	r := NewCapabilityRegistry(nil)
 	r.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
 		{Cmd: protocol.CmdWorkShift, Kind: "composite", Description: "装配工作"},
@@ -298,11 +287,9 @@ func TestBuildStrategicCapabilitySummary_WithRegistry(t *testing.T) {
 		{Cmd: protocol.CmdMoveTo, Kind: "atomic", Description: "移动"},
 	})
 	got := prompt.StrategicCapabilitySummary(r.EffectiveActions("H-01"))
-	// work_shift 走 override desc "工作班次（装配/作业）"
-	if !strings.Contains(got, "工作班次（装配/作业）") {
-		t.Errorf("summary missing override desc '工作班次（装配/作业）': %q", got)
+	if !strings.Contains(got, "装配工作") {
+		t.Errorf("summary missing registry desc '装配工作': %q", got)
 	}
-	// charge_at_station 无 override，走 registry Description "充电"
 	if !strings.Contains(got, "充电") {
 		t.Errorf("summary missing registry desc '充电': %q", got)
 	}

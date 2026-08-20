@@ -123,9 +123,10 @@ func generateTacticalPlan(
 	if registry != nil {
 		capActions = registry.EffectiveActions(agentID)
 	}
-	// System prompt：与战略层共享三模块（世界背景/人物背景/世界详细信息）
-	// + 完整工具清单，会话内稳定可缓存；user prompt 携带四段结构。
-	system := prompt.BuildTacticalSystemPrompt(kb, profiles, agentID, capActions)
+	// System prompt：与战略层共享三模块（世界背景/人物背景/世界详细
+	// 信息），会话内稳定可缓存；user prompt 携带四段结构（含仅从
+	// registry 派生的可用工具清单）。
+	system := prompt.BuildTacticalSystemPrompt(kb, profiles, agentID)
 	promptText := prompt.BuildTactical(prompt.TacticalInput{
 		Goal:          goal,
 		Zone:          zone,
@@ -138,6 +139,7 @@ func generateTacticalPlan(
 		Hint:          hint,
 		Memories:      memories,
 		Relationships: relationships,
+		Actions:       capActions,
 		AgentID:       agentID,
 		ObjectStatus:  objectStatus,
 		NearbyObjects: nearbyObjects,
@@ -198,8 +200,9 @@ func generateTacticalPlanStreaming(
 	if registry != nil {
 		capActions = registry.EffectiveActions(agentID)
 	}
-	// System prompt：与战略层共享三模块 + 完整工具清单（会话内稳定可缓存）。
-	system := prompt.BuildTacticalSystemPrompt(kb, profiles, agentID, capActions)
+	// System prompt：与战略层共享三模块（会话内稳定可缓存）；user prompt
+	// 携带四段结构（含仅从 registry 派生的可用工具清单）。
+	system := prompt.BuildTacticalSystemPrompt(kb, profiles, agentID)
 	promptText := prompt.BuildTactical(prompt.TacticalInput{
 		Goal:          goal,
 		Zone:          zone,
@@ -212,6 +215,7 @@ func generateTacticalPlanStreaming(
 		Hint:          hint,
 		Memories:      memories,
 		Relationships: relationships,
+		Actions:       capActions,
 		AgentID:       agentID,
 		ObjectStatus:  objectStatus,
 		NearbyObjects: nearbyObjects,
