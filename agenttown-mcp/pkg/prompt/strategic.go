@@ -51,14 +51,16 @@ func DefaultDailyPlan(kb *worldkb.KB) string {
 }
 
 // BuildStrategicSystemPrompt constructs the strategic layer's system message,
-// three modules (world KB + cmd derived, stable within a session):
+// three KB-derived modules (stable within a session):
 //  1. 【世界背景】 — world overview registered from the world KB: narrative
 //     setting/theme, zone roster, smart-object group roster, NPC roster.
 //  2. 【人物背景】 — the current agent's profile (AgentRole).
 //  3. 【世界详细信息】 — per-zone descriptions; smart objects grouped by
 //     semantic_group with per-interaction description, per-hour attribute
-//     effects and usage gates (from the KB's declared rates); composite cmd
-//     list from the capability registry.
+//     effects and usage gates (from the KB's declared rates).
+//
+// 复合动作清单不注入战略层——goal 只需映射到设施详情中的
+// (semantic_group, interaction) 组合，cmd 的选择属于战术层职责。
 //
 // The seven planning rules (StrategicRules) live in the user message
 // (StrategicUserTemplate's third placeholder) so they sit adjacent to the
@@ -67,10 +69,9 @@ func DefaultDailyPlan(kb *worldkb.KB) string {
 // (BuildStrategicUserContext). The system prompt text is identical across
 // calls within a session (per agent), keeping it cacheable.
 //
-// kb == nil → modules 1/3 degrade to empty; actions == nil → composite list
-// falls back to the builtin tools; profiles == nil → persona falls back to
-// the hardcoded fallback fields.
-func BuildStrategicSystemPrompt(kb *worldkb.KB, profiles map[string]*profile.Profile, agentID string, actions []protocol.CapabilityAction) string {
+// kb == nil → modules 1/3 degrade to empty; profiles == nil → persona falls
+// back to the hardcoded fallback fields.
+func BuildStrategicSystemPrompt(kb *worldkb.KB, profiles map[string]*profile.Profile, agentID string) string {
 	var sb strings.Builder
 	sb.WriteString(`你是小镇居民 NPC 的战略规划模块。每天清晨 07:00，你根据系统信息中的【世界背景】【人物背景】【世界详细信息】，以及用户信息中的今日日程、物理状态、昨日总结与规划要求，规划当天 07:00 到次日 07:00 的活动安排。
 
@@ -85,7 +86,7 @@ func BuildStrategicSystemPrompt(kb *worldkb.KB, profiles map[string]*profile.Pro
 		sb.WriteString("\n【人物背景】\n")
 		sb.WriteString(role)
 	}
-	if m3 := strategicDetailedWorld(kb, actions); m3 != "" {
+	if m3 := worldDetailCore(kb); m3 != "" {
 		sb.WriteString("\n【世界详细信息】\n")
 		sb.WriteString(m3)
 	}
@@ -216,22 +217,6 @@ func worldDetailCore(kb *worldkb.KB) string {
 	return sb.String()
 }
 
-// strategicDetailedWorld renders module 3: the shared world detail core plus
-// the composite cmd summary (from the capability registry) and the
-// InteractSmartObject tail note.
-func strategicDetailedWorld(kb *worldkb.KB, actions []protocol.CapabilityAction) string {
-	var sb strings.Builder
-	sb.WriteString(worldDetailCore(kb))
-	// 复合动作清单（来自 capability registry；nil → 内置兜底）。
-	if cap := StrategicCapabilitySummary(actions); cap != "" {
-		sb.WriteString("复合动作（长时段活动用，自动移动到对应位置，覆盖整段工作时间）：\n")
-		sb.WriteString(cap)
-		sb.WriteString("此外始终可用基础动作：移动、说话、表达情绪、与物体交互（InteractSmartObject）、等待（用于短耗时或衔接）。\n")
-		sb.WriteString("与物体交互（InteractSmartObject）可直接用于上方设施详情中列出的任意 semantic_group + interaction 组合，战术层会据此分解为对应的长时段互动。\n")
-	}
-	return sb.String()
-}
-
 // effectLookup builds a (semantic_group, interaction) → InteractionEffect map
 // from the merged KB's declared interaction rates.
 func effectLookup(kb *worldkb.KB) map[string]InteractionEffect {
@@ -256,10 +241,7 @@ const StrategicRules = `1. 输出 JSON 数组（6-8 条），每条只含 "time"
    - goal 用干练简洁的客观描述，只写"做什么 + 在哪"（如"主生产车间工作台装配""中央广场充电桩充电"），不带语气词、口头禅、内心独白或人设腔调
    - 人设只影响选择什么活动、如何安排时段，不影响 goal 的文字风格；说话语气留给执行时的 speak 动作表达
 2. 【硬性要求】每个时段的结束时间减去开始时间必须 ≥120 分钟（不足 120 分钟的活动要么并入相邻时段，要么不安排；午休等短暂休息也至少120分钟）；仅安排一项主要任务；连续两个时段不得任务相同
-3. 规划每个时段时，先想清楚这个时段的活动用什么实现，以下两类都合法：
-   - 复合动作：【世界详细信息】复合动作清单中列出的 cmd（如 装配→work_shift、充电→charge_at_station）
-   - 原子交互：InteractSmartObject + 【世界详细信息】设施详情中列出的任意动词（semantic_group + interaction）——不限于工种设备，睡眠舱的 sleep/meditate/tidy_up、长椅的 rest 都是合法活动
-   判断标准：goal 能映射到某个复合 cmd，或某个 (semantic_group, interaction) 组合 → 可以安排；两者都映射不上（如"准备工具""巡查"）→ 换一个
+3. 规划每个时段时，先想清楚这个时段的活动用什么实现：goal 应能映射到【世界详细信息】设施详情中列出的某个 (semantic_group, interaction) 组合——不限于工种设备，睡眠舱的 sleep/meditate/tidy_up、长椅的 rest 都是合法活动，战术层会据此分解为对应的移动与长时段互动；映射不上的抽象活动（如"准备工具""巡查"）→ 换一个。锻炼类活动（晨练拉伸等原地动作）不需要设施，属例外
 4. goal 中提到的地点、人物、设备必须是系统信息中【人物背景】和【世界详细信息】里存在的，不得编造未提及的人物或设施
 5. 第一个时段必须从 07:00 开始，且任何时段的开始时间不得早于 07:00——禁止输出 0:00-7:00 这类凌晨睡觉时段（凌晨睡眠已由前一晚的跨午夜末段覆盖，不要重复安排）。首段必须是日间活动，不得安排休眠；首段不一定是工作——早间也可以安排晨练拉伸（原地锻炼，不需要特定设施）、上网、长椅放松、充电、冥想醒神、整理舱位等非工作活动，按性格与状态选择。夜间睡眠必须是一个连续的跨午夜时段：约 22:00 前后开始、次日 06:00-07:00 结束；不得拆成多个睡眠时段（禁止 20:30-22:58 睡觉 + 22:58-07:16 睡觉这样的连续两段），也不得在凌晨提前结束（禁止 23:00-01:00 这样的短睡眠段）。末段跨午夜时结束时间表示次日时刻
 6. 充电原则上仅在能量为"低电量"或疲劳为"非常疲劳"时安排；维护仅在关节磨损达到"明显磨损"及以上时安排；能量充足时优先产出性活动
@@ -303,23 +285,6 @@ func BuildStrategicUserContext(agentID string, profiles map[string]*profile.Prof
 		// PhysicalLine 自带"物理状态："前缀，段头已去重。
 		sb.WriteString(strings.TrimPrefix(line, "物理状态："))
 		sb.WriteString("\n")
-	}
-	return sb.String()
-}
-
-// StrategicCapabilitySummary constructs the composite action bullet list.
-// Reuses toolEntries derivation (same source, ensuring strategic/tactical
-// capability views match), keeping only Kind=="composite" entries formatted
-// as "- 描述（tool_name）".
-// actions == nil → falls back to builtin tools.
-func StrategicCapabilitySummary(actions []protocol.CapabilityAction) string {
-	entries := ToolEntries(actions)
-	var sb strings.Builder
-	for _, e := range entries {
-		if e.Kind != "composite" {
-			continue
-		}
-		fmt.Fprintf(&sb, "- %s（%s）\n", e.Desc, e.Name)
 	}
 	return sb.String()
 }

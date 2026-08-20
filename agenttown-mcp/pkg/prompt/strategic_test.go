@@ -4,14 +4,13 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/AgentTown/agenttown-mcp/pkg/protocol"
 	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
 )
 
 // sysPrompt renders the strategic system prompt with a nil KB / nil profiles
 // (fallback persona) — the pure-rules view used by rule-text guard tests.
 func sysPrompt() string {
-	return BuildStrategicSystemPrompt(nil, nil, "H-01", nil)
+	return BuildStrategicSystemPrompt(nil, nil, "H-01")
 }
 
 // strategicDetailKB builds a KB with narrative, zone descriptions, and objects
@@ -68,7 +67,7 @@ func strategicDetailKB() *worldkb.KB {
 // 【世界详细信息】(details). The seven rules live in the user message
 // (StrategicRules + StrategicUserTemplate), not here.
 func TestBuildStrategicSystemPrompt_ThreeModules(t *testing.T) {
-	got := BuildStrategicSystemPrompt(strategicDetailKB(), nil, "H-01", strategicCapActions())
+	got := BuildStrategicSystemPrompt(strategicDetailKB(), nil, "H-01")
 	overIdx := strings.Index(got, "【世界背景】")
 	roleIdx := strings.Index(got, "【人物背景】")
 	detailIdx := strings.Index(got, "【世界详细信息】")
@@ -112,7 +111,7 @@ func TestBuildStrategicSystemPrompt_ThreeModules(t *testing.T) {
 // zone descriptions, per-group facilities with inline per-interaction
 // description + per-hour effects + gates, and the composite cmd list.
 func TestBuildStrategicSystemPrompt_Module3Details(t *testing.T) {
-	got := BuildStrategicSystemPrompt(strategicDetailKB(), nil, "H-01", strategicCapActions())
+	got := BuildStrategicSystemPrompt(strategicDetailKB(), nil, "H-01")
 	// zone 描述。
 	if !strings.Contains(got, "主生产车间（main_workshop）：小镇的生产核心") {
 		t.Errorf("module 3 missing zone description:\n%s", got)
@@ -131,15 +130,12 @@ func TestBuildStrategicSystemPrompt_Module3Details(t *testing.T) {
 	if !strings.Contains(got, "  - poke") {
 		t.Errorf("module 3 should still list rate-less interaction verb poke:\n%s", got)
 	}
-	// 复合动作清单 + 尾注（nil registry → 内置兜底）。
-	if !strings.Contains(got, "复合动作（长时段活动用") {
-		t.Errorf("module 3 missing composite cmd section:\n%s", got)
+	// 复合动作清单不注入战略层（cmd 选择是战术层职责）。
+	if strings.Contains(got, "复合动作（长时段活动用") {
+		t.Errorf("module 3 should NOT contain the composite cmd section:\n%s", got)
 	}
-	if !strings.Contains(got, "work_shift") {
-		t.Errorf("module 3 missing builtin composite work_shift:\n%s", got)
-	}
-	if !strings.Contains(got, "任意 semantic_group + interaction 组合") {
-		t.Errorf("module 3 missing InteractSmartObject tail note:\n%s", got)
+	if strings.Contains(got, "work_shift") {
+		t.Errorf("module 3 should NOT list composite cmds:\n%s", got)
 	}
 }
 
@@ -172,19 +168,6 @@ func TestBuildStrategicUserContext_EmptyDayContext(t *testing.T) {
 	got := BuildStrategicUserContext("H-01", nil, nil, "")
 	if strings.Contains(got, "【今日日程】") {
 		t.Errorf("empty dayContext should not produce 【今日日程】 segment in:\n%s", got)
-	}
-}
-
-// strategicCapActions is a minimal registry fixture (composite cmds) for
-// tests that assert the composite summary section — tools come solely from
-// the cmd registry now, no builtin fallback.
-func strategicCapActions() []protocol.CapabilityAction {
-	return []protocol.CapabilityAction{
-		{Cmd: "WorkShift", Kind: "composite", Description: "工作班次（装配/作业）",
-			Params: []protocol.CapabilityParam{
-				{Name: "semantic_group", Type: "string", Required: true},
-				{Name: "interaction", Type: "string", Required: true},
-			}},
 	}
 }
 
@@ -255,7 +238,7 @@ func TestOtherAgentsLine_OmitsProfessionWhenEmpty(t *testing.T) {
 // 恢复社交安排时删掉本测试并把段加回。
 func TestBuildStrategicSystemPrompt_OmitsOtherNPCsSegment(t *testing.T) {
 	kb := strategicRosterKB()
-	got := BuildStrategicSystemPrompt(kb, nil, "H-01", nil)
+	got := BuildStrategicSystemPrompt(kb, nil, "H-01")
 	if strings.Contains(got, "【其他NPC】\n") {
 		t.Errorf("strategic prompt should not contain 【其他NPC】 segment while social planning is disabled:\n%s", got)
 	}
@@ -348,17 +331,16 @@ func TestStrategicSystemPrompt_NightSleepContinuous(t *testing.T) {
 	}
 }
 
-// TestStrategicSystemPrompt_InteractWorkGuidance 验证模块 3 尾注告知
-// InteractSmartObject 可用于设施详情中列出的任意组合（无复合动作工种
-// 的规划依据）。
+// TestStrategicSystemPrompt_InteractWorkGuidance 验证规则 3 告知
+// goal 可映射到设施详情中的任意 (semantic_group, interaction) 组合
+// （无复合动作工种的规划依据），且战术层负责分解。
 func TestStrategicSystemPrompt_InteractWorkGuidance(t *testing.T) {
-	got := BuildStrategicSystemPrompt(strategicDetailKB(), nil, "H-01", strategicCapActions())
 	for _, want := range []string{
-		"与物体交互（InteractSmartObject）可直接用于上方设施详情中列出的任意 semantic_group + interaction 组合",
-		"战术层会据此分解为对应的长时段互动",
+		"设施详情中列出的某个 (semantic_group, interaction) 组合",
+		"战术层会据此分解为对应的移动与长时段互动",
 	} {
-		if !strings.Contains(got, want) {
-			t.Errorf("module 3 tail note should mention %q:\n%s", want, got)
+		if !strings.Contains(StrategicRules, want) {
+			t.Errorf("rule 3 should mention %q:\n%s", want, StrategicRules)
 		}
 	}
 }
@@ -368,12 +350,12 @@ func TestStrategicSystemPrompt_InteractWorkGuidance(t *testing.T) {
 // meditate/tidy_up）由此获得准入，不再被"无 cmd 对应→换一个"拦下。
 func TestStrategicSystemPrompt_Rule3AtomicInteractionGate(t *testing.T) {
 	for _, want := range []string{
-		"两类都合法",
-		"(semantic_group, interaction) 组合",
+		"某个 (semantic_group, interaction) 组合",
 		"睡眠舱的 sleep/meditate/tidy_up",
+		"锻炼类活动（晨练拉伸等原地动作）不需要设施，属例外",
 	} {
 		if !strings.Contains(StrategicRules, want) {
-			t.Errorf("system prompt rule 3 missing %q", want)
+			t.Errorf("rules missing %q", want)
 		}
 	}
 	// 规则 5 早间露出。

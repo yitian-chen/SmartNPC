@@ -79,18 +79,15 @@ const yesterdaySummaryForFirstDay = "昨天按计划完成了车间装配。"
 // physical 注入【物理状态】段；nil 时 PhysicalLine 用默认满状态兜底。
 // dayContext 注入【今日日程】段（每周日程上下文，由 weeklyschedule.WeeklyLine
 // 预格式化）；"" 时跳过该段（禁用或 dayCount<0）。
-func generateDailyPlan(ctx context.Context, sc strategicCaller, agentID string, kb *worldkb.KB, profiles map[string]*profile.Profile, registry *CapabilityRegistry, logger *slog.Logger, yesterdaySummary string, physical *protocol.PhysicalState, dayContext string) string {
-	var actions []protocol.CapabilityAction
-	if registry != nil {
-		actions = registry.EffectiveActions(agentID)
-	}
+func generateDailyPlan(ctx context.Context, sc strategicCaller, agentID string, kb *worldkb.KB, profiles map[string]*profile.Profile, logger *slog.Logger, yesterdaySummary string, physical *protocol.PhysicalState, dayContext string) string {
 	if yesterdaySummary == "" {
 		yesterdaySummary = yesterdaySummaryForFirstDay
 	}
 	// System prompt：三模块结构（世界背景/人物背景/世界详细信息），
-	// 由 world KB + capability registry 派生，会话内稳定可缓存。
+	// 由 world KB 派生，会话内稳定可缓存（复合动作清单不注入战略层——
+	// goal 只需映射到设施交互组合，cmd 选择是战术层职责）。
 	// User prompt：动态段（今日日程+物理状态+昨日总结）+ 七条规则 + 规划指令。
-	system := prompt.BuildStrategicSystemPrompt(kb, profiles, agentID, actions)
+	system := prompt.BuildStrategicSystemPrompt(kb, profiles, agentID)
 	promptText := fmt.Sprintf(prompt.StrategicUserTemplate,
 		prompt.BuildStrategicUserContext(agentID, profiles, physical, dayContext),
 		"昨日总结："+yesterdaySummary,

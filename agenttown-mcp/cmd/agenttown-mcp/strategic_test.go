@@ -9,7 +9,6 @@ import (
 
 	"github.com/AgentTown/agenttown-mcp/pkg/llmtypes"
 	"github.com/AgentTown/agenttown-mcp/pkg/prompt"
-	"github.com/AgentTown/agenttown-mcp/pkg/protocol"
 )
 
 // fakeStrategicCaller 实现 strategicCaller 接口，用于单测。
@@ -143,7 +142,7 @@ func TestFormatDailyPlan_MultipleItems(t *testing.T) {
 
 func TestGenerateDailyPlan_HTTPError(t *testing.T) {
 	sc := &fakeStrategicCaller{err: errors.New("network down")}
-	plan := generateDailyPlan(context.Background(), sc, "H-01", nil, nil, nil, slog.Default(), "", nil, "")
+	plan := generateDailyPlan(context.Background(), sc, "H-01", nil, nil, slog.Default(), "", nil, "")
 	// HTTP 错误现在回退到 prompt.DefaultDailyPlan(nil) 的扰动版本
 	// （时间节点 ±planJitterMinutes 错峰），而不是空字符串，
 	// 保证战术层有目标可分解、仿真不瘫痪。
@@ -158,7 +157,7 @@ func TestGenerateDailyPlan_HTTPError(t *testing.T) {
 func TestGenerateDailyPlan_ValidResponse(t *testing.T) {
 	raw := `[{"time":"06:00-07:00","goal":"起床晨检"},{"time":"07:00-12:00","goal":"车间装配"}]`
 	sc := &fakeStrategicCaller{resp: makeStrategicResponse(raw)}
-	plan := generateDailyPlan(context.Background(), sc, "H-01", nil, nil, nil, slog.Default(), "", nil, "")
+	plan := generateDailyPlan(context.Background(), sc, "H-01", nil, nil, slog.Default(), "", nil, "")
 	if plan == "" {
 		t.Fatal("got empty plan, want non-empty")
 	}
@@ -176,7 +175,7 @@ func TestGenerateDailyPlan_ValidResponse(t *testing.T) {
 
 func TestGenerateDailyPlan_ParseFail(t *testing.T) {
 	sc := &fakeStrategicCaller{resp: makeStrategicResponse("今天天气不错，我打算去车间转转。")}
-	plan := generateDailyPlan(context.Background(), sc, "H-01", nil, nil, nil, slog.Default(), "", nil, "")
+	plan := generateDailyPlan(context.Background(), sc, "H-01", nil, nil, slog.Default(), "", nil, "")
 	// 解析失败现在回退到 prompt.DefaultDailyPlan(nil) 的扰动版本，
 	// 避免整天 Wait(60s) 瘫痪。
 	if !isJitteredDefaultPlan(t, plan) {
@@ -208,7 +207,7 @@ func isJitteredDefaultPlan(t *testing.T, plan string) bool {
 
 func TestBuildStrategicSystemPrompt_WithKB(t *testing.T) {
 	kb := loadTestKB(t)
-	got := prompt.BuildStrategicSystemPrompt(kb, nil, "H-01", nil)
+	got := prompt.BuildStrategicSystemPrompt(kb, nil, "H-01")
 	if got == "" {
 		t.Fatal("got empty system prompt, want non-empty for valid KB")
 	}
@@ -238,7 +237,7 @@ func TestBuildStrategicSystemPrompt_WithKB(t *testing.T) {
 func TestBuildStrategicSystemPrompt_NilKB(t *testing.T) {
 	// kb == nil 且 actions == nil：复合动作段为空（可用工具仅从 cmd 派生，
 	// 无内置兜底——UE 未连接时 LLM 不获知任何工具）。
-	got := prompt.BuildStrategicSystemPrompt(nil, nil, "H-01", nil)
+	got := prompt.BuildStrategicSystemPrompt(nil, nil, "H-01")
 	if strings.Contains(got, "复合动作（长时段活动用") {
 		t.Errorf("nil actions should not produce composite capability section: %q", got)
 	}
@@ -258,115 +257,12 @@ func TestBuildStrategicSystemPrompt_NilKB(t *testing.T) {
 func TestBuildStrategicSystemPrompt_AgentNotFound(t *testing.T) {
 	// KB 存在但 agentID 不在 KB 中：跳过人物背景段，仍注入世界模块。
 	kb := loadTestKB(t)
-	got := prompt.BuildStrategicSystemPrompt(kb, nil, "NONEXISTENT-99", nil)
+	got := prompt.BuildStrategicSystemPrompt(kb, nil, "NONEXISTENT-99")
 	if strings.Contains(got, "【人物背景】\n") {
 		t.Errorf("should not include persona module for unknown agent: %q", got)
 	}
 	if !strings.Contains(got, "【世界背景】\n") {
 		t.Errorf("should still include world overview module even if agent unknown: %q", got)
-	}
-}
-
-// ─── buildStrategicCapabilitySummary ─────────────────────────
-
-func TestBuildStrategicCapabilitySummary_NilRegistry(t *testing.T) {
-	// 可用工具仅从 cmd（registry）派生，不做内置兜底：registry 缺席时
-	// 能力清单为空（UE 未连接场景）。
-	if got := prompt.StrategicCapabilitySummary(nil); got != "" {
-		t.Errorf("nil registry should produce empty summary (no builtin fallback), got %q", got)
-	}
-}
-
-func TestBuildStrategicCapabilitySummary_WithRegistry(t *testing.T) {
-	// 注册 2 个复合 + 1 个原子，验证只列出复合动作。
-	// 工具描述一律来自 registry 的 Description 字段（不再有 override 表）。
-	r := NewCapabilityRegistry(nil)
-	r.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
-		{Cmd: protocol.CmdWorkShift, Kind: "composite", Description: "装配工作"},
-		{Cmd: protocol.CmdChargeAtStation, Kind: "composite", Description: "充电"},
-		{Cmd: protocol.CmdMoveTo, Kind: "atomic", Description: "移动"},
-	})
-	got := prompt.StrategicCapabilitySummary(r.EffectiveActions("H-01"))
-	if !strings.Contains(got, "装配工作") {
-		t.Errorf("summary missing registry desc '装配工作': %q", got)
-	}
-	if !strings.Contains(got, "充电") {
-		t.Errorf("summary missing registry desc '充电': %q", got)
-	}
-	if !strings.Contains(got, "work_shift") {
-		t.Errorf("summary missing tool name 'work_shift': %q", got)
-	}
-	if strings.Contains(got, "移动") {
-		t.Errorf("summary should not include atomic action '移动': %q", got)
-	}
-}
-
-func TestBuildStrategicCapabilitySummary_NoComposite(t *testing.T) {
-	// 只注册原子动作时，仅 SocialChat 兜底出现（它是 MCP-side composite）。
-	r := NewCapabilityRegistry(nil)
-	r.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
-		{Cmd: protocol.CmdMoveTo, Kind: "atomic", Description: "移动"},
-		{Cmd: protocol.CmdSpeak, Kind: "atomic", Description: "说话"},
-	})
-	got := prompt.StrategicCapabilitySummary(r.EffectiveActions("H-01"))
-	// SocialChat fallback is always injected as MCP-side composite,
-	// so the summary is never truly empty.
-	if !strings.Contains(got, "social_chat") {
-		t.Errorf("got %q, want social_chat in summary (MCP-side fallback)", got)
-	}
-}
-
-func TestBuildStrategicCapabilitySummary_NewCompositeFromUE(t *testing.T) {
-	// 同事新增的复合动作（UE 通过 capability_registry 推送，Kind="composite"）
-	// 应自动出现在能力列表中，无需改 MCP 代码。
-	r := NewCapabilityRegistry(nil)
-	r.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
-		{Cmd: "GroomSelf", Kind: "composite", Description: "整理仪容"},
-		{Cmd: protocol.CmdWorkShift, Kind: "composite", Description: "装配"},
-	})
-	got := prompt.StrategicCapabilitySummary(r.EffectiveActions("H-01"))
-	if !strings.Contains(got, "整理仪容") {
-		t.Errorf("summary should include UE-pushed new composite '整理仪容': %q", got)
-	}
-	// tool_name 从 Cmd 派生（CmdToToolName），GroomSelf → groom_self
-	if !strings.Contains(got, "groom_self") {
-		t.Errorf("summary should include derived tool name 'groom_self': %q", got)
-	}
-}
-
-// ─── buildStrategicContext capability injection ──────────────
-
-func TestBuildStrategicSystemPrompt_IncludesCapabilitySection(t *testing.T) {
-	// 有 KB + registry 时，复合动作段应出现在 system prompt 模块 3 中。
-	kb := loadTestKB(t)
-	r := NewCapabilityRegistry(nil)
-	r.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
-		{Cmd: protocol.CmdWorkShift, Kind: "composite", Description: "装配"},
-	})
-	got := prompt.BuildStrategicSystemPrompt(kb, nil, "H-01", r.EffectiveActions("H-01"))
-	if !strings.Contains(got, "复合动作（长时段活动用") {
-		t.Errorf("system prompt missing composite cmd section: %q", got)
-	}
-	if !strings.Contains(got, "装配") {
-		t.Errorf("system prompt missing composite action desc '装配': %q", got)
-	}
-	if !strings.Contains(got, "基础动作") {
-		t.Errorf("system prompt missing atomic action note '基础动作': %q", got)
-	}
-}
-
-func TestBuildStrategicSystemPrompt_NilKBWithRegistry(t *testing.T) {
-	// kb == nil 但 registry != nil：复合动作段仍注入（不依赖 KB）。
-	r := NewCapabilityRegistry(nil)
-	r.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
-		{Cmd: protocol.CmdWorkShift, Kind: "composite", Description: "装配"},
-	})
-	got := prompt.BuildStrategicSystemPrompt(nil, nil, "H-01", r.EffectiveActions("H-01"))
-	if !strings.Contains(got, "复合动作（长时段活动用") {
-		t.Errorf("system prompt should include capability section even with nil KB: %q", got)
-	}
-	if !strings.Contains(got, "装配") {
-		t.Errorf("system prompt missing composite action desc: %q", got)
 	}
 }
 
@@ -435,7 +331,7 @@ func TestGenerateDailyPlan_KBInjectedIntoPrompt(t *testing.T) {
 	kb := loadTestKB(t)
 	raw := `[{"time":"06:00-07:00","goal":"起床晨检"}]`
 	sc := &fakeStrategicCaller{resp: makeStrategicResponse(raw)}
-	_ = generateDailyPlan(context.Background(), sc, "H-01", kb, nil, nil, slog.Default(), "", nil, "")
+	_ = generateDailyPlan(context.Background(), sc, "H-01", kb, nil, slog.Default(), "", nil, "")
 
 	sys := sc.capturedSystem
 	if sys == "" {
@@ -1023,7 +919,7 @@ func TestSelectPlanInjection_OvernightSlotEarlyMorning(t *testing.T) {
 // 日后若 LLM 又出现 zone-object 错配可重新启用并恢复此断言。
 func TestBuildStrategicSystemPrompt_NoZoneObjectMapHeader(t *testing.T) {
 	kb := loadTestKB(t)
-	got := prompt.BuildStrategicSystemPrompt(kb, nil, "H-01", nil)
+	got := prompt.BuildStrategicSystemPrompt(kb, nil, "H-01")
 	if strings.Contains(got, "【区域设施映射】") {
 		t.Errorf("system prompt should NOT include '【区域设施映射】' section (superseded by module 3): %q", got)
 	}
