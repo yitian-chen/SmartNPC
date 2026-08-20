@@ -148,6 +148,8 @@ func generateTacticalPlan(
 	logger.Info("[MCP→LLM/TACTICAL-PROMPT]",
 		"agent_id", agentID, "goal", goal, "game_time", timeOfDay, "text", promptText,
 		"replan_hint", hint)
+	// 实际 prompt 文档：每次仿真留存 H-01 首次战术层 prompt（system+user）。
+	dumpPromptDoc(agentID, "tactical", system, promptText, logger)
 
 	resp, err := tc.SendWithSummary(ctx, system, promptText)
 	if err != nil {
@@ -224,6 +226,8 @@ func generateTacticalPlanStreaming(
 	logger.Info("[MCP→LLM/TACTICAL-PROMPT]",
 		"agent_id", agentID, "goal", goal, "game_time", timeOfDay, "text", promptText,
 		"streaming", true, "replan_hint", hint)
+	// 实际 prompt 文档：每次仿真留存 H-01 首次战术层 prompt（system+user）。
+	dumpPromptDoc(agentID, "tactical", system, promptText, logger)
 
 	var actions []plannedAction
 	acc := &streamAccumulator{

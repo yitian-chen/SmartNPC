@@ -1325,6 +1325,8 @@ func main() {
 		// 启动时一次性加载，与 kb/profiles 同级参数化传递，不入 agentContext。
 		weeklySchedulePath = flag.String("weekly-schedule", "assets/weekly_schedule.yaml",
 			"path to weekly schedule YAML (empty disables weekly context injection)")
+		promptDocFlag = flag.String("prompt-doc", "docs/actual_prompts.md",
+			"actual-prompt doc: append H-01's first strategic/tactical prompt (system+user) per simulation run (empty disables)")
 		tacticalStream = flag.Bool("tactical-stream", false,
 			"enable streaming for tactical layer LLM calls (experimental: only helps if upstream LLM emits tokens incrementally)")
 		ollamaURL = flag.String("ollama-url", "",
@@ -1365,6 +1367,7 @@ func main() {
 				"Example: user:pass@tcp(127.0.0.1:3306)/agenttown?parseTime=true&charset=utf8mb4")
 	)
 	flag.Parse()
+	setPromptDocPath(*promptDocFlag)
 	if *showVersion {
 		fmt.Fprintln(os.Stderr, version)
 		return
