@@ -630,6 +630,63 @@ func TestNormalizeDailyPlan_NoMergeDifferentGoals(t *testing.T) {
 	}
 }
 
+// TestNormalizeDailyPlan_MergesAdjacentSleepSynonyms 验证措辞不同的相邻
+// 睡眠时段（休息+睡眠）也被语义合并（实测 LLM 输出"睡眠舱休息 20:49-23:25"
+// + "睡眠舱睡眠 23:25-06:35"，两段都映射 rest_at_residence(sleep)，边界
+// 到期打断睡眠重睡）。
+func TestNormalizeDailyPlan_MergesAdjacentSleepSynonyms(t *testing.T) {
+	items := []dailyPlanItem{
+		{Time: "07:00-20:49", Goal: "白天活动"},
+		{Time: "20:49-23:25", Goal: "休眠舱居住区睡眠舱休息"},
+		{Time: "23:25-06:35", Goal: "休眠舱居住区睡眠舱睡眠"},
+	}
+	got := normalizeDailyPlan(items)
+	if len(got) != 2 {
+		t.Fatalf("got %d items, want 2 (sleep synonyms merged): %+v", len(got), got)
+	}
+	if got[1].Time != "20:49-06:35" {
+		t.Errorf("merged sleep slot should be 20:49-06:35: got %q", got[1].Time)
+	}
+}
+
+// TestNormalizeDailyPlan_NoMergeSleepVsOtherInteractions 验证睡眠语义合并
+// 不会误合并 sleep_pod 上的其他交互（冥想/整理）和长椅休息。
+func TestNormalizeDailyPlan_NoMergeSleepVsOtherInteractions(t *testing.T) {
+	items := []dailyPlanItem{
+		{Time: "18:30-20:45", Goal: "休眠舱居住区睡眠舱整理内务"},
+		{Time: "20:45-22:54", Goal: "休眠舱居住区睡眠舱冥想"},
+		{Time: "22:54-06:53", Goal: "休眠舱居住区睡眠舱睡眠"},
+	}
+	got := normalizeDailyPlan(items)
+	if len(got) != 3 {
+		t.Fatalf("got %d items, want 3 (tidy/meditate/sleep must not merge): %+v", len(got), got)
+	}
+}
+
+// TestIsSleepSlotGoal 表驱动验证睡眠类 goal 判定。
+func TestIsSleepSlotGoal(t *testing.T) {
+	cases := []struct {
+		goal string
+		want bool
+	}{
+		{"休眠舱居住区睡眠舱休息", true},
+		{"休眠舱居住区睡眠舱睡眠", true},
+		{"休眠舱居住区睡觉", true},
+		{"回舱睡觉", true},
+		{"休眠舱居住区睡眠舱冥想", false},
+		{"休眠舱居住区睡眠舱整理内务", false},
+		{"中央广场长椅休息", false},
+		{"档案馆电脑上网浏览", false},
+		{"中央广场充电桩充电", false},
+		{"主生产车间工作台装配", false},
+	}
+	for _, c := range cases {
+		if got := isSleepSlotGoal(c.goal); got != c.want {
+			t.Errorf("isSleepSlotGoal(%q) = %v, want %v", c.goal, got, c.want)
+		}
+	}
+}
+
 // TestClampNightEnd 验证跨午夜末段结束时间的 06:00 钳位：
 // 早于 06:00 → 钳到 06:00；已达 06:00 及以后 / 非跨午夜 → 不变。
 func TestClampNightEnd(t *testing.T) {

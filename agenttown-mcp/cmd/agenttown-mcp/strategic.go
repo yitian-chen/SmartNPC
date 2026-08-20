@@ -202,9 +202,14 @@ func normalizeDailyPlan(items []dailyPlanItem) []dailyPlanItem {
 		return si < sj
 	})
 	// 2.5 合并相邻同 goal 时段（含跨午夜边界两侧的连续睡眠）。
+	// 除字面完全相同外，还做"睡眠语义合并"：LLM 常用同义措辞把夜间拆成
+	// 两个时段（实测"睡眠舱休息 20:49-23:25" + "睡眠舱睡眠 23:25-06:35"），
+	// 两段都映射到 rest_at_residence(sleep)，边界到期会打断睡眠重睡。
+	// isSleepSlotGoal 判定双方均为睡眠舱睡眠类活动时同样合并。
 	merged := make([]dailyPlanItem, 0, len(valid))
 	for _, it := range valid {
-		if n := len(merged); n > 0 && merged[n-1].Goal == it.Goal {
+		if n := len(merged); n > 0 && (merged[n-1].Goal == it.Goal ||
+			isSleepSlotGoal(merged[n-1].Goal) && isSleepSlotGoal(it.Goal)) {
 			s, _, _ := prompt.SplitPlanRange(merged[n-1].Time)
 			_, e, _ := prompt.SplitPlanRange(it.Time)
 			merged[n-1].Time = prompt.FmtMinute(s) + "-" + prompt.FmtMinute(e)
@@ -248,6 +253,39 @@ func normalizeDailyPlan(items []dailyPlanItem) []dailyPlanItem {
 	// 避免 00:54 起的凌晨空洞导致睡眠段半夜到期（见 clampNightEnd 注释）。
 	valid = clampNightEnd(valid)
 	return valid
+}
+
+// isSleepSlotGoal 判断 goal 是否为"睡眠舱睡眠类"活动，供
+// normalizeDailyPlan 步骤 2.5 的语义合并使用。
+//
+// LLM 拆分夜间睡眠时常用不同措辞（休息/睡眠/睡觉/休眠），字面比对
+// 无法合并。判定规则：
+//   - 排除词：冥想/整理（同为 sleep_pod 交互但不是睡眠）、长椅/广场
+//     （bench 休息）、上网/充电（居住区其他活动）
+//   - 语境词：睡眠舱/休眠舱/居住区/住所/回舱（落在居住区）
+//   - 活动词：睡/休息/休眠/歇
+func isSleepSlotGoal(goal string) bool {
+	for _, ex := range []string{"冥想", "整理", "长椅", "广场", "上网", "充电"} {
+		if strings.Contains(goal, ex) {
+			return false
+		}
+	}
+	loc := false
+	for _, l := range []string{"睡眠舱", "休眠舱", "居住区", "住所", "回舱"} {
+		if strings.Contains(goal, l) {
+			loc = true
+			break
+		}
+	}
+	if !loc {
+		return false
+	}
+	for _, v := range []string{"睡", "休息", "休眠", "歇"} {
+		if strings.Contains(goal, v) {
+			return true
+		}
+	}
+	return false
 }
 
 // clampNightEnd 保证跨午夜末段的结束时间不早于 06:00（dayEndMinute 当日
