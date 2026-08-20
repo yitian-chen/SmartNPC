@@ -122,7 +122,7 @@ func TestAgentRole_ProfileOverridesKB(t *testing.T) {
 }
 
 // TestAgentRole_FallbackFillsWhenProfileEmpty 验证 profile 缺字段时 fallback 回填
-//（KB persona 字段被忽略，不再参与回退链）。
+// （KB persona 字段被忽略，不再参与回退链）。
 func TestAgentRole_FallbackFillsWhenProfileEmpty(t *testing.T) {
 	kb := worldkb.NewKB(nil, nil, []worldkb.Agent{
 		{

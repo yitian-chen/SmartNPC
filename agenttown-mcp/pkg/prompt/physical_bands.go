@@ -74,6 +74,7 @@ func (b BandThresholds) OrDefault() BandThresholds {
 	}
 	return b
 }
+
 // FatigueAlert returns the fatigue alert boundary: fatigue at or above
 // this is "非常疲劳" and triggers fatigue alerts.
 func (b BandThresholds) FatigueAlert() float64 { return b.Fatigue[2] }

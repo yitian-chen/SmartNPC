@@ -21,7 +21,7 @@ func TestKBContext_ObjectDescription(t *testing.T) {
 				ZoneID: "central_plaza", Description: "坐一坐，恢复少量疲劳。",
 				AvailableInteractions: []string{"rest"}},
 			{ID: "pod-1", DisplayName: "睡眠舱", SemanticGroup: "sleep_pod",
-				ZoneID: "residential_quarters", // 无 description → 不追加
+				ZoneID:                "residential_quarters", // 无 description → 不追加
 				AvailableInteractions: []string{"sleep"}},
 		},
 		nil,

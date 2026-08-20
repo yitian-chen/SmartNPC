@@ -15,8 +15,8 @@ import (
 	"github.com/AgentTown/agenttown-mcp/pkg/agentstate"
 	"github.com/AgentTown/agenttown-mcp/pkg/protocol"
 	"github.com/AgentTown/agenttown-mcp/pkg/venus"
-	"github.com/AgentTown/agenttown-mcp/pkg/wsserver"
 	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
+	"github.com/AgentTown/agenttown-mcp/pkg/wsserver"
 )
 
 // ─── 战术层队列辅助与 completion 路由 ──────────────────────────
@@ -448,7 +448,7 @@ func TestAdvanceSlotIfNeeded_DelayedStopForComposite(t *testing.T) {
 
 	ac.as.RefillQueue([]plannedAction{{Action: "wait", Params: map[string]any{"duration_sec": 30}}}, "08:00-10:00")
 	ac.as.RecordActionStarted("act_composite_1", "WorkShift", nil, agentstate.SourceTactical) // 内置硬编码复合 cmd
-	setGameTimeForTest(t, ac, "10:05") // 已过 slot 结束 10:00
+	setGameTimeForTest(t, ac, "10:05")                                                        // 已过 slot 结束 10:00
 
 	ac.advanceSlotIfNeeded(ws, "H-01", logger)
 
@@ -575,9 +575,9 @@ func TestRecordActionCompletion_OtherFailureStillTriggers(t *testing.T) {
 
 func TestMapDebugCmd(t *testing.T) {
 	cases := []struct {
-		cmd      string
-		wantCmd  string
-		wantOK   bool
+		cmd     string
+		wantCmd string
+		wantOK  bool
 	}{
 		{"generic_act", protocol.CmdGenericAct, true},
 		{"move_to", protocol.CmdMoveTo, true},
@@ -615,13 +615,13 @@ func TestMapDebugCmd_RegistryDerived(t *testing.T) {
 		{Cmd: "WaveHand", Kind: "atomic"},
 	})
 	cases := []struct {
-		cmd      string
-		wantCmd  string
-		wantOK   bool
+		cmd     string
+		wantCmd string
+		wantOK  bool
 	}{
 		{"move_to", protocol.CmdMoveTo, true}, // built-in
-		{"wave_hand", "WaveHand", true},                         // new cmd via registry
-		{"fly_to", "", false},                                   // not in registry
+		{"wave_hand", "WaveHand", true},       // new cmd via registry
+		{"fly_to", "", false},                 // not in registry
 	}
 	for _, c := range cases {
 		got, ok := mapDebugCmd(c.cmd, reg, "H-01")
@@ -634,7 +634,6 @@ func TestMapDebugCmd_RegistryDerived(t *testing.T) {
 		}
 	}
 }
-
 
 func TestBuildDebugParams_CompositePassthrough(t *testing.T) {
 	kb := loadTestKB(t)
@@ -1278,8 +1277,8 @@ func TestFormatTodSec(t *testing.T) {
 		{50400, "14:00"},
 		{51780, "14:23"},
 		{86399, "23:59"},
-		{-1, ""},      // 越界
-		{86400, ""},   // 越界
+		{-1, ""},    // 越界
+		{86400, ""}, // 越界
 	}
 	for _, c := range cases {
 		if got := formatTodSec(c.todSec); got != c.want {
@@ -1366,7 +1365,7 @@ func TestDetectDayRollover_SameDayNoRollover(t *testing.T) {
 // （跨日）触发 rollover=true 并更新 currentDay。
 func TestDetectDayRollover_DayIncrementTriggersRollover(t *testing.T) {
 	ac, _ := newAgentContext(context.Background())
-	ac.as.SetDailyPlan("", 0) // 首日已规划
+	ac.as.SetDailyPlan("", 0)                  // 首日已规划
 	setPerceptionForDayTest(t, ac, "06:00", 1) // 第二天 06:00
 	rollover, prev, newDay := ac.detectDayRollover()
 	if !rollover {

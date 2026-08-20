@@ -38,9 +38,9 @@ type ReactiveDecision struct {
 // simulations also trigger naturally. joint_wear threshold at 70 lets
 // maintenance trigger before wear becomes critical (0-100, higher = worse).
 const (
-	EnergyAlertThreshold     = 40.0 // energy below this triggers "low battery alert" → bias toward charge_at_station
-	FatigueAlertThreshold    = 80.0 // fatigue above this triggers "fatigue alert" → bias toward charge/rest
-	JointWearAlertThreshold  = 70.0 // joint_wear above this triggers "wear alert" → bias toward self_maintenance
+	EnergyAlertThreshold    = 40.0 // energy below this triggers "low battery alert" → bias toward charge_at_station
+	FatigueAlertThreshold   = 80.0 // fatigue above this triggers "fatigue alert" → bias toward charge/rest
+	JointWearAlertThreshold = 70.0 // joint_wear above this triggers "wear alert" → bias toward self_maintenance
 )
 
 // PeriodicTriggerInterval is the perception count interval for periodic

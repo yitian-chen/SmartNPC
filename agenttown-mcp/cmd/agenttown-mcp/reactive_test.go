@@ -152,12 +152,12 @@ func TestParseReactiveDecision_Replan(t *testing.T) {
 func TestBuildReactivePrompt_InjectsAgentRole(t *testing.T) {
 	role := "名字：老陈\n职业：车间主管\n性格特质：沉稳、念旧、重视工艺\n说话风格：简洁，偶尔念叨老物件\n"
 	in := ReactiveInput{
-		AgentID:       "H-01",
-		AgentName:     "老陈",
-		AgentRole:     role,
-		TimeOfDay:     "14:30",
-		Zone:          "main_workshop",
-		Energy:        45, Fatigue: 30,
+		AgentID:   "H-01",
+		AgentName: "老陈",
+		AgentRole: role,
+		TimeOfDay: "14:30",
+		Zone:      "main_workshop",
+		Energy:    45, Fatigue: 30,
 		CurrentAction: "WorkShift(smart_object=workbench_01)",
 		ActionSrc:     "tactical",
 		CurrentSlot:   "14:00-18:00",

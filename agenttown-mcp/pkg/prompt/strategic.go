@@ -77,7 +77,7 @@ func BuildStrategicSystemPrompt(kb *worldkb.KB, profiles map[string]*profile.Pro
 各活动对属性的每小时影响幅度见系统信息【世界详细信息】各设施的属性变动说明（由 world KB 声明生成）。规划时请综合权衡：产出性活动（工作）赚取余额但消耗体力、缓慢积攒关节磨损；恢复性活动（充电/维护/休息）花余额但延续工作能力。避免长时间连续工作导致体力耗尽，也避免频繁恢复导致余额入不敷出。
 
 `)
-	if m1 := strategicWorldOverview(kb); m1 != "" {
+	if m1 := WorldOverview(kb); m1 != "" {
 		sb.WriteString("【世界背景】\n")
 		sb.WriteString(m1)
 	}
@@ -92,10 +92,10 @@ func BuildStrategicSystemPrompt(kb *worldkb.KB, profiles map[string]*profile.Pro
 	return sb.String()
 }
 
-// strategicWorldOverview renders module 1: the world's basic situation —
+// WorldOverview renders the shared module 1: the world's basic situation —
 // narrative setting/theme, zone roster, smart-object group roster, and NPC
 // roster (compact inventories only; details live in module 3).
-func strategicWorldOverview(kb *worldkb.KB) string {
+func WorldOverview(kb *worldkb.KB) string {
 	if kb == nil {
 		return ""
 	}
@@ -148,11 +148,11 @@ func strategicWorldOverview(kb *worldkb.KB) string {
 	return strings.Join(lines, "\n") + "\n"
 }
 
-// strategicDetailedWorld renders module 3: per-zone descriptions, smart
-// objects grouped by semantic_group with per-interaction description +
-// per-hour attribute effects + usage gates (from the KB's declared rates),
-// and the composite cmd list from the capability registry.
-func strategicDetailedWorld(kb *worldkb.KB, actions []protocol.CapabilityAction) string {
+// worldDetailCore renders the KB-derived world detail shared by the strategic
+// and tactical system prompts: per-zone descriptions + smart objects grouped
+// by semantic_group with per-interaction description, per-hour attribute
+// effects and usage gates (from the KB's declared rates).
+func worldDetailCore(kb *worldkb.KB) string {
 	var sb strings.Builder
 	wroteZone := false
 	if kb != nil {
@@ -213,6 +213,15 @@ func strategicDetailedWorld(kb *worldkb.KB, actions []protocol.CapabilityAction)
 			sb.WriteString("\n")
 		}
 	}
+	return sb.String()
+}
+
+// strategicDetailedWorld renders module 3: the shared world detail core plus
+// the composite cmd summary (from the capability registry) and the
+// InteractSmartObject tail note.
+func strategicDetailedWorld(kb *worldkb.KB, actions []protocol.CapabilityAction) string {
+	var sb strings.Builder
+	sb.WriteString(worldDetailCore(kb))
 	// 复合动作清单（来自 capability registry；nil → 内置兜底）。
 	if cap := StrategicCapabilitySummary(actions); cap != "" {
 		sb.WriteString("复合动作（长时段活动用，自动移动到对应位置，覆盖整段工作时间）：\n")
@@ -296,22 +305,6 @@ func BuildStrategicUserContext(agentID string, profiles map[string]*profile.Prof
 	}
 	return sb.String()
 }
-
-// cmdEffectsText is the natural-language cmd→attribute-effect summary
-// injected into the TACTICAL layer prompt (after the tool list). Generated
-// at runtime from the world KB push (InteractionEffectsFromKB +
-// BuildCmdEffectsText, installed by main's world_kb handler via SetCmdEffects).
-// The strategic layer no longer uses this global — its system prompt renders
-// effects inline per object group (strategicDetailedWorld).
-// Empty (default) = disabled, segment skipped.
-var cmdEffectsText string
-
-// SetCmdEffects installs the cmd attribute-effect summary text. Call once at
-// startup (before any BuildTactical call); empty string disables the segment.
-func SetCmdEffects(s string) { cmdEffectsText = s }
-
-// CmdEffects returns the currently installed summary (empty = disabled).
-func CmdEffects() string { return cmdEffectsText }
 
 // StrategicCapabilitySummary constructs the composite action bullet list.
 // Reuses toolEntries derivation (same source, ensuring strategic/tactical

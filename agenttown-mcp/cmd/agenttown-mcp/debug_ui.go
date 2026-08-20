@@ -266,11 +266,11 @@ func handleDebugPlan(w http.ResponseWriter, r *http.Request, lookupAgent func(st
 	if ac == nil {
 		w.WriteHeader(http.StatusNotFound)
 		_ = json.NewEncoder(w).Encode(debugPlanResponse{
-			OK:      false,
-			AgentID: agentID,
-			Items:   []dailyPlanItem{},
+			OK:         false,
+			AgentID:    agentID,
+			Items:      []dailyPlanItem{},
 			CurrentIdx: -1,
-			AutoPlan: autoPlanEnabled,
+			AutoPlan:   autoPlanEnabled,
 		})
 		return
 	}

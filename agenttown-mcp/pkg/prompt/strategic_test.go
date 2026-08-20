@@ -174,24 +174,6 @@ func TestBuildStrategicUserContext_EmptyDayContext(t *testing.T) {
 	}
 }
 
-// TestBuildStrategic_CmdEffectsGlobalNotUsedByStrategic verifies the
-// SetCmdEffects global (tactical-layer injection) no longer affects the
-// strategic prompt — strategic effects render inline from the KB instead.
-func TestBuildStrategic_CmdEffectsGlobalNotUsedByStrategic(t *testing.T) {
-	kb := strategicDetailKB()
-	SetCmdEffects("全局效果段：疲劳度中等提升")
-	defer SetCmdEffects("")
-	got := BuildStrategicSystemPrompt(kb, nil, "H-01", nil)
-	if strings.Contains(got, "全局效果段") {
-		t.Errorf("strategic system prompt should not consume the tactical cmdEffects global:\n%s", got)
-	}
-	if !strings.Contains(got, "疲劳度明显提升") {
-		// 该短语来自 KB 声明的内联渲染（workbench/assemble +12/h → 明显档），
-		// 而非全局段。
-		t.Errorf("strategic system prompt should render inline effects from KB:\n%s", got)
-	}
-}
-
 // strategicRosterKB builds a minimal KB with 3 agents for roster-segment tests.
 func strategicRosterKB() *worldkb.KB {
 	return &worldkb.KB{

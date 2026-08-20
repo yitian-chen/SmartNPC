@@ -24,14 +24,18 @@ type TacticalInput struct {
 	Zone      string
 	TimeOfDay string
 	Slot      string
-	Physical  *protocol.PhysicalState
-	KB        *worldkb.KB
-	Profiles  map[string]*profile.Profile // NPC persona override; nil → AgentRole falls back to KB then hardcoded
-	Hint      string
-	Memories  string // Stage 4: formatted bullet list of recent memories; empty = skip segment
-	Relationships string // Stage 5: formatted relationship list for 【人际关系】段; empty = skip segment (single-NPC scenario)
-	Actions   []protocol.CapabilityAction // from registry.EffectiveActions(agentID); nil → builtin fallback
-	AgentID   string
+	// DailyPlan is the agent's full-day schedule (formatted "HH:MM-HH:MM: goal"
+	// lines), injected as 【全天日程】 so the tactical LLM sees the day's
+	// context around the current slot. Empty = skip the segment.
+	DailyPlan     string
+	Physical      *protocol.PhysicalState
+	KB            *worldkb.KB
+	Profiles      map[string]*profile.Profile // NPC persona override; nil → AgentRole falls back to KB then hardcoded
+	Hint          string
+	Memories      string                      // Stage 4: formatted bullet list of recent memories; empty = skip segment
+	Relationships string                      // Stage 5: formatted relationship list for 【人际关系】段; empty = skip segment (single-NPC scenario)
+	Actions       []protocol.CapabilityAction // from registry.EffectiveActions(agentID); nil → builtin fallback
+	AgentID       string
 	// ObjectStatus is UE5's per-category smart object availability aggregate
 	// (cross-zone). Injected into the tactical prompt as 【物体实时占用】 so
 	// the LLM can avoid planning actions targeting occupied objects. nil =
@@ -79,15 +83,15 @@ type ReactiveInput struct {
 	// defaults) used to render the physical segment as range labels and to
 	// evaluate physical alerts in UpgradeIfPhysicalAlert. Zero value →
 	// DefaultBandThresholds (see BandThresholds.OrDefault).
-	Bands             BandThresholds
-	CurrentAction     string // readable description of in-flight action (e.g. "WorkShift(smart_object=workbench_01)"), empty = no in-flight
-	ElapsedSec        int    // seconds the current action has been running
-	ActionSrc         string // in-flight action source: tactical / mcp_tool / empty
-	QueuedFor         string // 排队状态描述（约定21，如 "正在排队等待 workbench（位置 2，预计等待 30 秒）"），空 = 不在排队
-	CurrentSlot       string // current tactical slot "HH:MM-HH:MM", empty = not decomposed
-	DailyPlan         string // strategic daily plan summary (formatted string), empty = not generated
-	Trigger           ReactiveTrigger
-	TriggerDetail     string // trigger reason detail
+	Bands         BandThresholds
+	CurrentAction string // readable description of in-flight action (e.g. "WorkShift(smart_object=workbench_01)"), empty = no in-flight
+	ElapsedSec    int    // seconds the current action has been running
+	ActionSrc     string // in-flight action source: tactical / mcp_tool / empty
+	QueuedFor     string // 排队状态描述（约定21，如 "正在排队等待 workbench（位置 2，预计等待 30 秒）"），空 = 不在排队
+	CurrentSlot   string // current tactical slot "HH:MM-HH:MM", empty = not decomposed
+	DailyPlan     string // strategic daily plan summary (formatted string), empty = not generated
+	Trigger       ReactiveTrigger
+	TriggerDetail string // trigger reason detail
 }
 
 // ToolEntry is the intermediate representation for the tactical prompt's

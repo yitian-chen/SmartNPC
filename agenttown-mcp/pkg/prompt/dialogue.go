@@ -36,16 +36,16 @@ const DialogueTurnSystemPrompt = `你是小镇居民 NPC 的对话生成模块�
 // prompt used by B (the invitee) to decide whether to accept A's chat_invite
 // and, if accepting, produce an opening reply (sent as the first chat_turn).
 type DialogueInviteInput struct {
-	AgentID     string   // B's agent id
-	AgentName   string   // B's display name (e.g. "老王"); empty → fall back to AgentID
-	PeerID      string   // A's agent id
-	PeerName    string   // A's display name
-	PeerContent string   // A's opening line (the content field of social_chat)
-	Persona     string   // B's 【你的角色】段 (personality/speech style), from AgentRole()
-	CurrentAction string // what B was doing before being interrupted; empty = idle
-	Physical    string   // formatted physical state line; empty = skip
-	TimeOfDay   string   // "HH:MM" game time
-	Relationship string  // formatted relationship line with peer; empty = no prior relationship
+	AgentID        string   // B's agent id
+	AgentName      string   // B's display name (e.g. "老王"); empty → fall back to AgentID
+	PeerID         string   // A's agent id
+	PeerName       string   // A's display name
+	PeerContent    string   // A's opening line (the content field of social_chat)
+	Persona        string   // B's 【你的角色】段 (personality/speech style), from AgentRole()
+	CurrentAction  string   // what B was doing before being interrupted; empty = idle
+	Physical       string   // formatted physical state line; empty = skip
+	TimeOfDay      string   // "HH:MM" game time
+	Relationship   string   // formatted relationship line with peer; empty = no prior relationship
 	RecentMemories []string // recent memory summaries for context
 }
 
@@ -122,11 +122,11 @@ func ParseDialogueInviteDecision(raw string) (DialogueInviteDecision, error) {
 // DialogueTurnInput aggregates the inputs for BuildDialogueTurn — the prompt
 // used by either speaker to generate one chat_turn reply.
 type DialogueTurnInput struct {
-	AgentID   string // this agent's id
-	AgentName string // display name; empty → fall back to AgentID
-	PeerID    string // peer's agent id
-	PeerName  string // peer's display name
-	Persona   string // 【你的角色】段
+	AgentID     string // this agent's id
+	AgentName   string // display name; empty → fall back to AgentID
+	PeerID      string // peer's agent id
+	PeerName    string // peer's display name
+	Persona     string // 【你的角色】段
 	PeerContent string // peer's latest utterance (the turn being responded to)
 	// ShortTermContext holds the recent turns of THIS conversation (most
 	// recent last), capped to ~10 turns by the caller. Each entry records

@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/AgentTown/agenttown-mcp/adapters/agenttown/tools"
+	"github.com/AgentTown/agenttown-mcp/pkg/profile"
 	"github.com/AgentTown/agenttown-mcp/pkg/protocol"
 	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
 )
@@ -29,11 +30,11 @@ var toolOverride = map[string]struct {
 	Desc   string
 	Params string
 }{
-	"generic_act": {"兜底通用动作（带内心独白，无匹配复合动作时用）", `{"thought":"...","behavior":"idle|wave_hand|look_around"}`},
-	"move_to":     {"移动到目标", `{"target_type":"agent|smart_object|zone|position","target_id":"...","target_position":[x,y,z]}`},
-	"turn_to":     {"转向目标", `{"target_type":"agent|smart_object|zone|position","target_id":"...","target_position":[x,y,z]}`},
-	"speak":       {"说话", `{"content":"..."}`},
-	"emote":       {"表达情绪", `{"emotion":"happy|sad|..."}`},
+	"generic_act":         {"兜底通用动作（带内心独白，无匹配复合动作时用）", `{"thought":"...","behavior":"idle|wave_hand|look_around"}`},
+	"move_to":             {"移动到目标", `{"target_type":"agent|smart_object|zone|position","target_id":"...","target_position":[x,y,z]}`},
+	"turn_to":             {"转向目标", `{"target_type":"agent|smart_object|zone|position","target_id":"...","target_position":[x,y,z]}`},
+	"speak":               {"说话", `{"content":"..."}`},
+	"emote":               {"表达情绪", `{"emotion":"happy|sad|..."}`},
 	"InteractSmartObject": {"与智能物体交互（长耗时动作，单次持续到时段切换，可作队列收尾）", `{"semantic_group":"...","interaction":"动词"}`},
 	// wait intentionally not in override and not shown in prompt tool list.
 	// 复合动作 params 给出具体合法值示例（来自当前 world_kb.yaml），
@@ -49,29 +50,60 @@ var toolOverride = map[string]struct {
 	"exercise": {"锻炼（拉伸/散步/做操），放松身体", `{"exercise_type":"stretch|walk|gymnastics"}`},
 }
 
-// TacticalSystemPrompt is the tactical layer's system message: mechanism
-// text only (module role, tool-class explanation, decomposition rules,
-// output format). Fully static across agents and calls → cacheable.
-// Per-call data (goal, state, KB, tool list, example) goes in the user
-// message built by BuildTactical.
+// BuildTacticalSystemPrompt constructs the tactical layer's system message.
+// It shares the strategic layer's KB/cmd-derived modules ("绝大部分相同"),
+// stable within a session (per agent) and thus cacheable:
+//  1. 【世界背景】 — world overview (WorldOverview, shared with strategic).
+//  2. 【人物背景】 — the current agent's profile (AgentRole).
+//  3. 【世界详细信息】 — shared world detail core (zone descriptions +
+//     facility groups with inline per-interaction effects) plus the full
+//     tool list (all cmds with params, from the capability registry).
 //
-// Rules referencing dynamic segments say "用户信息中…" because those
-// segments (tool list, KB zones/objects, nearby NPCs, object occupancy)
-// live in the user message, not here.
-const TacticalSystemPrompt = `你是小镇居民 NPC 的战术规划模块。用户信息给出当前时段目标和你的实时上下文（位置、物理状态、世界知识、可用工具、周围 NPC 与物体占用等），请把目标分解为一个或多个 action，按顺序执行。
+// The decomposition rules (TacticalRules) live in the user message so they
+// sit adjacent to the decomposition ask. Per-call data (full-day plan,
+// current slot goal, realtime state, example) also lives in the user
+// message (BuildTactical).
+func BuildTacticalSystemPrompt(kb *worldkb.KB, profiles map[string]*profile.Profile, agentID string, actions []protocol.CapabilityAction) string {
+	var sb strings.Builder
+	sb.WriteString(`你是小镇居民 NPC 的战术规划模块。你根据系统信息中的【世界背景】【人物背景】【世界详细信息】（含可用工具清单），以及用户信息中的全天任务与当前时段任务、NPC与环境实时状态、分解规则，把当前时段目标分解为一个或多个 action，按顺序执行。
 
-用户信息中的可用工具分两类：
+【世界详细信息】中的可用工具分两类：
 - 复合动作（标记 [复合]）：长耗时、单步即可完成一段工作（如装配、充电、巡逻、聊天），会自动移动到对应位置，无需自己调用 move_to。若目标语义与某复合动作匹配，应优先使用复合动作。
 - 原子动作（标记 [原子]）：作为基本 building block。其中 move_to/speak/emote/turn_to/generic_act 是短耗时动作；InteractSmartObject（与智能物体交互）是长耗时动作——单次 interact 会持续执行直到时段切换（如在长椅上 rest、在工作台前 assemble），可作为队列收尾动作让 NPC 持续活动到下一 schedule 节点。
 仅当复合动作无法覆盖 schedule 要求时，才用原子动作组合实现；InteractSmartObject 因已是长动作，无需重复多次填充时段。
 
-要求：
-1. 队列首个动作必须是 speak（用一句话表达此刻内心想法或独白），然后才是其他动作
-2. 后续每行输出一个 {"action":"工具名","params":{...}}，按执行顺序排列。action 字段必须严格使用用户信息中"可用工具"列表给出的工具名（如 work_shift / charge_at_station / rest_at_residence / surf_internet / self_maintenance / social_chat / InteractSmartObject / move_to / speak / generic_act / emote / turn_to），禁止编造、禁止近形变换（如把 work_shift 写成 work_short、rest_at_residence 写成 rest_at_composite），否则动作会被丢弃导致队列提前耗尽
+`)
+	if m1 := WorldOverview(kb); m1 != "" {
+		sb.WriteString("【世界背景】\n")
+		sb.WriteString(m1)
+	}
+	if role := AgentRole(kb, profiles, agentID); role != "" {
+		sb.WriteString("\n【人物背景】\n")
+		sb.WriteString(role)
+	}
+	sb.WriteString("\n【世界详细信息】\n")
+	sb.WriteString(worldDetailCore(kb))
+	// 完整工具清单（原子+复合，带 params；nil registry → 内置兜底）。
+	toolList, toolCount := BuildTacticalToolList(actions)
+	if toolCount > 0 {
+		sb.WriteString(fmt.Sprintf("可用工具（仅限以下 %d 个）：\n", toolCount))
+		sb.WriteString(toolList)
+		sb.WriteString("\n")
+	}
+	return sb.String()
+}
+
+// TacticalRules is the tactical decomposition rules, injected into the user
+// message (recency effect: instructions closer to the ask are followed more
+// reliably). References to 【世界背景】/【人物背景】/【世界详细信息】 point
+// at the system message's modules; references to 【物理状态】/【附近NPC】/
+// 【物体实时占用】 point at the user message's dynamic segments.
+const TacticalRules = `1. 队列首个动作必须是 speak（用一句话表达此刻内心想法或独白），然后才是其他动作
+2. 后续每行输出一个 {"action":"工具名","params":{...}}，按执行顺序排列。action 字段必须严格使用系统信息【世界详细信息】可用工具列表给出的工具名（如 work_shift / charge_at_station / rest_at_residence / surf_internet / self_maintenance / social_chat / InteractSmartObject / move_to / speak / generic_act / emote / turn_to），禁止编造、禁止近形变换（如把 work_shift 写成 work_short、rest_at_residence 写成 rest_at_composite），否则动作会被丢弃导致队列提前耗尽
 3. 队列必须以长动作结尾（长复合动作 或 InteractSmartObject 原子动作均可）——长动作会持续执行直到时段切换，让 NPC 一直活动到下一 schedule 节点被 worker 主动打断
 4. 禁止输出 wait 动作；复合动作已包含自动移动到对应位置的逻辑，禁止在复合动作前加 move_to——直接输出单个长复合动作即可。
 5. 仅当目标确实没有匹配的长复合动作时，才用原子动作组合实现目标。长椅休息等场景用单个 InteractSmartObject 即可（InteractSmartObject 是长动作，会持续到时段切换），禁止把同一动作重复多次填充时段——队列提前耗尽会自动触发重分解生成新动作
-6. move_to/turn_to 的 target_id 用用户信息中【世界知识】"可前往区域"的 zone id；InteractSmartObject 和复合动作的 semantic_group 必须严格使用"可交互物体"给出的 semantic_group 值，禁止编造、禁止用实例 id（如 Charge-1）、禁止拼接 zone/interaction 信息
+6. move_to/turn_to 的 target_id 用系统信息【世界详细信息】各区域详情列出的 zone id；InteractSmartObject 和复合动作的 semantic_group 必须严格使用设施详情中给出的 semantic_group 值，禁止编造、禁止用实例 id（如 Charge-1）、禁止拼接 zone/interaction 信息
 7. 复合动作与 semantic_group 必须严格对应，禁止跨类别组合：
    - work_shift → workbench（装配）/ sorting_conveyor（分拣）/ inspection_table（质检），interaction 用 assemble / sort_cargo / inspect
    - charge_at_station → charger，interaction 用 charge
@@ -83,52 +115,51 @@ const TacticalSystemPrompt = `你是小镇居民 NPC 的战术规划模块。用
 8. 每行一个 JSON 对象，不要输出 JSON 数组，不要输出 markdown 围栏，不要输出任何其他文字；不要输出 inner_thought 字段，内心独白直接用首个 speak 动作表达
 9. 若用户信息中【物体实时占用】显示目标 semantic_group 全部占用，必须改用其他空闲 semantic_group 或先安排 generic_act(behavior=look_around) 短暂等待，禁止规划必然失败的占用动作`
 
-// tacticalUserBody is the user message's fixed skeleton. %s placeholders are:
-// goal / zone / timeOfDay /
-// physicalLine (physical state line, empty when all-0) / roleLine / memoriesLine /
-// relationshipsLine / nearbyLine (visible NPCs, empty when none) /
-// hintLine / slotDurationHint / kbContext / objectStatusLine / toolCount / toolList / exampleBlock.
-const tacticalUserBody = `[战术层/任务分解] 当前时段目标：%s
-你目前在：%s，游戏时间 %s。
-%s
-%s
-%s
-%s
-%s
-请把这个目标分解为一个或多个 action，按顺序执行。
-%s
-%s
-%s
-%s
-可用工具（仅限以下 %d 个）：
-%s
-
-示例（id 来自上方可用列表，不可照抄示例中的 id）：
-%s`
-
-// BuildTactical fills the tactical layer user message template.
-// kb injects available zone/object lists + NPC role (AgentRole), preventing
-// the LLM from fabricating IDs and letting decomposition reflect personality.
-// slot ("HH:MM-HH:MM") is used to hint slot duration, guiding the LLM to
-// produce steps whose total duration approaches the slot length.
-// actions (from registry.EffectiveActions) drives the tool list; nil → builtin fallback.
+// BuildTactical constructs the tactical layer's user message, four parts:
+//  1. 全天任务与当前时段任务 — full-day schedule + current slot goal +
+//     slot duration hint.
+//  2. NPC与环境实时状态 — realtime state from the latest perception_update:
+//     zone, game time, physical state, recent memories, relationships,
+//     nearby NPCs, object occupancy, replan hint (incl. physical-alert
+//     constraints).
+//  3. 分解规则 — TacticalRules (injected adjacent to the ask).
+//  4. 任务 — the decomposition ask + goal-specific example.
 //
-// Mechanism text (tool-class explanation, rules 1-9) lives in
-// TacticalSystemPrompt; callers pass it as the system message.
+// KB/world/persona/tool list live in the system message
+// (BuildTacticalSystemPrompt), not here.
 func BuildTactical(in TacticalInput) string {
 	th := BandThresholdsFor(in.Profiles, in.AgentID)
-	physicalLine := PhysicalLine(in.Physical, th)
-	roleLine := ""
-	if role := AgentRole(in.KB, in.Profiles, in.AgentID); role != "" {
-		roleLine = "【你的角色】\n" + role
+
+	// ── 一、全天任务与当前时段任务 ──
+	var sb strings.Builder
+	sb.WriteString("[战术层/任务分解]\n一、全天任务与当前时段任务\n")
+	if in.DailyPlan != "" {
+		sb.WriteString("【全天日程】\n")
+		sb.WriteString(in.DailyPlan)
+		if !strings.HasSuffix(in.DailyPlan, "\n") {
+			sb.WriteString("\n")
+		}
 	}
-	memoriesLine := ""
+	sb.WriteString("【当前时段目标】" + in.Goal + "\n")
+	sb.WriteString(SlotDurationHint(in.Slot, in.TimeOfDay))
+
+	// ── 二、NPC与环境实时状态 ──
+	sb.WriteString("\n二、NPC与环境实时状态\n")
+	sb.WriteString(fmt.Sprintf("你目前在：%s，游戏时间 %s。\n", in.Zone, in.TimeOfDay))
+	if line := PhysicalLine(in.Physical, th); line != "" {
+		sb.WriteString(line + "\n")
+	}
 	if in.Memories != "" {
-		memoriesLine = "【过往经验】\n" + in.Memories
+		sb.WriteString("【过往经验】\n" + in.Memories)
+		if !strings.HasSuffix(in.Memories, "\n") {
+			sb.WriteString("\n")
+		}
 	}
-	relationshipsLine := ""
 	if in.Relationships != "" {
-		relationshipsLine = "【人际关系】\n" + in.Relationships
+		sb.WriteString("【人际关系】\n" + in.Relationships)
+		if !strings.HasSuffix(in.Relationships, "\n") {
+			sb.WriteString("\n")
+		}
 	}
 	nearbyLine := NearbyAgentsLine(in.VisibleAgents)
 	if nearbyLine == "" && in.KB != nil {
@@ -136,66 +167,89 @@ func BuildTactical(in TacticalInput) string {
 		// NPC id 列表（social_chat 的 target_agent_id 需要 id 而非显示名）。
 		nearbyLine = OtherAgentsLine(in.KB, in.AgentID)
 	}
-	hintLine := ""
-	if in.Hint != "" {
-		hintLine = "【上次中断原因】" + in.Hint + "（请据此调整本轮规划）"
-	}
-	// 物理告警强约束段: when hint contains "物理状态告警" marker (set by
-	// upgradeIfPhysicalAlert), insert type-specific recovery constraints based
-	// on which physical values are actually in alert. Pairs with
-	// physicalAlertOverrideGoal (code-layer goal override) as double insurance.
-	// Different alert types drive different recovery actions:
-	//   - 低电量 → charge_at_station 充电
-	//   - 高疲劳 → charge_at_station 充电 / rest_at_residence 休息
-	//   - 高关节磨损 → self_maintenance 维修保养
-	if strings.Contains(in.Hint, "物理状态告警") && in.Physical != nil && !in.Physical.IsZero() {
-		var reqs, forbids []string
-		if in.Physical.Energy < th.EnergyAlert() {
-			reqs = append(reqs, "- 电量过低：必须优先 charge_at_station（充电）补能")
-		}
-		if in.Physical.Fatigue > th.FatigueAlert() {
-			reqs = append(reqs, "- 疲劳过高：优先 charge_at_station（充电）或 rest_at_residence（休息），充电后若仍疲劳追加 rest_at_residence")
-		}
-		if in.Physical.JointWear > th.JointWearAlert() {
-			reqs = append(reqs, "- 关节磨损过高：必须优先 self_maintenance（维护保养），否则持续工作会加剧损耗")
-		}
-		// 禁止项：仅禁止与所有活跃告警冲突的消耗性动作
-		// 关节磨损告警时不禁 self_maintenance（那是需要的恢复动作）
-		fatigueAlert := in.Physical.Fatigue > th.FatigueAlert()
-		jointWearAlert := in.Physical.JointWear > th.JointWearAlert()
-		if fatigueAlert {
-			forbids = append(forbids, "work_shift（消耗体力）")
-		}
-		if jointWearAlert {
-			forbids = append(forbids, "surf_internet（无助于恢复）")
-		}
-		if fatigueAlert {
-			forbids = append(forbids, "move_to 到非恢复设施区域")
-		}
-		if len(reqs) > 0 {
-			hintLine += "\n【物理告警强制约束】当前物理状态已突破警戒阈值，必须立即规划恢复类动作：\n" +
-				strings.Join(reqs, "\n")
-			if len(forbids) > 0 {
-				hintLine += "\n禁止规划以下动作：" + strings.Join(forbids, "、")
-			}
+	if nearbyLine != "" {
+		sb.WriteString(nearbyLine)
+		if !strings.HasSuffix(nearbyLine, "\n") {
+			sb.WriteString("\n")
 		}
 	}
-	toolList, toolCount := BuildTacticalToolList(in.Actions)
-	// 【动作对属性的影响】段与战略层共用同一份摘要（SetCmdEffects 注入，
-	// world_kb 推送时生成）。帮助战术层在恢复类 goal 下选择合适的互动
-	// （如 meditate 轻缓解 vs sleep 深度恢复）。空串=未生成，跳过。
-	if cmdEffectsText != "" {
-		toolList += "\n\n【动作对属性的影响】\n" + cmdEffectsText
+	if os := ObjectStatusContext(in.ObjectStatus, in.NearbyObjects, in.KB); os != "" {
+		sb.WriteString(os)
+		if !strings.HasSuffix(os, "\n") {
+			sb.WriteString("\n")
+		}
 	}
-	objectStatusLine := ObjectStatusContext(in.ObjectStatus, in.NearbyObjects, in.KB)
-	return fmt.Sprintf(tacticalUserBody, in.Goal, in.Zone, in.TimeOfDay,
-		physicalLine,
-		roleLine,
-		memoriesLine,
-		relationshipsLine,
-		nearbyLine,
-		hintLine, SlotDurationHint(in.Slot, in.TimeOfDay), KBContext(in.KB), objectStatusLine, toolCount, toolList,
-		TacticalExample(in.KB, in.Goal, in.AgentID))
+	hintLine := tacticalHintLine(in, th)
+	if hintLine != "" {
+		sb.WriteString(hintLine)
+		if !strings.HasSuffix(hintLine, "\n") {
+			sb.WriteString("\n")
+		}
+	}
+
+	// ── 三、分解规则 ──
+	sb.WriteString("\n三、分解规则\n")
+	sb.WriteString(TacticalRules)
+	sb.WriteString("\n")
+
+	// ── 四、任务 ──
+	sb.WriteString("\n四、任务\n")
+	sb.WriteString("请把【当前时段目标】分解为一个或多个 action，按顺序执行。\n")
+	if ex := TacticalExample(in.KB, in.Goal, in.AgentID); ex != "" {
+		sb.WriteString("示例（id 来自系统信息【世界详细信息】可用工具列表，不可照抄示例中的 id）：\n")
+		sb.WriteString(ex)
+		sb.WriteString("\n")
+	}
+	return sb.String()
+}
+
+// tacticalHintLine renders the replan hint plus, when the hint carries the
+// "物理状态告警" marker (set by upgradeIfPhysicalAlert), type-specific
+// recovery constraints based on which physical values are actually in alert.
+// Pairs with physicalAlertOverrideGoal (code-layer goal override) as double
+// insurance. Different alert types drive different recovery actions:
+//   - 低电量 → charge_at_station 充电
+//   - 高疲劳 → charge_at_station 充电 / rest_at_residence 休息
+//   - 高关节磨损 → self_maintenance 维修保养
+func tacticalHintLine(in TacticalInput, th BandThresholds) string {
+	if in.Hint == "" {
+		return ""
+	}
+	hintLine := "【上次中断原因】" + in.Hint + "（请据此调整本轮规划）"
+	if !strings.Contains(in.Hint, "物理状态告警") || in.Physical == nil || in.Physical.IsZero() {
+		return hintLine
+	}
+	var reqs, forbids []string
+	if in.Physical.Energy < th.EnergyAlert() {
+		reqs = append(reqs, "- 电量过低：必须优先 charge_at_station（充电）补能")
+	}
+	if in.Physical.Fatigue > th.FatigueAlert() {
+		reqs = append(reqs, "- 疲劳过高：优先 charge_at_station（充电）或 rest_at_residence（休息），充电后若仍疲劳追加 rest_at_residence")
+	}
+	if in.Physical.JointWear > th.JointWearAlert() {
+		reqs = append(reqs, "- 关节磨损过高：必须优先 self_maintenance（维护保养），否则持续工作会加剧损耗")
+	}
+	// 禁止项：仅禁止与所有活跃告警冲突的消耗性动作
+	// 关节磨损告警时不禁 self_maintenance（那是需要的恢复动作）
+	fatigueAlert := in.Physical.Fatigue > th.FatigueAlert()
+	jointWearAlert := in.Physical.JointWear > th.JointWearAlert()
+	if fatigueAlert {
+		forbids = append(forbids, "work_shift（消耗体力）")
+	}
+	if jointWearAlert {
+		forbids = append(forbids, "surf_internet（无助于恢复）")
+	}
+	if fatigueAlert {
+		forbids = append(forbids, "move_to 到非恢复设施区域")
+	}
+	if len(reqs) > 0 {
+		hintLine += "\n【物理告警强制约束】当前物理状态已突破警戒阈值，必须立即规划恢复类动作：\n" +
+			strings.Join(reqs, "\n")
+		if len(forbids) > 0 {
+			hintLine += "\n禁止规划以下动作：" + strings.Join(forbids, "、")
+		}
+	}
+	return hintLine
 }
 
 // SlotDurationHint constructs a hint line based on slot "HH:MM-HH:MM" and

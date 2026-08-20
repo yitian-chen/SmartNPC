@@ -463,7 +463,7 @@ func TestSelectCurrentGoal_PlanningWindowBoundary(t *testing.T) {
 
 func TestGenerateTacticalPlan_HTTPError(t *testing.T) {
 	tc := &fakeStrategicCaller{err: errors.New("network down")}
-	actions, err := generateTacticalPlan(context.Background(), tc, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", &protocol.PhysicalState{Energy: 80, Fatigue: 20, JointWear: 10}, nil, nil, slog.Default(), "", "", "", nil, nil, nil, nil)
+	actions, err := generateTacticalPlan(context.Background(), tc, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", "07:00-09:00: 上午准备\n09:00-12:00: 车间装配", &protocol.PhysicalState{Energy: 80, Fatigue: 20, JointWear: 10}, nil, nil, slog.Default(), "", "", "", nil, nil, nil, nil)
 	if err == nil {
 		t.Fatal("expected error on HTTP failure")
 	}
@@ -480,7 +480,7 @@ func TestGenerateTacticalPlan_ValidResponse(t *testing.T) {
 		`{"action":"move_to","params":{"target_type":"zone","target_id":"main_workshop"}}` + "\n" +
 		`{"action":"work_shift","params":{"semantic_group":"workbench_01","interaction":"assemble"}}`
 	tc := &fakeStrategicCaller{resp: makeStrategicResponse(raw)}
-	actions, err := generateTacticalPlan(context.Background(), tc, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", &protocol.PhysicalState{Energy: 80, Fatigue: 20, JointWear: 10}, nil, nil, slog.Default(), "", "", "", nil, nil, nil, nil)
+	actions, err := generateTacticalPlan(context.Background(), tc, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", "07:00-09:00: 上午准备\n09:00-12:00: 车间装配", &protocol.PhysicalState{Energy: 80, Fatigue: 20, JointWear: 10}, nil, nil, slog.Default(), "", "", "", nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -501,7 +501,7 @@ func TestGenerateTacticalPlan_ValidResponse(t *testing.T) {
 
 func TestGenerateTacticalPlan_ParseFail(t *testing.T) {
 	tc := &fakeStrategicCaller{resp: makeStrategicResponse("我今天打算去车间转转。")}
-	if _, err := generateTacticalPlan(context.Background(), tc, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", nil, nil, nil, slog.Default(), "", "", "", nil, nil, nil, nil); err == nil {
+	if _, err := generateTacticalPlan(context.Background(), tc, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", "07:00-09:00: 上午准备\n09:00-12:00: 车间装配", nil, nil, nil, slog.Default(), "", "", "", nil, nil, nil, nil); err == nil {
 		t.Fatal("expected error on parse failure (no actions)")
 	}
 }
@@ -509,7 +509,7 @@ func TestGenerateTacticalPlan_ParseFail(t *testing.T) {
 func TestGenerateTacticalPlan_EmptyActions(t *testing.T) {
 	raw := `{"inner_thought":"不知道做什么"}`
 	tc := &fakeStrategicCaller{resp: makeStrategicResponse(raw)}
-	if _, err := generateTacticalPlan(context.Background(), tc, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", nil, nil, nil, slog.Default(), "", "", "", nil, nil, nil, nil); err == nil {
+	if _, err := generateTacticalPlan(context.Background(), tc, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", "07:00-09:00: 上午准备\n09:00-12:00: 车间装配", nil, nil, nil, slog.Default(), "", "", "", nil, nil, nil, nil); err == nil {
 		t.Fatal("expected error when all actions filtered out")
 	}
 }
@@ -518,7 +518,7 @@ func TestGenerateTacticalPlan_ResetSessionCalled(t *testing.T) {
 	raw := `{"action":"speak","params":{"content":"开始"}}` + "\n" +
 		`{"action":"wait","params":{"duration_sec":30}}`
 	tc := &fakeStrategicCaller{resp: makeStrategicResponse(raw)}
-	_, _ = generateTacticalPlan(context.Background(), tc, "H-01", "等待", "main_workshop", "09:00", "09:00-12:00", nil, nil, nil, slog.Default(), "", "", "", nil, nil, nil, nil)
+	_, _ = generateTacticalPlan(context.Background(), tc, "H-01", "等待", "main_workshop", "09:00", "09:00-12:00", "", nil, nil, nil, slog.Default(), "", "", "", nil, nil, nil, nil)
 	if !tc.resetCalled {
 		t.Error("ResetSession should be called after successful tactical generation")
 	}
@@ -574,7 +574,8 @@ func TestBuildTacticalPrompt_WithPhysical(t *testing.T) {
 
 func TestBuildTacticalPrompt_InjectsKBContext(t *testing.T) {
 	kb := loadTestKB(t)
-	promptText := prompt.BuildTactical(prompt.TacticalInput{Goal: "装配", Zone: "main_workshop", TimeOfDay: "09:00", Slot: "09:00-12:00", Physical: &protocol.PhysicalState{Energy: 75, Fatigue: 30, JointWear: 5}, KB: kb, Hint: "", Actions: nil, AgentID: ""})
+	// KB 世界信息已迁至 system prompt（与战略层共享三模块）。
+	promptText := prompt.BuildTacticalSystemPrompt(kb, nil, "", nil)
 	// 应包含 KB 中所有 zone（assets/world_kb.yaml 当前是 7-zone 工业园区）
 	for _, zID := range []string{"main_workshop", "central_plaza", "logistics_hub", "repair_bay", "residential_quarters", "archive_station", "recycling_yard"} {
 		if !strings.Contains(promptText, zID) {
@@ -587,24 +588,16 @@ func TestBuildTacticalPrompt_InjectsKBContext(t *testing.T) {
 			t.Errorf("prompt should list semantic_group %q, got: %s", sg, promptText)
 		}
 	}
-	// 应包含"可交互物体"段落标题及交互动词
-	if !strings.Contains(promptText, "可交互物体") {
-		t.Errorf("prompt should contain '可交互物体' section, got: %s", promptText)
+	// 应包含设施详情段及交互动词
+	if !strings.Contains(promptText, "设施详情") {
+		t.Errorf("system prompt should contain '设施详情' section, got: %s", promptText)
 	}
 	if !strings.Contains(promptText, "assemble") || !strings.Contains(promptText, "charge") || !strings.Contains(promptText, "sleep") {
-		t.Errorf("prompt should list available interactions on objects, got: %s", promptText)
+		t.Errorf("system prompt should list available interactions on objects, got: %s", promptText)
 	}
-	// 验证新格式：每个 object 单独一行，明确分离 id/zone/interaction
-	// 不应再出现旧的 "id|zone[interactions]" 拼接格式
-	if strings.Contains(promptText, "workbench|main_workshop[") {
-		t.Errorf("prompt should not contain legacy 'id|zone[interactions]' format, got: %s", promptText)
-	}
-	// 应包含明确的 semantic_group/zone/interaction 标注
-	if !strings.Contains(promptText, "semantic_group=workbench") {
-		t.Errorf("prompt should contain 'semantic_group=workbench' label, got: %s", promptText)
-	}
-	if !strings.Contains(promptText, "位于 zone=main_workshop") {
-		t.Errorf("prompt should contain '位于 zone=main_workshop', got: %s", promptText)
+	// 应包含工具清单（战术层特有）
+	if !strings.Contains(promptText, "可用工具（仅限以下") {
+		t.Errorf("system prompt should contain the tool list, got: %s", promptText)
 	}
 }
 
@@ -652,12 +645,12 @@ func TestBuildTacticalPrompt_InjectsObjectStatus(t *testing.T) {
 	}
 	// 应包含"避免直接重试"或"全部占用"相关的引导文本
 	// （该引导在 TacticalSystemPrompt 规则 9 中，机制文本已移入 system 消息）
-	if !strings.Contains(prompt.TacticalSystemPrompt, "禁止规划必然失败") {
+	if !strings.Contains(prompt.TacticalRules, "禁止规划必然失败") {
 		t.Errorf("system prompt should guide LLM to avoid doomed occupancy actions")
 	}
 	// 所有工种设备都可用 InteractSmartObject 直接工作（process/debug/dismantle
 	// 等无复合动作的工种依据）；同时锚定 action 字段名 interact 防止 LLM 写错工具名。
-	if !strings.Contains(prompt.TacticalSystemPrompt, "所有工种设备都可用 InteractSmartObject") {
+	if !strings.Contains(prompt.TacticalRules, "所有工种设备都可用 InteractSmartObject") {
 		t.Error("system prompt should say InteractSmartObject works for any work device")
 	}
 }
@@ -669,15 +662,15 @@ func TestBuildTacticalPrompt_InjectsObjectStatus(t *testing.T) {
 func TestBuildTacticalPrompt_NilObjectStatusNoSection(t *testing.T) {
 	kb := loadTestKB(t)
 	promptText := prompt.BuildTactical(prompt.TacticalInput{
-		Goal:     "装配",
-		Zone:     "main_workshop",
+		Goal:      "装配",
+		Zone:      "main_workshop",
 		TimeOfDay: "09:00",
-		Slot:     "09:00-12:00",
-		Physical: &protocol.PhysicalState{Energy: 75, Fatigue: 30, JointWear: 5},
-		KB:       kb,
-		Hint:     "",
-		Actions:  nil,
-		AgentID:  "",
+		Slot:      "09:00-12:00",
+		Physical:  &protocol.PhysicalState{Energy: 75, Fatigue: 30, JointWear: 5},
+		KB:        kb,
+		Hint:      "",
+		Actions:   nil,
+		AgentID:   "",
 		// ObjectStatus / NearbyObjects 留空
 	})
 	if strings.Contains(promptText, "按 category 聚合") {
@@ -709,9 +702,10 @@ func TestBuildTacticalPrompt_NilKB(t *testing.T) {
 // "沉稳"性格影响 action 选择与节奏），而非机械分解。
 func TestBuildTacticalPrompt_InjectsAgentRole(t *testing.T) {
 	kb := loadTestKB(t)
-	promptText := prompt.BuildTactical(prompt.TacticalInput{Goal: "装配", Zone: "main_workshop", TimeOfDay: "09:00", Slot: "09:00-12:00", Physical: &protocol.PhysicalState{Energy: 75, Fatigue: 30, JointWear: 5}, KB: kb, Hint: "", Actions: nil, AgentID: "H-01"})
-	if !strings.Contains(promptText, "【你的角色】") {
-		t.Errorf("prompt missing '【你的角色】' section header, got: %s", promptText)
+	// 角色画像已迁至 system prompt 的【人物背景】模块。
+	promptText := prompt.BuildTacticalSystemPrompt(kb, nil, "H-01", nil)
+	if !strings.Contains(promptText, "【人物背景】") {
+		t.Errorf("prompt missing '【人物背景】' section header, got: %s", promptText)
 	}
 	for _, want := range []string{"老陈", "装配工人", "沉稳"} {
 		if !strings.Contains(promptText, want) {
@@ -723,9 +717,9 @@ func TestBuildTacticalPrompt_InjectsAgentRole(t *testing.T) {
 // TestBuildTacticalPrompt_NilKBNoRole 验证 kb==nil 时 prompt 不含
 // 【你的角色】段（roleLine 降级为空串，prompt 中仅留空行）。
 func TestBuildTacticalPrompt_NilKBNoRole(t *testing.T) {
-	promptText := prompt.BuildTactical(prompt.TacticalInput{Goal: "装配", Zone: "main_workshop", TimeOfDay: "09:00", Slot: "", Physical: nil, KB: nil, Hint: "", Actions: nil, AgentID: ""})
-	if strings.Contains(promptText, "【你的角色】") {
-		t.Errorf("prompt should not contain '【你的角色】' when KB is nil, got: %s", promptText)
+	promptText := prompt.BuildTacticalSystemPrompt(nil, nil, "", nil)
+	if strings.Contains(promptText, "【人物背景】\n") {
+		t.Errorf("prompt should not contain '【人物背景】' when KB is nil, got: %s", promptText)
 	}
 }
 
@@ -771,7 +765,8 @@ func TestBuildTacticalPrompt_RegistryFiltersTools(t *testing.T) {
 		{Cmd: protocol.CmdMoveTo, Kind: "atomic"},
 		{Cmd: protocol.CmdWait, Kind: "atomic"},
 	})
-	promptText := prompt.BuildTactical(prompt.TacticalInput{Goal: "装配", Zone: "main_workshop", TimeOfDay: "09:00", Slot: "09:00-12:00", Physical: &protocol.PhysicalState{Energy: 75, Fatigue: 30, JointWear: 5}, KB: nil, Hint: "", Actions: reg.EffectiveActions("H-01"), AgentID: "H-01"})
+	// 工具清单已迁至 system prompt。
+	promptText := prompt.BuildTacticalSystemPrompt(nil, nil, "H-01", reg.EffectiveActions("H-01"))
 	// Tool bullet list should contain move_to.
 	if !strings.Contains(promptText, "- move_to [原子]:") {
 		t.Errorf("prompt should list move_to as [原子] bullet, got: %s", promptText)
@@ -803,8 +798,9 @@ func TestBuildTacticalPrompt_PerAgentOverride(t *testing.T) {
 	reg.Register("H-02", []protocol.CapabilityAction{
 		{Cmd: protocol.CmdMoveTo, Kind: "atomic"},
 	})
-	promptH01 := prompt.BuildTactical(prompt.TacticalInput{Goal: "装配", Zone: "main_workshop", TimeOfDay: "09:00", Slot: "09:00-12:00", Physical: &protocol.PhysicalState{Energy: 75}, KB: nil, Hint: "", Actions: reg.EffectiveActions("H-01"), AgentID: "H-01"})
-	promptH02 := prompt.BuildTactical(prompt.TacticalInput{Goal: "装配", Zone: "main_workshop", TimeOfDay: "09:00", Slot: "09:00-12:00", Physical: &protocol.PhysicalState{Energy: 75}, KB: nil, Hint: "", Actions: reg.EffectiveActions("H-02"), AgentID: "H-02"})
+	// 工具清单已迁至 system prompt。
+	promptH01 := prompt.BuildTacticalSystemPrompt(nil, nil, "H-01", reg.EffectiveActions("H-01"))
+	promptH02 := prompt.BuildTacticalSystemPrompt(nil, nil, "H-02", reg.EffectiveActions("H-02"))
 	// Check bullet prefix — example section is hardcoded and not registry-aware.
 	if !strings.Contains(promptH01, "- work_shift [复合]:") {
 		t.Errorf("H-01 prompt should list composite tools as [复合] bullets (global default), got: %s", promptH01)
@@ -845,9 +841,9 @@ func TestSlotDurationMinute(t *testing.T) {
 		{"18:00-22:00", 240},
 		{"12:00-13:00", 60},
 		// 跨午夜 slot：end <= start 时归一化到次日
-		{"22:00-06:00", 480},  // 8 小时
-		{"23:30-06:00", 390},  // 6.5 小时
-		{"20:00-00:30", 270},  // 4.5 小时
+		{"22:00-06:00", 480}, // 8 小时
+		{"23:30-06:00", 390}, // 6.5 小时
+		{"20:00-00:30", 270}, // 4.5 小时
 		// 解析失败 / 非法
 		{"", -1},
 		{"09:00", -1},
@@ -1137,7 +1133,7 @@ func TestBuildTacticalExample_ChargingStationFirst(t *testing.T) {
 func TestBuildTacticalExample_WorkbenchOnly(t *testing.T) {
 	// KB 只含 workbench 时示例应用 work_shift。
 	kb := &worldkb.KB{
-		Zones:  []worldkb.Zone{{ID: "main_workshop", DisplayName: "车间"}},
+		Zones: []worldkb.Zone{{ID: "main_workshop", DisplayName: "车间"}},
 		Objects: []worldkb.Object{{
 			ID:                    "wb_01",
 			DisplayName:           "工作台",
@@ -1158,7 +1154,7 @@ func TestBuildTacticalExample_WorkbenchOnly(t *testing.T) {
 func TestBuildTacticalExample_RestBenchOnly(t *testing.T) {
 	// KB 只含 rest_bench（category 无专用复合工具）时示例应用 interact + rest。
 	kb := &worldkb.KB{
-		Zones:  []worldkb.Zone{{ID: "rest_area", DisplayName: "休息区"}},
+		Zones: []worldkb.Zone{{ID: "rest_area", DisplayName: "休息区"}},
 		Objects: []worldkb.Object{{
 			ID:                    "bench_01",
 			DisplayName:           "长椅",

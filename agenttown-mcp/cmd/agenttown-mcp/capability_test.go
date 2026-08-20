@@ -222,10 +222,10 @@ func TestCapabilityRegistry_NormalizesWhitespace(t *testing.T) {
 	r := NewCapabilityRegistry(nil)
 	r.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
 		{
-			Cmd:        " InteractSmartObject ",
-			Kind:       " atomic ",
-			Params:     []protocol.CapabilityParam{{Name: " smart_object ", Type: "string"}},
-			UsageHint:  " 保留描述空格不动 ",
+			Cmd:       " InteractSmartObject ",
+			Kind:      " atomic ",
+			Params:    []protocol.CapabilityParam{{Name: " smart_object ", Type: "string"}},
+			UsageHint: " 保留描述空格不动 ",
 		},
 		{Cmd: " MoveTo ", Kind: "atomic"},
 	})

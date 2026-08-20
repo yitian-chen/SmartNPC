@@ -28,10 +28,10 @@ const dialogueMaxTurns = 6
 type dialoguePhase string
 
 const (
-	phaseNone    dialoguePhase = "none"
+	phaseNone     dialoguePhase = "none"
 	phaseInviting dialoguePhase = "inviting"
-	phaseActive  dialoguePhase = "active"
-	phaseClosing dialoguePhase = "closing"
+	phaseActive   dialoguePhase = "active"
+	phaseClosing  dialoguePhase = "closing"
 )
 
 // dialogueRole distinguishes the initiator (A, sent social_chat) from the

@@ -694,20 +694,20 @@ func runPerceptionWorker(
 			continue
 		}
 
-	if ac.hasQueueNext() {
-		// 队列还有下一个：pop 并直发。
-		// 手动模式下 /debug/schedule 注入的 action 进队列后由 ac.signal() 唤醒
-		// worker 走这条路径下发，所以 popAndSendQueueAction 不受 autoPlanEnabled 限制。
-		ac.popAndSendQueueAction(ctx, agentID, ws, kb, logger)
-	} else if autoPlanEnabled {
-		// 队列空 + 自动规划开启：尝试战术 refill。refill 返回 false（无 goal /
-		// redecomposeCount 达上限）时不主动发任何指令，阻塞等下一次感知唤醒——
-		// 感知推进 game_time 后会进入新 slot，redecomposeCount 重置即可重新分解。
-		// 不再发 idle wait：长复合动作应持续到时段切换，短动作队列空时让
-		// 战术层重新分解（tacticalRefill 内部会在重分解时注入"未安排长动作"hint）。
-		ac.tacticalRefill(ctx, agentID, ws, kb, profiles, logger)
-	}
-	// 队列空 + 自动规划关闭：不主动下发，阻塞在 wake 等手动注入 signal。
+		if ac.hasQueueNext() {
+			// 队列还有下一个：pop 并直发。
+			// 手动模式下 /debug/schedule 注入的 action 进队列后由 ac.signal() 唤醒
+			// worker 走这条路径下发，所以 popAndSendQueueAction 不受 autoPlanEnabled 限制。
+			ac.popAndSendQueueAction(ctx, agentID, ws, kb, logger)
+		} else if autoPlanEnabled {
+			// 队列空 + 自动规划开启：尝试战术 refill。refill 返回 false（无 goal /
+			// redecomposeCount 达上限）时不主动发任何指令，阻塞等下一次感知唤醒——
+			// 感知推进 game_time 后会进入新 slot，redecomposeCount 重置即可重新分解。
+			// 不再发 idle wait：长复合动作应持续到时段切换，短动作队列空时让
+			// 战术层重新分解（tacticalRefill 内部会在重分解时注入"未安排长动作"hint）。
+			ac.tacticalRefill(ctx, agentID, ws, kb, profiles, logger)
+		}
+		// 队列空 + 自动规划关闭：不主动下发，阻塞在 wake 等手动注入 signal。
 	}
 }
 
@@ -1161,7 +1161,7 @@ func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
 
 	if tacticalStreamingEnabled {
 		// 流式路径：onAction 回调逐个入队 + 首 action 提前下发。
-		_, err = generateTacticalPlanStreaming(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, profiles, logger, hint, memories, relationships, capabilityRegistryRef, a.as.LatestObjectStatus(), a.as.LatestNearbyObjects(), a.as.LatestVisibleAgents(),
+		_, err = generateTacticalPlanStreaming(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, plan, physical, kbRef, profiles, logger, hint, memories, relationships, capabilityRegistryRef, a.as.LatestObjectStatus(), a.as.LatestNearbyObjects(), a.as.LatestVisibleAgents(),
 			func(pa plannedAction) {
 				a.as.AppendQueueAction(pa)
 				if a.as.ShouldDispatchFirst() {
@@ -1172,7 +1172,7 @@ func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
 		)
 	} else {
 		// 非流式路径（默认）：等完整响应后一次性填充队列。
-		actions, err = generateTacticalPlan(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, profiles, logger, hint, memories, relationships, capabilityRegistryRef, a.as.LatestObjectStatus(), a.as.LatestNearbyObjects(), a.as.LatestVisibleAgents())
+		actions, err = generateTacticalPlan(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, plan, physical, kbRef, profiles, logger, hint, memories, relationships, capabilityRegistryRef, a.as.LatestObjectStatus(), a.as.LatestNearbyObjects(), a.as.LatestVisibleAgents())
 		if err == nil {
 			a.as.ReplaceQueue(actions)
 		}
@@ -1237,6 +1237,7 @@ func (a *agentContext) tacticalRefillForReplan(
 	tacticalHc := a.tacticalHc
 	kbRef := kb
 	hint := replanHint
+	dailyPlan := plan // 【全天日程】注入战术层 user prompt
 
 	// 物理告警 goal override：反应层 upgradeIfPhysicalAlert 触发的 replan
 	// 含"物理状态告警"标记，此时原 goal（如"车间装配"）应被替换为恢复类
@@ -1265,7 +1266,7 @@ func (a *agentContext) tacticalRefillForReplan(
 		// 流式路径：回调收集到 local slice（不直接修改 a.actionQueue），
 		// 成功后才覆盖旧队列。失败则旧队列不受影响。
 		var collected []plannedAction
-		_, err = generateTacticalPlanStreaming(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, profiles, logger, hint, memories, relationships, capabilityRegistryRef, a.as.LatestObjectStatus(), a.as.LatestNearbyObjects(), a.as.LatestVisibleAgents(),
+		_, err = generateTacticalPlanStreaming(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, dailyPlan, physical, kbRef, profiles, logger, hint, memories, relationships, capabilityRegistryRef, a.as.LatestObjectStatus(), a.as.LatestNearbyObjects(), a.as.LatestVisibleAgents(),
 			func(pa plannedAction) {
 				collected = append(collected, pa)
 			},
@@ -1274,7 +1275,7 @@ func (a *agentContext) tacticalRefillForReplan(
 			actions = collected
 		}
 	} else {
-		actions, err = generateTacticalPlan(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, physical, kbRef, profiles, logger, hint, memories, relationships, capabilityRegistryRef, a.as.LatestObjectStatus(), a.as.LatestNearbyObjects(), a.as.LatestVisibleAgents())
+		actions, err = generateTacticalPlan(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, dailyPlan, physical, kbRef, profiles, logger, hint, memories, relationships, capabilityRegistryRef, a.as.LatestObjectStatus(), a.as.LatestNearbyObjects(), a.as.LatestVisibleAgents())
 	}
 
 	// 3. 失败处理：保留旧队列（不清空），调用方保持原 action
@@ -1311,57 +1312,57 @@ func main() {
 		mcpAPIKey          = flag.String("mcp-api-key", "", "if set, require this Bearer token on /mcp")
 		httpAllowAnyOrigin = flag.Bool("http-allow-any-origin", true,
 			"disable origin / localhost restrictions so cross-host clients can connect")
-	worldKBPath = flag.String("world-kb", "assets/world_kb.yaml", "path to world_kb.yaml (required, fail-fast on error)")
-	worldKBManifest    = flag.String("world-kb-manifest", "assets/world_kb.manifest.json",
-		"path to write world_kb.manifest.json (empty skips manifest; written when UE pushes world_kb)")
-	// profilesDir 指向存放 NPC profile.md 的目录（每个文件名 = agentID.md）。
-	// 空串=禁用 profile override，AgentRole 仅走 KB → hardcoded fallback。
-	// 启动时一次性加载，UE 推送 world_kb 不触发重载（与 kb 启动时适配一致）。
-	profilesDir = flag.String("profiles-dir", "assets/profiles",
-		"directory of NPC profile.md files (filename = <agentID>.md; empty disables profile override)")
-	// weeklySchedulePath 指向每周日程配置 YAML（7 天周期：工作日/休息日/上网日/派对日）。
-	// 空串=禁用每周日程上下文（不注入【今日日程】段，行为不变）。
-	// 启动时一次性加载，与 kb/profiles 同级参数化传递，不入 agentContext。
-	weeklySchedulePath = flag.String("weekly-schedule", "assets/weekly_schedule.yaml",
-		"path to weekly schedule YAML (empty disables weekly context injection)")
-	tacticalStream = flag.Bool("tactical-stream", false,
-		"enable streaming for tactical layer LLM calls (experimental: only helps if upstream LLM emits tokens incrementally)")
-	ollamaURL = flag.String("ollama-url", "",
-		"Ollama base URL for reactive layer (default empty disables reactive layer — reactive layer is opt-in due to high misjudgment rate and latency cost; set to http://localhost:11434 to enable via cloud dev env's local Ollama, or http://localhost:11435 for SSH reverse tunnel to a remote Windows host)")
-	ollamaModel = flag.String("ollama-model", "qwen2.5:7b-instruct-q4_K_M",
-		"Ollama model name for reactive layer decisions")
-	ollamaNumThread = flag.Int("ollama-num-thread", 16,
-		"CPU threads for Ollama inference (0=use default 16, -1=let Ollama decide). "+
-			"CPU inference on high-core-count machines often regresses past ~16 threads; "+
-			"benchmark to find the optimum for your host.")
-	// ─── 战略层/战术层 LLM backend ───────────────────────────────
-	// Venus 直连（OpenAI Chat Completions API），是唯一的战略/战术层后端。
-	venusURL = flag.String("venus-url", "http://v2.open.venus.oa.com/llmproxy",
-		"Venus LLM proxy base URL (OpenAI Chat Completions API compatible)")
-	venusAPIKey = flag.String("venus-api-key", "",
-		"Venus API key (overrides VENUS_API_KEY env var)")
-	venusModel = flag.String("venus-model", "deepseek-v4-flash",
-		"Venus model name (used for tactical layer)")
-	venusStrategicModel = flag.String("venus-strategic-model", "deepseek-v4-pro",
-		"Venus model name for strategic layer (daily plan generation). "+
-			"Set to empty to fall back to --venus-model.")
-	venusTimeout = flag.Duration("venus-timeout", 60*time.Second,
-		"Venus HTTP timeout per call")
-	tacticalTimeout = flag.Duration("tactical-timeout", 60*time.Second,
-		"hard timeout for a single tactical-layer LLM call (streaming or not)")
-	// autoPlanFlag 是自动规划总开关。关闭（false）时 MCP 进入手动模式：
-	// 不调战略层 generateDailyPlan、不调战术层 tacticalRefill、不主动发 idle wait、
-	// 不触发反应层 Ollama 决策。仅 /debug/schedule 注入和 /debug/action 手动下发
-	// 才会驱动 action。适合联调时隔离 UE 端、单独验证 MCP 行为。
-	// 解引用后赋给 package-level autoPlanEnabled（worker / WS handler 读此变量）。
-	autoPlanFlag = flag.Bool("auto-plan", true,
-		"enable auto planning (strategic + tactical + reactive). false = manual mode, only /debug/schedule and /debug/action drive actions")
-	// mysqlDSN 控制 MySQL 持久化层。空串 = 内存模式（NoopStore，当前行为），
-	// 非空 = 启用 MySQL 持久化（Stage 3：4 个调度字段 write-through 落盘 +
-	// 预埋 Stage 4/5 表骨架）。DSN 需含 parseTime=true 以正确扫描 DATETIME。
-	mysqlDSN = flag.String("mysql-dsn", "",
-		"MySQL DSN for state persistence (empty = in-memory mode, no persistence). "+
-			"Example: user:pass@tcp(127.0.0.1:3306)/agenttown?parseTime=true&charset=utf8mb4")
+		worldKBPath     = flag.String("world-kb", "assets/world_kb.yaml", "path to world_kb.yaml (required, fail-fast on error)")
+		worldKBManifest = flag.String("world-kb-manifest", "assets/world_kb.manifest.json",
+			"path to write world_kb.manifest.json (empty skips manifest; written when UE pushes world_kb)")
+		// profilesDir 指向存放 NPC profile.md 的目录（每个文件名 = agentID.md）。
+		// 空串=禁用 profile override，AgentRole 仅走 KB → hardcoded fallback。
+		// 启动时一次性加载，UE 推送 world_kb 不触发重载（与 kb 启动时适配一致）。
+		profilesDir = flag.String("profiles-dir", "assets/profiles",
+			"directory of NPC profile.md files (filename = <agentID>.md; empty disables profile override)")
+		// weeklySchedulePath 指向每周日程配置 YAML（7 天周期：工作日/休息日/上网日/派对日）。
+		// 空串=禁用每周日程上下文（不注入【今日日程】段，行为不变）。
+		// 启动时一次性加载，与 kb/profiles 同级参数化传递，不入 agentContext。
+		weeklySchedulePath = flag.String("weekly-schedule", "assets/weekly_schedule.yaml",
+			"path to weekly schedule YAML (empty disables weekly context injection)")
+		tacticalStream = flag.Bool("tactical-stream", false,
+			"enable streaming for tactical layer LLM calls (experimental: only helps if upstream LLM emits tokens incrementally)")
+		ollamaURL = flag.String("ollama-url", "",
+			"Ollama base URL for reactive layer (default empty disables reactive layer — reactive layer is opt-in due to high misjudgment rate and latency cost; set to http://localhost:11434 to enable via cloud dev env's local Ollama, or http://localhost:11435 for SSH reverse tunnel to a remote Windows host)")
+		ollamaModel = flag.String("ollama-model", "qwen2.5:7b-instruct-q4_K_M",
+			"Ollama model name for reactive layer decisions")
+		ollamaNumThread = flag.Int("ollama-num-thread", 16,
+			"CPU threads for Ollama inference (0=use default 16, -1=let Ollama decide). "+
+				"CPU inference on high-core-count machines often regresses past ~16 threads; "+
+				"benchmark to find the optimum for your host.")
+		// ─── 战略层/战术层 LLM backend ───────────────────────────────
+		// Venus 直连（OpenAI Chat Completions API），是唯一的战略/战术层后端。
+		venusURL = flag.String("venus-url", "http://v2.open.venus.oa.com/llmproxy",
+			"Venus LLM proxy base URL (OpenAI Chat Completions API compatible)")
+		venusAPIKey = flag.String("venus-api-key", "",
+			"Venus API key (overrides VENUS_API_KEY env var)")
+		venusModel = flag.String("venus-model", "deepseek-v4-flash",
+			"Venus model name (used for tactical layer)")
+		venusStrategicModel = flag.String("venus-strategic-model", "deepseek-v4-pro",
+			"Venus model name for strategic layer (daily plan generation). "+
+				"Set to empty to fall back to --venus-model.")
+		venusTimeout = flag.Duration("venus-timeout", 60*time.Second,
+			"Venus HTTP timeout per call")
+		tacticalTimeout = flag.Duration("tactical-timeout", 60*time.Second,
+			"hard timeout for a single tactical-layer LLM call (streaming or not)")
+		// autoPlanFlag 是自动规划总开关。关闭（false）时 MCP 进入手动模式：
+		// 不调战略层 generateDailyPlan、不调战术层 tacticalRefill、不主动发 idle wait、
+		// 不触发反应层 Ollama 决策。仅 /debug/schedule 注入和 /debug/action 手动下发
+		// 才会驱动 action。适合联调时隔离 UE 端、单独验证 MCP 行为。
+		// 解引用后赋给 package-level autoPlanEnabled（worker / WS handler 读此变量）。
+		autoPlanFlag = flag.Bool("auto-plan", true,
+			"enable auto planning (strategic + tactical + reactive). false = manual mode, only /debug/schedule and /debug/action drive actions")
+		// mysqlDSN 控制 MySQL 持久化层。空串 = 内存模式（NoopStore，当前行为），
+		// 非空 = 启用 MySQL 持久化（Stage 3：4 个调度字段 write-through 落盘 +
+		// 预埋 Stage 4/5 表骨架）。DSN 需含 parseTime=true 以正确扫描 DATETIME。
+		mysqlDSN = flag.String("mysql-dsn", "",
+			"MySQL DSN for state persistence (empty = in-memory mode, no persistence). "+
+				"Example: user:pass@tcp(127.0.0.1:3306)/agenttown?parseTime=true&charset=utf8mb4")
 	)
 	flag.Parse()
 	if *showVersion {
@@ -1568,9 +1569,9 @@ func main() {
 		// store==nil（内存模式）时 SetIdentity 仍记录 agentID 但持久化调用跳过；
 		// LoadPersistent 在 NoopStore 下返回 ErrNotFound→保持默认值（cold start）。
 		ac.as.SetIdentity(id, store)
-	// per-NPC 物理属性分段阈值（profile ## 属性分段）：反应层告警跨越检测、
-	// 强制 replan、战术层恢复约束共用，保证 LLM 文本与代码行为一致。
-	ac.physBands = prompt.BandThresholdsFor(profiles, id)
+		// per-NPC 物理属性分段阈值（profile ## 属性分段）：反应层告警跨越检测、
+		// 强制 replan、战术层恢复约束共用，保证 LLM 文本与代码行为一致。
+		ac.physBands = prompt.BandThresholdsFor(profiles, id)
 		if err := ac.as.LoadPersistent(ctx); err != nil {
 			logger.Warn("[main] load persistent state failed, continuing with cold start",
 				"agent_id", id, "err", err)
@@ -1600,20 +1601,20 @@ func main() {
 			Logger:  logger,
 			Timeout: *venusTimeout,
 		})
-	ac.tacticalHc = venus.New(venus.Config{
-		BaseURL: *venusURL,
-		APIKey:  venusAPIKeyValue,
-		Model:   *venusModel,
-		Logger:  logger,
-		Timeout: *venusTimeout,
-	})
-	// Stage 5: 注入 Ollama 客户端供关系层判断。nil 表示 --ollama-url=""
-	// 显式禁用反应层时，maybeUpdateRelationship 会早返回不调用 Ollama。
-	ac.ollama = ollamaClient
-	// Phase 2 Module C: 每个 agent 一个对话 runner，复用战术层 Venus 客户端
-	// 做对话生成。ws==nil 时返回 nil（对话禁用）。
-	ac.dialogue = newDialogueRunner(ac, ws, kb, profiles, logger)
-	agents[id] = ac
+		ac.tacticalHc = venus.New(venus.Config{
+			BaseURL: *venusURL,
+			APIKey:  venusAPIKeyValue,
+			Model:   *venusModel,
+			Logger:  logger,
+			Timeout: *venusTimeout,
+		})
+		// Stage 5: 注入 Ollama 客户端供关系层判断。nil 表示 --ollama-url=""
+		// 显式禁用反应层时，maybeUpdateRelationship 会早返回不调用 Ollama。
+		ac.ollama = ollamaClient
+		// Phase 2 Module C: 每个 agent 一个对话 runner，复用战术层 Venus 客户端
+		// 做对话生成。ws==nil 时返回 nil（对话禁用）。
+		ac.dialogue = newDialogueRunner(ac, ws, kb, profiles, logger)
+		agents[id] = ac
 		go runPerceptionWorker(workerCtx, id, ac, ws, kb, profiles, weeklySched, logger)
 		return ac, true
 	}
@@ -1699,18 +1700,7 @@ func main() {
 					"changes", normalizeChanges)
 			}
 			kb = newKB
-		kbRef = newKB // sync /debug/kb handler
-		// 从合并后 KB 的互动速率声明生成自然语言摘要，注入战略/战术层
-		// prompt 的【动作对属性的影响】段（Extra 中的原始速率只在
-		// world_kb 推送时存在，持久化 yaml 不含）。
-		if text := prompt.BuildCmdEffectsText(prompt.InteractionEffectsFromKB(kb)); text != "" {
-			prompt.SetCmdEffects(text)
-			logger.Info("cmd effects summary generated from world_kb",
-				"chars", len(text))
-		} else {
-			prompt.SetCmdEffects("")
-			logger.Info("cmd effects summary empty (no rate-declared interactions), segment disabled")
-		}
+			kbRef = newKB // sync /debug/kb handler
 			// Re-register tools so their closures capture the new kb.
 			// AddTool is idempotent (replaces same-named tools).
 			tools.RegisterAll(server, executor, kb, logger)
@@ -1784,14 +1774,14 @@ func main() {
 				logger.Warn("action_completed dropped for unregistered agent", "agent_id", agentID)
 				return
 			}
-		queued, trigger, detail := ac.recordActionCompletion(completed)
-		logger.Info("action_completed", "agent_id", agentID,
-			"action_id", completed.ActionID, "result", completed.Result,
-			"reason", completed.Reason, "progress", completed.Progress,
-			"decision_queued", queued)
-		if trigger != "" && autoPlanEnabled {
-			go reactiveRunnerRef.trigger(agentID, ac, trigger, detail)
-		}
+			queued, trigger, detail := ac.recordActionCompletion(completed)
+			logger.Info("action_completed", "agent_id", agentID,
+				"action_id", completed.ActionID, "result", completed.Result,
+				"reason", completed.Reason, "progress", completed.Progress,
+				"decision_queued", queued)
+			if trigger != "" && autoPlanEnabled {
+				go reactiveRunnerRef.trigger(agentID, ac, trigger, detail)
+			}
 
 		case protocol.TypeActionQueued:
 			var aq protocol.ActionQueuedPayload
@@ -1870,55 +1860,55 @@ func main() {
 				logger.Warn("perception_update parse failed", "agent_id", agentID, "err", err)
 				return
 			}
-		if trigger != "" && autoPlanEnabled {
-			go reactiveRunnerRef.trigger(agentID, ac, trigger, detail)
-		}
+			if trigger != "" && autoPlanEnabled {
+				go reactiveRunnerRef.trigger(agentID, ac, trigger, detail)
+			}
 
-	case protocol.TypeChatInvite:
-		// UE → B: A 想找 B 聊天（Phase 2 Module C）。
-		var invite protocol.ChatInvitePayload
-		if err := json.Unmarshal(payload, &invite); err != nil {
-			logger.Warn("chat_invite parse failed", "err", err)
-			return
-		}
-		ac := lookupAgent(agentID)
-		if ac == nil || ac.dialogue == nil {
-			logger.Debug("chat_invite dropped (agent unregistered or dialogue disabled)", "agent_id", agentID)
-			return
-		}
-		go ac.dialogue.handleInvite(ctx, invite)
+		case protocol.TypeChatInvite:
+			// UE → B: A 想找 B 聊天（Phase 2 Module C）。
+			var invite protocol.ChatInvitePayload
+			if err := json.Unmarshal(payload, &invite); err != nil {
+				logger.Warn("chat_invite parse failed", "err", err)
+				return
+			}
+			ac := lookupAgent(agentID)
+			if ac == nil || ac.dialogue == nil {
+				logger.Debug("chat_invite dropped (agent unregistered or dialogue disabled)", "agent_id", agentID)
+				return
+			}
+			go ac.dialogue.handleInvite(ctx, invite)
 
-	case protocol.TypeChatInviteRsp:
-		// B → UE（转发给 A）：B 的 accept/reject 决定。
-		var rsp protocol.ChatInviteRspPayload
-		if err := json.Unmarshal(payload, &rsp); err != nil {
-			logger.Warn("chat_invite_rsp parse failed", "err", err)
-			return
-		}
-		ac := lookupAgent(agentID)
-		if ac == nil || ac.dialogue == nil {
-			logger.Debug("chat_invite_rsp dropped (agent unregistered or dialogue disabled)", "agent_id", agentID)
-			return
-		}
-		go ac.dialogue.handleInviteRsp(ctx, rsp)
+		case protocol.TypeChatInviteRsp:
+			// B → UE（转发给 A）：B 的 accept/reject 决定。
+			var rsp protocol.ChatInviteRspPayload
+			if err := json.Unmarshal(payload, &rsp); err != nil {
+				logger.Warn("chat_invite_rsp parse failed", "err", err)
+				return
+			}
+			ac := lookupAgent(agentID)
+			if ac == nil || ac.dialogue == nil {
+				logger.Debug("chat_invite_rsp dropped (agent unregistered or dialogue disabled)", "agent_id", agentID)
+				return
+			}
+			go ac.dialogue.handleInviteRsp(ctx, rsp)
 
-	case protocol.TypeChatTurn:
-		// speaker → UE（转发给 peer）：一轮发言。
-		var turn protocol.ChatTurnPayload
-		if err := json.Unmarshal(payload, &turn); err != nil {
-			logger.Warn("chat_turn parse failed", "err", err)
-			return
-		}
-		ac := lookupAgent(agentID)
-		if ac == nil || ac.dialogue == nil {
-			logger.Debug("chat_turn dropped (agent unregistered or dialogue disabled)", "agent_id", agentID)
-			return
-		}
-		go ac.dialogue.handleTurn(ctx, turn)
+		case protocol.TypeChatTurn:
+			// speaker → UE（转发给 peer）：一轮发言。
+			var turn protocol.ChatTurnPayload
+			if err := json.Unmarshal(payload, &turn); err != nil {
+				logger.Warn("chat_turn parse failed", "err", err)
+				return
+			}
+			ac := lookupAgent(agentID)
+			if ac == nil || ac.dialogue == nil {
+				logger.Debug("chat_turn dropped (agent unregistered or dialogue disabled)", "agent_id", agentID)
+				return
+			}
+			go ac.dialogue.handleTurn(ctx, turn)
 
-	default:
-		logger.Debug("unhandled message type", "type", msgType, "agent_id", agentID)
-	}
+		default:
+			logger.Debug("unhandled message type", "type", msgType, "agent_id", agentID)
+		}
 	})
 
 	// ─── Start serving ─────────────────────────────────────────
@@ -2058,7 +2048,7 @@ type debugActionResponse struct {
 // "HH:MM-HH:MM: goal"。时间段可选，用于 prompt 提示步骤总时长。
 type debugScheduleRequest struct {
 	AgentID  string `json:"agent_id"`
-	Schedule string `json:"schedule"`       // 单行，纯 goal 或 "HH:MM-HH:MM: goal"
+	Schedule string `json:"schedule"`        // 单行，纯 goal 或 "HH:MM-HH:MM: goal"
 	Force    *bool  `json:"force,omitempty"` // nil/true → 强制中断当前 action（默认）
 }
 
@@ -2071,8 +2061,8 @@ type debugScheduleResponse struct {
 	Goal       string          `json:"goal,omitempty"`
 	Actions    []plannedAction `json:"actions,omitempty"`
 	QueueLen   int             `json:"queue_len,omitempty"`
-	Dispatched bool            `json:"dispatched"`           // false=已入队异步下发
-	Warning    string          `json:"warning,omitempty"`    // agent 无感知时非空
+	Dispatched bool            `json:"dispatched"`        // false=已入队异步下发
+	Warning    string          `json:"warning,omitempty"` // agent 无感知时非空
 	Error      string          `json:"error,omitempty"`
 }
 
@@ -2423,7 +2413,7 @@ func handleDebugSchedule(ctx context.Context, logger *slog.Logger, ws *wsserver.
 
 	actions, err := generateTacticalPlan(
 		tacticalCtx, tacticalHc, req.AgentID,
-		goal, zone, timeOfDay, slot, physical, kb, nil, logger, "", "", "", capabilityRegistryRef, nil, nil, nil,
+		goal, zone, timeOfDay, slot, "", physical, kb, nil, logger, "", "", "", capabilityRegistryRef, nil, nil, nil,
 	)
 	if err != nil {
 		logger.Warn("[debug/schedule] decompose failed",

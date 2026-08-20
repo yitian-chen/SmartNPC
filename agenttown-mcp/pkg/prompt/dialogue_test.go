@@ -7,16 +7,16 @@ import (
 
 func TestBuildDialogueInvite_ContainsCoreContext(t *testing.T) {
 	in := DialogueInviteInput{
-		AgentID:      "H-02",
-		AgentName:    "老王",
-		PeerID:       "H-01",
-		PeerName:     "老陈",
-		PeerContent:  "最近装配线怎么样？",
-		Persona:      "你是老王，质检员，说话简短直接。",
-		CurrentAction: "巡检设备",
-		Physical:     "电量 80%、疲劳 30%",
-		TimeOfDay:    "14:30",
-		Relationship: "与 老陈：熟悉度 5、好感 3",
+		AgentID:        "H-02",
+		AgentName:      "老王",
+		PeerID:         "H-01",
+		PeerName:       "老陈",
+		PeerContent:    "最近装配线怎么样？",
+		Persona:        "你是老王，质检员，说话简短直接。",
+		CurrentAction:  "巡检设备",
+		Physical:       "电量 80%、疲劳 30%",
+		TimeOfDay:      "14:30",
+		Relationship:   "与 老陈：熟悉度 5、好感 3",
 		RecentMemories: []string{"昨天和老陈一起修过传送带"},
 	}
 	got := BuildDialogueInvite(in)
@@ -107,20 +107,20 @@ func TestParseDialogueInviteDecision_NoJSON(t *testing.T) {
 
 func TestBuildDialogueTurn_ContainsShortTermContext(t *testing.T) {
 	in := DialogueTurnInput{
-		AgentID:    "H-01",
-		AgentName:  "老陈",
-		PeerID:     "H-02",
-		PeerName:   "老王",
-		Persona:    "你是老陈，装配工，说话带北方口音。",
+		AgentID:     "H-01",
+		AgentName:   "老陈",
+		PeerID:      "H-02",
+		PeerName:    "老王",
+		Persona:     "你是老陈，装配工，说话带北方口音。",
 		PeerContent: "还行，就是昨天传送带有点问题。",
 		ShortTermContext: []DialogueTurnEntry{
 			{SpeakerID: "H-01", SpeakerName: "老陈", Content: "最近怎么样？"},
 			{SpeakerID: "H-02", SpeakerName: "老王", Content: "还行，就是昨天传送带有点问题。"},
 		},
-		Relationship:  "与 老王：熟悉度 5",
-		TimeOfDay:     "14:30",
-		TurnCount:     3,
-		MaxTurns:      6,
+		Relationship: "与 老王：熟悉度 5",
+		TimeOfDay:    "14:30",
+		TurnCount:    3,
+		MaxTurns:     6,
 	}
 	got := BuildDialogueTurn(in)
 	checks := []string{

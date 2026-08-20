@@ -87,7 +87,7 @@ func indexOf(haystack, needle string) int {
 // relationshipFakeStore is a minimal Store for relationship.go tests. It
 // captures SeedRelationship calls so tests can assert which rows were seeded.
 type relationshipFakeStore struct {
-	seeded []storage.Relationship // captured seed calls (agentA, agentB, fam, aff)
+	seeded  []storage.Relationship // captured seed calls (agentA, agentB, fam, aff)
 	seedErr error
 }
 

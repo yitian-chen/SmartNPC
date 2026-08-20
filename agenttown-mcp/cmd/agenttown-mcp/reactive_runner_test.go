@@ -33,11 +33,11 @@ func newTestWS() *wsserver.Server {
 //   - dailyPlan 为空 → fallback 到 currentSlot
 func TestBuildInput_LiveSlot(t *testing.T) {
 	cases := []struct {
-		name           string
-		currentSlot    string
-		dailyPlan      string
-		timeOfDay      string // perception_update.environment 时间，"HH:MM" 格式（测试内转 time_of_day_sec）
-		wantSlot       string
+		name        string
+		currentSlot string
+		dailyPlan   string
+		timeOfDay   string // perception_update.environment 时间，"HH:MM" 格式（测试内转 time_of_day_sec）
+		wantSlot    string
 	}{
 		{
 			name:        "stale currentSlot refreshed by dailyPlan",
@@ -285,4 +285,3 @@ func TestUpgradeIfPhysicalAlert(t *testing.T) {
 		})
 	}
 }
-

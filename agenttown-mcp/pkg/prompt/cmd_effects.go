@@ -11,7 +11,6 @@ package prompt
 
 import (
 	"fmt"
-	"sort"
 	"strings"
 
 	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
@@ -54,10 +53,10 @@ var effectMagnitudes = []struct {
 
 // effectAttrWord 属性 → (显示名, 上升动词, 下降动词)。
 var effectAttrWord = map[string][3]string{
-	"energy":    {"能量", "恢复", "下降"},
-	"fatigue":   {"疲劳度", "提升", "缓解"},
+	"energy":     {"能量", "恢复", "下降"},
+	"fatigue":    {"疲劳度", "提升", "缓解"},
 	"joint_wear": {"关节磨损", "累积", "修复"},
-	"money":     {"余额", "增加", "消耗"},
+	"money":      {"余额", "增加", "消耗"},
 }
 
 // InteractionEffectsFromKB 从合并后的 KB 提取所有带速率声明的互动。
@@ -125,28 +124,6 @@ func effectFloat(m map[string]any, key string) float64 {
 		return 0
 	}
 	return v
-}
-
-// BuildCmdEffectsText 把互动影响声明转成自然语言多行文本（每行一条，
-// 按语义组+动词排序）。空列表返回空串（调用方跳过注入）。
-func BuildCmdEffectsText(effects []InteractionEffect) string {
-	if len(effects) == 0 {
-		return ""
-	}
-	sorted := make([]InteractionEffect, len(effects))
-	copy(sorted, effects)
-	sort.Slice(sorted, func(i, j int) bool {
-		if sorted[i].SemanticGroup != sorted[j].SemanticGroup {
-			return sorted[i].SemanticGroup < sorted[j].SemanticGroup
-		}
-		return sorted[i].Interaction < sorted[j].Interaction
-	})
-	var sb strings.Builder
-	sb.WriteString("各活动对属性的影响（每游戏小时变化率，来自 world KB 声明）：\n")
-	for _, e := range sorted {
-		sb.WriteString(fmt.Sprintf("- %s（%s/%s）：%s\n", e.DisplayName, e.SemanticGroup, e.Interaction, describeEffect(e)))
-	}
-	return strings.TrimSuffix(sb.String(), "\n")
 }
 
 // describeEffect 把单个互动的描述、速率与使用门槛转成自然语言。

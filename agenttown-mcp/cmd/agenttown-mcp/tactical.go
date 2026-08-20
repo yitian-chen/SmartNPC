@@ -106,7 +106,7 @@ func generateTacticalPlan(
 	ctx context.Context,
 	tc strategicCaller,
 	agentID string,
-	goal, zone, timeOfDay, slot string,
+	goal, zone, timeOfDay, slot, dailyPlan string,
 	physical *protocol.PhysicalState,
 	kb *worldkb.KB,
 	profiles map[string]*profile.Profile,
@@ -123,18 +123,21 @@ func generateTacticalPlan(
 	if registry != nil {
 		capActions = registry.EffectiveActions(agentID)
 	}
+	// System prompt：与战略层共享三模块（世界背景/人物背景/世界详细信息）
+	// + 完整工具清单，会话内稳定可缓存；user prompt 携带四段结构。
+	system := prompt.BuildTacticalSystemPrompt(kb, profiles, agentID, capActions)
 	promptText := prompt.BuildTactical(prompt.TacticalInput{
 		Goal:          goal,
 		Zone:          zone,
 		TimeOfDay:     timeOfDay,
 		Slot:          slot,
+		DailyPlan:     dailyPlan,
 		Physical:      physical,
 		KB:            kb,
 		Profiles:      profiles,
 		Hint:          hint,
 		Memories:      memories,
 		Relationships: relationships,
-		Actions:       capActions,
 		AgentID:       agentID,
 		ObjectStatus:  objectStatus,
 		NearbyObjects: nearbyObjects,
@@ -144,7 +147,7 @@ func generateTacticalPlan(
 		"agent_id", agentID, "goal", goal, "game_time", timeOfDay, "text", promptText,
 		"replan_hint", hint)
 
-	resp, err := tc.SendWithSummary(ctx, prompt.TacticalSystemPrompt, promptText)
+	resp, err := tc.SendWithSummary(ctx, system, promptText)
 	if err != nil {
 		return nil, fmt.Errorf("tactical llm: %w", err)
 	}
@@ -177,7 +180,7 @@ func generateTacticalPlan(
 func generateTacticalPlanStreaming(
 	ctx context.Context,
 	tc llmClient,
-	agentID, goal, zone, timeOfDay, slot string,
+	agentID, goal, zone, timeOfDay, slot, dailyPlan string,
 	physical *protocol.PhysicalState,
 	kb *worldkb.KB,
 	profiles map[string]*profile.Profile,
@@ -195,18 +198,20 @@ func generateTacticalPlanStreaming(
 	if registry != nil {
 		capActions = registry.EffectiveActions(agentID)
 	}
+	// System prompt：与战略层共享三模块 + 完整工具清单（会话内稳定可缓存）。
+	system := prompt.BuildTacticalSystemPrompt(kb, profiles, agentID, capActions)
 	promptText := prompt.BuildTactical(prompt.TacticalInput{
 		Goal:          goal,
 		Zone:          zone,
 		TimeOfDay:     timeOfDay,
 		Slot:          slot,
+		DailyPlan:     dailyPlan,
 		Physical:      physical,
 		KB:            kb,
 		Profiles:      profiles,
 		Hint:          hint,
 		Memories:      memories,
 		Relationships: relationships,
-		Actions:       capActions,
 		AgentID:       agentID,
 		ObjectStatus:  objectStatus,
 		NearbyObjects: nearbyObjects,
@@ -228,7 +233,7 @@ func generateTacticalPlanStreaming(
 		},
 	}
 
-	resp, err := tc.SendStreaming(ctx, prompt.TacticalSystemPrompt, promptText, func(delta string) {
+	resp, err := tc.SendStreaming(ctx, system, promptText, func(delta string) {
 		acc.feed(delta)
 	})
 	if err != nil {

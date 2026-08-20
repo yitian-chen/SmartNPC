@@ -199,9 +199,9 @@ func TestHandleDebugCap_NilRegistryReturnsEmpty(t *testing.T) {
 func TestHandleDebugCap_ToolNameField(t *testing.T) {
 	reg := NewCapabilityRegistry(nil)
 	reg.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
-		{Cmd: protocol.CmdMoveTo, Kind: "atomic"},                   // tool_name: move_to (builtin mapping)
-		{Cmd: protocol.CmdInteractSmartObject, Kind: "atomic"},      // tool_name: interact (special shortening)
-		{Cmd: "WaveHand", Kind: "atomic"},                           // tool_name: wave_hand (pascalToSnake fallback)
+		{Cmd: protocol.CmdMoveTo, Kind: "atomic"},              // tool_name: move_to (builtin mapping)
+		{Cmd: protocol.CmdInteractSmartObject, Kind: "atomic"}, // tool_name: interact (special shortening)
+		{Cmd: "WaveHand", Kind: "atomic"},                      // tool_name: wave_hand (pascalToSnake fallback)
 	})
 	logger := slog.Default()
 	req := httptest.NewRequest(http.MethodGet, "/debug/cap", nil)
@@ -293,8 +293,8 @@ func TestMapDebugCmd_AcceptsBothForms(t *testing.T) {
 		input string
 		want  string
 	}{
-		{"MoveTo", "MoveTo"},    // raw cmd form
-		{"move_to", "MoveTo"},   // tool_name form (builtin mapping)
+		{"MoveTo", "MoveTo"},  // raw cmd form
+		{"move_to", "MoveTo"}, // tool_name form (builtin mapping)
 	}
 	for _, c := range cases {
 		got, ok := mapDebugCmd(c.input, reg, agentID)

@@ -93,11 +93,11 @@ func TestBuildTactical_RelationshipsInjected(t *testing.T) {
 // produces no【人际关系】segment (single-NPC scenario should not pollute prompt).
 func TestBuildTactical_RelationshipsEmpty(t *testing.T) {
 	out := BuildTactical(TacticalInput{
-		Goal:      "车间装配",
-		Zone:      "main_workshop",
-		TimeOfDay: "08:00",
+		Goal:          "车间装配",
+		Zone:          "main_workshop",
+		TimeOfDay:     "08:00",
 		Relationships: "",
-		AgentID:   "H-01",
+		AgentID:       "H-01",
 	})
 	if strings.Contains(out, "【人际关系】") {
 		t.Error("【人际关系】 segment present when Relationships empty — should be skipped")
@@ -346,5 +346,91 @@ func TestPickChatPeer_SingleAgent(t *testing.T) {
 	}
 	if peer := pickChatPeer(kb, "H-01"); peer != "" {
 		t.Errorf("pickChatPeer single agent = %q, want empty", peer)
+	}
+}
+
+// TestBuildTacticalSystemPrompt_Structure verifies the tactical system prompt
+// shares the strategic layer's KB modules (世界背景/人物背景/世界详细信息)
+// plus the full tool list — and does NOT carry the decomposition rules
+// (they live in the user message).
+func TestBuildTacticalSystemPrompt_Structure(t *testing.T) {
+	got := BuildTacticalSystemPrompt(strategicDetailKB(), nil, "H-01", nil)
+	overIdx := strings.Index(got, "【世界背景】")
+	roleIdx := strings.Index(got, "【人物背景】")
+	detailIdx := strings.Index(got, "【世界详细信息】")
+	if overIdx < 0 || roleIdx < 0 || detailIdx < 0 {
+		t.Fatalf("missing shared modules (bg=%d role=%d detail=%d):\n%s", overIdx, roleIdx, detailIdx, got)
+	}
+	if !(overIdx < roleIdx && roleIdx < detailIdx) {
+		t.Errorf("module order wrong: bg=%d role=%d detail=%d", overIdx, roleIdx, detailIdx)
+	}
+	// 战术层特有：完整工具清单（带 params 与 [复合]/[原子] 标签）。
+	if !strings.Contains(got, "可用工具（仅限以下") {
+		t.Errorf("system prompt missing the tool list:\n%s", got)
+	}
+	if !strings.Contains(got, "[复合]") || !strings.Contains(got, "[原子]") {
+		t.Errorf("tool list should carry kind labels:\n%s", got)
+	}
+	// 分解规则已迁至 user prompt。
+	if strings.Contains(got, "队列首个动作必须是 speak") {
+		t.Errorf("system prompt should not contain the rules (moved to user prompt):\n%s", got)
+	}
+}
+
+// TestBuildTactical_FourParts verifies the user message's four-part layout:
+// 全天任务与当前时段任务 / NPC与环境实时状态 / 分解规则 / 任务.
+func TestBuildTactical_FourParts(t *testing.T) {
+	out := BuildTactical(TacticalInput{
+		Goal:      "主生产车间工作台装配",
+		Zone:      "main_workshop",
+		TimeOfDay: "08:00",
+		Slot:      "07:00-12:00",
+		DailyPlan: "07:00-12:00: 主生产车间工作台装配\n12:00-14:00: 中央广场长椅休息",
+		AgentID:   "H-01",
+	})
+	p1 := strings.Index(out, "一、全天任务与当前时段任务")
+	p2 := strings.Index(out, "二、NPC与环境实时状态")
+	p3 := strings.Index(out, "三、分解规则")
+	p4 := strings.Index(out, "四、任务")
+	if p1 < 0 || p2 < 0 || p3 < 0 || p4 < 0 {
+		t.Fatalf("missing four parts (t=%d s=%d r=%d a=%d):\n%s", p1, p2, p3, p4, out)
+	}
+	if !(p1 < p2 && p2 < p3 && p3 < p4) {
+		t.Errorf("part order wrong: %d %d %d %d", p1, p2, p3, p4)
+	}
+	// 第一部分：全天日程 + 当前时段目标。
+	if !strings.Contains(out, "【全天日程】") || !strings.Contains(out, "中央广场长椅休息") {
+		t.Errorf("part 1 missing full-day schedule:\n%s", out)
+	}
+	if !strings.Contains(out, "【当前时段目标】主生产车间工作台装配") {
+		t.Errorf("part 1 missing current goal:\n%s", out)
+	}
+	// 第二部分：实时状态。
+	if !strings.Contains(out, "你目前在：main_workshop，游戏时间 08:00。") {
+		t.Errorf("part 2 missing realtime state line:\n%s", out)
+	}
+	// 第三部分：分解规则。
+	if !strings.Contains(out, "队列首个动作必须是 speak") {
+		t.Errorf("part 3 missing tactical rules:\n%s", out)
+	}
+	// 第四部分：任务 + 示例。
+	if !strings.Contains(out, "请把【当前时段目标】分解为一个或多个 action") {
+		t.Errorf("part 4 missing the ask:\n%s", out)
+	}
+	// KB/工具清单不重复出现在 user prompt（规则文本引用模块名不算）。
+	if strings.Contains(out, "可用工具（仅限以下") {
+		t.Errorf("user prompt should not carry the tool list (system prompt's job):\n%s", out)
+	}
+}
+
+// TestBuildTactical_EmptyDailyPlanSkipped verifies an empty DailyPlan skips
+// the 【全天日程】 segment.
+func TestBuildTactical_EmptyDailyPlanSkipped(t *testing.T) {
+	out := BuildTactical(TacticalInput{
+		Goal: "车间装配", Zone: "main_workshop", TimeOfDay: "08:00",
+		Slot: "07:00-12:00", AgentID: "H-01",
+	})
+	if strings.Contains(out, "【全天日程】") {
+		t.Errorf("empty DailyPlan should skip the segment:\n%s", out)
 	}
 }
