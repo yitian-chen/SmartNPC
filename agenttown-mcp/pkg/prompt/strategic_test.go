@@ -272,6 +272,9 @@ func TestStrategicSystemPrompt_Rule3AtomicInteractionGate(t *testing.T) {
 	if !strings.Contains(StrategicSystemPrompt, "冥想醒神、整理舱位") {
 		t.Error("system prompt rule 5 should expose 冥想醒神/整理舱位 as morning options")
 	}
+	if !strings.Contains(StrategicSystemPrompt, "晨练拉伸") {
+		t.Error("system prompt rule 5 should expose 晨练拉伸 (exercise) as a morning option")
+	}
 }
 
 func TestBuildStrategic_ExcludesMechanismSegments(t *testing.T) {
