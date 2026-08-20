@@ -51,7 +51,7 @@ func DefaultDailyPlan(kb *worldkb.KB) string {
 }
 
 // BuildStrategicSystemPrompt constructs the strategic layer's system message,
-// four modules (world KB + cmd derived, stable within a session):
+// three modules (world KB + cmd derived, stable within a session):
 //  1. 【世界背景】 — world overview registered from the world KB: narrative
 //     setting/theme, zone roster, smart-object group roster, NPC roster.
 //  2. 【人物背景】 — the current agent's profile (AgentRole).
@@ -59,19 +59,20 @@ func DefaultDailyPlan(kb *worldkb.KB) string {
 //     semantic_group with per-interaction description, per-hour attribute
 //     effects and usage gates (from the KB's declared rates); composite cmd
 //     list from the capability registry.
-//  4. 规划要求 — the seven planning rules (strategicRules).
 //
-// Per-call dynamic data (physical state, today's weekly-schedule context,
-// yesterday summary) lives in the user message (BuildStrategicUserContext +
-// StrategicUserTemplate). The system prompt text is identical across calls
-// within a session (per agent), keeping it cacheable.
+// The seven planning rules (StrategicRules) live in the user message
+// (StrategicUserTemplate's third placeholder) so they sit adjacent to the
+// planning ask. Per-call dynamic data (physical state, weekly-schedule
+// context, yesterday summary) also lives in the user message
+// (BuildStrategicUserContext). The system prompt text is identical across
+// calls within a session (per agent), keeping it cacheable.
 //
 // kb == nil → modules 1/3 degrade to empty; actions == nil → composite list
 // falls back to the builtin tools; profiles == nil → persona falls back to
 // the hardcoded fallback fields.
 func BuildStrategicSystemPrompt(kb *worldkb.KB, profiles map[string]*profile.Profile, agentID string, actions []protocol.CapabilityAction) string {
 	var sb strings.Builder
-	sb.WriteString(`你是小镇居民 NPC 的战略规划模块。每天清晨 07:00，你根据系统信息中的【世界背景】【人物背景】【世界详细信息】，以及用户信息中的今日日程、物理状态与昨日总结，规划当天 07:00 到次日 07:00 的活动安排。
+	sb.WriteString(`你是小镇居民 NPC 的战略规划模块。每天清晨 07:00，你根据系统信息中的【世界背景】【人物背景】【世界详细信息】，以及用户信息中的今日日程、物理状态、昨日总结与规划要求，规划当天 07:00 到次日 07:00 的活动安排。
 
 各活动对属性的每小时影响幅度见系统信息【世界详细信息】各设施的属性变动说明（由 world KB 声明生成）。规划时请综合权衡：产出性活动（工作）赚取余额但消耗体力、缓慢积攒关节磨损；恢复性活动（充电/维护/休息）花余额但延续工作能力。避免长时间连续工作导致体力耗尽，也避免频繁恢复导致余额入不敷出。
 
@@ -88,8 +89,6 @@ func BuildStrategicSystemPrompt(kb *worldkb.KB, profiles map[string]*profile.Pro
 		sb.WriteString("\n【世界详细信息】\n")
 		sb.WriteString(m3)
 	}
-	sb.WriteString("\n规划要求：\n")
-	sb.WriteString(strategicRules)
 	return sb.String()
 }
 
@@ -238,10 +237,13 @@ func effectLookup(kb *worldkb.KB) map[string]InteractionEffect {
 	return m
 }
 
-// strategicRules is module 4: the seven planning rules. References to
-// 【世界背景】/【人物背景】/【世界详细信息】 point at this system message;
-// references to 【物理状态】 point at the user message's dynamic segments.
-const strategicRules = `1. 输出 JSON 数组（6-8 条），每条只含 "time"（"HH:MM-HH:MM"）和 "goal"（一句话，必须是纯文本字符串），以 [ 开头 ] 结尾，不要其他文字
+// StrategicRules is the seven planning rules, injected into the user message
+// (StrategicUserTemplate's third placeholder) so they sit adjacent to the
+// planning ask (recency effect: instructions closer to the ask are followed
+// more reliably). References to 【世界背景】/【人物背景】/【世界详细信息】
+// point at the system message's modules; references to 【物理状态】 point at
+// the user message's dynamic segments.
+const StrategicRules = `1. 输出 JSON 数组（6-8 条），每条只含 "time"（"HH:MM-HH:MM"）和 "goal"（一句话，必须是纯文本字符串），以 [ 开头 ] 结尾，不要其他文字
    - goal 用干练简洁的客观描述，只写"做什么 + 在哪"（如"主生产车间工作台装配""中央广场充电桩充电"），不带语气词、口头禅、内心独白或人设腔调
    - 人设只影响选择什么活动、如何安排时段，不影响 goal 的文字风格；说话语气留给执行时的 speak 动作表达
 2. 【硬性要求】每个时段的结束时间减去开始时间必须 ≥120 分钟（不足 120 分钟的活动要么并入相邻时段，要么不安排；午休等短暂休息也至少120分钟）；仅安排一项主要任务；连续两个时段不得任务相同
@@ -258,13 +260,17 @@ const strategicRules = `1. 输出 JSON 数组（6-8 条），每条只含 "time"
 
 // StrategicUserTemplate is the strategic layer's user message template.
 // Placeholders: %s = dynamic context (BuildStrategicUserContext output:
-// today's weekly-schedule context + physical state), %s = yesterday summary.
-// The instruction line stays in the user message so the "plan today" ask
-// sits immediately after the data it refers to.
+// today's weekly-schedule context + physical state), %s = yesterday summary,
+// %s = planning rules (StrategicRules). The instruction line stays in the
+// user message so the "plan today" ask sits immediately after the data and
+// rules it refers to.
 const StrategicUserTemplate = `[战略层/每日规划] 现在是仿真时间 07:00，新的一天开始了，你刚从休眠舱醒来，当前位于休眠舱区域。
 
 %s
 
+%s
+
+规划要求：
 %s
 
 请基于你的角色身份和性格，规划今天一天的活动安排（人设只影响选什么活动、怎么安排时段；goal 文字一律干练简洁，不带人设语气）。一天从 07:00 到次日 07:00，你从 07:00 开始活动。

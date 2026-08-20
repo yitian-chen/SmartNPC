@@ -245,12 +245,13 @@ func TestBuildStrategicSystemPrompt_NilKB(t *testing.T) {
 	if !strings.Contains(got, "work_shift") {
 		t.Errorf("nil KB should list builtin composite tool 'work_shift': %q", got)
 	}
-	// kb == nil 时世界背景模块跳过（前言提及模块名不算），但规则模块仍在。
+	// kb == nil 时世界背景模块跳过（前言提及模块名不算）；规则已迁至
+	// user prompt，system prompt 不包含。
 	if strings.Contains(got, "【世界背景】\n") {
 		t.Errorf("nil KB should not produce 世界背景 module: %q", got)
 	}
-	if !strings.Contains(got, "规划要求：") {
-		t.Errorf("nil KB should still include rules module: %q", got)
+	if strings.Contains(got, "规划要求：") {
+		t.Errorf("system prompt should not contain rules module (moved to user prompt): %q", got)
 	}
 }
 
@@ -473,11 +474,18 @@ func TestGenerateDailyPlan_KBInjectedIntoPrompt(t *testing.T) {
 	if !strings.Contains(user, "昨日总结：") {
 		t.Errorf("user prompt missing yesterday summary: %q", user)
 	}
+	if !strings.Contains(user, "规划要求：") {
+		t.Errorf("user prompt missing the rules block: %q", user)
+	}
+	if !strings.Contains(user, "连续两个时段不得任务相同") {
+		t.Errorf("user prompt missing rule 2 text: %q", user)
+	}
 	if !strings.Contains(user, "【物理状态】") {
 		t.Errorf("user prompt missing physical state segment: %q", user)
 	}
-	// KB 内容不应重复出现在 user prompt。
-	if strings.Contains(user, "【世界详细信息】") {
+	// KB 内容不应重复出现在 user prompt（规则文本中引用模块名不算，
+	// 模块头以换行结尾）。
+	if strings.Contains(user, "【世界详细信息】\n") {
 		t.Errorf("user prompt should not contain world detail module: %q", user)
 	}
 }

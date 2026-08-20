@@ -62,20 +62,24 @@ func strategicDetailKB() *worldkb.KB {
 	}
 }
 
-// TestBuildStrategicSystemPrompt_FourModules verifies the four-module
+// TestBuildStrategicSystemPrompt_ThreeModules verifies the three-module
 // structure: 【世界背景】(overview) → 【人物背景】(profile) →
-// 【世界详细信息】(details) → 规划要求 (rules + format example).
-func TestBuildStrategicSystemPrompt_FourModules(t *testing.T) {
+// 【世界详细信息】(details). The seven rules live in the user message
+// (StrategicRules + StrategicUserTemplate), not here.
+func TestBuildStrategicSystemPrompt_ThreeModules(t *testing.T) {
 	got := BuildStrategicSystemPrompt(strategicDetailKB(), nil, "H-01", nil)
 	overIdx := strings.Index(got, "【世界背景】")
 	roleIdx := strings.Index(got, "【人物背景】")
 	detailIdx := strings.Index(got, "【世界详细信息】")
-	ruleIdx := strings.Index(got, "规划要求：")
-	if overIdx < 0 || roleIdx < 0 || detailIdx < 0 || ruleIdx < 0 {
-		t.Fatalf("missing modules (bg=%d role=%d detail=%d rules=%d):\n%s", overIdx, roleIdx, detailIdx, ruleIdx, got)
+	if overIdx < 0 || roleIdx < 0 || detailIdx < 0 {
+		t.Fatalf("missing modules (bg=%d role=%d detail=%d):\n%s", overIdx, roleIdx, detailIdx, got)
 	}
-	if !(overIdx < roleIdx && roleIdx < detailIdx && detailIdx < ruleIdx) {
-		t.Errorf("module order wrong: bg=%d role=%d detail=%d rules=%d", overIdx, roleIdx, detailIdx, ruleIdx)
+	if !(overIdx < roleIdx && roleIdx < detailIdx) {
+		t.Errorf("module order wrong: bg=%d role=%d detail=%d", overIdx, roleIdx, detailIdx)
+	}
+	// 规则已迁至 user prompt，system prompt 不再包含。
+	if strings.Contains(got, "规划要求：") {
+		t.Errorf("system prompt should not contain the rules module (moved to user prompt):\n%s", got)
 	}
 	// 模块 1 世界背景：narrative + 三份名册。
 	for _, want := range []string{
@@ -93,9 +97,13 @@ func TestBuildStrategicSystemPrompt_FourModules(t *testing.T) {
 	if !strings.Contains(got, "名字：老陈") {
 		t.Errorf("module 2 missing fallback persona name:\n%s", got)
 	}
-	// 模块 4：七条规则 + 格式示例。
-	if !strings.Contains(got, "格式示例：[{\"time\":\"07:00-9:00\"") {
-		t.Errorf("rules module missing format example:\n%s", got)
+	// 七条规则（user prompt 注入）+ 格式示例。
+	if !strings.Contains(StrategicRules, "格式示例：[{\"time\":\"07:00-9:00\"") {
+		t.Errorf("StrategicRules missing format example:\n%s", StrategicRules)
+	}
+	// user 模板第三个占位符注入规则。
+	if !strings.Contains(StrategicUserTemplate, "规划要求：\n%s") {
+		t.Errorf("user template should carry the rules placeholder:\n%s", StrategicUserTemplate)
 	}
 }
 
@@ -271,7 +279,7 @@ func TestStrategicSystemPrompt_NoSocialWhileDisabled(t *testing.T) {
 func TestStrategicSystemPrompt_GoalMustBeString(t *testing.T) {
 	// L1（json_schema）之外的软约束：goal 字段类型显式声明。
 	// 起因：实际仿真中 LLM 把 goal 写成 {"goal":"...","cmd":"..."} 导致整包解析失败。
-	if !strings.Contains(sysPrompt(), `"goal"（一句话，必须是纯文本字符串）`) {
+	if !strings.Contains(StrategicRules, `"goal"（一句话，必须是纯文本字符串）`) {
 		t.Error("system prompt should declare goal must be a plain string")
 	}
 }
@@ -279,10 +287,10 @@ func TestStrategicSystemPrompt_GoalMustBeString(t *testing.T) {
 func TestStrategicSystemPrompt_GoalStyleTerse(t *testing.T) {
 	// goal 文案干练简洁（做什么+在哪），人设语气不得进入 schedule 文字
 	// ——语气只属于战术层的 speak 动作。
-	if !strings.Contains(sysPrompt(), "goal 用干练简洁的客观描述") {
+	if !strings.Contains(StrategicRules, "goal 用干练简洁的客观描述") {
 		t.Error("system prompt should require terse objective goal text")
 	}
-	if !strings.Contains(sysPrompt(), "不带语气词、口头禅、内心独白或人设腔调") {
+	if !strings.Contains(StrategicRules, "不带语气词、口头禅、内心独白或人设腔调") {
 		t.Error("system prompt should ban persona tone in goal text")
 	}
 	if !strings.Contains(StrategicUserTemplate, "goal 文字一律干练简洁，不带人设语气") {
@@ -303,10 +311,10 @@ func TestStrategicUserTemplate_EndsWithFormatReminder(t *testing.T) {
 
 func TestStrategicSystemPrompt_SlotDurationRuleEmphasized(t *testing.T) {
 	// 规则 2 标记为硬性要求，且说明不足 120 分钟时的处理方式（并入/不安排）。
-	if !strings.Contains(sysPrompt(), "【硬性要求】每个时段的结束时间减去开始时间必须 ≥120 分钟") {
+	if !strings.Contains(StrategicRules, "【硬性要求】每个时段的结束时间减去开始时间必须 ≥120 分钟") {
 		t.Error("system prompt rule 2 should be marked as a hard ≥120-minute requirement")
 	}
-	if !strings.Contains(sysPrompt(), "并入相邻时段") {
+	if !strings.Contains(StrategicRules, "并入相邻时段") {
 		t.Error("system prompt should say short activities merge into adjacent slots")
 	}
 }
@@ -319,7 +327,7 @@ func TestStrategicSystemPrompt_PlanStartsAtSeven(t *testing.T) {
 		"任何时段的开始时间不得早于 07:00",
 		"禁止输出 0:00-7:00",
 	} {
-		if !strings.Contains(sysPrompt(), want) {
+		if !strings.Contains(StrategicRules, want) {
 			t.Errorf("system prompt missing %q", want)
 		}
 	}
@@ -338,7 +346,7 @@ func TestStrategicSystemPrompt_NightSleepContinuous(t *testing.T) {
 		"不得拆成多个睡眠时段",
 		"不得在凌晨提前结束",
 	} {
-		if !strings.Contains(sysPrompt(), want) {
+		if !strings.Contains(StrategicRules, want) {
 			t.Errorf("system prompt missing %q", want)
 		}
 	}
@@ -368,16 +376,16 @@ func TestStrategicSystemPrompt_Rule3AtomicInteractionGate(t *testing.T) {
 		"(semantic_group, interaction) 组合",
 		"睡眠舱的 sleep/meditate/tidy_up",
 	} {
-		if !strings.Contains(sysPrompt(), want) {
+		if !strings.Contains(StrategicRules, want) {
 			t.Errorf("system prompt rule 3 missing %q", want)
 		}
 	}
 	// 规则 5 早间露出。
-	if !strings.Contains(sysPrompt(), "冥想醒神、整理舱位") {
-		t.Error("system prompt rule 5 should expose 冥想醒神/整理舱位 as morning options")
+	if !strings.Contains(StrategicRules, "冥想醒神、整理舱位") {
+		t.Error("rules should expose 冥想醒神/整理舱位 as morning options")
 	}
-	if !strings.Contains(sysPrompt(), "晨练拉伸") {
-		t.Error("system prompt rule 5 should expose 晨练拉伸 (exercise) as a morning option")
+	if !strings.Contains(StrategicRules, "晨练拉伸") {
+		t.Error("rules should expose 晨练拉伸 (exercise) as a morning option")
 	}
 }
 

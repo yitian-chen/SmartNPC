@@ -87,13 +87,14 @@ func generateDailyPlan(ctx context.Context, sc strategicCaller, agentID string, 
 	if yesterdaySummary == "" {
 		yesterdaySummary = yesterdaySummaryForFirstDay
 	}
-	// System prompt：四模块结构（世界背景/人物背景/世界详细信息/规则），
+	// System prompt：三模块结构（世界背景/人物背景/世界详细信息），
 	// 由 world KB + capability registry 派生，会话内稳定可缓存。
-	// User prompt：动态段（今日日程+物理状态+昨日总结）+ 规划指令。
+	// User prompt：动态段（今日日程+物理状态+昨日总结）+ 七条规则 + 规划指令。
 	system := prompt.BuildStrategicSystemPrompt(kb, profiles, agentID, actions)
 	promptText := fmt.Sprintf(prompt.StrategicUserTemplate,
 		prompt.BuildStrategicUserContext(agentID, profiles, physical, dayContext),
-		"昨日总结："+yesterdaySummary)
+		"昨日总结："+yesterdaySummary,
+		prompt.StrategicRules)
 	logger.Info("[MCP→LLM/STRATEGIC-PROMPT]", "agent_id", agentID, "text", promptText)
 
 	resp, err := sc.SendWithSchema(ctx, system, promptText, "daily_plan", []byte(dailyPlanSchema))
