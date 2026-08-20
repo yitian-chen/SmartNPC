@@ -474,6 +474,24 @@ func exampleForGoal(kb *worldkb.KB, goal, agentID string, zones []worldkb.ZoneIn
 		}
 	}
 
+	// 2a-4. 锻炼/晨练/拉伸 → speak + exercise（原地复合动作，无需 move_to）
+	if containsAny(gl, "锻炼", "晨练", "拉伸", "散步", "做操", "运动", "exercise") {
+		return `{"action":"speak","params":{"content":"先活动活动筋骨"}}
+{"action":"exercise","params":{"exercise_type":"stretch"}}`
+	}
+
+	// 2a-5. 上网 → speak + surf_internet（复合动作自带前往电脑的移动）。
+	//     关键：禁止在 surf_internet 前加 move_to——实测 LLM 自由发挥输出
+	//     speak+move_to+surf_internet 三步结构时，UE 对已到达目标的复合
+	//     动作会瞬间返回 success（0.1-1.7s），触发战术层重分解循环+呆站；
+	//     两步结构（复合动作自己走路）则正常持续到时段切换。
+	if containsAny(gl, "上网", "网上", "浏览", "查资料", "surf") {
+		if obj := findObjectBySemanticGroup(objs, "computer"); obj != nil {
+			return `{"action":"speak","params":{"content":"去档案馆电脑上查点资料"}}
+{"action":"surf_internet","params":{"semantic_group":"computer","interaction":"surf_internet"}}`
+		}
+	}
+
 	// 2b. 回住所/休眠/睡觉 → speak + rest_at_residence(sleep_pod/sleep)
 	//     仅匹配"回舱/休眠/睡觉"语义，rest_at_residence 只能搭配 sleep_pod。
 	if containsAny(gl, "回住所", "回休眠", "休眠舱", "睡觉", "睡个", "睡眠", "回舱", "rest_at_residence", "sleep") {

@@ -243,6 +243,51 @@ func TestTacticalExample_TidyUpGoal(t *testing.T) {
 	}
 }
 
+// TestTacticalExample_ExerciseGoal verifies an exercise goal (晨练/拉伸)
+// emits the exercise composite with a concrete exercise_type param.
+func TestTacticalExample_ExerciseGoal(t *testing.T) {
+	kb := worldkb.NewKB(
+		[]worldkb.Zone{{ID: "central_plaza", DisplayName: "中央广场"}},
+		[]worldkb.Object{{ID: "Bench-1", DisplayName: "长椅",
+			SemanticGroup: "bench", ZoneID: "central_plaza",
+			AvailableInteractions: []string{"rest"}}},
+		[]worldkb.Agent{{ID: "H-01", DisplayName: "老陈"}},
+	)
+	got := TacticalExample(kb, "中央广场晨练拉伸放松", "H-01")
+	if !strings.Contains(got, `"action":"exercise"`) {
+		t.Errorf("exercise goal should emit exercise composite, got:\n%s", got)
+	}
+	if !strings.Contains(got, `"exercise_type":"stretch"`) {
+		t.Errorf("exercise example should show concrete exercise_type param, got:\n%s", got)
+	}
+}
+
+// TestTacticalExample_InternetGoal verifies an internet goal emits the
+// two-action form speak + surf_internet WITHOUT a preceding move_to.
+// Rationale: the three-action form (speak+move_to+surf_internet) makes UE
+// complete the composite almost instantly (0.1-1.7s, observed in logs),
+// triggering re-decompose loops + idle standing; the two-action form lets
+// the composite walk itself and run until the slot switch.
+func TestTacticalExample_InternetGoal(t *testing.T) {
+	kb := worldkb.NewKB(
+		[]worldkb.Zone{{ID: "archive_station", DisplayName: "档案馆"}},
+		[]worldkb.Object{{ID: "Computer-1", DisplayName: "电脑",
+			SemanticGroup: "computer", ZoneID: "archive_station",
+			AvailableInteractions: []string{"surf_internet"}}},
+		[]worldkb.Agent{{ID: "H-01", DisplayName: "老陈"}},
+	)
+	got := TacticalExample(kb, "档案馆电脑上网浏览", "H-01")
+	if !strings.Contains(got, `"action":"surf_internet"`) {
+		t.Errorf("internet goal should emit surf_internet composite, got:\n%s", got)
+	}
+	if !strings.Contains(got, `"semantic_group":"computer"`) {
+		t.Errorf("internet example should use semantic_group=computer, got:\n%s", got)
+	}
+	if strings.Contains(got, `"action":"move_to"`) {
+		t.Errorf("internet example must NOT include move_to before the composite, got:\n%s", got)
+	}
+}
+
 // TestTacticalExample_SleepGoalStillRoutesToResidence verifies the plain
 // sleep goal is unaffected by the new branches (regression guard).
 func TestTacticalExample_SleepGoalStillRoutesToResidence(t *testing.T) {
