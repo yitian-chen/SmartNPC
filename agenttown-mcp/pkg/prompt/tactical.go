@@ -11,6 +11,14 @@ import (
 	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
 )
 
+// tacticalToolClassNote explains the two tool classes, rendered in the user
+// message right after the 【可用工具】 list so the explanation sits adjacent
+// to the bullets it describes.
+const tacticalToolClassNote = `工具分两类：
+- 复合动作（标记 [复合]）：长耗时、单步即可完成一段工作（如装配、充电、巡逻、聊天），会自动移动到对应位置，无需自己调用 move_to。若目标语义与某复合动作匹配，应优先使用复合动作。
+- 原子动作（标记 [原子]）：作为基本 building block。其中 move_to/speak/emote/turn_to/generic_act 是短耗时动作；InteractSmartObject（与智能物体交互）是长耗时动作——单次 interact 会持续执行直到时段切换（如在长椅上 rest、在工作台前 assemble），可作为队列收尾动作让 NPC 持续活动到下一 schedule 节点。
+仅当复合动作无法覆盖 schedule 要求时，才用原子动作组合实现；InteractSmartObject 因已是长动作，无需重复多次填充时段。`
+
 // BuildTacticalSystemPrompt constructs the tactical layer's system message.
 // It shares the strategic layer's KB/cmd-derived modules ("绝大部分相同"),
 // stable within a session (per agent) and thus cacheable:
@@ -26,12 +34,7 @@ import (
 // message (BuildTactical).
 func BuildTacticalSystemPrompt(kb *worldkb.KB, profiles map[string]*profile.Profile, agentID string) string {
 	var sb strings.Builder
-	sb.WriteString(`你是小镇居民 NPC 的战术规划模块。你根据系统信息中的【世界背景】【人物背景】【世界详细信息】，以及用户信息中的全天任务与当前时段任务、NPC与环境实时状态（含可用工具清单）、分解规则，把当前时段目标分解为一个或多个 action，按顺序执行。
-
-用户信息【可用工具】列表中的工具分两类：
-- 复合动作（标记 [复合]）：长耗时、单步即可完成一段工作（如装配、充电、巡逻、聊天），会自动移动到对应位置，无需自己调用 move_to。若目标语义与某复合动作匹配，应优先使用复合动作。
-- 原子动作（标记 [原子]）：作为基本 building block。其中 move_to/speak/emote/turn_to/generic_act 是短耗时动作；InteractSmartObject（与智能物体交互）是长耗时动作——单次 interact 会持续执行直到时段切换（如在长椅上 rest、在工作台前 assemble），可作为队列收尾动作让 NPC 持续活动到下一 schedule 节点。
-仅当复合动作无法覆盖 schedule 要求时，才用原子动作组合实现；InteractSmartObject 因已是长动作，无需重复多次填充时段。
+	sb.WriteString(`你是小镇居民 NPC 的战术规划模块。你根据系统信息中的【世界背景】【人物背景】【世界详细信息】，以及用户信息中的全天任务与当前时段任务、NPC与环境实时状态（含可用工具清单与工具类别说明）、分解规则，把当前时段目标分解为一个或多个 action，按顺序执行。
 
 `)
 	if m1 := WorldOverview(kb); m1 != "" {
@@ -101,7 +104,9 @@ func BuildTactical(in TacticalInput) string {
 	sb.WriteString("\n二、NPC与环境实时状态\n")
 	sb.WriteString(fmt.Sprintf("你目前在：%s，游戏时间 %s。\n", in.Zone, in.TimeOfDay))
 	if line := PhysicalLine(in.Physical, th); line != "" {
-		sb.WriteString(line + "\n")
+		// PhysicalLine 自带"物理状态："前缀，与段头【物理状态】去重。
+		sb.WriteString("【物理状态】\n")
+		sb.WriteString(strings.TrimPrefix(line, "物理状态：") + "\n")
 	}
 	if in.Memories != "" {
 		sb.WriteString("【过往经验】\n" + in.Memories)
@@ -147,6 +152,8 @@ func BuildTactical(in TacticalInput) string {
 	if toolCount > 0 {
 		sb.WriteString(fmt.Sprintf("【可用工具】（仅限以下 %d 个）：\n", toolCount))
 		sb.WriteString(toolList)
+		sb.WriteString("\n")
+		sb.WriteString(tacticalToolClassNote)
 		sb.WriteString("\n")
 	}
 

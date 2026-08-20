@@ -300,7 +300,8 @@ func BuildStrategicUserContext(agentID string, profiles map[string]*profile.Prof
 	}
 	if line := PhysicalLine(physical, BandThresholdsFor(profiles, agentID)); line != "" {
 		sb.WriteString("【物理状态】\n")
-		sb.WriteString(line)
+		// PhysicalLine 自带"物理状态："前缀，段头已去重。
+		sb.WriteString(strings.TrimPrefix(line, "物理状态："))
 		sb.WriteString("\n")
 	}
 	return sb.String()

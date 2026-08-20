@@ -457,3 +457,46 @@ func TestBuildTactical_EmptyDailyPlanSkipped(t *testing.T) {
 		t.Errorf("empty DailyPlan should skip the segment:\n%s", out)
 	}
 }
+
+// TestBuildTactical_PhysicalNoDuplicatePrefix verifies the physical segment
+// renders as 【物理状态】header + band line WITHOUT the redundant in-line
+// "物理状态：" prefix.
+func TestBuildTactical_PhysicalNoDuplicatePrefix(t *testing.T) {
+	out := BuildTactical(TacticalInput{
+		Goal: "车间装配", Zone: "main_workshop", TimeOfDay: "08:00",
+		Slot: "07:00-12:00", Physical: &protocol.PhysicalState{Energy: 75, Fatigue: 30, JointWear: 5},
+		AgentID: "H-01",
+	})
+	if !strings.Contains(out, "【物理状态】\n能量 中等、疲劳 精神饱满") {
+		t.Errorf("physical segment should be header + band line without in-line prefix:\n%s", out)
+	}
+	if strings.Contains(out, "\n物理状态：") {
+		t.Errorf("in-line '物理状态：' prefix should be stripped under the segment header:\n%s", out)
+	}
+}
+
+// TestBuildTactical_ToolClassNoteAfterToolList verifies the tool-class
+// explanation renders in the user message right after the 【可用工具】
+// bullets (not in the system prompt).
+func TestBuildTactical_ToolClassNoteAfterToolList(t *testing.T) {
+	actions := []protocol.CapabilityAction{
+		{Cmd: "WorkShift", Kind: "composite", Description: "工作班次"},
+	}
+	out := BuildTactical(TacticalInput{
+		Goal: "车间装配", Zone: "main_workshop", TimeOfDay: "08:00",
+		Slot: "07:00-12:00", Actions: actions, AgentID: "H-01",
+	})
+	listIdx := strings.Index(out, "【可用工具】（仅限以下 1 个）")
+	noteIdx := strings.Index(out, "工具分两类：")
+	if listIdx < 0 || noteIdx < 0 {
+		t.Fatalf("missing tool list (%d) or tool-class note (%d):\n%s", listIdx, noteIdx, out)
+	}
+	if noteIdx < listIdx {
+		t.Errorf("tool-class note should come after the tool list: list=%d note=%d", listIdx, noteIdx)
+	}
+	// system prompt 不再含类别说明。
+	sys := BuildTacticalSystemPrompt(strategicDetailKB(), nil, "H-01")
+	if strings.Contains(sys, "工具分两类") {
+		t.Errorf("system prompt should not carry the tool-class note:\n%s", sys)
+	}
+}
