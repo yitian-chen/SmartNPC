@@ -9,20 +9,36 @@ import (
 
 	"github.com/AgentTown/agenttown-mcp/pkg/llmtypes"
 	"github.com/AgentTown/agenttown-mcp/pkg/prompt"
+	"github.com/AgentTown/agenttown-mcp/pkg/venus"
 )
 
-// fakeStrategicCaller 实现 strategicCaller 接口，用于单测。
+// fakeStrategicCaller 实现 strategicCaller / llmClient 接口，用于单测。
 type fakeStrategicCaller struct {
 	resp               *llmtypes.Response
 	err                error
 	capturedInput      string
 	capturedSystem     string
 	capturedSchemaName string
+	capturedTools      []venus.Tool
 	resetCalled        bool
 }
 
 func (f *fakeStrategicCaller) SendWithSummary(_ context.Context, _, user string) (*llmtypes.Response, error) {
 	f.capturedInput = user
+	return f.resp, f.err
+}
+
+func (f *fakeStrategicCaller) SendWithSummaryTools(_ context.Context, _, user string, tools []venus.Tool) (*llmtypes.Response, error) {
+	f.capturedInput = user
+	f.capturedTools = tools
+	return f.resp, f.err
+}
+
+func (f *fakeStrategicCaller) SendStreaming(_ context.Context, _, _ string, _ func(string)) (*llmtypes.Response, error) {
+	return f.resp, f.err
+}
+
+func (f *fakeStrategicCaller) SendStreamingTools(_ context.Context, _, _ string, _ []venus.Tool, _ func(string)) (*llmtypes.Response, error) {
 	return f.resp, f.err
 }
 

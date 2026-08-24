@@ -93,7 +93,20 @@ func (c *Client) SendWithSummary(ctx context.Context, system, user string) (*llm
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	return c.doSend(ctx, system, user, false, nil, nil)
+	return c.doSend(ctx, system, user, false, nil, nil, nil)
+}
+
+// SendWithSummaryTools is SendWithSummary plus a `tools` array (function
+// calling). The LLM may choose to call one of the tools instead of (or in
+// addition to) emitting free-form text; callers that only want the tools
+// advertised pass them here.
+func (c *Client) SendWithSummaryTools(ctx context.Context, system, user string, tools []Tool) (*llmtypes.Response, error) {
+	c.sendMu.Lock()
+	defer c.sendMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return c.doSend(ctx, system, user, false, nil, nil, tools)
 }
 
 // SendStreaming POSTs a (system, user) message pair with stream:true and
@@ -106,7 +119,17 @@ func (c *Client) SendStreaming(ctx context.Context, system, user string, onDelta
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	return c.doSend(ctx, system, user, true, onDelta, nil)
+	return c.doSend(ctx, system, user, true, onDelta, nil, nil)
+}
+
+// SendStreamingTools is SendStreaming plus a `tools` array (function calling).
+func (c *Client) SendStreamingTools(ctx context.Context, system, user string, tools []Tool, onDelta func(delta string)) (*llmtypes.Response, error) {
+	c.sendMu.Lock()
+	defer c.sendMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return c.doSend(ctx, system, user, true, onDelta, nil, tools)
 }
 
 // SendWithSchema POSTs a (system, user) message pair with OpenAI
@@ -124,7 +147,7 @@ func (c *Client) SendWithSchema(ctx context.Context, system, user, schemaName st
 		return nil, err
 	}
 	def := &JSONSchemaDef{Name: schemaName, Strict: true, Schema: json.RawMessage(schema)}
-	return c.doSend(ctx, system, user, false, nil, def)
+	return c.doSend(ctx, system, user, false, nil, def, nil)
 }
 
 // ResetSession is a no-op for venus.Client. Venus has no session chain
@@ -137,9 +160,9 @@ func (c *Client) ResetSession() {
 
 // doSend performs the HTTP POST and parses the response. For streaming
 // requests, onDelta is invoked for each text delta. A non-nil schema adds
-// response_format (Structured Outputs) to the request body. Caller MUST
-// hold sendMu.
-func (c *Client) doSend(ctx context.Context, system, user string, stream bool, onDelta func(string), schema *JSONSchemaDef) (*llmtypes.Response, error) {
+// response_format (Structured Outputs) to the request body; a non-nil tools
+// slice adds the `tools` array (function calling). Caller MUST hold sendMu.
+func (c *Client) doSend(ctx context.Context, system, user string, stream bool, onDelta func(string), schema *JSONSchemaDef, tools []Tool) (*llmtypes.Response, error) {
 	msgs := make([]message, 0, 2)
 	if system != "" {
 		msgs = append(msgs, message{Role: "system", Content: system})
@@ -150,6 +173,7 @@ func (c *Client) doSend(ctx context.Context, system, user string, stream bool, o
 		MaxTokens: c.cfg.MaxTokens,
 		Messages:  msgs,
 		Stream:    stream,
+		Tools:     tools,
 	}
 	if schema != nil {
 		body.ResponseFormat = &ResponseFormat{Type: "json_schema", JSONSchema: schema}
@@ -329,6 +353,23 @@ type request struct {
 	Messages       []message       `json:"messages"`
 	Stream         bool            `json:"stream,omitempty"`
 	ResponseFormat *ResponseFormat `json:"response_format,omitempty"`
+	Tools          []Tool          `json:"tools,omitempty"`
+}
+
+// Tool is one entry in the OpenAI `tools` array (function calling).
+// The function's Parameters is a raw JSON Schema document describing the
+// arguments object; venus.Client treats it as an opaque blob so it stays
+// decoupled from the capability registry that produces the schema.
+type Tool struct {
+	Type     string       `json:"type"` // "function"
+	Function ToolFunction `json:"function"`
+}
+
+// ToolFunction is the `function` object inside a Tool entry.
+type ToolFunction struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description,omitempty"`
+	Parameters  json.RawMessage `json:"parameters,omitempty"`
 }
 
 // ResponseFormat is the OpenAI response_format field (Structured Outputs).

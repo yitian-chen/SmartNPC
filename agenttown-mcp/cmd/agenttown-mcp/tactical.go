@@ -12,6 +12,7 @@ import (
 	"github.com/AgentTown/agenttown-mcp/pkg/profile"
 	"github.com/AgentTown/agenttown-mcp/pkg/prompt"
 	"github.com/AgentTown/agenttown-mcp/pkg/protocol"
+	"github.com/AgentTown/agenttown-mcp/pkg/venus"
 	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
 )
 
@@ -101,10 +102,11 @@ func physicalAlertOverrideGoal(hint, origGoal string, physical *protocol.Physica
 // generateTacticalPlan 调战术层 LLM 分解当前时段 goal（非流式路径）。
 // 返回分解出的 action 列表。
 // 任一步失败返回 err，调用方决定回退兜底。
-// 复用 strategicCaller 接口（venus.Client 已满足）。
+// 复用 llmClient 接口（venus.Client 已满足），请求体带 function calling
+// tools（从 capability registry 派生）。
 func generateTacticalPlan(
 	ctx context.Context,
-	tc strategicCaller,
+	tc llmClient,
 	agentID string,
 	goal, zone, timeOfDay, slot, dailyPlan string,
 	physical *protocol.PhysicalState,
@@ -151,7 +153,8 @@ func generateTacticalPlan(
 	// 实际 prompt 文档：每次仿真留存 H-01 首次战术层 prompt（system+user）。
 	dumpPromptDoc(agentID, "tactical", system, promptText, logger)
 
-	resp, err := tc.SendWithSummary(ctx, system, promptText)
+	ftools := tacticalToolsFromRegistry(registry, agentID)
+	resp, err := tc.SendWithSummaryTools(ctx, system, promptText, ftools)
 	if err != nil {
 		return nil, fmt.Errorf("tactical llm: %w", err)
 	}
@@ -180,7 +183,7 @@ func generateTacticalPlan(
 // action 即调 onAction 回调，使调用方能在首 action 到达时立即下发，
 // 将首动作体感延迟从 ~14s 降至 ~2-3s。
 //
-// 走 llmClient 接口（venus.Client 实现）。
+// 走 llmClient 接口（venus.Client 实现），请求体带 function calling tools。
 func generateTacticalPlanStreaming(
 	ctx context.Context,
 	tc llmClient,
@@ -241,7 +244,8 @@ func generateTacticalPlanStreaming(
 		},
 	}
 
-	resp, err := tc.SendStreaming(ctx, system, promptText, func(delta string) {
+	ftools := tacticalToolsFromRegistry(registry, agentID)
+	resp, err := tc.SendStreamingTools(ctx, system, promptText, ftools, func(delta string) {
 		acc.feed(delta)
 	})
 	if err != nil {
@@ -381,6 +385,86 @@ func filterValidActions(actions []plannedAction, registry *CapabilityRegistry, a
 		}
 	}
 	return out
+}
+
+// tacticalToolsFromRegistry 从 capability registry 派生 OpenAI function
+// calling 的 tools 数组，注入战术层请求体。工具名与 prompt【可用工具】
+// 清单一致（CmdToToolName），描述与参数 schema 来自 CapabilityAction。
+// 跳过 scan_area/stop/wait（非战术层排队工具）。registry == nil → nil
+// （UE 未连接时请求体不带 tools，与 prompt 工具清单段跳过保持一致）。
+func tacticalToolsFromRegistry(registry *CapabilityRegistry, agentID string) []venus.Tool {
+	if registry == nil {
+		return nil
+	}
+	actions := registry.EffectiveActions(agentID)
+	out := make([]venus.Tool, 0, len(actions))
+	for _, act := range actions {
+		name := tools.CmdToToolName(act.Cmd)
+		if name == "scan_area" || name == "stop" || name == "wait" {
+			continue
+		}
+		desc := act.Description
+		if desc == "" {
+			desc = name
+		}
+		out = append(out, venus.Tool{
+			Type: "function",
+			Function: venus.ToolFunction{
+				Name:        name,
+				Description: desc,
+				Parameters:  capabilityParamsSchema(act.Params),
+			},
+		})
+	}
+	return out
+}
+
+// capabilityParamsSchema 把 CapabilityParam 列表转成 function calling 的
+// parameters JSON Schema（object 类型）。不包含 MCP 侧 meta 字段
+// （agent_id/decision_epoch）——function calling 的参数就是 UE cmd 的参数。
+func capabilityParamsSchema(params []protocol.CapabilityParam) json.RawMessage {
+	props := map[string]any{}
+	required := make([]string, 0, len(params))
+	for _, p := range params {
+		prop := map[string]any{
+			"type":        capabilityJSONSchemaType(p.Type),
+			"description": p.Description,
+		}
+		if len(p.EnumValues) > 0 {
+			prop["enum"] = p.EnumValues
+		}
+		props[p.Name] = prop
+		if p.Required {
+			required = append(required, p.Name)
+		}
+	}
+	schema := map[string]any{
+		"type":       "object",
+		"properties": props,
+		"required":   required,
+	}
+	b, err := json.Marshal(schema)
+	if err != nil {
+		return nil
+	}
+	return b
+}
+
+// capabilityJSONSchemaType 映射 CapabilityParam.Type 到 JSON Schema type。
+// vector→"array"（UE5 [x,y,z]）；enum→"string"（配合 enum 字段）。
+func capabilityJSONSchemaType(t string) string {
+	switch t {
+	case "string", "enum":
+		return "string"
+	case "number":
+		return "number"
+	case "bool":
+		return "boolean"
+	case "vector":
+		return "array"
+	default:
+		return "string"
+	}
 }
 
 // mapTacticalAction 把战术层 plannedAction 映射到 ws.SendAction 的 (cmd, params)。

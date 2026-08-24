@@ -9,6 +9,7 @@ import (
 	"github.com/AgentTown/agenttown-mcp/pkg/prompt"
 	"github.com/AgentTown/agenttown-mcp/pkg/protocol"
 	"github.com/AgentTown/agenttown-mcp/pkg/storage"
+	"github.com/AgentTown/agenttown-mcp/pkg/venus"
 	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
 	"github.com/AgentTown/agenttown-mcp/pkg/wsserver"
 	"log/slog"
@@ -31,6 +32,14 @@ func (f *fakeDialogueLLM) SendStreaming(_ context.Context, _, _ string, _ func(s
 }
 
 func (f *fakeDialogueLLM) SendWithSchema(_ context.Context, _, _, _ string, _ []byte) (*llmtypes.Response, error) {
+	return f.resp, f.err
+}
+
+func (f *fakeDialogueLLM) SendWithSummaryTools(_ context.Context, _, _ string, _ []venus.Tool) (*llmtypes.Response, error) {
+	return f.resp, f.err
+}
+
+func (f *fakeDialogueLLM) SendStreamingTools(_ context.Context, _, _ string, _ []venus.Tool, _ func(string)) (*llmtypes.Response, error) {
 	return f.resp, f.err
 }
 

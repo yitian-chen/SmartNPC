@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/AgentTown/agenttown-mcp/pkg/prompt"
 	"github.com/AgentTown/agenttown-mcp/pkg/protocol"
+	"github.com/AgentTown/agenttown-mcp/pkg/venus"
 	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
 )
 
@@ -1094,6 +1096,102 @@ func TestMapTacticalAction_NewCmdNilRegistryErrors(t *testing.T) {
 func TestBuildTacticalToolEntries_NilRegistryEmpty(t *testing.T) {
 	if entries := prompt.ToolEntries(nil); len(entries) != 0 {
 		t.Fatalf("nil registry entry count=%d, want 0 (no builtin fallback)", len(entries))
+	}
+}
+
+// ─── tacticalToolsFromRegistry (function calling) ────────────
+
+func TestTacticalToolsFromRegistry_BuildsTools(t *testing.T) {
+	reg := NewCapabilityRegistry(nil)
+	reg.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
+		{
+			Cmd:         protocol.CmdWorkShift,
+			Kind:        "composite",
+			Description: "去指定设施执行工作",
+			Params: []protocol.CapabilityParam{
+				{Name: "semantic_group", Type: "string", Description: "设施语义组", Required: true},
+				{Name: "interaction", Type: "string", Description: "交互类型", Required: true},
+			},
+		},
+		{
+			Cmd:  protocol.CmdMoveTo,
+			Kind: "atomic",
+			Params: []protocol.CapabilityParam{
+				{Name: "target_type", Type: "enum", Description: "目标类型", Required: true, EnumValues: []string{"agent", "zone"}},
+			},
+		},
+	})
+	// Register(system) 会自动注入 social_chat（MCP 侧对话工具），所以总数
+	// = MoveTo + WorkShift + SocialChat。
+	got := tacticalToolsFromRegistry(reg, "H-01")
+	byName := map[string]venus.Tool{}
+	for _, tool := range got {
+		byName[tool.Function.Name] = tool
+	}
+	if len(got) != 3 {
+		t.Fatalf("tools len = %d, want 3 (MoveTo + WorkShift + SocialChat)", len(got))
+	}
+	if _, ok := byName["move_to"]; !ok {
+		t.Fatalf("move_to tool missing: %v", got)
+	}
+	if _, ok := byName["work_shift"]; !ok {
+		t.Fatalf("work_shift tool missing: %v", got)
+	}
+	if _, ok := byName["social_chat"]; !ok {
+		t.Fatalf("social_chat tool missing: %v", got)
+	}
+	if byName["work_shift"].Type != "function" {
+		t.Errorf("tool type should be function")
+	}
+	if byName["work_shift"].Function.Description != "去指定设施执行工作" {
+		t.Errorf("work_shift description = %q", byName["work_shift"].Function.Description)
+	}
+	// 校验 work_shift 的 parameters schema 含 semantic_group/interaction 且 required。
+	var schema struct {
+		Type       string         `json:"type"`
+		Properties map[string]any `json:"properties"`
+		Required   []string       `json:"required"`
+	}
+	if err := json.Unmarshal(byName["work_shift"].Function.Parameters, &schema); err != nil {
+		t.Fatalf("parameters is not valid JSON: %v", err)
+	}
+	if schema.Type != "object" {
+		t.Errorf("schema.type = %q, want object", schema.Type)
+	}
+	if len(schema.Required) != 2 {
+		t.Errorf("schema.required = %v, want [semantic_group interaction]", schema.Required)
+	}
+	// 校验 move_to 的 target_type enum。
+	var mschema struct {
+		Properties map[string]struct {
+			Enum []string `json:"enum"`
+		} `json:"properties"`
+	}
+	if err := json.Unmarshal(byName["move_to"].Function.Parameters, &mschema); err != nil {
+		t.Fatalf("move_to parameters is not valid JSON: %v", err)
+	}
+	if len(mschema.Properties["target_type"].Enum) != 2 {
+		t.Errorf("move_to target_type enum = %v, want 2 values", mschema.Properties["target_type"].Enum)
+	}
+}
+
+func TestTacticalToolsFromRegistry_NilRegistryEmpty(t *testing.T) {
+	if got := tacticalToolsFromRegistry(nil, "H-01"); got != nil {
+		t.Fatalf("nil registry should return nil tools, got %v", got)
+	}
+}
+
+func TestTacticalToolsFromRegistry_SkipsNonQueueable(t *testing.T) {
+	reg := NewCapabilityRegistry(nil)
+	reg.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
+		{Cmd: protocol.CmdMoveTo, Kind: "atomic"},
+		{Cmd: protocol.CmdWait, Kind: "atomic"},
+	})
+	got := tacticalToolsFromRegistry(reg, "H-01")
+	for _, tool := range got {
+		if tool.Function.Name == "wait" {
+			t.Errorf("wait is non-queueable and should be skipped")
+		}
 	}
 }
 

@@ -365,6 +365,47 @@ func TestSendWithSummary_NoResponseFormat(t *testing.T) {
 	if capturedRequest.ResponseFormat != nil {
 		t.Errorf("response_format should be absent, got %+v", capturedRequest.ResponseFormat)
 	}
+	if capturedRequest.Tools != nil {
+		t.Errorf("tools should be absent for plain SendWithSummary, got %+v", capturedRequest.Tools)
+	}
+}
+
+// TestSendWithSummaryTools_RequestIncludesTools verifies SendWithSummaryTools
+// serializes the `tools` array (function calling) into the request body.
+func TestSendWithSummaryTools_RequestIncludesTools(t *testing.T) {
+	var capturedRequest request
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&capturedRequest)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"x","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{}}`))
+	}))
+	defer server.Close()
+
+	c := newTestClient(t, server.URL)
+	tools := []Tool{{
+		Type: "function",
+		Function: ToolFunction{
+			Name:        "work_shift",
+			Description: "去指定设施执行工作",
+			Parameters:  json.RawMessage(`{"type":"object","properties":{"semantic_group":{"type":"string"}},"required":["semantic_group"]}`),
+		},
+	}}
+	if _, err := c.SendWithSummaryTools(context.Background(), "sys", "user", tools); err != nil {
+		t.Fatalf("SendWithSummaryTools: %v", err)
+	}
+	if len(capturedRequest.Tools) != 1 {
+		t.Fatalf("tools len = %d, want 1", len(capturedRequest.Tools))
+	}
+	got := capturedRequest.Tools[0]
+	if got.Type != "function" {
+		t.Errorf("tools[0].type = %q, want function", got.Type)
+	}
+	if got.Function.Name != "work_shift" {
+		t.Errorf("tools[0].function.name = %q, want work_shift", got.Function.Name)
+	}
+	if string(got.Function.Parameters) != `{"type":"object","properties":{"semantic_group":{"type":"string"}},"required":["semantic_group"]}` {
+		t.Errorf("tools[0].function.parameters = %s", got.Function.Parameters)
+	}
 }
 
 // TestResetSession_NoOp verifies ResetSession is a safe no-op.

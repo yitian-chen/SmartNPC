@@ -1054,10 +1054,14 @@ var tacticalCallTimeout = 60 * time.Second
 
 // llmClient 是战略层/战术层 LLM 客户端的统一接口。
 // *venus.Client（Venus 代理，OpenAI Chat Completions 协议）实现此接口。
+// SendWithSummaryTools/SendStreamingTools 用于战术层（function calling tools
+// 注入请求体）。
 type llmClient interface {
 	SendWithSummary(ctx context.Context, system, user string) (*llmtypes.Response, error)
 	SendStreaming(ctx context.Context, system, user string, onDelta func(string)) (*llmtypes.Response, error)
 	SendWithSchema(ctx context.Context, system, user, schemaName string, schema []byte) (*llmtypes.Response, error)
+	SendWithSummaryTools(ctx context.Context, system, user string, tools []venus.Tool) (*llmtypes.Response, error)
+	SendStreamingTools(ctx context.Context, system, user string, tools []venus.Tool, onDelta func(string)) (*llmtypes.Response, error)
 	ResetSession()
 }
 
