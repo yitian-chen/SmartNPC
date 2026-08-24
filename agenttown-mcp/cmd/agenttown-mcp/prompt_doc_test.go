@@ -51,15 +51,15 @@ func TestDumpPromptDoc_DisabledWhenPathEmpty(t *testing.T) {
 	// 无 panic、无写入即为通过（路径为空时直接返回）。
 }
 
-func TestDumpPromptDoc_AppendsAcrossProcesses(t *testing.T) {
+func TestDumpPromptDoc_OverwritesAcrossProcesses(t *testing.T) {
 	dir := t.TempDir()
 	doc := filepath.Join(dir, "actual_prompts.md")
 
 	// 模拟第一次仿真（进程 1）。
 	resetPromptDocForTest(doc)
 	dumpPromptDoc("H-01", "strategic", "SYS-RUN1", "USER-RUN1", testLogger())
-	// 模拟服务器重启（进程 2）：重置进程级状态后再次落盘应追加，
-	// 文档按仿真累积。
+	// 模拟服务器重启（进程 2）：重置进程级状态后再次落盘应覆盖旧内容，
+	// 文档只反映最新一次仿真。
 	resetPromptDocForTest(doc)
 	dumpPromptDoc("H-01", "strategic", "SYS-RUN2", "USER-RUN2", testLogger())
 
@@ -68,8 +68,11 @@ func TestDumpPromptDoc_AppendsAcrossProcesses(t *testing.T) {
 		t.Fatalf("doc not written: %v", err)
 	}
 	s := string(got)
-	if !strings.Contains(s, "SYS-RUN1") || !strings.Contains(s, "SYS-RUN2") {
-		t.Errorf("doc should accumulate across simulation runs:\n%s", s)
+	if !strings.Contains(s, "SYS-RUN2") {
+		t.Errorf("doc should contain latest run:\n%s", s)
+	}
+	if strings.Contains(s, "SYS-RUN1") {
+		t.Errorf("doc should be overwritten, stale run must not remain:\n%s", s)
 	}
 }
 
