@@ -261,7 +261,7 @@ var BuiltinCmdCapabilities = []protocol.CapabilityAction{
 		Cmd:         protocol.CmdChargeAtStation,
 		Kind:        "composite",
 		Description: "去充电桩充电，包含去充电桩和充电两个部分的动作",
-		UsageHint:   "能量低时使用",
+		UsageHint:   "电量低时使用",
 		Params: []protocol.CapabilityParam{
 			{Name: "semantic_group", Type: "string", Description: "充电桩所属语义组的 ID（world_kb 中对应 category 的物体 id），如 charger、charging_pillar", Required: true, DefaultValue: ""},
 			{Name: "interaction", Type: "string", Description: "交互动作类型，固定为charge", Required: true, DefaultValue: ""},

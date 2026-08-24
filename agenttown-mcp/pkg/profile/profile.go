@@ -38,10 +38,10 @@ type Profile struct {
 	Traits      []string // ## 性格特质 (split by 、 or newline)
 	SpeechStyle string   // ## 说话风格
 	// AttrBands holds per-attribute band boundaries from ## 属性分段, keyed
-	// by attribute name (能量/疲劳/关节磨损). Each value is 3 ascending
-	// thresholds splitting the 0-100 range into 4 bands. Only attributes
-	// explicitly listed in the profile are present; consumers fall back to
-	// global defaults for the rest. nil when the section is absent.
+	// by attribute name (电量/疲劳/关节磨损; 旧名"能量"兼容读取). Each value
+	// is 3 ascending thresholds splitting the 0-100 range into 4 bands.
+	// Only attributes explicitly listed in the profile are present; consumers
+	// fall back to global defaults for the rest. nil when the section is absent.
 	AttrBands map[string][3]float64
 }
 
@@ -57,7 +57,9 @@ const (
 )
 
 // bandAttrNames are the attribute names allowed in ## 属性分段.
+// 2026-08-24 物理属性名"能量"改称"电量"；保留"能量"旧名兼容尚未迁移的 profile.md。
 var bandAttrNames = map[string]struct{}{
+	"电量":   {},
 	"能量":   {},
 	"疲劳":   {},
 	"关节磨损": {},

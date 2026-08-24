@@ -176,134 +176,6 @@ func TestBuildTactical_VisibleAgentsInjected(t *testing.T) {
 	}
 }
 
-// TestTacticalExample_SocialChatGoal verifies the chat/social goal branch
-// now emits a social_chat composite action (not move_to+speak) and picks
-// the peer via pickChatPeer (falls back to first non-self agent when no
-// KB relationships exist).
-func TestTacticalExample_SocialChatGoal(t *testing.T) {
-	kb := &worldkb.KB{
-		Version: "1.0",
-		Agents: []worldkb.Agent{
-			{ID: "H-01", DisplayName: "老陈"},
-			{ID: "H-02", DisplayName: "老王"},
-			{ID: "H-05", DisplayName: "老张"},
-		},
-	}
-	got := TacticalExample(kb, "去找同事聊天社交", "H-01")
-	if !strings.Contains(got, `"action":"social_chat"`) {
-		t.Errorf("chat goal should emit social_chat action, got:\n%s", got)
-	}
-	if !strings.Contains(got, `"target_agent_id":"H-02"`) {
-		t.Errorf("pickChatPeer fallback should pick first non-self agent H-02, got:\n%s", got)
-	}
-	if strings.Contains(got, `"action":"move_to"`) {
-		t.Errorf("chat goal should NOT emit move_to (social_chat is composite, auto-moves), got:\n%s", got)
-	}
-}
-
-// TestTacticalExample_MeditateGoal verifies a meditate goal (even when the
-// text mentions 睡眠舱, which would otherwise be routed to the sleep branch)
-// emits InteractSmartObject(sleep_pod/meditate) instead of rest_at_residence.
-func TestTacticalExample_MeditateGoal(t *testing.T) {
-	kb := worldkb.NewKB(
-		[]worldkb.Zone{{ID: "residential_quarters", DisplayName: "休眠舱居住区"}},
-		[]worldkb.Object{{ID: "SleepPod-1", DisplayName: "睡眠舱",
-			SemanticGroup: "sleep_pod", ZoneID: "residential_quarters",
-			AvailableInteractions: []string{"sleep", "meditate", "tidy_up"}}},
-		[]worldkb.Agent{{ID: "H-01", DisplayName: "老陈"}},
-	)
-	got := TacticalExample(kb, "休眠舱居住区睡眠舱冥想放松", "H-01")
-	if !strings.Contains(got, `"action":"InteractSmartObject"`) {
-		t.Errorf("meditate goal should emit InteractSmartObject, got:\n%s", got)
-	}
-	if !strings.Contains(got, `"semantic_group":"sleep_pod"`) || !strings.Contains(got, `"interaction":"meditate"`) {
-		t.Errorf("meditate goal should use sleep_pod/meditate, got:\n%s", got)
-	}
-	if strings.Contains(got, `"action":"rest_at_residence"`) || strings.Contains(got, `"interaction":"sleep"`) {
-		t.Errorf("meditate goal must NOT be routed to rest_at_residence/sleep, got:\n%s", got)
-	}
-}
-
-// TestTacticalExample_TidyUpGoal verifies a tidy-up goal emits
-// InteractSmartObject(sleep_pod/tidy_up).
-func TestTacticalExample_TidyUpGoal(t *testing.T) {
-	kb := worldkb.NewKB(
-		[]worldkb.Zone{{ID: "residential_quarters", DisplayName: "休眠舱居住区"}},
-		[]worldkb.Object{{ID: "SleepPod-1", DisplayName: "睡眠舱",
-			SemanticGroup: "sleep_pod", ZoneID: "residential_quarters",
-			AvailableInteractions: []string{"sleep", "meditate", "tidy_up"}}},
-		[]worldkb.Agent{{ID: "H-01", DisplayName: "老陈"}},
-	)
-	got := TacticalExample(kb, "早起整理床铺和舱位", "H-01")
-	if !strings.Contains(got, `"interaction":"tidy_up"`) {
-		t.Errorf("tidy-up goal should emit tidy_up interaction, got:\n%s", got)
-	}
-	if strings.Contains(got, `"action":"rest_at_residence"`) {
-		t.Errorf("tidy-up goal must NOT be routed to rest_at_residence, got:\n%s", got)
-	}
-}
-
-// TestTacticalExample_ExerciseGoal verifies an exercise goal (晨练/拉伸)
-// emits the exercise composite with a concrete exercise_type param.
-func TestTacticalExample_ExerciseGoal(t *testing.T) {
-	kb := worldkb.NewKB(
-		[]worldkb.Zone{{ID: "central_plaza", DisplayName: "中央广场"}},
-		[]worldkb.Object{{ID: "Bench-1", DisplayName: "长椅",
-			SemanticGroup: "bench", ZoneID: "central_plaza",
-			AvailableInteractions: []string{"rest"}}},
-		[]worldkb.Agent{{ID: "H-01", DisplayName: "老陈"}},
-	)
-	got := TacticalExample(kb, "中央广场晨练拉伸放松", "H-01")
-	if !strings.Contains(got, `"action":"exercise"`) {
-		t.Errorf("exercise goal should emit exercise composite, got:\n%s", got)
-	}
-	if !strings.Contains(got, `"exercise_type":"stretch"`) {
-		t.Errorf("exercise example should show concrete exercise_type param, got:\n%s", got)
-	}
-}
-
-// TestTacticalExample_InternetGoal verifies an internet goal emits the
-// two-action form speak + surf_internet WITHOUT a preceding move_to.
-// Rationale: the three-action form (speak+move_to+surf_internet) makes UE
-// complete the composite almost instantly (0.1-1.7s, observed in logs),
-// triggering re-decompose loops + idle standing; the two-action form lets
-// the composite walk itself and run until the slot switch.
-func TestTacticalExample_InternetGoal(t *testing.T) {
-	kb := worldkb.NewKB(
-		[]worldkb.Zone{{ID: "archive_station", DisplayName: "档案馆"}},
-		[]worldkb.Object{{ID: "Computer-1", DisplayName: "电脑",
-			SemanticGroup: "computer", ZoneID: "archive_station",
-			AvailableInteractions: []string{"surf_internet"}}},
-		[]worldkb.Agent{{ID: "H-01", DisplayName: "老陈"}},
-	)
-	got := TacticalExample(kb, "档案馆电脑上网浏览", "H-01")
-	if !strings.Contains(got, `"action":"surf_internet"`) {
-		t.Errorf("internet goal should emit surf_internet composite, got:\n%s", got)
-	}
-	if !strings.Contains(got, `"semantic_group":"computer"`) {
-		t.Errorf("internet example should use semantic_group=computer, got:\n%s", got)
-	}
-	if strings.Contains(got, `"action":"move_to"`) {
-		t.Errorf("internet example must NOT include move_to before the composite, got:\n%s", got)
-	}
-}
-
-// TestTacticalExample_SleepGoalStillRoutesToResidence verifies the plain
-// sleep goal is unaffected by the new branches (regression guard).
-func TestTacticalExample_SleepGoalStillRoutesToResidence(t *testing.T) {
-	kb := worldkb.NewKB(
-		[]worldkb.Zone{{ID: "residential_quarters", DisplayName: "休眠舱居住区"}},
-		[]worldkb.Object{{ID: "SleepPod-1", DisplayName: "睡眠舱",
-			SemanticGroup: "sleep_pod", ZoneID: "residential_quarters",
-			AvailableInteractions: []string{"sleep", "meditate", "tidy_up"}}},
-		[]worldkb.Agent{{ID: "H-01", DisplayName: "老陈"}},
-	)
-	got := TacticalExample(kb, "回休眠舱睡觉", "H-01")
-	if !strings.Contains(got, `"action":"rest_at_residence"`) || !strings.Contains(got, `"interaction":"sleep"`) {
-		t.Errorf("plain sleep goal should still route to rest_at_residence/sleep, got:\n%s", got)
-	}
-}
-
 // TestPickChatPeer_PrefersRelationship verifies pickChatPeer prefers the
 // KB-declared relationship peer with the highest familiarity over the
 // declaration-order fallback.
@@ -443,7 +315,7 @@ func TestBuildTactical_PhysicalNoDuplicatePrefix(t *testing.T) {
 		Slot: "07:00-12:00", Physical: &protocol.PhysicalState{Energy: 75, Fatigue: 30, JointWear: 5},
 		AgentID: "H-01",
 	})
-	if !strings.Contains(out, "【物理状态】\n能量 中等、疲劳 精神饱满") {
+	if !strings.Contains(out, "【物理状态】\n电量 中等、疲劳 精神饱满") {
 		t.Errorf("physical segment should be header + band line without in-line prefix:\n%s", out)
 	}
 	if strings.Contains(out, "\n物理状态：") {

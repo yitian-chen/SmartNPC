@@ -137,7 +137,7 @@ func TestBuildStrategicSystemPrompt_Module3Details(t *testing.T) {
 	if strings.Contains(got, "工作台（workbench），位于") {
 		t.Errorf("module 3 facility detail should not carry per-object zone, got:\n%s", got)
 	}
-	if !strings.Contains(got, "  - assemble：在工作台上进行零件装配，产出成品。能量中等下降、疲劳度明显提升、关节磨损少量累积、余额快速增加。使用门槛：能量≥10、疲劳≤80") {
+	if !strings.Contains(got, "  - assemble：在工作台上进行零件装配，产出成品。电量中等下降、疲劳度明显提升、关节磨损少量累积、余额快速增加。使用门槛：电量≥10、疲劳≤80") {
 		t.Errorf("module 3 missing inline effect line for assemble:\n%s", got)
 	}
 	if !strings.Contains(got, "  - meditate：坐在床上冥想，时间不宜太长。疲劳度明显缓解") {

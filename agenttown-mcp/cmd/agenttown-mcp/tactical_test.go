@@ -377,13 +377,13 @@ func TestBuildTacticalPrompt_NilPhysical(t *testing.T) {
 	if promptText == "" {
 		t.Fatal("promptText should not be empty")
 	}
-	// nil physical 时注入默认物理状态（100/0/0/200 → 充足/精神饱满/良好），
+	// nil physical 时注入默认物理状态（100/0/0/200 → 很高/精神饱满/良好），
 	// 让 LLM 始终看到有效物理上下文（分段标签，非原始数值）
 	if !strings.Contains(promptText, "物理状态") {
 		t.Errorf("prompt should contain '物理状态' with default values for nil physical, got: %s", promptText)
 	}
-	if !strings.Contains(promptText, "能量 充足") {
-		t.Errorf("prompt should contain default band 能量 充足 for nil physical, got: %s", promptText)
+	if !strings.Contains(promptText, "电量 很高") {
+		t.Errorf("prompt should contain default band 电量 很高 for nil physical, got: %s", promptText)
 	}
 	// slot 为空时不应有时长提示行
 	if strings.Contains(promptText, "请让步骤总时长接近此时长") {
@@ -398,16 +398,16 @@ func TestBuildTacticalPrompt_ZeroPhysical(t *testing.T) {
 	if !strings.Contains(promptText, "物理状态") {
 		t.Errorf("prompt should contain '物理状态' with default values for all-zero physical, got: %s", promptText)
 	}
-	if !strings.Contains(promptText, "能量 充足") {
-		t.Errorf("prompt should contain default band 能量 充足 for all-zero physical, got: %s", promptText)
+	if !strings.Contains(promptText, "电量 很高") {
+		t.Errorf("prompt should contain default band 电量 很高 for all-zero physical, got: %s", promptText)
 	}
 }
 
 func TestBuildTacticalPrompt_WithPhysical(t *testing.T) {
 	promptText := prompt.BuildTactical(prompt.TacticalInput{Goal: "装配", Zone: "main_workshop", TimeOfDay: "09:00", Slot: "09:00-12:00", Physical: &protocol.PhysicalState{Energy: 75, Fatigue: 30, JointWear: 5}, KB: nil, Hint: "", AgentID: ""})
 	// 数值以分段标签呈现：75→中等、30→精神饱满、5→良好
-	if !strings.Contains(promptText, "能量 中等") {
-		t.Errorf("prompt should contain '能量 中等' (75), got: %s", promptText)
+	if !strings.Contains(promptText, "电量 中等") {
+		t.Errorf("prompt should contain '电量 中等' (75), got: %s", promptText)
 	}
 	if !strings.Contains(promptText, "疲劳 精神饱满") {
 		t.Errorf("prompt should contain '疲劳 精神饱满' (30), got: %s", promptText)
@@ -1067,99 +1067,9 @@ func TestBuildTacticalExample_ZoneObjectPairing(t *testing.T) {
 }
 
 // ─── buildTacticalExample (goal-aware, P0-2) ──────────────────
-
-func TestBuildTacticalExample_GoalCharge(t *testing.T) {
-	// goal 含"充电"应选 charge_at_station 示例。
-	kb := loadTestKB(t)
-	got := prompt.TacticalExample(kb, "午间停工，前往充电站补电休息", "")
-	if !strings.Contains(got, "charge_at_station") {
-		t.Errorf("goal=充电 should pick charge_at_station example: %q", got)
-	}
-	if !strings.Contains(got, "charge") {
-		t.Errorf("example should reference charge: %q", got)
-	}
-	// 2026-08-11 修复：复合动作示例不应含 move_to（复合动作自带移动）。
-	if strings.Contains(got, `"action":"move_to"`) {
-		t.Errorf("charge_at_station example must NOT contain move_to (composite includes movement): %q", got)
-	}
-}
-
-// TestBuildTacticalExample_GoalBenchRest 回归测试 P0-2：goal 含"长椅休息"
-// 必须返回 interact(bench/rest) 示例，禁止错配到 rest_at_residence(sleep_pod/sleep)。
-// 旧版 exampleForGoal 第 2 分支用"休息"关键词统一路由到 charge_at_station，
-// LLM 模仿后会把"长椅休息"goal 和 rest_at_residence 复合动作自由组合，产生
-// rest_at_residence(bench/rest) 这种参数错配（bench 不是住所）。
-func TestBuildTacticalExample_GoalBenchRest(t *testing.T) {
-	kb := loadTestKB(t)
-	got := prompt.TacticalExample(kb, "午间到中央广场长椅短暂休息，缓解疲劳", "")
-	if !strings.Contains(got, `"action":"InteractSmartObject"`) {
-		t.Errorf("goal=长椅休息 should pick interact example: %q", got)
-	}
-	if !strings.Contains(got, `"semantic_group":"bench"`) || !strings.Contains(got, `"interaction":"rest"`) {
-		t.Errorf("bench rest example must use semantic_group=bench interaction=rest: %q", got)
-	}
-	if strings.Contains(got, "rest_at_residence") {
-		t.Errorf("bench rest must NOT use rest_at_residence (bench is not residence): %q", got)
-	}
-	if strings.Contains(got, "sleep_pod") {
-		t.Errorf("bench rest must NOT reference sleep_pod: %q", got)
-	}
-}
-
-// TestBuildTacticalExample_GoalSleepAtResidence 回归测试 P0-2：goal 含"回休眠舱睡觉"
-// 必须返回 rest_at_residence(sleep_pod/sleep) 示例，参数严格对应。
-func TestBuildTacticalExample_GoalSleepAtResidence(t *testing.T) {
-	kb := loadTestKB(t)
-	got := prompt.TacticalExample(kb, "夜间回休眠舱居住区睡眠，恢复体力迎接明天", "")
-	if !strings.Contains(got, "rest_at_residence") {
-		t.Errorf("goal=回休眠舱睡觉 should pick rest_at_residence example: %q", got)
-	}
-	if !strings.Contains(got, `"semantic_group":"sleep_pod"`) || !strings.Contains(got, `"interaction":"sleep"`) {
-		t.Errorf("rest_at_residence example must use sleep_pod/sleep: %q", got)
-	}
-	if strings.Contains(got, `"semantic_group":"bench"`) {
-		t.Errorf("sleep example must NOT use bench (bench is not residence): %q", got)
-	}
-	// 复合动作不应含 move_to（复合动作自带移动）
-	if strings.Contains(got, `"action":"move_to"`) {
-		t.Errorf("rest_at_residence example must NOT contain move_to: %q", got)
-	}
-}
-
-func TestBuildTacticalExample_GoalPatrol(t *testing.T) {
-	// goal 含"巡视"应选 move_to + generic_act 示例，不引用任何 object。
-	// 新 12 cmd 体系无 patrol_zone，巡视用 generic_act(behavior=look_around) 兜底。
-	kb := loadTestKB(t)
-	got := prompt.TacticalExample(kb, "巡视主生产车间，记录设备运行日志", "")
-	if !strings.Contains(got, "generic_act") {
-		t.Errorf("goal=巡视 should pick generic_act example: %q", got)
-	}
-	if strings.Contains(got, "work_shift") || strings.Contains(got, "charge_at_station") {
-		t.Errorf("patrol goal must NOT fall back to object examples: %q", got)
-	}
-}
-
-func TestBuildTacticalExample_GoalInspect(t *testing.T) {
-	// goal 含"检查"应选 interact inspect 示例。
-	// 真 KB 物体没有 inspect interaction，用 inline KB 验证此分支。
-	kb := &worldkb.KB{
-		Zones: []worldkb.Zone{{ID: "main_workshop", DisplayName: "车间"}},
-		Objects: []worldkb.Object{{
-			ID:                    "wb_01",
-			DisplayName:           "工作台",
-			Category:              "workbench",
-			ZoneID:                "main_workshop",
-			AvailableInteractions: []string{"assemble", "inspect"},
-		}},
-	}
-	got := prompt.TacticalExample(kb, "启动自检，检查关节磨损情况", "")
-	if !strings.Contains(got, `"action":"InteractSmartObject"`) {
-		t.Errorf("goal=检查 should pick interact example: %q", got)
-	}
-	if !strings.Contains(got, `"interaction":"inspect"`) {
-		t.Errorf("inspect goal should use interaction=inspect: %q", got)
-	}
-}
+// 2026-08-24 停用：exampleForGoal 的 goal 关键词→示例路由已注释（"长椅/休息"
+// 分支硬编码 move_to central_plaza 是午休扎堆中央广场的根因）。goal 示例测试
+// 一并移除；剩余 fallback 测试（category-aware）继续覆盖 TacticalExample。
 
 func TestBuildTacticalExample_GoalFallbackOnMissingObject(t *testing.T) {
 	// goal=装配 但 KB 无 workbench object → 降级到默认示例（首个 object 的 category）

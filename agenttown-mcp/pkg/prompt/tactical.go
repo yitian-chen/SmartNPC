@@ -46,14 +46,15 @@ func BuildTacticalSystemPrompt(kb *worldkb.KB, profiles map[string]*profile.Prof
 // The available tools are NOT listed here — they arrive via the
 // function-calling `tools` request field.
 const TacticalRules = `1. 第一个工具调用必须是 speak（用一段话表达此刻内心想法或独白），随后可返回 1-4 个动作段，按执行顺序排列。每段是长复合动作或 InteractSmartObject 长动作，段间用 time_to_stop 控制时长；最后一段以长动作收尾（可不设 time_to_stop，自然持续到时段切换）。
-2. 你可以根据当前NPC的实际属性、实际游戏时间等信息灵活安排，如果当前此条日程并不合理（例如半夜不睡觉而是跑步；电量高时去充电；所有对应的smartObject都已经占用等），鼓励安排其他更合理的action去做。
+2. 你可以根据当前NPC的实际属性、实际游戏时间等信息灵活安排，如果当前此条日程并不合理，例如半夜不睡觉而是跑步、电量高时去充电、所有对应的smartObject都已经占用等情况，请下发更合理的动作，不必遵守原有日程规定。
 3. 复合动作已包含自动移动到对应位置的逻辑，禁止在复合动作前调用 move_to——直接调用单个长复合动作即可。
 4. 仅当目标确实没有匹配的长复合动作时，才用原子动作组合实现目标。禁止把同一动作连续重复多次填充时段（工作段之间应穿插休息段）。
 5. InteractSmartObject 和复合动作的 semantic_group 必须严格使用设施详情中给出的 semantic_group 值，禁止编造、禁止用实例 id（如 Charge-1）、禁止拼接 zone/interaction 信息。
 6. 复合动作与 semantic_group 必须严格对应，禁止跨类别组合。
    - 补充：所有工种设备都可用 InteractSmartObject 原子动作直接工作——semantic_group 填工作设备、interaction 填对应动词即可（如 加工机 process、调试台 debug、拆解台 dismantle，以及 workbench/assemble、sorting_conveyor/sort_cargo、inspection_table/inspect）；work_shift 只是其中三类工种设备的快捷复合动作，没有复合动作的工种一律用 InteractSmartObject。
-7. 长动作可加 time_to_stop 参数（秒）设置该段动作的时长：冥想、整理床铺等单段设 1800 秒左右，不宜超过 1 小时。到点后系统会打断该段并继续执行你返回的后续动作段；只有你返回的动作全部执行完，系统才会再次询问你。推荐模式：工作段（设 time_to_stop，如 1 小时）→ 长椅小憩段（设 time_to_stop，不超过 30 分钟）→ 返回工作段（不设，持续到时段结束）。睡眠等可自然持续到时段切换的动作可不设 time_to_stop。
-8. 在work_shift工作时，也可以设置执行时长（例如先工作1小时），允许NPC在工作途中短暂在长椅小憩（不超过30分钟），然后回去继续工作`
+7. 长动作可加 time_to_stop 参数（秒）设置该段动作的时长：冥想、整理床铺等单段设 1800 秒左右，不宜超过 1 小时。到点后系统会打断该段并继续执行你返回的后续动作段；只有你返回的动作全部执行完，系统才会再次询问你。推荐模式：工作段（设 time_to_stop，如 1.5 小时）→ 长椅小憩/原地拉伸段（设 time_to_stop，不超过 30 分钟）→ 返回工作段（不设，持续到时段结束）。睡眠等可自然持续到时段切换的动作可不设 time_to_stop。
+8. 在work_shift工作时，也可以设置执行时长（例如先工作1小时），允许NPC在工作途中短暂在长椅小憩（不超过30分钟），然后回去继续工作
+9. 休息/午休/小憩类动作就近安排：优先使用当前所在区域或最近区域的休息设施——长椅在主生产车间、物流转运站等各区域均有分布，不必专程前往中央广场；当前区域长椅占用时再考虑相邻区域或改为拉伸/整理等原地动作`
 
 // BuildTactical constructs the tactical layer's user message, four parts:
 //  1. 全天任务与当前时段任务 — full-day schedule + current slot goal +
@@ -253,9 +254,13 @@ func TacticalExample(kb *worldkb.KB, goal, agentID string) string {
 	// Goal-specific example first — some branches (e.g. social_chat) only
 	// need kb.Agents and don't depend on zones/objs, so must run before the
 	// empty-map guard below.
-	if ex := exampleForGoal(kb, goal, agentID, zones, objs); ex != "" {
-		return ex
-	}
+	// TODO(exampleForGoal): 2026-08-24 暂时停用 goal 关键词→示例路由，原因是
+	// exampleForGoal 的"长椅/休息"分支硬编码 move_to central_plaza，把午休 NPC
+	// 都引向中央广场长椅。停用后示例回退到下方 category-aware fallback，
+	// 就近休息由 StrategicRules/TacticalRules 的"就近休息"规则引导。
+	// if ex := exampleForGoal(kb, goal, agentID, zones, objs); ex != "" {
+	// 	return ex
+	// }
 
 	if len(zones) == 0 && len(objs) == 0 {
 		return genericExample
@@ -293,7 +298,7 @@ func TacticalExample(kb *worldkb.KB, goal, agentID string) string {
 		if len(obj.AvailableInteractions) > 0 {
 			verb = obj.AvailableInteractions[0]
 		}
-		return fmt.Sprintf(`{"action":"speak","params":{"content":"去充电设施补充能量"}}
+		return fmt.Sprintf(`{"action":"speak","params":{"content":"去充电设施补充电量"}}
 {"action":"charge_at_station","params":{"semantic_group":"%s","interaction":"%s"}}`, exObj, verb)
 	default:
 		verb := "<可用 interaction>"
@@ -308,132 +313,138 @@ func TacticalExample(kb *worldkb.KB, goal, agentID string) string {
 
 // exampleForGoal returns a goal-specific example; no match or required resource
 // missing returns empty string (caller degrades to default).
-func exampleForGoal(kb *worldkb.KB, goal, agentID string, zones []worldkb.ZoneInfo, objs []worldkb.ObjectInfo) string {
-	if kb == nil || goal == "" {
-		return ""
-	}
-	gl := strings.ToLower(goal)
-
-	// 1. 巡视/巡检/巡逻 → speak + move_to zone + generic_act（新体系无 patrol_zone）
-	if containsAny(gl, "巡视", "巡检", "巡逻", "patrol") {
-		exZone := "<上方可前往区域的 id>"
-		if len(zones) > 0 {
-			exZone = zones[0].ID
-		}
-		return fmt.Sprintf(`{"action":"speak","params":{"content":"去目标区域巡视一圈"}}
-{"action":"move_to","params":{"target_type":"zone","target_id":"%s"}}
-{"action":"generic_act","params":{"thought":"巡视设备状态","behavior":"look_around"}}`, exZone)
-	}
-
-	// 2. 充电/补能 → speak + charge_at_station
-	//    仅匹配明确的"充电"语义，避免把"休息/恢复/疲劳"也路由到充电示例
-	//    （P0-2 修复：原分支含"休息/恢复/疲劳"会把"长椅休息"goal 错配到 charge_at_station）。
-	if containsAny(gl, "充电", "补能", "charge") {
-		if obj := findObjectByCategory(objs, "charging_station", "charging"); obj != nil {
-			verb := "<可用 interaction>"
-			if len(obj.AvailableInteractions) > 0 {
-				verb = obj.AvailableInteractions[0]
-			}
-			return fmt.Sprintf(`{"action":"speak","params":{"content":"去充电设施补充能量"}}
-{"action":"charge_at_station","params":{"semantic_group":"%s","interaction":"%s"}}`, semanticGroupOf(*obj), verb)
-		}
-	}
-
-	// 2a-2. 冥想 → speak + InteractSmartObject(sleep_pod/meditate)
-	//     必须先于 2b（回住所/休眠舱/睡觉）判断：冥想 goal 常含"睡眠舱"
-	//     字样，若 2b 先命中会被错误引向 rest_at_residence/sleep。
-	//     InteractSmartObject 自带"前往物体+执行互动"，无需 move_to。
-	if containsAny(gl, "冥想", "meditate") {
-		if obj := findObjectBySemanticGroup(objs, "sleep_pod"); obj != nil {
-			return `{"action":"speak","params":{"content":"去舱里静坐一会儿"}}
-{"action":"InteractSmartObject","params":{"semantic_group":"sleep_pod","interaction":"meditate"}}`
-		}
-	}
-
-	// 2a-3. 整理床铺/舱位 → speak + InteractSmartObject(sleep_pod/tidy_up)
-	if containsAny(gl, "整理床铺", "整理舱", "整理内务", "tidy") {
-		if obj := findObjectBySemanticGroup(objs, "sleep_pod"); obj != nil {
-			return `{"action":"speak","params":{"content":"把舱位收拾整齐"}}
-{"action":"InteractSmartObject","params":{"semantic_group":"sleep_pod","interaction":"tidy_up"}}`
-		}
-	}
-
-	// 2a-4. 锻炼/晨练/拉伸 → speak + exercise（原地复合动作，无需 move_to）
-	if containsAny(gl, "锻炼", "晨练", "拉伸", "散步", "做操", "运动", "exercise") {
-		return `{"action":"speak","params":{"content":"先活动活动筋骨"}}
-{"action":"exercise","params":{"exercise_type":"stretch"}}`
-	}
-
-	// 2a-5. 上网 → speak + surf_internet（复合动作自带前往电脑的移动）。
-	//     关键：禁止在 surf_internet 前加 move_to——实测 LLM 自由发挥输出
-	//     speak+move_to+surf_internet 三步结构时，UE 对已到达目标的复合
-	//     动作会瞬间返回 success（0.1-1.7s），触发战术层重分解循环+呆站；
-	//     两步结构（复合动作自己走路）则正常持续到时段切换。
-	if containsAny(gl, "上网", "网上", "浏览", "查资料", "surf") {
-		if obj := findObjectBySemanticGroup(objs, "computer"); obj != nil {
-			return `{"action":"speak","params":{"content":"去档案馆电脑上查点资料"}}
-{"action":"surf_internet","params":{"semantic_group":"computer","interaction":"surf_internet"}}`
-		}
-	}
-
-	// 2b. 回住所/休眠/睡觉 → speak + rest_at_residence(sleep_pod/sleep)
-	//     仅匹配"回舱/休眠/睡觉"语义，rest_at_residence 只能搭配 sleep_pod。
-	if containsAny(gl, "回住所", "回休眠", "休眠舱", "睡觉", "睡个", "睡眠", "回舱", "rest_at_residence", "sleep") {
-		if obj := findObjectBySemanticGroup(objs, "sleep_pod"); obj != nil {
-			return fmt.Sprintf(`{"action":"speak","params":{"content":"回休眠舱好好睡一觉"}}
-{"action":"rest_at_residence","params":{"semantic_group":"sleep_pod","interaction":"sleep"}}`)
-		}
-	}
-
-	// 2c. 长椅/广场休息 → speak + InteractSmartObject(bench/rest)
-	//     长椅休息不是"在住所休息"，必须用 InteractSmartObject 原子动作，禁止套用 rest_at_residence。
-	if containsAny(gl, "长椅", "广场休息", "短暂休息", "歇会儿", "歇会", "休息", "rest") {
-		if obj := findObjectBySemanticGroup(objs, "bench"); obj != nil {
-			return fmt.Sprintf(`{"action":"speak","params":{"content":"去中央广场长椅坐会儿"}}
-{"action":"move_to","params":{"target_type":"zone","target_id":"central_plaza"}}
-{"action":"InteractSmartObject","params":{"semantic_group":"bench","interaction":"rest"}}`)
-		}
-	}
-
-	// 3. 装配/工作/作业/打磨/加工 → speak + work_shift
-	if containsAny(gl, "装配", "工作", "作业", "打磨", "加工", "assemble", "craft") {
-		if obj := findObjectByCategory(objs, "workbench", "work"); obj != nil {
-			verb := "<可用 interaction>"
-			if len(obj.AvailableInteractions) > 0 {
-				verb = obj.AvailableInteractions[0]
-			}
-			return fmt.Sprintf(`{"action":"speak","params":{"content":"去工作设施开始作业"}}
-{"action":"work_shift","params":{"semantic_group":"%s","interaction":"%s"}}`, semanticGroupOf(*obj), verb)
-		}
-	}
-
-	// 4. 聊天/社交/对话 → speak + social_chat（主动找人聊天，走向对方+对话挂起）
-	//    peer 优先从 KB 关系中选熟悉度最高的；无关系则回退首个非自身 agent。
-	if containsAny(gl, "聊天", "社交", "对话", "chat", "social") && len(kb.Agents) >= 2 {
-		peer := pickChatPeer(kb, agentID)
-		return fmt.Sprintf(`{"action":"speak","params":{"content":"去找同事聊两句"}}
-{"action":"social_chat","params":{"target_agent_id":"%s","content":"最近怎么样？"}}`, peer)
-	}
-
-	// 5. 检查/自检/inspect → speak + move_to + InteractSmartObject inspect
-	if containsAny(gl, "检查", "自检", "inspect", "examine") {
-		for i := range objs {
-			for _, v := range objs[i].AvailableInteractions {
-				if v == "inspect" {
-					exZone := objs[i].ZoneID
-					if exZone == "" {
-						exZone = "<上方可前往区域的 id>"
-					}
-					return fmt.Sprintf(`{"action":"speak","params":{"content":"先去目标区域检查设备"}}
-{"action":"move_to","params":{"target_type":"zone","target_id":"%s"}}
-{"action":"InteractSmartObject","params":{"semantic_group":"%s","interaction":"inspect"}}`, exZone, semanticGroupOf(objs[i]))
-				}
-			}
-		}
-	}
-
-	return ""
-}
+//
+// 2026-08-24 暂时停用（见 TacticalExample 中调用处的 TODO）：goal 关键词→
+// 示例路由的"长椅/休息"分支硬编码 move_to central_plaza，把午休 NPC 都引向
+// 中央广场长椅，与"各区域可交互设施"映射表的真实分布冲突。恢复前请先修正
+// 硬编码地点为就近 zone。示例生成暂时回退到 category-aware fallback。
+// func exampleForGoal(kb *worldkb.KB, goal, agentID string, zones []worldkb.ZoneInfo, objs []worldkb.ObjectInfo) string {
+// 	if kb == nil || goal == "" {
+// 		return ""
+// 	}
+// 	gl := strings.ToLower(goal)
+//
+// 	// 1. 巡视/巡检/巡逻 → speak + move_to zone + generic_act（新体系无 patrol_zone）
+// 	if containsAny(gl, "巡视", "巡检", "巡逻", "patrol") {
+// 		exZone := "<上方可前往区域的 id>"
+// 		if len(zones) > 0 {
+// 			exZone = zones[0].ID
+// 		}
+// 		return fmt.Sprintf(`{"action":"speak","params":{"content":"去目标区域巡视一圈"}}
+// {"action":"move_to","params":{"target_type":"zone","target_id":"%s"}}
+// {"action":"generic_act","params":{"thought":"巡视设备状态","behavior":"look_around"}}`, exZone)
+// 	}
+//
+// 	// 2. 充电/补能 → speak + charge_at_station
+// 	//    仅匹配明确的"充电"语义，避免把"休息/恢复/疲劳"也路由到充电示例
+// 	//    （P0-2 修复：原分支含"休息/恢复/疲劳"会把"长椅休息"goal 错配到 charge_at_station）。
+// 	if containsAny(gl, "充电", "补能", "charge") {
+// 		if obj := findObjectByCategory(objs, "charging_station", "charging"); obj != nil {
+// 			verb := "<可用 interaction>"
+// 			if len(obj.AvailableInteractions) > 0 {
+// 				verb = obj.AvailableInteractions[0]
+// 			}
+// 			return fmt.Sprintf(`{"action":"speak","params":{"content":"去充电设施补充电量"}}
+// {"action":"charge_at_station","params":{"semantic_group":"%s","interaction":"%s"}}`, semanticGroupOf(*obj), verb)
+// 		}
+// 	}
+//
+// 	// 2a-2. 冥想 → speak + InteractSmartObject(sleep_pod/meditate)
+// 	//     必须先于 2b（回住所/休眠舱/睡觉）判断：冥想 goal 常含"睡眠舱"
+// 	//     字样，若 2b 先命中会被错误引向 rest_at_residence/sleep。
+// 	//     InteractSmartObject 自带"前往物体+执行互动"，无需 move_to。
+// 	if containsAny(gl, "冥想", "meditate") {
+// 		if obj := findObjectBySemanticGroup(objs, "sleep_pod"); obj != nil {
+// 			return `{"action":"speak","params":{"content":"去舱里静坐一会儿"}}
+// {"action":"InteractSmartObject","params":{"semantic_group":"sleep_pod","interaction":"meditate"}}`
+// 		}
+// 	}
+//
+// 	// 2a-3. 整理床铺/舱位 → speak + InteractSmartObject(sleep_pod/tidy_up)
+// 	if containsAny(gl, "整理床铺", "整理舱", "整理内务", "tidy") {
+// 		if obj := findObjectBySemanticGroup(objs, "sleep_pod"); obj != nil {
+// 			return `{"action":"speak","params":{"content":"把舱位收拾整齐"}}
+// {"action":"InteractSmartObject","params":{"semantic_group":"sleep_pod","interaction":"tidy_up"}}`
+// 		}
+// 	}
+//
+// 	// 2a-4. 锻炼/晨练/拉伸 → speak + exercise（原地复合动作，无需 move_to）
+// 	if containsAny(gl, "锻炼", "晨练", "拉伸", "散步", "做操", "运动", "exercise") {
+// 		return `{"action":"speak","params":{"content":"先活动活动筋骨"}}
+// {"action":"exercise","params":{"exercise_type":"stretch"}}`
+// 	}
+//
+// 	// 2a-5. 上网 → speak + surf_internet（复合动作自带前往电脑的移动）。
+// 	//     关键：禁止在 surf_internet 前加 move_to——实测 LLM 自由发挥输出
+// 	//     speak+move_to+surf_internet 三步结构时，UE 对已到达目标的复合
+// 	//     动作会瞬间返回 success（0.1-1.7s），触发战术层重分解循环+呆站；
+// 	//     两步结构（复合动作自己走路）则正常持续到时段切换。
+// 	if containsAny(gl, "上网", "网上", "浏览", "查资料", "surf") {
+// 		if obj := findObjectBySemanticGroup(objs, "computer"); obj != nil {
+// 			return `{"action":"speak","params":{"content":"去档案馆电脑上查点资料"}}
+// {"action":"surf_internet","params":{"semantic_group":"computer","interaction":"surf_internet"}}`
+// 		}
+// 	}
+//
+// 	// 2b. 回住所/休眠/睡觉 → speak + rest_at_residence(sleep_pod/sleep)
+// 	//     仅匹配"回舱/休眠/睡觉"语义，rest_at_residence 只能搭配 sleep_pod。
+// 	if containsAny(gl, "回住所", "回休眠", "休眠舱", "睡觉", "睡个", "睡眠", "回舱", "rest_at_residence", "sleep") {
+// 		if obj := findObjectBySemanticGroup(objs, "sleep_pod"); obj != nil {
+// 			return fmt.Sprintf(`{"action":"speak","params":{"content":"回休眠舱好好睡一觉"}}
+// {"action":"rest_at_residence","params":{"semantic_group":"sleep_pod","interaction":"sleep"}}`)
+// 		}
+// 	}
+//
+// 	// 2c. 长椅/广场休息 → speak + InteractSmartObject(bench/rest)
+// 	//     长椅休息不是"在住所休息"，必须用 InteractSmartObject 原子动作，禁止套用 rest_at_residence。
+// 	//     注意：此处 move_to 目标曾硬编码 central_plaza，是午休扎堆中央广场的根因，
+// 	//     恢复该分支时须改为"当前所在 zone"或"最近的长椅所在 zone"。
+// 	if containsAny(gl, "长椅", "广场休息", "短暂休息", "歇会儿", "歇会", "休息", "rest") {
+// 		if obj := findObjectBySemanticGroup(objs, "bench"); obj != nil {
+// 			return fmt.Sprintf(`{"action":"speak","params":{"content":"就近找个长椅歇会儿"}}
+// {"action":"InteractSmartObject","params":{"semantic_group":"bench","interaction":"rest"}}`)
+// 		}
+// 	}
+//
+// 	// 3. 装配/工作/作业/打磨/加工 → speak + work_shift
+// 	if containsAny(gl, "装配", "工作", "作业", "打磨", "加工", "assemble", "craft") {
+// 		if obj := findObjectByCategory(objs, "workbench", "work"); obj != nil {
+// 			verb := "<可用 interaction>"
+// 			if len(obj.AvailableInteractions) > 0 {
+// 				verb = obj.AvailableInteractions[0]
+// 			}
+// 			return fmt.Sprintf(`{"action":"speak","params":{"content":"去工作设施开始作业"}}
+// {"action":"work_shift","params":{"semantic_group":"%s","interaction":"%s"}}`, semanticGroupOf(*obj), verb)
+// 		}
+// 	}
+//
+// 	// 4. 聊天/社交/对话 → speak + social_chat（主动找人聊天，走向对方+对话挂起）
+// 	//    peer 优先从 KB 关系中选熟悉度最高的；无关系则回退首个非自身 agent。
+// 	if containsAny(gl, "聊天", "社交", "对话", "chat", "social") && len(kb.Agents) >= 2 {
+// 		peer := pickChatPeer(kb, agentID)
+// 		return fmt.Sprintf(`{"action":"speak","params":{"content":"去找同事聊两句"}}
+// {"action":"social_chat","params":{"target_agent_id":"%s","content":"最近怎么样？"}}`, peer)
+// 	}
+//
+// 	// 5. 检查/自检/inspect → speak + move_to + InteractSmartObject inspect
+// 	if containsAny(gl, "检查", "自检", "inspect", "examine") {
+// 		for i := range objs {
+// 			for _, v := range objs[i].AvailableInteractions {
+// 				if v == "inspect" {
+// 					exZone := objs[i].ZoneID
+// 					if exZone == "" {
+// 						exZone = "<上方可前往区域的 id>"
+// 					}
+// 					return fmt.Sprintf(`{"action":"speak","params":{"content":"先去目标区域检查设备"}}
+// {"action":"move_to","params":{"target_type":"zone","target_id":"%s"}}
+// {"action":"InteractSmartObject","params":{"semantic_group":"%s","interaction":"inspect"}}`, exZone, semanticGroupOf(objs[i]))
+// 				}
+// 			}
+// 		}
+// 	}
+//
+// 	return ""
+// }
 
 // pickChatPeer chooses a social_chat target for the example prompt. Prefers
 // the KB-declared relationship peer with the highest familiarity (so the

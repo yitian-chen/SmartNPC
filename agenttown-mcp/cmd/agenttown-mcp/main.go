@@ -315,7 +315,7 @@ func replanHintByReason(reason string) string {
 	case strings.Contains(reason, "too_tired"):
 		return "本次规划请避免安排 work_shift 等消耗体力的动作——NPC 当前过于疲劳，" +
 			"应优先安排 rest_at_residence（回住所休息）或 charge_at_station（充电）" +
-			"缓解疲劳/恢复能量，待状态恢复后再安排工作。"
+			"缓解疲劳/恢复电量，待状态恢复后再安排工作。"
 	case strings.Contains(reason, "object_occupied"):
 		return "本次规划请避免直接重试同一动作——若目标物体被占用，如同类物体有空余，" +
 			"请先直接重试同一动作；如果同类物品已没有空余，可先 generic_act(behavior=look_around) " +

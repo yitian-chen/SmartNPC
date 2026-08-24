@@ -84,7 +84,7 @@ func TestBandThresholdsFor_PerNPCDifference(t *testing.T) {
 func TestPhysicalLineActual_BandedOutput(t *testing.T) {
 	p := protocol.PhysicalState{Energy: 10, Fatigue: 85, JointWear: 75, Money: 150}
 	got := PhysicalLineActual(p, DefaultBandThresholds())
-	for _, want := range []string{"能量 低电量", "疲劳 非常疲劳", "关节磨损 严重磨损", "余额 150"} {
+	for _, want := range []string{"电量 低电量", "疲劳 非常疲劳", "关节磨损 严重磨损", "余额 150"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("PhysicalLineActual missing %q in: %s", want, got)
 		}
@@ -99,7 +99,7 @@ func TestPhysicalLineActual_BandedOutput(t *testing.T) {
 
 func TestPhysicalLine_DefaultFallbackBanded(t *testing.T) {
 	got := PhysicalLine(nil, DefaultBandThresholds())
-	if !strings.Contains(got, "能量 充足") || !strings.Contains(got, "疲劳 精神饱满") {
+	if !strings.Contains(got, "电量 很高") || !strings.Contains(got, "疲劳 精神饱满") {
 		t.Errorf("nil physical should render default fresh bands, got: %s", got)
 	}
 }
