@@ -507,8 +507,14 @@ func (a *agentContext) advanceSlotIfNeeded(ws *wsserver.Server, agentID string, 
 // checkTimeToStop 轮询长动作的 time_to_stop：动作设了 time_to_stop 且权威
 // game_time 到达目标时刻时，标记 pendingStop（延迟到下次下发前补发 stop，避免
 // NPC 呆站）+ 清队列/in-flight，signal 触发下一轮战术层 LLM。
+//
+// 下一轮分解前注入 hint：告诉 LLM 本时段已执行哪个动作、执行了多久，并明确
+// 禁止重复下发相同长动作——否则 LLM 面对与上一轮几乎相同的输入（当前时段
+// 目标未变、无"已执行"信息）会重复返回相同命令（实测 H-01 冥想 3000 秒到点
+// 后第二轮又下发 meditate）。hint 走 SetReplanHint → BeginTacticalRefill 消费
+// → 战术层 user prompt【上次中断原因】段。
 func (a *agentContext) checkTimeToStop(agentID string, logger *slog.Logger) {
-	target, actionID, armed := a.as.TimeStop()
+	target, duration, actionID, armed := a.as.TimeStop()
 	if !armed {
 		return
 	}
@@ -525,6 +531,11 @@ func (a *agentContext) checkTimeToStop(agentID string, logger *slog.Logger) {
 	if info.ActionCmd != "" && isCompositeCmdDynamic(info.ActionCmd, capabilityRegistryRef) {
 		a.as.SetPendingStopActionID(actionID)
 	}
+	// 下一轮战术层重分解前注入 hint：告知已执行动作与时长，并要求切换活动，
+	// 避免 LLM 重复下发相同长动作（同输入同输出的根因）。
+	if info.ActionCmd != "" {
+		a.as.SetReplanHint(timeStopReplanHint(info.ActionCmd, info.Params, duration))
+	}
 	// 取消旧 action 超时 timer（若有）
 	if actionID != "" {
 		a.coordMu.Lock()
@@ -538,6 +549,33 @@ func (a *agentContext) checkTimeToStop(agentID string, logger *slog.Logger) {
 	logger.Info("[战术层] time_to_stop 到点，打断长动作进入下一轮",
 		"agent_id", agentID, "action_id", actionID, "game_time", now, "target", target)
 	a.signal()
+}
+
+// timeStopReplanHint 构造 time_to_stop 到点后注入战术层的重规划提示。
+// cmd 是 UE 命令名，params 含 semantic_group/interaction（工具名由
+// CmdToToolName 反查，便于 LLM 对照【可用工具】），durationSec 是 LLM 预设的
+// time_to_stop 时长。提示 LLM 该动作已达设定时长，不得重复下发相同长动作。
+func timeStopReplanHint(cmd string, params map[string]any, durationSec float64) string {
+	tool := tools.CmdToToolName(cmd)
+	if tool == "" {
+		tool = cmd
+	}
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("本时段已执行长动作 %s", tool))
+	if sg, ok := params["semantic_group"].(string); ok && sg != "" {
+		sb.WriteString("（semantic_group=" + sg)
+		if it, ok := params["interaction"].(string); ok && it != "" {
+			sb.WriteString(", interaction=" + it)
+		}
+		sb.WriteString("）")
+	}
+	if durationSec > 0 {
+		sb.WriteString(fmt.Sprintf("约 %d 分钟，已达设定时长", int(durationSec/60)))
+	} else {
+		sb.WriteString("，已执行一段时间")
+	}
+	sb.WriteString("。请勿再下发相同的长动作（相同 semantic_group + interaction），剩余时段请安排其他活动（读书/上网/长椅/整理/锻炼/充电等），或直接转入下一时段目标。")
+	return sb.String()
 }
 
 // recordEventNotification 处理环境事件通知。反应层：返回 trigger 信息供
@@ -1083,7 +1121,7 @@ func (a *agentContext) popAndSendQueueAction(ctx context.Context, agentID string
 		// time_to_stop：长动作设了执行时长，记下目标 game_time 供 checkTimeToStop 轮询。
 		if hasTTS && tts > 0 {
 			if start := a.as.LatestGameTimeSec(); start > 0 {
-				a.as.ArmTimeStop(ack.ActionID, start+tts)
+				a.as.ArmTimeStop(ack.ActionID, start+tts, tts)
 				logger.Info("[战术层] 长动作已设 time_to_stop",
 					"agent_id", agentID, "action_id", ack.ActionID, "duration_sec", tts, "target_game_time", start+tts)
 			}

@@ -1428,3 +1428,29 @@ func TestShouldAutoQueue(t *testing.T) {
 		}
 	}
 }
+
+// ─── time_to_stop 到点 hint ────────────────────────────────────
+
+func TestTimeStopReplanHint(t *testing.T) {
+	// 复合长动作：cmd 反查工具名 + params 拼语义组/交互 + 时长分钟数。
+	h := timeStopReplanHint("RestAtResidence", map[string]any{
+		"semantic_group": "sleep_pod",
+		"interaction":    "meditate",
+	}, 3000)
+	for _, want := range []string{
+		"rest_at_residence",
+		"semantic_group=sleep_pod",
+		"interaction=meditate",
+		"约 50 分钟",
+		"请勿再下发相同的长动作",
+	} {
+		if !strings.Contains(h, want) {
+			t.Errorf("hint missing %q: %s", want, h)
+		}
+	}
+	// 未知 cmd：CmdToToolName 回退到 snake_case（"SomeNewCmd"→"some_new_cmd"）。
+	h2 := timeStopReplanHint("SomeNewCmd", nil, 0)
+	if !strings.Contains(h2, "some_new_cmd") || strings.Contains(h2, "约") {
+		t.Errorf("unknown-cmd fallback hint wrong: %s", h2)
+	}
+}

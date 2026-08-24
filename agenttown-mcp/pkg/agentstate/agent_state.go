@@ -91,9 +91,12 @@ type AgentState struct {
 	conversation []llmtypes.Message
 	// timeStopTargetGameSec is the target authoritative game_time (GameTimeSec)
 	// at which the current long action's time_to_stop should fire; -1 = no
-	// time_to_stop armed. timeStopActionID is the in-flight action it tracks.
+	// time_to_stop armed. timeStopActionID is the in-flight action it tracks,
+	// timeStopDurationSec the preset duration (seconds) the LLM set via
+	// time_to_stop (used to tell the next tactical round how long it ran).
 	timeStopTargetGameSec float64
 	timeStopActionID      string
+	timeStopDurationSec   float64
 }
 
 // clearedActionInfo is the stash dropped by ClearForSlotSwitch/ClearForReplan
@@ -515,23 +518,26 @@ func (a *AgentState) ClearConversation() {
 
 // ArmTimeStop sets the time_to_stop target for an in-flight long action.
 // targetGameSec is the authoritative GameTimeSec at which the action should
-// be interrupted; actionID identifies the in-flight action.
-func (a *AgentState) ArmTimeStop(actionID string, targetGameSec float64) {
+// be interrupted; actionID identifies the in-flight action; durationSec is
+// the preset duration (seconds) so the next tactical round can be told how
+// long the action already ran.
+func (a *AgentState) ArmTimeStop(actionID string, targetGameSec float64, durationSec float64) {
 	a.mu.Lock()
 	a.timeStopActionID = actionID
 	a.timeStopTargetGameSec = targetGameSec
+	a.timeStopDurationSec = durationSec
 	a.mu.Unlock()
 }
 
-// TimeStop returns the armed time_to_stop target. armed=false means no
-// time_to_stop is currently armed.
-func (a *AgentState) TimeStop() (targetGameSec float64, actionID string, armed bool) {
+// TimeStop returns the armed time_to_stop target and preset duration.
+// armed=false means no time_to_stop is currently armed.
+func (a *AgentState) TimeStop() (targetGameSec float64, durationSec float64, actionID string, armed bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.timeStopTargetGameSec < 0 {
-		return 0, "", false
+		return 0, 0, "", false
 	}
-	return a.timeStopTargetGameSec, a.timeStopActionID, true
+	return a.timeStopTargetGameSec, a.timeStopDurationSec, a.timeStopActionID, true
 }
 
 // ClearTimeStop disarms time_to_stop tracking (e.g. after the action ends
@@ -540,6 +546,7 @@ func (a *AgentState) ClearTimeStop() {
 	a.mu.Lock()
 	a.timeStopTargetGameSec = -1
 	a.timeStopActionID = ""
+	a.timeStopDurationSec = 0
 	a.mu.Unlock()
 }
 
@@ -578,6 +585,7 @@ func (a *AgentState) SetCurrentActionSrc(src ActionSource) {
 type InFlightInfo struct {
 	ActionID  string
 	ActionCmd string
+	Params    map[string]any
 	QueueLen  int
 }
 
@@ -589,6 +597,7 @@ func (a *AgentState) ClearForSlotSwitch() InFlightInfo {
 	info := InFlightInfo{
 		ActionID:  a.currentActionID,
 		ActionCmd: a.currentActionCmd,
+		Params:    cloneParams(a.currentActionParams),
 		QueueLen:  len(a.actionQueue),
 	}
 	// Stash the in-flight action so its delayed stop completion

@@ -1072,16 +1072,16 @@ func TestConversation_AppendAndClear(t *testing.T) {
 
 func TestTimeStop_ArmClear(t *testing.T) {
 	a := New()
-	if _, _, armed := a.TimeStop(); armed {
+	if _, _, _, armed := a.TimeStop(); armed {
 		t.Fatal("fresh TimeStop should not be armed")
 	}
-	a.ArmTimeStop("act_x", 12345.0)
-	target, actionID, armed := a.TimeStop()
-	if !armed || target != 12345.0 || actionID != "act_x" {
-		t.Fatalf("TimeStop = (%v, %q, %v)", target, actionID, armed)
+	a.ArmTimeStop("act_x", 12345.0, 1800.0)
+	target, duration, actionID, armed := a.TimeStop()
+	if !armed || target != 12345.0 || duration != 1800.0 || actionID != "act_x" {
+		t.Fatalf("TimeStop = (%v, %v, %q, %v)", target, duration, actionID, armed)
 	}
 	a.ClearTimeStop()
-	if _, _, armed := a.TimeStop(); armed {
+	if _, _, _, armed := a.TimeStop(); armed {
 		t.Fatal("TimeStop after ClearTimeStop should not be armed")
 	}
 }
