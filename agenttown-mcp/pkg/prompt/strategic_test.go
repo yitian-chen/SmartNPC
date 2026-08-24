@@ -116,9 +116,16 @@ func TestBuildStrategicSystemPrompt_Module3Details(t *testing.T) {
 	if !strings.Contains(got, "主生产车间（main_workshop）：小镇的生产核心") {
 		t.Errorf("module 3 missing zone description:\n%s", got)
 	}
-	// 设施组 + 内联交互效果。
-	if !strings.Contains(got, "工作台（workbench），位于 main_workshop") {
+	// 各区域可交互设施映射表：按 zone 列出 semantic_group。
+	if !strings.Contains(got, "各区域可交互设施：\n- 主生产车间（main_workshop）：旧装置（legacy）、工作台（workbench）") {
+		t.Errorf("module 3 missing per-zone facility map for workbench:\n%s", got)
+	}
+	// 设施组 + 内联交互效果（不再带"位于"）。
+	if !strings.Contains(got, "- 工作台（workbench）：\n  - assemble：") {
 		t.Errorf("module 3 missing workbench group:\n%s", got)
+	}
+	if strings.Contains(got, "工作台（workbench），位于") {
+		t.Errorf("module 3 facility detail should not carry per-object zone, got:\n%s", got)
 	}
 	if !strings.Contains(got, "  - assemble：在工作台上进行零件装配，产出成品。能量中等下降、疲劳度明显提升、关节磨损少量累积、余额快速增加。使用门槛：能量≥10、疲劳≤80") {
 		t.Errorf("module 3 missing inline effect line for assemble:\n%s", got)

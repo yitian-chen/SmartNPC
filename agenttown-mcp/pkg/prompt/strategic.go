@@ -146,9 +146,10 @@ func WorldOverview(kb *worldkb.KB) string {
 }
 
 // worldDetailCore renders the KB-derived world detail shared by the strategic
-// and tactical system prompts: per-zone descriptions + smart objects grouped
-// by semantic_group with per-interaction description, per-hour attribute
-// effects and usage gates (from the KB's declared rates).
+// and tactical system prompts: per-zone descriptions + a per-zone
+// semantic_group map + smart objects grouped by semantic_group with
+// per-interaction description, per-hour attribute effects and usage gates
+// (from the KB's declared rates).
 func worldDetailCore(kb *worldkb.KB) string {
 	var sb strings.Builder
 	wroteZone := false
@@ -169,6 +170,40 @@ func worldDetailCore(kb *worldkb.KB) string {
 			}
 		}
 	}
+	// 各区域可交互设施：按 zone 列出该区域的 semantic_group，供规划时
+	// 直接按地点选设施，避免"中央广场的跑步机"这类 zone/设施错配。
+	if kb != nil {
+		if zs := kb.ListZones(); len(zs) > 0 {
+			if os := kb.ListObjects(); len(os) > 0 {
+				if wroteZone {
+					sb.WriteString("\n")
+				}
+				groups := groupObjectsBySemantic(os)
+				sb.WriteString("各区域可交互设施：\n")
+				for _, z := range zs {
+					names := make([]string, 0, 4)
+					for _, g := range groups {
+						if g.ZoneID != z.ID {
+							continue
+						}
+						if g.DisplayName != "" && g.DisplayName != g.SemanticGroup {
+							names = append(names, fmt.Sprintf("%s（%s）", g.DisplayName, g.SemanticGroup))
+						} else {
+							names = append(names, g.SemanticGroup)
+						}
+					}
+					if len(names) == 0 {
+						continue
+					}
+					zlabel := z.ID
+					if z.DisplayName != "" && z.DisplayName != z.ID {
+						zlabel = fmt.Sprintf("%s（%s）", z.DisplayName, z.ID)
+					}
+					sb.WriteString("- " + zlabel + "：" + strings.Join(names, "、") + "\n")
+				}
+			}
+		}
+	}
 	// 设施详情：按 semantic_group 分组，交互行内联 KB 声明的描述与属性变动。
 	if kb != nil {
 		if os := kb.ListObjects(); len(os) > 0 {
@@ -185,9 +220,6 @@ func worldDetailCore(kb *worldkb.KB) string {
 					label = fmt.Sprintf("semantic_group=%s", g.SemanticGroup)
 				}
 				meta := ""
-				if g.ZoneID != "" {
-					meta += "，位于 " + g.ZoneID
-				}
 				if g.InstanceCount > 1 {
 					meta += fmt.Sprintf("，%d 个实例", g.InstanceCount)
 				}
