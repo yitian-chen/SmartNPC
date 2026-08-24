@@ -415,34 +415,10 @@ func TestBuildTactical_FourParts(t *testing.T) {
 	if !strings.Contains(out, "请通过工具调用（function calling）把【当前时段目标】分解为动作序列") {
 		t.Errorf("part 4 missing the ask:\n%s", out)
 	}
-	// 工具清单仅从 registry（cmd）派生：Actions 为空时不出现，杜绝
-	// 硬编码兜底（规则文本中的模块名引用不算）。
+	// 工具清单已从 prompt 移除（经 function-calling tools 字段下发），
+	// prompt 文本不应再出现可用工具清单。
 	if strings.Contains(out, "【可用工具】（仅限以下") {
 		t.Errorf("empty Actions should not produce a tool list:\n%s", out)
-	}
-}
-
-// TestBuildTactical_ToolListFromRegistryOnly verifies the 【可用工具】
-// segment appears in the user prompt (part 2) when Actions come from the
-// registry, with kind labels and registry-derived descriptions.
-func TestBuildTactical_ToolListFromRegistryOnly(t *testing.T) {
-	actions := []protocol.CapabilityAction{
-		{Cmd: "WorkShift", Kind: "composite", Description: "工作班次（装配/作业）",
-			Params: []protocol.CapabilityParam{{Name: "semantic_group", Type: "string", Required: true}}},
-		{Cmd: "MoveTo", Kind: "atomic", Description: "移动到指定位置或Actor"},
-	}
-	out := BuildTactical(TacticalInput{
-		Goal: "车间装配", Zone: "main_workshop", TimeOfDay: "08:00",
-		Slot: "07:00-12:00", Actions: actions, AgentID: "H-01",
-	})
-	if !strings.Contains(out, "【可用工具】（仅限以下 2 个）") {
-		t.Errorf("user prompt should carry the registry-derived tool list:\n%s", out)
-	}
-	if !strings.Contains(out, "- work_shift [复合]: 工作班次（装配/作业）") {
-		t.Errorf("tool bullet should use registry cmd description:\n%s", out)
-	}
-	if !strings.Contains(out, "- move_to [原子]: 移动到指定位置或Actor") {
-		t.Errorf("tool bullet should use registry cmd description:\n%s", out)
 	}
 }
 
@@ -472,31 +448,5 @@ func TestBuildTactical_PhysicalNoDuplicatePrefix(t *testing.T) {
 	}
 	if strings.Contains(out, "\n物理状态：") {
 		t.Errorf("in-line '物理状态：' prefix should be stripped under the segment header:\n%s", out)
-	}
-}
-
-// TestBuildTactical_ToolClassNoteAfterToolList verifies the tool-class
-// explanation renders in the user message right after the 【可用工具】
-// bullets (not in the system prompt).
-func TestBuildTactical_ToolClassNoteAfterToolList(t *testing.T) {
-	actions := []protocol.CapabilityAction{
-		{Cmd: "WorkShift", Kind: "composite", Description: "工作班次"},
-	}
-	out := BuildTactical(TacticalInput{
-		Goal: "车间装配", Zone: "main_workshop", TimeOfDay: "08:00",
-		Slot: "07:00-12:00", Actions: actions, AgentID: "H-01",
-	})
-	listIdx := strings.Index(out, "【可用工具】（仅限以下 1 个）")
-	noteIdx := strings.Index(out, "工具分两类：")
-	if listIdx < 0 || noteIdx < 0 {
-		t.Fatalf("missing tool list (%d) or tool-class note (%d):\n%s", listIdx, noteIdx, out)
-	}
-	if noteIdx < listIdx {
-		t.Errorf("tool-class note should come after the tool list: list=%d note=%d", listIdx, noteIdx)
-	}
-	// system prompt 不再含类别说明。
-	sys := BuildTacticalSystemPrompt(strategicDetailKB(), nil, "H-01")
-	if strings.Contains(sys, "工具分两类") {
-		t.Errorf("system prompt should not carry the tool-class note:\n%s", sys)
 	}
 }

@@ -34,7 +34,6 @@ type TacticalInput struct {
 	Hint          string
 	Memories      string                      // Stage 4: formatted bullet list of recent memories; empty = skip segment
 	Relationships string                      // Stage 5: formatted relationship list for 【人际关系】段; empty = skip segment (single-NPC scenario)
-	Actions       []protocol.CapabilityAction // from registry.EffectiveActions(agentID); nil → builtin fallback
 	AgentID       string
 	// ObjectStatus is UE5's per-category smart object availability aggregate
 	// (cross-zone). Injected into the tactical prompt as 【物体实时占用】 so
@@ -92,15 +91,4 @@ type ReactiveInput struct {
 	DailyPlan     string // strategic daily plan summary (formatted string), empty = not generated
 	Trigger       ReactiveTrigger
 	TriggerDetail string // trigger reason detail
-}
-
-// ToolEntry is the intermediate representation for the tactical prompt's
-// tool list segment. Produced by ToolEntries, consumed by BuildTacticalToolList
-// and StrategicCapabilitySummary.
-type ToolEntry struct {
-	Name        string
-	RequiredCmd string
-	Kind        string // "atomic" | "composite"
-	Desc        string
-	Params      string
 }

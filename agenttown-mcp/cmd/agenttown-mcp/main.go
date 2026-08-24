@@ -553,8 +553,9 @@ func (a *agentContext) checkTimeToStop(agentID string, logger *slog.Logger) {
 
 // timeStopReplanHint 构造 time_to_stop 到点后注入战术层的重规划提示。
 // cmd 是 UE 命令名，params 含 semantic_group/interaction（工具名由
-// CmdToToolName 反查，便于 LLM 对照【可用工具】），durationSec 是 LLM 预设的
-// time_to_stop 时长。提示 LLM 该动作已达设定时长，不得重复下发相同长动作。
+// CmdToToolName 反查，与 function calling 的 tools 字段工具名一致），
+// durationSec 是 LLM 预设的 time_to_stop 时长。提示 LLM 该动作已达设定
+// 时长，不得重复下发相同长动作。
 func timeStopReplanHint(cmd string, params map[string]any, durationSec float64) string {
 	tool := tools.CmdToToolName(cmd)
 	if tool == "" {
@@ -574,7 +575,7 @@ func timeStopReplanHint(cmd string, params map[string]any, durationSec float64) 
 	} else {
 		sb.WriteString("，已执行一段时间")
 	}
-	sb.WriteString("。请勿再下发相同的长动作（相同 semantic_group + interaction），剩余时段请安排其他活动（读书/上网/长椅/整理/锻炼/充电等），或直接转入下一时段目标。")
+	sb.WriteString("。请勿再下发相同的长动作（相同 semantic_group + interaction），剩余时段请安排其他活动，或直接转入下一时段目标。")
 	return sb.String()
 }
 

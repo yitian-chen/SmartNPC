@@ -113,13 +113,9 @@ func generateTacticalPlan(
 	nearbyObjects []protocol.NearbyObject,
 	visibleAgents []protocol.VisibleAgent,
 ) ([]plannedAction, llmtypes.Message, error) {
-	var capActions []protocol.CapabilityAction
-	if registry != nil {
-		capActions = registry.EffectiveActions(agentID)
-	}
 	// System prompt：与战略层共享三模块（世界背景/人物背景/世界详细
-	// 信息），会话内稳定可缓存；user prompt 携带四段结构（含仅从
-	// registry 派生的可用工具清单）。
+	// 信息），会话内稳定可缓存；user prompt 携带四段结构，工具经
+	// function calling 的 tools 字段下发，不再注入 prompt 文本。
 	system := prompt.BuildTacticalSystemPrompt(kb, profiles, agentID)
 	promptText := prompt.BuildTactical(prompt.TacticalInput{
 		Goal:          goal,
@@ -133,7 +129,6 @@ func generateTacticalPlan(
 		Hint:          hint,
 		Memories:      memories,
 		Relationships: relationships,
-		Actions:       capActions,
 		AgentID:       agentID,
 		ObjectStatus:  objectStatus,
 		NearbyObjects: nearbyObjects,
@@ -215,10 +210,10 @@ func filterValidActions(actions []plannedAction, registry *CapabilityRegistry, a
 }
 
 // tacticalToolsFromRegistry 从 capability registry 派生 OpenAI function
-// calling 的 tools 数组，注入战术层请求体。工具名与 prompt【可用工具】
-// 清单一致（CmdToToolName），描述与参数 schema 来自 CapabilityAction。
-// 跳过 scan_area/stop/wait（非战术层排队工具）。registry == nil → nil
-// （UE 未连接时请求体不带 tools，与 prompt 工具清单段跳过保持一致）。
+// calling 的 tools 数组，注入战术层请求体。工具名由 CmdToToolName 生成，
+// 描述与参数 schema 来自 CapabilityAction。跳过 scan_area/stop/wait
+// （非战术层排队工具）。registry == nil → nil（UE 未连接时请求体不带
+// tools）。工具清单仅经此下发，不再注入 prompt 文本。
 func tacticalToolsFromRegistry(registry *CapabilityRegistry, agentID string) []venus.Tool {
 	if registry == nil {
 		return nil

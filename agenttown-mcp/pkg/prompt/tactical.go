@@ -5,19 +5,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/AgentTown/agenttown-mcp/adapters/agenttown/tools"
 	"github.com/AgentTown/agenttown-mcp/pkg/profile"
-	"github.com/AgentTown/agenttown-mcp/pkg/protocol"
 	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
 )
-
-// tacticalToolClassNote explains the two tool classes, rendered in the user
-// message right after the 【可用工具】 list so the explanation sits adjacent
-// to the bullets it describes.
-const tacticalToolClassNote = `工具分两类：
-- 复合动作（标记 [复合]）：长耗时、单步即可完成一段工作（如装配、充电、巡逻、聊天），会自动移动到对应位置，无需自己调用 move_to。若目标语义与某复合动作匹配，应优先使用复合动作。
-- 原子动作（标记 [原子]）：作为基本 building block。其中 move_to/speak/emote/turn_to/generic_act 是短耗时动作；InteractSmartObject（与智能物体交互）是长耗时动作——单次 interact 会持续执行直到时段切换（如在长椅上 rest、在工作台前 assemble），可作为队列收尾动作让 NPC 持续活动到下一 schedule 节点。
-仅当复合动作无法覆盖 schedule 要求时，才用原子动作组合实现；InteractSmartObject 因已是长动作，无需重复多次填充时段。`
 
 // BuildTacticalSystemPrompt constructs the tactical layer's system message.
 // It shares the strategic layer's KB/cmd-derived modules ("绝大部分相同"),
@@ -25,13 +15,13 @@ const tacticalToolClassNote = `工具分两类：
 //  1. 【世界背景】 — world overview (WorldOverview, shared with strategic).
 //  2. 【人物背景】 — the current agent's profile (AgentRole).
 //  3. 【世界详细信息】 — shared world detail core (zone descriptions +
-//     facility groups with inline per-interaction effects) plus the full
-//     tool list (all cmds with params, from the capability registry).
+//     facility groups with inline per-interaction effects).
 //
 // The decomposition rules (TacticalRules) live in the user message so they
 // sit adjacent to the decomposition ask. Per-call data (full-day plan,
 // current slot goal, realtime state, example) also lives in the user
-// message (BuildTactical).
+// message (BuildTactical). The tool list itself is NOT rendered in the
+// prompt — it is passed via the function-calling `tools` request field.
 func BuildTacticalSystemPrompt(kb *worldkb.KB, profiles map[string]*profile.Profile, agentID string) string {
 	var sb strings.Builder
 
@@ -51,16 +41,18 @@ func BuildTacticalSystemPrompt(kb *worldkb.KB, profiles map[string]*profile.Prof
 // TacticalRules is the tactical decomposition rules, injected into the user
 // message (recency effect: instructions closer to the ask are followed more
 // reliably). References to 【世界背景】/【人物背景】/【世界详细信息】 point
-// at the system message's modules; references to 【物理状态】/【可用工具】/
+// at the system message's modules; references to 【物理状态】/
 // 【附近NPC】/【物体实时占用】 point at the user message's dynamic segments.
-const TacticalRules = `1. 第一个工具调用必须是 speak（用一句话表达此刻内心想法或独白），然后才是其他工具调用，必须以长动作结尾（长复合动作 或 InteractSmartObject 原子动作均可），通过工具调用（function calling）依次返回动作，按执行顺序排列。
-3. 你可以根据当前NPC的实际属性、实际游戏时间等信息灵活安排，如果当前此条日程并不合理（例如半夜不睡觉而是跑步；电量高时去充电；所有对应的smartObject都已经占用等），鼓励按照前后的日程，自己安排其他更合理的action去做。
-2. 复合动作已包含自动移动到对应位置的逻辑，禁止在复合动作前调用 move_to——直接调用单个长复合动作即可。
-5. 仅当目标确实没有匹配的长复合动作时，才用原子动作组合实现目标。禁止把同一动作重复多次填充时段。
-6. InteractSmartObject 和复合动作的 semantic_group 必须严格使用设施详情中给出的 semantic_group 值，禁止编造、禁止用实例 id（如 Charge-1）、禁止拼接 zone/interaction 信息。
-7. 复合动作与 semantic_group 必须严格对应，禁止跨类别组合。
+// The available tools are NOT listed here — they arrive via the
+// function-calling `tools` request field.
+const TacticalRules = `1. 第一个工具调用必须是 speak（用一句话表达此刻内心想法或独白），然后才是其他工具调用，必须以长动作结尾（长复合动作 或 InteractSmartObject 原子动作均可）。
+2. 你可以根据当前NPC的实际属性、实际游戏时间等信息灵活安排，如果当前此条日程并不合理（例如半夜不睡觉而是跑步；电量高时去充电；所有对应的smartObject都已经占用等），鼓励按照前后的日程，自己安排其他更合理的action去做。
+3. 复合动作已包含自动移动到对应位置的逻辑，禁止在复合动作前调用 move_to——直接调用单个长复合动作即可。
+4. 仅当目标确实没有匹配的长复合动作时，才用原子动作组合实现目标。禁止把同一动作重复多次填充时段。
+5. InteractSmartObject 和复合动作的 semantic_group 必须严格使用设施详情中给出的 semantic_group 值，禁止编造、禁止用实例 id（如 Charge-1）、禁止拼接 zone/interaction 信息。
+6. 复合动作与 semantic_group 必须严格对应，禁止跨类别组合。
    - 补充：所有工种设备都可用 InteractSmartObject 原子动作直接工作——semantic_group 填工作设备、interaction 填对应动词即可（如 加工机 process、调试台 debug、拆解台 dismantle，以及 workbench/assemble、sorting_conveyor/sort_cargo、inspection_table/inspect）；work_shift 只是其中三类工种设备的快捷复合动作，没有复合动作的工种一律用 InteractSmartObject。
-10. 长动作可加 time_to_stop 参数（秒）设置执行时长：冥想、整理床铺等不宜执行过久的动作应设置较短时长（如 1800 秒=半小时），不应超过1小时。到点后系统会打断长动作并让你输出下一轮动作。睡眠等可自然持续到时段切换的动作可不设 time_to_stop。
+7. 长动作可加 time_to_stop 参数（秒）设置执行时长：冥想、整理床铺等不宜执行过久的动作应设置较短时长（如 1800 秒=半小时），不应超过1小时。到点后系统会打断长动作并让你输出下一轮动作。睡眠等可自然持续到时段切换的动作可不设 time_to_stop。
 8. 在work_shift工作时，也可以设置执行时长（例如先工作1小时），允许NPC在工作途中短暂在长椅小憩（不超过30分钟），然后回去继续工作`
 
 // BuildTactical constructs the tactical layer's user message, four parts:
@@ -69,8 +61,8 @@ const TacticalRules = `1. 第一个工具调用必须是 speak（用一句话表
 //  2. NPC与环境实时状态 — realtime state from the latest perception_update:
 //     zone, game time, physical state, recent memories, relationships,
 //     nearby NPCs, object occupancy, replan hint (incl. physical-alert
-//     constraints), plus the 【可用工具】 list derived solely from the
-//     capability registry (nil/empty Actions → segment skipped).
+//     constraints). Tools are NOT injected into the prompt text — they are
+//     passed via the function-calling `tools` request field instead.
 //  3. 分解规则 — TacticalRules (injected adjacent to the ask).
 //  4. 任务 — the decomposition ask + goal-specific example.
 //
@@ -79,11 +71,10 @@ func BuildTactical(in TacticalInput) string {
 	th := BandThresholdsFor(in.Profiles, in.AgentID)
 
 	var sb strings.Builder
-	sb.WriteString(`你是小镇居民 NPC 的战术规划模块。你根据系统信息中的【世界背景】【人物背景】【世界详细信息】，以及用户信息中的全天任务与当前时段任务、NPC与环境实时状态（含可用工具清单与工具类别说明）、分解规则，把当前时段目标分解为一个或多个 action，按顺序执行。
-	`)
+	sb.WriteString(`你是小镇居民 NPC 的战术规划模块。你根据系统信息中的【世界背景】【人物背景】【世界详细信息】，以及用户信息中的全天任务与当前时段任务、NPC与环境实时状态、分解规则，把当前时段目标分解为一个或多个 action，按顺序执行。\n`)
 
 	// ── 一、全天任务与当前时段任务 ──
-	sb.WriteString("[战术层/任务分解]\n一、全天任务与当前时段任务\n")
+	sb.WriteString("一、全天任务与当前时段任务\n")
 	if in.DailyPlan != "" {
 		sb.WriteString("【全天日程】\n")
 		sb.WriteString(in.DailyPlan)
@@ -138,17 +129,6 @@ func BuildTactical(in TacticalInput) string {
 		if !strings.HasSuffix(hintLine, "\n") {
 			sb.WriteString("\n")
 		}
-	}
-	// 【可用工具】：仅从 capability registry（cmd 声明）派生，紧邻规则
-	// 与 ask，让 action 名和 params 就在 LLM 输出之前。无 registry
-	// （UE 未连接）时整段跳过。
-	toolList, toolCount := BuildTacticalToolList(in.Actions)
-	if toolCount > 0 {
-		sb.WriteString(fmt.Sprintf("【可用工具】（仅限以下 %d 个）：\n", toolCount))
-		sb.WriteString(toolList)
-		sb.WriteString("\n")
-		sb.WriteString(tacticalToolClassNote)
-		sb.WriteString("\n")
 	}
 
 	// ── 三、分解规则 ──
@@ -241,90 +221,6 @@ func SlotDurationHint(slot, timeOfDay string) string {
 		return fmt.Sprintf("当前时段 %s，剩余约 %d 分钟（已过去 %d 分钟）；请让步骤总时长接近剩余时长，避免过短导致队列提前耗尽触发重分解。\n", slot, remaining, elapsed)
 	}
 	return fmt.Sprintf("当前时段 %s，约 %d 分钟；请让步骤总时长接近此时长，避免过短导致队列提前耗尽触发重分解。\n", slot, total)
-}
-
-// BuildTacticalToolList builds the tool bullet list for the prompt from
-// capability actions. Returns (joined bullet text, tool count).
-// Each line carries a [复合]/[原子] label for composite/atomic distinction.
-// actions == nil → falls back to builtin tools (backward compat).
-func BuildTacticalToolList(actions []protocol.CapabilityAction) (string, int) {
-	entries := ToolEntries(actions)
-	lines := make([]string, 0, len(entries))
-	for _, e := range entries {
-		lines = append(lines, fmt.Sprintf("- %s [%s]: %s。params: %s", e.Name, kindLabel(e.Kind), e.Desc, e.Params))
-	}
-	return strings.Join(lines, "\n"), len(entries)
-}
-
-// kindLabel maps Kind to the Chinese label; empty defaults to "原子"
-// (when new cmds are pushed without Kind, conservatively treat as atomic).
-func kindLabel(kind string) string {
-	if kind == "composite" {
-		return "复合"
-	}
-	return "原子"
-}
-
-// ToolEntries constructs the intermediate tool list representation.
-//
-// actions != nil: derives from EffectiveActions. Builtin tools' Desc/Params
-// use toolOverride; new cmds derive from CapabilityAction.Description and
-// param schema.
-//
-// actions == nil: falls back to BuiltinToolSpecs (minus scan_area/stop/wait),
-// all using toolOverride text.
-func ToolEntries(actions []protocol.CapabilityAction) []ToolEntry {
-	// 可用工具仅从 capability registry（cmd 声明）派生，不做内置兜底、
-	// 不硬编码描述——registry 缺席（UE 未连接）时返回空列表，调用方
-	// 跳过工具清单段。
-	out := make([]ToolEntry, 0, len(actions))
-	for _, act := range actions {
-		name := tools.CmdToToolName(act.Cmd)
-		if name == "scan_area" || name == "stop" || name == "wait" {
-			continue
-		}
-		entry := ToolEntry{Name: name, RequiredCmd: act.Cmd, Kind: act.Kind}
-		entry.Desc = act.Description
-		if entry.Desc == "" {
-			entry.Desc = name
-		}
-		entry.Params = toolParamHint(act.Params)
-		out = append(out, entry)
-	}
-	return out
-}
-
-// toolParamHint derives the prompt params example text from CapabilityParam list.
-// e.g. [{Name:"target_object_id",Type:"string",Required:true},{Name:"duration_sec",Type:"number"}]
-// → `{"target_object_id":"...","duration_sec":秒数}`
-func toolParamHint(params []protocol.CapabilityParam) string {
-	if len(params) == 0 {
-		return "{}"
-	}
-	parts := make([]string, 0, len(params))
-	for _, p := range params {
-		parts = append(parts, fmt.Sprintf("%s:%s", p.Name, paramPlaceholder(p)))
-	}
-	return "{" + strings.Join(parts, ",") + "}"
-}
-
-// paramPlaceholder returns the prompt placeholder text by CapabilityParam.Type.
-func paramPlaceholder(p protocol.CapabilityParam) string {
-	switch p.Type {
-	case "number":
-		return "秒数"
-	case "bool":
-		return "true|false"
-	case "vector":
-		return "[x,y,z]"
-	case "enum":
-		if len(p.EnumValues) > 0 {
-			return strings.Join(p.EnumValues, "|")
-		}
-		return "..."
-	default:
-		return "..."
-	}
 }
 
 // TacticalExample constructs the example block dynamically from KB and goal,

@@ -811,7 +811,7 @@ func (a *AgentState) BeginTacticalRefill(goal, slot string, idx int, hasTactical
 		}
 		// 注入"未安排长动作"hint
 		if a.replanHint == "" {
-			a.replanHint = "上次队列提前耗尽，未安排长动作收尾——本次请确保最后一个 action 是标记为 [复合] 的长复合动作（见上方可用工具列表），让 NPC 持续工作到下一时段"
+			a.replanHint = "上次队列提前耗尽，未安排长动作收尾——本次请确保最后一个 action 是长复合动作或 InteractSmartObject 长动作（见 function calling 的 tools 字段），让 NPC 持续工作到下一时段"
 		}
 	}
 	prep.IsRedecompose = slot == a.currentSlot
