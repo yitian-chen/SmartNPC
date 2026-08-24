@@ -45,14 +45,14 @@ func BuildTacticalSystemPrompt(kb *worldkb.KB, profiles map[string]*profile.Prof
 // 【附近NPC】/【物体实时占用】 point at the user message's dynamic segments.
 // The available tools are NOT listed here — they arrive via the
 // function-calling `tools` request field.
-const TacticalRules = `1. 第一个工具调用必须是 speak（用一句话表达此刻内心想法或独白），然后才是其他工具调用，必须以长动作结尾（长复合动作 或 InteractSmartObject 原子动作均可）。
-2. 你可以根据当前NPC的实际属性、实际游戏时间等信息灵活安排，如果当前此条日程并不合理（例如半夜不睡觉而是跑步；电量高时去充电；所有对应的smartObject都已经占用等），鼓励按照前后的日程，自己安排其他更合理的action去做。
+const TacticalRules = `1. 第一个工具调用必须是 speak（用一段话表达此刻内心想法或独白），随后可返回 1-4 个动作段，按执行顺序排列。每段是长复合动作或 InteractSmartObject 长动作，段间用 time_to_stop 控制时长；最后一段以长动作收尾（可不设 time_to_stop，自然持续到时段切换）。
+2. 你可以根据当前NPC的实际属性、实际游戏时间等信息灵活安排，如果当前此条日程并不合理（例如半夜不睡觉而是跑步；电量高时去充电；所有对应的smartObject都已经占用等），鼓励安排其他更合理的action去做。
 3. 复合动作已包含自动移动到对应位置的逻辑，禁止在复合动作前调用 move_to——直接调用单个长复合动作即可。
-4. 仅当目标确实没有匹配的长复合动作时，才用原子动作组合实现目标。禁止把同一动作重复多次填充时段。
+4. 仅当目标确实没有匹配的长复合动作时，才用原子动作组合实现目标。禁止把同一动作连续重复多次填充时段（工作段之间应穿插休息段）。
 5. InteractSmartObject 和复合动作的 semantic_group 必须严格使用设施详情中给出的 semantic_group 值，禁止编造、禁止用实例 id（如 Charge-1）、禁止拼接 zone/interaction 信息。
 6. 复合动作与 semantic_group 必须严格对应，禁止跨类别组合。
    - 补充：所有工种设备都可用 InteractSmartObject 原子动作直接工作——semantic_group 填工作设备、interaction 填对应动词即可（如 加工机 process、调试台 debug、拆解台 dismantle，以及 workbench/assemble、sorting_conveyor/sort_cargo、inspection_table/inspect）；work_shift 只是其中三类工种设备的快捷复合动作，没有复合动作的工种一律用 InteractSmartObject。
-7. 长动作可加 time_to_stop 参数（秒）设置执行时长：冥想、整理床铺等不宜执行过久的动作应设置较短时长（如 1800 秒=半小时），不应超过1小时。到点后系统会打断长动作并让你输出下一轮动作。睡眠等可自然持续到时段切换的动作可不设 time_to_stop。
+7. 长动作可加 time_to_stop 参数（秒）设置该段动作的时长：冥想、整理床铺等单段设 1800 秒左右，不宜超过 1 小时。到点后系统会打断该段并继续执行你返回的后续动作段；只有你返回的动作全部执行完，系统才会再次询问你。推荐模式：工作段（设 time_to_stop，如 1 小时）→ 长椅小憩段（设 time_to_stop，不超过 30 分钟）→ 返回工作段（不设，持续到时段结束）。睡眠等可自然持续到时段切换的动作可不设 time_to_stop。
 8. 在work_shift工作时，也可以设置执行时长（例如先工作1小时），允许NPC在工作途中短暂在长椅小憩（不超过30分钟），然后回去继续工作`
 
 // BuildTactical constructs the tactical layer's user message, four parts:
@@ -282,8 +282,12 @@ func TacticalExample(kb *worldkb.KB, goal, agentID string) string {
 		if len(obj.AvailableInteractions) > 0 {
 			verb = obj.AvailableInteractions[0]
 		}
-		return fmt.Sprintf(`{"action":"speak","params":{"content":"去工作设施开始作业"}}
-{"action":"work_shift","params":{"semantic_group":"%s","interaction":"%s"}}`, exObj, verb)
+		// 多段示例：工作段（设 time_to_stop）→ 长椅小憩段 → 返回工作段（不设，
+		// 持续到时段结束）。示范"长时间工作途中休息再回来"的推荐模式。
+		return fmt.Sprintf(`{"action":"speak","params":{"content":"先去工作设施干一阵，中途歇口气再继续"}}
+{"action":"work_shift","params":{"semantic_group":"%s","interaction":"%s","time_to_stop":3600}}
+{"action":"InteractSmartObject","params":{"semantic_group":"bench","interaction":"rest","time_to_stop":1800}}
+{"action":"work_shift","params":{"semantic_group":"%s","interaction":"%s"}}`, exObj, verb, exObj, verb)
 	case "charging_station", "charging":
 		verb := "<可用 interaction>"
 		if len(obj.AvailableInteractions) > 0 {

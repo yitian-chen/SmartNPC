@@ -1442,7 +1442,8 @@ func TestTimeStopReplanHint(t *testing.T) {
 		"semantic_group=sleep_pod",
 		"interaction=meditate",
 		"约 50 分钟",
-		"请勿再下发相同的长动作",
+		"禁止接下来立即继续执行刚才的动作",
+		"请避免连续相同长动作且中间无休息",
 	} {
 		if !strings.Contains(h, want) {
 			t.Errorf("hint missing %q: %s", want, h)
@@ -1452,5 +1453,52 @@ func TestTimeStopReplanHint(t *testing.T) {
 	h2 := timeStopReplanHint("SomeNewCmd", nil, 0)
 	if !strings.Contains(h2, "some_new_cmd") || strings.Contains(h2, "约") {
 		t.Errorf("unknown-cmd fallback hint wrong: %s", h2)
+	}
+}
+
+// TestCheckTimeToStop_KeepsQueue 验证 time_to_stop 到点后只打断当前段、
+// 保留队列与 currentSlot（多段计划 工作→小憩→工作 的核心路径）：到点后
+// in-flight 清空、pendingStop 已设、队列仍可顺序弹出下一段。
+func TestCheckTimeToStop_KeepsQueue(t *testing.T) {
+	ac, _ := newAgentContext(context.Background())
+	logger := slog.Default()
+
+	// 队列只含剩余段：当前工作段（act-work）已下发（in-flight），
+	// 队列里是 小憩段 + 返回工作段。
+	ac.as.RefillQueue([]plannedAction{
+		{Action: "InteractSmartObject", Params: map[string]any{"semantic_group": "bench", "interaction": "rest"}},
+		{Action: "work_shift", Params: map[string]any{"semantic_group": "workbench", "interaction": "assemble"}},
+	}, "09:00-12:00")
+	ac.as.RecordActionStarted("act-work", "WorkShift", map[string]any{"semantic_group": "workbench"}, agentstate.SourceTactical, "tool-1")
+	ac.as.ArmTimeStop("act-work", 40000, 3600) // target=40000
+
+	// 感知 game_time_sec=41000 > target → 到点。
+	raw := []byte(`{"environment":{"game_time_sec":41000}}`)
+	if _, err := ac.as.SetPerception(raw); err != nil {
+		t.Fatalf("SetPerception: %v", err)
+	}
+
+	ac.checkTimeToStop("H-01", logger)
+
+	if ac.as.HasInFlightAction() {
+		t.Error("HasInFlightAction = true after checkTimeToStop, want false")
+	}
+	if !ac.as.HasQueueNext() {
+		t.Error("HasQueueNext = false after checkTimeToStop, want true (queue preserved)")
+	}
+	next, pendingStop, ok := ac.as.PopActionIfIdle()
+	if !ok || next.Action != "InteractSmartObject" {
+		t.Errorf("PopActionIfIdle = (%q, ok=%v), want next segment InteractSmartObject", next.Action, ok)
+	}
+	if pendingStop != "act-work" {
+		t.Errorf("pendingStop = %q, want act-work (deferred stop for interrupted segment)", pendingStop)
+	}
+	if _, _, _, armed := ac.as.TimeStop(); armed {
+		t.Error("TimeStop still armed after checkTimeToStop, want cleared")
+	}
+	// currentSlot 保留（不触发时段切换）。
+	_, slot, _ := ac.as.SnapshotSchedule()
+	if slot != "09:00-12:00" {
+		t.Errorf("slot = %q, want 09:00-12:00 preserved", slot)
 	}
 }

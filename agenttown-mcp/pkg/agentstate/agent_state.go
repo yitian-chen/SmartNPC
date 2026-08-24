@@ -632,6 +632,45 @@ func (a *AgentState) ClearForSlotSwitch() InFlightInfo {
 	return info
 }
 
+// ClearInFlightKeepQueue clears only the in-flight action (incl. the
+// clearedAction stash), preserving the action queue, currentSlot and
+// redecompose counter. Used by time_to_stop expiry to interrupt the current
+// segment and continue with the next queued segment (multi-segment plan like
+// work → rest → work), instead of dropping the queue and re-decomposing.
+func (a *AgentState) ClearInFlightKeepQueue() InFlightInfo {
+	a.mu.Lock()
+	info := InFlightInfo{
+		ActionID:  a.currentActionID,
+		ActionCmd: a.currentActionCmd,
+		Params:    cloneParams(a.currentActionParams),
+		QueueLen:  len(a.actionQueue),
+	}
+	// 与 ClearForSlotSwitch 相同的 stash：延迟 stop 引发的
+	// action_completed(interrupted) 到达时仍能记账为完整 action_history 行。
+	if a.currentActionID != "" {
+		a.clearedAction = &clearedActionInfo{
+			ActionID:   a.currentActionID,
+			Cmd:        a.currentActionCmd,
+			Params:     a.currentActionParams,
+			Start:      a.currentActionStart,
+			Src:        a.currentActionSrc,
+			ToolCallID: a.currentActionToolCallID,
+		}
+	}
+	a.currentActionID = ""
+	a.currentActionCmd = ""
+	a.currentActionParams = nil
+	a.currentActionStart = time.Time{}
+	a.currentActionSrc = ""
+	a.currentActionToolCallID = ""
+	a.clearQueueStatusLocked()
+	// 保留 a.actionQueue、a.currentSlot、a.redecomposeCount。
+	snap := a.snapshotPersistentLocked()
+	a.mu.Unlock()
+	a.persistSchedule(snap)
+	return info
+}
+
 // ClearForReplan resets queue + in-flight + slot but preserves redecompose
 // counter semantics (caller manages). Used by tacticalRefillForReplan.
 func (a *AgentState) ClearForReplan() InFlightInfo {

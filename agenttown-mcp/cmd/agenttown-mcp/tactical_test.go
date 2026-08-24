@@ -488,10 +488,10 @@ func TestBuildTacticalPrompt_InjectsObjectStatus(t *testing.T) {
 	if !strings.Contains(promptText, "WorkBench") {
 		t.Errorf("prompt should mention nearby WorkBench, got: %s", promptText)
 	}
-	// 应包含"全部占用"相关的引导文本（新规则 3：日程不合理/设施占用时
-	// 鼓励按前后日程安排其他更合理的 action）。
+	// 应包含"全部占用"相关的引导文本（规则 2：日程不合理/设施占用时
+	// 鼓励安排其他更合理的 action）。
 	if !strings.Contains(prompt.TacticalRules, "所有对应的smartObject都已经占用") ||
-		!strings.Contains(prompt.TacticalRules, "自己安排其他更合理的action") {
+		!strings.Contains(prompt.TacticalRules, "安排其他更合理的action") {
 		t.Errorf("system prompt should guide LLM to avoid doomed occupancy actions")
 	}
 	// 所有工种设备都可用 InteractSmartObject 直接工作（process/debug/dismantle

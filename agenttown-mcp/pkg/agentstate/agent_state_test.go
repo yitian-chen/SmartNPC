@@ -364,6 +364,44 @@ func TestClearForSlotSwitch(t *testing.T) {
 	}
 }
 
+// TestClearInFlightKeepQueue verifies the time_to_stop segment-switch path:
+// in-flight action is dropped (stash saved), but the queue and currentSlot
+// are preserved so popAndSendQueueAction can continue with the next segment
+// of a multi-segment plan (work → rest → work).
+func TestClearInFlightKeepQueue(t *testing.T) {
+	a := New()
+	// 队列只含剩余段：当前工作段已下发（in-flight），队列里是 小憩段 + 返回工作段。
+	a.RefillQueue([]PlannedAction{
+		{Action: "InteractSmartObject", Params: map[string]any{"semantic_group": "bench", "interaction": "rest"}},
+		{Action: "work_shift", Params: map[string]any{"semantic_group": "workbench", "interaction": "assemble"}},
+	}, "09:00-12:00")
+	a.RecordActionStarted("act-work", "WorkShift", map[string]any{"semantic_group": "workbench"}, SourceTactical, "tool-1")
+
+	info := a.ClearInFlightKeepQueue()
+	if info.ActionID != "act-work" {
+		t.Errorf("info.ActionID = %q, want act-work", info.ActionID)
+	}
+	if info.QueueLen != 2 {
+		t.Errorf("info.QueueLen = %d, want 2 (queue preserved)", info.QueueLen)
+	}
+	if a.HasInFlightAction() {
+		t.Error("HasInFlightAction = true after ClearInFlightKeepQueue")
+	}
+	if !a.HasQueueNext() {
+		t.Error("HasQueueNext = false after ClearInFlightKeepQueue, want true (queue preserved)")
+	}
+	// 队列仍可顺序弹出剩余段：先是小憩段。
+	next, _, ok := a.PopActionIfIdle()
+	if !ok || next.Action != "InteractSmartObject" {
+		t.Errorf("PopActionIfIdle = (%q, %v), want InteractSmartObject", next.Action, ok)
+	}
+	// currentSlot 保留（仍在本时段，不发生时段切换）。
+	_, slot, _ := a.SnapshotSchedule()
+	if slot != "09:00-12:00" {
+		t.Errorf("slot = %q, want 09:00-12:00 preserved", slot)
+	}
+}
+
 // TestClearForSlotSwitch_thenCompletionRestoresStash verifies the
 // long-composite-action interrupt path: ClearForSlotSwitch drops in-flight
 // tracking (because popAndSendQueueAction will issue a deferred stop_action),
