@@ -3,6 +3,7 @@ package prompt
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/AgentTown/agenttown-mcp/pkg/profile"
@@ -170,30 +171,53 @@ func worldDetailCore(kb *worldkb.KB) string {
 			}
 		}
 	}
-	// 各区域可交互设施：按 zone 列出该区域的 semantic_group，供规划时
-	// 直接按地点选设施，避免"中央广场的跑步机"这类 zone/设施错配。
+	// 各区域可交互设施：按实例真实分布列出，跨 zone 的 semantic_group
+	//（如 bench 分布在中央广场/主生产车间/物流转运站）会在每个实际分布
+	// zone 下列出，避免"长椅只在中央广场"这类误导，供规划时直接按地点选设施。
 	if kb != nil {
 		if zs := kb.ListZones(); len(zs) > 0 {
 			if os := kb.ListObjects(); len(os) > 0 {
 				if wroteZone {
 					sb.WriteString("\n")
 				}
-				groups := groupObjectsBySemantic(os)
+				// zone → semantic_group 集合：按每个实例的 zone_id 聚合真实分布。
+				zoneGroups := make(map[string]map[string]bool, len(zs))
+				for _, o := range os {
+					if o.ZoneID == "" || o.SemanticGroup == "" {
+						continue
+					}
+					if zoneGroups[o.ZoneID] == nil {
+						zoneGroups[o.ZoneID] = make(map[string]bool)
+					}
+					zoneGroups[o.ZoneID][o.SemanticGroup] = true
+				}
+				// semantic_group → 显示名（取 group 的 DisplayName）。
+				display := make(map[string]string, len(os))
+				for _, g := range groupObjectsBySemantic(os) {
+					label := g.SemanticGroup
+					if g.DisplayName != "" && g.DisplayName != g.SemanticGroup {
+						label = fmt.Sprintf("%s（%s）", g.DisplayName, g.SemanticGroup)
+					}
+					display[g.SemanticGroup] = label
+				}
 				sb.WriteString("各区域可交互设施：\n")
 				for _, z := range zs {
-					names := make([]string, 0, 4)
-					for _, g := range groups {
-						if g.ZoneID != z.ID {
-							continue
-						}
-						if g.DisplayName != "" && g.DisplayName != g.SemanticGroup {
-							names = append(names, fmt.Sprintf("%s（%s）", g.DisplayName, g.SemanticGroup))
-						} else {
-							names = append(names, g.SemanticGroup)
-						}
-					}
-					if len(names) == 0 {
+					gs := zoneGroups[z.ID]
+					if len(gs) == 0 {
 						continue
+					}
+					keys := make([]string, 0, len(gs))
+					for k := range gs {
+						keys = append(keys, k)
+					}
+					sort.Strings(keys)
+					names := make([]string, 0, len(keys))
+					for _, k := range keys {
+						if n, ok := display[k]; ok {
+							names = append(names, n)
+						} else {
+							names = append(names, k)
+						}
 					}
 					zlabel := z.ID
 					if z.DisplayName != "" && z.DisplayName != z.ID {
@@ -268,11 +292,11 @@ func effectLookup(kb *worldkb.KB) map[string]InteractionEffect {
 const StrategicRules = `1. 输出 JSON 数组（6-8 条），每条只含 "time"（"HH:MM-HH:MM"）和 "goal"（一句话，必须是纯文本字符串），以 [ 开头 ] 结尾，不要其他文字
    - goal 用干练简洁的客观描述，只写"做什么 + 在哪"（如"主生产车间工作台装配""中央广场充电桩充电"），不带语气词、口头禅、内心独白或人设腔调
    - 人设只影响选择什么活动、如何安排时段，不影响 goal 的文字风格；说话语气留给执行时的 speak 动作表达
-2. 【硬性要求】每个时段的结束时间减去开始时间必须 ≥60 分钟（不足 60 分钟的活动要么并入相邻时段，要么不安排；午休等短暂休息也至少60分钟）；仅安排一项主要任务；连续两个时段不得任务相同
+2. 【硬性要求】每个时段的结束时间减去开始时间必须 ≥60 分钟（不足 60 分钟的活动要么并入相邻时段，要么不安排；午休等短暂休息也至少60分钟）；连续两个时段不得任务相同
 3. 规划每个时段时，先想清楚这个时段的活动用什么实现：goal 应能映射到【世界详细信息】设施详情中列出的某个 (semantic_group, interaction) 组合——不限于工种设备，睡眠舱的 sleep/meditate/tidy_up、长椅的 rest 都是合法活动，战术层会据此分解为对应的移动与长时段互动；映射不上的抽象活动（如"准备工具""巡查"）→ 换一个。锻炼类活动（晨练拉伸等原地动作）不需要设施，属例外
 4. goal 中提到的地点、人物、设备必须是系统信息中【人物背景】和【世界详细信息】里存在的，不得编造未提及的人物或设施
-5. 第一个时段必须从 07:00 开始，且任何时段的开始时间不得早于 07:00——禁止输出 0:00-7:00 这类凌晨睡觉时段（凌晨睡眠已由前一晚的跨午夜末段覆盖，不要重复安排）。首段必须是日间活动，不得安排休眠；首段不一定是工作——早间也可以安排晨练拉伸（原地锻炼，不需要特定设施）、上网、长椅放松、充电、冥想醒神、整理舱位等非工作活动，按性格与状态选择。夜间睡眠必须是一个连续的跨午夜时段：约 22:00 前后开始、次日 06:00-07:00 结束；不得拆成多个睡眠时段（禁止 20:30-22:58 睡觉 + 22:58-07:16 睡觉这样的连续两段），也不得在凌晨提前结束（禁止 23:00-01:00 这样的短睡眠段）。末段跨午夜时结束时间表示次日时刻
-6. 充电原则上仅在能量为"低电量"或疲劳为"非常疲劳"时安排；维护仅在关节磨损达到"明显磨损"及以上时安排；能量充足时优先产出性活动
+5. 第一个时段必须从 07:00 开始，且任何时段的开始时间不得早于 07:00——禁止输出 0:00-7:00 这类凌晨睡觉时段（凌晨睡眠已由前一晚的跨午夜末段覆盖，不要重复安排）。首段不一定是工作——早间也可以安排晨练拉伸（原地锻炼，不需要特定设施）、上网、长椅放松、充电、冥想醒神、整理舱位等非工作活动，按性格与状态选择。午间可以选择锻炼、长椅小憩、休眠舱午睡等非产出性活动。夜间睡眠必须是一个连续的跨午夜时段：约 22:00 前后开始、次日 06:00-07:00 结束；不得拆成多个睡眠时段（禁止 20:30-22:58 睡觉 + 22:58-07:16 睡觉这样的连续两段），也不得在凌晨提前结束（禁止 23:00-01:00 这样的短睡眠段）。末段跨午夜时结束时间表示次日时刻
+6. 充电仅在能量为"低电量"或疲劳为"非常疲劳"时安排；维护仅在关节磨损达到"明显磨损"及以上时安排；能量充足时优先产出性活动
 7. 综合用户信息中【物理状态】的四项状态调整安排侧重点：能量偏低→多充电少工作；疲劳偏高→提前休眠；磨损偏高→安排维护；余额低→多工作少花钱
 
 格式示例：[{"time":"07:00-9:00","goal":"xxx"},{"time":"9:00-12:00","goal":"xxx"}]`

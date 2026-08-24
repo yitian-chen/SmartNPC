@@ -54,6 +54,12 @@ func strategicDetailKB() *worldkb.KB {
 			// 无速率声明（仅动词列表）：交互行只列动词。
 			{ID: "legacy-1", DisplayName: "旧装置", SemanticGroup: "legacy", ZoneID: "main_workshop",
 				AvailableInteractions: []string{"poke"}},
+			// 跨 zone 的 bench：中央广场 + 主生产车间各一个实例，验证映射表
+			// 按实例真实分布列出（长椅同时出现在两个 zone）。
+			{ID: "bench-1", DisplayName: "长椅", SemanticGroup: "bench", ZoneID: "central_plaza",
+				AvailableInteractions: []string{"rest"}},
+			{ID: "bench-2", DisplayName: "长椅", SemanticGroup: "bench", ZoneID: "main_workshop",
+				AvailableInteractions: []string{"rest"}},
 		},
 		Agents: []worldkb.Agent{
 			{ID: "H-01", DisplayName: "老陈"},
@@ -116,9 +122,13 @@ func TestBuildStrategicSystemPrompt_Module3Details(t *testing.T) {
 	if !strings.Contains(got, "主生产车间（main_workshop）：小镇的生产核心") {
 		t.Errorf("module 3 missing zone description:\n%s", got)
 	}
-	// 各区域可交互设施映射表：按 zone 列出 semantic_group。
-	if !strings.Contains(got, "各区域可交互设施：\n- 主生产车间（main_workshop）：旧装置（legacy）、工作台（workbench）") {
-		t.Errorf("module 3 missing per-zone facility map for workbench:\n%s", got)
+	// 各区域可交互设施映射表：按实例真实分布列出 semantic_group，
+	// 跨 zone 的 bench 同时出现在中央广场和主生产车间。
+	if !strings.Contains(got, "- 中央广场（central_plaza）：长椅（bench）") {
+		t.Errorf("module 3 missing per-zone facility map for central_plaza bench:\n%s", got)
+	}
+	if !strings.Contains(got, "- 主生产车间（main_workshop）：长椅（bench）、旧装置（legacy）、工作台（workbench）") {
+		t.Errorf("module 3 missing cross-zone bench in main_workshop facility map:\n%s", got)
 	}
 	// 设施组 + 内联交互效果（不再带"位于"）。
 	if !strings.Contains(got, "- 工作台（workbench）：\n  - assemble：") {
