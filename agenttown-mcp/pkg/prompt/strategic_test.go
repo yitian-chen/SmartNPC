@@ -269,9 +269,9 @@ func TestStrategicUserTemplate_EndsWithFormatReminder(t *testing.T) {
 }
 
 func TestStrategicSystemPrompt_SlotDurationRuleEmphasized(t *testing.T) {
-	// 规则 2 标记为硬性要求，且说明不足 120 分钟时的处理方式（并入/不安排）。
-	if !strings.Contains(StrategicRules, "【硬性要求】每个时段的结束时间减去开始时间必须 ≥120 分钟") {
-		t.Error("system prompt rule 2 should be marked as a hard ≥120-minute requirement")
+	// 规则 2 标记为硬性要求，且说明不足 60 分钟时的处理方式（并入/不安排）。
+	if !strings.Contains(StrategicRules, "【硬性要求】每个时段的结束时间减去开始时间必须 ≥60 分钟") {
+		t.Error("system prompt rule 2 should be marked as a hard ≥60-minute requirement")
 	}
 	if !strings.Contains(StrategicRules, "并入相邻时段") {
 		t.Error("system prompt should say short activities merge into adjacent slots")

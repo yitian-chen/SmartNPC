@@ -53,23 +53,15 @@ func BuildTacticalSystemPrompt(kb *worldkb.KB, profiles map[string]*profile.Prof
 // reliably). References to 【世界背景】/【人物背景】/【世界详细信息】 point
 // at the system message's modules; references to 【物理状态】/【可用工具】/
 // 【附近NPC】/【物体实时占用】 point at the user message's dynamic segments.
-const TacticalRules = `1. 第一个工具调用必须是 speak（用一句话表达此刻内心想法或独白），然后才是其他工具调用
-2. 通过工具调用（function calling）依次返回动作，按执行顺序排列。工具名必须严格使用用户信息【可用工具】列表给出的工具名（如 work_shift / charge_at_station / rest_at_residence / surf_internet / self_maintenance / social_chat / InteractSmartObject / move_to / speak / generic_act / emote / turn_to），禁止编造、禁止近形变换（如把 work_shift 写成 work_short、rest_at_residence 写成 rest_at_composite），否则动作会被丢弃导致队列提前耗尽
-3. 每轮工具调用序列必须以长动作结尾（长复合动作 或 InteractSmartObject 原子动作均可）——你只需输出这一轮的动作，长动作会持续执行，长动作结束后（时段切换或 time_to_stop 到点）系统会再次调用你输出下一轮动作
-4. 禁止调用 wait 工具；复合动作已包含自动移动到对应位置的逻辑，禁止在复合动作前调用 move_to——直接调用单个长复合动作即可。
-5. 仅当目标确实没有匹配的长复合动作时，才用原子动作组合实现目标。长椅休息等场景用单个 InteractSmartObject 即可（InteractSmartObject 是长动作），禁止把同一动作重复多次填充时段
-6. move_to/turn_to 的 target_id 用系统信息【世界详细信息】各区域详情列出的 zone id；InteractSmartObject 和复合动作的 semantic_group 必须严格使用设施详情中给出的 semantic_group 值，禁止编造、禁止用实例 id（如 Charge-1）、禁止拼接 zone/interaction 信息
-7. 复合动作与 semantic_group 必须严格对应，禁止跨类别组合：
-   - work_shift → workbench（装配）/ sorting_conveyor（分拣）/ inspection_table（质检），interaction 用 assemble / sort_cargo / inspect
-   - charge_at_station → charger，interaction 用 charge
-   - rest_at_residence → sleep_pod（仅休眠舱），interaction 用 sleep；长椅（bench）休息不属于"在住所休息"，必须改用 InteractSmartObject 原子动作（semantic_group=bench, interaction=rest）
-   - self_maintenance → repair_table，interaction 用 repair
-   - surf_internet → computer，interaction 用 surf_internet
-   - social_chat → target_agent_id 必须严格使用用户信息中【附近NPC】列出的 NPC id（格式如 H-01），禁止用显示名（如"老王"）、禁止编造未列出的 id；content 为开场白；对话期间会自动走向对方并挂起直到对话结束
-   - 补充：所有工种设备都可用 InteractSmartObject 原子动作直接工作——semantic_group 填工作设备、interaction 填对应动词即可（如 加工机 process、调试台 debug、拆解台 dismantle，以及 workbench/assemble、sorting_conveyor/sort_cargo、inspection_table/inspect）；work_shift 只是其中三类工种设备的快捷复合动作，没有复合动作的工种一律用 InteractSmartObject
-8. 必须通过工具调用（function calling）输出动作序列，不要输出纯文本 JSON、JSON 数组或 markdown 围栏；不要输出 inner_thought 字段，内心独白直接用首个 speak 工具调用表达
-9. 若用户信息中【物体实时占用】显示目标 semantic_group 全部占用，必须改用其他空闲 semantic_group 或先安排 generic_act(behavior=look_around) 短暂等待，禁止规划必然失败的占用动作
-10. 长动作可加 time_to_stop 参数（秒）设置执行时长：冥想、整理床铺、上网等不宜执行过久的动作应设置较短时长（如 1800 秒=半小时），到点后系统会打断长动作并让你输出下一轮动作。工作、睡眠等可自然持续到时段切换的动作可不设 time_to_stop`
+const TacticalRules = `1. 第一个工具调用必须是 speak（用一句话表达此刻内心想法或独白），然后才是其他工具调用，必须以长动作结尾（长复合动作 或 InteractSmartObject 原子动作均可），通过工具调用（function calling）依次返回动作，按执行顺序排列。
+3. 你可以根据当前NPC的实际属性、实际游戏时间等信息灵活安排，如果当前此条日程并不合理（例如半夜不睡觉而是跑步；电量高时去充电；所有对应的smartObject都已经占用等），鼓励按照前后的日程，自己安排其他更合理的action去做。
+2. 复合动作已包含自动移动到对应位置的逻辑，禁止在复合动作前调用 move_to——直接调用单个长复合动作即可。
+5. 仅当目标确实没有匹配的长复合动作时，才用原子动作组合实现目标。禁止把同一动作重复多次填充时段。
+6. InteractSmartObject 和复合动作的 semantic_group 必须严格使用设施详情中给出的 semantic_group 值，禁止编造、禁止用实例 id（如 Charge-1）、禁止拼接 zone/interaction 信息。
+7. 复合动作与 semantic_group 必须严格对应，禁止跨类别组合。
+   - 补充：所有工种设备都可用 InteractSmartObject 原子动作直接工作——semantic_group 填工作设备、interaction 填对应动词即可（如 加工机 process、调试台 debug、拆解台 dismantle，以及 workbench/assemble、sorting_conveyor/sort_cargo、inspection_table/inspect）；work_shift 只是其中三类工种设备的快捷复合动作，没有复合动作的工种一律用 InteractSmartObject。
+10. 长动作可加 time_to_stop 参数（秒）设置执行时长：冥想、整理床铺等不宜执行过久的动作应设置较短时长（如 1800 秒=半小时），不应超过1小时。到点后系统会打断长动作并让你输出下一轮动作。睡眠等可自然持续到时段切换的动作可不设 time_to_stop。
+8. 在work_shift工作时，也可以设置执行时长（例如先工作1小时），允许NPC在工作途中短暂在长椅小憩（不超过30分钟），然后回去继续工作`
 
 // BuildTactical constructs the tactical layer's user message, four parts:
 //  1. 全天任务与当前时段任务 — full-day schedule + current slot goal +
