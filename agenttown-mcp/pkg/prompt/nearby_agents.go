@@ -25,9 +25,9 @@ func NearbyAgentsLine(agents []protocol.VisibleAgent) string {
 	sb.WriteString("【附近NPC】\n")
 	for _, a := range agents {
 		if a.CurrentAction != "" {
-			fmt.Fprintf(&sb, "- %s（id=%s）距离 %.0f 米，当前：%s\n", a.Name, a.ID, a.Distance, a.CurrentAction)
+			fmt.Fprintf(&sb, "- %s（id=%s）距离 %.0f 米，当前：%s\n", a.Name, a.ID, a.Distance/100, a.CurrentAction)
 		} else {
-			fmt.Fprintf(&sb, "- %s（id=%s）距离 %.0f 米\n", a.Name, a.ID, a.Distance)
+			fmt.Fprintf(&sb, "- %s（id=%s）距离 %.0f 米\n", a.Name, a.ID, a.Distance/100)
 		}
 	}
 	return strings.TrimSuffix(sb.String(), "\n")

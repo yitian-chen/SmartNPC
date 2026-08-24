@@ -73,11 +73,7 @@ func DefaultDailyPlan(kb *worldkb.KB) string {
 // back to the hardcoded fallback fields.
 func BuildStrategicSystemPrompt(kb *worldkb.KB, profiles map[string]*profile.Profile, agentID string) string {
 	var sb strings.Builder
-	sb.WriteString(`你是小镇居民 NPC 的战略规划模块。每天清晨 07:00，你根据系统信息中的【世界背景】【人物背景】【世界详细信息】，以及用户信息中的今日日程、物理状态、昨日总结与规划要求，规划当天 07:00 到次日 07:00 的活动安排。
 
-各活动对属性的每小时影响幅度见系统信息【世界详细信息】各设施的属性变动说明（由 world KB 声明生成）。规划时请综合权衡：产出性活动（工作）赚取余额但消耗体力、缓慢积攒关节磨损；恢复性活动（充电/维护/休息）花余额但延续工作能力。避免长时间连续工作导致体力耗尽，也避免频繁恢复导致余额入不敷出。
-
-`)
 	if m1 := WorldOverview(kb); m1 != "" {
 		sb.WriteString("【世界背景】\n")
 		sb.WriteString(m1)
@@ -179,7 +175,7 @@ func worldDetailCore(kb *worldkb.KB) string {
 			if wroteZone {
 				sb.WriteString("\n")
 			}
-			sb.WriteString("设施详情（按 semantic_group 分类，含交互功能与每游戏小时属性变动，来自 world KB 声明）：\n")
+			sb.WriteString("设施详情（这些设施均为SmartObject，均附带有可交互的一个或多个interaction列在后面，可进行调用）：\n")
 			effects := effectLookup(kb)
 			for _, g := range groupObjectsBySemantic(os) {
 				label := g.SemanticGroup
@@ -275,6 +271,12 @@ func BuildStrategicUserContext(agentID string, profiles map[string]*profile.Prof
 	// 【今日日程】段：每周日程上下文（星期几 + 工作日/休息日 + 当日提示）。
 	// dayContext 由调用方通过 weeklyschedule.WeeklyLine(dayCount, sched) 预格式化，
 	// pkg/prompt 不依赖 weeklyschedule 包（解耦）。空串=禁用或 dayCount<0，跳过。
+	sb.WriteString(`你是小镇居民 NPC 的战略规划模块。每天清晨 07:00，你根据系统信息中的【世界背景】【人物背景】【世界详细信息】，以及用户信息中的今日日程、物理状态、昨日总结与规划要求，规划当天 07:00 到次日 07:00 的活动安排。
+
+各活动对属性的每小时影响幅度见系统信息【世界详细信息】各设施的属性变动说明（由 world KB 声明生成）。规划时请综合权衡：产出性活动（工作）赚取余额但消耗体力、缓慢积攒关节磨损；恢复性活动（充电/维护/休息）花余额但延续工作能力。避免长时间连续工作导致体力耗尽，也避免频繁恢复导致余额入不敷出。
+
+`)
+
 	if dayContext != "" {
 		sb.WriteString("【今日日程】\n")
 		sb.WriteString(dayContext)

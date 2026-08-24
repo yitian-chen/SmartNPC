@@ -117,8 +117,8 @@ func TestNearbyAgentsLine(t *testing.T) {
 
 	// Non-empty → header + bullets.
 	agents := []protocol.VisibleAgent{
-		{ID: "H-02", Name: "老王", Distance: 4.2, CurrentAction: "idle"},
-		{ID: "H-05", Name: "老张", Distance: 9.8, CurrentAction: ""},
+		{ID: "H-02", Name: "老王", Distance: 420, CurrentAction: "idle"},
+		{ID: "H-05", Name: "老张", Distance: 980, CurrentAction: ""},
 	}
 	got := NearbyAgentsLine(agents)
 	if !strings.Contains(got, "【附近NPC】") {

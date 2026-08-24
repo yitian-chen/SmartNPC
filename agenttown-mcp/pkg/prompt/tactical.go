@@ -34,9 +34,7 @@ const tacticalToolClassNote = `工具分两类：
 // message (BuildTactical).
 func BuildTacticalSystemPrompt(kb *worldkb.KB, profiles map[string]*profile.Profile, agentID string) string {
 	var sb strings.Builder
-	sb.WriteString(`你是小镇居民 NPC 的战术规划模块。你根据系统信息中的【世界背景】【人物背景】【世界详细信息】，以及用户信息中的全天任务与当前时段任务、NPC与环境实时状态（含可用工具清单与工具类别说明）、分解规则，把当前时段目标分解为一个或多个 action，按顺序执行。
 
-`)
 	if m1 := WorldOverview(kb); m1 != "" {
 		sb.WriteString("【世界背景】\n")
 		sb.WriteString(m1)
@@ -88,8 +86,11 @@ const TacticalRules = `1. 第一个工具调用必须是 speak（用一句话表
 func BuildTactical(in TacticalInput) string {
 	th := BandThresholdsFor(in.Profiles, in.AgentID)
 
-	// ── 一、全天任务与当前时段任务 ──
 	var sb strings.Builder
+	sb.WriteString(`你是小镇居民 NPC 的战术规划模块。你根据系统信息中的【世界背景】【人物背景】【世界详细信息】，以及用户信息中的全天任务与当前时段任务、NPC与环境实时状态（含可用工具清单与工具类别说明）、分解规则，把当前时段目标分解为一个或多个 action，按顺序执行。
+	`)
+
+	// ── 一、全天任务与当前时段任务 ──
 	sb.WriteString("[战术层/任务分解]\n一、全天任务与当前时段任务\n")
 	if in.DailyPlan != "" {
 		sb.WriteString("【全天日程】\n")
