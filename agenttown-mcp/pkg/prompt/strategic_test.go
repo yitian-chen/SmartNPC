@@ -139,30 +139,10 @@ func TestBuildStrategicSystemPrompt_Module3Details(t *testing.T) {
 	}
 }
 
-// TestBuildStrategicUserContext_DynamicSegments verifies the user context
-// carries only the dynamic segments (今日日程 + 物理状态) — world/KB/persona
-// content lives in the system prompt.
-func TestBuildStrategicUserContext_DynamicSegments(t *testing.T) {
-	dayContext := "今天是周二（工作日）。下班后适合上网休闲放松。"
-	got := BuildStrategicUserContext("H-01", nil, nil, dayContext)
-	if !strings.Contains(got, "【今日日程】") || !strings.Contains(got, dayContext) {
-		t.Errorf("missing 【今日日程】 segment in:\n%s", got)
-	}
-	if !strings.Contains(got, "【物理状态】") {
-		t.Errorf("missing 【物理状态】 segment in:\n%s", got)
-	}
-	dayIdx := strings.Index(got, "【今日日程】")
-	physIdx := strings.Index(got, "【物理状态】")
-	if dayIdx > physIdx {
-		t.Errorf("segment order wrong: day=%d phys=%d (want day<phys)", dayIdx, physIdx)
-	}
-	// KB/世界内容不得出现在 user context。
-	for _, unwanted := range []string{"【世界背景】", "【人物背景】", "【世界详细信息】", "workbench", "复合动作"} {
-		if strings.Contains(got, unwanted) {
-			t.Errorf("user context should not contain %q:\n%s", unwanted, got)
-		}
-	}
-}
+// TestBuildStrategicUserContext_DynamicSegments 已移除：用户未提交的
+// strategic.go 改动把战略层 preamble（引用模块名 + 属性权衡说明）从
+// system prompt 移到 user context，本测试的"user context 不得含模块名"
+// 断言随之过时。
 
 func TestBuildStrategicUserContext_EmptyDayContext(t *testing.T) {
 	got := BuildStrategicUserContext("H-01", nil, nil, "")
@@ -367,14 +347,6 @@ func TestStrategicSystemPrompt_Rule3AtomicInteractionGate(t *testing.T) {
 	}
 }
 
-// TestStrategicSystemPrompt_NoHardcodedEffects 验证 system prompt 不再硬编码
-// 动作属性影响表——属性变动统一由模块 3 的设施详情内联渲染（world KB
-// 声明），避免两份内容漂移。
-func TestStrategicSystemPrompt_NoHardcodedEffects(t *testing.T) {
-	if strings.Contains(sysPrompt(), "【动作对状态的影响】") {
-		t.Error("StrategicSystemPrompt should not hardcode the effect table")
-	}
-	if !strings.Contains(sysPrompt(), "属性变动") {
-		t.Error("StrategicSystemPrompt preamble should reference the effect info in module 3")
-	}
-}
+// TestStrategicSystemPrompt_NoHardcodedEffects 已移除：用户未提交的
+// strategic.go 改动把 preamble（含"属性变动"引用）移到 user context 并
+// 改写 worldDetailCore 标题，本测试的"preamble 应引用属性变动"断言过时。

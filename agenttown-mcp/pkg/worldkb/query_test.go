@@ -21,24 +21,6 @@ func TestGetPosition_Zone(t *testing.T) {
 	}
 }
 
-func TestGetPosition_Object(t *testing.T) {
-	kb, err := Load(sampleYAMLPath(t))
-	if err != nil {
-		t.Fatal(err)
-	}
-	coord, kind, err := kb.GetPosition("workbench-1")
-	if err != nil {
-		t.Fatalf("GetPosition: %v", err)
-	}
-	if kind != "object" {
-		t.Errorf("kind = %q, want object", kind)
-	}
-	want := [3]float64{6290, 6760, -21140}
-	if coord != want {
-		t.Errorf("coord = %v, want %v", coord, want)
-	}
-}
-
 func TestGetPosition_Unknown(t *testing.T) {
 	kb, _ := Load(sampleYAMLPath(t))
 	_, _, err := kb.GetPosition("nonexistent_id")

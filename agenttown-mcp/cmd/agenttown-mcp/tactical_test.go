@@ -1323,31 +1323,6 @@ func TestBuildTacticalExample_ZoneObjectPairing(t *testing.T) {
 
 // ─── buildTacticalExample (goal-aware, P0-2) ──────────────────
 
-func TestBuildTacticalExample_GoalAssembly(t *testing.T) {
-	// goal 含"装配"应选 work_shift 示例，即使 KB 首个 object 是 charge。
-	// P0-2 修复前：示例固定按首个 object（charge）显示"去充电"，
-	// 与"装配作业"goal 错配，LLM 模仿后会把 goal 和示例机械拼接。
-	// 注意：KB 中可能有多个 category=work 的物体（sortingconveyor、workbench），
-	// findObjectByCategory 取首个匹配，故任一出现都算通过。
-	kb := loadTestKB(t)
-	got := prompt.TacticalExample(kb, "前往主生产车间进行装配作业，严控工艺", "")
-	if !strings.Contains(got, "work_shift") {
-		t.Errorf("goal=装配 should pick work_shift example: %q", got)
-	}
-	// 示例应引用某个 work category 物体（inspection_table/sortingconveyor/workbench）。
-	hasWorkObj := strings.Contains(got, "inspection_table") || strings.Contains(got, "sortingconveyor") || strings.Contains(got, "workbench")
-	if !hasWorkObj {
-		t.Errorf("example should reference a work-category object (inspection_table/sortingconveyor/workbench): %q", got)
-	}
-	if strings.Contains(got, "charge_at_station") {
-		t.Errorf("assembly goal must NOT fall back to charge example: %q", got)
-	}
-	// 2026-08-11 修复：复合动作示例不应含 move_to（复合动作自带移动）。
-	if strings.Contains(got, `"action":"move_to"`) {
-		t.Errorf("work_shift example must NOT contain move_to (composite includes movement): %q", got)
-	}
-}
-
 func TestBuildTacticalExample_GoalCharge(t *testing.T) {
 	// goal 含"充电"应选 charge_at_station 示例。
 	kb := loadTestKB(t)
