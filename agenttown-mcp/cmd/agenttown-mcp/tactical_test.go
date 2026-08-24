@@ -382,8 +382,8 @@ func TestBuildTacticalPrompt_NilPhysical(t *testing.T) {
 	if !strings.Contains(promptText, "物理状态") {
 		t.Errorf("prompt should contain '物理状态' with default values for nil physical, got: %s", promptText)
 	}
-	if !strings.Contains(promptText, "电量 很高") {
-		t.Errorf("prompt should contain default band 电量 很高 for nil physical, got: %s", promptText)
+	if !strings.Contains(promptText, "电量 高") {
+		t.Errorf("prompt should contain default band 电量 高 for nil physical, got: %s", promptText)
 	}
 	// slot 为空时不应有时长提示行
 	if strings.Contains(promptText, "请让步骤总时长接近此时长") {
@@ -398,8 +398,8 @@ func TestBuildTacticalPrompt_ZeroPhysical(t *testing.T) {
 	if !strings.Contains(promptText, "物理状态") {
 		t.Errorf("prompt should contain '物理状态' with default values for all-zero physical, got: %s", promptText)
 	}
-	if !strings.Contains(promptText, "电量 很高") {
-		t.Errorf("prompt should contain default band 电量 很高 for all-zero physical, got: %s", promptText)
+	if !strings.Contains(promptText, "电量 高") {
+		t.Errorf("prompt should contain default band 电量 高 for all-zero physical, got: %s", promptText)
 	}
 }
 

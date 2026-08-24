@@ -91,9 +91,9 @@ func (b BandThresholds) JointWearAlert() float64 { return b.JointWear[2] }
 // the thresholds vary.
 var (
 	// 2026-08-24 电量分档标签：最高档"充足"改称"很高"（"能量 充足"→"电量 很高"）。
-	energyBandLabels    = [4]string{"低电量", "偏低", "中等", "很高"}
-	fatigueBandLabels   = [4]string{"精神饱满", "轻度疲劳", "疲劳", "非常疲劳"}
-	jointWearBandLabels = [4]string{"良好", "轻微磨损", "明显磨损", "严重磨损"}
+	energyBandLabels    = [4]string{"低", "较低", "中等", "高"}
+	fatigueBandLabels   = [4]string{"精神饱满", "轻度疲劳", "中度疲劳", "非常疲劳"}
+	jointWearBandLabels = [4]string{"未有磨损", "轻微磨损", "明显磨损", "严重磨损"}
 )
 
 // bandOf maps a value to its band index 0-3 given 3 ascending thresholds.
