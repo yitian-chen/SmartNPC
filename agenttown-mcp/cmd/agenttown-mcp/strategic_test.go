@@ -604,6 +604,33 @@ func TestNormalizeDailyPlan_NoMergeSleepVsOtherInteractions(t *testing.T) {
 	}
 }
 
+// TestNormalizeDailyPlan_NoMergeRunBeforeSleep 验证睡眠语义合并不会把居住区
+// 跑步锻炼与后续睡眠合并（实测 H-05 首日：跑步段 20:00-22:00 被误合并进
+// 睡眠段，变成跨午夜的"跑步锻炼"时段，睡眠被吞掉）。
+func TestNormalizeDailyPlan_NoMergeRunBeforeSleep(t *testing.T) {
+	items := []dailyPlanItem{
+		{Time: "07:00-20:00", Goal: "白天活动"},
+		{Time: "20:00-22:00", Goal: "休眠舱居住区跑步机跑步锻炼"},
+		{Time: "22:00-07:00", Goal: "休眠舱睡眠"},
+	}
+	got := normalizeDailyPlan(items)
+	if len(got) != 3 {
+		t.Fatalf("got %d items, want 3 (run and sleep must not merge): %+v", len(got), got)
+	}
+	if got[1].Goal != "休眠舱居住区跑步机跑步锻炼" {
+		t.Errorf("run slot goal lost: %q", got[1].Goal)
+	}
+	if got[1].Time != "20:00-22:00" {
+		t.Errorf("run slot = %q, want 20:00-22:00", got[1].Time)
+	}
+	if got[2].Goal != "休眠舱睡眠" {
+		t.Errorf("sleep slot goal lost: %q", got[2].Goal)
+	}
+	if got[2].Time != "22:00-07:00" {
+		t.Errorf("sleep slot = %q, want 22:00-07:00", got[2].Time)
+	}
+}
+
 // TestIsSleepSlotGoal 表驱动验证睡眠类 goal 判定。
 func TestIsSleepSlotGoal(t *testing.T) {
 	cases := []struct {
@@ -616,6 +643,9 @@ func TestIsSleepSlotGoal(t *testing.T) {
 		{"回舱睡觉", true},
 		{"休眠舱居住区睡眠舱冥想", false},
 		{"休眠舱居住区睡眠舱整理内务", false},
+		{"休眠舱居住区跑步机跑步锻炼", false}, // 实测 H-05：地点词"休眠舱"自带"休眠"，不得误判为睡眠
+		{"睡眠舱晨跑锻炼", false},
+		{"休眠舱居住区睡眠舱睡眠", true},
 		{"中央广场长椅休息", false},
 		{"档案馆电脑上网浏览", false},
 		{"中央广场充电桩充电", false},

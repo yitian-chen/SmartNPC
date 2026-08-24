@@ -265,27 +265,35 @@ func normalizeDailyPlan(items []dailyPlanItem) []dailyPlanItem {
 // LLM 拆分夜间睡眠时常用不同措辞（休息/睡眠/睡觉/休眠），字面比对
 // 无法合并。判定规则：
 //   - 排除词：冥想/整理（同为 sleep_pod 交互但不是睡眠）、长椅/广场
-//     （bench 休息）、上网/充电（居住区其他活动）
+//     （bench 休息）、上网/充电、跑步/锻炼/运动（居住区锻炼类活动）
 //   - 语境词：睡眠舱/休眠舱/居住区/住所/回舱（落在居住区）
 //   - 活动词：睡/休息/休眠/歇
+//
+// 注意：语境词本身自带睡眠动词（"休眠舱"含"休眠"、"睡眠舱"含"睡"），
+// 活动词判定前必须先把语境词从 goal 里剔除，否则"休眠舱居住区跑步机
+// 跑步锻炼"会被误判为睡眠，导致 normalizeDailyPlan 把跑步段与后续睡眠段
+// 错误合并（实测 H-05 计划"跑步锻炼"被扩展成跨午夜段、睡眠被吞掉）。
 func isSleepSlotGoal(goal string) bool {
-	for _, ex := range []string{"冥想", "整理", "长椅", "广场", "上网", "充电"} {
+	for _, ex := range []string{"冥想", "整理", "长椅", "广场", "上网", "充电",
+		"跑步", "跑步机", "锻炼", "运动", "健身"} {
 		if strings.Contains(goal, ex) {
 			return false
 		}
 	}
 	loc := false
+	rest := goal
 	for _, l := range []string{"睡眠舱", "休眠舱", "居住区", "住所", "回舱"} {
-		if strings.Contains(goal, l) {
+		if strings.Contains(rest, l) {
 			loc = true
-			break
+			rest = strings.ReplaceAll(rest, l, "")
 		}
 	}
 	if !loc {
 		return false
 	}
+	rest = strings.TrimSpace(rest)
 	for _, v := range []string{"睡", "休息", "休眠", "歇"} {
-		if strings.Contains(goal, v) {
+		if strings.Contains(rest, v) {
 			return true
 		}
 	}
