@@ -42,6 +42,20 @@ type ToolFunction struct {
 	Arguments string `json:"arguments"`
 }
 
+// Message is one entry in a multi-turn conversation (agentic loop). The
+// tactical layer accumulates these to carry context across LLM rounds:
+//   - role=system:   the stable mechanism/instruction preamble
+//   - role=user:     per-round dynamic state (physical/time/nearby NPCs)
+//   - role=assistant: an LLM reply (may carry ToolCalls)
+//   - role=tool:     the execution result of a tool call, keyed by
+//     ToolCallID matching the assistant's ToolCalls[].ID
+type Message struct {
+	Role       string     `json:"role"`
+	Content    string     `json:"content,omitempty"`
+	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string     `json:"tool_call_id,omitempty"`
+}
+
 // Block is one entry in Response.Output.
 type Block struct {
 	Type    string    `json:"type"`

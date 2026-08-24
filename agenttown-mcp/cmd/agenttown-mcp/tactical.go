@@ -91,14 +91,14 @@ func physicalAlertOverrideGoal(hint, origGoal string, physical *protocol.Physica
 	}
 }
 
-// generateTacticalPlan 调战术层 LLM 分解当前时段 goal（非流式路径）。
-// 返回分解出的 action 列表。
+// generateTacticalPlan 调战术层 LLM 分解当前时段 goal（非流式，多轮）。
+// conversation 是此前累积的对话历史（system 由本函数重建并置于最前）。
+// 返回分解出的 action 段 + assistant 消息（调用方 append 回 conversation）。
 // 任一步失败返回 err，调用方决定回退兜底。
-// 复用 llmClient 接口（venus.Client 已满足），请求体带 function calling
-// tools（从 capability registry 派生）。
 func generateTacticalPlan(
 	ctx context.Context,
 	tc llmClient,
+	conversation []llmtypes.Message,
 	agentID string,
 	goal, zone, timeOfDay, slot, dailyPlan string,
 	physical *protocol.PhysicalState,
@@ -112,7 +112,7 @@ func generateTacticalPlan(
 	objectStatus map[string]protocol.ObjectCategoryStatus,
 	nearbyObjects []protocol.NearbyObject,
 	visibleAgents []protocol.VisibleAgent,
-) ([]plannedAction, error) {
+) ([]plannedAction, llmtypes.Message, error) {
 	var capActions []protocol.CapabilityAction
 	if registry != nil {
 		capActions = registry.EffectiveActions(agentID)
@@ -141,14 +141,20 @@ func generateTacticalPlan(
 	})
 	logger.Info("[MCP→LLM/TACTICAL-PROMPT]",
 		"agent_id", agentID, "goal", goal, "game_time", timeOfDay, "text", promptText,
-		"replan_hint", hint)
+		"replan_hint", hint, "history_turns", len(conversation))
 	// 实际 prompt 文档：每次仿真留存 H-01 首次战术层 prompt（system+user+tools）。
 	ftools := tacticalToolsFromRegistry(registry, agentID)
 	dumpPromptDoc(agentID, "tactical", system, promptText, ftools, logger)
 
-	resp, err := tc.SendWithSummaryTools(ctx, system, promptText, ftools)
+	// 多轮 messages：[system, ...历史, user(最新实时状态)]。
+	messages := make([]llmtypes.Message, 0, len(conversation)+2)
+	messages = append(messages, llmtypes.Message{Role: "system", Content: system})
+	messages = append(messages, conversation...)
+	messages = append(messages, llmtypes.Message{Role: "user", Content: promptText})
+
+	resp, err := tc.SendMessagesTools(ctx, messages, ftools)
 	if err != nil {
-		return nil, fmt.Errorf("tactical llm: %w", err)
+		return nil, llmtypes.Message{}, fmt.Errorf("tactical llm: %w", err)
 	}
 	tc.ResetSession() // 战术调用一次性，立即清链（与战略层一致）
 
@@ -158,105 +164,18 @@ func generateTacticalPlan(
 		"tool_calls", len(resp.ToolCalls))
 
 	if len(resp.ToolCalls) == 0 {
-		return nil, fmt.Errorf("tactical plan has no tool calls (raw=%s)", truncateText(raw, 200))
+		return nil, llmtypes.Message{}, fmt.Errorf("tactical plan has no tool calls (raw=%s)", truncateText(raw, 200))
 	}
 	actions := parseToolCalls(resp.ToolCalls, registry, agentID)
 	if len(actions) == 0 {
-		return nil, fmt.Errorf("tactical plan has no actions (raw=%s)", truncateText(raw, 200))
+		return nil, llmtypes.Message{}, fmt.Errorf("tactical plan has no actions (raw=%s)", truncateText(raw, 200))
 	}
 	actionsJSON, _ := json.Marshal(actions)
 	logger.Info("[战术层] 分解成功",
 		"agent_id", agentID, "steps", len(actions),
 		"actions", string(actionsJSON))
-	return actions, nil
-}
-
-// generateTacticalPlanStreaming 是 generateTacticalPlan 的流式版本：
-// 调 LLM 客户端 SendStreamingTools 边接收边增量累积 tool_calls，每完成
-// 一个 tool_call 即解析为 action 并调 onAction 回调，使调用方能在首动作
-// 到达时立即下发，将首动作体感延迟降至秒级。
-//
-// 走 llmClient 接口（venus.Client 实现），请求体带 function calling tools。
-func generateTacticalPlanStreaming(
-	ctx context.Context,
-	tc llmClient,
-	agentID, goal, zone, timeOfDay, slot, dailyPlan string,
-	physical *protocol.PhysicalState,
-	kb *worldkb.KB,
-	profiles map[string]*profile.Profile,
-	logger *slog.Logger,
-	hint string,
-	memories string,
-	relationships string,
-	registry *CapabilityRegistry,
-	objectStatus map[string]protocol.ObjectCategoryStatus,
-	nearbyObjects []protocol.NearbyObject,
-	visibleAgents []protocol.VisibleAgent,
-	onAction func(plannedAction),
-) ([]plannedAction, error) {
-	var capActions []protocol.CapabilityAction
-	if registry != nil {
-		capActions = registry.EffectiveActions(agentID)
-	}
-	// System prompt：与战略层共享三模块（会话内稳定可缓存）；user prompt
-	// 携带四段结构（含仅从 registry 派生的可用工具清单）。
-	system := prompt.BuildTacticalSystemPrompt(kb, profiles, agentID)
-	promptText := prompt.BuildTactical(prompt.TacticalInput{
-		Goal:          goal,
-		Zone:          zone,
-		TimeOfDay:     timeOfDay,
-		Slot:          slot,
-		DailyPlan:     dailyPlan,
-		Physical:      physical,
-		KB:            kb,
-		Profiles:      profiles,
-		Hint:          hint,
-		Memories:      memories,
-		Relationships: relationships,
-		Actions:       capActions,
-		AgentID:       agentID,
-		ObjectStatus:  objectStatus,
-		NearbyObjects: nearbyObjects,
-		VisibleAgents: visibleAgents,
-	})
-	logger.Info("[MCP→LLM/TACTICAL-PROMPT]",
-		"agent_id", agentID, "goal", goal, "game_time", timeOfDay, "text", promptText,
-		"streaming", true, "replan_hint", hint)
-	// 实际 prompt 文档：每次仿真留存 H-01 首次战术层 prompt（system+user+tools）。
-	ftools := tacticalToolsFromRegistry(registry, agentID)
-	dumpPromptDoc(agentID, "tactical", system, promptText, ftools, logger)
-
-	var actions []plannedAction
-	onToolCall := func(tc llmtypes.ToolCall) {
-		for _, pa := range parseToolCalls([]llmtypes.ToolCall{tc}, registry, agentID) {
-			actions = append(actions, pa)
-			if onAction != nil {
-				onAction(pa)
-			}
-		}
-	}
-
-	resp, err := tc.SendStreamingTools(ctx, system, promptText, ftools, nil, onToolCall)
-	if err != nil {
-		logger.Warn("[LLM→MCP/TACTICAL-STREAM] stream error, keeping actions already parsed",
-			"agent_id", agentID, "parsed_actions", len(actions), "err", err)
-		return actions, fmt.Errorf("tactical llm stream: %w", err)
-	}
-	tc.ResetSession()
-
-	raw := resp.ExtractText()
-	logger.Info("[LLM→MCP/TACTICAL-RESPONSE]",
-		"agent_id", agentID, "tokens", resp.Usage.TotalTokens, "raw_len", len(raw), "raw", raw,
-		"streaming", true, "tool_calls", len(resp.ToolCalls))
-
-	if len(actions) == 0 {
-		return nil, fmt.Errorf("tactical plan has no tool calls (raw=%s)", truncateText(raw, 200))
-	}
-	actionsJSON, _ := json.Marshal(actions)
-	logger.Info("[战术层] 分解成功",
-		"agent_id", agentID, "steps", len(actions),
-		"actions", string(actionsJSON))
-	return actions, nil
+	assistant := llmtypes.Message{Role: "assistant", Content: raw, ToolCalls: resp.ToolCalls}
+	return actions, assistant, nil
 }
 
 // parseToolCalls 把 LLM 返回的 tool_calls 解析为 plannedAction 队列。
@@ -278,7 +197,7 @@ func parseToolCalls(tcs []llmtypes.ToolCall, registry *CapabilityRegistry, agent
 				continue // arguments 不是合法 JSON，跳过该工具调用
 			}
 		}
-		actions = append(actions, plannedAction{Action: name, Params: params})
+		actions = append(actions, plannedAction{Action: name, Params: params, ToolCallID: tc.ID})
 	}
 	return filterValidActions(actions, registry, agentID)
 }
@@ -330,6 +249,7 @@ func tacticalToolsFromRegistry(registry *CapabilityRegistry, agentID string) []v
 // capabilityParamsSchema 把 CapabilityParam 列表转成 function calling 的
 // parameters JSON Schema（object 类型）。不包含 MCP 侧 meta 字段
 // （agent_id/decision_epoch）——function calling 的参数就是 UE cmd 的参数。
+// 额外追加一个可选的 time_to_stop（秒，MCP 侧控制字段，长动作定时终止）。
 func capabilityParamsSchema(params []protocol.CapabilityParam) json.RawMessage {
 	props := map[string]any{}
 	required := make([]string, 0, len(params))
@@ -345,6 +265,11 @@ func capabilityParamsSchema(params []protocol.CapabilityParam) json.RawMessage {
 		if p.Required {
 			required = append(required, p.Name)
 		}
+	}
+	// time_to_stop：长动作定时终止（MCP 侧轮询 game_time，不传 UE）。可选。
+	props["time_to_stop"] = map[string]any{
+		"type":        "number",
+		"description": "长动作执行时长（秒），到点后系统打断该动作并进入下一轮；冥想/整理/上网等宜设较短时长（如 1800），工作/睡眠可不设",
 	}
 	schema := map[string]any{
 		"type":       "object",

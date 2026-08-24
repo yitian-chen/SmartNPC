@@ -525,7 +525,7 @@ func TestReactiveRunner_BuildInput(t *testing.T) {
 		t.Fatalf("SetPerception: %v", err)
 	}
 	ac.as.SetPhysicalState(&protocol.PhysicalState{Energy: 18, Fatigue: 85, JointWear: 20}, nil)
-	ac.as.RecordActionStarted("act_001", protocol.CmdWorkShift, map[string]any{"semantic_group": "workbench_01", "interaction": "assemble"}, agentstate.SourceTactical)
+	ac.as.RecordActionStarted("act_001", protocol.CmdWorkShift, map[string]any{"semantic_group": "workbench_01", "interaction": "assemble"}, agentstate.SourceTactical, "")
 
 	in := r.buildInput("H-01", ac, TriggerPhysicalAlert, "energy 22→18")
 	if in.AgentID != "H-01" {

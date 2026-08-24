@@ -223,6 +223,19 @@ func (a *agentContext) recordActionCompletion(completion protocol.ActionComplete
 	// Stage 5: 异步触发关系更新判断（Ollama 5s 超时，不阻塞主路径）。
 	if res.WasInFlight {
 		a.recordActionHistory(completion, res)
+		// 多轮对话：把动作执行结果作为 tool role 回填会话历史（关联
+		// assistant.tool_calls[].ID），供下一轮 LLM 参考。
+		if res.ToolCallID != "" {
+			content := fmt.Sprintf("result=%s duration_ms=%d", completion.Result, completion.DurationMs)
+			if completion.Reason != "" {
+				content += fmt.Sprintf(" reason=%s", completion.Reason)
+			}
+			a.as.AppendConversationMessage(llmtypes.Message{
+				Role:       "tool",
+				Content:    content,
+				ToolCallID: res.ToolCallID,
+			})
+		}
 		// Phase 2 Module C: social_chat 走对话 runner 自己的关系增长路径，
 		// 跳过 Ollama 的 maybeUpdateRelationship 判断（避免双重 bump）。
 		if res.Cmd != protocol.CmdSocialChat {
@@ -491,6 +504,42 @@ func (a *agentContext) advanceSlotIfNeeded(ws *wsserver.Server, agentID string, 
 	a.signal()
 }
 
+// checkTimeToStop 轮询长动作的 time_to_stop：动作设了 time_to_stop 且权威
+// game_time 到达目标时刻时，标记 pendingStop（延迟到下次下发前补发 stop，避免
+// NPC 呆站）+ 清队列/in-flight，signal 触发下一轮战术层 LLM。
+func (a *agentContext) checkTimeToStop(agentID string, logger *slog.Logger) {
+	target, actionID, armed := a.as.TimeStop()
+	if !armed {
+		return
+	}
+	// 动作已结束（completion 已到），time_to_stop 失效。
+	if a.as.CurrentActionID() != actionID {
+		a.as.ClearTimeStop()
+		return
+	}
+	now := a.as.LatestGameTimeSec()
+	if now <= 0 || now < target {
+		return
+	}
+	info := a.as.ClearForSlotSwitch()
+	if info.ActionCmd != "" && isCompositeCmdDynamic(info.ActionCmd, capabilityRegistryRef) {
+		a.as.SetPendingStopActionID(actionID)
+	}
+	// 取消旧 action 超时 timer（若有）
+	if actionID != "" {
+		a.coordMu.Lock()
+		if timer, ok := a.pendingActionTimeouts[actionID]; ok {
+			timer.Stop()
+			delete(a.pendingActionTimeouts, actionID)
+		}
+		a.coordMu.Unlock()
+	}
+	a.as.ClearTimeStop()
+	logger.Info("[战术层] time_to_stop 到点，打断长动作进入下一轮",
+		"agent_id", agentID, "action_id", actionID, "game_time", now, "target", target)
+	a.signal()
+}
+
 // recordEventNotification 处理环境事件通知。反应层：返回 trigger 信息供
 // message handler 异步触发 reactiveRunner。环境事件不打断战术队列——
 // reactiveRunner 决策若为 replan 才会发 stop_action。
@@ -533,7 +582,7 @@ func (a *agentContext) stop() {
 	cancel()
 }
 
-func (a *agentContext) recordActionStarted(actionID, cmd string, params map[string]any, decisionEpoch int64, src actionSource) {
+func (a *agentContext) recordActionStarted(actionID, cmd string, params map[string]any, decisionEpoch int64, src actionSource, toolCallID string) {
 	_ = decisionEpoch // 反应层移除后不再记录到 recentActions，保留参数兼容调用方
 	// 竞态处理：超短动作（如 Speak, 4ms）的 ACK 和 action_completed 可能在
 	// 同一批 WS 消息中到达。read loop 按顺序处理，completion 在本函数之前
@@ -555,7 +604,7 @@ func (a *agentContext) recordActionStarted(actionID, cmd string, params map[stri
 	}
 	a.coordMu.Unlock()
 
-	a.as.RecordActionStarted(actionID, cmd, params, src)
+	a.as.RecordActionStarted(actionID, cmd, params, src, toolCallID)
 
 	// TOCTOU 兜底：completion 可能在上面检查和 RecordActionStarted 之间到达。
 	// 此时 currentActionID 刚被设置但 completion 已以 wasInFlight=false 跑过。
@@ -639,6 +688,9 @@ func runPerceptionWorker(
 		// 这是长复合动作的唯一打断路径（它们不设超时）。
 		ac.advanceSlotIfNeeded(ws, agentID, logger)
 
+		// time_to_stop 检测：长动作设了执行时长且 game_time 到点 → 打断进入下一轮。
+		ac.checkTimeToStop(agentID, logger)
+
 		// 多日循环：检测 day_count 递增（跨日），重新调用战略层生成新一天的 dailyPlan。
 		// 通常在 06:00-07:00 规划窗口内触发（selectCurrentGoal 已屏蔽战术层分解，
 		// NPC 仍在执行夜间睡眠 composite）。仅替换 dailyPlan，不打断在途睡眠——
@@ -658,6 +710,9 @@ func runPerceptionWorker(
 				// 由 advanceSlotIfNeeded 打断后走 tacticalRefill 选新计划 slot。
 				// currentDay 已由 detectDayRollover 更新为 newDay。
 				ac.as.SetDailyPlan(plan, newDay)
+				// 跨日清空多轮对话历史：每个游戏日一份独立会话。
+				ac.as.ClearConversation()
+				ac.as.ClearTimeStop()
 			}
 		}
 
@@ -766,7 +821,7 @@ func (g *guardedExecutor) SendAction(ctx context.Context, agentID string, decisi
 	}
 	ack, err := g.ws.SendAction(ctx, agentID, cmd, params, shouldAutoQueue(cmd))
 	if err == nil && ack != nil {
-		ac.recordActionStarted(ack.ActionID, cmd, params, decisionEpoch, sourceTool)
+		ac.recordActionStarted(ack.ActionID, cmd, params, decisionEpoch, sourceTool, "")
 		// 长复合动作不设超时：它们持续执行直到下一 schedule 时段切换
 		// （advanceSlotIfNeeded 主动 stop + 重规划），自己不会超时。
 		// 用动态判断兜底 UE5 新推送的复合 cmd（如 WorkShift/SelfMaintenance）。
@@ -1001,6 +1056,10 @@ func (a *agentContext) popAndSendQueueAction(ctx context.Context, agentID string
 		return
 	}
 
+	// time_to_stop 是 MCP 侧控制字段（长动作定时终止），不传给 UE。
+	tts, hasTTS := numericParam(pa.Params["time_to_stop"])
+	delete(params, "time_to_stop")
+
 	logger.Info("[战术层] 下发 action", "agent_id", agentID, "action", pa.Action, "cmd", cmd, "queue_left", a.queueLen())
 	ack, err := ws.SendAction(ctx, agentID, cmd, params, shouldAutoQueue(cmd))
 	if err != nil {
@@ -1020,7 +1079,15 @@ func (a *agentContext) popAndSendQueueAction(ctx context.Context, agentID string
 	}
 	if ack != nil {
 		// 复用现有记账 + 超时机制；source=tactical 让 completion 走队列路径
-		a.recordActionStarted(ack.ActionID, cmd, params, 0 /*无 decision_epoch*/, sourceTactical)
+		a.recordActionStarted(ack.ActionID, cmd, params, 0 /*无 decision_epoch*/, sourceTactical, pa.ToolCallID)
+		// time_to_stop：长动作设了执行时长，记下目标 game_time 供 checkTimeToStop 轮询。
+		if hasTTS && tts > 0 {
+			if start := a.as.LatestGameTimeSec(); start > 0 {
+				a.as.ArmTimeStop(ack.ActionID, start+tts)
+				logger.Info("[战术层] 长动作已设 time_to_stop",
+					"agent_id", agentID, "action_id", ack.ActionID, "duration_sec", tts, "target_game_time", start+tts)
+			}
+		}
 		// 长复合动作不设超时：持续执行到下一 schedule 时段切换由
 		// advanceSlotIfNeeded 主动打断，自己不会超时。
 		// 用动态判断兜底 UE5 新推送的复合 cmd（如 WorkShift/SelfMaintenance）。
@@ -1031,12 +1098,27 @@ func (a *agentContext) popAndSendQueueAction(ctx context.Context, agentID string
 	}
 }
 
-// tacticalStreamingEnabled controls whether tacticalRefill uses streaming LLM
-// calls (generateTacticalPlanStreaming) or non-streaming (generateTacticalPlan).
-// Set from --tactical-stream flag. Default false: streaming only helps when the
-// upstream LLM emits tokens incrementally; if it buffers the full response
-// (DeepSeek peak-hour queueing behavior), streaming adds SSE overhead with no
-// latency benefit.
+// numericParam 把 LLM 参数值（JSON 反序列化后 float64）提取为 float64。
+// 兼容 int/float64；非法或非数值返回 (0, false)。
+func numericParam(v any) (float64, bool) {
+	switch n := v.(type) {
+	case float64:
+		return n, true
+	case int:
+		return float64(n), true
+	case int64:
+		return float64(n), true
+	case json.Number:
+		f, err := n.Float64()
+		return f, err == nil
+	default:
+		return 0, false
+	}
+}
+
+// tacticalStreamingEnabled 已废弃：多轮对话（agentic loop）下战术层统一走
+// 非流式 SendMessagesTools，每轮输出很短，流式的首动作提前下发收益不再明显。
+// --tactical-stream flag 仍保留以兼容启动命令，但不再驱动任何逻辑分支。
 var tacticalStreamingEnabled bool
 
 // autoPlanEnabled 是自动规划总开关，由 --auto-plan flag 解引用设置。
@@ -1062,6 +1144,7 @@ type llmClient interface {
 	SendWithSchema(ctx context.Context, system, user, schemaName string, schema []byte) (*llmtypes.Response, error)
 	SendWithSummaryTools(ctx context.Context, system, user string, tools []venus.Tool) (*llmtypes.Response, error)
 	SendStreamingTools(ctx context.Context, system, user string, tools []venus.Tool, onDelta func(string), onToolCall func(llmtypes.ToolCall)) (*llmtypes.Response, error)
+	SendMessagesTools(ctx context.Context, messages []llmtypes.Message, tools []venus.Tool) (*llmtypes.Response, error)
 	ResetSession()
 }
 
@@ -1163,24 +1246,13 @@ func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
 	tacticalCtx, tacticalCancel := context.WithTimeout(ctx, tacticalCallTimeout)
 	defer tacticalCancel()
 
-	if tacticalStreamingEnabled {
-		// 流式路径：onAction 回调逐个入队 + 首 action 提前下发。
-		_, err = generateTacticalPlanStreaming(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, plan, physical, kbRef, profiles, logger, hint, memories, relationships, capabilityRegistryRef, a.as.LatestObjectStatus(), a.as.LatestNearbyObjects(), a.as.LatestVisibleAgents(),
-			func(pa plannedAction) {
-				a.as.AppendQueueAction(pa)
-				if a.as.ShouldDispatchFirst() {
-					logger.Info("[战术层] 流式下发首 action", "agent_id", agentID, "action", pa.Action)
-					a.popAndSendQueueAction(ctx, agentID, ws, kb, logger)
-				}
-			},
-		)
-	} else {
-		// 非流式路径（默认）：等完整响应后一次性填充队列。
-		actions, err = generateTacticalPlan(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, plan, physical, kbRef, profiles, logger, hint, memories, relationships, capabilityRegistryRef, a.as.LatestObjectStatus(), a.as.LatestNearbyObjects(), a.as.LatestVisibleAgents())
-		if err == nil {
-			a.as.ReplaceQueue(actions)
-		}
-	}
+	// 多轮对话：读会话历史，每轮生成一段（以长动作结尾），append assistant。
+	conversation := a.as.Conversation()
+
+	actions, assistant, err := generateTacticalPlan(tacticalCtx, tacticalHc, conversation,
+		agentID, goal, zone, a.latestTimeOfDay(), slot, plan, physical, kbRef, profiles, logger,
+		hint, memories, relationships, capabilityRegistryRef,
+		a.as.LatestObjectStatus(), a.as.LatestNearbyObjects(), a.as.LatestVisibleAgents())
 
 	// 3. LLM 调用结束后的记账（流式/非流式共用）
 	if err != nil {
@@ -1189,6 +1261,9 @@ func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
 			"agent_id", agentID, "queued", queued, "err", err)
 		return false
 	}
+	a.as.ReplaceQueue(actions)
+	// append assistant（含 tool_calls）到会话历史，供下一轮 LLM 参考。
+	a.as.AppendConversationMessage(assistant)
 	a.as.CommitTacticalRefill(slot, idx, prep.IsRedecompose)
 	queueLen := a.as.QueueLen()
 	redecomposeCount := a.as.RedecomposeCountSnapshot()
@@ -1266,21 +1341,12 @@ func (a *agentContext) tacticalRefillForReplan(
 	var actions []plannedAction
 	var err error
 
-	if tacticalStreamingEnabled {
-		// 流式路径：回调收集到 local slice（不直接修改 a.actionQueue），
-		// 成功后才覆盖旧队列。失败则旧队列不受影响。
-		var collected []plannedAction
-		_, err = generateTacticalPlanStreaming(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, dailyPlan, physical, kbRef, profiles, logger, hint, memories, relationships, capabilityRegistryRef, a.as.LatestObjectStatus(), a.as.LatestNearbyObjects(), a.as.LatestVisibleAgents(),
-			func(pa plannedAction) {
-				collected = append(collected, pa)
-			},
-		)
-		if err == nil {
-			actions = collected
-		}
-	} else {
-		actions, err = generateTacticalPlan(tacticalCtx, tacticalHc, agentID, goal, zone, a.latestTimeOfDay(), slot, dailyPlan, physical, kbRef, profiles, logger, hint, memories, relationships, capabilityRegistryRef, a.as.LatestObjectStatus(), a.as.LatestNearbyObjects(), a.as.LatestVisibleAgents())
-	}
+	// 多轮对话：replan 也携带会话历史，让 LLM 看到此前动作与结果。
+	conversation := a.as.Conversation()
+	actions, assistant, err := generateTacticalPlan(tacticalCtx, tacticalHc, conversation,
+		agentID, goal, zone, a.latestTimeOfDay(), slot, dailyPlan, physical, kbRef, profiles, logger,
+		hint, memories, relationships, capabilityRegistryRef,
+		a.as.LatestObjectStatus(), a.as.LatestNearbyObjects(), a.as.LatestVisibleAgents())
 
 	// 3. 失败处理：保留旧队列（不清空），调用方保持原 action
 	if err != nil {
@@ -1291,6 +1357,7 @@ func (a *agentContext) tacticalRefillForReplan(
 	}
 
 	// 4. 成功：原子完成——覆盖旧队列、重置计数、清 hint、signal worker
+	a.as.AppendConversationMessage(assistant)
 	a.as.CommitReplan(actions, slot, idx)
 	queueLen := a.as.QueueLen()
 	queuedActions := a.as.QueueSnapshot()
@@ -2418,8 +2485,8 @@ func handleDebugSchedule(ctx context.Context, logger *slog.Logger, ws *wsserver.
 	tacticalCtx, tacticalCancel := context.WithTimeout(ctx, tacticalCallTimeout)
 	defer tacticalCancel()
 
-	actions, err := generateTacticalPlan(
-		tacticalCtx, tacticalHc, req.AgentID,
+	actions, assistant, err := generateTacticalPlan(
+		tacticalCtx, tacticalHc, ac.as.Conversation(), req.AgentID,
 		goal, zone, timeOfDay, slot, "", physical, kb, nil, logger, "", "", "", capabilityRegistryRef, nil, nil, nil,
 	)
 	if err != nil {
@@ -2431,6 +2498,7 @@ func handleDebugSchedule(ctx context.Context, logger *slog.Logger, ws *wsserver.
 		})
 		return
 	}
+	ac.as.AppendConversationMessage(assistant)
 
 	// 入队 + 记账。currentSlot 加 "__debug__" 前缀避免与 dailyPlan 同时段撞
 	// redecomposeCount >= 1 限制，保证 worker 下次 refill 必走"新时段"重置路径，

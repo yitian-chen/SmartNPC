@@ -29,7 +29,7 @@ func setQueueForTest(ac *agentContext, actions []plannedAction) {
 func TestRecordActionCompletion_SignalsWorkerAndClearsInFlight(t *testing.T) {
 	ac, _ := newAgentContext(context.Background())
 
-	ac.as.RecordActionStarted("act_t1", "", nil, agentstate.SourceTactical)
+	ac.as.RecordActionStarted("act_t1", "", nil, agentstate.SourceTactical, "")
 
 	// 排空 wake 通道
 	select {
@@ -127,7 +127,7 @@ func TestRecordActionCompletion_FailureSetsReplanHint(t *testing.T) {
 	// 模拟战术层下发的 work_shift（被 UE 拒绝，因为工作台被占用）
 	ac.as.RecordActionStarted("act_workbench_fail", "work_shift",
 		map[string]any{"semantic_group": "workbench", "interaction": "assemble"},
-		agentstate.SourceTactical)
+		agentstate.SourceTactical, "")
 
 	ac.recordActionCompletion(protocol.ActionCompletedPayload{
 		ActionID: "act_workbench_fail",
@@ -169,7 +169,7 @@ func TestRecordActionCompletion_TooTiredHintGuidesRest(t *testing.T) {
 	ac, _ := newAgentContext(context.Background())
 	ac.as.RecordActionStarted("act_too_tired", "work_shift",
 		map[string]any{"semantic_group": "workbench", "interaction": "assemble"},
-		agentstate.SourceTactical)
+		agentstate.SourceTactical, "")
 
 	ac.recordActionCompletion(protocol.ActionCompletedPayload{
 		ActionID: "act_too_tired",
@@ -215,7 +215,7 @@ func TestRecordActionCompletion_SuccessNoReplanHint(t *testing.T) {
 	ac, _ := newAgentContext(context.Background())
 	ac.as.RecordActionStarted("act_work_ok", "work_shift",
 		map[string]any{"semantic_group": "workbench", "interaction": "assemble"},
-		agentstate.SourceTactical)
+		agentstate.SourceTactical, "")
 	ac.recordActionCompletion(protocol.ActionCompletedPayload{
 		ActionID: "act_work_ok",
 		Result:   protocol.ResultSuccess,
@@ -309,7 +309,7 @@ func TestPopAndSendQueueAction_RefillOnBusyRejection(t *testing.T) {
 func TestRecordActionStarted_SetsSource(t *testing.T) {
 	ac, _ := newAgentContext(context.Background())
 
-	ac.recordActionStarted("act_1", "MoveTo", map[string]any{"target": "main_workshop"}, 1, sourceTactical)
+	ac.recordActionStarted("act_1", "MoveTo", map[string]any{"target": "main_workshop"}, 1, sourceTactical, "")
 	snap := ac.as.Snapshot()
 	if snap.CurrentActionSrc != sourceTactical {
 		t.Fatalf("currentActionSrc=%q, want tactical", snap.CurrentActionSrc)
@@ -318,7 +318,7 @@ func TestRecordActionStarted_SetsSource(t *testing.T) {
 		t.Fatalf("currentActionID=%q, want act_1", snap.CurrentActionID)
 	}
 
-	ac.recordActionStarted("act_2", "Wait", map[string]any{"duration_sec": 30}, 2, sourceTool)
+	ac.recordActionStarted("act_2", "Wait", map[string]any{"duration_sec": 30}, 2, sourceTool, "")
 	snap = ac.as.Snapshot()
 	if snap.CurrentActionSrc != sourceTool {
 		t.Fatalf("currentActionSrc=%q, want mcp_tool", snap.CurrentActionSrc)
@@ -357,7 +357,7 @@ func TestRecordActionStarted_CompletionAlreadyArrived(t *testing.T) {
 
 	// Now recordActionStarted is called (ACK was delivered, caller proceeds).
 	// This must NOT set currentActionID — the action already completed.
-	ac.recordActionStarted("act_short", "Speak", map[string]any{"content": "hi"}, 1, sourceTactical)
+	ac.recordActionStarted("act_short", "Speak", map[string]any{"content": "hi"}, 1, sourceTactical, "")
 
 	snap := ac.as.Snapshot()
 	if snap.CurrentActionID != "" {
@@ -398,7 +398,7 @@ func TestRecordActionStarted_TOCTOU_Recovery(t *testing.T) {
 	// check would have passed. Since we can't easily inject into the middle
 	// of recordActionStarted, we test ClearInFlightAction directly — the
 	// TOCTOU recovery primitive that recordActionStarted calls.
-	ac.as.RecordActionStarted("act_race", "Speak", map[string]any{"content": "x"}, agentstate.SourceTactical)
+	ac.as.RecordActionStarted("act_race", "Speak", map[string]any{"content": "x"}, agentstate.SourceTactical, "")
 	if !ac.as.HasInFlightAction() {
 		t.Fatal("precondition: should have in-flight action")
 	}
@@ -447,8 +447,8 @@ func TestAdvanceSlotIfNeeded_DelayedStopForComposite(t *testing.T) {
 	logger := slog.Default()
 
 	ac.as.RefillQueue([]plannedAction{{Action: "wait", Params: map[string]any{"duration_sec": 30}}}, "08:00-10:00")
-	ac.as.RecordActionStarted("act_composite_1", "WorkShift", nil, agentstate.SourceTactical) // 内置硬编码复合 cmd
-	setGameTimeForTest(t, ac, "10:05")                                                        // 已过 slot 结束 10:00
+	ac.as.RecordActionStarted("act_composite_1", "WorkShift", nil, agentstate.SourceTactical, "") // 内置硬编码复合 cmd
+	setGameTimeForTest(t, ac, "10:05")                                                            // 已过 slot 结束 10:00
 
 	ac.advanceSlotIfNeeded(ws, "H-01", logger)
 
@@ -481,7 +481,7 @@ func TestAdvanceSlotIfNeeded_NoPendingStopForAtomicAction(t *testing.T) {
 	logger := slog.Default()
 
 	ac.as.RefillQueue(nil, "08:00-10:00")
-	ac.as.RecordActionStarted("act_speak_1", "Speak", nil, agentstate.SourceTactical) // 原子动作
+	ac.as.RecordActionStarted("act_speak_1", "Speak", nil, agentstate.SourceTactical, "") // 原子动作
 	setGameTimeForTest(t, ac, "10:05")
 
 	ac.advanceSlotIfNeeded(ws, "H-01", logger)

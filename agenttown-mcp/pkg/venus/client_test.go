@@ -441,6 +441,51 @@ func TestSendWithSummaryTools_ParsesToolCalls(t *testing.T) {
 	}
 }
 
+// TestSendMessagesTools_SerializesMultiTurn verifies SendMessagesTools sends
+// the full messages array (including assistant tool_calls and tool role with
+// tool_call_id) in order.
+func TestSendMessagesTools_SerializesMultiTurn(t *testing.T) {
+	var capturedRequest request
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&capturedRequest)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"x","choices":[{"message":{"role":"assistant","content":"","tool_calls":[{"id":"call_9","type":"function","function":{"name":"speak","arguments":"{}"}}]}}],"usage":{}}`))
+	}))
+	defer server.Close()
+
+	c := newTestClient(t, server.URL)
+	messages := []llmtypes.Message{
+		{Role: "system", Content: "sys"},
+		{Role: "user", Content: "round1"},
+		{Role: "assistant", Content: "", ToolCalls: []llmtypes.ToolCall{
+			{ID: "call_1", Type: "function", Function: llmtypes.ToolFunction{Name: "move_to", Arguments: `{"target_id":"z"}`}},
+		}},
+		{Role: "tool", Content: "result=success", ToolCallID: "call_1"},
+		{Role: "user", Content: "round2"},
+	}
+	resp, err := c.SendMessagesTools(context.Background(), messages, []Tool{{Type: "function", Function: ToolFunction{Name: "speak"}}})
+	if err != nil {
+		t.Fatalf("SendMessagesTools: %v", err)
+	}
+	if len(capturedRequest.Messages) != 5 {
+		t.Fatalf("messages len = %d, want 5", len(capturedRequest.Messages))
+	}
+	if capturedRequest.Messages[0].Role != "system" || capturedRequest.Messages[0].Content != "sys" {
+		t.Errorf("messages[0] = %+v", capturedRequest.Messages[0])
+	}
+	asst := capturedRequest.Messages[2]
+	if asst.Role != "assistant" || len(asst.ToolCalls) != 1 || asst.ToolCalls[0].ID != "call_1" {
+		t.Errorf("messages[2] assistant tool_calls = %+v", asst)
+	}
+	toolMsg := capturedRequest.Messages[3]
+	if toolMsg.Role != "tool" || toolMsg.ToolCallID != "call_1" || toolMsg.Content != "result=success" {
+		t.Errorf("messages[3] tool = %+v", toolMsg)
+	}
+	if len(resp.ToolCalls) != 1 || resp.ToolCalls[0].ID != "call_9" {
+		t.Errorf("resp.ToolCalls = %+v", resp.ToolCalls)
+	}
+}
+
 // TestSendStreamingTools_AccumulatesToolCalls verifies streamed delta.tool_calls
 // are accumulated by index and delivered via onToolCall once complete.
 func TestSendStreamingTools_AccumulatesToolCalls(t *testing.T) {

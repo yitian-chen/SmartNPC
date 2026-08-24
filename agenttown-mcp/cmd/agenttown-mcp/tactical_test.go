@@ -308,7 +308,7 @@ func makeToolCallResponse(tcs []llmtypes.ToolCall) *llmtypes.Response {
 
 func TestGenerateTacticalPlan_HTTPError(t *testing.T) {
 	tc := &fakeStrategicCaller{err: errors.New("network down")}
-	actions, err := generateTacticalPlan(context.Background(), tc, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", "07:00-09:00: 上午准备\n09:00-12:00: 车间装配", &protocol.PhysicalState{Energy: 80, Fatigue: 20, JointWear: 10}, nil, nil, slog.Default(), "", "", "", nil, nil, nil, nil)
+	actions, _, err := generateTacticalPlan(context.Background(), tc, nil, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", "07:00-09:00: 上午准备\n09:00-12:00: 车间装配", &protocol.PhysicalState{Energy: 80, Fatigue: 20, JointWear: 10}, nil, nil, slog.Default(), "", "", "", nil, nil, nil, nil)
 	if err == nil {
 		t.Fatal("expected error on HTTP failure")
 	}
@@ -326,7 +326,7 @@ func TestGenerateTacticalPlan_ValidResponse(t *testing.T) {
 		{Function: llmtypes.ToolFunction{Name: "move_to", Arguments: `{"target_type":"zone","target_id":"main_workshop"}`}},
 		{Function: llmtypes.ToolFunction{Name: "work_shift", Arguments: `{"semantic_group":"workbench_01","interaction":"assemble"}`}},
 	})}
-	actions, err := generateTacticalPlan(context.Background(), tc, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", "07:00-09:00: 上午准备\n09:00-12:00: 车间装配", &protocol.PhysicalState{Energy: 80, Fatigue: 20, JointWear: 10}, nil, nil, slog.Default(), "", "", "", nil, nil, nil, nil)
+	actions, _, err := generateTacticalPlan(context.Background(), tc, nil, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", "07:00-09:00: 上午准备\n09:00-12:00: 车间装配", &protocol.PhysicalState{Energy: 80, Fatigue: 20, JointWear: 10}, nil, nil, slog.Default(), "", "", "", nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -346,7 +346,7 @@ func TestGenerateTacticalPlan_ValidResponse(t *testing.T) {
 
 func TestGenerateTacticalPlan_NoToolCalls(t *testing.T) {
 	tc := &fakeStrategicCaller{resp: makeStrategicResponse("我今天打算去车间转转。")}
-	if _, err := generateTacticalPlan(context.Background(), tc, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", "07:00-09:00: 上午准备\n09:00-12:00: 车间装配", nil, nil, nil, slog.Default(), "", "", "", nil, nil, nil, nil); err == nil {
+	if _, _, err := generateTacticalPlan(context.Background(), tc, nil, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", "07:00-09:00: 上午准备\n09:00-12:00: 车间装配", nil, nil, nil, slog.Default(), "", "", "", nil, nil, nil, nil); err == nil {
 		t.Fatal("expected error when no tool calls returned")
 	}
 }
@@ -355,7 +355,7 @@ func TestGenerateTacticalPlan_AllFiltered(t *testing.T) {
 	tc := &fakeStrategicCaller{resp: makeToolCallResponse([]llmtypes.ToolCall{
 		{Function: llmtypes.ToolFunction{Name: "scan_area", Arguments: `{}`}},
 	})}
-	if _, err := generateTacticalPlan(context.Background(), tc, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", "07:00-09:00: 上午准备\n09:00-12:00: 车间装配", nil, nil, nil, slog.Default(), "", "", "", nil, nil, nil, nil); err == nil {
+	if _, _, err := generateTacticalPlan(context.Background(), tc, nil, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", "07:00-09:00: 上午准备\n09:00-12:00: 车间装配", nil, nil, nil, slog.Default(), "", "", "", nil, nil, nil, nil); err == nil {
 		t.Fatal("expected error when all tool calls filtered out")
 	}
 }
@@ -364,7 +364,7 @@ func TestGenerateTacticalPlan_ResetSessionCalled(t *testing.T) {
 	tc := &fakeStrategicCaller{resp: makeToolCallResponse([]llmtypes.ToolCall{
 		{Function: llmtypes.ToolFunction{Name: "speak", Arguments: `{"content":"开始"}`}},
 	})}
-	_, _ = generateTacticalPlan(context.Background(), tc, "H-01", "等待", "main_workshop", "09:00", "09:00-12:00", "", nil, nil, nil, slog.Default(), "", "", "", nil, nil, nil, nil)
+	_, _, _ = generateTacticalPlan(context.Background(), tc, nil, "H-01", "等待", "main_workshop", "09:00", "09:00-12:00", "", nil, nil, nil, slog.Default(), "", "", "", nil, nil, nil, nil)
 	if !tc.resetCalled {
 		t.Error("ResetSession should be called after successful tactical generation")
 	}

@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/AgentTown/agenttown-mcp/pkg/llmtypes"
 	"github.com/AgentTown/agenttown-mcp/pkg/protocol"
 	"github.com/AgentTown/agenttown-mcp/pkg/storage"
 )
@@ -35,9 +36,9 @@ type AgentState struct {
 	currentSlot      string // "HH:MM-HH:MM" or "__debug__"-prefixed
 
 	// Transient fields (in-process, not persisted)
-	online              bool
-	latestPhysical      *protocol.PhysicalState
-	latestPerception    json.RawMessage
+	online           bool
+	latestPhysical   *protocol.PhysicalState
+	latestPerception json.RawMessage
 	// latestVisibleAgents is the visible-NPC list from the latest
 	// perception_update (Phase 2 Module C). UE pushes visible_agents on
 	// every perception; MCP injects this into the tactical prompt as
@@ -50,6 +51,10 @@ type AgentState struct {
 	currentActionParams map[string]any
 	currentActionStart  time.Time
 	currentActionSrc    ActionSource
+	// currentActionToolCallID is the assistant tool_calls[].ID that produced
+	// the in-flight action (multi-turn conversation). Empty for hand-built
+	// actions (debug path). Cleared alongside currentActionID.
+	currentActionToolCallID string
 	// Queue state (约定21): when an auto_queue=true action targets an
 	// occupied Smart Object, UE queues the agent and notifies via
 	// action_queued. These fields track the latest queue status so the
@@ -72,24 +77,34 @@ type AgentState struct {
 	// so callers (recordActionHistory) still record the full action row
 	// for long-composite actions interrupted by slot switch or replan
 	// fallback. One-shot: matched → cleared. Overwritten by next clear.
-	clearedAction *clearedActionInfo
-	prevZone      string
-	prevObjectIDs []string
-	lastReactiveAt      map[string]time.Time
-	perceptionCount     int
-	replanHint          string
-	lastReplanAt        time.Time
-	lastReplanGameTime  string
+	clearedAction      *clearedActionInfo
+	prevZone           string
+	prevObjectIDs      []string
+	lastReactiveAt     map[string]time.Time
+	perceptionCount    int
+	replanHint         string
+	lastReplanAt       time.Time
+	lastReplanGameTime string
+	// conversation is the multi-turn tactical dialogue history (system/
+	// user/assistant/tool messages). Cleared once per game day (on day
+	// rollover). In-process only, not persisted.
+	conversation []llmtypes.Message
+	// timeStopTargetGameSec is the target authoritative game_time (GameTimeSec)
+	// at which the current long action's time_to_stop should fire; -1 = no
+	// time_to_stop armed. timeStopActionID is the in-flight action it tracks.
+	timeStopTargetGameSec float64
+	timeStopActionID      string
 }
 
 // clearedActionInfo is the stash dropped by ClearForSlotSwitch/ClearForReplan
 // and consumed by RecordActionCompletion when a delayed stop completion arrives.
 type clearedActionInfo struct {
-	ActionID string
-	Cmd      string
-	Params   map[string]any
-	Start    time.Time
-	Src      ActionSource
+	ActionID   string
+	Cmd        string
+	Params     map[string]any
+	Start      time.Time
+	Src        ActionSource
+	ToolCallID string
 }
 
 // New creates an AgentState with default zero values. currentDay starts
@@ -97,8 +112,9 @@ type clearedActionInfo struct {
 // after generateDailyPlan on startup.
 func New() *AgentState {
 	return &AgentState{
-		currentDay:     -1,
-		lastReactiveAt: make(map[string]time.Time),
+		currentDay:            -1,
+		timeStopTargetGameSec: -1,
+		lastReactiveAt:        make(map[string]time.Time),
 	}
 }
 
@@ -305,13 +321,14 @@ func (a *AgentState) SetOnline(v bool) {
 }
 
 // RecordActionStarted records a newly-dispatched in-flight action.
-func (a *AgentState) RecordActionStarted(actionID, cmd string, params map[string]any, src ActionSource) {
+func (a *AgentState) RecordActionStarted(actionID, cmd string, params map[string]any, src ActionSource, toolCallID string) {
 	a.mu.Lock()
 	a.currentActionID = actionID
 	a.currentActionSrc = src
 	a.currentActionCmd = cmd
 	a.currentActionParams = params
 	a.currentActionStart = time.Now()
+	a.currentActionToolCallID = toolCallID
 	a.mu.Unlock()
 }
 
@@ -330,6 +347,7 @@ type CompletionResult struct {
 	Cmd            string
 	Params         map[string]any
 	Start          time.Time
+	ToolCallID     string
 }
 
 // RecordActionCompletion clears in-flight tracking for the given action
@@ -347,15 +365,18 @@ func (a *AgentState) RecordActionCompletion(actionID string) CompletionResult {
 	var params map[string]any
 	var start time.Time
 	var src ActionSource
+	var toolCallID string
 	if wasInFlight {
 		cmd = a.currentActionCmd
 		params = a.currentActionParams
 		start = a.currentActionStart
 		src = a.currentActionSrc
+		toolCallID = a.currentActionToolCallID
 		a.currentActionID = ""
 		a.currentActionCmd = ""
 		a.currentActionParams = nil
 		a.currentActionStart = time.Time{}
+		a.currentActionToolCallID = ""
 	} else if a.clearedAction != nil && a.clearedAction.ActionID == actionID {
 		// Delayed stop completion for a long-composite action whose
 		// in-flight tracking was already dropped by ClearForSlotSwitch /
@@ -366,6 +387,7 @@ func (a *AgentState) RecordActionCompletion(actionID string) CompletionResult {
 		params = a.clearedAction.Params
 		start = a.clearedAction.Start
 		src = a.clearedAction.Src
+		toolCallID = a.clearedAction.ToolCallID
 		wasInFlight = true
 		a.clearedAction = nil
 	}
@@ -393,6 +415,7 @@ func (a *AgentState) RecordActionCompletion(actionID string) CompletionResult {
 		Cmd:            cmd,
 		Params:         params,
 		Start:          start,
+		ToolCallID:     toolCallID,
 	}
 }
 
@@ -467,6 +490,59 @@ func (a *AgentState) PendingStopActionID() string {
 	return a.pendingStopActionID
 }
 
+// AppendConversationMessage appends one message (system/user/assistant/tool)
+// to the multi-turn tactical dialogue history.
+func (a *AgentState) AppendConversationMessage(m llmtypes.Message) {
+	a.mu.Lock()
+	a.conversation = append(a.conversation, m)
+	a.mu.Unlock()
+}
+
+// Conversation returns a copy of the multi-turn dialogue history.
+func (a *AgentState) Conversation() []llmtypes.Message {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return append([]llmtypes.Message(nil), a.conversation...)
+}
+
+// ClearConversation drops the multi-turn dialogue history (called on day
+// rollover so each game day starts a fresh conversation).
+func (a *AgentState) ClearConversation() {
+	a.mu.Lock()
+	a.conversation = nil
+	a.mu.Unlock()
+}
+
+// ArmTimeStop sets the time_to_stop target for an in-flight long action.
+// targetGameSec is the authoritative GameTimeSec at which the action should
+// be interrupted; actionID identifies the in-flight action.
+func (a *AgentState) ArmTimeStop(actionID string, targetGameSec float64) {
+	a.mu.Lock()
+	a.timeStopActionID = actionID
+	a.timeStopTargetGameSec = targetGameSec
+	a.mu.Unlock()
+}
+
+// TimeStop returns the armed time_to_stop target. armed=false means no
+// time_to_stop is currently armed.
+func (a *AgentState) TimeStop() (targetGameSec float64, actionID string, armed bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.timeStopTargetGameSec < 0 {
+		return 0, "", false
+	}
+	return a.timeStopTargetGameSec, a.timeStopActionID, true
+}
+
+// ClearTimeStop disarms time_to_stop tracking (e.g. after the action ends
+// or the stop has been dispatched).
+func (a *AgentState) ClearTimeStop() {
+	a.mu.Lock()
+	a.timeStopTargetGameSec = -1
+	a.timeStopActionID = ""
+	a.mu.Unlock()
+}
+
 // SetSelfStopInProgress marks an action ID we actively stopped and are
 // awaiting interrupted completion for (suppresses reactive trigger).
 func (a *AgentState) SetSelfStopInProgress(id string) {
@@ -523,11 +599,12 @@ func (a *AgentState) ClearForSlotSwitch() InFlightInfo {
 	// recording — losing the long-composite action entirely.
 	if a.currentActionID != "" {
 		a.clearedAction = &clearedActionInfo{
-			ActionID: a.currentActionID,
-			Cmd:      a.currentActionCmd,
-			Params:   a.currentActionParams,
-			Start:    a.currentActionStart,
-			Src:      a.currentActionSrc,
+			ActionID:   a.currentActionID,
+			Cmd:        a.currentActionCmd,
+			Params:     a.currentActionParams,
+			Start:      a.currentActionStart,
+			Src:        a.currentActionSrc,
+			ToolCallID: a.currentActionToolCallID,
 		}
 	}
 	a.actionQueue = nil
@@ -536,6 +613,7 @@ func (a *AgentState) ClearForSlotSwitch() InFlightInfo {
 	a.currentActionParams = nil
 	a.currentActionStart = time.Time{}
 	a.currentActionSrc = ""
+	a.currentActionToolCallID = ""
 	a.clearQueueStatusLocked()
 	a.currentSlot = ""
 	a.redecomposeCount = 0
@@ -563,6 +641,7 @@ func (a *AgentState) Stop() {
 	a.currentActionCmd = ""
 	a.currentActionParams = nil
 	a.currentActionStart = time.Time{}
+	a.currentActionToolCallID = ""
 	a.actionQueue = nil
 	a.clearQueueStatusLocked()
 	a.currentSlot = ""
@@ -976,6 +1055,22 @@ func (a *AgentState) LatestTimeOfDay() string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.latestTimeOfDayLocked()
+}
+
+// LatestGameTimeSec returns the authoritative GameTimeSec from the latest
+// perception, or 0 if no perception has arrived or parsing fails. Used by
+// time_to_stop polling.
+func (a *AgentState) LatestGameTimeSec() float64 {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if len(a.latestPerception) == 0 {
+		return 0
+	}
+	var p protocol.PerceptionPayload
+	if err := json.Unmarshal(a.latestPerception, &p); err != nil {
+		return 0
+	}
+	return p.Environment.GameTimeSec
 }
 
 // LatestDayCount returns the day_count from the latest perception, or -1

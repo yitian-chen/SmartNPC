@@ -93,7 +93,7 @@ func (c *Client) SendWithSummary(ctx context.Context, system, user string) (*llm
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	return c.doSend(ctx, system, user, false, nil, nil, nil, nil)
+	return c.doSend(ctx, systemUserMessages(system, user), false, nil, nil, nil, nil)
 }
 
 // SendWithSummaryTools is SendWithSummary plus a `tools` array (function
@@ -106,7 +106,7 @@ func (c *Client) SendWithSummaryTools(ctx context.Context, system, user string, 
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	return c.doSend(ctx, system, user, false, nil, nil, nil, tools)
+	return c.doSend(ctx, systemUserMessages(system, user), false, nil, nil, nil, tools)
 }
 
 // SendStreaming POSTs a (system, user) message pair with stream:true and
@@ -119,7 +119,7 @@ func (c *Client) SendStreaming(ctx context.Context, system, user string, onDelta
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	return c.doSend(ctx, system, user, true, onDelta, nil, nil, nil)
+	return c.doSend(ctx, systemUserMessages(system, user), true, onDelta, nil, nil, nil)
 }
 
 // SendStreamingTools is SendStreaming plus a `tools` array (function calling).
@@ -133,7 +133,7 @@ func (c *Client) SendStreamingTools(ctx context.Context, system, user string, to
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	return c.doSend(ctx, system, user, true, onDelta, onToolCall, nil, tools)
+	return c.doSend(ctx, systemUserMessages(system, user), true, onDelta, onToolCall, nil, tools)
 }
 
 // SendWithSchema POSTs a (system, user) message pair with OpenAI
@@ -151,7 +151,56 @@ func (c *Client) SendWithSchema(ctx context.Context, system, user, schemaName st
 		return nil, err
 	}
 	def := &JSONSchemaDef{Name: schemaName, Strict: true, Schema: json.RawMessage(schema)}
-	return c.doSend(ctx, system, user, false, nil, nil, def, nil)
+	return c.doSend(ctx, systemUserMessages(system, user), false, nil, nil, def, nil)
+}
+
+// SendMessagesTools is the multi-turn variant: it sends an arbitrary
+// messages array (e.g. [system, ...assistant/tool/user history, user]) with
+// function calling tools. The tactical layer uses it to carry conversation
+// context across rounds of an agentic loop. tool_choice is set to "required"
+// when tools are non-empty.
+func (c *Client) SendMessagesTools(ctx context.Context, messages []llmtypes.Message, tools []Tool) (*llmtypes.Response, error) {
+	c.sendMu.Lock()
+	defer c.sendMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return c.doSend(ctx, toVenusMessages(messages), false, nil, nil, nil, tools)
+}
+
+// systemUserMessages builds the default [system?, user] message pair.
+func systemUserMessages(system, user string) []message {
+	msgs := make([]message, 0, 2)
+	if system != "" {
+		msgs = append(msgs, message{Role: "system", Content: system})
+	}
+	msgs = append(msgs, message{Role: "user", Content: user})
+	return msgs
+}
+
+// toVenusMessages converts shared llmtypes.Message entries into the wire
+// message shape (tool_calls / tool_call_id included).
+func toVenusMessages(in []llmtypes.Message) []message {
+	out := make([]message, 0, len(in))
+	for _, m := range in {
+		wire := message{
+			Role:       m.Role,
+			Content:    m.Content,
+			ToolCallID: m.ToolCallID,
+		}
+		for _, tc := range m.ToolCalls {
+			wire.ToolCalls = append(wire.ToolCalls, openaiToolCall{
+				ID:   tc.ID,
+				Type: tc.Type,
+				Function: openaiToolFunction{
+					Name:      tc.Function.Name,
+					Arguments: tc.Function.Arguments,
+				},
+			})
+		}
+		out = append(out, wire)
+	}
+	return out
 }
 
 // ResetSession is a no-op for venus.Client. Venus has no session chain
@@ -168,12 +217,7 @@ func (c *Client) ResetSession() {
 // Outputs) to the request body; a non-nil tools slice adds the `tools`
 // array and sets tool_choice="required" (function calling). Caller MUST
 // hold sendMu.
-func (c *Client) doSend(ctx context.Context, system, user string, stream bool, onDelta func(string), onToolCall func(llmtypes.ToolCall), schema *JSONSchemaDef, tools []Tool) (*llmtypes.Response, error) {
-	msgs := make([]message, 0, 2)
-	if system != "" {
-		msgs = append(msgs, message{Role: "system", Content: system})
-	}
-	msgs = append(msgs, message{Role: "user", Content: user})
+func (c *Client) doSend(ctx context.Context, msgs []message, stream bool, onDelta func(string), onToolCall func(llmtypes.ToolCall), schema *JSONSchemaDef, tools []Tool) (*llmtypes.Response, error) {
 	body := request{
 		Model:     c.cfg.Model,
 		MaxTokens: c.cfg.MaxTokens,
@@ -426,10 +470,14 @@ type JSONSchemaDef struct {
 	Schema json.RawMessage `json:"schema"`
 }
 
-// message is one entry in the Messages array.
+// message is one entry in the Messages array. ToolCalls is populated on
+// assistant messages (function calling); ToolCallID is populated on tool
+// messages to associate the result with the assistant's tool_calls[].ID.
 type message struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role       string           `json:"role"`
+	Content    string           `json:"content,omitempty"`
+	ToolCalls  []openaiToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string           `json:"tool_call_id,omitempty"`
 }
 
 // openaiResponse is the (subset of the) OpenAI Chat Completions response.

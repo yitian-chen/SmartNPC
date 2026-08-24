@@ -34,6 +34,13 @@ func (f *fakeStrategicCaller) SendWithSummaryTools(_ context.Context, _, user st
 	return f.resp, f.err
 }
 
+func (f *fakeStrategicCaller) SendMessagesTools(_ context.Context, messages []llmtypes.Message, _ []venus.Tool) (*llmtypes.Response, error) {
+	if len(messages) > 0 {
+		f.capturedInput = messages[len(messages)-1].Content
+	}
+	return f.resp, f.err
+}
+
 func (f *fakeStrategicCaller) SendStreaming(_ context.Context, _, _ string, _ func(string)) (*llmtypes.Response, error) {
 	return f.resp, f.err
 }
