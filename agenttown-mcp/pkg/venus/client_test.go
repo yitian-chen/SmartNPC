@@ -406,6 +406,96 @@ func TestSendWithSummaryTools_RequestIncludesTools(t *testing.T) {
 	if string(got.Function.Parameters) != `{"type":"object","properties":{"semantic_group":{"type":"string"}},"required":["semantic_group"]}` {
 		t.Errorf("tools[0].function.parameters = %s", got.Function.Parameters)
 	}
+	// tools 非空时自动设置 tool_choice="required"（function calling 强制调用）。
+	if capturedRequest.ToolChoice != "required" {
+		t.Errorf("tool_choice = %v, want required", capturedRequest.ToolChoice)
+	}
+}
+
+// TestSendWithSummaryTools_ParsesToolCalls verifies a non-streaming response
+// with tool_calls is converted into llmtypes.Response.ToolCalls.
+func TestSendWithSummaryTools_ParsesToolCalls(t *testing.T) {
+	body := `{"id":"x","choices":[{"message":{"role":"assistant","content":"","tool_calls":[` +
+		`{"id":"call_1","type":"function","function":{"name":"speak","arguments":"{\"content\":\"hi\"}"}},` +
+		`{"id":"call_2","type":"function","function":{"name":"move_to","arguments":"{\"target_id\":\"main_workshop\"}"}}` +
+		`]}}],"usage":{}}`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(body))
+	}))
+	defer server.Close()
+
+	c := newTestClient(t, server.URL)
+	resp, err := c.SendWithSummaryTools(context.Background(), "sys", "user", []Tool{{Type: "function", Function: ToolFunction{Name: "speak"}}})
+	if err != nil {
+		t.Fatalf("SendWithSummaryTools: %v", err)
+	}
+	if len(resp.ToolCalls) != 2 {
+		t.Fatalf("ToolCalls len = %d, want 2", len(resp.ToolCalls))
+	}
+	if resp.ToolCalls[0].Function.Name != "speak" || resp.ToolCalls[0].Function.Arguments != `{"content":"hi"}` {
+		t.Errorf("ToolCalls[0] = %+v", resp.ToolCalls[0])
+	}
+	if resp.ToolCalls[1].Function.Name != "move_to" || resp.ToolCalls[1].Function.Arguments != `{"target_id":"main_workshop"}` {
+		t.Errorf("ToolCalls[1] = %+v", resp.ToolCalls[1])
+	}
+}
+
+// TestSendStreamingTools_AccumulatesToolCalls verifies streamed delta.tool_calls
+// are accumulated by index and delivered via onToolCall once complete.
+func TestSendStreamingTools_AccumulatesToolCalls(t *testing.T) {
+	// 用 json.Marshal 构造 SSE chunk，避免手写多层转义。
+	mkChunk := func(delta map[string]any, finish string) string {
+		chunk := map[string]any{
+			"id":      "s1",
+			"choices": []any{map[string]any{"delta": delta, "finish_reason": finish}},
+		}
+		b, _ := json.Marshal(chunk)
+		return "data: " + string(b) + "\n\n"
+	}
+	sse := "" +
+		mkChunk(map[string]any{"tool_calls": []any{map[string]any{
+			"index": 0, "id": "call_1", "type": "function",
+			"function": map[string]any{"name": "speak", "arguments": `{"content":"`},
+		}}}, "") +
+		mkChunk(map[string]any{"tool_calls": []any{map[string]any{
+			"index":    0,
+			"function": map[string]any{"arguments": `hi"}`},
+		}}}, "") +
+		mkChunk(map[string]any{"tool_calls": []any{map[string]any{
+			"index": 1, "id": "call_2", "type": "function",
+			"function": map[string]any{"name": "move_to", "arguments": `{"target_id":"main_workshop"}`},
+		}}}, "") +
+		mkChunk(map[string]any{}, "tool_calls") +
+		"data: [DONE]\n\n"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(sse))
+	}))
+	defer server.Close()
+
+	c := newTestClient(t, server.URL)
+	var completed []llmtypes.ToolCall
+	resp, err := c.SendStreamingTools(context.Background(), "sys", "user", []Tool{{Type: "function", Function: ToolFunction{Name: "speak"}}}, nil, func(tc llmtypes.ToolCall) {
+		completed = append(completed, tc)
+	})
+	if err != nil {
+		t.Fatalf("SendStreamingTools: %v", err)
+	}
+	if len(completed) != 2 {
+		t.Fatalf("onToolCall count = %d, want 2", len(completed))
+	}
+	if completed[0].Function.Name != "speak" || completed[0].Function.Arguments != `{"content":"hi"}` {
+		t.Errorf("completed[0] = %+v, want speak with content hi", completed[0])
+	}
+	if completed[1].Function.Name != "move_to" || completed[1].Function.Arguments != `{"target_id":"main_workshop"}` {
+		t.Errorf("completed[1] = %+v, want move_to", completed[1])
+	}
+	// 最终 Response 也应携带累积后的 ToolCalls。
+	if len(resp.ToolCalls) != 2 {
+		t.Errorf("resp.ToolCalls len = %d, want 2", len(resp.ToolCalls))
+	}
 }
 
 // TestResetSession_NoOp verifies ResetSession is a safe no-op.

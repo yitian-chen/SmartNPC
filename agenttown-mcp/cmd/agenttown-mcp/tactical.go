@@ -9,6 +9,7 @@ import (
 
 	"github.com/AgentTown/agenttown-mcp/adapters/agenttown/tools"
 	"github.com/AgentTown/agenttown-mcp/pkg/agentstate"
+	"github.com/AgentTown/agenttown-mcp/pkg/llmtypes"
 	"github.com/AgentTown/agenttown-mcp/pkg/profile"
 	"github.com/AgentTown/agenttown-mcp/pkg/prompt"
 	"github.com/AgentTown/agenttown-mcp/pkg/protocol"
@@ -20,15 +21,6 @@ import (
 // 类型定义已迁移到 pkg/agentstate（导出名 PlannedAction），此处保留
 // alias 供 main 包过渡期使用，避免一次性重命名几十处引用。
 type plannedAction = agentstate.PlannedAction
-
-// ndjsonLine 是战术层 NDJSON 输出的单行判别联合体：当前仅支持 action 行
-// （inner_thought 字段已废弃——内心独白改由 prompt 要求首个 action 为 speak 表达）。
-// 保留 InnerThought 字段仅用于向后兼容解析旧 LLM 输出，解析时直接忽略。
-type ndjsonLine struct {
-	InnerThought string         `json:"inner_thought,omitempty"` // deprecated, 解析时忽略
-	Action       string         `json:"action,omitempty"`
-	Params       map[string]any `json:"params,omitempty"`
-}
 
 // actionSource 标识一个在途 action 由哪一层下发，决定 completion 后的路由。
 // 类型定义已迁移到 pkg/agentstate（导出名 ActionSource），此处保留 alias。
@@ -162,12 +154,13 @@ func generateTacticalPlan(
 
 	raw := resp.ExtractText()
 	logger.Info("[LLM→MCP/TACTICAL-RESPONSE]",
-		"agent_id", agentID, "tokens", resp.Usage.TotalTokens, "raw_len", len(raw), "raw", raw)
+		"agent_id", agentID, "tokens", resp.Usage.TotalTokens, "raw_len", len(raw), "raw", raw,
+		"tool_calls", len(resp.ToolCalls))
 
-	actions, err := parseTacticalNDJSON(raw, registry, agentID)
-	if err != nil {
-		return nil, fmt.Errorf("tactical parse: %w (raw=%s)", err, truncateText(raw, 200))
+	if len(resp.ToolCalls) == 0 {
+		return nil, fmt.Errorf("tactical plan has no tool calls (raw=%s)", truncateText(raw, 200))
 	}
+	actions := parseToolCalls(resp.ToolCalls, registry, agentID)
 	if len(actions) == 0 {
 		return nil, fmt.Errorf("tactical plan has no actions (raw=%s)", truncateText(raw, 200))
 	}
@@ -179,9 +172,9 @@ func generateTacticalPlan(
 }
 
 // generateTacticalPlanStreaming 是 generateTacticalPlan 的流式版本：
-// 调 LLM 客户端 SendStreaming 边接收边增量解析 NDJSON，每解析出一个
-// action 即调 onAction 回调，使调用方能在首 action 到达时立即下发，
-// 将首动作体感延迟从 ~14s 降至 ~2-3s。
+// 调 LLM 客户端 SendStreamingTools 边接收边增量累积 tool_calls，每完成
+// 一个 tool_call 即解析为 action 并调 onAction 回调，使调用方能在首动作
+// 到达时立即下发，将首动作体感延迟降至秒级。
 //
 // 走 llmClient 接口（venus.Client 实现），请求体带 function calling tools。
 func generateTacticalPlanStreaming(
@@ -234,34 +227,30 @@ func generateTacticalPlanStreaming(
 	dumpPromptDoc(agentID, "tactical", system, promptText, ftools, logger)
 
 	var actions []plannedAction
-	acc := &streamAccumulator{
-		registry: registry,
-		agentID:  agentID,
-		onComplete: func(pa plannedAction) {
+	onToolCall := func(tc llmtypes.ToolCall) {
+		for _, pa := range parseToolCalls([]llmtypes.ToolCall{tc}, registry, agentID) {
 			actions = append(actions, pa)
 			if onAction != nil {
 				onAction(pa)
 			}
-		},
+		}
 	}
 
-	resp, err := tc.SendStreamingTools(ctx, system, promptText, ftools, func(delta string) {
-		acc.feed(delta)
-	})
+	resp, err := tc.SendStreamingTools(ctx, system, promptText, ftools, nil, onToolCall)
 	if err != nil {
 		logger.Warn("[LLM→MCP/TACTICAL-STREAM] stream error, keeping actions already parsed",
 			"agent_id", agentID, "parsed_actions", len(actions), "err", err)
 		return actions, fmt.Errorf("tactical llm stream: %w", err)
 	}
-	acc.flush()
 	tc.ResetSession()
 
 	raw := resp.ExtractText()
 	logger.Info("[LLM→MCP/TACTICAL-RESPONSE]",
-		"agent_id", agentID, "tokens", resp.Usage.TotalTokens, "raw_len", len(raw), "raw", raw, "streaming", true)
+		"agent_id", agentID, "tokens", resp.Usage.TotalTokens, "raw_len", len(raw), "raw", raw,
+		"streaming", true, "tool_calls", len(resp.ToolCalls))
 
 	if len(actions) == 0 {
-		return nil, fmt.Errorf("tactical plan has no actions (raw=%s)", truncateText(raw, 200))
+		return nil, fmt.Errorf("tactical plan has no tool calls (raw=%s)", truncateText(raw, 200))
 	}
 	actionsJSON, _ := json.Marshal(actions)
 	logger.Info("[战术层] 分解成功",
@@ -270,109 +259,28 @@ func generateTacticalPlanStreaming(
 	return actions, nil
 }
 
-// parseTacticalNDJSON 从 LLM 的 NDJSON 输出解析 action 列表。
-// 容错：剥 ```json 围栏 → 按行解析 → 跳过空行/parse 失败行 → 过滤非法工具。
-// 返回的 actions 已经过 filterValidActions。
-//
-// registry 非 nil 时，过滤还会剔除依赖的 cmd 在 registry 中对 agentID 不可用
-// 的工具（与 prompt 工具列表保持一致）。
-//
-// 内心独白已不再通过 inner_thought 字段传递——prompt 要求首个 action 直接是
-// speak。若 LLM 仍输出 inner_thought 行（向后兼容），该行被静默忽略。
-func parseTacticalNDJSON(raw string, registry *CapabilityRegistry, agentID string) ([]plannedAction, error) {
-	s := strings.TrimSpace(raw)
-	// 剥 markdown 围栏（LLM 可能仍加，即使 prompt 禁止）
-	if strings.HasPrefix(s, "```json") {
-		s = strings.TrimPrefix(s, "```json")
-		s = strings.TrimSuffix(s, "```")
-		s = strings.TrimSpace(s)
-	} else if strings.HasPrefix(s, "```") {
-		s = strings.TrimPrefix(s, "```")
-		s = strings.TrimSuffix(s, "```")
-		s = strings.TrimSpace(s)
-	}
-
+// parseToolCalls 把 LLM 返回的 tool_calls 解析为 plannedAction 队列。
+// function.name → Action；function.arguments（JSON）→ Params。arguments
+// 解析失败或 name 为空时跳过该条；末尾过 filterValidActions。
+func parseToolCalls(tcs []llmtypes.ToolCall, registry *CapabilityRegistry, agentID string) []plannedAction {
 	var actions []plannedAction
-	for _, line := range strings.Split(s, "\n") {
-		pa, isAction, ok := parseTacticalNDJSONLine(line)
-		if !ok || !isAction {
-			continue // 跳过空行、parse 失败行、inner_thought 行（向后兼容）
+	for _, tc := range tcs {
+		name := tc.Function.Name
+		if name == "interact" { // 旧工具名，保留兼容 LLM 偶发输出
+			name = "InteractSmartObject"
 		}
-		actions = append(actions, pa)
+		if name == "" {
+			continue
+		}
+		params := map[string]any{}
+		if args := strings.TrimSpace(tc.Function.Arguments); args != "" {
+			if err := json.Unmarshal([]byte(args), &params); err != nil {
+				continue // arguments 不是合法 JSON，跳过该工具调用
+			}
+		}
+		actions = append(actions, plannedAction{Action: name, Params: params})
 	}
-	actions = filterValidActions(actions, registry, agentID)
-	return actions, nil
-}
-
-// parseTacticalNDJSONLine 解析单行 NDJSON。返回 (action, isAction, ok)。
-// ok=false 表示空行或 parse 失败（调用方跳过）。isAction=true 表示该行是 action；
-// isAction=false 且 ok=true 表示该行是 inner_thought（向后兼容，调用方忽略）。
-func parseTacticalNDJSONLine(line string) (pa plannedAction, isAction bool, ok bool) {
-	line = strings.TrimSpace(line)
-	if line == "" {
-		return plannedAction{}, false, false
-	}
-	var nl ndjsonLine
-	if err := json.Unmarshal([]byte(line), &nl); err != nil {
-		return plannedAction{}, false, false
-	}
-	if nl.Action != "" {
-		return plannedAction{Action: nl.Action, Params: nl.Params}, true, true
-	}
-	// inner_thought 行（已废弃）：ok=true 但 isAction=false，调用方跳过
-	if nl.InnerThought != "" {
-		return plannedAction{}, false, true
-	}
-	return plannedAction{}, false, false
-}
-
-// streamAccumulator 是流式回调的增量 NDJSON 解析器。
-// feed(delta) 追加 delta 到内部 buffer，按 \n 分割出完整行并即时解析；
-// 最后一行（可能不完整）保留在 buffer 等下次 feed 补全。
-// flush() 在流结束后调用，处理 buffer 中的残余内容。
-type streamAccumulator struct {
-	buf        strings.Builder
-	onComplete func(plannedAction) // 每完整解析出一个合法 action 调一次
-	registry   *CapabilityRegistry // 用于过滤依赖 cmd 不可用的工具；nil = 不过滤
-	agentID    string              // 配合 registry 做 per-agent 过滤
-}
-
-// feed 追加一段 delta 文本并处理所有已完成的行（以 \n 结尾）。
-func (a *streamAccumulator) feed(delta string) {
-	a.buf.WriteString(delta)
-	content := a.buf.String()
-	lines := strings.Split(content, "\n")
-	// 除最后一行外都是完整行（以 \n 结尾）。
-	for _, line := range lines[:len(lines)-1] {
-		a.processLine(line)
-	}
-	// 最后一行可能不完整，留在 buffer 等下次 feed。
-	a.buf.Reset()
-	a.buf.WriteString(lines[len(lines)-1])
-}
-
-// flush 在流结束后调用，处理 buffer 中残余的最后一行。
-func (a *streamAccumulator) flush() {
-	remaining := strings.TrimSpace(a.buf.String())
-	a.buf.Reset()
-	if remaining == "" {
-		return
-	}
-	a.processLine(remaining)
-}
-
-// processLine 解析单行：合法 action 调 onComplete；inner_thought 行（向后兼容）忽略。
-func (a *streamAccumulator) processLine(line string) {
-	pa, isAction, ok := parseTacticalNDJSONLine(line)
-	if !ok || !isAction {
-		return // 跳过空行、parse 失败行、inner_thought 行
-	}
-	if !tacticalActionAvailable(pa.Action, a.agentID, a.registry) {
-		return // 过滤非法工具或依赖 cmd 不可用的工具（与 parseTacticalNDJSON 一致）
-	}
-	if a.onComplete != nil {
-		a.onComplete(pa)
-	}
+	return filterValidActions(actions, registry, agentID)
 }
 
 // filterValidActions 过滤掉 scan_area/stop/未知工具，保留可排队工具。

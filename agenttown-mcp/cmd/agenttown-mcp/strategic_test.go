@@ -38,7 +38,7 @@ func (f *fakeStrategicCaller) SendStreaming(_ context.Context, _, _ string, _ fu
 	return f.resp, f.err
 }
 
-func (f *fakeStrategicCaller) SendStreamingTools(_ context.Context, _, _ string, _ []venus.Tool, _ func(string)) (*llmtypes.Response, error) {
+func (f *fakeStrategicCaller) SendStreamingTools(_ context.Context, _, _ string, _ []venus.Tool, _ func(string), _ func(llmtypes.ToolCall)) (*llmtypes.Response, error) {
 	return f.resp, f.err
 }
 

@@ -1061,7 +1061,7 @@ type llmClient interface {
 	SendStreaming(ctx context.Context, system, user string, onDelta func(string)) (*llmtypes.Response, error)
 	SendWithSchema(ctx context.Context, system, user, schemaName string, schema []byte) (*llmtypes.Response, error)
 	SendWithSummaryTools(ctx context.Context, system, user string, tools []venus.Tool) (*llmtypes.Response, error)
-	SendStreamingTools(ctx context.Context, system, user string, tools []venus.Tool, onDelta func(string)) (*llmtypes.Response, error)
+	SendStreamingTools(ctx context.Context, system, user string, tools []venus.Tool, onDelta func(string), onToolCall func(llmtypes.ToolCall)) (*llmtypes.Response, error)
 	ResetSession()
 }
 

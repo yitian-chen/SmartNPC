@@ -39,7 +39,7 @@ func (f *fakeDialogueLLM) SendWithSummaryTools(_ context.Context, _, _ string, _
 	return f.resp, f.err
 }
 
-func (f *fakeDialogueLLM) SendStreamingTools(_ context.Context, _, _ string, _ []venus.Tool, _ func(string)) (*llmtypes.Response, error) {
+func (f *fakeDialogueLLM) SendStreamingTools(_ context.Context, _, _ string, _ []venus.Tool, _ func(string), _ func(llmtypes.ToolCall)) (*llmtypes.Response, error) {
 	return f.resp, f.err
 }
 

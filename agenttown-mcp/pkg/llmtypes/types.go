@@ -17,11 +17,29 @@ package llmtypes
 // It mirrors the subset of the OpenAI Responses API that the strategic
 // and tactical layers actually read.
 type Response struct {
-	ID     string  `json:"id"`
-	Status string  `json:"status"`
-	Model  string  `json:"model"`
-	Output []Block `json:"output"`
-	Usage  Usage   `json:"usage"`
+	ID        string     `json:"id"`
+	Status    string     `json:"status"`
+	Model     string     `json:"model"`
+	Output    []Block    `json:"output"`
+	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
+	Usage     Usage      `json:"usage"`
+}
+
+// ToolCall is one function-calling entry returned by the LLM (the OpenAI
+// Chat Completions `tool_calls` element). The tactical layer reads these
+// to build its action queue.
+type ToolCall struct {
+	ID       string       `json:"id"`
+	Type     string       `json:"type"` // "function"
+	Function ToolFunction `json:"function"`
+}
+
+// ToolFunction describes a callable function inside a ToolCall. Arguments
+// is a raw JSON string (the function's parameters object); callers unmarshal
+// it into a map[string]any.
+type ToolFunction struct {
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"`
 }
 
 // Block is one entry in Response.Output.

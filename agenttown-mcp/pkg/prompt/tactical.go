@@ -55,10 +55,10 @@ func BuildTacticalSystemPrompt(kb *worldkb.KB, profiles map[string]*profile.Prof
 // reliably). References to 【世界背景】/【人物背景】/【世界详细信息】 point
 // at the system message's modules; references to 【物理状态】/【可用工具】/
 // 【附近NPC】/【物体实时占用】 point at the user message's dynamic segments.
-const TacticalRules = `1. 队列首个动作必须是 speak（用一句话表达此刻内心想法或独白），然后才是其他动作
-2. 后续每行输出一个 {"action":"工具名","params":{...}}，按执行顺序排列。action 字段必须严格使用用户信息【可用工具】列表给出的工具名（如 work_shift / charge_at_station / rest_at_residence / surf_internet / self_maintenance / social_chat / InteractSmartObject / move_to / speak / generic_act / emote / turn_to），禁止编造、禁止近形变换（如把 work_shift 写成 work_short、rest_at_residence 写成 rest_at_composite），否则动作会被丢弃导致队列提前耗尽
+const TacticalRules = `1. 第一个工具调用必须是 speak（用一句话表达此刻内心想法或独白），然后才是其他工具调用
+2. 通过工具调用（function calling）依次返回动作，按执行顺序排列。工具名必须严格使用用户信息【可用工具】列表给出的工具名（如 work_shift / charge_at_station / rest_at_residence / surf_internet / self_maintenance / social_chat / InteractSmartObject / move_to / speak / generic_act / emote / turn_to），禁止编造、禁止近形变换（如把 work_shift 写成 work_short、rest_at_residence 写成 rest_at_composite），否则动作会被丢弃导致队列提前耗尽
 3. 队列必须以长动作结尾（长复合动作 或 InteractSmartObject 原子动作均可）——长动作会持续执行直到时段切换，让 NPC 一直活动到下一 schedule 节点被 worker 主动打断
-4. 禁止输出 wait 动作；复合动作已包含自动移动到对应位置的逻辑，禁止在复合动作前加 move_to——直接输出单个长复合动作即可。
+4. 禁止调用 wait 工具；复合动作已包含自动移动到对应位置的逻辑，禁止在复合动作前调用 move_to——直接调用单个长复合动作即可。
 5. 仅当目标确实没有匹配的长复合动作时，才用原子动作组合实现目标。长椅休息等场景用单个 InteractSmartObject 即可（InteractSmartObject 是长动作，会持续到时段切换），禁止把同一动作重复多次填充时段——队列提前耗尽会自动触发重分解生成新动作
 6. move_to/turn_to 的 target_id 用系统信息【世界详细信息】各区域详情列出的 zone id；InteractSmartObject 和复合动作的 semantic_group 必须严格使用设施详情中给出的 semantic_group 值，禁止编造、禁止用实例 id（如 Charge-1）、禁止拼接 zone/interaction 信息
 7. 复合动作与 semantic_group 必须严格对应，禁止跨类别组合：
@@ -69,7 +69,7 @@ const TacticalRules = `1. 队列首个动作必须是 speak（用一句话表达
    - surf_internet → computer，interaction 用 surf_internet
    - social_chat → target_agent_id 必须严格使用用户信息中【附近NPC】列出的 NPC id（格式如 H-01），禁止用显示名（如"老王"）、禁止编造未列出的 id；content 为开场白；对话期间会自动走向对方并挂起直到对话结束
    - 补充：所有工种设备都可用 InteractSmartObject 原子动作直接工作——semantic_group 填工作设备、interaction 填对应动词即可（如 加工机 process、调试台 debug、拆解台 dismantle，以及 workbench/assemble、sorting_conveyor/sort_cargo、inspection_table/inspect）；work_shift 只是其中三类工种设备的快捷复合动作，没有复合动作的工种一律用 InteractSmartObject
-8. 每行一个 JSON 对象，不要输出 JSON 数组，不要输出 markdown 围栏，不要输出任何其他文字；不要输出 inner_thought 字段，内心独白直接用首个 speak 动作表达
+8. 必须通过工具调用（function calling）输出动作序列，不要输出纯文本 JSON、JSON 数组或 markdown 围栏；不要输出 inner_thought 字段，内心独白直接用首个 speak 工具调用表达
 9. 若用户信息中【物体实时占用】显示目标 semantic_group 全部占用，必须改用其他空闲 semantic_group 或先安排 generic_act(behavior=look_around) 短暂等待，禁止规划必然失败的占用动作`
 
 // BuildTactical constructs the tactical layer's user message, four parts:
@@ -164,9 +164,9 @@ func BuildTactical(in TacticalInput) string {
 
 	// ── 四、任务 ──
 	sb.WriteString("\n四、任务\n")
-	sb.WriteString("请把【当前时段目标】分解为一个或多个 action，按顺序执行。\n")
+	sb.WriteString("请通过工具调用（function calling）把【当前时段目标】分解为动作序列，按顺序执行（首个工具调用是 speak）。\n")
 	if ex := TacticalExample(in.KB, in.Goal, in.AgentID); ex != "" {
-		sb.WriteString("示例（id 来自用户信息【可用工具】列表与系统信息【世界详细信息】，不可照抄示例中的 id）：\n")
+		sb.WriteString("工具与参数参考（下面每行展示一个工具调用应使用的工具名与参数值，实际请直接调用工具，不要输出文本 JSON）：\n")
 		sb.WriteString(ex)
 		sb.WriteString("\n")
 	}

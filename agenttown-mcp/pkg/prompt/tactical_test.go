@@ -370,7 +370,7 @@ func TestBuildTacticalSystemPrompt_Structure(t *testing.T) {
 		t.Errorf("system prompt should not carry the tool list (moved to user prompt, registry-derived):\n%s", got)
 	}
 	// 分解规则已迁至 user prompt。
-	if strings.Contains(got, "队列首个动作必须是 speak") {
+	if strings.Contains(got, "第一个工具调用必须是 speak") {
 		t.Errorf("system prompt should not contain the rules (moved to user prompt):\n%s", got)
 	}
 }
@@ -408,11 +408,11 @@ func TestBuildTactical_FourParts(t *testing.T) {
 		t.Errorf("part 2 missing realtime state line:\n%s", out)
 	}
 	// 第三部分：分解规则。
-	if !strings.Contains(out, "队列首个动作必须是 speak") {
+	if !strings.Contains(out, "第一个工具调用必须是 speak") {
 		t.Errorf("part 3 missing tactical rules:\n%s", out)
 	}
 	// 第四部分：任务 + 示例。
-	if !strings.Contains(out, "请把【当前时段目标】分解为一个或多个 action") {
+	if !strings.Contains(out, "请通过工具调用（function calling）把【当前时段目标】分解为动作序列") {
 		t.Errorf("part 4 missing the ask:\n%s", out)
 	}
 	// 工具清单仅从 registry（cmd）派生：Actions 为空时不出现，杜绝

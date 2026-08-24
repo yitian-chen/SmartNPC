@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/AgentTown/agenttown-mcp/pkg/llmtypes"
 	"github.com/AgentTown/agenttown-mcp/pkg/prompt"
 	"github.com/AgentTown/agenttown-mcp/pkg/protocol"
 	"github.com/AgentTown/agenttown-mcp/pkg/venus"
@@ -30,238 +31,72 @@ func loadTestKB(t *testing.T) *worldkb.KB {
 	return kb
 }
 
-// ─── parseTacticalNDJSON ─────────────────────────────────────
+// ─── parseToolCalls ────────────────────────────────────────
 
-func TestParseTacticalNDJSON_Valid(t *testing.T) {
-	// inner_thought 行被静默忽略（向后兼容）；speak 由 LLM 显式输出为首个 action
-	raw := `{"action":"speak","params":{"content":"先去车间再装配"}}` + "\n" +
-		`{"action":"move_to","params":{"target_type":"zone","target_id":"main_workshop"}}` + "\n" +
-		`{"action":"work_shift","params":{"semantic_group":"workbench_01","interaction":"assemble"}}`
-	actions, err := parseTacticalNDJSON(raw, nil, "")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+func TestParseToolCalls_Basic(t *testing.T) {
+	tcs := []llmtypes.ToolCall{
+		{Function: llmtypes.ToolFunction{Name: "speak", Arguments: `{"content":"先去车间再装配"}`}},
+		{Function: llmtypes.ToolFunction{Name: "move_to", Arguments: `{"target_type":"zone","target_id":"main_workshop"}`}},
+		{Function: llmtypes.ToolFunction{Name: "work_shift", Arguments: `{"semantic_group":"workbench_01","interaction":"assemble"}`}},
 	}
+	actions := parseToolCalls(tcs, nil, "")
 	if len(actions) != 3 {
-		t.Fatalf("got %d actions, want 3 (speak + move + work)", len(actions))
+		t.Fatalf("got %d actions, want 3", len(actions))
 	}
-	if actions[0].Action != "speak" {
-		t.Errorf("action[0]=%q, want speak", actions[0].Action)
+	if actions[0].Action != "speak" || actions[0].Params["content"] != "先去车间再装配" {
+		t.Errorf("actions[0]=%+v, want speak with content", actions[0])
 	}
-	if actions[0].Params["content"] != "先去车间再装配" {
-		t.Errorf("speak content=%v", actions[0].Params["content"])
-	}
-	if actions[1].Action != "move_to" {
-		t.Errorf("action[1]=%q, want move_to", actions[1].Action)
+	if actions[1].Action != "move_to" || actions[2].Action != "work_shift" {
+		t.Errorf("actions=%+v, want [speak move_to work_shift]", actions)
 	}
 }
 
-func TestParseTacticalNDJSON_WithFence(t *testing.T) {
-	raw := "```json\n" +
-		`{"action":"speak","params":{"content":"充电"}}` + "\n" +
-		`{"action":"charge_at_station","params":{"semantic_group":"charging_station_01","interaction":"assemble"}}` + "\n" +
-		"```"
-	actions, err := parseTacticalNDJSON(raw, nil, "")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(actions) != 2 || actions[0].Action != "speak" || actions[1].Action != "charge_at_station" {
-		t.Errorf("actions=%+v, want [speak, charge_at_station]", actions)
+func TestParseToolCalls_Empty(t *testing.T) {
+	if got := parseToolCalls(nil, nil, ""); len(got) != 0 {
+		t.Errorf("got %d actions, want 0", len(got))
 	}
 }
 
-func TestParseTacticalNDJSON_BlankLines(t *testing.T) {
-	raw := `{"action":"speak","params":{"content":"开始"}}` + "\n\n" +
-		`{"action":"move_to","params":{"target_type":"zone","target_id":"main_workshop"}}` + "\n" +
-		"\n"
-	actions, err := parseTacticalNDJSON(raw, nil, "")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+func TestParseToolCalls_EmptyName(t *testing.T) {
+	tcs := []llmtypes.ToolCall{
+		{Function: llmtypes.ToolFunction{Name: "", Arguments: `{}`}},
+		{Function: llmtypes.ToolFunction{Name: "speak", Arguments: `{"content":"hi"}`}},
 	}
-	if len(actions) != 2 || actions[0].Action != "speak" || actions[1].Action != "move_to" {
-		t.Errorf("actions=%+v, want [speak, move_to]", actions)
+	actions := parseToolCalls(tcs, nil, "")
+	if len(actions) != 1 || actions[0].Action != "speak" {
+		t.Errorf("actions=%+v, want [speak] (empty name skipped)", actions)
 	}
 }
 
-func TestParseTacticalNDJSON_MalformedLine(t *testing.T) {
-	// 单行 parse 失败应跳过，不影响其他行
-	raw := `{"action":"speak","params":{"content":"计划"}}` + "\n" +
-		`这不是JSON` + "\n" +
-		`{"action":"move_to","params":{"target_type":"zone","target_id":"main_workshop"}}`
-	actions, err := parseTacticalNDJSON(raw, nil, "")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+func TestParseToolCalls_InvalidArgumentsSkipped(t *testing.T) {
+	tcs := []llmtypes.ToolCall{
+		{Function: llmtypes.ToolFunction{Name: "speak", Arguments: `not-json`}},
+		{Function: llmtypes.ToolFunction{Name: "move_to", Arguments: `{"target_type":"zone"}`}},
 	}
-	if len(actions) != 2 || actions[0].Action != "speak" || actions[1].Action != "move_to" {
-		t.Errorf("actions=%+v, want [speak, move_to]", actions)
-	}
-}
-
-func TestParseTacticalNDJSON_Empty(t *testing.T) {
-	actions, err := parseTacticalNDJSON("", nil, "")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(actions) != 0 {
-		t.Errorf("got %d actions, want 0", len(actions))
-	}
-}
-
-// TestParseTacticalNDJSON_LegacyInnerThoughtIgnored 验证旧 LLM 输出仍含
-// inner_thought 行时被静默忽略（不报错、不转 speak、不污染 actions）。
-// 向后兼容路径：prompt 已要求首个 action 为 speak，但模型偶尔可能仍输出
-// inner_thought 字段，解析层需优雅降级。
-func TestParseTacticalNDJSON_LegacyInnerThoughtIgnored(t *testing.T) {
-	raw := `{"inner_thought":"不知道做什么"}` + "\n" +
-		`{"action":"move_to","params":{"target_type":"zone","target_id":"main_workshop"}}`
-	actions, err := parseTacticalNDJSON(raw, nil, "")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	// inner_thought 行被忽略，只剩 move_to
+	actions := parseToolCalls(tcs, nil, "")
 	if len(actions) != 1 || actions[0].Action != "move_to" {
-		t.Errorf("actions=%+v, want [move_to] (inner_thought silently dropped)", actions)
+		t.Errorf("actions=%+v, want [move_to] (invalid arguments skipped)", actions)
 	}
 }
 
-// TestParseTacticalNDJSON_ThoughtOnlyNoActions 验证只有 inner_thought、
-// 无任何 action 行时返回空 actions（不注入 speak）。
-func TestParseTacticalNDJSON_ThoughtOnlyNoActions(t *testing.T) {
-	raw := `{"inner_thought":"不知道做什么"}`
-	actions, err := parseTacticalNDJSON(raw, nil, "")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+func TestParseToolCalls_FiltersInvalidTool(t *testing.T) {
+	tcs := []llmtypes.ToolCall{
+		{Function: llmtypes.ToolFunction{Name: "scan_area", Arguments: `{}`}},
+		{Function: llmtypes.ToolFunction{Name: "move_to", Arguments: `{"target_type":"zone"}`}},
 	}
-	if len(actions) != 0 {
-		t.Errorf("got %d actions, want 0", len(actions))
-	}
-}
-
-func TestParseTacticalNDJSON_FiltersScanAreaAndStop(t *testing.T) {
-	raw := `{"action":"speak","params":{"content":"扫描一下"}}` + "\n" +
-		`{"action":"scan_area","params":{}}` + "\n" +
-		`{"action":"move_to","params":{"target_type":"zone","target_id":"main_workshop"}}` + "\n" +
-		`{"action":"stop","params":{}}`
-	actions, err := parseTacticalNDJSON(raw, nil, "")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	// speak + move_to（scan_area/stop 被过滤）
-	if len(actions) != 2 {
-		t.Fatalf("got %d actions, want 2 (speak + move_to)", len(actions))
-	}
-	if actions[0].Action != "speak" {
-		t.Errorf("actions[0]=%q, want speak", actions[0].Action)
-	}
-	if actions[1].Action != "move_to" {
-		t.Errorf("actions[1]=%q, want move_to", actions[1].Action)
-	}
-}
-
-// TestParseTacticalNDJSON_NoSpeakNoInjection 验证 LLM 未输出 speak 时
-// 不会自动注入 speak（speak 现在是 LLM 显式输出的 action，不再由 thought 转换）。
-func TestParseTacticalNDJSON_NoSpeakNoInjection(t *testing.T) {
-	raw := `{"action":"move_to","params":{"target_type":"zone","target_id":"main_workshop"}}`
-	actions, err := parseTacticalNDJSON(raw, nil, "")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	actions := parseToolCalls(tcs, nil, "")
 	if len(actions) != 1 || actions[0].Action != "move_to" {
-		t.Errorf("actions=%+v, want [move_to] (no auto speak injection)", actions)
+		t.Errorf("actions=%+v, want [move_to] (scan_area filtered)", actions)
 	}
 }
 
-// ─── streamAccumulator ───────────────────────────────────────
-
-func TestStreamAccumulator_Feed(t *testing.T) {
-	var collected []plannedAction
-	acc := &streamAccumulator{
-		onComplete: func(pa plannedAction) { collected = append(collected, pa) },
+func TestParseToolCalls_InteractAlias(t *testing.T) {
+	tcs := []llmtypes.ToolCall{
+		{Function: llmtypes.ToolFunction{Name: "interact", Arguments: `{"semantic_group":"sleep_pod","interaction":"meditate"}`}},
 	}
-
-	// 第一行 speak 完整到达，立即触发 onComplete
-	acc.feed(`{"action":"speak","params":{"content":"开工"}}` + "\n")
-	if len(collected) != 1 {
-		t.Fatalf("after first feed: collected=%d, want 1 (speak immediate)", len(collected))
-	}
-	if collected[0].Action != "speak" {
-		t.Errorf("collected[0]=%q, want speak", collected[0].Action)
-	}
-	if collected[0].Params["content"] != "开工" {
-		t.Errorf("speak content=%v, want 开工", collected[0].Params["content"])
-	}
-
-	// 第二行被拆成两个 delta
-	acc.feed(`{"action":"move_to","params":{"targ`)
-	acc.feed(`et":"main_workshop"}}` + "\n")
-	if len(collected) != 2 {
-		t.Fatalf("after second line: collected=%d, want 2 (speak + move_to)", len(collected))
-	}
-	if collected[1].Action != "move_to" {
-		t.Errorf("collected[1]=%q, want move_to", collected[1].Action)
-	}
-
-	// 第三行不完整（无 \n），不应触发 onComplete
-	acc.feed(`{"action":"InteractSmartObject","params":{"semantic_group":"workbench_01","interaction":"assemble"}}`)
-	if len(collected) != 2 {
-		t.Errorf("incomplete line should not trigger: collected=%d, want 2", len(collected))
-	}
-
-	// flush 处理残余
-	acc.flush()
-	if len(collected) != 3 {
-		t.Fatalf("after flush: collected=%d, want 3 (speak + move + interact)", len(collected))
-	}
-	if collected[2].Action != "InteractSmartObject" {
-		t.Errorf("collected[2]=%q, want interact", collected[2].Action)
-	}
-}
-
-func TestStreamAccumulator_FiltersInvalidAction(t *testing.T) {
-	var collected []plannedAction
-	acc := &streamAccumulator{
-		onComplete: func(pa plannedAction) { collected = append(collected, pa) },
-	}
-	acc.feed(`{"action":"scan_area","params":{}}` + "\n")
-	acc.feed(`{"action":"move_to","params":{"target_type":"zone","target_id":"main_workshop"}}` + "\n")
-	acc.flush()
-	if len(collected) != 1 {
-		t.Fatalf("collected=%d, want 1 (scan_area filtered)", len(collected))
-	}
-	if collected[0].Action != "move_to" {
-		t.Errorf("collected[0]=%q, want move_to", collected[0].Action)
-	}
-}
-
-// TestStreamAccumulator_LegacyInnerThoughtIgnored 验证流式路径收到
-// inner_thought 行时静默忽略（不报错、不触发 onComplete）。
-func TestStreamAccumulator_LegacyInnerThoughtIgnored(t *testing.T) {
-	var collected []plannedAction
-	acc := &streamAccumulator{
-		onComplete: func(pa plannedAction) { collected = append(collected, pa) },
-	}
-	// inner_thought 行应被忽略
-	acc.feed(`{"inner_thought":"开工"}` + "\n")
-	acc.feed(`{"action":"move_to","params":{"target_type":"zone","target_id":"main_workshop"}}` + "\n")
-	acc.flush()
-	if len(collected) != 1 {
-		t.Fatalf("collected=%d, want 1 (inner_thought ignored, only move_to)", len(collected))
-	}
-	if collected[0].Action != "move_to" {
-		t.Errorf("collected[0]=%q, want move_to", collected[0].Action)
-	}
-}
-
-// TestStreamAccumulator_ThoughtOnlyNoAction 验证流式路径只有 inner_thought、
-// 无任何 action 行时不触发 onComplete。
-func TestStreamAccumulator_ThoughtOnlyNoAction(t *testing.T) {
-	var collected []plannedAction
-	acc := &streamAccumulator{
-		onComplete: func(pa plannedAction) { collected = append(collected, pa) },
-	}
-	acc.feed(`{"inner_thought":"不知道做什么"}` + "\n")
-	acc.flush()
-	if len(collected) != 0 {
-		t.Errorf("collected=%d, want 0 (inner_thought ignored, no actions)", len(collected))
+	actions := parseToolCalls(tcs, nil, "")
+	if len(actions) != 1 || actions[0].Action != "InteractSmartObject" {
+		t.Errorf("actions=%+v, want [InteractSmartObject] (interact alias)", actions)
 	}
 }
 
@@ -463,6 +298,14 @@ func TestSelectCurrentGoal_PlanningWindowBoundary(t *testing.T) {
 
 // ─── generateTacticalPlan ────────────────────────────────────
 
+func makeToolCallResponse(tcs []llmtypes.ToolCall) *llmtypes.Response {
+	return &llmtypes.Response{
+		Status:    "completed",
+		Output:    []llmtypes.Block{{Type: "message", Role: "assistant", Content: []llmtypes.Content{{Type: "output_text", Text: ""}}}},
+		ToolCalls: tcs,
+	}
+}
+
 func TestGenerateTacticalPlan_HTTPError(t *testing.T) {
 	tc := &fakeStrategicCaller{err: errors.New("network down")}
 	actions, err := generateTacticalPlan(context.Background(), tc, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", "07:00-09:00: 上午准备\n09:00-12:00: 车间装配", &protocol.PhysicalState{Energy: 80, Fatigue: 20, JointWear: 10}, nil, nil, slog.Default(), "", "", "", nil, nil, nil, nil)
@@ -478,15 +321,15 @@ func TestGenerateTacticalPlan_HTTPError(t *testing.T) {
 }
 
 func TestGenerateTacticalPlan_ValidResponse(t *testing.T) {
-	raw := `{"action":"speak","params":{"content":"先移动再装配"}}` + "\n" +
-		`{"action":"move_to","params":{"target_type":"zone","target_id":"main_workshop"}}` + "\n" +
-		`{"action":"work_shift","params":{"semantic_group":"workbench_01","interaction":"assemble"}}`
-	tc := &fakeStrategicCaller{resp: makeStrategicResponse(raw)}
+	tc := &fakeStrategicCaller{resp: makeToolCallResponse([]llmtypes.ToolCall{
+		{Function: llmtypes.ToolFunction{Name: "speak", Arguments: `{"content":"先移动再装配"}`}},
+		{Function: llmtypes.ToolFunction{Name: "move_to", Arguments: `{"target_type":"zone","target_id":"main_workshop"}`}},
+		{Function: llmtypes.ToolFunction{Name: "work_shift", Arguments: `{"semantic_group":"workbench_01","interaction":"assemble"}`}},
+	})}
 	actions, err := generateTacticalPlan(context.Background(), tc, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", "07:00-09:00: 上午准备\n09:00-12:00: 车间装配", &protocol.PhysicalState{Energy: 80, Fatigue: 20, JointWear: 10}, nil, nil, slog.Default(), "", "", "", nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	// LLM 显式输出 speak 作为首个 action
 	if len(actions) != 3 {
 		t.Fatalf("got %d actions, want 3 (speak + move + work)", len(actions))
 	}
@@ -501,25 +344,26 @@ func TestGenerateTacticalPlan_ValidResponse(t *testing.T) {
 	}
 }
 
-func TestGenerateTacticalPlan_ParseFail(t *testing.T) {
+func TestGenerateTacticalPlan_NoToolCalls(t *testing.T) {
 	tc := &fakeStrategicCaller{resp: makeStrategicResponse("我今天打算去车间转转。")}
 	if _, err := generateTacticalPlan(context.Background(), tc, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", "07:00-09:00: 上午准备\n09:00-12:00: 车间装配", nil, nil, nil, slog.Default(), "", "", "", nil, nil, nil, nil); err == nil {
-		t.Fatal("expected error on parse failure (no actions)")
+		t.Fatal("expected error when no tool calls returned")
 	}
 }
 
-func TestGenerateTacticalPlan_EmptyActions(t *testing.T) {
-	raw := `{"inner_thought":"不知道做什么"}`
-	tc := &fakeStrategicCaller{resp: makeStrategicResponse(raw)}
+func TestGenerateTacticalPlan_AllFiltered(t *testing.T) {
+	tc := &fakeStrategicCaller{resp: makeToolCallResponse([]llmtypes.ToolCall{
+		{Function: llmtypes.ToolFunction{Name: "scan_area", Arguments: `{}`}},
+	})}
 	if _, err := generateTacticalPlan(context.Background(), tc, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", "07:00-09:00: 上午准备\n09:00-12:00: 车间装配", nil, nil, nil, slog.Default(), "", "", "", nil, nil, nil, nil); err == nil {
-		t.Fatal("expected error when all actions filtered out")
+		t.Fatal("expected error when all tool calls filtered out")
 	}
 }
 
 func TestGenerateTacticalPlan_ResetSessionCalled(t *testing.T) {
-	raw := `{"action":"speak","params":{"content":"开始"}}` + "\n" +
-		`{"action":"wait","params":{"duration_sec":30}}`
-	tc := &fakeStrategicCaller{resp: makeStrategicResponse(raw)}
+	tc := &fakeStrategicCaller{resp: makeToolCallResponse([]llmtypes.ToolCall{
+		{Function: llmtypes.ToolFunction{Name: "speak", Arguments: `{"content":"开始"}`}},
+	})}
 	_, _ = generateTacticalPlan(context.Background(), tc, "H-01", "等待", "main_workshop", "09:00", "09:00-12:00", "", nil, nil, nil, slog.Default(), "", "", "", nil, nil, nil, nil)
 	if !tc.resetCalled {
 		t.Error("ResetSession should be called after successful tactical generation")
