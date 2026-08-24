@@ -15,12 +15,15 @@ package main
 //   - 落盘失败只记 warn 日志，绝不影响决策链路
 
 import (
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/AgentTown/agenttown-mcp/pkg/venus"
 )
 
 // promptDocAgent 是落盘观察对象。换人观察时改这里。
@@ -40,9 +43,10 @@ func setPromptDocPath(p string) {
 	promptDocPath = p
 }
 
-// dumpPromptDoc 把一次 LLM 调用的 system+user prompt 追加写入文档。
-// layer 取 "strategic" / "tactical"。同 layer 每进程只写一次。
-func dumpPromptDoc(agentID, layer, system, user string, logger *slog.Logger) {
+// dumpPromptDoc 把一次 LLM 调用的 system+user prompt（及可选 function
+// calling tools）写入文档。layer 取 "strategic" / "tactical"。同 layer
+// 每进程只写一次。tools 非空时额外落盘一个 ### Tools 段（JSON 序列化）。
+func dumpPromptDoc(agentID, layer, system, user string, tools []venus.Tool, logger *slog.Logger) {
 	if promptDocPath == "" || agentID != promptDocAgent {
 		return
 	}
@@ -78,7 +82,7 @@ func dumpPromptDoc(agentID, layer, system, user string, logger *slog.Logger) {
 
 	if !promptDocInitialized {
 		// 文档首节：说明用途（仅进程内首次写时输出；此时文件已清空）。
-		fmt.Fprintf(f, "# 实际 Prompt 留存\n\n每次仿真覆盖写入 H-01 的第一次战略层与战术层 prompt（system + user 全文），由 MCP 运行时落盘。\n\n")
+		fmt.Fprintf(f, "# 实际 Prompt 留存\n\n每次仿真覆盖写入 H-01 的第一次战略层与战术层 prompt（system + user 全文，战术层附 tools 字段），由 MCP 运行时落盘。\n\n")
 		promptDocInitialized = true
 	}
 
@@ -86,7 +90,12 @@ func dumpPromptDoc(agentID, layer, system, user string, logger *slog.Logger) {
 	fmt.Fprintf(f, "## %s 仿真 · H-01 首次%s prompt\n\n", ts, layerName)
 	fmt.Fprintf(f, "### System Prompt\n\n```\n%s\n```\n\n", system)
 	fmt.Fprintf(f, "### User Prompt\n\n```\n%s\n```\n\n", user)
+	if len(tools) > 0 {
+		if b, err := json.MarshalIndent(tools, "", "  "); err == nil {
+			fmt.Fprintf(f, "### Tools\n\n```json\n%s\n```\n\n", b)
+		}
+	}
 	logger.Info("[prompt-doc] 已落盘 H-01 首次 prompt",
 		"path", promptDocPath, "layer", layerName,
-		"system_chars", len(system), "user_chars", len(user))
+		"system_chars", len(system), "user_chars", len(user), "tools", len(tools))
 }

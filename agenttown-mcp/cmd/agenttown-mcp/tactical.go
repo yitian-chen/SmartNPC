@@ -150,10 +150,10 @@ func generateTacticalPlan(
 	logger.Info("[MCP→LLM/TACTICAL-PROMPT]",
 		"agent_id", agentID, "goal", goal, "game_time", timeOfDay, "text", promptText,
 		"replan_hint", hint)
-	// 实际 prompt 文档：每次仿真留存 H-01 首次战术层 prompt（system+user）。
-	dumpPromptDoc(agentID, "tactical", system, promptText, logger)
-
+	// 实际 prompt 文档：每次仿真留存 H-01 首次战术层 prompt（system+user+tools）。
 	ftools := tacticalToolsFromRegistry(registry, agentID)
+	dumpPromptDoc(agentID, "tactical", system, promptText, ftools, logger)
+
 	resp, err := tc.SendWithSummaryTools(ctx, system, promptText, ftools)
 	if err != nil {
 		return nil, fmt.Errorf("tactical llm: %w", err)
@@ -229,8 +229,9 @@ func generateTacticalPlanStreaming(
 	logger.Info("[MCP→LLM/TACTICAL-PROMPT]",
 		"agent_id", agentID, "goal", goal, "game_time", timeOfDay, "text", promptText,
 		"streaming", true, "replan_hint", hint)
-	// 实际 prompt 文档：每次仿真留存 H-01 首次战术层 prompt（system+user）。
-	dumpPromptDoc(agentID, "tactical", system, promptText, logger)
+	// 实际 prompt 文档：每次仿真留存 H-01 首次战术层 prompt（system+user+tools）。
+	ftools := tacticalToolsFromRegistry(registry, agentID)
+	dumpPromptDoc(agentID, "tactical", system, promptText, ftools, logger)
 
 	var actions []plannedAction
 	acc := &streamAccumulator{
@@ -244,7 +245,6 @@ func generateTacticalPlanStreaming(
 		},
 	}
 
-	ftools := tacticalToolsFromRegistry(registry, agentID)
 	resp, err := tc.SendStreamingTools(ctx, system, promptText, ftools, func(delta string) {
 		acc.feed(delta)
 	})

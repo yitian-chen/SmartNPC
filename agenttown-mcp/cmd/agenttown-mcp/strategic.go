@@ -94,7 +94,7 @@ func generateDailyPlan(ctx context.Context, sc strategicCaller, agentID string, 
 		prompt.StrategicRules)
 	logger.Info("[MCP→LLM/STRATEGIC-PROMPT]", "agent_id", agentID, "text", promptText)
 	// 实际 prompt 文档：每次仿真留存 H-01 首次战略层 prompt（system+user）。
-	dumpPromptDoc(agentID, "strategic", system, promptText, logger)
+	dumpPromptDoc(agentID, "strategic", system, promptText, nil, logger)
 
 	resp, err := sc.SendWithSchema(ctx, system, promptText, "daily_plan", []byte(dailyPlanSchema))
 	if err != nil {
