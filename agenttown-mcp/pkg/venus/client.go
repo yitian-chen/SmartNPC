@@ -63,6 +63,11 @@ type Client struct {
 	http   *http.Client
 	log    *slog.Logger
 	sendMu sync.Mutex
+
+	// lastRequestBody is the JSON body of the most recent request sent via
+	// this client (set in doSend after marshalling). Used to dump the actual
+	// request to docs/actual_prompts.md. Guarded by sendMu.
+	lastRequestBody []byte
 }
 
 // New creates a Client.
@@ -211,6 +216,15 @@ func (c *Client) ResetSession() {
 	// Intentionally empty.
 }
 
+// LastRequestBody returns a copy of the JSON body of the most recent request
+// sent via this client. Empty if no request has been sent yet. Used to dump
+// the actual request (docs/actual_prompts.md) without re-marshalling.
+func (c *Client) LastRequestBody() []byte {
+	c.sendMu.Lock()
+	defer c.sendMu.Unlock()
+	return append([]byte(nil), c.lastRequestBody...)
+}
+
 // doSend performs the HTTP POST and parses the response. For streaming
 // requests, onDelta is invoked for each text delta and onToolCall for each
 // completed tool_call. A non-nil schema adds response_format (Structured
@@ -235,6 +249,8 @@ func (c *Client) doSend(ctx context.Context, msgs []message, stream bool, onDelt
 	if err != nil {
 		return nil, fmt.Errorf("marshal request: %w", err)
 	}
+	// 记录完整请求体（供 docs/actual_prompts.md 留存最新一次发给 LLM 的内容）。
+	c.lastRequestBody = payload
 
 	url := strings.TrimRight(c.cfg.BaseURL, "/") + "/v1/chat/completions"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))

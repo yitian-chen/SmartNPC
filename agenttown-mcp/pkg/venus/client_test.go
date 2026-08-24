@@ -608,3 +608,33 @@ func TestVenusClient_MatchesLLMClientSignatures(t *testing.T) {
 		ResetSession()
 	} = (*Client)(nil)
 }
+
+// TestLastRequestBody verifies the client records the full request body of
+// the most recent send, for docs/actual_prompts.md (latest actual request).
+func TestLastRequestBody(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"x","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+	}))
+	defer server.Close()
+
+	c := newTestClient(t, server.URL)
+	if body := c.LastRequestBody(); len(body) != 0 {
+		t.Fatalf("LastRequestBody before any send = %q, want empty", body)
+	}
+	if _, err := c.SendWithSummary(context.Background(), "sys", "user"); err != nil {
+		t.Fatalf("SendWithSummary: %v", err)
+	}
+	body := c.LastRequestBody()
+	var got map[string]any
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("LastRequestBody not valid JSON: %v", err)
+	}
+	if got["model"] != "qwen3.6-35b-a3b" {
+		t.Errorf("body model = %v, want qwen3.6-35b-a3b", got["model"])
+	}
+	msgs, ok := got["messages"].([]any)
+	if !ok || len(msgs) != 2 {
+		t.Fatalf("body messages = %v, want 2 entries", got["messages"])
+	}
+}

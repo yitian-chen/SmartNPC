@@ -93,10 +93,10 @@ func generateDailyPlan(ctx context.Context, sc strategicCaller, agentID string, 
 		"昨日总结："+yesterdaySummary,
 		prompt.StrategicRules)
 	logger.Info("[MCP→LLM/STRATEGIC-PROMPT]", "agent_id", agentID, "text", promptText)
-	// 实际 prompt 文档：每次仿真留存 H-01 首次战略层 prompt（system+user）。
-	dumpPromptDoc(agentID, "strategic", system, promptText, nil, logger)
 
 	resp, err := sc.SendWithSchema(ctx, system, promptText, "daily_plan", []byte(dailyPlanSchema))
+	// 实际 prompt 文档：记录 H-01 最新一次战略层请求体完整 JSON。
+	dumpLastRequestBody(agentID, "strategic", sc, logger)
 	if err != nil {
 		fallback := jitterPlanString(prompt.DefaultDailyPlan(kb))
 		logger.Warn("[战略层] 计划生成失败，使用默认计划兜底",

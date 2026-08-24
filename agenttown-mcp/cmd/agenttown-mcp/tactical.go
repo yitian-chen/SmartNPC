@@ -137,9 +137,8 @@ func generateTacticalPlan(
 	logger.Info("[MCP→LLM/TACTICAL-PROMPT]",
 		"agent_id", agentID, "goal", goal, "game_time", timeOfDay, "text", promptText,
 		"replan_hint", hint, "history_turns", len(conversation))
-	// 实际 prompt 文档：每次仿真留存 H-01 首次战术层 prompt（system+user+tools）。
+	// function calling tools：仅经请求体 tools 字段下发。
 	ftools := tacticalToolsFromRegistry(registry, agentID)
-	dumpPromptDoc(agentID, "tactical", system, promptText, ftools, logger)
 
 	// 多轮 messages：[system, ...历史, user(最新实时状态)]。
 	messages := make([]llmtypes.Message, 0, len(conversation)+2)
@@ -148,6 +147,8 @@ func generateTacticalPlan(
 	messages = append(messages, llmtypes.Message{Role: "user", Content: promptText})
 
 	resp, err := tc.SendMessagesTools(ctx, messages, ftools)
+	// 实际 prompt 文档：记录 H-01 最新一次战术层请求体完整 JSON（无论成败）。
+	dumpLastRequestBody(agentID, "tactical", tc, logger)
 	if err != nil {
 		return nil, llmtypes.Message{}, fmt.Errorf("tactical llm: %w", err)
 	}
