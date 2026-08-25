@@ -576,7 +576,7 @@ func timeStopReplanHint(cmd string, params map[string]any, durationSec float64) 
 	} else {
 		sb.WriteString("，已执行一段时间")
 	}
-	sb.WriteString("。禁止接下来立即继续执行刚才的动作。如有必要可先安排长椅小憩（不超过 30 分钟）再返回工作，也可安排其他动作，如拉伸、阅读等。请避免连续相同长动作且中间无休息。")
+	sb.WriteString("。如有必要可先安排长椅小憩（不超过 30 分钟）再返回工作，也可安排其他动作，如拉伸、阅读等。请避免连续相同长工作且中间无休息。")
 	return sb.String()
 }
 
@@ -1299,6 +1299,14 @@ func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
 		queued := a.as.QueueLen()
 		logger.Warn("[战术层] 分解失败，保留已入队 action",
 			"agent_id", agentID, "queued", queued, "err", err)
+		// 队列空时补兜底动作（speak + look_around），避免 NPC 呆站。
+		// 兜底动作执行期间形成自然退避（completion 后才唤醒重试分解）。
+		if queued == 0 {
+			a.as.ReplaceQueue(fallbackRetryActions())
+			a.signal()
+			logger.Info("[战术层] 分解失败，补发兜底动作避免呆站",
+				"agent_id", agentID, "fallback", "speak+look_around")
+		}
 		return false
 	}
 	a.as.ReplaceQueue(actions)

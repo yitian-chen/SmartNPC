@@ -4,31 +4,31 @@ This file provides guidance to CodeBuddy Code when working with code in this rep
 
 ## 项目定位
 
-AgentTown_v3 — AI NPC 模拟系统。一期单 Agent（H-01 老陈，车间主管机器人），通过 MCP 协议驱动完整的"感知→决策→行动"闭环。通信协议按 `docs/AgentTown_CommProtocol_Values.md` 实现，Mock UE 模拟 UE5 游戏世界。
+AgentTown_v3 — AI NPC 模拟系统。5 个 NPC（H-01~H-05，各自独立 profile 人设 + 工种），通过 MCP 协议驱动完整的"感知→决策→行动"闭环，对接真实 UE5（AgentTown 地图，2026-08-11 起弃用 Mock UE）。通信协议按 `docs/AgentTown_CommProtocol_Values.md` 实现。
 
-**三层决策架构**（2026-07 落地）：
-- **战略层**（`strategic.go`）：每日 06:00 生成当天计划（`dailyPlan`），一条 LLM 调用产出 7 个时段的 goal
-- **战术层**（`tactical.go`）：每个时段把 goal 分解为 1-5 个 action 进 `actionQueue`（复合优先：匹配复合动作时 1-2 步即可，否则 2-5 个原子动作组合），worker 逐个 pop 下发 UE
-- **反应层**（`reactive.go` + `reactive_runner.go`）：监听 zone 变化/动作完成/物理警戒/周期触发，调本地 Ollama 决策 continue/observe/replan
+**三层决策架构**：
+- **战略层**（`pkg/prompt/strategic.go` + `cmd/agenttown-mcp/strategic.go`）：每日 07:00 生成当天计划（`dailyPlan`，6-8 个时段 goal）。system/user prompt 拆分、规则迁 user prompt、注入生产工作流概述与物理状态分档
+- **战术层**（`pkg/prompt/tactical.go` + `cmd/agenttown-mcp/tactical.go`）：每个时段把 goal 分解为 1-4 个动作段，走 **OpenAI 原生 function calling**（`tools` 字段、`tool_choice=required`、多轮 agentic loop），段间用 `time_to_stop` 控制时长
+- **反应层**（`reactive.go` + `reactive_runner.go`）：**默认禁用**（`--ollama-url=""`）；触发时调本地 Ollama 决策 continue/observe/replan
 
-**LLM 后端**：MCP 直连 Venus（OpenAI Chat Completions 协议），战略/战术层调用 Venus（`deepseek-v4-flash`）。反应层始终直连本地 Ollama（`qwen2.5:7b`），不走 Venus。
+**LLM 后端**：MCP 直连 Venus（OpenAI Chat Completions 协议），战略层用 `deepseek-v4-pro`、战术层用 `deepseek-v4-flash`（`--venus-strategic-model`/`--venus-model`）。反应层直连本地 Ollama（`qwen2.5:7b`），不走 Venus。
 
 ## 架构总览
 
 ```mermaid
 graph LR
-    subgraph Win["Windows 宿主"]
-        UE["Mock UE (Python)<br/>asyncio + websockets<br/>src/agenttown/mock_ue.py"]
+    subgraph UE["UE5 游戏世界"]
+        UE5["真实 UE5<br/>AgentTown 地图<br/>5 个 NPC (H-01~H-05)"]
     end
-    subgraph WSL["WSL2 / Linux"]
+    subgraph MCP["Linux 云环境"]
         MCP["agenttown-mcp (Go)<br/>MCP Server + WS Server<br/>:8760 HTTP / :9090 WS<br/>三层决策：战略+战术+反应"]
     end
     subgraph LLM["LLM 后端"]
-        VENUS["Venus<br/>deepseek-v4-flash<br/>(OpenAI 兼容)"]
-        OLLAMA["Ollama 本地<br/>qwen2.5:7b<br/>(反应层专用)"]
+        VENUS["Venus<br/>战略 deepseek-v4-pro<br/>战术 deepseek-v4-flash<br/>(OpenAI 兼容)"]
+        OLLAMA["Ollama 本地<br/>qwen2.5:7b<br/>(反应层专用，默认禁用)"]
     end
-    UE <-->|"WebSocket :9090<br/>7-field Envelope"| MCP
-    MCP -->|"HTTP POST<br/>/v1/chat/completions<br/>(战略/战术层)"| VENUS
+    UE5 <-->|"WebSocket :9090<br/>7-field Envelope"| MCP
+    MCP -->|"HTTP POST<br/>/v1/chat/completions<br/>(战略/战术层 function calling)"| VENUS
     MCP -->|"HTTP POST<br/>/api/chat<br/>(反应层)"| OLLAMA
 ```
 
@@ -36,7 +36,7 @@ graph LR
 
 | 组件 | 语言 | 路径 | 端口 | 职责 |
 |------|------|------|------|------|
-| Mock UE | Python 3.10+ | `src/agenttown/mock_ue.py` | — | 模拟 UE5：物理状态、空间状态、动作执行、感知推送 |
+| 真实 UE5 | C++/蓝图 | UE 侧 AgentTown 地图 | — | 游戏世界：物理状态、空间状态、动作执行、感知推送、world_kb/capability_registry 下发 |
 | agenttown-mcp | Go 1.25+ | `agenttown-mcp/` | HTTP `:8760`, WS `:9090` | 协议适配、感知语义化、工具暴露、三层决策、LLM 桥接 |
 | Venus | 远程 | `--venus-url` | — | OpenAI 兼容 LLM 服务（战略/战术层后端） |
 | Ollama | 本地 | `--ollama-url` | `:11434`（默认禁用，需显式启用） | 反应层本地 LLM（qwen2.5:7b） |
@@ -48,93 +48,92 @@ MCP 内置三层决策，由 `runPerceptionWorker`（`main.go:279`）事件驱�
 ```mermaid
 graph TB
     subgraph 战略层["战略层 strategic.go"]
-        S1["每日 06:00<br/>generateDailyPlan<br/>1 次 LLM 调用"] --> S2["dailyPlan<br/>7 个时段 goal"]
+        S1["每日 07:00<br/>generateDailyPlan<br/>1 次 LLM 调用(Structured Outputs)"] --> S2["dailyPlan<br/>6-8 个时段 goal"]
     end
     subgraph 战术层["战术层 tactical.go"]
-        T1["队列空 → selectCurrentGoal<br/>按 game_time 选 dailyPlan 时段"] --> T2["generateTacticalPlan<br/>1 次 LLM 调用"]
-        T2 --> T3["actionQueue<br/>1-5 个 plannedAction<br/>(复合优先: 匹配时 1-2 步)"]
+        T1["队列空 → selectCurrentGoal<br/>按 game_time 选 dailyPlan 时段"] --> T2["generateTacticalPlan<br/>function calling(tools + tool_choice=required)"]
+        T2 --> T3["actionQueue<br/>1-4 个动作段<br/>(段间 time_to_stop)"]
         T3 --> T4["popAndSendQueueAction<br/>逐个下发 UE"]
     end
     subgraph 反应层["反应层 reactive_runner.go"]
-        R1["触发: zone/action_done/<br/>physical_alert/periodic"] --> R2["Ollama 调用<br/>8s 超时"]
+        R1["触发: zone/action_done/<br/>physical_alert/periodic"] --> R2["Ollama 调用<br/>8s 超时(默认禁用)"]
         R2 --> R3{"决策"}
         R3 -->|continue| R4[不打断]
         R3 -->|observe| R4
         R3 -->|replan| R7[战术层重规划<br/>+ stop 当前]
     end
     S2 --> T1
-    T4 --> UE
-    UE -.->|感知事件| R1
+    T4 --> UE5
+    UE5 -.->|感知事件| R1
 ```
 
 ### 关键机制
 
 - **worker 循环**：`runPerceptionWorker` 监听 `wake` 信号，队列空时调 `tacticalRefill` → `selectCurrentGoal` → `generateTacticalPlan` → 填 `actionQueue` → `popAndSendQueueAction` 下发
-- **`replanInProgress` mutex**：防止 worker 的战术层重规划和 `/debug/schedule` 注入并发调用 `tacticalHc` 冲突。worker 在 main.go:311 检查此标志
-- **`debugOverride`**：仅阻止 worker 的 idle-wait refill（main.go:327），**不阻止**正在 LLM 调用中的 refill——所以 `/debug/schedule` handler 会同时设 `replanInProgress=true` + `debugOverride=true`
+- **战术层 function calling 多轮对话**：`generateTacticalPlan` 用 `SendMessagesTools` 携带多轮历史（assistant tool_calls + tool 结果），每游戏日 `ClearConversation` 清空。**历史轮次截断**保留最近 8 轮完整轮次（`truncateConversationRounds`），防止长上下文导致 LLM 输出坏 tools JSON（venus 500 trailing characters）与目标漂移
+- **多段动作计划 + time_to_stop**：LLM 一次返回 1-4 个动作段，段间设 `time_to_stop` 控制时长；到点 `ClearInFlightKeepQueue` 打断当前段、保留队列继续下一段；末段不设 time_to_stop 自然持续到时段切换
+- **time_to_stop 兜底**（不依赖 LLM 自觉）：`fillDefaultTimeToStopForRest` 给非队尾休息动作补 1800s、`fillDefaultTimeToStopForWork` 给非队尾工作动作补 5400s——防止中间动作漏设导致队列卡死（NPC 一直坐长椅/一直工作）
+- **LLM 失败兜底**：战术层分解失败且队列空时补发 `fallbackRetryActions()`（speak"网络波动了"+ generic_act look_around 30s），避免呆站，动作执行完 completion 再唤醒重试
+- **zone 透传**：`mapTacticalAction` 对 `InteractSmartObject` 透传 LLM 填写的 `zone` 参数（UE 支持），否则"去中央广场长椅"会落到 NPC 所在 zone 的设施
+- **`replanInProgress` mutex**：防止 worker 的战术层重规划和 `/debug/schedule` 注入并发调用 `tacticalHc` 冲突
+- **`debugOverride`**：仅阻止 worker 的 idle-wait refill，**不阻止**正在 LLM 调用中的 refill——所以 `/debug/schedule` handler 会同时设 `replanInProgress=true` + `debugOverride=true`
 - **`currentSlot` 加 `__debug__` 前缀**：防止注入的 slot 和 dailyPlan 同名 slot 碰撞触发 `redecomposeCount >= 1` 限制
 - **反应层去抖**：`lastReactiveAt` map 按 trigger 类型去抖（periodic 60s / zone_change 45s）
-- **反应层 replan**：决策为 `replan` 时调 `ac.tacticalRefillForReplan`，会重置 `actionQueue` 重新调战术层 LLM。规划失败时调 `fallbackStopAndRefill`：清空队列 + 清在途追踪 + stop_action + signal worker，让 worker 通过自然 `tacticalRefill` 路径重新规划（避免 75 游戏分钟延迟）
+- **反应层 replan**：决策为 `replan` 时调 `ac.tacticalRefillForReplan`，会重置 `actionQueue` 重新调战术层 LLM
 
 ### LLM 后端
 
-MCP 直连 Venus（OpenAI Chat Completions 协议），战略/战术层调用 Venus。反应层**始终**走 `pkg/ollama/client.go`（本地 Ollama，5-8s 超时），不受影响。
+MCP 直连 Venus（OpenAI Chat Completions 协议），战略/战术层调用 Venus。反应层**始终**走 `pkg/ollama/client.go`（本地 Ollama，5-8s 超时），默认禁用。
+
+**function calling**：战术层经 `tools` 请求字段下发工具（由 `capability_registry` 派生），`tool_choice=required`，多轮 messages（system + 历史 + 最新 user）。战略层用 Structured Outputs（`response_format` json_schema strict）。
 
 **启动示例**：
 ```bash
 ./agenttown-mcp --http :8760 --ws :9090 \
   --venus-url http://v2.open.venus.oa.com/llmproxy \
   --venus-api-key $VENUS_API_KEY \
-  --venus-model deepseek-v4-flash
+  --venus-model deepseek-v4-flash \
+  --venus-strategic-model deepseek-v4-pro
 ```
 
-Venus 客户端无状态——每次调用全量 prompt，不复用会话链。战略/战术层 prompt 完全由 MCP 构造，所有上下文（角色、世界知识、物理状态）显式注入。
+Venus 客户端无状态——每次调用全量 prompt，不复用会话链（战术层多轮历史由 MCP 侧 `agentstate.Conversation` 维护，非 Venus session）。战略/战术层 prompt 完全由 MCP 构造，所有上下文（角色、世界知识、物理状态）显式注入。
 
 ## 通信流向
 
+核心消息流（三层决策细节见上方"三层决策架构"）：
+
 ```mermaid
 sequenceDiagram
-    participant UE as Mock UE
+    participant UE as UE5
     participant WS as wsserver (MCP)
-    participant Fmt as perception.Format
     participant LLM as venus.Client
     participant Tools as MCP Tools
 
-    Note over UE: 感知循环 (每 N 游戏分钟，按模式配置)
-    UE->>WS: perception_update {location, physical_delta, nearby_objects...}
-    WS->>Fmt: 原始 payload → 第一人称叙事
-    Fmt->>LLM: POST /v1/chat/completions {messages:[...]}
-    LLM-->>Fmt: 响应 (narrative 或 tool_call)
-    
-    alt 响应含工具调用
-        LLM->>Tools: MCP Tool Call (agent_id, params)
-        Tools->>WS: SendAction → action_command
-        WS->>UE: action_command {cmd, params}
-        UE-->>WS: action_started (ACK ≤2s)
-        WS-->>Tools: ACK → 工具返回
-        Note over UE: 执行动作...
-        UE->>WS: action_completed {result, progress}
-        WS->>Fmt: 下次感知时折入叙事
-    end
-    
-    Fmt->>WS: narrative 文本
-    WS->>UE: narrative {text} (显示用)
+    Note over UE: UE 连接后首发 world_kb → agent_registered → capability_registry
+    UE->>WS: perception_update {location, physical_state, nearby_objects...}
+    Note over WS: worker 循环：slot 判断 / time_to_stop 检测 / 队列 pop
+    WS->>LLM: 战术层 function calling（tools + tool_choice=required）
+    LLM-->>WS: tool_calls（1-4 个动作段）
+    WS->>Tools: 解析 tool_calls → actionQueue
+    WS->>UE: action_command {cmd, params}
+    UE-->>WS: action_started (ACK ≤2s)
+    Note over UE: 执行动作...
+    UE->>WS: action_completed {result, duration_ms, progress}
+    Note over WS: completion → 队列下一段 / 重分解 / 关系判断 / action_history 落盘
 ```
 
 ## 常用命令
 
-### 一键启动
+### 一键启动（云环境）
 
 ```bash
-bash start.sh normal             # 完整日：06:00-22:00, 150x
-bash start.sh behavior           # 行为联调：06:00-18:00, 60x, 场景事件
-bash start.sh quick-smoke        # 协议烟测：06:00-10:00, 600x
-bash start.sh --quick            # quick-smoke 兼容别名
-bash start.sh behavior --speed 100 --end 12  # 模式参数覆盖
-SKIP_MCP_BUILD=1 bash start.sh normal        # 跳过 Go 编译
+cd /data/workspace/dev
+bash start-dev.sh              # dev 实例：端口 8770/9091，日志 logs-dev/
+cd /data/workspace/stable
+bash start-debug.sh            # stable 实例：端口 8760/9090，日志 logs/
 ```
 
-`start.sh` 执行顺序：**先停全部 → 编译+部署 MCP → 启动 MCP → 启动 Mock UE → 仿真结束后合并日志**。每步健康检查通过才继续。
+`start-debug.sh`/`start-dev.sh` 执行顺序：**读取 .env → 拉起 MySQL → 编译+启动 MCP → 等健康检查通过**。UE5 端由外部启动连接 MCP 的 WS 端点（`:9090` stable / `:9091` dev）。
 
 ### Go 构建 / 测试
 
@@ -142,14 +141,15 @@ SKIP_MCP_BUILD=1 bash start.sh normal        # 跳过 Go 编译
 cd agenttown-mcp
 go build ./...                                              # 编译检查
 go test ./...                                               # 全部测试
+go test ./cmd/agenttown-mcp/ -v -count=1                    # 战术/战略层 + 决策
+go test ./pkg/prompt/ -v -count=1                           # prompt 构建 + 物理分档
 go test ./pkg/wsserver/ -v -count=1                         # WS 缓冲/重放测试
 go test ./pkg/protocol/ -v -count=1                         # 协议序列化测试
-go test ./adapters/agenttown/perception/ -v -count=1        # 感知格式化测试
 ```
 
 ### 日志检查
 
-**统一日志文件**：`logs/YYYY-MM-DD/debug-mcp.log`（MCP 进程独占写入，JSON Lines 格式，含 UE + MCP + LLM 三层全链路；`YYYY-MM-DD` 为仿真启动日期）
+**统一日志文件**：`logs/YYYY-MM-DD/debug-mcp.log`（stable 实例）或 `logs-dev/YYYY-MM-DD/debug-mcp.log`（dev 实例）。MCP 进程独占写入，JSON Lines 格式，含 UE + MCP + LLM 三层全链路；`YYYY-MM-DD` 为仿真启动日期
 
 **推荐：用 `scripts/pretty_log.py` 可读化查看**（每条 JSON 渲染为多行，方向标记着色，长字段按行展开）：
 
@@ -182,8 +182,8 @@ python scripts/pretty_log.py --raw                        # 原始 JSON（grep/a
 **原始 grep（不渲染，单行 JSON）**：
 
 ```bash
-grep '\[UE→MCP\]' logs/YYYY-MM-DD/debug-mcp.log           # Mock UE → MCP（感知/状态/动作完成）
-grep '\[MCP→UE\]' logs/YYYY-MM-DD/debug-mcp.log           # MCP → Mock UE（动作命令/叙事）
+grep '\[UE→MCP\]' logs/YYYY-MM-DD/debug-mcp.log           # UE5 → MCP（感知/状态/动作完成）
+grep '\[MCP→UE\]' logs/YYYY-MM-DD/debug-mcp.log           # MCP → UE5（动作命令）
 grep '\[MCP→LLM/PERCEPTION\]' logs/YYYY-MM-DD/debug-mcp.log    # MCP → LLM（感知文本）
 grep '\[LLM→MCP/RESPONSE\]' logs/YYYY-MM-DD/debug-mcp.log      # LLM → MCP（LLM 响应 + narrative）
 grep '\[MCP→LLM/STRATEGIC-PROMPT\]' logs/YYYY-MM-DD/debug-mcp.log   # 战略层 prompt（每日规划输入）
@@ -207,7 +207,7 @@ grep -E 'TACTICAL-PROMPT|TACTICAL-RESPONSE|队列已填充|\[战术层\] 下发 
 
 **战术/战略层日志**：战略层和战术层使用独立的 LLM 调用（无状态，不复用决策链），因此不带 `decision_epoch`。链路按 `agent_id` + 时间顺序关联：`[MCP→LLM/STRATEGIC-PROMPT]` → `[LLM→MCP/STRATEGIC-RESPONSE]` → `[战略层] 每日计划生成成功`；`[MCP→LLM/TACTICAL-PROMPT]` → `[LLM→MCP/TACTICAL-RESPONSE]` → `[战术层] 队列已填充`（含完整 actions JSON）→ `[战术层] 下发 action`（逐个 pop）。
 
-Mock UE 不再写独立日志文件，但控制台仍输出 `[PERCEPTION]`/`[STATE]`/`[SPEAK]` 等人类可读摘要供实时观察。
+UE5 不写独立日志文件，MCP 的 `logs/`（stable）或 `logs-dev/`（dev）日志为唯一权威记录。
 
 ## 联调 Debug 工具
 
@@ -219,6 +219,12 @@ MCP 启动后暴露 HTTP debug 端点（dev 端口 `:8770`，stable `:8760`，�
 | `POST /debug/action` | POST | 直接下发单个 action_command 到 UE（单步调试） |
 | `POST /debug/schedule` | POST | 注入一条 schedule 到战术层，立即分解为 action 序列入队 |
 | `GET /debug/kb` | GET | 返回 world_kb JSON（zones/objects） |
+| `GET /debug/cap` | GET | 返回 capability_registry 当前状态（global + per-agent cmd） |
+| `GET /debug/agents` | GET | 返回已注册 agent ID 列表（供前端 agent 下拉） |
+| `GET /debug/logs` | GET | 返回最近 MCP 日志（环形缓冲 500 条，按 level 筛选） |
+| `GET /debug/plan` | GET | 返回指定 agent 当日 dailyPlan 快照（items/current_slot/game_time） |
+| `GET /debug/tactical` | GET | 返回所有 agent 战术层分解情况（当前时段 goal + 在途 action 及参数 + 待执行队列） |
+| `GET /debug/ue-errors` | GET | 返回最近 UE 上报 error 消息（环形缓冲 50 条） |
 
 ### `/debug/schedule`（2026-07 新增）
 
@@ -241,9 +247,12 @@ MCP 启动后暴露 HTTP debug 端点（dev 端口 `:8770`，stable `:8760`，�
 
 ### 浏览器 UI
 
-`/debug/` 提供 tab 切换：
+`/debug/` 单页控制台，多面板：
 - **单 Action**：填 cmd + params，直接下发 UE
 - **Schedule 注入**：填 schedule 文本，触发战术层分解
+- **当日 schedule**：右侧面板展示 dailyPlan（时段 + goal + 当前高亮）
+- **战术层分解情况**：全宽面板展示每个 NPC 当前时段 goal + 在途 action（含全部参数）+ 待执行队列（每 5s 刷新）
+- **MCP 日志**：全宽面板，按 level 筛选的环形日志
 
 UI 特性：curl 预览、历史记录（支持 replay）、响应字段高亮、强制中断复选框。
 
@@ -300,7 +309,7 @@ type Envelope struct {
 ```mermaid
 sequenceDiagram
     participant Agent as MCP (Agent)
-    participant UE as Mock UE
+    participant UE as UE5
     Note over Agent: 工具调用触发
     Agent->>UE: action_command {action_id, cmd, params}
     UE-->>Agent: action_started {action_id, accepted, estimated_duration_sec} (≤2s)
@@ -406,12 +415,12 @@ energy / fatigue / joint_wear，通过 `perception_update` 全量上传（`physi
 
 MCP 是唯一的 LLM 调用入口，启动后即可接收感知事件、调用 Venus/Ollama、下发工具调用。
 
-正确顺序（`start.sh` 已保证）：
+正确顺序（`start-debug.sh`/`start-dev.sh` 已保证）：
 1. 停掉所有旧进程
-2. 编译+部署 MCP 二进制到 WSL `~/agenttown-mcp`
+2. 编译 MCP 二进制
 3. 启动 MCP → 等 `:8760` + `:9090` 就绪
-4. 启动 Mock UE → 预检查通过后运行
-5. 仿真日志统一写入 `logs/YYYY-MM-DD/debug-mcp.log`（MCP 独占，无需合并）
+4. 启动 UE5（AgentTown 地图）→ 连接 MCP WS 端点
+5. 仿真日志统一写入 `logs/YYYY-MM-DD/debug-mcp.log`（stable）或 `logs-dev/YYYY-MM-DD/debug-mcp.log`（dev），MCP 独占，无需合并
 
 **UE 连接消息序列**（硬约束）：UE 连接 MCP 后按以下顺序首发系统消息：
 1. `world_kb`（`agent_id="system"`）— 推送完整世界 KB（generated + authored JSON），MCP 合并+落盘+swap 内存 KB。**必须在首个 `agent_registered` 之前**，确保 worker 启动时捕获新 KB
@@ -473,13 +482,12 @@ Stage 5 在 Stage 3/4 之上接入 NPC 间关系数值动态维护：动作完�
 
 UE 推送新 `world_kb` 后，MCP 重启即自动适配全链路，无需改任何代码：
 
-- **战略层 prompt 注入 KB + 角色 + 能力边界**：`generateDailyPlan` 接收 `kb` 和 `registry`，`buildStrategicContext(kb, agentID, registry)` 构造【你的角色】+【世界知识】+【区域设施映射】+【可用能力】四段——角色段复用 `buildAgentRoleContext(kb, agentID)`（三层决策共用 helper），从 `kb.GetAgent(agentID)` 取 `DisplayName`/`Profession`/`Description`/`Personality`；世界知识段复用 `buildKBContext(kb)`（与战术层同源）列出全部 zone/object id；可用能力段复用 `buildTacticalToolEntries`（与战术层同源）列出 `Kind=="composite"` 的复合动作，告知 AI 能力边界，避免规划无对应动作的 goal（如"整理仪容"）。LLM 据此规划当日计划，不会编造 KB 外概念，也不会规划无法由现有动作实现的活动。
-- **战术层 prompt 注入 KB + 角色**：`buildTacticalPrompt` 接收 `kb` 和 `agentID`，注入【你的角色】段（同样复用 `buildAgentRoleContext`）+【世界知识】段。战术层分解动作时体现 NPC 角色风格。
-- **反应层 prompt 注入角色**：`ReactiveInput.AgentRole` 由 `reactiveRunner.buildInput` 从 kb 取，注入反应层 prompt 开头。反应决策（continue/observe/replan）受 NPC 性格影响。
-- **工具列表动态派生**：`capability_registry` 驱动 `ReconcileTools` 增删工具；`buildTacticalToolEntries` 按 registry 对 agent 的有效能力集生成 prompt 工具列表；`buildTacticalExample(kb)` 从 KB 取首个 zone/object 作示例。新 cmd 由 `registerGenericActionTool` 自动注册通用工具。
-- **反应层决策简化**：反应层仅支持 `continue`/`observe`/`replan` 三种决策（已移除 `interrupt`/`act`）。物理告警时代码层 `upgradeIfPhysicalAlert` 强制升级 continue/observe → replan。
-- **工具 jsonschema 描述去硬编码 id**：`MoveToInput.TargetID` / `InteractInput.SemanticGroup` / `WorkShiftInput.SemanticGroup` 等不再写死 `e.g. main_workshop`/`workbench_01`/`"H-01"`，改为引用 `world_kb`，LLM 从 prompt 注入的【世界知识】段获取合法 id。
-- **兜底每日计划从 KB 派生**：`buildDefaultDailyPlan(kb)` 用首个 zone 显示名 + 首个 object 显示名组装工作时段；`kb == nil` 时降级为中性表述（不引用"车间"/"装配"/"充电"等当前 KB 专属词）。
+- **战略/战术层 prompt 注入 KB + 角色**：`BuildStrategicSystemPrompt`/`BuildTacticalSystemPrompt` 共享三模块（【世界背景】`WorldOverview` + 【人物背景】`AgentRole` + 【世界详细信息】`worldDetailCore`）。角色段 `AgentRole(kb, profiles, agentID)` 三层 per-field 回退；世界详情 `worldDetailCore` 从 KB 派生各区域描述 + 设施映射表 + 属性影响/使用门槛，LLM 不会编造 KB 外概念
+- **工具列表动态派生**：`capability_registry` 驱动 `ReconcileTools` 增删工具；战术层 tools 经 `tacticalToolsFromRegistry` 从 registry 对 agent 的有效能力集生成 function calling 的 `tools` 数组（`capabilityParamsSchema` 转 JSON Schema + 追加 time_to_stop）。新 cmd 由 `registerGenericActionTool` 自动注册
+- **反应层 prompt 注入角色**：`ReactiveInput.AgentRole` 由 `reactiveRunner.buildInput` 从 kb 取，注入反应层 prompt 开头。反应决策（continue/observe/replan）受 NPC 性格影响
+- **反应层决策简化**：反应层仅支持 `continue`/`observe`/`replan` 三种决策（已移除 `interrupt`/`act`）。物理告警时代码层 `upgradeIfPhysicalAlert` 强制升级 continue/observe → replan
+- **工具 jsonschema 描述去硬编码 id**：参数描述引用 `world_kb` 语义组名，LLM 从 prompt 注入的【世界详细信息】段获取合法 id
+- **兜底每日计划从 KB 派生**：`DefaultDailyPlan(kb)` 用首个 zone 显示名 + 首个 object 显示名组装工作时段；`kb == nil` 时降级为中性表述
 
 **仅启动时适配**：不支持运行时热替换 KB。worker 按值捕获 kb，swap 仅在 worker 启动前发生，当前架构安全。换 KB 流程：UE 推送新 `world_kb` → MCP 重启 → worker 启动时拿新 kb。
 
@@ -496,18 +504,18 @@ NPC 性格、背景、说话风格等 persona 字段从 `assets/profiles/<agentI
 
 ### 每周日程配置
 
-NPC 行为随 7 天周期变化：前 5 天工作日、后 2 天休息日；第 2 天上网日（下班后倾向上网）、第 3 天派对日（下班后倾向放松休闲，社交功能后续做）。仅注入战略层 prompt，影响当日计划安排。
+NPC 行为随 7 天周期变化：前 5 天工作日、后 2 天休息日；第 2 天运动日（今天可以早点结束工作去运动）、第 3 天冥想日（21:00-22:00 集体冥想）。仅注入战略层 prompt，影响当日计划安排。
 
-- **配置文件**：`assets/weekly_schedule.yaml`，7 条 `day_of_week` 1-7 各一条，每条声明 `type`（work/rest）、可选 `after_work` 语义标签（internet/party，不注入 prompt）、可选 `note`（注入 prompt 的提示语）
+- **配置文件**：`assets/weekly_schedule.yaml`，7 条 `day_of_week` 1-7 各一条，每条声明 `type`（work/rest）、可选 `after_work` 语义标签（exercise/meditation，不注入 prompt）、可选 `note`（注入 prompt 的提示语）
 - **加载机制**：`pkg/weeklyschedule.Load(path)` 启动时加载，`--weekly-schedule=""` → 禁用（nil，不注入【今日日程】段，行为不变），非空路径格式错 fail-fast。进程级只读，与 kb/profiles 同级参数化传递，不入 `agentContext`
 - **星期映射**：UE `Environment.DayCount` 从 0 开始，`dayOfWeek = (dayCount % 7) + 1`（Day 0 → 周一，Day 6 → 周日）。`WeeklyLine(dayCount, sched)` 返回预格式化字符串（如"今天是周二（工作日）。下班后适合上网休闲放松。"），dayCount<0 或 nil 返回空
 - **战略层注入**：`BuildStrategic` 接收 `dayContext string` 参数，【今日日程】段插在【你的角色】后、【物理状态】前。`pkg/prompt` 不依赖 `pkg/weeklyschedule`（预格式化字符串解耦，镜像 `PhysicalLine` 模式）
 - **调用点**：worker 启动计划用 `ac.as.LatestDayCount()`（首条 perception 未到为 -1，无星期上下文）；跨日计划用 `detectDayRollover` 返回的 `newDay`
 - **仅战略层**：战术层不动 — 它分解战略层为晚间时段写的 goal（如"傍晚去上网休闲"→`surf_internet` 复合动作）
 
-### Mock UE Busy 状态
+### UE Busy 状态
 
-长耗时复合动作（`WorkShift`/`ChargeAtStation`/`SelfMaintenance`/`RestAtResidence`/`SurfInternet`）不跳跃时间，设置 `npc.busy_until_min`。感知循环自然推进时间，NPC 留在原位直到时间到达。
+长耗时复合动作（`WorkShift`/`ChargeAtStation`/`SelfMaintenance`/`RestAtResidence`/`SurfInternet`）由 UE5 行为树执行，MCP 侧通过 time_to_stop 或 slot 切换打断。感知循环自然推进时间，NPC 留在原位直到时间到达。
 
 - 忙碌期间拒绝破坏性动作：`MoveTo`/`TurnTo`/`InteractSmartObject`/5 个复合 cmd/`Wait`
 - 短动作立即执行 + 发 `action_completed`
@@ -517,7 +525,7 @@ NPC 行为随 7 天周期变化：前 5 天工作日、后 2 天休息日；第 
 
 ```mermaid
 sequenceDiagram
-    participant UE as Mock UE
+    participant UE as UE5
     participant MCP as MCP (WS Server)
     Note over UE,MCP: 连接断开
     Note over UE: 心跳超时 15s → 标记断线
@@ -552,14 +560,14 @@ sequenceDiagram
 
 ### LLM 调用
 
-MCP 直连 Venus（OpenAI Chat Completions 协议），无会话链——每次调用全量 prompt，不复用历史。战略/战术/反应三层各自构造完整 prompt：
-- **战略层**：每日 06:00 一次调用，输入 = `buildStrategicContext(kb, agentID, registry)` + 7 时段模板，输出 = 当日 plan JSON
-- **战术层**：每个时段开始时调用，输入 = `buildTacticalPrompt(...)`（含角色/世界知识/物理状态/工具列表/示例），输出 = NDJSON actions
+MCP 直连 Venus（OpenAI Chat Completions 协议）。战略层用 Structured Outputs（json_schema strict），战术层用 function calling（tools + tool_choice=required + 多轮历史）。三层各自构造完整 prompt：
+- **战略层**：每日 07:00 一次调用，`SendWithSchema` + `dailyPlanSchema`，输入 = `BuildStrategicSystemPrompt`（三模块）+ user（物理状态/昨日总结/规则），输出 = 当日 plan JSON
+- **战术层**：每个时段开始时调用，`SendMessagesTools`，输入 = `BuildTacticalSystemPrompt`（三模块）+ user（全天日程/当前时段目标/实时状态/规则），工具经 `tools` 字段下发，输出 = tool_calls（1-4 动作段）
 - **反应层**：触发时调本地 Ollama（5-8s 超时），输入 = `buildReactivePrompt(in)`（含角色/状态/在途动作/触发原因），输出 = `{"reaction": "...", "reason": "..."}`
 
 ### 感知格式化
 
-Mock UE 推送 `perception_update` → MCP 的 `adapters/agenttown/perception/format.go` 转为第一人称叙事 → POST 给 Venus（战略/战术层）或 Ollama（反应层）。格式包括时段（清晨/上午/中午/下午/傍晚）、位置、物理状态、附近物体、pending action_completion 折入叙事。
+UE5 推送 `perception_update` → MCP 的 `pkg/agentstate` 语义化（zone 判断、物理状态、附近物体、可见 NPC）→ 作为战术层 prompt 的【NPC与环境实时状态】段注入。`adapters/agenttown/perception/format.go` 已移除（旧的"第一人称叙事"流不再使用）。
 
 ### stdio vs HTTP 模式
 
@@ -571,7 +579,7 @@ Mock UE 推送 `perception_update` → MCP 的 `adapters/agenttown/perception/fo
 
 ### 网络拓扑
 
-MCP 监听 `0.0.0.0:8760`（HTTP）+ `0.0.0.0:9090`（WS）。Mock UE 通过 `ws://localhost:9090/ws` 连接（WSL2 localhost 转发）。Venus 远程服务通过 HTTPS 调用。Ollama 本地服务通过 `http://localhost:11434` 调用。
+MCP 监听 `0.0.0.0:8760`（HTTP）+ `0.0.0.0:9090`（WS）。UE5 通过 `ws://<host>:9090/ws` 连接（dev 实例为 `:9091`）。Venus 远程服务通过 HTTPS 调用。Ollama 本地服务通过 `http://localhost:11434` 调用。
 
 ## 代码规范
 
@@ -593,38 +601,40 @@ cp .env.example .env
 # 编辑 .env，填入 VENUS_API_KEY
 ```
 
-关键环境变量（`.env`）：
+关键环境变量（`.env`，详见 `.env.example`）：
 - `VENUS_API_KEY` — Venus 后端 API key（**必填**，MCP 直连 Venus 凭据）
-- `AGENTTOWN_MCP_HTTP` — MCP HTTP 监听（默认 `:8760`）
-- `AGENTTOWN_MCP_WS` — MCP WebSocket 监听（默认 `:9090`）
+- `AGENTTOWN_MCP_AUTO_PLAN` — 自动规划总开关（默认 `true`）
+- `HTTP_PORT` / `WS_PORT` — MCP 监听端口（start-debug.sh 读取，默认 `8760`/`9090`）
+- `MYSQL_DSN` / `MYSQL_DB` / `SKIP_MYSQL` — 持久化存储（默认内存模式）
+- `OLLAMA_URL` / `OLLAMA_MODEL` / `OLLAMA_NUM_THREAD` — 反应层（默认禁用）
 
 ### MCP 启动 flag 速查
 
 | flag | 默认值 | 说明 |
 |------|--------|------|
 | `--http` | `:8760` | MCP HTTP 监听地址（空=stdio 模式） |
-| `--ws` | `:9090` | WebSocket 监听（Mock UE 连接） |
+| `--ws` | `:9090` | WebSocket 监听（UE5 连接） |
 | `--venus-url` | `http://v2.open.venus.oa.com/llmproxy` | Venus 后端 URL |
-| `--venus-api-key` | `""` | Venus API key（**必填**，否则 401） |
+| `--venus-api-key` | `""` | Venus API key（**必填**，否则 401）。env 回退 `VENUS_API_KEY` |
 | `--venus-model` | `deepseek-v4-flash` | Venus 模型 ID（战术层） |
-| `--venus-strategic-model` | `deepseek-v4-flash` | 战略层模型 ID（空值回退到 `--venus-model`） |
+| `--venus-strategic-model` | `deepseek-v4-pro` | 战略层模型 ID（空值回退到 `--venus-model`） |
 | `--venus-timeout` | `60s` | Venus 调用超时 |
-| `--tactical-timeout` | `60s` | 战术层 LLM 调用超时 |
+| `--tactical-timeout` | `60s` | 战术层 LLM 调用超时（time_scale=90 下 ≈90 游戏分钟，slot 切换拖尾主因之一） |
 | `--tactical-stream` | `false` | 战术层流式输出（实验性，默认关） |
 | `--auto-plan` | `true` | 自动规划总开关（false=手动模式，跳过战略/战术/反应层自动决策，仅响应 /debug/schedule 注入和 /debug/action 手动下发） |
 | `--mysql-dsn` | `""` | MySQL DSN（空=内存模式无持久化；非空启用 Stage 3 存储层，DSN 需含 `parseTime=true`）。env 回退 `MYSQL_DSN` |
-| `--ollama-url` | `""` | Ollama URL（**默认空串=禁用反应层**——当前误判率高、延迟成本大，待优化后再默认启用；设为 `http://localhost:11434` 启用） |
+| `--ollama-url` | `""` | Ollama URL（**默认空串=禁用反应层**；设为 `http://localhost:11434` 启用） |
 | `--ollama-model` | `qwen2.5:7b-instruct-q4_K_M` | 反应层模型 |
 | `--ollama-num-thread` | `16` | Ollama CPU 推理线程数（0=默认 16，-1=让 Ollama 自决）。高核数 CPU 上默认用满所有核反而劣化，实测 96 vCPU EPYC 限制到 16 线程可获得 3x 加速 |
 | `--world-kb` | `assets/world_kb.yaml` | 世界 KB 路径（fail-fast 启动加载；UE 推送 world_kb 时也写入此路径） |
 | `--world-kb-manifest` | `assets/world_kb.manifest.json` | manifest.json 输出路径（UE 推送 world_kb 时写入；空串=跳过 manifest） |
 | `--profiles-dir` | `assets/profiles` | NPC profile.md 目录（文件名 = `<agentID>.md`；空串=禁用 profile override，仅走 KB → fallback） |
-| `--weekly-schedule` | `assets/weekly_schedule.yaml` | 每周日程配置 YAML（7 天周期：工作日/休息日/上网日/派对日；空串=禁用，不注入【今日日程】段） |
+| `--weekly-schedule` | `assets/weekly_schedule.yaml` | 每周日程配置 YAML（7 天周期：工作日/休息日/运动日/冥想日；空串=禁用，不注入【今日日程】段） |
 | `--log-level` | `info` | `debug`/`info`/`warn`/`error` |
 
 ### 云开发环境（AnyDev / 远程 Linux）
 
-`start.sh` 是为 Windows+WSL 设计的，**纯 Linux 环境不能直接跑**。分组件启动：
+云环境用 `start-debug.sh`（stable）/ `start-dev.sh`（dev）一键启动，或分组件启动：
 
 ```bash
 # 1. 编译 MCP
@@ -634,13 +644,9 @@ cd agenttown-mcp && go build -o ../mcp ./cmd/agenttown-mcp && cd ..
 cp .env.example .env  # 填入 VENUS_API_KEY
 
 # 3. 启动 MCP（直连 Venus）
-./mcp --http :8760 --ws :9090 \
-  --venus-api-key "$VENUS_API_KEY" \
-  --log-level debug 2>&1 | tee logs/$(date +%Y-%m-%d)/debug-mcp.log
+bash start-debug.sh    # stable 实例（或 bash start-dev.sh 起 dev 实例）
 
-# 4. 另开终端启动 Mock UE
-pip install websockets pyyaml
-python src/run_day.py
+# 4. UE5 端启动 AgentTown 地图，连接 MCP 的 WS 端点（:9090 stable / :9091 dev）
 
 # 5.（可选）启用反应层需在 MCP 启动时加 --ollama-url http://localhost:11434，
 #    并启动本地 Ollama：
@@ -656,10 +662,10 @@ ollama pull qwen2.5:7b-instruct-q4_K_M
 
 云开发环境（AnyDev / 远程 Linux）下，项目 clone 到 `/data/workspace/` 下两个独立目录，用端口隔离同时运行：
 
-| 目录 | 分支 | 用途 | MCP HTTP | MCP WS | Mock UE 连接 | debug 控制台 |
-|------|------|------|----------|--------|--------------|--------------|
-| `/data/workspace/stable` | `master` | 稳定运行、验证 | `:8760` | `:9090` | `--mcp-ws ws://localhost:9090/ws` | `http://localhost:8760/debug/` |
-| `/data/workspace/dev` | `dev-working` | 日常开发、调试 | `:8770` | `:9091` | 默认（`ws://localhost:9091/ws`） | `http://localhost:8770/debug/` |
+| 目录 | 分支 | 用途 | MCP HTTP | MCP WS | debug 控制台 | 日志目录 |
+|------|------|------|----------|--------|--------------|----------|
+| `/data/workspace/stable` | `master` | 稳定运行、验证 | `:8760` | `:9090` | `http://localhost:8760/debug/` | `logs/` |
+| `/data/workspace/dev` | `feature/openai-origin-tool-calling` | 日常开发、调试 | `:8770` | `:9091` | `http://localhost:8770/debug/` | `logs-dev/` |
 
 **初始化**（每个目录独立 clone + 编译）：
 ```bash
@@ -667,7 +673,7 @@ cd /data/workspace
 git clone https://git.woa.com/yitianchen/smartnpc.git stable
 cd stable && git checkout master && cd ..
 git clone https://git.woa.com/yitianchen/smartnpc.git dev
-cd dev && git checkout dev-working && cd ..
+cd dev && git checkout feature/openai-origin-tool-calling && cd ..
 
 # 各自编译 MCP（需要 Go 1.25+）
 cd /data/workspace/stable/agenttown-mcp && go build -o ../mcp ./cmd/agenttown-mcp && cd ~
@@ -678,33 +684,21 @@ cp .env.example /data/workspace/stable/.env  # 填入 VENUS_API_KEY
 cp .env.example /data/workspace/dev/.env
 ```
 
-**启动 stable**（终端 1 — MCP，终端 2 — Mock UE）：
+**启动 stable**（终端 1 — MCP）：
 ```bash
-# 终端 1
 cd /data/workspace/stable
-./mcp --http :8760 --ws :9090 \
-  --venus-api-key "$VENUS_API_KEY" --log-level debug
-
-# 终端 2
-cd /data/workspace/stable
-python3 src/run_day.py --mcp-ws ws://localhost:9090/ws
+bash start-debug.sh     # 或直接 ./mcp --http :8760 --ws :9090 --venus-api-key "$VENUS_API_KEY"
 ```
 
-**启动 dev**（终端 3 — MCP，终端 4 — Mock UE）：
+**启动 dev**（终端 2 — MCP）：
 ```bash
-# 终端 3
 cd /data/workspace/dev
-./mcp --http :8770 --ws :9091 \
-  --venus-api-key "$VENUS_API_KEY" --log-level debug
-
-# 终端 4
-cd /data/workspace/dev
-python3 src/run_day.py   # 默认连 :9091
+bash start-dev.sh       # 偏移端口 8770/9091 + logs-dev/ 日志目录
 ```
 
-**端口隔离原则**：stable 用 `8760/9090`，dev 用 `8770/9091`，互不干扰，可同时运行各自独立的仿真。日志分别写入 `/data/workspace/{stable,dev}/logs/YYYY-MM-DD/debug-mcp.log`。
+**端口隔离原则**：stable 用 `8760/9090`，dev 用 `8770/9091`，互不干扰，可同时运行各自独立的仿真。日志分别写入 `/data/workspace/stable/logs/` 和 `/data/workspace/dev/logs-dev/`（各按 `YYYY-MM-DD/debug-mcp.log` 组织，由 `start-debug.sh` / `start-dev.sh` 分别写入）。
 
-**本地 Windows 对比**：本地用 `D:\SmartNPC_v3`（dev worktree，`dev-working` 分支）和 `D:\SmartNPC_v3-stable`（stable worktree，`master` 分支）两个 worktree 实现同样的分离，端口约定一致。
+**本地 Windows 对比**：本地用 `D:\SmartNPC_v3`（dev worktree）和 `D:\SmartNPC_v3-stable`（stable worktree，`master` 分支）两个 worktree 实现同样的分离，端口约定一致。
 
 ## 文件地图
 
@@ -721,8 +715,8 @@ python3 src/run_day.py   # 默认连 :9091
 | `agenttown-mcp/cmd/agenttown-mcp/memory.go` | Stage 4 记忆层：日终 LLM 总结 action_history → 结构化 memories + narrative |
 | `agenttown-mcp/cmd/agenttown-mcp/relationship.go` | Stage 5 关系层：Ollama 判断 + 关系格式化 + KB 种子导入 |
 | `agenttown-mcp/cmd/agenttown-mcp/capability.go` | NPC 能力注册表：per-agent cmd 能力声明（system 全局默认 + 具体 agent 覆盖） |
-| `agenttown-mcp/cmd/agenttown-mcp/debug_ui.go` | `/debug/` 浏览器控制台 + `/debug/kb` JSON 端点 |
-| `agenttown-mcp/cmd/agenttown-mcp/web/debug.html` | debug 控制台单页 HTML（单 Action + Schedule 注入双 tab） |
+| `agenttown-mcp/cmd/agenttown-mcp/debug_ui.go` | `/debug/` 浏览器控制台 + `/debug/{kb,cap,agents,logs,plan,tactical,ue-errors}` JSON 端点 |
+| `agenttown-mcp/cmd/agenttown-mcp/web/debug.html` | debug 控制台单页 HTML（单 Action + Schedule 注入 + 当日 schedule + 战术层分解情况 + MCP 日志多面板） |
 | `agenttown-mcp/pkg/protocol/envelope.go` | Envelope + 12 消息类型 + 12 cmd + error_code 常量 |
 | `agenttown-mcp/pkg/protocol/messages.go` | 各消息 payload 结构体 + resync/event_lost/capability_registry |
 | `agenttown-mcp/pkg/wsserver/server.go` | WS 服务端：收发信封、seq、send buffer、重放、Call/SendAction |
@@ -744,21 +738,25 @@ python3 src/run_day.py   # 默认连 :9091
 | `agenttown-mcp/pkg/weeklyschedule/loader.go` | 每周日程配置加载：`Load` 解析 7 天 YAML + `Day` 查询 |
 | `agenttown-mcp/pkg/weeklyschedule/format.go` | `WeeklyLine(dayCount, sched)` 把 UE DayCount 映射到星期 + 注入【今日日程】段 |
 | `agenttown-mcp/pkg/prompt/agent_role.go` | `AgentRole(kb, profiles, agentID)` 三层 per-field 回退构造【你的角色】段 |
+| `agenttown-mcp/pkg/prompt/strategic.go` | 战略层 prompt：`BuildStrategicSystemPrompt`（三模块）+ `StrategicRules` + 生产工作流概述 |
+| `agenttown-mcp/pkg/prompt/tactical.go` | 战术层 prompt：`BuildTacticalSystemPrompt` + `TacticalRules`（规则迁 user prompt，工具走 function calling tools 字段） |
+| `agenttown-mcp/pkg/prompt/physical_bands.go` | 物理属性分档（电量/疲劳/关节磨损 3 阈值切 4 档）+ per-NPC `## 属性分段` 覆盖 |
+| `agenttown-mcp/pkg/prompt/cmd_effects.go` | 设施每小时属性影响 + 使用门槛（由 world KB 声明速率派生） |
+| `agenttown-mcp/pkg/prompt/kb_context.go` | 【世界详细信息】各区域可交互设施映射表（按实例真实分布） |
 | `agenttown-mcp/adapters/agenttown/tools/registry.go` | 工具注册 + Executor 接口 |
 | `agenttown-mcp/adapters/agenttown/tools/composite.go` | 5 个复合行为工具 |
 | `agenttown-mcp/adapters/agenttown/tools/atomic.go` | 7 个原子行为工具 + 2 个特殊工具（scan_area/stop） |
-| `agenttown-mcp/adapters/agenttown/perception/format.go` | 感知 → 自然语言叙事 |
-| `agenttown-mcp/internal/log/logger.go` | slog JSON 日志（写 stderr） |
-| `assets/world_kb.yaml` | 世界 KB：7 zones / 3 objects / 1 agent（新 schema，locations 已合并进 objects） |
+| `agenttown-mcp/internal/log/logger.go` | slog JSON 日志（环形缓冲 + 写日志文件/stderr） |
+| `assets/world_kb.yaml` | 世界 KB：7 zones / 57 objects / 5 agents（新 schema，locations 已合并进 objects） |
 | `assets/world_kb.manifest.json` | merge 产物：源 SHA256 + 时间戳（UE 推送 world_kb 时写入） |
-| `assets/profiles/H-01.md` / `H-02.md` / `H-03.md` | NPC 人设档案：纯 markdown 固定标题分段（名字/职业/背景/性格特质/说话风格），三层决策 persona override |
-| `assets/weekly_schedule.yaml` | 每周日程配置：7 天周期（工作日/休息日/上网日/派对日），战略层注入【今日日程】段 |
-| `start.sh` | 一键启动脚本（Windows+WSL 专用） |
-| `start-debug.sh` | UE 联调启动脚本（MCP 跑 Windows 原生，监听 0.0.0.0） |
-| `start-dev.sh` | dev 实例启动 wrapper（偏移端口 8770/9091） |
+| `assets/profiles/H-01.md` ~ `H-05.md` | NPC 人设档案（5 个）：纯 markdown 固定标题分段（名字/职业/背景/性格特质/说话风格/属性分段），三层决策 persona override |
+| `assets/weekly_schedule.yaml` | 每周日程配置：7 天周期（工作日/休息日/运动日/冥想日），战略层注入【今日日程】段 |
+| `start.sh` | 一键启动脚本（Windows+WSL 专用，本地开发用） |
+| `start-debug.sh` | 云环境启动脚本：拉起 MySQL + MCP + 读取 .env（stable 实例，端口 8760/9090，日志 logs/） |
+| `start-dev.sh` | dev 实例启动 wrapper（偏移端口 8770/9091，日志 logs-dev/） |
 | `scripts/pretty_log.py` | 日志可读化工具（HTML 报告 + 终端渲染；--hermes 系列参数 DEPRECATED 仅供历史日志） |
 | `.env` | 环境变量（VENUS_API_KEY 等，不入库） |
-| `hermes/` | **存档保留**：Hermes Gateway profile/SOUL.md/SKILL.md，不再被任何代码加载，仅供历史参考 |
+| `.env.example` | 环境变量模板（分组注释 + 默认值 + 读取方说明） |
 
 ## Git 提交
 
@@ -773,17 +771,17 @@ python3 src/run_day.py   # 默认连 :9091
 
 | Milestone | 状态 | 说明 |
 |-----------|------|------|
-| M-1 世界快照定义 | ✅ | `docs/我的方案/场景与人物设定.md` |
+| M-1 世界快照定义 | ✅ | 世界 KB + 场景人物设定（docs 已整理归档） |
 | M-2 LLM Gateway | ✅（已归档） | Hermes Gateway + DeepSeek，2026-08 移除 |
 | M-3 Hermes Agent Mind | ✅（已归档） | SOUL.md + SKILL.md + profile，2026-08 移除 |
 | M-4 Translator | ✅ | MCP 工具注册 |
-| M-5 Mock UE Bridge | ✅ | Python async + WebSocket |
-| MCP 层 | ✅ | Go agenttown-mcp，14 工具（5 复合+7 原子+2 特殊） |
-| 协议重构 Phase 1-7 | ✅ | 7 字段信封、11 消息类型、seq+ACK、物理四态、动作异步生命周期、断线重连+seq 重放 |
-| 端到端闭环 | ✅ | 感知→LLM→工具→Mock UE 全链路验证 |
+| M-5 Mock UE Bridge | ✅（已弃用） | Python async + WebSocket，2026-08-11 起转真实 UE5 |
+| MCP 层 | ✅ | Go agenttown-mcp，12 cmd（5 复合+7 原子）+ 2 特殊工具 |
+| 协议重构 Phase 1-7 | ✅ | 7 字段信封、消息类型、seq+ACK、物理状态、动作异步生命周期、断线重连+seq 重放 |
+| 端到端闭环 | ✅ | 感知→LLM→工具→真实 UE5 全链路验证 |
 | 三层决策架构 | ✅ | 战略层（每日计划）+ 战术层（任务分解）+ 反应层（Ollama 打断） |
 | Venus 直连 | ✅ | MCP 直连 Venus，无状态调用，2026-08 取缔 Hermes |
-| 三层决策注入 NPC 性格 | ✅ | `buildAgentRoleContext` 共享 helper，战略/战术/反应层注入【你的角色】段 |
+| 三层决策注入 NPC 性格 | ✅ | `AgentRole` 共享 helper，战略/战术/反应层注入【你的角色】段 |
 | 反应层 P0-P1 | ✅ | 本地 Ollama + zone/physical/periodic 触发 + replan 决策 |
 | Debug 工具升级 | ✅ | `/debug/action` + `/debug/schedule`（注入 schedule 调试战术层） |
 | 战术层流式输出 | ✅ | `--tactical-stream` flag（默认关，DeepSeek 高峰排队时回退） |
@@ -792,22 +790,33 @@ python3 src/run_day.py   # 默认连 :9091
 | 状态访问与业务逻辑分离 Stage 5 | ✅ | 关系数值动态维护：动作完成 Ollama 判断 + 双向 familiarity+=1 + 战术层注入【人际关系】段 + KB 种子导入 |
 | 12 cmd 体系迁移 | ✅ | 旧 14 cmd（8 原子+6 复合）→ 新 12 cmd（7 原子+5 复合）对齐真实 UE5；统一 MoveTo（target_type+target_id/target_position）；复合动作共享 semantic_group+interaction schema（按真实 UE5 capability_registry 参数名）；GenericAct 兜底；MCP 不再做 KB 坐标解析 |
 | NPC profile.md 人设档案 | ✅ | `pkg/profile` 加载 `assets/profiles/<agentID>.md`；三层 per-field 回退（profile > KB > hardcoded）；战略/战术/反应/记忆层透传 profiles 参数到 `AgentRole` |
-| 每周日程配置 | ✅ | `pkg/weeklyschedule` 加载 `assets/weekly_schedule.yaml`；7 天周期（工作日/休息日/上网日/派对日）；战略层注入【今日日程】段；`WeeklyLine` 预格式化解耦 pkg/prompt |
+| 每周日程配置 | ✅ | `pkg/weeklyschedule` 加载 `assets/weekly_schedule.yaml`；7 天周期（工作日/休息日/运动日/冥想日）；战略层注入【今日日程】段；`WeeklyLine` 预格式化解耦 pkg/prompt |
+| 战术层 function calling 迁移 | ✅ | OpenAI 原生 function calling（`tools` 字段 + `tool_choice=required` + 多轮 agentic loop）；工具由 capability_registry 派生；多段动作计划（1-4 段 + time_to_stop）；历史轮次截断（最近 8 轮） |
+| 战略/战术层 prompt 重构 | ✅ | system/user 拆分；规则迁 user prompt；注入生产工作流概述；物理属性分档（电量/疲劳/关节磨损）；"各区域可交互设施"映射表按实例真实分布 |
+| 战术层健壮性兜底 | ✅ | time_to_stop 兜底（非队尾休息 1800s/工作 5400s）；LLM 失败兜底动作（speak+look_around 防呆站）；zone 参数透传修复 |
+| debug 控制台升级 | ✅ | 新增 `/debug/tactical`（战术层分解情况面板）、`/debug/cap`、`/debug/agents`、`/debug/logs`、`/debug/plan`、`/debug/ue-errors` |
 
-## 当前已知问题（2026-07-29 仿真分析）
+## 当前已知问题（2026-08-25 仿真分析）
 
 按严重度排序：
 
-1. **战术层输出 schema 漂移**：模型偶尔把 `target_id` 放顶层而非 `params` 内，或发明不存在的动作（如 `patrol_route`/`chat_with` 等旧体系遗留名）。**部分缓解**：三层决策 prompt 现注入【你的角色】+【世界知识】段（`buildAgentRoleContext` + `buildKBContext`），LLM 可见 KB 内合法 zone/object/agent 名，减少编造 KB 外概念；工具 jsonschema 描述已去硬编码 id 示例；新 12 cmd 体系已移除易诱导漂移的 `patrol_route`/`chat_with` 等动作，改用 `generic_act(behavior=look_around)` + `move_to` + `speak` 组合
-2. **战术层队列提前耗尽**：模型给的 action 总时长不够 slot 时长，触发频繁重分解（50 秒内重调 LLM），浪费 token
-3. **反应层冷启动超时**：Ollama 模型卸载后首 call >8s 超时，预热后稳定 1.3s
-4. **反应层 0% replan 率**：当前 prompt 强偏向 continue/observe，从未触发 replan（成本中心问题）
+1. **LLM 输出坏 tools JSON（venus 500 trailing characters）**：deepseek-v4-flash 在 function calling 多轮场景下偶尔输出格式异常的 tool_calls（括号不配对/尾随字符），被存进对话历史后重放时 venus `list[FunctionDefinition]` 校验失败。约 1/4 战术层调用失败，集中在少数波动窗口。已做历史截断（8 轮）+ 失败兜底动作缓解，但坏条目在窗口内仍会重放
+2. **战术层队列提前耗尽**：LLM 给的 action 总时长不够 slot 时长，触发重分解。已用 time_to_stop 兜底（rest/work 补默认值）部分缓解
+3. **战略层日程质量参差**：同一 prompt 下 LLM 采样方差大（4-9 条不等），首段可能违反"禁止安排工作"硬约束。短时段裁剪逻辑已停用（原 60min 门槛与"≥30 分钟"规则矛盾导致裁坏日程）
+4. **slot 切换时旧动作超时执行**：旧动作的 stop 被推迟到"新 slot 分解成功之后"，LLM 慢/失败时旧动作跨 slot 执行（60s 超时 × 90 倍时间缩放 ≈ 90 游戏分钟）
+5. **反应层冷启动超时**：Ollama 模型卸载后首 call >8s 超时（反应层当前默认禁用，影响有限）
 
 ## 历史重构记录
 
 **取缔 Hermes、MCP 回归无状态**（2026-08 完成）：
 - 移除 `pkg/hermes` 客户端、Docker 配置、启动脚本逻辑、`--llm-backend` flag
 - 抽取 `pkg/llmtypes` 共享类型，Venus 成为唯一战略/战术层后端
-- 三层决策注入 NPC 性格（`buildAgentRoleContext` 共享 helper）
-- `hermes/` 目录仅作存档保留，不再被任何代码加载
+- 三层决策注入 NPC 性格（`AgentRole` 共享 helper）
+- `hermes/` 目录及 `docs/archive` 下 Hermes 文档已彻底移除
 - `scripts/pretty_log.py` `--hermes` 系列参数 DEPRECATED，仅供历史日志解析
+
+**战术层迁移 function calling**（2026-08 完成）：
+- 战术层从 prompt 文本工具清单迁至 OpenAI 原生 function calling（`tools` 字段 + `tool_choice=required`）
+- 多段动作计划（1-4 段 + time_to_stop）；多轮 agentic loop 保留会话历史
+- 历史轮次截断（最近 8 轮）；time_to_stop 兜底 + LLM 失败兜底动作
+- 战略/战术层 prompt 重构（system/user 拆分、规则迁 user prompt、生产工作流概述、物理分档"能量→电量"）

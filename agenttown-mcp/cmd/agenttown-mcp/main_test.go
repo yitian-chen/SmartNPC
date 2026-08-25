@@ -1442,8 +1442,7 @@ func TestTimeStopReplanHint(t *testing.T) {
 		"semantic_group=sleep_pod",
 		"interaction=meditate",
 		"约 50 分钟",
-		"禁止接下来立即继续执行刚才的动作",
-		"请避免连续相同长动作且中间无休息",
+		"请避免连续相同长工作且中间无休息",
 	} {
 		if !strings.Contains(h, want) {
 			t.Errorf("hint missing %q: %s", want, h)

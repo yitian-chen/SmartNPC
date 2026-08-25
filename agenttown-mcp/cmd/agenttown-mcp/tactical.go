@@ -217,12 +217,125 @@ func generateTacticalPlan(
 	if len(actions) == 0 {
 		return nil, llmtypes.Message{}, fmt.Errorf("tactical plan has no actions (raw=%s)", truncateText(raw, 200))
 	}
+	actions = fillDefaultTimeToStopForRest(actions)
+	actions = fillDefaultTimeToStopForWork(actions)
 	actionsJSON, _ := json.Marshal(actions)
 	logger.Info("[战术层] 分解成功",
 		"agent_id", agentID, "steps", len(actions),
 		"actions", string(actionsJSON))
 	assistant := llmtypes.Message{Role: "assistant", Content: raw, ToolCalls: resp.ToolCalls}
 	return actions, assistant, nil
+}
+
+// defaultRestTimeToStopSec 是非队尾休息类动作的默认 time_to_stop（30 分钟）。
+// LLM 常给工作段设 time_to_stop 却给中间的"长椅休息"漏设，导致休息段自然
+// 持续到 slot 切换、卡住后续工作动作。此处为兜底，不依赖 LLM 自觉。
+const defaultRestTimeToStopSec = 1800
+
+// fillDefaultTimeToStopForRest 给队列中"非队尾的休息类动作"补齐默认
+// time_to_stop（30 分钟）。只处理 InteractSmartObject + interaction=rest
+// （长椅休息）；队尾动作保持不设（自然持续到时段切换）。
+func fillDefaultTimeToStopForRest(actions []plannedAction) []plannedAction {
+	if len(actions) < 2 {
+		return actions
+	}
+	for i := 0; i < len(actions)-1; i++ {
+		a := &actions[i]
+		if a.Action != "InteractSmartObject" || !paramIs(a.Params, "interaction", "rest") {
+			continue
+		}
+		if _, ok := a.Params["time_to_stop"]; ok {
+			continue
+		}
+		if a.Params == nil {
+			a.Params = map[string]any{}
+		}
+		a.Params["time_to_stop"] = defaultRestTimeToStopSec
+	}
+	return actions
+}
+
+// paramIs 判断 Params 中 key 对应的字符串值是否等于 want。
+func paramIs(params map[string]any, key, want string) bool {
+	if params == nil {
+		return false
+	}
+	v, ok := params[key]
+	if !ok {
+		return false
+	}
+	s, _ := v.(string)
+	return s == want
+}
+
+// fallbackRetryActions 构造战术层 LLM 分解失败时的兜底动作序列：
+// speak 告知网络波动 + generic_act(behavior=look_around) 原地观察，
+// 避免队列空时 NPC 呆站。兜底动作执行期间形成自然退避——执行完成后
+// completion 唤醒 worker 再重试分解，而不会每轮感知都立即重试。
+func fallbackRetryActions() []plannedAction {
+	return []plannedAction{
+		{Action: "speak", Params: map[string]any{
+			"content": "网络波动了，我稍等一下，正在重试……",
+		}},
+		{Action: "generic_act", Params: map[string]any{
+			"behavior":     "look_around",
+			"thought":      "网络波动，原地观察等待重试",
+			"time_to_stop": 30,
+		}},
+	}
+}
+
+// defaultWorkTimeToStopSec 是非队尾工作动作的默认 time_to_stop（90 分钟）。
+// LLM 偶尔会给中间的工作段漏设 time_to_stop，使其自然持续到 slot 切换、
+// 卡住后续动作。此处兜底，不依赖 LLM 自觉。
+const defaultWorkTimeToStopSec = 5400
+
+// workInteractions 是六种工种的交互动词（含 InteractSmartObject 直接工作）。
+var workInteractions = map[string]bool{
+	"assemble":   true, // 工作台装配
+	"sort_cargo": true, // 分拣
+	"dismantle":  true, // 拆解
+	"debug":      true, // 调试
+	"inspect":    true, // 质检
+	"process":    true, // 加工
+}
+
+// isWorkAction 判断是否为"工作类"动作：work_shift 复合工作，或
+// InteractSmartObject + 工种交互动词（assemble/sort_cargo 等）。
+func isWorkAction(a *plannedAction) bool {
+	if a.Action == "work_shift" {
+		return true
+	}
+	if a.Action != "InteractSmartObject" {
+		return false
+	}
+	inter := ""
+	if v, ok := a.Params["interaction"].(string); ok {
+		inter = v
+	}
+	return workInteractions[inter]
+}
+
+// fillDefaultTimeToStopForWork 给队列中"非队尾的工作类动作"补齐默认
+// time_to_stop（90 分钟）。队尾动作保持不设（自然持续到时段切换）。
+func fillDefaultTimeToStopForWork(actions []plannedAction) []plannedAction {
+	if len(actions) < 2 {
+		return actions
+	}
+	for i := 0; i < len(actions)-1; i++ {
+		a := &actions[i]
+		if !isWorkAction(a) {
+			continue
+		}
+		if _, ok := a.Params["time_to_stop"]; ok {
+			continue
+		}
+		if a.Params == nil {
+			a.Params = map[string]any{}
+		}
+		a.Params["time_to_stop"] = defaultWorkTimeToStopSec
+	}
+	return actions
 }
 
 // parseToolCalls 把 LLM 返回的 tool_calls 解析为 plannedAction 队列。
@@ -301,9 +414,16 @@ func capabilityParamsSchema(params []protocol.CapabilityParam) json.RawMessage {
 	props := map[string]any{}
 	required := make([]string, 0, len(params))
 	for _, p := range params {
+		desc := p.Description
+		// zone 字段（UE 声明为可选）：增强描述，让 LLM 在日程明确指定区域时
+		// 必须填 zone，否则默认只会找 NPC 所在 zone 的设施（如"去中央广场
+		// 休息"若不填 zone 就会在本地随便找长椅）。
+		if p.Name == "zone" {
+			desc = "目标设施所在的 zone（区域）id。若当前日程目标明确指定了区域（如\"去中央广场休息\"\"到物流站工作\"），必须填写该区域 id（如 central_plaza、logistics_hub）；不填则默认优先找 NPC 自己所在 zone 的设施，找不到再跨 zone，会导致\"去指定区域\"的日程落空。"
+		}
 		prop := map[string]any{
 			"type":        capabilityJSONSchemaType(p.Type),
-			"description": p.Description,
+			"description": desc,
 		}
 		if len(p.EnumValues) > 0 {
 			prop["enum"] = p.EnumValues
@@ -313,10 +433,11 @@ func capabilityParamsSchema(params []protocol.CapabilityParam) json.RawMessage {
 			required = append(required, p.Name)
 		}
 	}
-	// time_to_stop：长动作定时终止（MCP 侧轮询 game_time，不传 UE）。可选。
+	// time_to_stop：长动作定时终止（MCP 侧轮询 game_time，不传 UE）。
+	// 描述与 TacticalRules 规则 8 对齐：队列中间动作必须设，仅末段可不设。
 	props["time_to_stop"] = map[string]any{
 		"type":        "number",
-		"description": "长动作执行时长（秒），到点后系统打断该动作并进入下一轮；冥想/整理/上网等宜设较短时长（如 1800），工作/睡眠可不设",
+		"description": "队列中间动作必须设置本参数（秒），到点后系统打断当前段并进入队列下一段；仅最后一个动作可不设，自然持续到时段切换。冥想/整理/上网等单段宜设 1800 秒左右，工作时长段可设 3600-7200",
 	}
 	schema := map[string]any{
 		"type":       "object",
@@ -444,11 +565,18 @@ func mapTacticalAction(pa plannedAction, agentID string, kb *worldkb.KB, registr
 			"emotion": pa.Params["emotion"],
 		}, nil
 	case "InteractSmartObject", "interact": // interact 为旧工具名，保留兼容 LLM 偶发输出
-		return protocol.CmdInteractSmartObject, map[string]any{
+		params := map[string]any{
 			"semantic_group": pa.Params["semantic_group"],
 			"interaction":    pa.Params["interaction"],
 			"auto_queue":     true,
-		}, nil
+		}
+		// zone 是 UE 明确支持的参数（capability_registry 声明），透传给 UE。
+		// 否则"去中央广场长椅"等指定区域的日程会被落下到 NPC 所在 zone 的
+		// 设施（如主生产车间的长椅），指定区域的意图落空。
+		if z, ok := pa.Params["zone"].(string); ok && z != "" {
+			params["zone"] = z
+		}
+		return protocol.CmdInteractSmartObject, params, nil
 	case "wait":
 		return protocol.CmdWait, map[string]any{
 			"duration_sec": toFloat(pa.Params["duration_sec"]),

@@ -10,12 +10,12 @@ days:
     type: work
   - day_of_week: 2
     type: work
-    after_work: internet
-    note: "下班后适合上网休闲放松"
+    after_work: exercise
+    note: "运动日，今天可以早点结束工作去运动"
   - day_of_week: 3
     type: work
-    after_work: party
-    note: "下班后适合放松休闲"
+    after_work: meditation
+    note: "21:00-22:00集体冥想"
   - day_of_week: 4
     type: work
   - day_of_week: 5

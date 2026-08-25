@@ -615,12 +615,12 @@ async function loadTactical() {
   }
 }
 
-// 把工具参数渲染成可读的 key=value 字符串，超长值截断（speak 的 content 很长）。
+// 把工具参数渲染成可读的 key=value 字符串，完整展示不截断
+// （speak 的 content 较长，靠 CSS word-break 换行）。
 function fmtTacticalParams(params) {
   if (!params || !Object.keys(params).length) return '';
   return Object.entries(params).map(([k, v]) => {
-    let s = typeof v === 'object' ? JSON.stringify(v) : String(v);
-    if (s.length > 40) s = s.slice(0, 40) + '…';
+    const s = typeof v === 'object' ? JSON.stringify(v) : String(v);
     return `${escapeHtml(k)}=${escapeHtml(s)}`;
   }).join(' ');
 }

@@ -1332,3 +1332,184 @@ func TestTruncateConversationRounds_OrphanToolHead(t *testing.T) {
 		t.Errorf("head should be first assistant, got role=%q", got[0].Role)
 	}
 }
+
+// ─── fillDefaultTimeToStopForRest ────────────────────────────
+
+func TestFillDefaultTimeToStopForRest_MidQueueRestGetsDefault(t *testing.T) {
+	actions := []plannedAction{
+		{Action: "speak", Params: map[string]any{"content": "hi"}},
+		{Action: "InteractSmartObject", Params: map[string]any{"interaction": "rest", "semantic_group": "bench"}},
+		{Action: "work_shift", Params: map[string]any{"interaction": "assemble", "semantic_group": "workbench", "time_to_stop": 3600}},
+	}
+	got := fillDefaultTimeToStopForRest(actions)
+	if v, ok := got[1].Params["time_to_stop"]; !ok || v != defaultRestTimeToStopSec {
+		t.Fatalf("mid-queue rest should get default time_to_stop=%d, got %v", defaultRestTimeToStopSec, got[1].Params["time_to_stop"])
+	}
+}
+
+func TestFillDefaultTimeToStopForRest_KeepsExisting(t *testing.T) {
+	actions := []plannedAction{
+		{Action: "speak", Params: map[string]any{"content": "hi"}},
+		{Action: "InteractSmartObject", Params: map[string]any{"interaction": "rest", "semantic_group": "bench", "time_to_stop": 900}},
+		{Action: "work_shift", Params: map[string]any{"interaction": "assemble", "semantic_group": "workbench"}},
+	}
+	got := fillDefaultTimeToStopForRest(actions)
+	if v, ok := got[1].Params["time_to_stop"]; !ok || v != 900 {
+		t.Fatalf("existing time_to_stop should be preserved, got %v", got[1].Params["time_to_stop"])
+	}
+}
+
+func TestFillDefaultTimeToStopForRest_TailRestUntouched(t *testing.T) {
+	actions := []plannedAction{
+		{Action: "speak", Params: map[string]any{"content": "hi"}},
+		{Action: "work_shift", Params: map[string]any{"interaction": "assemble", "semantic_group": "workbench"}},
+		{Action: "InteractSmartObject", Params: map[string]any{"interaction": "rest", "semantic_group": "bench"}},
+	}
+	got := fillDefaultTimeToStopForRest(actions)
+	if _, ok := got[2].Params["time_to_stop"]; ok {
+		t.Fatalf("tail rest should stay without time_to_stop, got %v", got[2].Params)
+	}
+}
+
+func TestFillDefaultTimeToStopForRest_NonRestUntouched(t *testing.T) {
+	actions := []plannedAction{
+		{Action: "speak", Params: map[string]any{"content": "hi"}},
+		{Action: "work_shift", Params: map[string]any{"interaction": "assemble", "semantic_group": "workbench"}},
+		{Action: "InteractSmartObject", Params: map[string]any{"interaction": "charge", "semantic_group": "charger"}},
+	}
+	got := fillDefaultTimeToStopForRest(actions)
+	for i, a := range got {
+		if _, ok := a.Params["time_to_stop"]; ok {
+			t.Fatalf("non-rest action %d should not get time_to_stop, got %v", i, a.Params)
+		}
+	}
+}
+
+func TestFillDefaultTimeToStopForRest_SingleActionNoop(t *testing.T) {
+	actions := []plannedAction{
+		{Action: "InteractSmartObject", Params: map[string]any{"interaction": "rest", "semantic_group": "bench"}},
+	}
+	got := fillDefaultTimeToStopForRest(actions)
+	if _, ok := got[0].Params["time_to_stop"]; ok {
+		t.Fatalf("single-action queue should be a no-op, got %v", got[0].Params)
+	}
+}
+
+// ─── fillDefaultTimeToStopForWork ────────────────────────────
+
+func TestFillDefaultTimeToStopForWork_MidQueueWorkGetsDefault(t *testing.T) {
+	actions := []plannedAction{
+		{Action: "speak", Params: map[string]any{"content": "hi"}},
+		{Action: "work_shift", Params: map[string]any{"interaction": "assemble", "semantic_group": "workbench"}},
+		{Action: "InteractSmartObject", Params: map[string]any{"interaction": "rest", "semantic_group": "bench", "time_to_stop": 900}},
+	}
+	got := fillDefaultTimeToStopForWork(actions)
+	if v, ok := got[1].Params["time_to_stop"]; !ok || v != defaultWorkTimeToStopSec {
+		t.Fatalf("mid-queue work should get default time_to_stop=%d, got %v", defaultWorkTimeToStopSec, got[1].Params["time_to_stop"])
+	}
+}
+
+func TestFillDefaultTimeToStopForWork_InteractWorkGetsDefault(t *testing.T) {
+	actions := []plannedAction{
+		{Action: "speak", Params: map[string]any{"content": "hi"}},
+		{Action: "InteractSmartObject", Params: map[string]any{"interaction": "sort_cargo", "semantic_group": "sorting_conveyor"}},
+		{Action: "InteractSmartObject", Params: map[string]any{"interaction": "rest", "semantic_group": "bench"}},
+	}
+	got := fillDefaultTimeToStopForWork(actions)
+	if v, ok := got[1].Params["time_to_stop"]; !ok || v != defaultWorkTimeToStopSec {
+		t.Fatalf("mid-queue InteractSmartObject work should get default time_to_stop, got %v", got[1].Params["time_to_stop"])
+	}
+}
+
+func TestFillDefaultTimeToStopForWork_KeepsExisting(t *testing.T) {
+	actions := []plannedAction{
+		{Action: "speak", Params: map[string]any{"content": "hi"}},
+		{Action: "work_shift", Params: map[string]any{"interaction": "assemble", "semantic_group": "workbench", "time_to_stop": 7200}},
+		{Action: "work_shift", Params: map[string]any{"interaction": "assemble", "semantic_group": "workbench"}},
+	}
+	got := fillDefaultTimeToStopForWork(actions)
+	if v, ok := got[1].Params["time_to_stop"]; !ok || v != 7200 {
+		t.Fatalf("existing time_to_stop should be preserved, got %v", got[1].Params["time_to_stop"])
+	}
+}
+
+func TestFillDefaultTimeToStopForWork_TailWorkUntouched(t *testing.T) {
+	actions := []plannedAction{
+		{Action: "speak", Params: map[string]any{"content": "hi"}},
+		{Action: "InteractSmartObject", Params: map[string]any{"interaction": "rest", "semantic_group": "bench"}},
+		{Action: "work_shift", Params: map[string]any{"interaction": "assemble", "semantic_group": "workbench"}},
+	}
+	got := fillDefaultTimeToStopForWork(actions)
+	if _, ok := got[2].Params["time_to_stop"]; ok {
+		t.Fatalf("tail work should stay without time_to_stop, got %v", got[2].Params)
+	}
+}
+
+func TestFillDefaultTimeToStopForWork_NonWorkUntouched(t *testing.T) {
+	actions := []plannedAction{
+		{Action: "speak", Params: map[string]any{"content": "hi"}},
+		{Action: "InteractSmartObject", Params: map[string]any{"interaction": "rest", "semantic_group": "bench"}},
+		{Action: "surf_internet", Params: map[string]any{"interaction": "surf_internet", "semantic_group": "computer"}},
+	}
+	got := fillDefaultTimeToStopForWork(actions)
+	for i, a := range got {
+		if _, ok := a.Params["time_to_stop"]; ok {
+			t.Fatalf("non-work action %d should not get time_to_stop, got %v", i, a.Params)
+		}
+	}
+}
+
+// ─── fallbackRetryActions ────────────────────────────────────
+
+func TestFallbackRetryActions(t *testing.T) {
+	acts := fallbackRetryActions()
+	if len(acts) != 2 {
+		t.Fatalf("got %d actions, want 2 (speak + look_around)", len(acts))
+	}
+	if acts[0].Action != "speak" {
+		t.Errorf("first action should be speak, got %q", acts[0].Action)
+	}
+	if _, ok := acts[0].Params["content"]; !ok {
+		t.Errorf("speak should carry content, got %v", acts[0].Params)
+	}
+	if acts[1].Action != "generic_act" {
+		t.Errorf("second action should be generic_act, got %q", acts[1].Action)
+	}
+	if acts[1].Params["behavior"] != "look_around" {
+		t.Errorf("generic_act behavior should be look_around, got %v", acts[1].Params["behavior"])
+	}
+	if v, ok := acts[1].Params["time_to_stop"]; !ok || v != 30 {
+		t.Errorf("generic_act should have 30s time_to_stop, got %v", acts[1].Params["time_to_stop"])
+	}
+}
+
+// TestMapTacticalAction_InteractZonePassthrough 验证 InteractSmartObject 的
+// zone 参数会透传给 UE（否则"去中央广场长椅"的日程会落到 NPC 所在 zone）。
+func TestMapTacticalAction_InteractZonePassthrough(t *testing.T) {
+	kb := loadTestKB(t)
+	// 填了 zone → 透传
+	pa := plannedAction{Action: "InteractSmartObject", Params: map[string]any{
+		"semantic_group": "bench", "interaction": "rest", "zone": "central_plaza",
+	}}
+	cmd, params, err := mapTacticalAction(pa, "", kb, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cmd != protocol.CmdInteractSmartObject {
+		t.Fatalf("cmd=%q, want InteractSmartObject", cmd)
+	}
+	if params["zone"] != "central_plaza" {
+		t.Errorf("zone should pass through to UE, got %v", params["zone"])
+	}
+	// 未填 zone → 不附加 zone 字段
+	pa2 := plannedAction{Action: "InteractSmartObject", Params: map[string]any{
+		"semantic_group": "bench", "interaction": "rest",
+	}}
+	_, params2, err := mapTacticalAction(pa2, "", kb, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, has := params2["zone"]; has {
+		t.Errorf("zone should be absent when not provided: %+v", params2)
+	}
+}
