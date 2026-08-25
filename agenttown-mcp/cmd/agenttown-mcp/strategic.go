@@ -25,7 +25,7 @@ const (
 	dayEndMinute   = 30 * 60 // 次日 06:00（= 1440 + 360，归一化坐标）
 	minSlotMinutes = 60      // 时段最短时长，短于此会被丢弃
 
-	planJitterMinutes = 30 // 时间节点随机波动幅度（±分钟），用于错开各 NPC 的活动开始时间
+	planJitterMinutes = 15 // 时间节点随机波动幅度（±分钟），用于错开各 NPC 的活动开始时间
 	planJitterMinGap  = 30 // 扰动后相邻节点最小间隔，保证时段不会被压扁成零/负时长
 )
 
