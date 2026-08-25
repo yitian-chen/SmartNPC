@@ -268,6 +268,23 @@ func paramIs(params map[string]any, key, want string) bool {
 	return s == want
 }
 
+// fallbackRetryActions 构造战术层 LLM 分解失败时的兜底动作序列：
+// speak 告知网络波动 + generic_act(behavior=look_around) 原地观察，
+// 避免队列空时 NPC 呆站。兜底动作执行期间形成自然退避——执行完成后
+// completion 唤醒 worker 再重试分解，而不会每轮感知都立即重试。
+func fallbackRetryActions() []plannedAction {
+	return []plannedAction{
+		{Action: "speak", Params: map[string]any{
+			"content": "网络波动了，我稍等一下，正在重试……",
+		}},
+		{Action: "generic_act", Params: map[string]any{
+			"behavior":     "look_around",
+			"thought":      "网络波动，原地观察等待重试",
+			"time_to_stop": 30,
+		}},
+	}
+}
+
 // defaultWorkTimeToStopSec 是非队尾工作动作的默认 time_to_stop（90 分钟）。
 // LLM 偶尔会给中间的工作段漏设 time_to_stop，使其自然持续到 slot 切换、
 // 卡住后续动作。此处兜底，不依赖 LLM 自觉。

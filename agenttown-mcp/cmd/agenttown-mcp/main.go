@@ -1299,6 +1299,14 @@ func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
 		queued := a.as.QueueLen()
 		logger.Warn("[战术层] 分解失败，保留已入队 action",
 			"agent_id", agentID, "queued", queued, "err", err)
+		// 队列空时补兜底动作（speak + look_around），避免 NPC 呆站。
+		// 兜底动作执行期间形成自然退避（completion 后才唤醒重试分解）。
+		if queued == 0 {
+			a.as.ReplaceQueue(fallbackRetryActions())
+			a.signal()
+			logger.Info("[战术层] 分解失败，补发兜底动作避免呆站",
+				"agent_id", agentID, "fallback", "speak+look_around")
+		}
 		return false
 	}
 	a.as.ReplaceQueue(actions)

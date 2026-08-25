@@ -1458,3 +1458,27 @@ func TestFillDefaultTimeToStopForWork_NonWorkUntouched(t *testing.T) {
 		}
 	}
 }
+
+// ─── fallbackRetryActions ────────────────────────────────────
+
+func TestFallbackRetryActions(t *testing.T) {
+	acts := fallbackRetryActions()
+	if len(acts) != 2 {
+		t.Fatalf("got %d actions, want 2 (speak + look_around)", len(acts))
+	}
+	if acts[0].Action != "speak" {
+		t.Errorf("first action should be speak, got %q", acts[0].Action)
+	}
+	if _, ok := acts[0].Params["content"]; !ok {
+		t.Errorf("speak should carry content, got %v", acts[0].Params)
+	}
+	if acts[1].Action != "generic_act" {
+		t.Errorf("second action should be generic_act, got %q", acts[1].Action)
+	}
+	if acts[1].Params["behavior"] != "look_around" {
+		t.Errorf("generic_act behavior should be look_around, got %v", acts[1].Params["behavior"])
+	}
+	if v, ok := acts[1].Params["time_to_stop"]; !ok || v != 30 {
+		t.Errorf("generic_act should have 30s time_to_stop, got %v", acts[1].Params["time_to_stop"])
+	}
+}
