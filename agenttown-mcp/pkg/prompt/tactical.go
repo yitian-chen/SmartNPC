@@ -56,7 +56,7 @@ const TacticalRules = `1. 第一个工具调用必须是 speak（用一段话表
    - 补充：所有工种设备都可用 InteractSmartObject 原子动作直接工作——semantic_group 填工作设备、interaction 填对应动词即可（如 加工机 process、调试台 debug、拆解台 dismantle，以及 workbench/assemble、sorting_conveyor/sort_cargo、inspection_table/inspect）；work_shift 只是其中三类工种设备的快捷复合动作，没有复合动作的工种一律用 InteractSmartObject。
 7. 长动作可加 time_to_stop 参数（秒）设置该段动作的时长：冥想、整理床铺等单段设 1800 秒左右，不宜超过 1 小时。到点后系统会打断该段并继续执行你返回的后续动作段；只有你返回的动作全部执行完，系统才会再次询问你。推荐模式：工作段（设 time_to_stop，如 1.5 小时）→ 长椅小憩/原地拉伸段（设 time_to_stop，不超过 30 分钟）→ 返回工作段（不设，持续到时段结束）。睡眠等可自然持续到时段切换的动作可不设 time_to_stop。
 8. 工具调用队列除了最后一个调用，其他都需要设置time_to_stop；每次生成的最后一个动作都必须是不设time_to_stop的长动作，确保NPC不会在时间结束后呆站。
-9. 对于去长椅休息，默认直接调用会选择最近的长椅。如果需要去特定区域的长椅，请在zone字段中填写此区域名。`
+9. 若当前日程目标明确指定了区域（如"去中央广场休息""到物流站工作"），调用 InteractSmartObject 等设施工具时**必须**在该工具的 zone 参数中填写对应区域 id（如 central_plaza、logistics_hub）；不填则默认只找 NPC 所在 zone 的设施，会导致"去指定区域"的日程落空。仅当目标未指定区域时才可不填 zone（默认就近）。`
 
 // BuildTactical constructs the tactical layer's user message, four parts:
 //  1. 全天任务与当前时段任务 — full-day schedule + current slot goal +
