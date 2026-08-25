@@ -301,9 +301,16 @@ func capabilityParamsSchema(params []protocol.CapabilityParam) json.RawMessage {
 	props := map[string]any{}
 	required := make([]string, 0, len(params))
 	for _, p := range params {
+		desc := p.Description
+		// zone 字段（UE 声明为可选）：增强描述，让 LLM 在日程明确指定区域时
+		// 必须填 zone，否则默认只会找 NPC 所在 zone 的设施（如"去中央广场
+		// 休息"若不填 zone 就会在本地随便找长椅）。
+		if p.Name == "zone" {
+			desc = "目标设施所在的 zone（区域）id。若当前日程目标明确指定了区域（如\"去中央广场休息\"\"到物流站工作\"），必须填写该区域 id（如 central_plaza、logistics_hub）；不填则默认优先找 NPC 自己所在 zone 的设施，找不到再跨 zone，会导致\"去指定区域\"的日程落空。"
+		}
 		prop := map[string]any{
 			"type":        capabilityJSONSchemaType(p.Type),
-			"description": p.Description,
+			"description": desc,
 		}
 		if len(p.EnumValues) > 0 {
 			prop["enum"] = p.EnumValues
@@ -313,10 +320,11 @@ func capabilityParamsSchema(params []protocol.CapabilityParam) json.RawMessage {
 			required = append(required, p.Name)
 		}
 	}
-	// time_to_stop：长动作定时终止（MCP 侧轮询 game_time，不传 UE）。可选。
+	// time_to_stop：长动作定时终止（MCP 侧轮询 game_time，不传 UE）。
+	// 描述与 TacticalRules 规则 8 对齐：队列中间动作必须设，仅末段可不设。
 	props["time_to_stop"] = map[string]any{
 		"type":        "number",
-		"description": "长动作执行时长（秒），到点后系统打断该动作并进入下一轮；冥想/整理/上网等宜设较短时长（如 1800），工作/睡眠可不设",
+		"description": "队列中间动作必须设置本参数（秒），到点后系统打断当前段并进入队列下一段；仅最后一个动作可不设，自然持续到时段切换。冥想/整理/上网等单段宜设 1800 秒左右，工作时长段可设 3600-7200",
 	}
 	schema := map[string]any{
 		"type":       "object",
