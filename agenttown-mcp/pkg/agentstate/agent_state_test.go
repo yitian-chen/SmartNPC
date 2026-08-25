@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/AgentTown/agenttown-mcp/pkg/llmtypes"
 	"github.com/AgentTown/agenttown-mcp/pkg/protocol"
 	"github.com/AgentTown/agenttown-mcp/pkg/storage"
 )
@@ -260,7 +261,7 @@ func TestDetectDayRollover_NoPerceptionNoRollover(t *testing.T) {
 
 func TestRecordActionStarted_Completion(t *testing.T) {
 	a := New()
-	a.RecordActionStarted("act-1", "WorkAtWorkbench", map[string]any{"duration_sec": 60}, SourceTactical)
+	a.RecordActionStarted("act-1", "WorkAtWorkbench", map[string]any{"duration_sec": 60}, SourceTactical, "")
 
 	if !a.HasInFlightAction() {
 		t.Error("HasInFlightAction = false after RecordActionStarted")
@@ -339,7 +340,7 @@ func TestRecordActionCompletion_SelfStopMatch(t *testing.T) {
 func TestClearForSlotSwitch(t *testing.T) {
 	a := New()
 	a.RefillQueue([]PlannedAction{{Action: "work"}}, "07:00-11:00")
-	a.RecordActionStarted("act-1", "WorkAtWorkbench", nil, SourceTactical)
+	a.RecordActionStarted("act-1", "WorkAtWorkbench", nil, SourceTactical, "")
 
 	info := a.ClearForSlotSwitch()
 	if info.ActionID != "act-1" {
@@ -363,6 +364,44 @@ func TestClearForSlotSwitch(t *testing.T) {
 	}
 }
 
+// TestClearInFlightKeepQueue verifies the time_to_stop segment-switch path:
+// in-flight action is dropped (stash saved), but the queue and currentSlot
+// are preserved so popAndSendQueueAction can continue with the next segment
+// of a multi-segment plan (work → rest → work).
+func TestClearInFlightKeepQueue(t *testing.T) {
+	a := New()
+	// 队列只含剩余段：当前工作段已下发（in-flight），队列里是 小憩段 + 返回工作段。
+	a.RefillQueue([]PlannedAction{
+		{Action: "InteractSmartObject", Params: map[string]any{"semantic_group": "bench", "interaction": "rest"}},
+		{Action: "work_shift", Params: map[string]any{"semantic_group": "workbench", "interaction": "assemble"}},
+	}, "09:00-12:00")
+	a.RecordActionStarted("act-work", "WorkShift", map[string]any{"semantic_group": "workbench"}, SourceTactical, "tool-1")
+
+	info := a.ClearInFlightKeepQueue()
+	if info.ActionID != "act-work" {
+		t.Errorf("info.ActionID = %q, want act-work", info.ActionID)
+	}
+	if info.QueueLen != 2 {
+		t.Errorf("info.QueueLen = %d, want 2 (queue preserved)", info.QueueLen)
+	}
+	if a.HasInFlightAction() {
+		t.Error("HasInFlightAction = true after ClearInFlightKeepQueue")
+	}
+	if !a.HasQueueNext() {
+		t.Error("HasQueueNext = false after ClearInFlightKeepQueue, want true (queue preserved)")
+	}
+	// 队列仍可顺序弹出剩余段：先是小憩段。
+	next, _, ok := a.PopActionIfIdle()
+	if !ok || next.Action != "InteractSmartObject" {
+		t.Errorf("PopActionIfIdle = (%q, %v), want InteractSmartObject", next.Action, ok)
+	}
+	// currentSlot 保留（仍在本时段，不发生时段切换）。
+	_, slot, _ := a.SnapshotSchedule()
+	if slot != "09:00-12:00" {
+		t.Errorf("slot = %q, want 09:00-12:00 preserved", slot)
+	}
+}
+
 // TestClearForSlotSwitch_thenCompletionRestoresStash verifies the
 // long-composite-action interrupt path: ClearForSlotSwitch drops in-flight
 // tracking (because popAndSendQueueAction will issue a deferred stop_action),
@@ -373,7 +412,7 @@ func TestClearForSlotSwitch(t *testing.T) {
 func TestClearForSlotSwitch_thenCompletionRestoresStash(t *testing.T) {
 	a := New()
 	params := map[string]any{"target": "workbench_01", "duration_sec": 1800}
-	a.RecordActionStarted("act-long", "ExecuteComposite", params, SourceTactical)
+	a.RecordActionStarted("act-long", "ExecuteComposite", params, SourceTactical, "")
 
 	info := a.ClearForSlotSwitch()
 	if info.ActionID != "act-long" || info.ActionCmd != "ExecuteComposite" {
@@ -385,7 +424,7 @@ func TestClearForSlotSwitch_thenCompletionRestoresStash(t *testing.T) {
 
 	// popAndSendQueueAction would now dispatch a new action; simulate that
 	// writing a fresh currentActionID before the old completion arrives.
-	a.RecordActionStarted("act-new", "MoveTo", nil, SourceTactical)
+	a.RecordActionStarted("act-new", "MoveTo", nil, SourceTactical, "")
 
 	// Delayed stop completion for the old long action arrives.
 	res := a.RecordActionCompletion("act-long")
@@ -419,7 +458,7 @@ func TestClearForSlotSwitch_thenCompletionRestoresStash(t *testing.T) {
 // the stashed fields.
 func TestRecordActionCompletion_NoStashMatch(t *testing.T) {
 	a := New()
-	a.RecordActionStarted("act-long", "ExecuteComposite", map[string]any{"k": "v"}, SourceTactical)
+	a.RecordActionStarted("act-long", "ExecuteComposite", map[string]any{"k": "v"}, SourceTactical, "")
 	a.ClearForSlotSwitch()
 
 	res := a.RecordActionCompletion("act-other")
@@ -438,7 +477,7 @@ func TestRecordActionCompletion_NoStashMatch(t *testing.T) {
 // RecordActionStarted.
 func TestClearInFlightAction(t *testing.T) {
 	a := New()
-	a.RecordActionStarted("act-1", "Speak", map[string]any{"content": "hi"}, SourceTactical)
+	a.RecordActionStarted("act-1", "Speak", map[string]any{"content": "hi"}, SourceTactical, "")
 	if !a.HasInFlightAction() {
 		t.Fatal("precondition: should have in-flight action")
 	}
@@ -464,7 +503,7 @@ func TestStop_ClearsTransient(t *testing.T) {
 	a := New()
 	a.SetOnline(true)
 	a.RefillQueue([]PlannedAction{{Action: "work"}}, "07:00-11:00")
-	a.RecordActionStarted("act-1", "MoveTo", nil, SourceTactical)
+	a.RecordActionStarted("act-1", "MoveTo", nil, SourceTactical, "")
 	a.Stop()
 
 	snap := a.Snapshot()
@@ -775,7 +814,7 @@ func TestClearForSlotSwitch_PersistsClearedSlot(t *testing.T) {
 	a := New()
 	fs := bindStore(t, a, "H-01")
 	a.RefillQueue([]PlannedAction{{Action: "work"}}, "08:00-12:00") // 1 save
-	a.ClearForSlotSwitch()                                            // 2nd save
+	a.ClearForSlotSwitch()                                          // 2nd save
 	if got := fs.saveCount(); got != 2 {
 		t.Fatalf("save calls: got %d, want 2", got)
 	}
@@ -837,7 +876,7 @@ func TestDetectDayRollover_Persists(t *testing.T) {
 func TestDetectDayRollover_NoSaveWhenUnchanged(t *testing.T) {
 	a := New()
 	fs := bindStore(t, a, "H-01")
-	a.SetDailyPlan("plan", 3) // save 1
+	a.SetDailyPlan("plan", 3)              // save 1
 	setPerceptionForTest(t, a, "10:00", 3) // same day
 	a.DetectDayRollover()                  // no change → no save
 	if got := fs.saveCount(); got != 1 {
@@ -983,7 +1022,7 @@ func TestRecordQueueStatus_TimeoutClears(t *testing.T) {
 
 func TestRecordActionCompletion_ClearsQueueStatus(t *testing.T) {
 	a := New()
-	a.RecordActionStarted("act_001", "WorkShift", nil, SourceTactical)
+	a.RecordActionStarted("act_001", "WorkShift", nil, SourceTactical, "")
 	a.RecordQueueStatus(protocol.ActionQueuedPayload{
 		ActionID: "act_001",
 		Status:   protocol.QueueStatusQueued,
@@ -999,7 +1038,7 @@ func TestRecordActionCompletion_ClearsQueueStatus(t *testing.T) {
 
 func TestClearForSlotSwitch_ClearsQueueStatus(t *testing.T) {
 	a := New()
-	a.RecordActionStarted("act_001", "WorkShift", nil, SourceTactical)
+	a.RecordActionStarted("act_001", "WorkShift", nil, SourceTactical, "")
 	a.RecordQueueStatus(protocol.ActionQueuedPayload{
 		ActionID: "act_001",
 		Status:   protocol.QueueStatusQueued,
@@ -1044,5 +1083,43 @@ func TestSnapshot_QueueDeepCopy(t *testing.T) {
 	snap2 := a.Snapshot()
 	if snap2.QueuedPosition == nil || *snap2.QueuedPosition != 2 {
 		t.Errorf("snapshot should deep-copy pointer fields: got %v", snap2.QueuedPosition)
+	}
+}
+
+func TestConversation_AppendAndClear(t *testing.T) {
+	a := New()
+	if got := a.Conversation(); len(got) != 0 {
+		t.Fatalf("fresh conversation len = %d, want 0", len(got))
+	}
+	a.AppendConversationMessage(llmtypes.Message{Role: "user", Content: "hi"})
+	a.AppendConversationMessage(llmtypes.Message{Role: "assistant", Content: "", ToolCalls: []llmtypes.ToolCall{{ID: "c1"}}})
+	if got := a.Conversation(); len(got) != 2 || got[1].ToolCalls[0].ID != "c1" {
+		t.Fatalf("conversation = %+v", got)
+	}
+	// Conversation 返回拷贝，外部修改不影响内部。
+	cp := a.Conversation()
+	cp[0].Content = "mutated"
+	if got := a.Conversation(); got[0].Content != "hi" {
+		t.Errorf("Conversation should return a copy, got %q", got[0].Content)
+	}
+	a.ClearConversation()
+	if got := a.Conversation(); len(got) != 0 {
+		t.Errorf("conversation after clear = %d, want 0", len(got))
+	}
+}
+
+func TestTimeStop_ArmClear(t *testing.T) {
+	a := New()
+	if _, _, _, armed := a.TimeStop(); armed {
+		t.Fatal("fresh TimeStop should not be armed")
+	}
+	a.ArmTimeStop("act_x", 12345.0, 1800.0)
+	target, duration, actionID, armed := a.TimeStop()
+	if !armed || target != 12345.0 || duration != 1800.0 || actionID != "act_x" {
+		t.Fatalf("TimeStop = (%v, %v, %q, %v)", target, duration, actionID, armed)
+	}
+	a.ClearTimeStop()
+	if _, _, _, armed := a.TimeStop(); armed {
+		t.Fatal("TimeStop after ClearTimeStop should not be armed")
 	}
 }

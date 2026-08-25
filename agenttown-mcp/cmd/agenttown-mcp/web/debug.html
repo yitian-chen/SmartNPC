@@ -74,7 +74,7 @@
   .panel-request   { grid-row: 1 / span 2; grid-column: 1; }
   .panel-schedule  { grid-row: 1; grid-column: 2; }
   .panel-response  { grid-row: 2; grid-column: 2; }
-  .panel-ue-errors { grid-column: 1 / -1; }
+  .panel-tactical { grid-column: 1 / -1; }
   .panel-logs      { grid-column: 1 / -1; }
   @media (max-width: 900px) {
     main { grid-template-columns: 1fr; }
@@ -224,37 +224,45 @@
     padding: 20px;
     text-align: center;
   }
-  .ue-error-entry {
+  .tac-entry {
     border: 1px solid var(--border);
-    border-left: 3px solid var(--err);
+    border-left: 3px solid var(--accent);
     border-radius: 4px;
     padding: 10px 12px;
     margin-bottom: 8px;
     background: var(--panel-2);
     font-size: 13px;
   }
-  .ue-error-entry .err-header {
+  .tac-entry .tac-header {
     display: flex;
     gap: 10px;
     align-items: center;
     margin-bottom: 4px;
     flex-wrap: wrap;
   }
-  .ue-error-code {
-    background: var(--err);
-    color: #fff;
-    padding: 2px 8px;
-    border-radius: 3px;
-    font-size: 12px;
-    font-family: "Consolas", "Monaco", monospace;
+  .tac-agent {
+    font-weight: bold;
+    color: var(--accent);
   }
-  .ue-error-time, .ue-error-agent {
+  .tac-time, .tac-slot, .tac-inflight, .tac-qlen {
     color: var(--text-muted);
     font-size: 12px;
     font-family: "Consolas", "Monaco", monospace;
   }
-  .ue-error-msg { color: var(--text); margin: 4px 0; word-break: break-word; }
-  .ue-error-context {
+  .tac-inflight { color: #c9a227; }
+  .tac-inflight-line {
+    color: #c9a227;
+    font-family: "Consolas", "Monaco", monospace;
+    font-size: 12px;
+    margin: 4px 0;
+    word-break: break-all;
+  }
+  .tac-inflight-line.muted { color: var(--text-muted); }
+  .tac-inflight-line .tac-action { color: #e0a800; white-space: nowrap; }
+  .tac-qlen { color: var(--text-muted); }
+  .tac-goal { color: var(--text); margin: 4px 0; word-break: break-word; }
+  .tac-goal.muted, .tac-slot.muted, .tac-queue.muted { color: var(--text-muted); }
+  .tac-queue {
     background: var(--code-bg);
     border-radius: 3px;
     padding: 6px 8px;
@@ -262,9 +270,10 @@
     font-family: "Consolas", "Monaco", monospace;
     font-size: 12px;
     color: var(--text-muted);
-    white-space: pre-wrap;
-    word-break: break-all;
   }
+  .tac-task { display: flex; gap: 8px; align-items: baseline; }
+  .tac-action { color: var(--accent); white-space: nowrap; }
+  .tac-params { color: var(--text-muted); word-break: break-all; }
   .count-badge {
     display: inline-block;
     background: var(--err);
@@ -495,14 +504,14 @@
     </div>
   </section>
 
-  <!-- 全宽：UE 上报错误 -->
-  <section class="panel panel-ue-errors" style="grid-column: 1 / -1;">
-    <h2>UE 上报错误 <span id="ue-error-count" class="count-badge" style="display:none;">0</span></h2>
+  <!-- 全宽：战术层分解情况 -->
+  <section class="panel panel-tactical" style="grid-column: 1 / -1;">
+    <h2>战术层分解情况 <span id="tactical-count" class="count-badge" style="display:none; background: var(--accent);">0</span></h2>
     <div class="hint" style="margin-bottom:10px;">
-      来自 UE 的 error 消息
+      每个 NPC 当前时段 goal 与战术层分解出的待执行任务队列（每 5s 刷新）
     </div>
-    <div id="ue-error-list">
-      <div class="empty-state">暂无 UE 上报错误</div>
+    <div id="tactical-list">
+      <div class="empty-state">暂无战术层分解数据</div>
     </div>
   </section>
 
@@ -537,13 +546,13 @@ let registeredAgents = ['H-01']; // 已注册 agent 列表（来自 /debug/agent
 
 // ─── 初始化 ──────────────────────────────────────────────
 async function init() {
-  await Promise.all([loadStatus(), loadKB(), loadCap(), loadUEErrors(), loadLogs(), loadPlan(), loadAgents()]);
+  await Promise.all([loadStatus(), loadKB(), loadCap(), loadTactical(), loadLogs(), loadPlan(), loadAgents()]);
   onCmdChange();
   updateSchedCurlPreview();
-  // 定时刷新状态徽章 + capability + UE 错误 + MCP 日志 + schedule + agent 列表（每 5s）
+  // 定时刷新状态徽章 + capability + 战术层分解 + MCP 日志 + schedule + agent 列表（每 5s）
   setInterval(loadStatus, 5000);
   setInterval(loadCap, 5000);
-  setInterval(loadUEErrors, 5000);
+  setInterval(loadTactical, 5000);
   setInterval(loadLogs, 5000);
   setInterval(loadPlan, 5000);
   setInterval(loadAgents, 5000);
@@ -594,46 +603,63 @@ async function loadCap() {
   }
 }
 
-// ─── UE 上报错误加载和渲染 ─────────────────────────────
-async function loadUEErrors() {
+// ─── 战术层分解情况加载和渲染 ────────────────────────────
+async function loadTactical() {
   try {
-    const r = await fetch('/debug/ue-errors');
+    const r = await fetch('/debug/tactical');
     if (!r.ok) return;
     const j = await r.json();
-    renderUEErrors(Array.isArray(j) ? j : []);
+    renderTactical(Array.isArray(j) ? j : []);
   } catch (e) {
-    console.warn('loadUEErrors failed:', e);
+    console.warn('loadTactical failed:', e);
   }
 }
 
-function renderUEErrors(entries) {
-  const list = document.getElementById('ue-error-list');
-  const badge = document.getElementById('ue-error-count');
+// 把工具参数渲染成可读的 key=value 字符串，超长值截断（speak 的 content 很长）。
+function fmtTacticalParams(params) {
+  if (!params || !Object.keys(params).length) return '';
+  return Object.entries(params).map(([k, v]) => {
+    let s = typeof v === 'object' ? JSON.stringify(v) : String(v);
+    if (s.length > 40) s = s.slice(0, 40) + '…';
+    return `${escapeHtml(k)}=${escapeHtml(s)}`;
+  }).join(' ');
+}
+
+function renderTactical(entries) {
+  const list = document.getElementById('tactical-list');
+  const badge = document.getElementById('tactical-count');
   if (!entries.length) {
-    list.innerHTML = '<div class="empty-state">暂无 UE 上报错误</div>';
+    list.innerHTML = '<div class="empty-state">暂无战术层分解数据</div>';
     badge.style.display = 'none';
     return;
   }
   badge.style.display = '';
   badge.textContent = entries.length;
-  // 后端按时间正序返回，前端倒序展示（最新在最上）
-  list.innerHTML = entries.slice().reverse().map(e => {
-    const ts = e.received_at ? new Date(e.received_at).toLocaleTimeString('zh-CN', { hour12: false }) : '';
-    const action = e.action_id
-      ? `<span class="ue-error-agent">action: ${escapeHtml(e.action_id)}</span>`
-      : '';
-    const ctx = e.context
-      ? `<div class="ue-error-context">${escapeHtml(JSON.stringify(e.context, null, 2))}</div>`
-      : '';
-    return `<div class="ue-error-entry">
-      <div class="err-header">
-        <span class="ue-error-code">${escapeHtml(e.error_code || 'UNKNOWN')}</span>
-        <span class="ue-error-time">${escapeHtml(ts)}</span>
-        <span class="ue-error-agent">agent: ${escapeHtml(e.agent_id || '')}</span>
-        ${action}
+  list.innerHTML = entries.map(e => {
+    const slot = e.current_slot ? `<span class="tac-slot">${escapeHtml(e.current_slot)}</span>` : '<span class="tac-slot muted">未命中时段</span>';
+    const goal = e.current_goal
+      ? `<div class="tac-goal">当前目标：${escapeHtml(e.current_goal)}</div>`
+      : '<div class="tac-goal muted">暂无当前目标（计划未生成或处于规划窗口）</div>';
+    const inflight = e.in_flight
+      ? `<div class="tac-inflight-line">执行中: <span class="tac-action">${escapeHtml(e.in_flight_cmd || e.in_flight.slice(0, 18))}</span>${fmtTacticalParams(e.in_flight_params) ? ` <span class="tac-params">${fmtTacticalParams(e.in_flight_params)}</span>` : ''}</div>`
+      : '<div class="tac-inflight-line muted">当前无在途 action</div>';
+    const queue = (e.queue || []).map(a => {
+      const params = fmtTacticalParams(a.params);
+      return `<div class="tac-task"><span class="tac-action">${escapeHtml(a.action)}</span>${params ? `<span class="tac-params">${params}</span>` : ''}</div>`;
+    }).join('');
+    const queueBody = e.queue_len > 0
+      ? `<div class="tac-queue">${queue}</div>`
+      : '<div class="tac-queue muted">队列为空（等待分解）</div>';
+    return `<div class="tac-entry">
+      <div class="tac-header">
+        <span class="tac-agent">${escapeHtml(e.agent_id)}</span>
+        <span class="tac-time">${escapeHtml(e.game_time || '--:--')}</span>
+        ${slot}
+        <span class="tac-qlen">队列 ${e.queue_len}</span>
       </div>
-      <div class="ue-error-msg">${escapeHtml(e.message || '')}</div>
-      ${ctx}
+      ${inflight}
+      ${goal}
+      ${queueBody}
     </div>`;
   }).join('');
 }

@@ -19,6 +19,10 @@ import (
 type PlannedAction struct {
 	Action string         `json:"action"` // tool name: work_at_workbench / move_to_location / ...
 	Params map[string]any `json:"params"` // tool params (raw LLM output, duration_sec not converted)
+	// ToolCallID is the assistant message's tool_calls[].ID this action came
+	// from. Used to associate the tool-role result message with the assistant
+	// tool call in multi-turn conversations. Empty for hand-built actions.
+	ToolCallID string `json:"tool_call_id,omitempty"`
 }
 
 // ActionSource identifies which layer issued an in-flight action and
@@ -36,9 +40,9 @@ const (
 // the prompt package (stage 2) and tests. All fields are value types or
 // deep copies; mutating a Snapshot does not affect the source AgentState.
 type Snapshot struct {
-	Online              bool
-	LatestPhysical      *protocol.PhysicalState
-	LatestPerception    json.RawMessage
+	Online           bool
+	LatestPhysical   *protocol.PhysicalState
+	LatestPerception json.RawMessage
 	// LatestVisibleAgents is the visible-NPC list from the latest
 	// perception_update (Phase 2 Module C). nil when no agents are visible.
 	// Used to inject 【附近NPC】 into the tactical prompt.

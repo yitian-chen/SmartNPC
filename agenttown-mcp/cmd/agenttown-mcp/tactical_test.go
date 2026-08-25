@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -9,8 +10,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/AgentTown/agenttown-mcp/pkg/llmtypes"
 	"github.com/AgentTown/agenttown-mcp/pkg/prompt"
 	"github.com/AgentTown/agenttown-mcp/pkg/protocol"
+	"github.com/AgentTown/agenttown-mcp/pkg/venus"
 	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
 )
 
@@ -28,238 +31,72 @@ func loadTestKB(t *testing.T) *worldkb.KB {
 	return kb
 }
 
-// ─── parseTacticalNDJSON ─────────────────────────────────────
+// ─── parseToolCalls ────────────────────────────────────────
 
-func TestParseTacticalNDJSON_Valid(t *testing.T) {
-	// inner_thought 行被静默忽略（向后兼容）；speak 由 LLM 显式输出为首个 action
-	raw := `{"action":"speak","params":{"content":"先去车间再装配"}}` + "\n" +
-		`{"action":"move_to","params":{"target_type":"zone","target_id":"main_workshop"}}` + "\n" +
-		`{"action":"work_shift","params":{"semantic_group":"workbench_01","interaction":"assemble"}}`
-	actions, err := parseTacticalNDJSON(raw, nil, "")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+func TestParseToolCalls_Basic(t *testing.T) {
+	tcs := []llmtypes.ToolCall{
+		{Function: llmtypes.ToolFunction{Name: "speak", Arguments: `{"content":"先去车间再装配"}`}},
+		{Function: llmtypes.ToolFunction{Name: "move_to", Arguments: `{"target_type":"zone","target_id":"main_workshop"}`}},
+		{Function: llmtypes.ToolFunction{Name: "work_shift", Arguments: `{"semantic_group":"workbench_01","interaction":"assemble"}`}},
 	}
+	actions := parseToolCalls(tcs, nil, "")
 	if len(actions) != 3 {
-		t.Fatalf("got %d actions, want 3 (speak + move + work)", len(actions))
+		t.Fatalf("got %d actions, want 3", len(actions))
 	}
-	if actions[0].Action != "speak" {
-		t.Errorf("action[0]=%q, want speak", actions[0].Action)
+	if actions[0].Action != "speak" || actions[0].Params["content"] != "先去车间再装配" {
+		t.Errorf("actions[0]=%+v, want speak with content", actions[0])
 	}
-	if actions[0].Params["content"] != "先去车间再装配" {
-		t.Errorf("speak content=%v", actions[0].Params["content"])
-	}
-	if actions[1].Action != "move_to" {
-		t.Errorf("action[1]=%q, want move_to", actions[1].Action)
+	if actions[1].Action != "move_to" || actions[2].Action != "work_shift" {
+		t.Errorf("actions=%+v, want [speak move_to work_shift]", actions)
 	}
 }
 
-func TestParseTacticalNDJSON_WithFence(t *testing.T) {
-	raw := "```json\n" +
-		`{"action":"speak","params":{"content":"充电"}}` + "\n" +
-		`{"action":"charge_at_station","params":{"semantic_group":"charging_station_01","interaction":"assemble"}}` + "\n" +
-		"```"
-	actions, err := parseTacticalNDJSON(raw, nil, "")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(actions) != 2 || actions[0].Action != "speak" || actions[1].Action != "charge_at_station" {
-		t.Errorf("actions=%+v, want [speak, charge_at_station]", actions)
+func TestParseToolCalls_Empty(t *testing.T) {
+	if got := parseToolCalls(nil, nil, ""); len(got) != 0 {
+		t.Errorf("got %d actions, want 0", len(got))
 	}
 }
 
-func TestParseTacticalNDJSON_BlankLines(t *testing.T) {
-	raw := `{"action":"speak","params":{"content":"开始"}}` + "\n\n" +
-		`{"action":"move_to","params":{"target_type":"zone","target_id":"main_workshop"}}` + "\n" +
-		"\n"
-	actions, err := parseTacticalNDJSON(raw, nil, "")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+func TestParseToolCalls_EmptyName(t *testing.T) {
+	tcs := []llmtypes.ToolCall{
+		{Function: llmtypes.ToolFunction{Name: "", Arguments: `{}`}},
+		{Function: llmtypes.ToolFunction{Name: "speak", Arguments: `{"content":"hi"}`}},
 	}
-	if len(actions) != 2 || actions[0].Action != "speak" || actions[1].Action != "move_to" {
-		t.Errorf("actions=%+v, want [speak, move_to]", actions)
+	actions := parseToolCalls(tcs, nil, "")
+	if len(actions) != 1 || actions[0].Action != "speak" {
+		t.Errorf("actions=%+v, want [speak] (empty name skipped)", actions)
 	}
 }
 
-func TestParseTacticalNDJSON_MalformedLine(t *testing.T) {
-	// 单行 parse 失败应跳过，不影响其他行
-	raw := `{"action":"speak","params":{"content":"计划"}}` + "\n" +
-		`这不是JSON` + "\n" +
-		`{"action":"move_to","params":{"target_type":"zone","target_id":"main_workshop"}}`
-	actions, err := parseTacticalNDJSON(raw, nil, "")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+func TestParseToolCalls_InvalidArgumentsSkipped(t *testing.T) {
+	tcs := []llmtypes.ToolCall{
+		{Function: llmtypes.ToolFunction{Name: "speak", Arguments: `not-json`}},
+		{Function: llmtypes.ToolFunction{Name: "move_to", Arguments: `{"target_type":"zone"}`}},
 	}
-	if len(actions) != 2 || actions[0].Action != "speak" || actions[1].Action != "move_to" {
-		t.Errorf("actions=%+v, want [speak, move_to]", actions)
-	}
-}
-
-func TestParseTacticalNDJSON_Empty(t *testing.T) {
-	actions, err := parseTacticalNDJSON("", nil, "")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(actions) != 0 {
-		t.Errorf("got %d actions, want 0", len(actions))
-	}
-}
-
-// TestParseTacticalNDJSON_LegacyInnerThoughtIgnored 验证旧 LLM 输出仍含
-// inner_thought 行时被静默忽略（不报错、不转 speak、不污染 actions）。
-// 向后兼容路径：prompt 已要求首个 action 为 speak，但模型偶尔可能仍输出
-// inner_thought 字段，解析层需优雅降级。
-func TestParseTacticalNDJSON_LegacyInnerThoughtIgnored(t *testing.T) {
-	raw := `{"inner_thought":"不知道做什么"}` + "\n" +
-		`{"action":"move_to","params":{"target_type":"zone","target_id":"main_workshop"}}`
-	actions, err := parseTacticalNDJSON(raw, nil, "")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	// inner_thought 行被忽略，只剩 move_to
+	actions := parseToolCalls(tcs, nil, "")
 	if len(actions) != 1 || actions[0].Action != "move_to" {
-		t.Errorf("actions=%+v, want [move_to] (inner_thought silently dropped)", actions)
+		t.Errorf("actions=%+v, want [move_to] (invalid arguments skipped)", actions)
 	}
 }
 
-// TestParseTacticalNDJSON_ThoughtOnlyNoActions 验证只有 inner_thought、
-// 无任何 action 行时返回空 actions（不注入 speak）。
-func TestParseTacticalNDJSON_ThoughtOnlyNoActions(t *testing.T) {
-	raw := `{"inner_thought":"不知道做什么"}`
-	actions, err := parseTacticalNDJSON(raw, nil, "")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+func TestParseToolCalls_FiltersInvalidTool(t *testing.T) {
+	tcs := []llmtypes.ToolCall{
+		{Function: llmtypes.ToolFunction{Name: "scan_area", Arguments: `{}`}},
+		{Function: llmtypes.ToolFunction{Name: "move_to", Arguments: `{"target_type":"zone"}`}},
 	}
-	if len(actions) != 0 {
-		t.Errorf("got %d actions, want 0", len(actions))
-	}
-}
-
-func TestParseTacticalNDJSON_FiltersScanAreaAndStop(t *testing.T) {
-	raw := `{"action":"speak","params":{"content":"扫描一下"}}` + "\n" +
-		`{"action":"scan_area","params":{}}` + "\n" +
-		`{"action":"move_to","params":{"target_type":"zone","target_id":"main_workshop"}}` + "\n" +
-		`{"action":"stop","params":{}}`
-	actions, err := parseTacticalNDJSON(raw, nil, "")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	// speak + move_to（scan_area/stop 被过滤）
-	if len(actions) != 2 {
-		t.Fatalf("got %d actions, want 2 (speak + move_to)", len(actions))
-	}
-	if actions[0].Action != "speak" {
-		t.Errorf("actions[0]=%q, want speak", actions[0].Action)
-	}
-	if actions[1].Action != "move_to" {
-		t.Errorf("actions[1]=%q, want move_to", actions[1].Action)
-	}
-}
-
-// TestParseTacticalNDJSON_NoSpeakNoInjection 验证 LLM 未输出 speak 时
-// 不会自动注入 speak（speak 现在是 LLM 显式输出的 action，不再由 thought 转换）。
-func TestParseTacticalNDJSON_NoSpeakNoInjection(t *testing.T) {
-	raw := `{"action":"move_to","params":{"target_type":"zone","target_id":"main_workshop"}}`
-	actions, err := parseTacticalNDJSON(raw, nil, "")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	actions := parseToolCalls(tcs, nil, "")
 	if len(actions) != 1 || actions[0].Action != "move_to" {
-		t.Errorf("actions=%+v, want [move_to] (no auto speak injection)", actions)
+		t.Errorf("actions=%+v, want [move_to] (scan_area filtered)", actions)
 	}
 }
 
-// ─── streamAccumulator ───────────────────────────────────────
-
-func TestStreamAccumulator_Feed(t *testing.T) {
-	var collected []plannedAction
-	acc := &streamAccumulator{
-		onComplete: func(pa plannedAction) { collected = append(collected, pa) },
+func TestParseToolCalls_InteractAlias(t *testing.T) {
+	tcs := []llmtypes.ToolCall{
+		{Function: llmtypes.ToolFunction{Name: "interact", Arguments: `{"semantic_group":"sleep_pod","interaction":"meditate"}`}},
 	}
-
-	// 第一行 speak 完整到达，立即触发 onComplete
-	acc.feed(`{"action":"speak","params":{"content":"开工"}}` + "\n")
-	if len(collected) != 1 {
-		t.Fatalf("after first feed: collected=%d, want 1 (speak immediate)", len(collected))
-	}
-	if collected[0].Action != "speak" {
-		t.Errorf("collected[0]=%q, want speak", collected[0].Action)
-	}
-	if collected[0].Params["content"] != "开工" {
-		t.Errorf("speak content=%v, want 开工", collected[0].Params["content"])
-	}
-
-	// 第二行被拆成两个 delta
-	acc.feed(`{"action":"move_to","params":{"targ`)
-	acc.feed(`et":"main_workshop"}}` + "\n")
-	if len(collected) != 2 {
-		t.Fatalf("after second line: collected=%d, want 2 (speak + move_to)", len(collected))
-	}
-	if collected[1].Action != "move_to" {
-		t.Errorf("collected[1]=%q, want move_to", collected[1].Action)
-	}
-
-	// 第三行不完整（无 \n），不应触发 onComplete
-	acc.feed(`{"action":"InteractSmartObject","params":{"semantic_group":"workbench_01","interaction":"assemble"}}`)
-	if len(collected) != 2 {
-		t.Errorf("incomplete line should not trigger: collected=%d, want 2", len(collected))
-	}
-
-	// flush 处理残余
-	acc.flush()
-	if len(collected) != 3 {
-		t.Fatalf("after flush: collected=%d, want 3 (speak + move + interact)", len(collected))
-	}
-	if collected[2].Action != "InteractSmartObject" {
-		t.Errorf("collected[2]=%q, want interact", collected[2].Action)
-	}
-}
-
-func TestStreamAccumulator_FiltersInvalidAction(t *testing.T) {
-	var collected []plannedAction
-	acc := &streamAccumulator{
-		onComplete: func(pa plannedAction) { collected = append(collected, pa) },
-	}
-	acc.feed(`{"action":"scan_area","params":{}}` + "\n")
-	acc.feed(`{"action":"move_to","params":{"target_type":"zone","target_id":"main_workshop"}}` + "\n")
-	acc.flush()
-	if len(collected) != 1 {
-		t.Fatalf("collected=%d, want 1 (scan_area filtered)", len(collected))
-	}
-	if collected[0].Action != "move_to" {
-		t.Errorf("collected[0]=%q, want move_to", collected[0].Action)
-	}
-}
-
-// TestStreamAccumulator_LegacyInnerThoughtIgnored 验证流式路径收到
-// inner_thought 行时静默忽略（不报错、不触发 onComplete）。
-func TestStreamAccumulator_LegacyInnerThoughtIgnored(t *testing.T) {
-	var collected []plannedAction
-	acc := &streamAccumulator{
-		onComplete: func(pa plannedAction) { collected = append(collected, pa) },
-	}
-	// inner_thought 行应被忽略
-	acc.feed(`{"inner_thought":"开工"}` + "\n")
-	acc.feed(`{"action":"move_to","params":{"target_type":"zone","target_id":"main_workshop"}}` + "\n")
-	acc.flush()
-	if len(collected) != 1 {
-		t.Fatalf("collected=%d, want 1 (inner_thought ignored, only move_to)", len(collected))
-	}
-	if collected[0].Action != "move_to" {
-		t.Errorf("collected[0]=%q, want move_to", collected[0].Action)
-	}
-}
-
-// TestStreamAccumulator_ThoughtOnlyNoAction 验证流式路径只有 inner_thought、
-// 无任何 action 行时不触发 onComplete。
-func TestStreamAccumulator_ThoughtOnlyNoAction(t *testing.T) {
-	var collected []plannedAction
-	acc := &streamAccumulator{
-		onComplete: func(pa plannedAction) { collected = append(collected, pa) },
-	}
-	acc.feed(`{"inner_thought":"不知道做什么"}` + "\n")
-	acc.flush()
-	if len(collected) != 0 {
-		t.Errorf("collected=%d, want 0 (inner_thought ignored, no actions)", len(collected))
+	actions := parseToolCalls(tcs, nil, "")
+	if len(actions) != 1 || actions[0].Action != "InteractSmartObject" {
+		t.Errorf("actions=%+v, want [InteractSmartObject] (interact alias)", actions)
 	}
 }
 
@@ -461,9 +298,17 @@ func TestSelectCurrentGoal_PlanningWindowBoundary(t *testing.T) {
 
 // ─── generateTacticalPlan ────────────────────────────────────
 
+func makeToolCallResponse(tcs []llmtypes.ToolCall) *llmtypes.Response {
+	return &llmtypes.Response{
+		Status:    "completed",
+		Output:    []llmtypes.Block{{Type: "message", Role: "assistant", Content: []llmtypes.Content{{Type: "output_text", Text: ""}}}},
+		ToolCalls: tcs,
+	}
+}
+
 func TestGenerateTacticalPlan_HTTPError(t *testing.T) {
 	tc := &fakeStrategicCaller{err: errors.New("network down")}
-	actions, err := generateTacticalPlan(context.Background(), tc, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", "07:00-09:00: 上午准备\n09:00-12:00: 车间装配", &protocol.PhysicalState{Energy: 80, Fatigue: 20, JointWear: 10}, nil, nil, slog.Default(), "", "", "", nil, nil, nil, nil)
+	actions, _, err := generateTacticalPlan(context.Background(), tc, nil, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", "07:00-09:00: 上午准备\n09:00-12:00: 车间装配", &protocol.PhysicalState{Energy: 80, Fatigue: 20, JointWear: 10}, nil, nil, slog.Default(), "", "", "", nil, nil, nil, nil)
 	if err == nil {
 		t.Fatal("expected error on HTTP failure")
 	}
@@ -476,15 +321,15 @@ func TestGenerateTacticalPlan_HTTPError(t *testing.T) {
 }
 
 func TestGenerateTacticalPlan_ValidResponse(t *testing.T) {
-	raw := `{"action":"speak","params":{"content":"先移动再装配"}}` + "\n" +
-		`{"action":"move_to","params":{"target_type":"zone","target_id":"main_workshop"}}` + "\n" +
-		`{"action":"work_shift","params":{"semantic_group":"workbench_01","interaction":"assemble"}}`
-	tc := &fakeStrategicCaller{resp: makeStrategicResponse(raw)}
-	actions, err := generateTacticalPlan(context.Background(), tc, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", "07:00-09:00: 上午准备\n09:00-12:00: 车间装配", &protocol.PhysicalState{Energy: 80, Fatigue: 20, JointWear: 10}, nil, nil, slog.Default(), "", "", "", nil, nil, nil, nil)
+	tc := &fakeStrategicCaller{resp: makeToolCallResponse([]llmtypes.ToolCall{
+		{Function: llmtypes.ToolFunction{Name: "speak", Arguments: `{"content":"先移动再装配"}`}},
+		{Function: llmtypes.ToolFunction{Name: "move_to", Arguments: `{"target_type":"zone","target_id":"main_workshop"}`}},
+		{Function: llmtypes.ToolFunction{Name: "work_shift", Arguments: `{"semantic_group":"workbench_01","interaction":"assemble"}`}},
+	})}
+	actions, _, err := generateTacticalPlan(context.Background(), tc, nil, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", "07:00-09:00: 上午准备\n09:00-12:00: 车间装配", &protocol.PhysicalState{Energy: 80, Fatigue: 20, JointWear: 10}, nil, nil, slog.Default(), "", "", "", nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	// LLM 显式输出 speak 作为首个 action
 	if len(actions) != 3 {
 		t.Fatalf("got %d actions, want 3 (speak + move + work)", len(actions))
 	}
@@ -499,26 +344,27 @@ func TestGenerateTacticalPlan_ValidResponse(t *testing.T) {
 	}
 }
 
-func TestGenerateTacticalPlan_ParseFail(t *testing.T) {
+func TestGenerateTacticalPlan_NoToolCalls(t *testing.T) {
 	tc := &fakeStrategicCaller{resp: makeStrategicResponse("我今天打算去车间转转。")}
-	if _, err := generateTacticalPlan(context.Background(), tc, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", "07:00-09:00: 上午准备\n09:00-12:00: 车间装配", nil, nil, nil, slog.Default(), "", "", "", nil, nil, nil, nil); err == nil {
-		t.Fatal("expected error on parse failure (no actions)")
+	if _, _, err := generateTacticalPlan(context.Background(), tc, nil, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", "07:00-09:00: 上午准备\n09:00-12:00: 车间装配", nil, nil, nil, slog.Default(), "", "", "", nil, nil, nil, nil); err == nil {
+		t.Fatal("expected error when no tool calls returned")
 	}
 }
 
-func TestGenerateTacticalPlan_EmptyActions(t *testing.T) {
-	raw := `{"inner_thought":"不知道做什么"}`
-	tc := &fakeStrategicCaller{resp: makeStrategicResponse(raw)}
-	if _, err := generateTacticalPlan(context.Background(), tc, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", "07:00-09:00: 上午准备\n09:00-12:00: 车间装配", nil, nil, nil, slog.Default(), "", "", "", nil, nil, nil, nil); err == nil {
-		t.Fatal("expected error when all actions filtered out")
+func TestGenerateTacticalPlan_AllFiltered(t *testing.T) {
+	tc := &fakeStrategicCaller{resp: makeToolCallResponse([]llmtypes.ToolCall{
+		{Function: llmtypes.ToolFunction{Name: "scan_area", Arguments: `{}`}},
+	})}
+	if _, _, err := generateTacticalPlan(context.Background(), tc, nil, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", "07:00-09:00: 上午准备\n09:00-12:00: 车间装配", nil, nil, nil, slog.Default(), "", "", "", nil, nil, nil, nil); err == nil {
+		t.Fatal("expected error when all tool calls filtered out")
 	}
 }
 
 func TestGenerateTacticalPlan_ResetSessionCalled(t *testing.T) {
-	raw := `{"action":"speak","params":{"content":"开始"}}` + "\n" +
-		`{"action":"wait","params":{"duration_sec":30}}`
-	tc := &fakeStrategicCaller{resp: makeStrategicResponse(raw)}
-	_, _ = generateTacticalPlan(context.Background(), tc, "H-01", "等待", "main_workshop", "09:00", "09:00-12:00", "", nil, nil, nil, slog.Default(), "", "", "", nil, nil, nil, nil)
+	tc := &fakeStrategicCaller{resp: makeToolCallResponse([]llmtypes.ToolCall{
+		{Function: llmtypes.ToolFunction{Name: "speak", Arguments: `{"content":"开始"}`}},
+	})}
+	_, _, _ = generateTacticalPlan(context.Background(), tc, nil, "H-01", "等待", "main_workshop", "09:00", "09:00-12:00", "", nil, nil, nil, slog.Default(), "", "", "", nil, nil, nil, nil)
 	if !tc.resetCalled {
 		t.Error("ResetSession should be called after successful tactical generation")
 	}
@@ -527,17 +373,17 @@ func TestGenerateTacticalPlan_ResetSessionCalled(t *testing.T) {
 // ─── buildTacticalPrompt ─────────────────────────────────────
 
 func TestBuildTacticalPrompt_NilPhysical(t *testing.T) {
-	promptText := prompt.BuildTactical(prompt.TacticalInput{Goal: "装配", Zone: "main_workshop", TimeOfDay: "09:00", Slot: "", Physical: nil, KB: nil, Hint: "", Actions: nil, AgentID: ""})
+	promptText := prompt.BuildTactical(prompt.TacticalInput{Goal: "装配", Zone: "main_workshop", TimeOfDay: "09:00", Slot: "", Physical: nil, KB: nil, Hint: "", AgentID: ""})
 	if promptText == "" {
 		t.Fatal("promptText should not be empty")
 	}
-	// nil physical 时注入默认物理状态（100/0/0/200 → 充足/精神饱满/良好），
+	// nil physical 时注入默认物理状态（100/0/0/200 → 很高/精神饱满/良好），
 	// 让 LLM 始终看到有效物理上下文（分段标签，非原始数值）
 	if !strings.Contains(promptText, "物理状态") {
 		t.Errorf("prompt should contain '物理状态' with default values for nil physical, got: %s", promptText)
 	}
-	if !strings.Contains(promptText, "能量 充足") {
-		t.Errorf("prompt should contain default band 能量 充足 for nil physical, got: %s", promptText)
+	if !strings.Contains(promptText, "电量 高") {
+		t.Errorf("prompt should contain default band 电量 高 for nil physical, got: %s", promptText)
 	}
 	// slot 为空时不应有时长提示行
 	if strings.Contains(promptText, "请让步骤总时长接近此时长") {
@@ -548,20 +394,20 @@ func TestBuildTacticalPrompt_NilPhysical(t *testing.T) {
 // TestBuildTacticalPrompt_ZeroPhysical 验证全 0 物理状态（UE 已上报但值全 0）
 // 也注入默认物理状态，与 nil physical 同等处理。
 func TestBuildTacticalPrompt_ZeroPhysical(t *testing.T) {
-	promptText := prompt.BuildTactical(prompt.TacticalInput{Goal: "装配", Zone: "main_workshop", TimeOfDay: "09:00", Slot: "09:00-12:00", Physical: &protocol.PhysicalState{}, KB: nil, Hint: "", Actions: nil, AgentID: ""})
+	promptText := prompt.BuildTactical(prompt.TacticalInput{Goal: "装配", Zone: "main_workshop", TimeOfDay: "09:00", Slot: "09:00-12:00", Physical: &protocol.PhysicalState{}, KB: nil, Hint: "", AgentID: ""})
 	if !strings.Contains(promptText, "物理状态") {
 		t.Errorf("prompt should contain '物理状态' with default values for all-zero physical, got: %s", promptText)
 	}
-	if !strings.Contains(promptText, "能量 充足") {
-		t.Errorf("prompt should contain default band 能量 充足 for all-zero physical, got: %s", promptText)
+	if !strings.Contains(promptText, "电量 高") {
+		t.Errorf("prompt should contain default band 电量 高 for all-zero physical, got: %s", promptText)
 	}
 }
 
 func TestBuildTacticalPrompt_WithPhysical(t *testing.T) {
-	promptText := prompt.BuildTactical(prompt.TacticalInput{Goal: "装配", Zone: "main_workshop", TimeOfDay: "09:00", Slot: "09:00-12:00", Physical: &protocol.PhysicalState{Energy: 75, Fatigue: 30, JointWear: 5}, KB: nil, Hint: "", Actions: nil, AgentID: ""})
+	promptText := prompt.BuildTactical(prompt.TacticalInput{Goal: "装配", Zone: "main_workshop", TimeOfDay: "09:00", Slot: "09:00-12:00", Physical: &protocol.PhysicalState{Energy: 75, Fatigue: 30, JointWear: 5}, KB: nil, Hint: "", AgentID: ""})
 	// 数值以分段标签呈现：75→中等、30→精神饱满、5→良好
-	if !strings.Contains(promptText, "能量 中等") {
-		t.Errorf("prompt should contain '能量 中等' (75), got: %s", promptText)
+	if !strings.Contains(promptText, "电量 中等") {
+		t.Errorf("prompt should contain '电量 中等' (75), got: %s", promptText)
 	}
 	if !strings.Contains(promptText, "疲劳 精神饱满") {
 		t.Errorf("prompt should contain '疲劳 精神饱满' (30), got: %s", promptText)
@@ -622,7 +468,6 @@ func TestBuildTacticalPrompt_InjectsObjectStatus(t *testing.T) {
 		Physical:      &protocol.PhysicalState{Energy: 75, Fatigue: 30, JointWear: 5},
 		KB:            kb,
 		Hint:          "",
-		Actions:       nil,
 		AgentID:       "",
 		ObjectStatus:  status,
 		NearbyObjects: nearby,
@@ -643,9 +488,10 @@ func TestBuildTacticalPrompt_InjectsObjectStatus(t *testing.T) {
 	if !strings.Contains(promptText, "WorkBench") {
 		t.Errorf("prompt should mention nearby WorkBench, got: %s", promptText)
 	}
-	// 应包含"避免直接重试"或"全部占用"相关的引导文本
-	// （该引导在 TacticalSystemPrompt 规则 9 中，机制文本已移入 system 消息）
-	if !strings.Contains(prompt.TacticalRules, "禁止规划必然失败") {
+	// 应包含"日程不合理"相关的引导文本（规则 2：日程不合理/设施占用时
+	// 鼓励安排其他更合理的动作；含夜间工作反例）。
+	if !strings.Contains(prompt.TacticalRules, "半夜不睡觉而是跑步/工作") ||
+		!strings.Contains(prompt.TacticalRules, "请下发更合理的动作") {
 		t.Errorf("system prompt should guide LLM to avoid doomed occupancy actions")
 	}
 	// 所有工种设备都可用 InteractSmartObject 直接工作（process/debug/dismantle
@@ -669,7 +515,6 @@ func TestBuildTacticalPrompt_NilObjectStatusNoSection(t *testing.T) {
 		Physical:  &protocol.PhysicalState{Energy: 75, Fatigue: 30, JointWear: 5},
 		KB:        kb,
 		Hint:      "",
-		Actions:   nil,
 		AgentID:   "",
 		// ObjectStatus / NearbyObjects 留空
 	})
@@ -683,7 +528,7 @@ func TestBuildTacticalPrompt_NilObjectStatusNoSection(t *testing.T) {
 
 func TestBuildTacticalPrompt_NilKB(t *testing.T) {
 	// nil KB 时不应崩溃，也不应包含 KB 上下文段落
-	promptText := prompt.BuildTactical(prompt.TacticalInput{Goal: "装配", Zone: "main_workshop", TimeOfDay: "09:00", Slot: "", Physical: nil, KB: nil, Hint: "", Actions: nil, AgentID: ""})
+	promptText := prompt.BuildTactical(prompt.TacticalInput{Goal: "装配", Zone: "main_workshop", TimeOfDay: "09:00", Slot: "", Physical: nil, KB: nil, Hint: "", AgentID: ""})
 	// 不应出现 KB 段落标题（"可前往区域（..."、"可交互物体（..."）
 	// 注意：示例 fallback 文本里会提到"上方可前往区域的 id"作为占位提示，
 	// 这是引导文字而非 KB 内容，不应被此断言拦截——所以用更精确的段落标题匹配。
@@ -727,14 +572,14 @@ func TestBuildTacticalPrompt_NilKBNoRole(t *testing.T) {
 // 不在 KB 中时也降级跳过【你的角色】段（buildAgentRoleContext 返回空串）。
 func TestBuildTacticalPrompt_AgentNotFoundNoRole(t *testing.T) {
 	kb := loadTestKB(t)
-	promptText := prompt.BuildTactical(prompt.TacticalInput{Goal: "装配", Zone: "main_workshop", TimeOfDay: "09:00", Slot: "", Physical: nil, KB: kb, Hint: "", Actions: nil, AgentID: "NONEXISTENT-99"})
+	promptText := prompt.BuildTactical(prompt.TacticalInput{Goal: "装配", Zone: "main_workshop", TimeOfDay: "09:00", Slot: "", Physical: nil, KB: kb, Hint: "", AgentID: "NONEXISTENT-99"})
 	if strings.Contains(promptText, "【你的角色】") {
 		t.Errorf("prompt should not include '【你的角色】' for unknown agent, got: %s", promptText)
 	}
 }
 
 func TestBuildTacticalPrompt_WithHint(t *testing.T) {
-	promptText := prompt.BuildTactical(prompt.TacticalInput{Goal: "装配", Zone: "main_workshop", TimeOfDay: "09:00", Slot: "09:00-12:00", Physical: &protocol.PhysicalState{Energy: 75, Fatigue: 30, JointWear: 5}, KB: nil, Hint: "fatigue=72 已突破警戒带，当前装配任务不合理", Actions: nil, AgentID: ""})
+	promptText := prompt.BuildTactical(prompt.TacticalInput{Goal: "装配", Zone: "main_workshop", TimeOfDay: "09:00", Slot: "09:00-12:00", Physical: &protocol.PhysicalState{Energy: 75, Fatigue: 30, JointWear: 5}, KB: nil, Hint: "fatigue=72 已突破警戒带，当前装配任务不合理", AgentID: ""})
 	if !strings.Contains(promptText, "【上次中断原因】") {
 		t.Errorf("prompt should contain '【上次中断原因】' when hint is non-empty, got: %s", promptText)
 	}
@@ -747,68 +592,13 @@ func TestBuildTacticalPrompt_WithHint(t *testing.T) {
 }
 
 func TestBuildTacticalPrompt_NoHint(t *testing.T) {
-	promptText := prompt.BuildTactical(prompt.TacticalInput{Goal: "装配", Zone: "main_workshop", TimeOfDay: "09:00", Slot: "09:00-12:00", Physical: &protocol.PhysicalState{Energy: 75, Fatigue: 30, JointWear: 5}, KB: nil, Hint: "", Actions: nil, AgentID: ""})
+	promptText := prompt.BuildTactical(prompt.TacticalInput{Goal: "装配", Zone: "main_workshop", TimeOfDay: "09:00", Slot: "09:00-12:00", Physical: &protocol.PhysicalState{Energy: 75, Fatigue: 30, JointWear: 5}, KB: nil, Hint: "", AgentID: ""})
 	if strings.Contains(promptText, "【上次中断原因】") {
 		t.Errorf("prompt should not contain '【上次中断原因】' when hint is empty, got: %s", promptText)
 	}
 }
 
 // ─── registry-aware tactical prompt / filtering ─────────────
-
-func TestBuildTacticalPrompt_RegistryFiltersTools(t *testing.T) {
-	// Registry with only CmdMoveTo + CmdWait available. CmdWait is now
-	// filtered from the tactical tool list (long composites run until slot
-	// transition, queue empty triggers tacticalRefill, no idle wait), so only
-	// move_to should appear in the prompt.
-	reg := NewCapabilityRegistry(nil)
-	reg.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
-		{Cmd: protocol.CmdMoveTo, Kind: "atomic"},
-		{Cmd: protocol.CmdWait, Kind: "atomic"},
-	})
-	// 工具清单在 user prompt（仅从 registry 派生）。
-	promptText := prompt.BuildTactical(prompt.TacticalInput{Goal: "装配", Zone: "main_workshop", TimeOfDay: "09:00", Slot: "09:00-12:00", Actions: reg.EffectiveActions("H-01"), AgentID: "H-01"})
-	// Tool bullet list should contain move_to.
-	if !strings.Contains(promptText, "- move_to [原子]:") {
-		t.Errorf("prompt should list move_to as [原子] bullet, got: %s", promptText)
-	}
-	// wait should NOT appear as a tool bullet (filtered from tactical prompt).
-	if strings.Contains(promptText, "- wait [") {
-		t.Errorf("prompt should NOT list wait as a bullet (filtered from tactical prompt), got: %s", promptText)
-	}
-	// Tool bullet list should NOT contain composite tools (composite cmds unavailable).
-	// Check the bullet prefix specifically — the hardcoded example section
-	// mentions work_shift regardless, which is a separate prompt-quality concern.
-	if strings.Contains(promptText, "- work_shift [复合]:") || strings.Contains(promptText, "- charge_at_station [复合]:") {
-		t.Errorf("prompt should NOT list composite tools as [复合] bullets (composite cmds unavailable), got: %s", promptText)
-	}
-	// Count in header should match available tools (2 — move_to + social_chat fallback).
-	if !strings.Contains(promptText, "仅限以下 2 个") {
-		t.Errorf("prompt header should say '仅限以下 2 个' (move_to + social_chat fallback), got: %s", promptText)
-	}
-}
-
-func TestBuildTacticalPrompt_PerAgentOverride(t *testing.T) {
-	// Global has CmdMoveTo + CmdWorkShift; per-agent H-02 only
-	// has CmdMoveTo. H-02's prompt should NOT list composite tools.
-	reg := NewCapabilityRegistry(nil)
-	reg.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
-		{Cmd: protocol.CmdMoveTo, Kind: "atomic"},
-		{Cmd: protocol.CmdWorkShift, Kind: "composite"},
-	})
-	reg.Register("H-02", []protocol.CapabilityAction{
-		{Cmd: protocol.CmdMoveTo, Kind: "atomic"},
-	})
-	// 工具清单在 user prompt（仅从 registry 派生）。
-	promptH01 := prompt.BuildTactical(prompt.TacticalInput{Goal: "装配", Zone: "main_workshop", TimeOfDay: "09:00", Slot: "09:00-12:00", Actions: reg.EffectiveActions("H-01"), AgentID: "H-01"})
-	promptH02 := prompt.BuildTactical(prompt.TacticalInput{Goal: "装配", Zone: "main_workshop", TimeOfDay: "09:00", Slot: "09:00-12:00", Actions: reg.EffectiveActions("H-02"), AgentID: "H-02"})
-	// Check bullet prefix — example section is hardcoded and not registry-aware.
-	if !strings.Contains(promptH01, "- work_shift [复合]:") {
-		t.Errorf("H-01 prompt should list composite tools as [复合] bullets (global default), got: %s", promptH01)
-	}
-	if strings.Contains(promptH02, "- work_shift [复合]:") {
-		t.Errorf("H-02 prompt should NOT list composite tools as [复合] bullets (per-agent override), got: %s", promptH02)
-	}
-}
 
 func TestFilterValidActions_RegistryFiltersCmd(t *testing.T) {
 	reg := NewCapabilityRegistry(nil)
@@ -1010,40 +800,6 @@ func TestBuildSlotDurationHint_Remaining(t *testing.T) {
 
 // ─── 动态 cmd 派生（Phase 2） ────────────────────────────────
 
-// TestBuildTacticalToolList_NewCmdDerived verifies that a UE-pushed new cmd
-// (not in BuiltinToolSpecs) appears in the tactical prompt tool list with
-// Desc/Params derived from CapabilityAction metadata.
-func TestBuildTacticalToolList_NewCmdDerived(t *testing.T) {
-	reg := NewCapabilityRegistry(nil)
-	reg.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
-		{Cmd: protocol.CmdMoveTo, Kind: "atomic"},
-		{
-			Cmd:         "WaveHand",
-			Kind:        "atomic",
-			Description: "挥手致意",
-			Params: []protocol.CapabilityParam{
-				{Name: "target_agent_id", Type: "string", Required: true},
-				{Name: "duration_sec", Type: "number"},
-			},
-		},
-	})
-	list, count := prompt.BuildTacticalToolList(reg.EffectiveActions("H-01"))
-	// SocialChat auto-injected as MCP-side fallback, so count includes it.
-	if count != 3 {
-		t.Fatalf("tool count=%d, want 3 (move_to + wave_hand + social_chat fallback)", count)
-	}
-	if !strings.Contains(list, "- wave_hand [原子]:") {
-		t.Errorf("tool list should contain wave_hand bullet with [原子] kind label, got: %s", list)
-	}
-	if !strings.Contains(list, "挥手致意") {
-		t.Errorf("tool list should contain derived Desc '挥手致意', got: %s", list)
-	}
-	// Params hint should include both param names
-	if !strings.Contains(list, "target_agent_id") || !strings.Contains(list, "duration_sec") {
-		t.Errorf("tool list should include param names, got: %s", list)
-	}
-}
-
 // TestTacticalActionAvailable_NewCmdAccepted verifies tacticalActionAvailable
 // accepts a UE-pushed new cmd via registry lookup.
 func TestTacticalActionAvailable_NewCmdAccepted(t *testing.T) {
@@ -1088,12 +844,99 @@ func TestMapTacticalAction_NewCmdNilRegistryErrors(t *testing.T) {
 	}
 }
 
-// TestBuildTacticalToolEntries_NilRegistryEmpty verifies tools come solely
-// from the cmd registry: nil actions produce an empty list (no builtin
-// fallback, no hardcoded availability).
-func TestBuildTacticalToolEntries_NilRegistryEmpty(t *testing.T) {
-	if entries := prompt.ToolEntries(nil); len(entries) != 0 {
-		t.Fatalf("nil registry entry count=%d, want 0 (no builtin fallback)", len(entries))
+// ─── tacticalToolsFromRegistry (function calling) ────────────
+
+func TestTacticalToolsFromRegistry_BuildsTools(t *testing.T) {
+	reg := NewCapabilityRegistry(nil)
+	reg.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
+		{
+			Cmd:         protocol.CmdWorkShift,
+			Kind:        "composite",
+			Description: "去指定设施执行工作",
+			Params: []protocol.CapabilityParam{
+				{Name: "semantic_group", Type: "string", Description: "设施语义组", Required: true},
+				{Name: "interaction", Type: "string", Description: "交互类型", Required: true},
+			},
+		},
+		{
+			Cmd:  protocol.CmdMoveTo,
+			Kind: "atomic",
+			Params: []protocol.CapabilityParam{
+				{Name: "target_type", Type: "enum", Description: "目标类型", Required: true, EnumValues: []string{"agent", "zone"}},
+			},
+		},
+	})
+	// Register(system) 会自动注入 social_chat（MCP 侧对话工具），所以总数
+	// = MoveTo + WorkShift + SocialChat。
+	got := tacticalToolsFromRegistry(reg, "H-01")
+	byName := map[string]venus.Tool{}
+	for _, tool := range got {
+		byName[tool.Function.Name] = tool
+	}
+	if len(got) != 3 {
+		t.Fatalf("tools len = %d, want 3 (MoveTo + WorkShift + SocialChat)", len(got))
+	}
+	if _, ok := byName["move_to"]; !ok {
+		t.Fatalf("move_to tool missing: %v", got)
+	}
+	if _, ok := byName["work_shift"]; !ok {
+		t.Fatalf("work_shift tool missing: %v", got)
+	}
+	if _, ok := byName["social_chat"]; !ok {
+		t.Fatalf("social_chat tool missing: %v", got)
+	}
+	if byName["work_shift"].Type != "function" {
+		t.Errorf("tool type should be function")
+	}
+	if byName["work_shift"].Function.Description != "去指定设施执行工作" {
+		t.Errorf("work_shift description = %q", byName["work_shift"].Function.Description)
+	}
+	// 校验 work_shift 的 parameters schema 含 semantic_group/interaction 且 required。
+	var schema struct {
+		Type       string         `json:"type"`
+		Properties map[string]any `json:"properties"`
+		Required   []string       `json:"required"`
+	}
+	if err := json.Unmarshal(byName["work_shift"].Function.Parameters, &schema); err != nil {
+		t.Fatalf("parameters is not valid JSON: %v", err)
+	}
+	if schema.Type != "object" {
+		t.Errorf("schema.type = %q, want object", schema.Type)
+	}
+	if len(schema.Required) != 2 {
+		t.Errorf("schema.required = %v, want [semantic_group interaction]", schema.Required)
+	}
+	// 校验 move_to 的 target_type enum。
+	var mschema struct {
+		Properties map[string]struct {
+			Enum []string `json:"enum"`
+		} `json:"properties"`
+	}
+	if err := json.Unmarshal(byName["move_to"].Function.Parameters, &mschema); err != nil {
+		t.Fatalf("move_to parameters is not valid JSON: %v", err)
+	}
+	if len(mschema.Properties["target_type"].Enum) != 2 {
+		t.Errorf("move_to target_type enum = %v, want 2 values", mschema.Properties["target_type"].Enum)
+	}
+}
+
+func TestTacticalToolsFromRegistry_NilRegistryEmpty(t *testing.T) {
+	if got := tacticalToolsFromRegistry(nil, "H-01"); got != nil {
+		t.Fatalf("nil registry should return nil tools, got %v", got)
+	}
+}
+
+func TestTacticalToolsFromRegistry_SkipsNonQueueable(t *testing.T) {
+	reg := NewCapabilityRegistry(nil)
+	reg.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
+		{Cmd: protocol.CmdMoveTo, Kind: "atomic"},
+		{Cmd: protocol.CmdWait, Kind: "atomic"},
+	})
+	got := tacticalToolsFromRegistry(reg, "H-01")
+	for _, tool := range got {
+		if tool.Function.Name == "wait" {
+			t.Errorf("wait is non-queueable and should be skipped")
+		}
 	}
 }
 
@@ -1224,124 +1067,9 @@ func TestBuildTacticalExample_ZoneObjectPairing(t *testing.T) {
 }
 
 // ─── buildTacticalExample (goal-aware, P0-2) ──────────────────
-
-func TestBuildTacticalExample_GoalAssembly(t *testing.T) {
-	// goal 含"装配"应选 work_shift 示例，即使 KB 首个 object 是 charge。
-	// P0-2 修复前：示例固定按首个 object（charge）显示"去充电"，
-	// 与"装配作业"goal 错配，LLM 模仿后会把 goal 和示例机械拼接。
-	// 注意：KB 中可能有多个 category=work 的物体（sortingconveyor、workbench），
-	// findObjectByCategory 取首个匹配，故任一出现都算通过。
-	kb := loadTestKB(t)
-	got := prompt.TacticalExample(kb, "前往主生产车间进行装配作业，严控工艺", "")
-	if !strings.Contains(got, "work_shift") {
-		t.Errorf("goal=装配 should pick work_shift example: %q", got)
-	}
-	// 示例应引用某个 work category 物体（inspection_table/sortingconveyor/workbench）。
-	hasWorkObj := strings.Contains(got, "inspection_table") || strings.Contains(got, "sortingconveyor") || strings.Contains(got, "workbench")
-	if !hasWorkObj {
-		t.Errorf("example should reference a work-category object (inspection_table/sortingconveyor/workbench): %q", got)
-	}
-	if strings.Contains(got, "charge_at_station") {
-		t.Errorf("assembly goal must NOT fall back to charge example: %q", got)
-	}
-	// 2026-08-11 修复：复合动作示例不应含 move_to（复合动作自带移动）。
-	if strings.Contains(got, `"action":"move_to"`) {
-		t.Errorf("work_shift example must NOT contain move_to (composite includes movement): %q", got)
-	}
-}
-
-func TestBuildTacticalExample_GoalCharge(t *testing.T) {
-	// goal 含"充电"应选 charge_at_station 示例。
-	kb := loadTestKB(t)
-	got := prompt.TacticalExample(kb, "午间停工，前往充电站补电休息", "")
-	if !strings.Contains(got, "charge_at_station") {
-		t.Errorf("goal=充电 should pick charge_at_station example: %q", got)
-	}
-	if !strings.Contains(got, "charge") {
-		t.Errorf("example should reference charge: %q", got)
-	}
-	// 2026-08-11 修复：复合动作示例不应含 move_to（复合动作自带移动）。
-	if strings.Contains(got, `"action":"move_to"`) {
-		t.Errorf("charge_at_station example must NOT contain move_to (composite includes movement): %q", got)
-	}
-}
-
-// TestBuildTacticalExample_GoalBenchRest 回归测试 P0-2：goal 含"长椅休息"
-// 必须返回 interact(bench/rest) 示例，禁止错配到 rest_at_residence(sleep_pod/sleep)。
-// 旧版 exampleForGoal 第 2 分支用"休息"关键词统一路由到 charge_at_station，
-// LLM 模仿后会把"长椅休息"goal 和 rest_at_residence 复合动作自由组合，产生
-// rest_at_residence(bench/rest) 这种参数错配（bench 不是住所）。
-func TestBuildTacticalExample_GoalBenchRest(t *testing.T) {
-	kb := loadTestKB(t)
-	got := prompt.TacticalExample(kb, "午间到中央广场长椅短暂休息，缓解疲劳", "")
-	if !strings.Contains(got, `"action":"InteractSmartObject"`) {
-		t.Errorf("goal=长椅休息 should pick interact example: %q", got)
-	}
-	if !strings.Contains(got, `"semantic_group":"bench"`) || !strings.Contains(got, `"interaction":"rest"`) {
-		t.Errorf("bench rest example must use semantic_group=bench interaction=rest: %q", got)
-	}
-	if strings.Contains(got, "rest_at_residence") {
-		t.Errorf("bench rest must NOT use rest_at_residence (bench is not residence): %q", got)
-	}
-	if strings.Contains(got, "sleep_pod") {
-		t.Errorf("bench rest must NOT reference sleep_pod: %q", got)
-	}
-}
-
-// TestBuildTacticalExample_GoalSleepAtResidence 回归测试 P0-2：goal 含"回休眠舱睡觉"
-// 必须返回 rest_at_residence(sleep_pod/sleep) 示例，参数严格对应。
-func TestBuildTacticalExample_GoalSleepAtResidence(t *testing.T) {
-	kb := loadTestKB(t)
-	got := prompt.TacticalExample(kb, "夜间回休眠舱居住区睡眠，恢复体力迎接明天", "")
-	if !strings.Contains(got, "rest_at_residence") {
-		t.Errorf("goal=回休眠舱睡觉 should pick rest_at_residence example: %q", got)
-	}
-	if !strings.Contains(got, `"semantic_group":"sleep_pod"`) || !strings.Contains(got, `"interaction":"sleep"`) {
-		t.Errorf("rest_at_residence example must use sleep_pod/sleep: %q", got)
-	}
-	if strings.Contains(got, `"semantic_group":"bench"`) {
-		t.Errorf("sleep example must NOT use bench (bench is not residence): %q", got)
-	}
-	// 复合动作不应含 move_to（复合动作自带移动）
-	if strings.Contains(got, `"action":"move_to"`) {
-		t.Errorf("rest_at_residence example must NOT contain move_to: %q", got)
-	}
-}
-
-func TestBuildTacticalExample_GoalPatrol(t *testing.T) {
-	// goal 含"巡视"应选 move_to + generic_act 示例，不引用任何 object。
-	// 新 12 cmd 体系无 patrol_zone，巡视用 generic_act(behavior=look_around) 兜底。
-	kb := loadTestKB(t)
-	got := prompt.TacticalExample(kb, "巡视主生产车间，记录设备运行日志", "")
-	if !strings.Contains(got, "generic_act") {
-		t.Errorf("goal=巡视 should pick generic_act example: %q", got)
-	}
-	if strings.Contains(got, "work_shift") || strings.Contains(got, "charge_at_station") {
-		t.Errorf("patrol goal must NOT fall back to object examples: %q", got)
-	}
-}
-
-func TestBuildTacticalExample_GoalInspect(t *testing.T) {
-	// goal 含"检查"应选 interact inspect 示例。
-	// 真 KB 物体没有 inspect interaction，用 inline KB 验证此分支。
-	kb := &worldkb.KB{
-		Zones: []worldkb.Zone{{ID: "main_workshop", DisplayName: "车间"}},
-		Objects: []worldkb.Object{{
-			ID:                    "wb_01",
-			DisplayName:           "工作台",
-			Category:              "workbench",
-			ZoneID:                "main_workshop",
-			AvailableInteractions: []string{"assemble", "inspect"},
-		}},
-	}
-	got := prompt.TacticalExample(kb, "启动自检，检查关节磨损情况", "")
-	if !strings.Contains(got, `"action":"InteractSmartObject"`) {
-		t.Errorf("goal=检查 should pick interact example: %q", got)
-	}
-	if !strings.Contains(got, `"interaction":"inspect"`) {
-		t.Errorf("inspect goal should use interaction=inspect: %q", got)
-	}
-}
+// 2026-08-24 停用：exampleForGoal 的 goal 关键词→示例路由已注释（"长椅/休息"
+// 分支硬编码 move_to central_plaza 是午休扎堆中央广场的根因）。goal 示例测试
+// 一并移除；剩余 fallback 测试（category-aware）继续覆盖 TacticalExample。
 
 func TestBuildTacticalExample_GoalFallbackOnMissingObject(t *testing.T) {
 	// goal=装配 但 KB 无 workbench object → 降级到默认示例（首个 object 的 category）
@@ -1468,7 +1196,7 @@ func TestPhysicalAlertOverrideGoal_FatigueTakesPrecedence(t *testing.T) {
 func TestBuildTacticalPrompt_PhysicalAlertConstraint(t *testing.T) {
 	kb := loadTestKB(t)
 	hint := "物理状态告警自动升级(疲劳=82超过80)；原决策=observe/..."
-	promptText := prompt.BuildTactical(prompt.TacticalInput{Goal: "前往充电站休息", Zone: "main_workshop", TimeOfDay: "13:15", Slot: "13:00-17:00", Physical: &protocol.PhysicalState{Energy: 88, Fatigue: 82, JointWear: 0}, KB: kb, Hint: hint, Actions: nil, AgentID: "H-01"})
+	promptText := prompt.BuildTactical(prompt.TacticalInput{Goal: "前往充电站休息", Zone: "main_workshop", TimeOfDay: "13:15", Slot: "13:00-17:00", Physical: &protocol.PhysicalState{Energy: 88, Fatigue: 82, JointWear: 0}, KB: kb, Hint: hint, AgentID: "H-01"})
 
 	if !strings.Contains(promptText, "【物理告警强制约束】") {
 		t.Errorf("prompt should contain physical alert constraint section, got: %s", promptText)
@@ -1486,7 +1214,7 @@ func TestBuildTacticalPrompt_PhysicalAlertConstraint(t *testing.T) {
 func TestBuildTacticalPrompt_PhysicalAlertJointWearConstraint(t *testing.T) {
 	kb := loadTestKB(t)
 	hint := "物理状态告警自动升级(关节磨损=75超过70)；原决策=observe/..."
-	promptText := prompt.BuildTactical(prompt.TacticalInput{Goal: "车间装配", Zone: "main_workshop", TimeOfDay: "14:00", Slot: "13:00-17:00", Physical: &protocol.PhysicalState{Energy: 88, Fatigue: 30, JointWear: 75}, KB: kb, Hint: hint, Actions: nil, AgentID: "H-01"})
+	promptText := prompt.BuildTactical(prompt.TacticalInput{Goal: "车间装配", Zone: "main_workshop", TimeOfDay: "14:00", Slot: "13:00-17:00", Physical: &protocol.PhysicalState{Energy: 88, Fatigue: 30, JointWear: 75}, KB: kb, Hint: hint, AgentID: "H-01"})
 
 	if !strings.Contains(promptText, "【物理告警强制约束】") {
 		t.Errorf("prompt should contain constraint section, got: %s", promptText)
@@ -1507,9 +1235,100 @@ func TestBuildTacticalPrompt_PhysicalAlertJointWearConstraint(t *testing.T) {
 func TestBuildTacticalPrompt_NoPhysicalAlertConstraint(t *testing.T) {
 	kb := loadTestKB(t)
 	// 普通 hint（无"物理状态告警"标记）不应插入强约束段
-	promptText := prompt.BuildTactical(prompt.TacticalInput{Goal: "车间装配", Zone: "main_workshop", TimeOfDay: "09:00", Slot: "09:00-12:00", Physical: &protocol.PhysicalState{Energy: 90, Fatigue: 20, JointWear: 0}, KB: kb, Hint: "上次中断原因：zone 变化", Actions: nil, AgentID: "H-01"})
+	promptText := prompt.BuildTactical(prompt.TacticalInput{Goal: "车间装配", Zone: "main_workshop", TimeOfDay: "09:00", Slot: "09:00-12:00", Physical: &protocol.PhysicalState{Energy: 90, Fatigue: 20, JointWear: 0}, KB: kb, Hint: "上次中断原因：zone 变化", AgentID: "H-01"})
 
 	if strings.Contains(promptText, "【物理告警强制约束】") {
 		t.Errorf("non-physical-alert hint should NOT contain constraint section, got: %s", promptText)
+	}
+}
+
+// ─── truncateConversationRounds ───────────────────────────────
+
+// testConvRound 构造一轮完整对话：assistant(带 tool_calls) + 对应 tool 结果。
+func testConvRound(id string) []llmtypes.Message {
+	return []llmtypes.Message{
+		{Role: "assistant", Content: "speak " + id, ToolCalls: []llmtypes.ToolCall{{ID: id, Type: "function", Function: llmtypes.ToolFunction{Name: "speak", Arguments: "{}"}}}},
+		{Role: "tool", Content: "result=success", ToolCallID: id},
+	}
+}
+
+func TestTruncateConversationRounds_Empty(t *testing.T) {
+	if got := truncateConversationRounds(nil, maxTacticalHistoryRounds); got != nil {
+		t.Errorf("empty input should stay nil, got %v", got)
+	}
+	if got := truncateConversationRounds([]llmtypes.Message{}, maxTacticalHistoryRounds); len(got) != 0 {
+		t.Errorf("empty slice should stay empty, got %d items", len(got))
+	}
+}
+
+func TestTruncateConversationRounds_NoopWhenBelowLimit(t *testing.T) {
+	conv := []llmtypes.Message{}
+	for i := 0; i < 5; i++ {
+		conv = append(conv, testConvRound(fmt.Sprintf("c%d", i))...)
+	}
+	got := truncateConversationRounds(conv, maxTacticalHistoryRounds)
+	if len(got) != len(conv) {
+		t.Errorf("below-limit history should be unchanged: got %d want %d", len(got), len(conv))
+	}
+	for i := range conv {
+		if got[i].Role != conv[i].Role || got[i].Content != conv[i].Content {
+			t.Errorf("below-limit history should preserve order/content: got[%d]=%+v want %+v", i, got[i], conv[i])
+		}
+	}
+}
+
+func TestTruncateConversationRounds_KeepsRecentRounds(t *testing.T) {
+	conv := []llmtypes.Message{}
+	for i := 0; i < 20; i++ {
+		conv = append(conv, testConvRound(fmt.Sprintf("c%d", i))...)
+	}
+	got := truncateConversationRounds(conv, 8)
+	if len(got) != 16 { // 8 轮 × 2 条
+		t.Fatalf("got %d messages, want 16 (8 rounds)", len(got))
+	}
+	// 起点必须是 assistant（tool 消息不能成为头部孤儿）。
+	if got[0].Role != "assistant" {
+		t.Errorf("truncated head should be an assistant message, got role=%q", got[0].Role)
+	}
+	// 应保留 c12..c19 这最后 8 轮。
+	if !strings.Contains(got[0].Content, "c12") {
+		t.Errorf("head should be round c12, got %q", got[0].Content)
+	}
+	// 每一对 assistant/tool 必须保持配对与顺序。
+	for i := 0; i+1 < len(got); i += 2 {
+		if got[i].Role != "assistant" || got[i+1].Role != "tool" {
+			t.Fatalf("pair %d broken: %+v / %+v", i, got[i], got[i+1])
+		}
+		if got[i+1].ToolCallID != got[i].ToolCalls[0].ID {
+			t.Errorf("pair %d: tool_call_id %q does not match assistant tool_calls id %q",
+				i, got[i+1].ToolCallID, got[i].ToolCalls[0].ID)
+		}
+	}
+}
+
+func TestTruncateConversationRounds_NonPositiveLimit(t *testing.T) {
+	conv := testConvRound("c0")
+	if got := truncateConversationRounds(conv, 0); got != nil {
+		t.Errorf("maxRounds=0 should return nil, got %v", got)
+	}
+	if got := truncateConversationRounds(conv, -3); got != nil {
+		t.Errorf("negative maxRounds should return nil, got %v", got)
+	}
+}
+
+func TestTruncateConversationRounds_OrphanToolHead(t *testing.T) {
+	conv := []llmtypes.Message{
+		{Role: "tool", Content: "result=failed", ToolCallID: "orphan"},
+	}
+	for i := 0; i < 3; i++ {
+		conv = append(conv, testConvRound(fmt.Sprintf("c%d", i))...)
+	}
+	got := truncateConversationRounds(conv, 8)
+	// 头部孤儿 tool 应被丢弃（不足上限，但头部非 assistant）。
+	if len(got) != 6 {
+		t.Fatalf("got %d messages, want 6 (orphan dropped)", len(got))
+	}
+	if got[0].Role != "assistant" {
+		t.Errorf("head should be first assistant, got role=%q", got[0].Role)
 	}
 }

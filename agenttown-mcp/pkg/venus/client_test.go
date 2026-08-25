@@ -365,6 +365,182 @@ func TestSendWithSummary_NoResponseFormat(t *testing.T) {
 	if capturedRequest.ResponseFormat != nil {
 		t.Errorf("response_format should be absent, got %+v", capturedRequest.ResponseFormat)
 	}
+	if capturedRequest.Tools != nil {
+		t.Errorf("tools should be absent for plain SendWithSummary, got %+v", capturedRequest.Tools)
+	}
+}
+
+// TestSendWithSummaryTools_RequestIncludesTools verifies SendWithSummaryTools
+// serializes the `tools` array (function calling) into the request body.
+func TestSendWithSummaryTools_RequestIncludesTools(t *testing.T) {
+	var capturedRequest request
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&capturedRequest)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"x","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{}}`))
+	}))
+	defer server.Close()
+
+	c := newTestClient(t, server.URL)
+	tools := []Tool{{
+		Type: "function",
+		Function: ToolFunction{
+			Name:        "work_shift",
+			Description: "去指定设施执行工作",
+			Parameters:  json.RawMessage(`{"type":"object","properties":{"semantic_group":{"type":"string"}},"required":["semantic_group"]}`),
+		},
+	}}
+	if _, err := c.SendWithSummaryTools(context.Background(), "sys", "user", tools); err != nil {
+		t.Fatalf("SendWithSummaryTools: %v", err)
+	}
+	if len(capturedRequest.Tools) != 1 {
+		t.Fatalf("tools len = %d, want 1", len(capturedRequest.Tools))
+	}
+	got := capturedRequest.Tools[0]
+	if got.Type != "function" {
+		t.Errorf("tools[0].type = %q, want function", got.Type)
+	}
+	if got.Function.Name != "work_shift" {
+		t.Errorf("tools[0].function.name = %q, want work_shift", got.Function.Name)
+	}
+	if string(got.Function.Parameters) != `{"type":"object","properties":{"semantic_group":{"type":"string"}},"required":["semantic_group"]}` {
+		t.Errorf("tools[0].function.parameters = %s", got.Function.Parameters)
+	}
+	// tools 非空时自动设置 tool_choice="required"（function calling 强制调用）。
+	if capturedRequest.ToolChoice != "required" {
+		t.Errorf("tool_choice = %v, want required", capturedRequest.ToolChoice)
+	}
+}
+
+// TestSendWithSummaryTools_ParsesToolCalls verifies a non-streaming response
+// with tool_calls is converted into llmtypes.Response.ToolCalls.
+func TestSendWithSummaryTools_ParsesToolCalls(t *testing.T) {
+	body := `{"id":"x","choices":[{"message":{"role":"assistant","content":"","tool_calls":[` +
+		`{"id":"call_1","type":"function","function":{"name":"speak","arguments":"{\"content\":\"hi\"}"}},` +
+		`{"id":"call_2","type":"function","function":{"name":"move_to","arguments":"{\"target_id\":\"main_workshop\"}"}}` +
+		`]}}],"usage":{}}`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(body))
+	}))
+	defer server.Close()
+
+	c := newTestClient(t, server.URL)
+	resp, err := c.SendWithSummaryTools(context.Background(), "sys", "user", []Tool{{Type: "function", Function: ToolFunction{Name: "speak"}}})
+	if err != nil {
+		t.Fatalf("SendWithSummaryTools: %v", err)
+	}
+	if len(resp.ToolCalls) != 2 {
+		t.Fatalf("ToolCalls len = %d, want 2", len(resp.ToolCalls))
+	}
+	if resp.ToolCalls[0].Function.Name != "speak" || resp.ToolCalls[0].Function.Arguments != `{"content":"hi"}` {
+		t.Errorf("ToolCalls[0] = %+v", resp.ToolCalls[0])
+	}
+	if resp.ToolCalls[1].Function.Name != "move_to" || resp.ToolCalls[1].Function.Arguments != `{"target_id":"main_workshop"}` {
+		t.Errorf("ToolCalls[1] = %+v", resp.ToolCalls[1])
+	}
+}
+
+// TestSendMessagesTools_SerializesMultiTurn verifies SendMessagesTools sends
+// the full messages array (including assistant tool_calls and tool role with
+// tool_call_id) in order.
+func TestSendMessagesTools_SerializesMultiTurn(t *testing.T) {
+	var capturedRequest request
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&capturedRequest)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"x","choices":[{"message":{"role":"assistant","content":"","tool_calls":[{"id":"call_9","type":"function","function":{"name":"speak","arguments":"{}"}}]}}],"usage":{}}`))
+	}))
+	defer server.Close()
+
+	c := newTestClient(t, server.URL)
+	messages := []llmtypes.Message{
+		{Role: "system", Content: "sys"},
+		{Role: "user", Content: "round1"},
+		{Role: "assistant", Content: "", ToolCalls: []llmtypes.ToolCall{
+			{ID: "call_1", Type: "function", Function: llmtypes.ToolFunction{Name: "move_to", Arguments: `{"target_id":"z"}`}},
+		}},
+		{Role: "tool", Content: "result=success", ToolCallID: "call_1"},
+		{Role: "user", Content: "round2"},
+	}
+	resp, err := c.SendMessagesTools(context.Background(), messages, []Tool{{Type: "function", Function: ToolFunction{Name: "speak"}}})
+	if err != nil {
+		t.Fatalf("SendMessagesTools: %v", err)
+	}
+	if len(capturedRequest.Messages) != 5 {
+		t.Fatalf("messages len = %d, want 5", len(capturedRequest.Messages))
+	}
+	if capturedRequest.Messages[0].Role != "system" || capturedRequest.Messages[0].Content != "sys" {
+		t.Errorf("messages[0] = %+v", capturedRequest.Messages[0])
+	}
+	asst := capturedRequest.Messages[2]
+	if asst.Role != "assistant" || len(asst.ToolCalls) != 1 || asst.ToolCalls[0].ID != "call_1" {
+		t.Errorf("messages[2] assistant tool_calls = %+v", asst)
+	}
+	toolMsg := capturedRequest.Messages[3]
+	if toolMsg.Role != "tool" || toolMsg.ToolCallID != "call_1" || toolMsg.Content != "result=success" {
+		t.Errorf("messages[3] tool = %+v", toolMsg)
+	}
+	if len(resp.ToolCalls) != 1 || resp.ToolCalls[0].ID != "call_9" {
+		t.Errorf("resp.ToolCalls = %+v", resp.ToolCalls)
+	}
+}
+
+// TestSendStreamingTools_AccumulatesToolCalls verifies streamed delta.tool_calls
+// are accumulated by index and delivered via onToolCall once complete.
+func TestSendStreamingTools_AccumulatesToolCalls(t *testing.T) {
+	// 用 json.Marshal 构造 SSE chunk，避免手写多层转义。
+	mkChunk := func(delta map[string]any, finish string) string {
+		chunk := map[string]any{
+			"id":      "s1",
+			"choices": []any{map[string]any{"delta": delta, "finish_reason": finish}},
+		}
+		b, _ := json.Marshal(chunk)
+		return "data: " + string(b) + "\n\n"
+	}
+	sse := "" +
+		mkChunk(map[string]any{"tool_calls": []any{map[string]any{
+			"index": 0, "id": "call_1", "type": "function",
+			"function": map[string]any{"name": "speak", "arguments": `{"content":"`},
+		}}}, "") +
+		mkChunk(map[string]any{"tool_calls": []any{map[string]any{
+			"index":    0,
+			"function": map[string]any{"arguments": `hi"}`},
+		}}}, "") +
+		mkChunk(map[string]any{"tool_calls": []any{map[string]any{
+			"index": 1, "id": "call_2", "type": "function",
+			"function": map[string]any{"name": "move_to", "arguments": `{"target_id":"main_workshop"}`},
+		}}}, "") +
+		mkChunk(map[string]any{}, "tool_calls") +
+		"data: [DONE]\n\n"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(sse))
+	}))
+	defer server.Close()
+
+	c := newTestClient(t, server.URL)
+	var completed []llmtypes.ToolCall
+	resp, err := c.SendStreamingTools(context.Background(), "sys", "user", []Tool{{Type: "function", Function: ToolFunction{Name: "speak"}}}, nil, func(tc llmtypes.ToolCall) {
+		completed = append(completed, tc)
+	})
+	if err != nil {
+		t.Fatalf("SendStreamingTools: %v", err)
+	}
+	if len(completed) != 2 {
+		t.Fatalf("onToolCall count = %d, want 2", len(completed))
+	}
+	if completed[0].Function.Name != "speak" || completed[0].Function.Arguments != `{"content":"hi"}` {
+		t.Errorf("completed[0] = %+v, want speak with content hi", completed[0])
+	}
+	if completed[1].Function.Name != "move_to" || completed[1].Function.Arguments != `{"target_id":"main_workshop"}` {
+		t.Errorf("completed[1] = %+v, want move_to", completed[1])
+	}
+	// 最终 Response 也应携带累积后的 ToolCalls。
+	if len(resp.ToolCalls) != 2 {
+		t.Errorf("resp.ToolCalls len = %d, want 2", len(resp.ToolCalls))
+	}
 }
 
 // TestResetSession_NoOp verifies ResetSession is a safe no-op.
@@ -431,4 +607,34 @@ func TestVenusClient_MatchesLLMClientSignatures(t *testing.T) {
 		SendWithSchema(ctx context.Context, system, user, schemaName string, schema []byte) (*llmtypes.Response, error)
 		ResetSession()
 	} = (*Client)(nil)
+}
+
+// TestLastRequestBody verifies the client records the full request body of
+// the most recent send, for docs/actual_prompts.md (latest actual request).
+func TestLastRequestBody(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"x","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+	}))
+	defer server.Close()
+
+	c := newTestClient(t, server.URL)
+	if body := c.LastRequestBody(); len(body) != 0 {
+		t.Fatalf("LastRequestBody before any send = %q, want empty", body)
+	}
+	if _, err := c.SendWithSummary(context.Background(), "sys", "user"); err != nil {
+		t.Fatalf("SendWithSummary: %v", err)
+	}
+	body := c.LastRequestBody()
+	var got map[string]any
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("LastRequestBody not valid JSON: %v", err)
+	}
+	if got["model"] != "qwen3.6-35b-a3b" {
+		t.Errorf("body model = %v, want qwen3.6-35b-a3b", got["model"])
+	}
+	msgs, ok := got["messages"].([]any)
+	if !ok || len(msgs) != 2 {
+		t.Fatalf("body messages = %v, want 2 entries", got["messages"])
+	}
 }

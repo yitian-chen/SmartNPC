@@ -23,7 +23,7 @@ import (
 // BandThresholds splits each physical attribute's 0-100 range into 4
 // bands. The 3 thresholds per attribute are ascending boundaries.
 type BandThresholds struct {
-	Energy    [3]float64 // 低电量 <t1 | 偏低 | 中等 | 充足 ≥t3
+	Energy    [3]float64 // 低电量 <t1 | 偏低 | 中等 | 很高 ≥t3
 	Fatigue   [3]float64 // 精神饱满 <t1 | 轻度疲劳 | 疲劳 | 非常疲劳 ≥t3
 	JointWear [3]float64 // 良好 <t1 | 轻微磨损 | 明显磨损 | 严重磨损 ≥t3
 }
@@ -43,13 +43,16 @@ func DefaultBandThresholds() BandThresholds {
 // BandThresholdsFor resolves the effective band thresholds for an agent:
 // global defaults overlaid with the agent's profile ## 属性分段 overrides.
 // profiles == nil or agent not found / section absent → defaults.
+// 2026-08-24 物理属性"能量"改称"电量"；profile.md 未迁移时兼容读取旧 key"能量"。
 func BandThresholdsFor(profiles map[string]*profile.Profile, agentID string) BandThresholds {
 	th := DefaultBandThresholds()
 	p := profiles[agentID]
 	if p == nil {
 		return th
 	}
-	if v, ok := p.AttrBands["能量"]; ok {
+	if v, ok := p.AttrBands["电量"]; ok {
+		th.Energy = v
+	} else if v, ok := p.AttrBands["能量"]; ok {
 		th.Energy = v
 	}
 	if v, ok := p.AttrBands["疲劳"]; ok {
@@ -87,9 +90,10 @@ func (b BandThresholds) JointWearAlert() float64 { return b.JointWear[2] }
 // bandOf result (0-3). Labels are global (not per-NPC configurable) — only
 // the thresholds vary.
 var (
-	energyBandLabels    = [4]string{"低电量", "偏低", "中等", "充足"}
-	fatigueBandLabels   = [4]string{"精神饱满", "轻度疲劳", "疲劳", "非常疲劳"}
-	jointWearBandLabels = [4]string{"良好", "轻微磨损", "明显磨损", "严重磨损"}
+	// 2026-08-24 电量分档标签：最高档"充足"改称"很高"（"能量 充足"→"电量 很高"）。
+	energyBandLabels    = [4]string{"低", "较低", "中等", "高"}
+	fatigueBandLabels   = [4]string{"精神饱满", "轻度疲劳", "中度疲劳", "非常疲劳"}
+	jointWearBandLabels = [4]string{"未有磨损", "轻微磨损", "明显磨损", "严重磨损"}
 )
 
 // bandOf maps a value to its band index 0-3 given 3 ascending thresholds.
@@ -126,6 +130,6 @@ func (b BandThresholds) JointWearBand(v float64) string {
 // joint_wear and a raw number for money (余额 stays numeric — it is an
 // economic balance, not an alert-style state).
 func PhysicalLineActual(p protocol.PhysicalState, th BandThresholds) string {
-	return fmt.Sprintf("物理状态：能量 %s、疲劳 %s、关节磨损 %s、余额 %.0f。",
+	return fmt.Sprintf("物理状态：电量 %s、疲劳 %s、关节磨损 %s、余额 %.0f。",
 		th.EnergyBand(p.Energy), th.FatigueBand(p.Fatigue), th.JointWearBand(p.JointWear), p.Money)
 }

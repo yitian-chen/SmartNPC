@@ -93,7 +93,7 @@ func TestSendStopAction_LooksUpCurrentActionID(t *testing.T) {
 	// 设置 currentActionID，不传 actionID → 应查到 act_test123 并尝试 ws.SendStopAction
 	// ws 未连接会失败，但错误消息应来自 ws 层（不是 "unknown agent"），
 	// 证明它成功查到了 currentActionID 并走到了 ws 调用。
-	ac.as.RecordActionStarted("act_test123", "", nil, agentstate.SourceTactical)
+	ac.as.RecordActionStarted("act_test123", "", nil, agentstate.SourceTactical, "")
 	err := ex.SendStopAction("H-01", "")
 	if err == nil {
 		// ws.SendStopAction 在未连接时可能返回 nil（fire-and-forget）。
@@ -110,7 +110,7 @@ func TestSendStopAction_LooksUpCurrentActionID(t *testing.T) {
 func TestSendStopAction_ExplicitActionIDUsed(t *testing.T) {
 	ex, ac, _ := newTestExecutor(t)
 	// 显式传 actionID 时不应查 currentActionID（即使 currentActionID 不同也用传入的）
-	ac.as.RecordActionStarted("act_other", "", nil, agentstate.SourceTactical)
+	ac.as.RecordActionStarted("act_other", "", nil, agentstate.SourceTactical, "")
 	// 未连接 ws 会失败，但验证不 panic
 	err := ex.SendStopAction("H-01", "act_explicit")
 	if err == nil {

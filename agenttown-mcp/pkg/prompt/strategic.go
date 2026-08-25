@@ -3,12 +3,19 @@ package prompt
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/AgentTown/agenttown-mcp/pkg/profile"
 	"github.com/AgentTown/agenttown-mcp/pkg/protocol"
 	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
 )
+
+// ProductionWorkflowText summarizes the town's production workflow (from
+// docs/AgentTown_Workflow.md) as a short natural-language paragraph. Injected
+// into both the strategic and tactical system prompts so both layers share
+// the same mental model of the production loop and job trade-offs.
+const ProductionWorkflowText = "小镇生产是一条概念流水线：物流转运站加工原料、分拣货物，主生产车间装配半成品、调试设备、质检成品，废料回收与再制造场拆解报废设备回收零件（当前阶段无物料/库存依赖，各工序彼此独立）。六类工种强度与收入成正比：质检轻松低薪；装配、加工、分拣强度与收入中等；调试、拆解高薪但更耗电量、更积磨损。机器人靠电量、疲劳、关节磨损、余额四项状态维持“打工循环”：工作挣余额，同时耗电量、涨疲劳、积磨损，又需花钱充电、休息、维修才能延续工作。规划时应按自身状态取舍：累了或电量低选轻松工种，缺钱时选高强度工种。"
 
 // defaultDailyPlan is the fallback plan when kb == nil.
 // Kept neutral (no KB-specific terms) so it adapts when KB changes.
@@ -73,11 +80,7 @@ func DefaultDailyPlan(kb *worldkb.KB) string {
 // back to the hardcoded fallback fields.
 func BuildStrategicSystemPrompt(kb *worldkb.KB, profiles map[string]*profile.Profile, agentID string) string {
 	var sb strings.Builder
-	sb.WriteString(`你是小镇居民 NPC 的战略规划模块。每天清晨 07:00，你根据系统信息中的【世界背景】【人物背景】【世界详细信息】，以及用户信息中的今日日程、物理状态、昨日总结与规划要求，规划当天 07:00 到次日 07:00 的活动安排。
 
-各活动对属性的每小时影响幅度见系统信息【世界详细信息】各设施的属性变动说明（由 world KB 声明生成）。规划时请综合权衡：产出性活动（工作）赚取余额但消耗体力、缓慢积攒关节磨损；恢复性活动（充电/维护/休息）花余额但延续工作能力。避免长时间连续工作导致体力耗尽，也避免频繁恢复导致余额入不敷出。
-
-`)
 	if m1 := WorldOverview(kb); m1 != "" {
 		sb.WriteString("【世界背景】\n")
 		sb.WriteString(m1)
@@ -90,6 +93,8 @@ func BuildStrategicSystemPrompt(kb *worldkb.KB, profiles map[string]*profile.Pro
 		sb.WriteString("\n【世界详细信息】\n")
 		sb.WriteString(m3)
 	}
+	sb.WriteString("\n【生产工作流】\n")
+	sb.WriteString(ProductionWorkflowText)
 	return sb.String()
 }
 
@@ -150,9 +155,10 @@ func WorldOverview(kb *worldkb.KB) string {
 }
 
 // worldDetailCore renders the KB-derived world detail shared by the strategic
-// and tactical system prompts: per-zone descriptions + smart objects grouped
-// by semantic_group with per-interaction description, per-hour attribute
-// effects and usage gates (from the KB's declared rates).
+// and tactical system prompts: per-zone descriptions + a per-zone
+// semantic_group map + smart objects grouped by semantic_group with
+// per-interaction description, per-hour attribute effects and usage gates
+// (from the KB's declared rates).
 func worldDetailCore(kb *worldkb.KB) string {
 	var sb strings.Builder
 	wroteZone := false
@@ -173,13 +179,70 @@ func worldDetailCore(kb *worldkb.KB) string {
 			}
 		}
 	}
+	// 各区域可交互设施：按实例真实分布列出，跨 zone 的 semantic_group
+	//（如 bench 分布在中央广场/主生产车间/物流转运站）会在每个实际分布
+	// zone 下列出，避免"长椅只在中央广场"这类误导，供规划时直接按地点选设施。
+	if kb != nil {
+		if zs := kb.ListZones(); len(zs) > 0 {
+			if os := kb.ListObjects(); len(os) > 0 {
+				if wroteZone {
+					sb.WriteString("\n")
+				}
+				// zone → semantic_group 集合：按每个实例的 zone_id 聚合真实分布。
+				zoneGroups := make(map[string]map[string]bool, len(zs))
+				for _, o := range os {
+					if o.ZoneID == "" || o.SemanticGroup == "" {
+						continue
+					}
+					if zoneGroups[o.ZoneID] == nil {
+						zoneGroups[o.ZoneID] = make(map[string]bool)
+					}
+					zoneGroups[o.ZoneID][o.SemanticGroup] = true
+				}
+				// semantic_group → 显示名（取 group 的 DisplayName）。
+				display := make(map[string]string, len(os))
+				for _, g := range groupObjectsBySemantic(os) {
+					label := g.SemanticGroup
+					if g.DisplayName != "" && g.DisplayName != g.SemanticGroup {
+						label = fmt.Sprintf("%s（%s）", g.DisplayName, g.SemanticGroup)
+					}
+					display[g.SemanticGroup] = label
+				}
+				sb.WriteString("各区域可交互设施：\n")
+				for _, z := range zs {
+					gs := zoneGroups[z.ID]
+					if len(gs) == 0 {
+						continue
+					}
+					keys := make([]string, 0, len(gs))
+					for k := range gs {
+						keys = append(keys, k)
+					}
+					sort.Strings(keys)
+					names := make([]string, 0, len(keys))
+					for _, k := range keys {
+						if n, ok := display[k]; ok {
+							names = append(names, n)
+						} else {
+							names = append(names, k)
+						}
+					}
+					zlabel := z.ID
+					if z.DisplayName != "" && z.DisplayName != z.ID {
+						zlabel = fmt.Sprintf("%s（%s）", z.DisplayName, z.ID)
+					}
+					sb.WriteString("- " + zlabel + "：" + strings.Join(names, "、") + "\n")
+				}
+			}
+		}
+	}
 	// 设施详情：按 semantic_group 分组，交互行内联 KB 声明的描述与属性变动。
 	if kb != nil {
 		if os := kb.ListObjects(); len(os) > 0 {
 			if wroteZone {
 				sb.WriteString("\n")
 			}
-			sb.WriteString("设施详情（按 semantic_group 分类，含交互功能与每游戏小时属性变动，来自 world KB 声明）：\n")
+			sb.WriteString("设施详情（这些设施均为SmartObject，均附带有可交互的一个或多个interaction列在后面，可进行调用）：\n")
 			effects := effectLookup(kb)
 			for _, g := range groupObjectsBySemantic(os) {
 				label := g.SemanticGroup
@@ -189,9 +252,6 @@ func worldDetailCore(kb *worldkb.KB) string {
 					label = fmt.Sprintf("semantic_group=%s", g.SemanticGroup)
 				}
 				meta := ""
-				if g.ZoneID != "" {
-					meta += "，位于 " + g.ZoneID
-				}
 				if g.InstanceCount > 1 {
 					meta += fmt.Sprintf("，%d 个实例", g.InstanceCount)
 				}
@@ -237,15 +297,13 @@ func effectLookup(kb *worldkb.KB) map[string]InteractionEffect {
 // more reliably). References to 【世界背景】/【人物背景】/【世界详细信息】
 // point at the system message's modules; references to 【物理状态】 point at
 // the user message's dynamic segments.
-const StrategicRules = `1. 输出 JSON 数组（6-8 条），每条只含 "time"（"HH:MM-HH:MM"）和 "goal"（一句话，必须是纯文本字符串），以 [ 开头 ] 结尾，不要其他文字
-   - goal 用干练简洁的客观描述，只写"做什么 + 在哪"（如"主生产车间工作台装配""中央广场充电桩充电"），不带语气词、口头禅、内心独白或人设腔调
-   - 人设只影响选择什么活动、如何安排时段，不影响 goal 的文字风格；说话语气留给执行时的 speak 动作表达
-2. 【硬性要求】每个时段的结束时间减去开始时间必须 ≥120 分钟（不足 120 分钟的活动要么并入相邻时段，要么不安排；午休等短暂休息也至少120分钟）；仅安排一项主要任务；连续两个时段不得任务相同
-3. 规划每个时段时，先想清楚这个时段的活动用什么实现：goal 应能映射到【世界详细信息】设施详情中列出的某个 (semantic_group, interaction) 组合——不限于工种设备，睡眠舱的 sleep/meditate/tidy_up、长椅的 rest 都是合法活动，战术层会据此分解为对应的移动与长时段互动；映射不上的抽象活动（如"准备工具""巡查"）→ 换一个。锻炼类活动（晨练拉伸等原地动作）不需要设施，属例外
-4. goal 中提到的地点、人物、设备必须是系统信息中【人物背景】和【世界详细信息】里存在的，不得编造未提及的人物或设施
-5. 第一个时段必须从 07:00 开始，且任何时段的开始时间不得早于 07:00——禁止输出 0:00-7:00 这类凌晨睡觉时段（凌晨睡眠已由前一晚的跨午夜末段覆盖，不要重复安排）。首段必须是日间活动，不得安排休眠；首段不一定是工作——早间也可以安排晨练拉伸（原地锻炼，不需要特定设施）、上网、长椅放松、充电、冥想醒神、整理舱位等非工作活动，按性格与状态选择。夜间睡眠必须是一个连续的跨午夜时段：约 22:00 前后开始、次日 06:00-07:00 结束；不得拆成多个睡眠时段（禁止 20:30-22:58 睡觉 + 22:58-07:16 睡觉这样的连续两段），也不得在凌晨提前结束（禁止 23:00-01:00 这样的短睡眠段）。末段跨午夜时结束时间表示次日时刻
-6. 充电原则上仅在能量为"低电量"或疲劳为"非常疲劳"时安排；维护仅在关节磨损达到"明显磨损"及以上时安排；能量充足时优先产出性活动
-7. 综合用户信息中【物理状态】的四项状态调整安排侧重点：能量偏低→多充电少工作；疲劳偏高→提前休眠；磨损偏高→安排维护；余额低→多工作少花钱
+const StrategicRules = `1. 【硬性要求】每个时段的结束时间减去开始时间必须 ≥30 分钟（不足 30 分钟的活动要么并入相邻时段，要么不安排）；每段安排 1 - 2 项任务，连续两个时段不得任务完全相同
+2. 规划每个时段时，先想清楚这个时段的活动用什么实现：goal 应能映射到【世界详细信息】设施详情中列出的某个 (semantic_group, interaction) 组合——不限于工种设备，睡眠舱的 sleep/meditate/tidy_up、长椅的 rest 都是合法活动，战术层会据此分解为对应的移动与长时段互动；映射不上的抽象活动（如"准备工具""巡查"）→ 换一个。锻炼类活动（晨练拉伸等原地动作）不需要设施，属例外
+3. goal 中提到的地点、人物、设备必须是系统信息中【人物背景】和【世界详细信息】里存在的，不得编造未提及的人物或设施
+4. 第一个时段必须从 07:00 开始，且任何时段的开始时间不得早于 07:00——禁止输出 0:00-7:00 这类凌晨睡觉时段（凌晨睡眠已由前一晚的跨午夜末段覆盖，不要重复安排）。首段不安排工作——早间可以安排晨练拉伸、上网、长椅放松、冥想醒神、整理舱位等非工作活动，按性格与状态选择。午间可以选择锻炼、就近长椅小憩、休眠舱午睡等非产出性活动。夜间睡眠必须是一个连续的跨午夜时段：约 22:00 前后开始、次日 06:00-07:00 结束；不得拆成多个睡眠时段（禁止 20:30-22:58 睡觉 + 22:58-07:16 睡觉这样的连续两段），也不得在凌晨提前结束（禁止 23:00-01:00 这样的短睡眠段）。末段跨午夜时结束时间表示次日时刻
+5. 充电仅在规划时电量为"低"或"较低"时安排，规划时电量为"高"或"中"时严禁规划充电；维护仅在关节磨损达到"明显磨损"及以上时安排；睡眠只能在午间和晚上
+6. 综合用户信息中【物理状态】的四项状态调整安排侧重点：电量偏低→多充电少工作；疲劳偏高→提前休眠；磨损偏高→安排维护；余额低→多工作少花钱
+7. 整理内务、冥想等动作安排的时间不得超过一小时
 
 格式示例：[{"time":"07:00-9:00","goal":"xxx"},{"time":"9:00-12:00","goal":"xxx"}]`
 
@@ -265,7 +323,7 @@ const StrategicUserTemplate = `[战略层/每日规划] 现在是仿真时间 07
 %s
 
 请基于你的角色身份和性格，规划今天一天的活动安排（人设只影响选什么活动、怎么安排时段；goal 文字一律干练简洁，不带人设语气）。一天从 07:00 到次日 07:00，你从 07:00 开始活动。
-只输出 JSON 数组，每条形如 {"time":"HH:MM-HH:MM","goal":"纯文本一句话"}，"goal" 必须是字符串；第一个时段从 07:00 开始，任何时段的开始时间不得早于 07:00；每个时段必须 ≥120 分钟；不要输出任何其他文字。`
+只输出 JSON 数组，每条形如 {"time":"HH:MM-HH:MM","goal":"纯文本一句话"}，"goal" 必须是字符串；第一个时段从 07:00 开始，任何时段的开始时间不得早于 07:00；分出6 - 8个时段，每个时段必须 ≥30 分钟；不要输出任何其他文字。`
 
 // BuildStrategicUserContext constructs the strategic layer user message's
 // dynamic context segment: 【今日日程】 (weekly schedule context, skipped
@@ -275,6 +333,12 @@ func BuildStrategicUserContext(agentID string, profiles map[string]*profile.Prof
 	// 【今日日程】段：每周日程上下文（星期几 + 工作日/休息日 + 当日提示）。
 	// dayContext 由调用方通过 weeklyschedule.WeeklyLine(dayCount, sched) 预格式化，
 	// pkg/prompt 不依赖 weeklyschedule 包（解耦）。空串=禁用或 dayCount<0，跳过。
+	sb.WriteString(`你是小镇居民 NPC 的战略规划模块。每天清晨 07:00，你根据系统信息中的【世界背景】【人物背景】【世界详细信息】，以及用户信息中的今日日程、物理状态、昨日总结与规划要求，规划当天 07:00 到次日 07:00 的活动安排。
+
+各活动对属性的每小时影响幅度见系统信息【世界详细信息】各设施的属性变动说明（由 world KB 声明生成）。规划时请综合权衡：产出性活动（工作）赚取余额但消耗体力、缓慢积攒关节磨损；恢复性活动（充电/维护/休息）花余额但延续工作能力。避免长时间连续工作导致体力耗尽，也避免频繁恢复导致余额入不敷出。
+
+`)
+
 	if dayContext != "" {
 		sb.WriteString("【今日日程】\n")
 		sb.WriteString(dayContext)

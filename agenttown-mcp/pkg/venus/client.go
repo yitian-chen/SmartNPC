@@ -63,6 +63,11 @@ type Client struct {
 	http   *http.Client
 	log    *slog.Logger
 	sendMu sync.Mutex
+
+	// lastRequestBody is the JSON body of the most recent request sent via
+	// this client (set in doSend after marshalling). Used to dump the actual
+	// request to docs/actual_prompts.md. Guarded by sendMu.
+	lastRequestBody []byte
 }
 
 // New creates a Client.
@@ -93,7 +98,20 @@ func (c *Client) SendWithSummary(ctx context.Context, system, user string) (*llm
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	return c.doSend(ctx, system, user, false, nil, nil)
+	return c.doSend(ctx, systemUserMessages(system, user), false, nil, nil, nil, nil)
+}
+
+// SendWithSummaryTools is SendWithSummary plus a `tools` array (function
+// calling). The LLM may choose to call one of the tools instead of (or in
+// addition to) emitting free-form text; callers that only want the tools
+// advertised pass them here.
+func (c *Client) SendWithSummaryTools(ctx context.Context, system, user string, tools []Tool) (*llmtypes.Response, error) {
+	c.sendMu.Lock()
+	defer c.sendMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return c.doSend(ctx, systemUserMessages(system, user), false, nil, nil, nil, tools)
 }
 
 // SendStreaming POSTs a (system, user) message pair with stream:true and
@@ -106,7 +124,21 @@ func (c *Client) SendStreaming(ctx context.Context, system, user string, onDelta
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	return c.doSend(ctx, system, user, true, onDelta, nil)
+	return c.doSend(ctx, systemUserMessages(system, user), true, onDelta, nil, nil, nil)
+}
+
+// SendStreamingTools is SendStreaming plus a `tools` array (function calling).
+// onDelta receives text deltas (may be empty in pure tool-calling); onToolCall
+// receives each completed tool_call as soon as its streamed fragments are
+// complete (by index transition or stream end), so callers can dispatch the
+// first action before the stream finishes.
+func (c *Client) SendStreamingTools(ctx context.Context, system, user string, tools []Tool, onDelta func(delta string), onToolCall func(llmtypes.ToolCall)) (*llmtypes.Response, error) {
+	c.sendMu.Lock()
+	defer c.sendMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return c.doSend(ctx, systemUserMessages(system, user), true, onDelta, onToolCall, nil, tools)
 }
 
 // SendWithSchema POSTs a (system, user) message pair with OpenAI
@@ -124,7 +156,56 @@ func (c *Client) SendWithSchema(ctx context.Context, system, user, schemaName st
 		return nil, err
 	}
 	def := &JSONSchemaDef{Name: schemaName, Strict: true, Schema: json.RawMessage(schema)}
-	return c.doSend(ctx, system, user, false, nil, def)
+	return c.doSend(ctx, systemUserMessages(system, user), false, nil, nil, def, nil)
+}
+
+// SendMessagesTools is the multi-turn variant: it sends an arbitrary
+// messages array (e.g. [system, ...assistant/tool/user history, user]) with
+// function calling tools. The tactical layer uses it to carry conversation
+// context across rounds of an agentic loop. tool_choice is set to "required"
+// when tools are non-empty.
+func (c *Client) SendMessagesTools(ctx context.Context, messages []llmtypes.Message, tools []Tool) (*llmtypes.Response, error) {
+	c.sendMu.Lock()
+	defer c.sendMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return c.doSend(ctx, toVenusMessages(messages), false, nil, nil, nil, tools)
+}
+
+// systemUserMessages builds the default [system?, user] message pair.
+func systemUserMessages(system, user string) []message {
+	msgs := make([]message, 0, 2)
+	if system != "" {
+		msgs = append(msgs, message{Role: "system", Content: system})
+	}
+	msgs = append(msgs, message{Role: "user", Content: user})
+	return msgs
+}
+
+// toVenusMessages converts shared llmtypes.Message entries into the wire
+// message shape (tool_calls / tool_call_id included).
+func toVenusMessages(in []llmtypes.Message) []message {
+	out := make([]message, 0, len(in))
+	for _, m := range in {
+		wire := message{
+			Role:       m.Role,
+			Content:    m.Content,
+			ToolCallID: m.ToolCallID,
+		}
+		for _, tc := range m.ToolCalls {
+			wire.ToolCalls = append(wire.ToolCalls, openaiToolCall{
+				ID:   tc.ID,
+				Type: tc.Type,
+				Function: openaiToolFunction{
+					Name:      tc.Function.Name,
+					Arguments: tc.Function.Arguments,
+				},
+			})
+		}
+		out = append(out, wire)
+	}
+	return out
 }
 
 // ResetSession is a no-op for venus.Client. Venus has no session chain
@@ -135,21 +216,31 @@ func (c *Client) ResetSession() {
 	// Intentionally empty.
 }
 
+// LastRequestBody returns a copy of the JSON body of the most recent request
+// sent via this client. Empty if no request has been sent yet. Used to dump
+// the actual request (docs/actual_prompts.md) without re-marshalling.
+func (c *Client) LastRequestBody() []byte {
+	c.sendMu.Lock()
+	defer c.sendMu.Unlock()
+	return append([]byte(nil), c.lastRequestBody...)
+}
+
 // doSend performs the HTTP POST and parses the response. For streaming
-// requests, onDelta is invoked for each text delta. A non-nil schema adds
-// response_format (Structured Outputs) to the request body. Caller MUST
+// requests, onDelta is invoked for each text delta and onToolCall for each
+// completed tool_call. A non-nil schema adds response_format (Structured
+// Outputs) to the request body; a non-nil tools slice adds the `tools`
+// array and sets tool_choice="required" (function calling). Caller MUST
 // hold sendMu.
-func (c *Client) doSend(ctx context.Context, system, user string, stream bool, onDelta func(string), schema *JSONSchemaDef) (*llmtypes.Response, error) {
-	msgs := make([]message, 0, 2)
-	if system != "" {
-		msgs = append(msgs, message{Role: "system", Content: system})
-	}
-	msgs = append(msgs, message{Role: "user", Content: user})
+func (c *Client) doSend(ctx context.Context, msgs []message, stream bool, onDelta func(string), onToolCall func(llmtypes.ToolCall), schema *JSONSchemaDef, tools []Tool) (*llmtypes.Response, error) {
 	body := request{
 		Model:     c.cfg.Model,
 		MaxTokens: c.cfg.MaxTokens,
 		Messages:  msgs,
 		Stream:    stream,
+		Tools:     tools,
+	}
+	if len(tools) > 0 {
+		body.ToolChoice = "required"
 	}
 	if schema != nil {
 		body.ResponseFormat = &ResponseFormat{Type: "json_schema", JSONSchema: schema}
@@ -158,6 +249,8 @@ func (c *Client) doSend(ctx context.Context, system, user string, stream bool, o
 	if err != nil {
 		return nil, fmt.Errorf("marshal request: %w", err)
 	}
+	// 记录完整请求体（供 docs/actual_prompts.md 留存最新一次发给 LLM 的内容）。
+	c.lastRequestBody = payload
 
 	url := strings.TrimRight(c.cfg.BaseURL, "/") + "/v1/chat/completions"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
@@ -186,7 +279,7 @@ func (c *Client) doSend(ctx context.Context, system, user string, stream bool, o
 	}
 
 	if stream {
-		return c.parseStream(resp.Body, onDelta)
+		return c.parseStream(resp.Body, onDelta, onToolCall)
 	}
 	return c.parseResponse(resp.Body)
 }
@@ -214,17 +307,19 @@ func (c *Client) parseResponse(r io.Reader) (*llmtypes.Response, error) {
 //	data: [DONE]
 //
 // Comment / keepalive lines start with ':'.
-func (c *Client) parseStream(r io.Reader, onDelta func(string)) (*llmtypes.Response, error) {
+func (c *Client) parseStream(r io.Reader, onDelta func(string), onToolCall func(llmtypes.ToolCall)) (*llmtypes.Response, error) {
 	sc := bufio.NewScanner(r)
 	// SSE events can carry a large chunk payload; allow up to 1MB per line.
 	sc.Buffer(make([]byte, 0, 64*1024), 1<<20)
 
 	var (
-		hr      llmtypes.Response
-		textBuf strings.Builder
-		respID  string
-		usage   *openaiUsage
-		gotDone bool
+		hr         llmtypes.Response
+		textBuf    strings.Builder
+		respID     string
+		usage      *openaiUsage
+		gotDone    bool
+		toolCalls  []llmtypes.ToolCall
+		pendingIdx = -1
 	)
 
 	for sc.Scan() {
@@ -260,14 +355,35 @@ func (c *Client) parseStream(r io.Reader, onDelta func(string)) (*llmtypes.Respo
 		if chunk.ID != "" {
 			respID = chunk.ID
 		}
-		// Extract text delta from first choice.
+		// Extract text delta and tool-call fragments from first choice.
 		if len(chunk.Choices) > 0 {
-			delta := chunk.Choices[0].Delta.Content
-			if delta != "" {
-				textBuf.WriteString(delta)
+			delta := chunk.Choices[0].Delta
+			if delta.Content != "" {
+				textBuf.WriteString(delta.Content)
 				if onDelta != nil {
-					onDelta(delta)
+					onDelta(delta.Content)
 				}
+			}
+			for _, dtc := range delta.ToolCalls {
+				// A new index signals the previous tool_call is complete.
+				if dtc.Index != pendingIdx {
+					if pendingIdx != -1 && len(toolCalls) > 0 && onToolCall != nil {
+						onToolCall(toolCalls[len(toolCalls)-1])
+					}
+					pendingIdx = dtc.Index
+					toolCalls = append(toolCalls, llmtypes.ToolCall{})
+				}
+				tc := &toolCalls[len(toolCalls)-1]
+				if dtc.ID != "" {
+					tc.ID = dtc.ID
+				}
+				if dtc.Type != "" {
+					tc.Type = dtc.Type
+				}
+				if dtc.Function.Name != "" {
+					tc.Function.Name = dtc.Function.Name
+				}
+				tc.Function.Arguments += dtc.Function.Arguments
 			}
 		}
 		// Usage may appear in the final chunk (if stream_options.include_usage=true).
@@ -281,11 +397,16 @@ func (c *Client) parseStream(r io.Reader, onDelta func(string)) (*llmtypes.Respo
 	}
 
 	// Stream ended without [DONE] but with content — graceful degradation.
-	if !gotDone && textBuf.Len() == 0 && respID == "" {
+	if !gotDone && textBuf.Len() == 0 && len(toolCalls) == 0 && respID == "" {
 		return nil, fmt.Errorf("sse stream ended without terminal event: %w", io.ErrUnexpectedEOF)
 	}
 
-	c.finalizeStream(&hr, &textBuf, respID, usage)
+	// Flush the final tool_call (its fragments ended with the stream).
+	if len(toolCalls) > 0 && onToolCall != nil {
+		onToolCall(toolCalls[len(toolCalls)-1])
+	}
+
+	c.finalizeStream(&hr, &textBuf, toolCalls, respID, usage)
 	return &hr, nil
 }
 
@@ -293,10 +414,11 @@ func (c *Client) parseStream(r io.Reader, onDelta func(string)) (*llmtypes.Respo
 // stream state. If usage is nil (stream_options not supported), token
 // counts are left as zero — they're only used for logging, not for
 // session reset logic.
-func (c *Client) finalizeStream(hr *llmtypes.Response, textBuf *strings.Builder, respID string, usage *openaiUsage) {
+func (c *Client) finalizeStream(hr *llmtypes.Response, textBuf *strings.Builder, toolCalls []llmtypes.ToolCall, respID string, usage *openaiUsage) {
 	hr.ID = respID
 	hr.Status = "completed"
 	hr.Model = c.cfg.Model
+	hr.ToolCalls = toolCalls
 	hr.Output = []llmtypes.Block{{
 		Type: "message",
 		Role: "assistant",
@@ -329,6 +451,24 @@ type request struct {
 	Messages       []message       `json:"messages"`
 	Stream         bool            `json:"stream,omitempty"`
 	ResponseFormat *ResponseFormat `json:"response_format,omitempty"`
+	Tools          []Tool          `json:"tools,omitempty"`
+	ToolChoice     any             `json:"tool_choice,omitempty"`
+}
+
+// Tool is one entry in the OpenAI `tools` array (function calling).
+// The function's Parameters is a raw JSON Schema document describing the
+// arguments object; venus.Client treats it as an opaque blob so it stays
+// decoupled from the capability registry that produces the schema.
+type Tool struct {
+	Type     string       `json:"type"` // "function"
+	Function ToolFunction `json:"function"`
+}
+
+// ToolFunction is the `function` object inside a Tool entry.
+type ToolFunction struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description,omitempty"`
+	Parameters  json.RawMessage `json:"parameters,omitempty"`
 }
 
 // ResponseFormat is the OpenAI response_format field (Structured Outputs).
@@ -346,10 +486,14 @@ type JSONSchemaDef struct {
 	Schema json.RawMessage `json:"schema"`
 }
 
-// message is one entry in the Messages array.
+// message is one entry in the Messages array. ToolCalls is populated on
+// assistant messages (function calling); ToolCallID is populated on tool
+// messages to associate the result with the assistant's tool_calls[].ID.
 type message struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role       string           `json:"role"`
+	Content    string           `json:"content,omitempty"`
+	ToolCalls  []openaiToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string           `json:"tool_call_id,omitempty"`
 }
 
 // openaiResponse is the (subset of the) OpenAI Chat Completions response.
@@ -367,8 +511,24 @@ type openaiChoice struct {
 }
 
 type openaiMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role      string           `json:"role"`
+	Content   string           `json:"content"`
+	ToolCalls []openaiToolCall `json:"tool_calls,omitempty"`
+}
+
+// openaiToolCall is one entry in message.tool_calls (non-streaming) or
+// delta.tool_calls (streaming). Index is only populated on streaming deltas;
+// non-streaming tool_calls rely on array order.
+type openaiToolCall struct {
+	Index    int                `json:"index"`
+	ID       string             `json:"id"`
+	Type     string             `json:"type"`
+	Function openaiToolFunction `json:"function"`
+}
+
+type openaiToolFunction struct {
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"`
 }
 
 type openaiUsage struct {
@@ -390,17 +550,29 @@ type openaiChunk struct {
 // (Venus returns "default" rather than the actual model name).
 func (or *openaiResponse) toLlmTypes(modelFallback string) *llmtypes.Response {
 	var text string
+	var toolCalls []llmtypes.ToolCall
 	for _, ch := range or.Choices {
 		text += ch.Message.Content
+		for _, tc := range ch.Message.ToolCalls {
+			toolCalls = append(toolCalls, llmtypes.ToolCall{
+				ID:   tc.ID,
+				Type: tc.Type,
+				Function: llmtypes.ToolFunction{
+					Name:      tc.Function.Name,
+					Arguments: tc.Function.Arguments,
+				},
+			})
+		}
 	}
 	model := or.Model
 	if model == "" || model == "default" {
 		model = modelFallback
 	}
 	return &llmtypes.Response{
-		ID:     or.ID,
-		Status: "completed",
-		Model:  model,
+		ID:        or.ID,
+		Status:    "completed",
+		Model:     model,
+		ToolCalls: toolCalls,
 		Output: []llmtypes.Block{{
 			Type: "message",
 			Role: "assistant",

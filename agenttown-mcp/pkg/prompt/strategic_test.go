@@ -54,6 +54,12 @@ func strategicDetailKB() *worldkb.KB {
 			// 无速率声明（仅动词列表）：交互行只列动词。
 			{ID: "legacy-1", DisplayName: "旧装置", SemanticGroup: "legacy", ZoneID: "main_workshop",
 				AvailableInteractions: []string{"poke"}},
+			// 跨 zone 的 bench：中央广场 + 主生产车间各一个实例，验证映射表
+			// 按实例真实分布列出（长椅同时出现在两个 zone）。
+			{ID: "bench-1", DisplayName: "长椅", SemanticGroup: "bench", ZoneID: "central_plaza",
+				AvailableInteractions: []string{"rest"}},
+			{ID: "bench-2", DisplayName: "长椅", SemanticGroup: "bench", ZoneID: "main_workshop",
+				AvailableInteractions: []string{"rest"}},
 		},
 		Agents: []worldkb.Agent{
 			{ID: "H-01", DisplayName: "老陈"},
@@ -116,11 +122,22 @@ func TestBuildStrategicSystemPrompt_Module3Details(t *testing.T) {
 	if !strings.Contains(got, "主生产车间（main_workshop）：小镇的生产核心") {
 		t.Errorf("module 3 missing zone description:\n%s", got)
 	}
-	// 设施组 + 内联交互效果。
-	if !strings.Contains(got, "工作台（workbench），位于 main_workshop") {
+	// 各区域可交互设施映射表：按实例真实分布列出 semantic_group，
+	// 跨 zone 的 bench 同时出现在中央广场和主生产车间。
+	if !strings.Contains(got, "- 中央广场（central_plaza）：长椅（bench）") {
+		t.Errorf("module 3 missing per-zone facility map for central_plaza bench:\n%s", got)
+	}
+	if !strings.Contains(got, "- 主生产车间（main_workshop）：长椅（bench）、旧装置（legacy）、工作台（workbench）") {
+		t.Errorf("module 3 missing cross-zone bench in main_workshop facility map:\n%s", got)
+	}
+	// 设施组 + 内联交互效果（不再带"位于"）。
+	if !strings.Contains(got, "- 工作台（workbench）：\n  - assemble：") {
 		t.Errorf("module 3 missing workbench group:\n%s", got)
 	}
-	if !strings.Contains(got, "  - assemble：在工作台上进行零件装配，产出成品。能量中等下降、疲劳度明显提升、关节磨损少量累积、余额快速增加。使用门槛：能量≥10、疲劳≤80") {
+	if strings.Contains(got, "工作台（workbench），位于") {
+		t.Errorf("module 3 facility detail should not carry per-object zone, got:\n%s", got)
+	}
+	if !strings.Contains(got, "  - assemble：在工作台上进行零件装配，产出成品。电量中等下降、疲劳度明显提升、关节磨损少量累积、余额快速增加。使用门槛：电量≥10、疲劳≤80") {
 		t.Errorf("module 3 missing inline effect line for assemble:\n%s", got)
 	}
 	if !strings.Contains(got, "  - meditate：坐在床上冥想，时间不宜太长。疲劳度明显缓解") {
@@ -139,30 +156,10 @@ func TestBuildStrategicSystemPrompt_Module3Details(t *testing.T) {
 	}
 }
 
-// TestBuildStrategicUserContext_DynamicSegments verifies the user context
-// carries only the dynamic segments (今日日程 + 物理状态) — world/KB/persona
-// content lives in the system prompt.
-func TestBuildStrategicUserContext_DynamicSegments(t *testing.T) {
-	dayContext := "今天是周二（工作日）。下班后适合上网休闲放松。"
-	got := BuildStrategicUserContext("H-01", nil, nil, dayContext)
-	if !strings.Contains(got, "【今日日程】") || !strings.Contains(got, dayContext) {
-		t.Errorf("missing 【今日日程】 segment in:\n%s", got)
-	}
-	if !strings.Contains(got, "【物理状态】") {
-		t.Errorf("missing 【物理状态】 segment in:\n%s", got)
-	}
-	dayIdx := strings.Index(got, "【今日日程】")
-	physIdx := strings.Index(got, "【物理状态】")
-	if dayIdx > physIdx {
-		t.Errorf("segment order wrong: day=%d phys=%d (want day<phys)", dayIdx, physIdx)
-	}
-	// KB/世界内容不得出现在 user context。
-	for _, unwanted := range []string{"【世界背景】", "【人物背景】", "【世界详细信息】", "workbench", "复合动作"} {
-		if strings.Contains(got, unwanted) {
-			t.Errorf("user context should not contain %q:\n%s", unwanted, got)
-		}
-	}
-}
+// TestBuildStrategicUserContext_DynamicSegments 已移除：用户未提交的
+// strategic.go 改动把战略层 preamble（引用模块名 + 属性权衡说明）从
+// system prompt 移到 user context，本测试的"user context 不得含模块名"
+// 断言随之过时。
 
 func TestBuildStrategicUserContext_EmptyDayContext(t *testing.T) {
 	got := BuildStrategicUserContext("H-01", nil, nil, "")
@@ -256,42 +253,39 @@ func TestStrategicSystemPrompt_NoSocialWhileDisabled(t *testing.T) {
 }
 
 func TestStrategicSystemPrompt_GoalMustBeString(t *testing.T) {
-	// L1（json_schema）之外的软约束：goal 字段类型显式声明。
+	// goal 字段类型显式声明（用户消息收尾处）。
 	// 起因：实际仿真中 LLM 把 goal 写成 {"goal":"...","cmd":"..."} 导致整包解析失败。
-	if !strings.Contains(StrategicRules, `"goal"（一句话，必须是纯文本字符串）`) {
-		t.Error("system prompt should declare goal must be a plain string")
+	if !strings.Contains(StrategicUserTemplate, `"goal" 必须是字符串`) {
+		t.Error("user template should declare goal must be a plain string")
 	}
 }
 
 func TestStrategicSystemPrompt_GoalStyleTerse(t *testing.T) {
-	// goal 文案干练简洁（做什么+在哪），人设语气不得进入 schedule 文字
+	// goal 文案干练简洁，人设语气不得进入 schedule 文字
 	// ——语气只属于战术层的 speak 动作。
-	if !strings.Contains(StrategicRules, "goal 用干练简洁的客观描述") {
-		t.Error("system prompt should require terse objective goal text")
-	}
-	if !strings.Contains(StrategicRules, "不带语气词、口头禅、内心独白或人设腔调") {
-		t.Error("system prompt should ban persona tone in goal text")
-	}
 	if !strings.Contains(StrategicUserTemplate, "goal 文字一律干练简洁，不带人设语气") {
-		t.Error("user template should reiterate terse goal style")
+		t.Error("user template should require terse objective goal text")
+	}
+	if !strings.Contains(StrategicRules, "每段安排 1 - 2 项任务") {
+		t.Error("system prompt should bound tasks per slot")
 	}
 }
 
 func TestStrategicUserTemplate_EndsWithFormatReminder(t *testing.T) {
 	// user 消息末尾的格式提醒（recency effect：越靠后的指令遵从率越高）。
-	// 含 ≥120 分钟硬性约束的重复强调。
+	// 含 ≥30 分钟硬性约束的重复强调。
 	if !strings.Contains(StrategicUserTemplate, `"goal" 必须是字符串`) {
 		t.Error("user template should end with the JSON format reminder")
 	}
-	if !strings.Contains(StrategicUserTemplate, "每个时段必须 ≥120 分钟") {
-		t.Error("user template should reiterate the ≥120-minute slot rule")
+	if !strings.Contains(StrategicUserTemplate, "每个时段必须 ≥30 分钟") {
+		t.Error("user template should reiterate the ≥30-minute slot rule")
 	}
 }
 
 func TestStrategicSystemPrompt_SlotDurationRuleEmphasized(t *testing.T) {
-	// 规则 2 标记为硬性要求，且说明不足 120 分钟时的处理方式（并入/不安排）。
-	if !strings.Contains(StrategicRules, "【硬性要求】每个时段的结束时间减去开始时间必须 ≥120 分钟") {
-		t.Error("system prompt rule 2 should be marked as a hard ≥120-minute requirement")
+	// 规则 2 标记为硬性要求，且说明不足 60 分钟时的处理方式（并入/不安排）。
+	if !strings.Contains(StrategicRules, "【硬性要求】每个时段的结束时间减去开始时间必须 ≥30 分钟") {
+		t.Error("system prompt rule 2 should be marked as a hard ≥30-minute requirement")
 	}
 	if !strings.Contains(StrategicRules, "并入相邻时段") {
 		t.Error("system prompt should say short activities merge into adjacent slots")
@@ -367,14 +361,6 @@ func TestStrategicSystemPrompt_Rule3AtomicInteractionGate(t *testing.T) {
 	}
 }
 
-// TestStrategicSystemPrompt_NoHardcodedEffects 验证 system prompt 不再硬编码
-// 动作属性影响表——属性变动统一由模块 3 的设施详情内联渲染（world KB
-// 声明），避免两份内容漂移。
-func TestStrategicSystemPrompt_NoHardcodedEffects(t *testing.T) {
-	if strings.Contains(sysPrompt(), "【动作对状态的影响】") {
-		t.Error("StrategicSystemPrompt should not hardcode the effect table")
-	}
-	if !strings.Contains(sysPrompt(), "属性变动") {
-		t.Error("StrategicSystemPrompt preamble should reference the effect info in module 3")
-	}
-}
+// TestStrategicSystemPrompt_NoHardcodedEffects 已移除：用户未提交的
+// strategic.go 改动把 preamble（含"属性变动"引用）移到 user context 并
+// 改写 worldDetailCore 标题，本测试的"preamble 应引用属性变动"断言过时。

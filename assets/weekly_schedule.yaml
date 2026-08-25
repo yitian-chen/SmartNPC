@@ -8,10 +8,10 @@
 days:
   - day_of_week: 1
     type: work
-    after_work: internet
-    note: "下班后适合上网休闲放松"
   - day_of_week: 2
     type: work
+    after_work: internet
+    note: "下班后适合上网休闲放松"
   - day_of_week: 3
     type: work
     after_work: party

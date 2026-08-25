@@ -32,7 +32,7 @@ type InteractionEffect struct {
 	// MoneyOneShot 是使用时的一次性余额变动（充电 -30、维修 -50）。
 	MoneyOneShot float64
 	// 使用门槛（UE 侧校验，不满足则互动被拒绝；0/100 为"无限制"默认值）。
-	MinEnergy    float64 // min_energy_to_use，能量需 ≥ 此值
+	MinEnergy    float64 // min_energy_to_use，电量需 ≥ 此值
 	MaxFatigue   float64 // max_fatigue_to_use，疲劳需 ≤ 此值
 	MinMoney     float64 // min_money_to_use，余额需 ≥ 此值
 	MaxJointWear float64 // max_joint_wear_to_use，磨损需 ≤ 此值
@@ -40,7 +40,7 @@ type InteractionEffect struct {
 
 // magnitude 分档（每游戏小时 |速率|）：<1 忽略；1-4 少量；4-10 中等；
 // 10-20 明显；≥20 快速。阈值与 UE 侧数值量纲对齐（工作疲劳 +8~20/h、
-// 充电能量 +80/h、睡眠疲劳 -25/h 等）。
+// 充电电量 +80/h、睡眠疲劳 -25/h 等）。
 var effectMagnitudes = []struct {
 	lo   float64
 	word string
@@ -53,7 +53,7 @@ var effectMagnitudes = []struct {
 
 // effectAttrWord 属性 → (显示名, 上升动词, 下降动词)。
 var effectAttrWord = map[string][3]string{
-	"energy":     {"能量", "恢复", "下降"},
+	"energy":     {"电量", "恢复", "下降"},
 	"fatigue":    {"疲劳度", "提升", "缓解"},
 	"joint_wear": {"关节磨损", "累积", "修复"},
 	"money":      {"余额", "增加", "消耗"},
@@ -147,11 +147,11 @@ func describeEffect(e InteractionEffect) string {
 }
 
 // describeGates 把使用门槛转成自然语言（顿号分隔），全为无限制默认值
-// （能量/余额下限 0、疲劳/磨损上限 100）时返回空串。
+// （电量/余额下限 0、疲劳/磨损上限 100）时返回空串。
 func describeGates(e InteractionEffect) string {
 	var gates []string
 	if e.MinEnergy > 0 {
-		gates = append(gates, fmt.Sprintf("能量≥%g", e.MinEnergy))
+		gates = append(gates, fmt.Sprintf("电量≥%g", e.MinEnergy))
 	}
 	if e.MaxFatigue > 0 && e.MaxFatigue < 100 {
 		gates = append(gates, fmt.Sprintf("疲劳≤%g", e.MaxFatigue))

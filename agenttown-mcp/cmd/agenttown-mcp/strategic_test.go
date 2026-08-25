@@ -9,20 +9,43 @@ import (
 
 	"github.com/AgentTown/agenttown-mcp/pkg/llmtypes"
 	"github.com/AgentTown/agenttown-mcp/pkg/prompt"
+	"github.com/AgentTown/agenttown-mcp/pkg/venus"
 )
 
-// fakeStrategicCaller 实现 strategicCaller 接口，用于单测。
+// fakeStrategicCaller 实现 strategicCaller / llmClient 接口，用于单测。
 type fakeStrategicCaller struct {
 	resp               *llmtypes.Response
 	err                error
 	capturedInput      string
 	capturedSystem     string
 	capturedSchemaName string
+	capturedTools      []venus.Tool
 	resetCalled        bool
 }
 
 func (f *fakeStrategicCaller) SendWithSummary(_ context.Context, _, user string) (*llmtypes.Response, error) {
 	f.capturedInput = user
+	return f.resp, f.err
+}
+
+func (f *fakeStrategicCaller) SendWithSummaryTools(_ context.Context, _, user string, tools []venus.Tool) (*llmtypes.Response, error) {
+	f.capturedInput = user
+	f.capturedTools = tools
+	return f.resp, f.err
+}
+
+func (f *fakeStrategicCaller) SendMessagesTools(_ context.Context, messages []llmtypes.Message, _ []venus.Tool) (*llmtypes.Response, error) {
+	if len(messages) > 0 {
+		f.capturedInput = messages[len(messages)-1].Content
+	}
+	return f.resp, f.err
+}
+
+func (f *fakeStrategicCaller) SendStreaming(_ context.Context, _, _ string, _ func(string)) (*llmtypes.Response, error) {
+	return f.resp, f.err
+}
+
+func (f *fakeStrategicCaller) SendStreamingTools(_ context.Context, _, _ string, _ []venus.Tool, _ func(string), _ func(llmtypes.ToolCall)) (*llmtypes.Response, error) {
 	return f.resp, f.err
 }
 
@@ -360,7 +383,7 @@ func TestGenerateDailyPlan_KBInjectedIntoPrompt(t *testing.T) {
 	if !strings.Contains(user, "规划要求：") {
 		t.Errorf("user prompt missing the rules block: %q", user)
 	}
-	if !strings.Contains(user, "连续两个时段不得任务相同") {
+	if !strings.Contains(user, "连续两个时段不得任务完全相同") {
 		t.Errorf("user prompt missing rule 2 text: %q", user)
 	}
 	if !strings.Contains(user, "【物理状态】") {
@@ -548,60 +571,43 @@ func TestNormalizeDailyPlan_NoMergeDifferentGoals(t *testing.T) {
 	}
 }
 
-// TestNormalizeDailyPlan_MergesAdjacentSleepSynonyms 验证措辞不同的相邻
-// 睡眠时段（休息+睡眠）也被语义合并（实测 LLM 输出"睡眠舱休息 20:49-23:25"
-// + "睡眠舱睡眠 23:25-06:35"，两段都映射 rest_at_residence(sleep)，边界
-// 到期打断睡眠重睡）。
-func TestNormalizeDailyPlan_MergesAdjacentSleepSynonyms(t *testing.T) {
+// TestNormalizeDailyPlan_NoMergeSleepSynonyms 验证措辞不同的相邻睡眠时段
+// 不再被自动合并（睡眠语义合并已移除，计划保留 LLM 原样输出）。
+func TestNormalizeDailyPlan_NoMergeSleepSynonyms(t *testing.T) {
 	items := []dailyPlanItem{
 		{Time: "07:00-20:49", Goal: "白天活动"},
 		{Time: "20:49-23:25", Goal: "休眠舱居住区睡眠舱休息"},
 		{Time: "23:25-06:35", Goal: "休眠舱居住区睡眠舱睡眠"},
 	}
 	got := normalizeDailyPlan(items)
-	if len(got) != 2 {
-		t.Fatalf("got %d items, want 2 (sleep synonyms merged): %+v", len(got), got)
-	}
-	if got[1].Time != "20:49-06:35" {
-		t.Errorf("merged sleep slot should be 20:49-06:35: got %q", got[1].Time)
+	if len(got) != 3 {
+		t.Fatalf("got %d items, want 3 (different-goal sleep slots must not merge): %+v", len(got), got)
 	}
 }
 
-// TestNormalizeDailyPlan_NoMergeSleepVsOtherInteractions 验证睡眠语义合并
-// 不会误合并 sleep_pod 上的其他交互（冥想/整理）和长椅休息。
-func TestNormalizeDailyPlan_NoMergeSleepVsOtherInteractions(t *testing.T) {
+// TestNormalizeDailyPlan_NoMergeRunBeforeSleep 验证跑步锻炼与后续睡眠不会
+// 被合并（睡眠语义合并移除后天然不合并；此测试锁定该行为不被重新引入）。
+func TestNormalizeDailyPlan_NoMergeRunBeforeSleep(t *testing.T) {
 	items := []dailyPlanItem{
-		{Time: "18:30-20:45", Goal: "休眠舱居住区睡眠舱整理内务"},
-		{Time: "20:45-22:54", Goal: "休眠舱居住区睡眠舱冥想"},
-		{Time: "22:54-06:53", Goal: "休眠舱居住区睡眠舱睡眠"},
+		{Time: "07:00-20:00", Goal: "白天活动"},
+		{Time: "20:00-22:00", Goal: "休眠舱居住区跑步机跑步锻炼"},
+		{Time: "22:00-07:00", Goal: "休眠舱睡眠"},
 	}
 	got := normalizeDailyPlan(items)
 	if len(got) != 3 {
-		t.Fatalf("got %d items, want 3 (tidy/meditate/sleep must not merge): %+v", len(got), got)
+		t.Fatalf("got %d items, want 3 (run and sleep must not merge): %+v", len(got), got)
 	}
-}
-
-// TestIsSleepSlotGoal 表驱动验证睡眠类 goal 判定。
-func TestIsSleepSlotGoal(t *testing.T) {
-	cases := []struct {
-		goal string
-		want bool
-	}{
-		{"休眠舱居住区睡眠舱休息", true},
-		{"休眠舱居住区睡眠舱睡眠", true},
-		{"休眠舱居住区睡觉", true},
-		{"回舱睡觉", true},
-		{"休眠舱居住区睡眠舱冥想", false},
-		{"休眠舱居住区睡眠舱整理内务", false},
-		{"中央广场长椅休息", false},
-		{"档案馆电脑上网浏览", false},
-		{"中央广场充电桩充电", false},
-		{"主生产车间工作台装配", false},
+	if got[1].Goal != "休眠舱居住区跑步机跑步锻炼" {
+		t.Errorf("run slot goal lost: %q", got[1].Goal)
 	}
-	for _, c := range cases {
-		if got := isSleepSlotGoal(c.goal); got != c.want {
-			t.Errorf("isSleepSlotGoal(%q) = %v, want %v", c.goal, got, c.want)
-		}
+	if got[1].Time != "20:00-22:00" {
+		t.Errorf("run slot = %q, want 20:00-22:00", got[1].Time)
+	}
+	if got[2].Goal != "休眠舱睡眠" {
+		t.Errorf("sleep slot goal lost: %q", got[2].Goal)
+	}
+	if got[2].Time != "22:00-07:00" {
+		t.Errorf("sleep slot = %q, want 22:00-07:00", got[2].Time)
 	}
 }
 

@@ -34,8 +34,8 @@ func TestBuildReactivePrompt_Defaults(t *testing.T) {
 	promptText := prompt.BuildReactive(in)
 	for _, want := range []string{
 		"14:30", "main_workshop",
-		// 物理状态以分段标签呈现（45→偏低、30→精神饱满、15→良好），余额保留数值
-		"能量 偏低", "疲劳 精神饱满", "关节磨损 良好", "余额 0",
+		// 物理状态以分段标签呈现（45→较低、30→精神饱满、15→未有磨损），余额保留数值
+		"电量 较低", "疲劳 精神饱满", "关节磨损 未有磨损", "余额 0",
 		"WorkShift(smart_object=workbench_01, interaction=assemble)",
 		"tactical", "14:00-18:00", "14:00-18:00 工作组装",
 		"zone rest_area→main_workshop",
@@ -525,7 +525,7 @@ func TestReactiveRunner_BuildInput(t *testing.T) {
 		t.Fatalf("SetPerception: %v", err)
 	}
 	ac.as.SetPhysicalState(&protocol.PhysicalState{Energy: 18, Fatigue: 85, JointWear: 20}, nil)
-	ac.as.RecordActionStarted("act_001", protocol.CmdWorkShift, map[string]any{"semantic_group": "workbench_01", "interaction": "assemble"}, agentstate.SourceTactical)
+	ac.as.RecordActionStarted("act_001", protocol.CmdWorkShift, map[string]any{"semantic_group": "workbench_01", "interaction": "assemble"}, agentstate.SourceTactical, "")
 
 	in := r.buildInput("H-01", ac, TriggerPhysicalAlert, "energy 22→18")
 	if in.AgentID != "H-01" {

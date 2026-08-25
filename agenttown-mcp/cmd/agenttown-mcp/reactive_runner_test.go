@@ -143,7 +143,7 @@ func TestFallbackStopAndRefill_ClearsQueueAndSignalsWorker(t *testing.T) {
 	r := &reactiveRunner{ws: ws, logger: testLogger()}
 	ac, _ := newAgentContext(context.Background())
 
-	ac.as.RecordActionStarted("act_inflight_456", "WorkAtWorkbench", map[string]any{"target_object_id": "workbench_01"}, agentstate.SourceTactical)
+	ac.as.RecordActionStarted("act_inflight_456", "WorkAtWorkbench", map[string]any{"target_object_id": "workbench_01"}, agentstate.SourceTactical, "")
 	ac.as.ReplaceQueue([]plannedAction{
 		{Action: "work_at_workbench", Params: map[string]any{"target_object_id": "workbench_01"}},
 		{Action: "wait", Params: map[string]any{"duration_sec": 600}},

@@ -174,7 +174,7 @@ func BuildReactive(in ReactiveInput) string {
 		physicalLine = PhysicalLineActual(protocol.PhysicalState{
 			Energy: in.Energy, Fatigue: in.Fatigue, JointWear: in.JointWear, Money: in.Money,
 		}, th) + "\n"
-		physicalRuleLine = "【物理告警补充规则】当【当前状态】中能量为\"低电量\"、疲劳为\"非常疲劳\"或关节磨损为\"严重磨损\"时，原则上需要输出 replan 让 NPC 优先处理物理需求、不可输出 continue/observe\n"
+		physicalRuleLine = "【物理告警补充规则】当【当前状态】中电量为\"低电量\"、疲劳为\"非常疲劳\"或关节磨损为\"严重磨损\"时，原则上需要输出 replan 让 NPC 优先处理物理需求、不可输出 continue/observe\n"
 	}
 	// Queue segment (约定21): empty when not queued → entire segment
 	// collapses to a single blank line. When queued, show what the agent
