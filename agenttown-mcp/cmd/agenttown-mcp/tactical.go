@@ -218,6 +218,7 @@ func generateTacticalPlan(
 		return nil, llmtypes.Message{}, fmt.Errorf("tactical plan has no actions (raw=%s)", truncateText(raw, 200))
 	}
 	actions = fillDefaultTimeToStopForRest(actions)
+	actions = fillDefaultTimeToStopForWork(actions)
 	actionsJSON, _ := json.Marshal(actions)
 	logger.Info("[战术层] 分解成功",
 		"agent_id", agentID, "steps", len(actions),
@@ -265,6 +266,59 @@ func paramIs(params map[string]any, key, want string) bool {
 	}
 	s, _ := v.(string)
 	return s == want
+}
+
+// defaultWorkTimeToStopSec 是非队尾工作动作的默认 time_to_stop（90 分钟）。
+// LLM 偶尔会给中间的工作段漏设 time_to_stop，使其自然持续到 slot 切换、
+// 卡住后续动作。此处兜底，不依赖 LLM 自觉。
+const defaultWorkTimeToStopSec = 5400
+
+// workInteractions 是六种工种的交互动词（含 InteractSmartObject 直接工作）。
+var workInteractions = map[string]bool{
+	"assemble":   true, // 工作台装配
+	"sort_cargo": true, // 分拣
+	"dismantle":  true, // 拆解
+	"debug":      true, // 调试
+	"inspect":    true, // 质检
+	"process":    true, // 加工
+}
+
+// isWorkAction 判断是否为"工作类"动作：work_shift 复合工作，或
+// InteractSmartObject + 工种交互动词（assemble/sort_cargo 等）。
+func isWorkAction(a *plannedAction) bool {
+	if a.Action == "work_shift" {
+		return true
+	}
+	if a.Action != "InteractSmartObject" {
+		return false
+	}
+	inter := ""
+	if v, ok := a.Params["interaction"].(string); ok {
+		inter = v
+	}
+	return workInteractions[inter]
+}
+
+// fillDefaultTimeToStopForWork 给队列中"非队尾的工作类动作"补齐默认
+// time_to_stop（90 分钟）。队尾动作保持不设（自然持续到时段切换）。
+func fillDefaultTimeToStopForWork(actions []plannedAction) []plannedAction {
+	if len(actions) < 2 {
+		return actions
+	}
+	for i := 0; i < len(actions)-1; i++ {
+		a := &actions[i]
+		if !isWorkAction(a) {
+			continue
+		}
+		if _, ok := a.Params["time_to_stop"]; ok {
+			continue
+		}
+		if a.Params == nil {
+			a.Params = map[string]any{}
+		}
+		a.Params["time_to_stop"] = defaultWorkTimeToStopSec
+	}
+	return actions
 }
 
 // parseToolCalls 把 LLM 返回的 tool_calls 解析为 plannedAction 队列。
