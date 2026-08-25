@@ -36,10 +36,10 @@ CODEBUDDY.md                    # 完整开发手册
 
 同一个远端仓库（`git.woa.com/yitianchen/smartnpc.git`）clone 成**两个独立目录**，用不同分支 + 端口 + 数据库 + 日志目录完全隔离，可同时运行：
 
-| 目录 | 分支 | MCP HTTP / WS | MySQL 库 | 日志目录 |
-|------|------|---------------|----------|----------|
-| `/data/workspace/stable` | `master` | `8760` / `9090` | `agenttown_stable` | `logs/` |
-| `/data/workspace/dev` | `feature/openai-origin-tool-calling` | `8770` / `9091` | `agenttown_dev` | `logs-dev/` |
+| 目录 | 分支            | MCP HTTP / WS | MySQL 库 | 日志目录 |
+|------|---------------|---------------|----------|----------|
+| `/data/workspace/stable` | `master`      | `8760` / `9090` | `agenttown_stable` | `logs/` |
+| `/data/workspace/dev` | `dev-working` | `8770` / `9091` | `agenttown_dev` | `logs-dev/` |
 
 `start-dev.sh` 只是 `start-debug.sh` 的 wrapper（export 偏移端口 + dev 库名 + `logs-dev/`），实际启动逻辑都在 `start-debug.sh`。
 
@@ -52,7 +52,7 @@ cd /data/workspace
 git clone https://git.woa.com/yitianchen/smartnpc.git stable
 git -C stable checkout master
 git clone https://git.woa.com/yitianchen/smartnpc.git dev
-git -C dev checkout feature/openai-origin-tool-calling
+git -C dev checkout dev-working
 
 # 2. 各自配 .env（至少 VENUS_API_KEY）
 cp /data/workspace/stable/.env.example /data/workspace/stable/.env   # 填入 VENUS_API_KEY
@@ -94,25 +94,21 @@ go build ./...                  # 编译检查
 go test ./...                   # 全量测试
 ```
 
-**debug 控制台**：`http://localhost:8770/debug/`（dev）或 `:8760`（stable）——单 Action 下发、Schedule 注入、当日 schedule、战术层分解情况、MCP 日志。
+**debug 控制台**：`http://localhost:8770/debug/ `（dev）或 `:8760`（stable）——单 Action 下发、Schedule 注入、当日 schedule、战术层分解情况、MCP 日志。
 
 ## 关键信息
 
-- **三层决策**：战略层（每日 07:00 生成 6-8 时段计划）→ 战术层（每时段把 goal 分解为 1-4 动作段）→ 反应层（默认禁用，Ollama 决策 continue/observe/replan）
-- **战术层 function calling**：OpenAI 原生 `tools` 字段 + `tool_choice=required` + 多轮 agentic loop；工具由 `capability_registry` 派生；段间用 `time_to_stop` 控制时长（末段不设，自然持续到时段切换）
+- **三层决策结构**：战略层（每日 07:00 生成 6-8 时段计划）→ 战术层（每时段把 goal 分解为 1-4 动作段）→ 反应层（当前由于延迟较高、表现不佳，默认禁用，Ollama 决策 continue/observe/replan）
+- **LLM 上下文工程**：战略层与战术层按照 `system`, `user`, `assistant`, `tool` 四个 role 来构建请求体中的 messages 字段，形成 agentic loop
+- **战略层工作原理**：生成 json 数组格式化日程安排，例如 `{"time":"07:00-9:00","goal":"在跑步机跑步锻炼"}`，注入后续战术层中
+- **战术层工作原理**：生成每个时段的动作安排（可由多个动作组成，组成队列依次下发），填写 `tools` 字段 + `tool_choice=required`；工具由 UE 端上传的 `capability_registry` 派生；每条动作用 `time_to_stop` 控制时长；允许战术层根据实际属性等情况自主裁量
 - **LLM 后端**：战略层 `deepseek-v4-pro`、战术层 `deepseek-v4-flash`（Venus，OpenAI 兼容）；反应层本地 Ollama（默认禁用）
-- **物理属性分档**：电量/疲劳/关节磨损 3 阈值切 4 档，标签注入战略层 prompt；per-NPC 可经 `profile.md` 的 `## 属性分段` 覆盖
-- **capability_registry**：UE 连接后推送能力声明，MCP 据此动态增删工具；`world_kb` 推送合并落盘
-- **持久化**：默认内存模式；`MYSQL_DSN` 非空启用 MySQL（调度状态 + 记忆 + 动作历史 + 关系）
+- **物理属性分档**：UE端传来电量/疲劳/关节磨损切分为 4 档，把属性值按档位转化为自然语言标签注入 prompt；每个 NPC 的个性化分档设置可经 `profile.md` 的 `## 属性分段` 覆盖
+- **UE 端信息自动更新**：UE 连接后推送能力声明，MCP 据此动态增删工具；`world_kb` 推送合并落盘
+- **持久化**：默认内存模式；`MYSQL_DSN` 非空启用 MySQL（记忆 + 动作历史 + NPC 关系）
 - **日志**：`logs/YYYY-MM-DD/debug-mcp.log`（stable）或 `logs-dev/...`（dev），JSON Lines 全链路
 
 ## 坑点
 
-- **Go bool flag 必须 `=` 赋值**：`--auto-plan true` 会把 `true` 当 positional arg 导致后续 flag 不解析，必须写 `--auto-plan=true`
 - **战术层 LLM 输出坏 tools JSON**：deepseek-v4-flash 多轮场景偶发输出格式异常 tool_calls，存进历史后重放触发 venus 500 `trailing characters`。已做历史截断（8 轮）+ 失败兜底动作缓解，但根因在模型侧
 - **time_to_stop 漏设 → 队列卡死**：LLM 常给中间动作漏设 time_to_stop，导致 NPC 一直坐长椅/一直工作。已做代码层兜底（非队尾休息 1800s / 工作 5400s）
-- **zone 参数曾在下发时被丢弃**：`mapTacticalAction` 白名单式构造 params 曾漏掉 `zone`，导致"去中央广场长椅"落到 NPC 所在 zone。已修复透传
-- **slot 切换时旧动作超时**：旧动作 stop 被推迟到"新 slot 分解成功之后"，LLM 慢/失败时旧动作跨 slot 执行（60s 超时 × 90 倍时间缩放 ≈ 90 游戏分钟）
-- **战略层短时段裁剪（已停用）**：原 `minSlotMinutes=60` 与规则"每段 ≥30 分钟"矛盾，会把晨练/午休等 30-59 分钟短时段裁掉，计划变"工作+睡眠"简略形态
-- **bash 工作目录不持久**：每条命令需显式 `cd` 到目标目录（`cd` 不跨命令保留）
-- **日志目录区分**：stable 写 `logs/`，dev 写 `logs-dev/`，别查错目录
