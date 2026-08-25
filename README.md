@@ -27,24 +27,66 @@ docs/                           # 设计文档（协议/工作流/对话/世界 
 scripts/pretty_log.py           # 日志可读化工具（HTML 报告）
 start-debug.sh / start-dev.sh   # 启动脚本（stable / dev 实例）
 .env.example                    # 环境变量模板
-CODEBUDDY.md                    # 完整开发手册（比本 README 更详细）
+CODEBUDDY.md                    # 完整开发手册
 ```
 
 ## 快速开始
 
-**云环境（推荐）**：
+### dev 与 stable 仓库的关系
+
+同一个远端仓库（`git.woa.com/yitianchen/smartnpc.git`）clone 成**两个独立目录**，用不同分支 + 端口 + 数据库 + 日志目录完全隔离，可同时运行：
+
+| 目录 | 分支 | MCP HTTP / WS | MySQL 库 | 日志目录 |
+|------|------|---------------|----------|----------|
+| `/data/workspace/stable` | `master` | `8760` / `9090` | `agenttown_stable` | `logs/` |
+| `/data/workspace/dev` | `feature/openai-origin-tool-calling` | `8770` / `9091` | `agenttown_dev` | `logs-dev/` |
+
+`start-dev.sh` 只是 `start-debug.sh` 的 wrapper（export 偏移端口 + dev 库名 + `logs-dev/`），实际启动逻辑都在 `start-debug.sh`。
+
+### 拉取并配置
 
 ```bash
-cd /data/workspace/dev
-cp .env.example .env            # 填入 VENUS_API_KEY
-bash start-dev.sh               # dev 实例：端口 8770/9091，日志 logs-dev/
+cd /data/workspace
 
-# stable 实例（另一目录）：
-cd /data/workspace/stable
-bash start-debug.sh             # 端口 8760/9090，日志 logs/
+# 1. 分别 clone（stable 用 master，dev 用开发分支）
+git clone https://git.woa.com/yitianchen/smartnpc.git stable
+git -C stable checkout master
+git clone https://git.woa.com/yitianchen/smartnpc.git dev
+git -C dev checkout feature/openai-origin-tool-calling
+
+# 2. 各自配 .env（至少 VENUS_API_KEY）
+cp /data/workspace/stable/.env.example /data/workspace/stable/.env   # 填入 VENUS_API_KEY
+cp /data/workspace/dev/.env.example    /data/workspace/dev/.env
 ```
 
-**编译 / 测试**：
+编译由启动脚本自动完成（`start-debug.sh` 内置 build step，会 `go build -o agenttown-mcp[-dev]` 到 `agenttown-mcp/` 下）。如需手动编译：
+
+```bash
+cd /data/workspace/stable/agenttown-mcp && go build -o agenttown-mcp     ./cmd/agenttown-mcp
+cd /data/workspace/dev/agenttown-mcp    && go build -o agenttown-mcp-dev ./cmd/agenttown-mcp
+```
+
+### 启动
+
+```bash
+# dev 实例（日常开发调试）
+cd /data/workspace/dev && bash start-dev.sh
+
+# stable 实例（稳定运行验证）
+cd /data/workspace/stable && bash start-debug.sh
+
+# 停止
+bash start-dev.sh --stop          # 或 bash start-debug.sh --stop
+```
+
+**`--drop-tables`（重置数据库）**：MySQL 持久化模式下，`--drop-tables` 会 `DROP DATABASE + CREATE` 清空该实例的库（`agenttown_dev` / `agenttown_stable`），MCP 启动时由 migrations 从零重建全部表。用于清掉累积的调度状态/记忆/关系、做"干净日"重跑。默认 false（保留累积状态）。
+
+```bash
+bash start-dev.sh --drop-tables      # 清空 dev 库后重启
+bash start-debug.sh --drop-tables    # 清空 stable 库后重启
+```
+
+### 编译 / 测试
 
 ```bash
 cd agenttown-mcp
