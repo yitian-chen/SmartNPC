@@ -276,12 +276,12 @@ func TestStrategicSystemPrompt_GoalStyleTerse(t *testing.T) {
 
 func TestStrategicUserTemplate_EndsWithFormatReminder(t *testing.T) {
 	// user 消息末尾的格式提醒（recency effect：越靠后的指令遵从率越高）。
-	// 含 ≥120 分钟硬性约束的重复强调。
+	// 含 ≥30 分钟硬性约束的重复强调。
 	if !strings.Contains(StrategicUserTemplate, `"goal" 必须是字符串`) {
 		t.Error("user template should end with the JSON format reminder")
 	}
-	if !strings.Contains(StrategicUserTemplate, "每个时段必须 ≥120 分钟") {
-		t.Error("user template should reiterate the ≥120-minute slot rule")
+	if !strings.Contains(StrategicUserTemplate, "每个时段必须 ≥30 分钟") {
+		t.Error("user template should reiterate the ≥30-minute slot rule")
 	}
 }
 
