@@ -488,9 +488,9 @@ func TestBuildTacticalPrompt_InjectsObjectStatus(t *testing.T) {
 	if !strings.Contains(promptText, "WorkBench") {
 		t.Errorf("prompt should mention nearby WorkBench, got: %s", promptText)
 	}
-	// 应包含"全部占用"相关的引导文本（规则 2：日程不合理/设施占用时
-	// 鼓励安排其他更合理的动作）。
-	if !strings.Contains(prompt.TacticalRules, "所有对应的smartObject都已经占用") ||
+	// 应包含"日程不合理"相关的引导文本（规则 2：日程不合理/设施占用时
+	// 鼓励安排其他更合理的动作；含夜间工作反例）。
+	if !strings.Contains(prompt.TacticalRules, "半夜不睡觉而是跑步/工作") ||
 		!strings.Contains(prompt.TacticalRules, "请下发更合理的动作") {
 		t.Errorf("system prompt should guide LLM to avoid doomed occupancy actions")
 	}
@@ -1239,5 +1239,96 @@ func TestBuildTacticalPrompt_NoPhysicalAlertConstraint(t *testing.T) {
 
 	if strings.Contains(promptText, "【物理告警强制约束】") {
 		t.Errorf("non-physical-alert hint should NOT contain constraint section, got: %s", promptText)
+	}
+}
+
+// ─── truncateConversationRounds ───────────────────────────────
+
+// testConvRound 构造一轮完整对话：assistant(带 tool_calls) + 对应 tool 结果。
+func testConvRound(id string) []llmtypes.Message {
+	return []llmtypes.Message{
+		{Role: "assistant", Content: "speak " + id, ToolCalls: []llmtypes.ToolCall{{ID: id, Type: "function", Function: llmtypes.ToolFunction{Name: "speak", Arguments: "{}"}}}},
+		{Role: "tool", Content: "result=success", ToolCallID: id},
+	}
+}
+
+func TestTruncateConversationRounds_Empty(t *testing.T) {
+	if got := truncateConversationRounds(nil, maxTacticalHistoryRounds); got != nil {
+		t.Errorf("empty input should stay nil, got %v", got)
+	}
+	if got := truncateConversationRounds([]llmtypes.Message{}, maxTacticalHistoryRounds); len(got) != 0 {
+		t.Errorf("empty slice should stay empty, got %d items", len(got))
+	}
+}
+
+func TestTruncateConversationRounds_NoopWhenBelowLimit(t *testing.T) {
+	conv := []llmtypes.Message{}
+	for i := 0; i < 5; i++ {
+		conv = append(conv, testConvRound(fmt.Sprintf("c%d", i))...)
+	}
+	got := truncateConversationRounds(conv, maxTacticalHistoryRounds)
+	if len(got) != len(conv) {
+		t.Errorf("below-limit history should be unchanged: got %d want %d", len(got), len(conv))
+	}
+	for i := range conv {
+		if got[i].Role != conv[i].Role || got[i].Content != conv[i].Content {
+			t.Errorf("below-limit history should preserve order/content: got[%d]=%+v want %+v", i, got[i], conv[i])
+		}
+	}
+}
+
+func TestTruncateConversationRounds_KeepsRecentRounds(t *testing.T) {
+	conv := []llmtypes.Message{}
+	for i := 0; i < 20; i++ {
+		conv = append(conv, testConvRound(fmt.Sprintf("c%d", i))...)
+	}
+	got := truncateConversationRounds(conv, 8)
+	if len(got) != 16 { // 8 轮 × 2 条
+		t.Fatalf("got %d messages, want 16 (8 rounds)", len(got))
+	}
+	// 起点必须是 assistant（tool 消息不能成为头部孤儿）。
+	if got[0].Role != "assistant" {
+		t.Errorf("truncated head should be an assistant message, got role=%q", got[0].Role)
+	}
+	// 应保留 c12..c19 这最后 8 轮。
+	if !strings.Contains(got[0].Content, "c12") {
+		t.Errorf("head should be round c12, got %q", got[0].Content)
+	}
+	// 每一对 assistant/tool 必须保持配对与顺序。
+	for i := 0; i+1 < len(got); i += 2 {
+		if got[i].Role != "assistant" || got[i+1].Role != "tool" {
+			t.Fatalf("pair %d broken: %+v / %+v", i, got[i], got[i+1])
+		}
+		if got[i+1].ToolCallID != got[i].ToolCalls[0].ID {
+			t.Errorf("pair %d: tool_call_id %q does not match assistant tool_calls id %q",
+				i, got[i+1].ToolCallID, got[i].ToolCalls[0].ID)
+		}
+	}
+}
+
+func TestTruncateConversationRounds_NonPositiveLimit(t *testing.T) {
+	conv := testConvRound("c0")
+	if got := truncateConversationRounds(conv, 0); got != nil {
+		t.Errorf("maxRounds=0 should return nil, got %v", got)
+	}
+	if got := truncateConversationRounds(conv, -3); got != nil {
+		t.Errorf("negative maxRounds should return nil, got %v", got)
+	}
+}
+
+func TestTruncateConversationRounds_OrphanToolHead(t *testing.T) {
+	conv := []llmtypes.Message{
+		{Role: "tool", Content: "result=failed", ToolCallID: "orphan"},
+	}
+	for i := 0; i < 3; i++ {
+		conv = append(conv, testConvRound(fmt.Sprintf("c%d", i))...)
+	}
+	got := truncateConversationRounds(conv, 8)
+	// 头部孤儿 tool 应被丢弃（不足上限，但头部非 assistant）。
+	if len(got) != 6 {
+		t.Fatalf("got %d messages, want 6 (orphan dropped)", len(got))
+	}
+	if got[0].Role != "assistant" {
+		t.Errorf("head should be first assistant, got role=%q", got[0].Role)
 	}
 }

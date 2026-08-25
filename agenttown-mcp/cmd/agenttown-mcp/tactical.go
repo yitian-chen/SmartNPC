@@ -22,6 +22,47 @@ import (
 // alias 供 main 包过渡期使用，避免一次性重命名几十处引用。
 type plannedAction = agentstate.PlannedAction
 
+// maxTacticalHistoryRounds 是战术层多轮 function-calling 保留的历史轮数上限。
+// 每"轮"= 一条 assistant 消息（含 tool_calls）+ 其后对应的 tool 结果消息。
+// 超长历史会让 LLM 生成 tools JSON 更易出错（venus 报 trailing characters）
+// 且注意力漂移（如夜间仍按白天习惯工作），因此只保留最近若干轮。
+const maxTacticalHistoryRounds = 8
+
+// truncateConversationRounds 把会话历史裁剪为最近 maxRounds 轮完整轮次。
+// 以 assistant 消息为轮边界从后向前计数；保留起点一定是 assistant，其后
+// 的 tool 消息全部完整，保证 function-calling 消息配对不破坏。
+// 历史轮数不足 maxRounds 时原样返回（仅去掉头部可能存在的孤儿 tool）。
+func truncateConversationRounds(conv []llmtypes.Message, maxRounds int) []llmtypes.Message {
+	if maxRounds <= 0 {
+		return nil
+	}
+	if len(conv) <= 1 {
+		return conv
+	}
+	startIdx := -1
+	count := 0
+	for i := len(conv) - 1; i >= 0; i-- {
+		if conv[i].Role != "assistant" {
+			continue
+		}
+		count++
+		if count == maxRounds {
+			startIdx = i
+			break
+		}
+	}
+	if startIdx < 0 {
+		// 不足 maxRounds 轮：若头部有孤儿 tool 消息，从首个 assistant 起保留。
+		for i := 0; i < len(conv); i++ {
+			if conv[i].Role == "assistant" {
+				return conv[i:]
+			}
+		}
+		return conv
+	}
+	return conv[startIdx:]
+}
+
 // actionSource 标识一个在途 action 由哪一层下发，决定 completion 后的路由。
 // 类型定义已迁移到 pkg/agentstate（导出名 ActionSource），此处保留 alias。
 type actionSource = agentstate.ActionSource
@@ -141,6 +182,16 @@ func generateTacticalPlan(
 	ftools := tacticalToolsFromRegistry(registry, agentID)
 
 	// 多轮 messages：[system, ...历史, user(最新实时状态)]。
+	// 历史先做轮次截断：只保留最近 maxTacticalHistoryRounds 轮，防止
+	// too_tired 打断/分解失败重试导致会话无限膨胀（长上下文会诱发 LLM
+	// 输出坏 tools JSON 与目标漂移）。
+	origTurns := len(conversation)
+	conversation = truncateConversationRounds(conversation, maxTacticalHistoryRounds)
+	if len(conversation) < origTurns {
+		logger.Warn("[战术层] 会话历史截断",
+			"agent_id", agentID, "from", origTurns, "to", len(conversation),
+			"max_rounds", maxTacticalHistoryRounds)
+	}
 	messages := make([]llmtypes.Message, 0, len(conversation)+2)
 	messages = append(messages, llmtypes.Message{Role: "system", Content: system})
 	messages = append(messages, conversation...)
