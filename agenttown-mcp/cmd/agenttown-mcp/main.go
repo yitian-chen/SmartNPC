@@ -2084,6 +2084,12 @@ func runHTTP(ctx context.Context, logger *slog.Logger, server *mcp.Server, addr 
 			handleDebugUEErrors(w, r, logger)
 			return
 		}
+		// /debug/tactical — 返回所有 agent 当前战术层分解情况（当前时段 goal
+		// + 待执行任务队列），供 debug 控制台全宽面板展示。
+		if r.URL.Path == "/debug/tactical" {
+			handleDebugTactical(w, r, lookupAgent, listAgentIDs, logger)
+			return
+		}
 		// /debug/logs — 返回最近 MCP 日志条目（环形缓冲，最多 500 条）
 		if r.URL.Path == "/debug/logs" {
 			handleDebugLogs(w, r, logger)

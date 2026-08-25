@@ -215,6 +215,77 @@ func handleDebugUEErrors(w http.ResponseWriter, r *http.Request, logger *slog.Lo
 	}
 }
 
+// debugTacticalEntry 是 /debug/tactical 返回的单个 agent 战术层分解快照：
+// 当前时段 goal + 战术层队列中待执行的任务列表。
+type debugTacticalEntry struct {
+	AgentID     string                `json:"agent_id"`
+	GameTime    string                `json:"game_time"`              // "HH:MM"（来自最新 perception）
+	CurrentSlot string                `json:"current_slot"`           // "HH:MM-HH:MM" 或 ""
+	CurrentGoal string                `json:"current_goal,omitempty"` // 当前时段 goal（来自战略层计划）
+	QueueLen    int                   `json:"queue_len"`              // 队列中剩余任务数
+	Queue       []debugTacticalAction `json:"queue"`                  // 战术层分解出的任务列表
+	InFlight    string                `json:"in_flight,omitempty"`    // 当前在途 action_id
+}
+
+// debugTacticalAction 是队列中的一个战术层分解任务（对应一次工具调用）。
+type debugTacticalAction struct {
+	Action string         `json:"action"`           // 工具名（如 speak / work_shift / move_to）
+	Params map[string]any `json:"params,omitempty"` // 工具参数（LLM 原始输出）
+}
+
+// handleDebugTactical 返回所有已注册 agent 当前战术层分解情况（当前时段
+// goal + 待执行任务队列），供 debug 控制台全宽面板展示。未注册任何 agent
+// 时回落 ["H-01"]，与 /debug/agents 一致。响应始终是 JSON 数组。
+func handleDebugTactical(w http.ResponseWriter, r *http.Request, lookupAgent func(string) *agentContext, listAgentIDs func() []string, logger *slog.Logger) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+
+	ids := listAgentIDs()
+	if len(ids) == 0 {
+		ids = []string{"H-01"}
+	}
+	resp := make([]debugTacticalEntry, 0, len(ids))
+	for _, id := range ids {
+		ac := lookupAgent(id)
+		if ac == nil {
+			continue
+		}
+		plan, slot, idx := ac.snapshotSchedule()
+		items := parseFormattedPlan(plan)
+		goal := ""
+		if idx >= 0 && idx < len(items) {
+			goal = items[idx].Goal
+		} else if slot != "" {
+			for _, it := range items {
+				if it.Time == slot {
+					goal = it.Goal
+					break
+				}
+			}
+		}
+		queue := ac.as.QueueSnapshot()
+		q := make([]debugTacticalAction, 0, len(queue))
+		for _, pa := range queue {
+			q = append(q, debugTacticalAction{Action: pa.Action, Params: pa.Params})
+		}
+		resp = append(resp, debugTacticalEntry{
+			AgentID:     id,
+			GameTime:    ac.latestTimeOfDay(),
+			CurrentSlot: slot,
+			CurrentGoal: goal,
+			QueueLen:    len(q),
+			Queue:       q,
+			InFlight:    ac.as.CurrentActionID(),
+		})
+	}
+	if resp == nil {
+		resp = []debugTacticalEntry{}
+	}
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		logger.Warn("[debug/tactical] encode failed", "err", err)
+	}
+}
+
 // handleDebugLogs 返回最近 MCP 日志条目（环形缓冲，最多 500 条），供 debug
 // 控制台展示 MCP 侧全量日志。前端按 level 筛选（ALL/DEBUG/INFO/WARN/ERROR）。
 // 响应始终是 JSON 数组（无日志时为 []），按时间正序返回，前端倒序渲染（最新在最上）。

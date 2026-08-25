@@ -253,24 +253,21 @@ func TestStrategicSystemPrompt_NoSocialWhileDisabled(t *testing.T) {
 }
 
 func TestStrategicSystemPrompt_GoalMustBeString(t *testing.T) {
-	// L1（json_schema）之外的软约束：goal 字段类型显式声明。
+	// goal 字段类型显式声明（用户消息收尾处）。
 	// 起因：实际仿真中 LLM 把 goal 写成 {"goal":"...","cmd":"..."} 导致整包解析失败。
-	if !strings.Contains(StrategicRules, `"goal"（一句话，必须是纯文本字符串）`) {
-		t.Error("system prompt should declare goal must be a plain string")
+	if !strings.Contains(StrategicUserTemplate, `"goal" 必须是字符串`) {
+		t.Error("user template should declare goal must be a plain string")
 	}
 }
 
 func TestStrategicSystemPrompt_GoalStyleTerse(t *testing.T) {
-	// goal 文案干练简洁（做什么+在哪），人设语气不得进入 schedule 文字
+	// goal 文案干练简洁，人设语气不得进入 schedule 文字
 	// ——语气只属于战术层的 speak 动作。
-	if !strings.Contains(StrategicRules, "goal 用干练简洁的客观描述") {
-		t.Error("system prompt should require terse objective goal text")
-	}
-	if !strings.Contains(StrategicRules, "不带语气词、口头禅、内心独白或人设腔调") {
-		t.Error("system prompt should ban persona tone in goal text")
-	}
 	if !strings.Contains(StrategicUserTemplate, "goal 文字一律干练简洁，不带人设语气") {
-		t.Error("user template should reiterate terse goal style")
+		t.Error("user template should require terse objective goal text")
+	}
+	if !strings.Contains(StrategicRules, "每段安排 1 - 2 项任务") {
+		t.Error("system prompt should bound tasks per slot")
 	}
 }
 
