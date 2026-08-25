@@ -183,17 +183,21 @@ func normalizeDailyPlan(items []dailyPlanItem) []dailyPlanItem {
 	// 1. 过滤短时段。跨午夜 slot（end <= start）时长按 end+1440-start 计算。
 	valid := make([]dailyPlanItem, 0, len(items))
 	for _, it := range items {
-		start, end, ok := prompt.SplitPlanRange(it.Time)
+		_, _, ok := prompt.SplitPlanRange(it.Time)
 		if !ok {
 			continue
 		}
-		dur := end - start
-		if end <= start {
-			dur = end + 1440 - start // 跨午夜
-		}
-		if dur < minSlotMinutes {
-			continue
-		}
+		// 短时段裁剪已停用：minSlotMinutes(60) 与战略层规则"每段 ≥30 分钟"
+		// 不一致，会把 LLM 生成的晨练/午休/锻炼等 30-59 分钟短时段静默丢弃，
+		// 导致计划被裁成"工作+睡眠"的简略形态。改为保留全部合法时段，
+		// 由后续步骤 4 的"填补空白"自然合并过短的空隙。
+		// dur := end - start
+		// if end <= start {
+		// 	dur = end + 1440 - start // 跨午夜
+		// }
+		// if dur < minSlotMinutes {
+		// 	continue
+		// }
 		valid = append(valid, it)
 	}
 	if len(valid) == 0 {

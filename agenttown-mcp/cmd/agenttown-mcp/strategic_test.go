@@ -435,20 +435,26 @@ func TestBuildDefaultDailyPlan_WithKB(t *testing.T) {
 
 // ─── normalizeDailyPlan ─────────────────────────────────────
 
-func TestNormalizeDailyPlan_DropsShortSlots(t *testing.T) {
+func TestNormalizeDailyPlan_KeepsShortSlots(t *testing.T) {
+	// 短时段裁剪已停用：30-59 分钟的短时段（晨练/午休等）应被保留，
+	// 否则 LLM 生成的优质日程会被裁成"工作+睡眠"的简略形态。
 	items := []dailyPlanItem{
-		{Time: "06:00-06:30", Goal: "短时段"}, // 30min, 应被丢弃
+		{Time: "06:00-06:30", Goal: "短时段"}, // 30min, 不再被丢弃
 		{Time: "06:30-12:00", Goal: "上午工作"},
 		{Time: "12:00-22:00", Goal: "下午到晚上"},
 	}
 	got := normalizeDailyPlan(items)
-	if len(got) != 2 {
-		t.Fatalf("got %d items, want 2 (short slot dropped)", len(got))
+	if len(got) != 3 {
+		t.Fatalf("got %d items, want 3 (short slot kept)", len(got))
 	}
+	found := false
 	for _, it := range got {
 		if it.Goal == "短时段" {
-			t.Errorf("short slot should have been dropped: %+v", got)
+			found = true
 		}
+	}
+	if !found {
+		t.Errorf("short slot should be kept: %+v", got)
 	}
 }
 
@@ -492,14 +498,15 @@ func TestNormalizeDailyPlan_ExtendsLastSlot(t *testing.T) {
 	}
 }
 
-func TestNormalizeDailyPlan_AllDropped(t *testing.T) {
+func TestNormalizeDailyPlan_KeepsAllShortSlots(t *testing.T) {
+	// 短时段裁剪停用后，全短时段计划不再返回 nil（交由后续步骤填补空白）。
 	items := []dailyPlanItem{
 		{Time: "06:00-06:30", Goal: "短1"},
 		{Time: "07:00-07:15", Goal: "短2"},
 	}
 	got := normalizeDailyPlan(items)
-	if got != nil {
-		t.Errorf("all slots dropped should return nil, got %+v", got)
+	if got == nil || len(got) != 2 {
+		t.Fatalf("short slots should be kept, got %+v", got)
 	}
 }
 
