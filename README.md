@@ -32,56 +32,56 @@ CODEBUDDY.md                    # 完整开发手册
 
 ## Agent 内部数据流
 
+每 NPC 一个独立 worker，事件驱动（perception_update / action_completed 唤醒）：
+
 ```mermaid
-graph TB
-    subgraph UE["UE5"]
-        UE5["游戏世界<br/>感知/动作执行/能力声明/世界 KB"]
+flowchart TB
+    subgraph UE5["UE5 游戏世界"]
+        P["perception_update<br/>位置 / 物理 / 物体占用"]
+        ACK["action_started (ACK ≤2s)"]
+        DONE["action_completed<br/>result / duration_ms"]
     end
 
-    subgraph MCP["agenttown-mcp (Go)"]
-        WS["wsserver<br/>7 字段信封收发 / seq / 重放"]
+    subgraph MCP["agenttown-mcp（每 NPC 独立 worker）"]
+        WS["wsserver<br/>消息收发 / seq 重放"]
+        AS["agentstate<br/>世界快照 · actionQueue(1-4段)<br/>多轮会话历史(截8轮) · dailyPlan"]
 
-        subgraph STATE["agentContext + AgentState（每 NPC 一份）"]
-            AS["AgentState<br/>dailyPlan / actionQueue<br/>conversation 历史 / 物理状态"]
-            WORKER["perception worker 循环<br/>slot 判断 / time_to_stop 检测 / pop"]
+        subgraph W["worker 循环（事件驱动）"]
+            ADV["advanceSlotIfNeeded<br/>slot 过期 → 清队列"]
+            CHK["checkTimeToStop<br/>段到点 → 打断当前段保队列"]
+            REF["tacticalRefill<br/>队列空 → 重新分解"]
         end
 
-        subgraph DECIDE["三层决策"]
-            STR["战略层 generateDailyPlan<br/>Structured Outputs<br/>(Venus deepseek-v4-pro)"]
-            TAC["战术层 generateTacticalPlan<br/>function calling<br/>(Venus deepseek-v4-flash)"]
-            REA["反应层<br/>Ollama（默认禁用）"]
-        end
-
-        KB["worldkb<br/>世界 KB 合并/查询"]
-        REG["CapabilityRegistry<br/>能力声明"]
-        PROFILE["profile + weeklyschedule<br/>人设 / 每周日程"]
+        TAC["战术层分解<br/>function calling · time_to_stop 兜底<br/>失败兜底(speak+look_around)"]
+        STR["战略层规划（每日 07:00 / 跨日）<br/>日终记忆 → LLM → dailyPlan<br/>normalize + ±15min jitter"]
+        MAP["mapTacticalAction<br/>工具名 → UE cmd"]
     end
 
-    UE5 -->|"world_kb"| KB
-    UE5 -->|"capability_registry"| REG
-    UE5 -->|"perception_update / action_completed"| WS
+    VT["Venus 战术层<br/>deepseek-v4-flash<br/>tools + tool_choice=required"]
+    VS["Venus 战略层<br/>deepseek-v4-pro<br/>Structured Outputs"]
 
-    WS -->|"驱动 worker"| WORKER
-    WORKER <-->|"读写状态"| AS
+    %% 感知流
+    P --> WS --> AS
+    AS -->|"signal"| W
 
-    KB -->|"三模块 system prompt"| STR
-    KB -->|"三模块 system prompt"| TAC
-    REG -->|"function calling tools 字段"| TAC
-    PROFILE -->|"【人物背景】/【今日日程】"| STR
-    PROFILE -->|"【人物背景】"| TAC
+    %% 战术决策流
+    ADV --> REF
+    CHK --> REF
+    REF --> TAC
+    TAC -->|"prompt / tool_calls 1-4 段"| VT
+    TAC -->|"ReplaceQueue 入队"| AS
 
-    AS -->|"07:00 触发"| STR
-    STR -->|"dailyPlan（6-8 时段 goal）"| AS
-    AS -->|"当前时段 goal + 实时状态"| TAC
-    TAC -->|"actionQueue（1-4 动作段）"| AS
-    REA -.->|"物理告警时 replan"| TAC
+    %% 战略决策流
+    AS -->|"day_count 递增"| STR
+    STR -->|"prompt / dailyPlan JSON"| VS
+    STR -->|"SetDailyPlan"| AS
 
-    AS -->|"pop 队首"| SEND["popAndSendQueueAction"]
-    SEND -->|"action_command"| WS
-    WS -->|"下发动作"| UE5
+    %% 执行流
+    MAP -->|"action_command"| WS
+    WS --> ACK
+    WS --> DONE
+    DONE -->|"tool 结果入会话历史 · action_history 落盘 · signal"| AS
 ```
-
-数据流主线：**UE 消息 → wsserver → worker 循环 → AgentState（状态中心）→ 战略层（每日生成 dailyPlan）→ 战术层（每时段把 goal 分解成 actionQueue）→ pop 下发 UE**。worldkb / capability_registry / profile 作为支撑数据注入各层 prompt 与 tools。
 
 ## 快速开始
 
