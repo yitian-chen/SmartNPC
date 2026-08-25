@@ -35,6 +35,8 @@ func BuildTacticalSystemPrompt(kb *worldkb.KB, profiles map[string]*profile.Prof
 	}
 	sb.WriteString("\n【世界详细信息】\n")
 	sb.WriteString(worldDetailCore(kb))
+	sb.WriteString("\n【生产工作流】\n")
+	sb.WriteString(ProductionWorkflowText)
 	return sb.String()
 }
 

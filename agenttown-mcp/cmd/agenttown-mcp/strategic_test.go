@@ -383,7 +383,7 @@ func TestGenerateDailyPlan_KBInjectedIntoPrompt(t *testing.T) {
 	if !strings.Contains(user, "规划要求：") {
 		t.Errorf("user prompt missing the rules block: %q", user)
 	}
-	if !strings.Contains(user, "连续两个时段不得任务相同") {
+	if !strings.Contains(user, "连续两个时段不得任务完全相同") {
 		t.Errorf("user prompt missing rule 2 text: %q", user)
 	}
 	if !strings.Contains(user, "【物理状态】") {
