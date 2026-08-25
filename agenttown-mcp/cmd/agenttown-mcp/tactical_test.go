@@ -1482,3 +1482,34 @@ func TestFallbackRetryActions(t *testing.T) {
 		t.Errorf("generic_act should have 30s time_to_stop, got %v", acts[1].Params["time_to_stop"])
 	}
 }
+
+// TestMapTacticalAction_InteractZonePassthrough 验证 InteractSmartObject 的
+// zone 参数会透传给 UE（否则"去中央广场长椅"的日程会落到 NPC 所在 zone）。
+func TestMapTacticalAction_InteractZonePassthrough(t *testing.T) {
+	kb := loadTestKB(t)
+	// 填了 zone → 透传
+	pa := plannedAction{Action: "InteractSmartObject", Params: map[string]any{
+		"semantic_group": "bench", "interaction": "rest", "zone": "central_plaza",
+	}}
+	cmd, params, err := mapTacticalAction(pa, "", kb, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cmd != protocol.CmdInteractSmartObject {
+		t.Fatalf("cmd=%q, want InteractSmartObject", cmd)
+	}
+	if params["zone"] != "central_plaza" {
+		t.Errorf("zone should pass through to UE, got %v", params["zone"])
+	}
+	// 未填 zone → 不附加 zone 字段
+	pa2 := plannedAction{Action: "InteractSmartObject", Params: map[string]any{
+		"semantic_group": "bench", "interaction": "rest",
+	}}
+	_, params2, err := mapTacticalAction(pa2, "", kb, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, has := params2["zone"]; has {
+		t.Errorf("zone should be absent when not provided: %+v", params2)
+	}
+}

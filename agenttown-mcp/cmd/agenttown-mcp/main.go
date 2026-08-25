@@ -576,7 +576,7 @@ func timeStopReplanHint(cmd string, params map[string]any, durationSec float64) 
 	} else {
 		sb.WriteString("，已执行一段时间")
 	}
-	sb.WriteString("。禁止接下来立即继续执行刚才的动作。如有必要可先安排长椅小憩（不超过 30 分钟）再返回工作，也可安排其他动作，如拉伸、阅读等。请避免连续相同长动作且中间无休息。")
+	sb.WriteString("。如有必要可先安排长椅小憩（不超过 30 分钟）再返回工作，也可安排其他动作，如拉伸、阅读等。请避免连续相同长工作且中间无休息。")
 	return sb.String()
 }
 

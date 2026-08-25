@@ -565,11 +565,18 @@ func mapTacticalAction(pa plannedAction, agentID string, kb *worldkb.KB, registr
 			"emotion": pa.Params["emotion"],
 		}, nil
 	case "InteractSmartObject", "interact": // interact 为旧工具名，保留兼容 LLM 偶发输出
-		return protocol.CmdInteractSmartObject, map[string]any{
+		params := map[string]any{
 			"semantic_group": pa.Params["semantic_group"],
 			"interaction":    pa.Params["interaction"],
 			"auto_queue":     true,
-		}, nil
+		}
+		// zone 是 UE 明确支持的参数（capability_registry 声明），透传给 UE。
+		// 否则"去中央广场长椅"等指定区域的日程会被落下到 NPC 所在 zone 的
+		// 设施（如主生产车间的长椅），指定区域的意图落空。
+		if z, ok := pa.Params["zone"].(string); ok && z != "" {
+			params["zone"] = z
+		}
+		return protocol.CmdInteractSmartObject, params, nil
 	case "wait":
 		return protocol.CmdWait, map[string]any{
 			"duration_sec": toFloat(pa.Params["duration_sec"]),
