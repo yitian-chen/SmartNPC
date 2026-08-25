@@ -1332,3 +1332,65 @@ func TestTruncateConversationRounds_OrphanToolHead(t *testing.T) {
 		t.Errorf("head should be first assistant, got role=%q", got[0].Role)
 	}
 }
+
+// ─── fillDefaultTimeToStopForRest ────────────────────────────
+
+func TestFillDefaultTimeToStopForRest_MidQueueRestGetsDefault(t *testing.T) {
+	actions := []plannedAction{
+		{Action: "speak", Params: map[string]any{"content": "hi"}},
+		{Action: "InteractSmartObject", Params: map[string]any{"interaction": "rest", "semantic_group": "bench"}},
+		{Action: "work_shift", Params: map[string]any{"interaction": "assemble", "semantic_group": "workbench", "time_to_stop": 3600}},
+	}
+	got := fillDefaultTimeToStopForRest(actions)
+	if v, ok := got[1].Params["time_to_stop"]; !ok || v != defaultRestTimeToStopSec {
+		t.Fatalf("mid-queue rest should get default time_to_stop=%d, got %v", defaultRestTimeToStopSec, got[1].Params["time_to_stop"])
+	}
+}
+
+func TestFillDefaultTimeToStopForRest_KeepsExisting(t *testing.T) {
+	actions := []plannedAction{
+		{Action: "speak", Params: map[string]any{"content": "hi"}},
+		{Action: "InteractSmartObject", Params: map[string]any{"interaction": "rest", "semantic_group": "bench", "time_to_stop": 900}},
+		{Action: "work_shift", Params: map[string]any{"interaction": "assemble", "semantic_group": "workbench"}},
+	}
+	got := fillDefaultTimeToStopForRest(actions)
+	if v, ok := got[1].Params["time_to_stop"]; !ok || v != 900 {
+		t.Fatalf("existing time_to_stop should be preserved, got %v", got[1].Params["time_to_stop"])
+	}
+}
+
+func TestFillDefaultTimeToStopForRest_TailRestUntouched(t *testing.T) {
+	actions := []plannedAction{
+		{Action: "speak", Params: map[string]any{"content": "hi"}},
+		{Action: "work_shift", Params: map[string]any{"interaction": "assemble", "semantic_group": "workbench"}},
+		{Action: "InteractSmartObject", Params: map[string]any{"interaction": "rest", "semantic_group": "bench"}},
+	}
+	got := fillDefaultTimeToStopForRest(actions)
+	if _, ok := got[2].Params["time_to_stop"]; ok {
+		t.Fatalf("tail rest should stay without time_to_stop, got %v", got[2].Params)
+	}
+}
+
+func TestFillDefaultTimeToStopForRest_NonRestUntouched(t *testing.T) {
+	actions := []plannedAction{
+		{Action: "speak", Params: map[string]any{"content": "hi"}},
+		{Action: "work_shift", Params: map[string]any{"interaction": "assemble", "semantic_group": "workbench"}},
+		{Action: "InteractSmartObject", Params: map[string]any{"interaction": "charge", "semantic_group": "charger"}},
+	}
+	got := fillDefaultTimeToStopForRest(actions)
+	for i, a := range got {
+		if _, ok := a.Params["time_to_stop"]; ok {
+			t.Fatalf("non-rest action %d should not get time_to_stop, got %v", i, a.Params)
+		}
+	}
+}
+
+func TestFillDefaultTimeToStopForRest_SingleActionNoop(t *testing.T) {
+	actions := []plannedAction{
+		{Action: "InteractSmartObject", Params: map[string]any{"interaction": "rest", "semantic_group": "bench"}},
+	}
+	got := fillDefaultTimeToStopForRest(actions)
+	if _, ok := got[0].Params["time_to_stop"]; ok {
+		t.Fatalf("single-action queue should be a no-op, got %v", got[0].Params)
+	}
+}

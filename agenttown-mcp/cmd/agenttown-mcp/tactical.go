@@ -217,12 +217,54 @@ func generateTacticalPlan(
 	if len(actions) == 0 {
 		return nil, llmtypes.Message{}, fmt.Errorf("tactical plan has no actions (raw=%s)", truncateText(raw, 200))
 	}
+	actions = fillDefaultTimeToStopForRest(actions)
 	actionsJSON, _ := json.Marshal(actions)
 	logger.Info("[战术层] 分解成功",
 		"agent_id", agentID, "steps", len(actions),
 		"actions", string(actionsJSON))
 	assistant := llmtypes.Message{Role: "assistant", Content: raw, ToolCalls: resp.ToolCalls}
 	return actions, assistant, nil
+}
+
+// defaultRestTimeToStopSec 是非队尾休息类动作的默认 time_to_stop（30 分钟）。
+// LLM 常给工作段设 time_to_stop 却给中间的"长椅休息"漏设，导致休息段自然
+// 持续到 slot 切换、卡住后续工作动作。此处为兜底，不依赖 LLM 自觉。
+const defaultRestTimeToStopSec = 1800
+
+// fillDefaultTimeToStopForRest 给队列中"非队尾的休息类动作"补齐默认
+// time_to_stop（30 分钟）。只处理 InteractSmartObject + interaction=rest
+// （长椅休息）；队尾动作保持不设（自然持续到时段切换）。
+func fillDefaultTimeToStopForRest(actions []plannedAction) []plannedAction {
+	if len(actions) < 2 {
+		return actions
+	}
+	for i := 0; i < len(actions)-1; i++ {
+		a := &actions[i]
+		if a.Action != "InteractSmartObject" || !paramIs(a.Params, "interaction", "rest") {
+			continue
+		}
+		if _, ok := a.Params["time_to_stop"]; ok {
+			continue
+		}
+		if a.Params == nil {
+			a.Params = map[string]any{}
+		}
+		a.Params["time_to_stop"] = defaultRestTimeToStopSec
+	}
+	return actions
+}
+
+// paramIs 判断 Params 中 key 对应的字符串值是否等于 want。
+func paramIs(params map[string]any, key, want string) bool {
+	if params == nil {
+		return false
+	}
+	v, ok := params[key]
+	if !ok {
+		return false
+	}
+	s, _ := v.(string)
+	return s == want
 }
 
 // parseToolCalls 把 LLM 返回的 tool_calls 解析为 plannedAction 队列。
