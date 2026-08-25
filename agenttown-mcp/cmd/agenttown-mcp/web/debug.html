@@ -250,6 +250,15 @@
     font-family: "Consolas", "Monaco", monospace;
   }
   .tac-inflight { color: #c9a227; }
+  .tac-inflight-line {
+    color: #c9a227;
+    font-family: "Consolas", "Monaco", monospace;
+    font-size: 12px;
+    margin: 4px 0;
+    word-break: break-all;
+  }
+  .tac-inflight-line.muted { color: var(--text-muted); }
+  .tac-inflight-line .tac-action { color: #e0a800; white-space: nowrap; }
   .tac-qlen { color: var(--text-muted); }
   .tac-goal { color: var(--text); margin: 4px 0; word-break: break-word; }
   .tac-goal.muted, .tac-slot.muted, .tac-queue.muted { color: var(--text-muted); }
@@ -632,8 +641,8 @@ function renderTactical(entries) {
       ? `<div class="tac-goal">当前目标：${escapeHtml(e.current_goal)}</div>`
       : '<div class="tac-goal muted">暂无当前目标（计划未生成或处于规划窗口）</div>';
     const inflight = e.in_flight
-      ? `<span class="tac-inflight">在途: ${escapeHtml(e.in_flight.slice(0, 18))}</span>`
-      : '';
+      ? `<div class="tac-inflight-line">执行中: <span class="tac-action">${escapeHtml(e.in_flight_cmd || e.in_flight.slice(0, 18))}</span>${fmtTacticalParams(e.in_flight_params) ? ` <span class="tac-params">${fmtTacticalParams(e.in_flight_params)}</span>` : ''}</div>`
+      : '<div class="tac-inflight-line muted">当前无在途 action</div>';
     const queue = (e.queue || []).map(a => {
       const params = fmtTacticalParams(a.params);
       return `<div class="tac-task"><span class="tac-action">${escapeHtml(a.action)}</span>${params ? `<span class="tac-params">${params}</span>` : ''}</div>`;
@@ -646,9 +655,9 @@ function renderTactical(entries) {
         <span class="tac-agent">${escapeHtml(e.agent_id)}</span>
         <span class="tac-time">${escapeHtml(e.game_time || '--:--')}</span>
         ${slot}
-        ${inflight}
         <span class="tac-qlen">队列 ${e.queue_len}</span>
       </div>
+      ${inflight}
       ${goal}
       ${queueBody}
     </div>`;

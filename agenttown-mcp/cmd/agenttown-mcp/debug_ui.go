@@ -216,15 +216,17 @@ func handleDebugUEErrors(w http.ResponseWriter, r *http.Request, logger *slog.Lo
 }
 
 // debugTacticalEntry 是 /debug/tactical 返回的单个 agent 战术层分解快照：
-// 当前时段 goal + 战术层队列中待执行的任务列表。
+// 当前在途 action + 当前时段 goal + 战术层队列中待执行的任务列表。
 type debugTacticalEntry struct {
-	AgentID     string                `json:"agent_id"`
-	GameTime    string                `json:"game_time"`              // "HH:MM"（来自最新 perception）
-	CurrentSlot string                `json:"current_slot"`           // "HH:MM-HH:MM" 或 ""
-	CurrentGoal string                `json:"current_goal,omitempty"` // 当前时段 goal（来自战略层计划）
-	QueueLen    int                   `json:"queue_len"`              // 队列中剩余任务数
-	Queue       []debugTacticalAction `json:"queue"`                  // 战术层分解出的任务列表
-	InFlight    string                `json:"in_flight,omitempty"`    // 当前在途 action_id
+	AgentID        string                `json:"agent_id"`
+	GameTime       string                `json:"game_time"`                  // "HH:MM"（来自最新 perception）
+	CurrentSlot    string                `json:"current_slot"`               // "HH:MM-HH:MM" 或 ""
+	CurrentGoal    string                `json:"current_goal,omitempty"`     // 当前时段 goal（来自战略层计划）
+	QueueLen       int                   `json:"queue_len"`                  // 队列中剩余任务数
+	Queue          []debugTacticalAction `json:"queue"`                      // 战术层分解出的任务列表
+	InFlight       string                `json:"in_flight,omitempty"`        // 当前在途 action_id
+	InFlightCmd    string                `json:"in_flight_cmd,omitempty"`    // 当前在途 action 的工具名
+	InFlightParams map[string]any        `json:"in_flight_params,omitempty"` // 当前在途 action 的全部参数
 }
 
 // debugTacticalAction 是队列中的一个战术层分解任务（对应一次工具调用）。
@@ -268,14 +270,17 @@ func handleDebugTactical(w http.ResponseWriter, r *http.Request, lookupAgent fun
 		for _, pa := range queue {
 			q = append(q, debugTacticalAction{Action: pa.Action, Params: pa.Params})
 		}
+		snap := ac.as.Snapshot()
 		resp = append(resp, debugTacticalEntry{
-			AgentID:     id,
-			GameTime:    ac.latestTimeOfDay(),
-			CurrentSlot: slot,
-			CurrentGoal: goal,
-			QueueLen:    len(q),
-			Queue:       q,
-			InFlight:    ac.as.CurrentActionID(),
+			AgentID:        id,
+			GameTime:       ac.latestTimeOfDay(),
+			CurrentSlot:    slot,
+			CurrentGoal:    goal,
+			QueueLen:       len(q),
+			Queue:          q,
+			InFlight:       snap.CurrentActionID,
+			InFlightCmd:    snap.CurrentActionCmd,
+			InFlightParams: snap.CurrentActionParams,
 		})
 	}
 	if resp == nil {
