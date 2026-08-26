@@ -7,7 +7,7 @@
 #   - 启动后打印局域网地址给 UE 同事
 #
 # 启动组件：
-#   1. agenttown-mcp.exe (Windows, WS :9090 + HTTP :8760)  ← UE 连这个
+#   1. agenttown-mcp.exe (Windows, WS :9092 + HTTP :8760)  ← UE 连这个
 #
 # LLM 后端：MCP 直连 Venus（OpenAI Chat Completions 协议），
 # 凭据 VENUS_API_KEY 从 .env 读取，启动时透传给 MCP 进程。
@@ -45,7 +45,7 @@ MCP_DIR="$PROJECT_DIR/agenttown-mcp"
 MCP_EXE_NAME="${MCP_EXE_NAME:-agenttown-mcp.exe}"
 MCP_EXE="$MCP_DIR/$MCP_EXE_NAME"
 ENV_FILE="$PROJECT_DIR/.env"
-WS_PORT="${WS_PORT:-9090}"
+WS_PORT="${WS_PORT:-9092}"
 HTTP_PORT="${HTTP_PORT:-8760}"
 
 # ─── MySQL 配置（仅 Linux 云环境默认启用）──────────────────
@@ -544,7 +544,7 @@ start_mcp() {
     fi
 
     info "Starting MCP (log: logs/$LOG_DATE/debug-mcp.log)..."
-    # --ws :9090 在 Windows 上监听 0.0.0.0:9090，局域网可达
+    # --ws :9092 在 Windows 上监听 0.0.0.0:9092，局域网可达
     # --http :8760 同理
     # MCP 直连 Venus（OpenAI Chat Completions 协议），--venus-api-key 透传凭据。
     # --world-kb 用绝对路径，避免 cwd 不对找不到 assets/world_kb.yaml
