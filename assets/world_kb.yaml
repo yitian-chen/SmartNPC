@@ -1577,11 +1577,11 @@ zones:
     - actor_path: /AgentTownBridge/Map/AgentTown.AgentTown:PersistentLevel.BP_AT_LogisticsHub_C_UAID_ACF46673A2EA25F302_1323014622
       bounds:
         center:
-            - -8423.9
-            - -8360.21
+            - -8703.9
+            - -8030.21
             - -22802.58
         extent:
-            - 1500
+            - 1400
             - 7000
             - 2000
         rotation:
@@ -1599,8 +1599,8 @@ zones:
         - 0.66
         - 0
       entry_point:
-        - -8423.9
-        - -8360.21
+        - -8703.9
+        - -8030.21
         - -22802.58
       id: logistics_hub
     - actor_path: /AgentTownBridge/Map/AgentTown.AgentTown:PersistentLevel.BP_AT_MainWorkShop_C_UAID_ACF46673A2EA22F302_1440335089
