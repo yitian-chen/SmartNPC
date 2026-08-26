@@ -30,6 +30,59 @@ start-debug.sh / start-dev.sh   # 启动脚本（stable / dev 实例）
 CODEBUDDY.md                    # 完整开发手册
 ```
 
+## Agent 内部数据流
+
+每 NPC 一个独立 worker，事件驱动（perception_update / action_completed 唤醒）：
+
+```mermaid
+flowchart TB
+    subgraph UE5["UE5 游戏世界"]
+        P["perception_update<br/>位置 / 物理 / 物体占用"]
+        ACK["action_started (ACK ≤2s)"]
+        DONE["action_completed<br/>result / duration_ms"]
+    end
+
+    subgraph MCP["agenttown-mcp（每 NPC 独立 worker）"]
+        WS["wsserver<br/>消息收发 / seq 重放"]
+        AS["agentstate<br/>世界快照 · actionQueue(1-4段)<br/>多轮会话历史(截8轮) · dailyPlan"]
+
+        subgraph W["worker 循环（事件驱动）"]
+            ADV["advanceSlotIfNeeded<br/>slot 过期 → 清队列"]
+            CHK["checkTimeToStop<br/>段到点 → 打断当前段保队列"]
+            REF["tacticalRefill<br/>队列空 → 重新分解"]
+        end
+
+        TAC["战术层分解<br/>function calling · time_to_stop 兜底<br/>失败兜底(speak+look_around)"]
+        STR["战略层规划（每日 07:00 / 跨日）<br/>日终记忆 → LLM → dailyPlan<br/>normalize + ±15min jitter"]
+        MAP["mapTacticalAction<br/>工具名 → UE cmd"]
+    end
+
+    VT["Venus 战术层<br/>deepseek-v4-flash<br/>tools + tool_choice=required"]
+    VS["Venus 战略层<br/>deepseek-v4-pro<br/>Structured Outputs"]
+
+    %% 感知流
+    P --> WS --> AS
+    AS -->|"signal"| W
+
+    %% 战术决策流
+    ADV --> REF
+    CHK --> REF
+    REF --> TAC
+    TAC -->|"prompt / tool_calls 1-4 段"| VT
+    TAC -->|"ReplaceQueue 入队"| AS
+
+    %% 战略决策流
+    AS -->|"day_count 递增"| STR
+    STR -->|"prompt / dailyPlan JSON"| VS
+    STR -->|"SetDailyPlan"| AS
+
+    %% 执行流
+    MAP -->|"action_command"| WS
+    WS --> ACK
+    WS --> DONE
+    DONE -->|"tool 结果入会话历史 · action_history 落盘 · signal"| AS
+```
+
 ## 快速开始
 
 ### dev 与 stable 仓库的关系

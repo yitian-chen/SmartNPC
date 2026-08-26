@@ -3,7 +3,7 @@
 #
 # 启动开发实例（本目录 /data/workspace/dev，跑 dev-working 分支，偏移端口
 # 8770/9091）。与 stable 目录的实例（/data/workspace/stable，跑 master
-# 分支，默认端口 8760/9090）端口隔离，可同时运行。
+# 分支，默认端口 8760/9092）端口隔离，可同时运行。
 #
 # 端口分配（dev 偏移端口）：
 #   MCP WS    9091
@@ -20,7 +20,7 @@
 #   bash start-dev.sh                # 启动开发实例全套
 #   bash start-dev.sh --stop         # 停开发实例
 
-# 端口：dev 偏移端口（与 stable 默认端口 8760/9090 隔离）
+# 端口：dev 偏移端口（与 stable 默认端口 8760/9092 隔离）
 export WS_PORT=9091
 export HTTP_PORT=8770
 

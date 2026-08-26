@@ -47,7 +47,7 @@ func BuildTacticalSystemPrompt(kb *worldkb.KB, profiles map[string]*profile.Prof
 // 【附近NPC】/【物体实时占用】 point at the user message's dynamic segments.
 // The available tools are NOT listed here — they arrive via the
 // function-calling `tools` request field.
-const TacticalRules = `1. 第一个工具调用必须是 speak（用一段话表达此刻内心想法或独白），随后可返回 1-4 个动作段，按执行顺序排列。每段是长复合动作或 InteractSmartObject 长动作，段间用 time_to_stop 控制时长；最后一段以长动作收尾（可不设 time_to_stop，自然持续到时段切换）。可以在动作之间穿插speak表达现在的情况。
+const TacticalRules = `1. 第一个工具调用必须是 speak（用一段话表达此刻内心想法或独白），随后可返回 1-4 个动作段，按执行顺序排列。每段是长复合动作或 InteractSmartObject 长动作，段间用 time_to_stop 控制时长；最后一段以长动作收尾（不设 time_to_stop，自然持续到时段切换）。可以在动作之间穿插speak表达现在的情况。
 2. 你可以根据当前NPC的实际属性、实际游戏时间等信息灵活安排，如果当前此条日程并不合理，例如半夜不睡觉而是跑步/工作、电量不为低时就去充电等情况，请下发更合理的动作，不必遵守原有日程规定。
 3. 复合动作已包含自动移动到对应位置的逻辑，禁止在复合动作前调用 move_to——直接调用单个长复合动作即可。
 4. 仅当目标确实没有匹配的长复合动作时，才用原子动作组合实现目标。禁止把同一动作连续重复多次填充时段（工作段之间应穿插休息段）。
@@ -56,7 +56,7 @@ const TacticalRules = `1. 第一个工具调用必须是 speak（用一段话表
    - 补充：所有工种设备都可用 InteractSmartObject 原子动作直接工作——semantic_group 填工作设备、interaction 填对应动词即可（如 加工机 process、调试台 debug、拆解台 dismantle，以及 workbench/assemble、sorting_conveyor/sort_cargo、inspection_table/inspect）；work_shift 只是其中三类工种设备的快捷复合动作，没有复合动作的工种一律用 InteractSmartObject。
 7. 长动作可加 time_to_stop 参数（秒）设置该段动作的时长：冥想、整理床铺等单段设 1800 秒左右，不宜超过 1 小时。到点后系统会打断该段并继续执行你返回的后续动作段；只有你返回的动作全部执行完，系统才会再次询问你。推荐模式：工作段（设 time_to_stop，如 1.5 小时）→ 长椅小憩/原地拉伸段（设 time_to_stop，不超过 30 分钟）→ 返回工作段（不设，持续到时段结束）。
 8. 工具调用队列除了最后一个调用，其他都需要设置time_to_stop；每次生成的最后一个动作都必须是不设time_to_stop的长动作，确保NPC不会在时间结束后呆站。
-9. 若当前日程目标明确指定了区域（如"去中央广场休息""到物流站工作"），调用 InteractSmartObject 等设施工具时**必须**在该工具的 zone 参数中填写对应区域 id（如 central_plaza、logistics_hub）；不填则默认只找 NPC 所在 zone 的设施，会导致"去指定区域"的日程落空。仅当目标未指定区域时才可不填 zone（默认就近）。`
+9. 如果是调用 InteractSmartObject 工具，若当前日程目标明确指定了区域（如"去中央广场长椅休息"），**必须**在该工具的 zone 参数中填写对应区域 id（如 central_plaza、logistics_hub）。`
 
 // BuildTactical constructs the tactical layer's user message, four parts:
 //  1. 全天任务与当前时段任务 — full-day schedule + current slot goal +

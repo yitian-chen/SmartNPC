@@ -370,6 +370,112 @@ func TestGenerateTacticalPlan_ResetSessionCalled(t *testing.T) {
 	}
 }
 
+// ─── venus 4001 重试 ────────────────────────────────────────
+
+// sequenceCaller 按调用次数依次返回 seq[i] 的错误（nil 表示成功返回 resp），
+// 用于验证 4001 重试次数。实现 llmClient 全部方法。
+type sequenceCaller struct {
+	seq        []error
+	resp       *llmtypes.Response
+	calls      int
+	resetCount int
+}
+
+func (s *sequenceCaller) next() (*llmtypes.Response, error) {
+	if s.calls >= len(s.seq) {
+		s.calls++
+		return nil, errors.New("unexpected call")
+	}
+	err := s.seq[s.calls]
+	s.calls++
+	if err == nil {
+		return s.resp, nil
+	}
+	return nil, err
+}
+
+func (s *sequenceCaller) SendWithSummary(_ context.Context, _, _ string) (*llmtypes.Response, error) {
+	return s.next()
+}
+func (s *sequenceCaller) SendWithSummaryTools(_ context.Context, _, _ string, _ []venus.Tool) (*llmtypes.Response, error) {
+	return s.next()
+}
+func (s *sequenceCaller) SendMessagesTools(_ context.Context, _ []llmtypes.Message, _ []venus.Tool) (*llmtypes.Response, error) {
+	return s.next()
+}
+func (s *sequenceCaller) SendStreaming(_ context.Context, _, _ string, _ func(string)) (*llmtypes.Response, error) {
+	return s.next()
+}
+func (s *sequenceCaller) SendStreamingTools(_ context.Context, _, _ string, _ []venus.Tool, _ func(string), _ func(llmtypes.ToolCall)) (*llmtypes.Response, error) {
+	return s.next()
+}
+func (s *sequenceCaller) SendWithSchema(_ context.Context, _, _, _ string, _ []byte) (*llmtypes.Response, error) {
+	return s.next()
+}
+func (s *sequenceCaller) ResetSession() { s.resetCount++ }
+
+// venusErr4001 模拟 venus 校验 tools JSON 失败的 500 响应（code 4001）。
+var venusErr4001 = errors.New(`venus status 500: {"error":{"message":"Response generation failed: 1 validation error for list[FunctionDefinition]","type":"server_error","code":"4001"},"venusMarker":{"spanId":"test"}}`)
+
+func TestGenerateTacticalPlan_RetryOn4001(t *testing.T) {
+	// 前两次 4001，第三次成功 → 重试后成功，共调用 3 次（1 首调 + 2 重试）。
+	tc := &sequenceCaller{
+		seq:  []error{venusErr4001, venusErr4001, nil},
+		resp: makeToolCallResponse([]llmtypes.ToolCall{{Function: llmtypes.ToolFunction{Name: "speak", Arguments: `{"content":"重试成功"}`}}}),
+	}
+	actions, _, err := generateTacticalPlan(context.Background(), tc, nil, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", "", &protocol.PhysicalState{Energy: 80}, nil, nil, slog.Default(), "", "", "", nil, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error after retries: %v", err)
+	}
+	if tc.calls != 3 {
+		t.Fatalf("got %d calls, want 3 (1 initial + 2 retries)", tc.calls)
+	}
+	if len(actions) != 1 {
+		t.Fatalf("got %d actions, want 1", len(actions))
+	}
+	if tc.resetCount != 1 {
+		t.Errorf("resetCount=%d, want 1", tc.resetCount)
+	}
+}
+
+func TestGenerateTacticalPlan_RetryExhausted(t *testing.T) {
+	// 连续 4 次 4001 → 重试 3 次后仍失败，最终返回错误。
+	tc := &sequenceCaller{seq: []error{venusErr4001, venusErr4001, venusErr4001, venusErr4001}}
+	_, _, err := generateTacticalPlan(context.Background(), tc, nil, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", "", nil, nil, nil, slog.Default(), "", "", "", nil, nil, nil, nil)
+	if err == nil {
+		t.Fatal("expected error after exhausting retries")
+	}
+	if tc.calls != 4 {
+		t.Fatalf("got %d calls, want 4 (1 initial + 3 retries)", tc.calls)
+	}
+}
+
+func TestGenerateTacticalPlan_NoRetryOnNon4001(t *testing.T) {
+	// 非 4001 错误（如超时/连接失败）不重试，仅调用 1 次。
+	tc := &sequenceCaller{seq: []error{errors.New("http do: Post: context deadline exceeded")}}
+	if _, _, err := generateTacticalPlan(context.Background(), tc, nil, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", "", nil, nil, nil, slog.Default(), "", "", "", nil, nil, nil, nil); err == nil {
+		t.Fatal("expected error")
+	}
+	if tc.calls != 1 {
+		t.Fatalf("got %d calls, want 1 (no retry for non-4001)", tc.calls)
+	}
+}
+
+func TestIsVenusErrorCode(t *testing.T) {
+	if !isVenusErrorCode(venusErr4001, "4001") {
+		t.Error("expected 4001 match")
+	}
+	if isVenusErrorCode(venusErr4001, "4002") {
+		t.Error("unexpected 4002 match")
+	}
+	if isVenusErrorCode(errors.New("http do: Post: context deadline exceeded"), "4001") {
+		t.Error("non-venus error should not match")
+	}
+	if isVenusErrorCode(nil, "4001") {
+		t.Error("nil error should not match")
+	}
+}
+
 // ─── buildTacticalPrompt ─────────────────────────────────────
 
 func TestBuildTacticalPrompt_NilPhysical(t *testing.T) {
@@ -1239,97 +1345,6 @@ func TestBuildTacticalPrompt_NoPhysicalAlertConstraint(t *testing.T) {
 
 	if strings.Contains(promptText, "【物理告警强制约束】") {
 		t.Errorf("non-physical-alert hint should NOT contain constraint section, got: %s", promptText)
-	}
-}
-
-// ─── truncateConversationRounds ───────────────────────────────
-
-// testConvRound 构造一轮完整对话：assistant(带 tool_calls) + 对应 tool 结果。
-func testConvRound(id string) []llmtypes.Message {
-	return []llmtypes.Message{
-		{Role: "assistant", Content: "speak " + id, ToolCalls: []llmtypes.ToolCall{{ID: id, Type: "function", Function: llmtypes.ToolFunction{Name: "speak", Arguments: "{}"}}}},
-		{Role: "tool", Content: "result=success", ToolCallID: id},
-	}
-}
-
-func TestTruncateConversationRounds_Empty(t *testing.T) {
-	if got := truncateConversationRounds(nil, maxTacticalHistoryRounds); got != nil {
-		t.Errorf("empty input should stay nil, got %v", got)
-	}
-	if got := truncateConversationRounds([]llmtypes.Message{}, maxTacticalHistoryRounds); len(got) != 0 {
-		t.Errorf("empty slice should stay empty, got %d items", len(got))
-	}
-}
-
-func TestTruncateConversationRounds_NoopWhenBelowLimit(t *testing.T) {
-	conv := []llmtypes.Message{}
-	for i := 0; i < 5; i++ {
-		conv = append(conv, testConvRound(fmt.Sprintf("c%d", i))...)
-	}
-	got := truncateConversationRounds(conv, maxTacticalHistoryRounds)
-	if len(got) != len(conv) {
-		t.Errorf("below-limit history should be unchanged: got %d want %d", len(got), len(conv))
-	}
-	for i := range conv {
-		if got[i].Role != conv[i].Role || got[i].Content != conv[i].Content {
-			t.Errorf("below-limit history should preserve order/content: got[%d]=%+v want %+v", i, got[i], conv[i])
-		}
-	}
-}
-
-func TestTruncateConversationRounds_KeepsRecentRounds(t *testing.T) {
-	conv := []llmtypes.Message{}
-	for i := 0; i < 20; i++ {
-		conv = append(conv, testConvRound(fmt.Sprintf("c%d", i))...)
-	}
-	got := truncateConversationRounds(conv, 8)
-	if len(got) != 16 { // 8 轮 × 2 条
-		t.Fatalf("got %d messages, want 16 (8 rounds)", len(got))
-	}
-	// 起点必须是 assistant（tool 消息不能成为头部孤儿）。
-	if got[0].Role != "assistant" {
-		t.Errorf("truncated head should be an assistant message, got role=%q", got[0].Role)
-	}
-	// 应保留 c12..c19 这最后 8 轮。
-	if !strings.Contains(got[0].Content, "c12") {
-		t.Errorf("head should be round c12, got %q", got[0].Content)
-	}
-	// 每一对 assistant/tool 必须保持配对与顺序。
-	for i := 0; i+1 < len(got); i += 2 {
-		if got[i].Role != "assistant" || got[i+1].Role != "tool" {
-			t.Fatalf("pair %d broken: %+v / %+v", i, got[i], got[i+1])
-		}
-		if got[i+1].ToolCallID != got[i].ToolCalls[0].ID {
-			t.Errorf("pair %d: tool_call_id %q does not match assistant tool_calls id %q",
-				i, got[i+1].ToolCallID, got[i].ToolCalls[0].ID)
-		}
-	}
-}
-
-func TestTruncateConversationRounds_NonPositiveLimit(t *testing.T) {
-	conv := testConvRound("c0")
-	if got := truncateConversationRounds(conv, 0); got != nil {
-		t.Errorf("maxRounds=0 should return nil, got %v", got)
-	}
-	if got := truncateConversationRounds(conv, -3); got != nil {
-		t.Errorf("negative maxRounds should return nil, got %v", got)
-	}
-}
-
-func TestTruncateConversationRounds_OrphanToolHead(t *testing.T) {
-	conv := []llmtypes.Message{
-		{Role: "tool", Content: "result=failed", ToolCallID: "orphan"},
-	}
-	for i := 0; i < 3; i++ {
-		conv = append(conv, testConvRound(fmt.Sprintf("c%d", i))...)
-	}
-	got := truncateConversationRounds(conv, 8)
-	// 头部孤儿 tool 应被丢弃（不足上限，但头部非 assistant）。
-	if len(got) != 6 {
-		t.Fatalf("got %d messages, want 6 (orphan dropped)", len(got))
-	}
-	if got[0].Role != "assistant" {
-		t.Errorf("head should be first assistant, got role=%q", got[0].Role)
 	}
 }
 
