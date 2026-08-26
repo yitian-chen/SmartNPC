@@ -370,6 +370,112 @@ func TestGenerateTacticalPlan_ResetSessionCalled(t *testing.T) {
 	}
 }
 
+// ─── venus 4001 重试 ────────────────────────────────────────
+
+// sequenceCaller 按调用次数依次返回 seq[i] 的错误（nil 表示成功返回 resp），
+// 用于验证 4001 重试次数。实现 llmClient 全部方法。
+type sequenceCaller struct {
+	seq        []error
+	resp       *llmtypes.Response
+	calls      int
+	resetCount int
+}
+
+func (s *sequenceCaller) next() (*llmtypes.Response, error) {
+	if s.calls >= len(s.seq) {
+		s.calls++
+		return nil, errors.New("unexpected call")
+	}
+	err := s.seq[s.calls]
+	s.calls++
+	if err == nil {
+		return s.resp, nil
+	}
+	return nil, err
+}
+
+func (s *sequenceCaller) SendWithSummary(_ context.Context, _, _ string) (*llmtypes.Response, error) {
+	return s.next()
+}
+func (s *sequenceCaller) SendWithSummaryTools(_ context.Context, _, _ string, _ []venus.Tool) (*llmtypes.Response, error) {
+	return s.next()
+}
+func (s *sequenceCaller) SendMessagesTools(_ context.Context, _ []llmtypes.Message, _ []venus.Tool) (*llmtypes.Response, error) {
+	return s.next()
+}
+func (s *sequenceCaller) SendStreaming(_ context.Context, _, _ string, _ func(string)) (*llmtypes.Response, error) {
+	return s.next()
+}
+func (s *sequenceCaller) SendStreamingTools(_ context.Context, _, _ string, _ []venus.Tool, _ func(string), _ func(llmtypes.ToolCall)) (*llmtypes.Response, error) {
+	return s.next()
+}
+func (s *sequenceCaller) SendWithSchema(_ context.Context, _, _, _ string, _ []byte) (*llmtypes.Response, error) {
+	return s.next()
+}
+func (s *sequenceCaller) ResetSession() { s.resetCount++ }
+
+// venusErr4001 模拟 venus 校验 tools JSON 失败的 500 响应（code 4001）。
+var venusErr4001 = errors.New(`venus status 500: {"error":{"message":"Response generation failed: 1 validation error for list[FunctionDefinition]","type":"server_error","code":"4001"},"venusMarker":{"spanId":"test"}}`)
+
+func TestGenerateTacticalPlan_RetryOn4001(t *testing.T) {
+	// 前两次 4001，第三次成功 → 重试后成功，共调用 3 次（1 首调 + 2 重试）。
+	tc := &sequenceCaller{
+		seq:  []error{venusErr4001, venusErr4001, nil},
+		resp: makeToolCallResponse([]llmtypes.ToolCall{{Function: llmtypes.ToolFunction{Name: "speak", Arguments: `{"content":"重试成功"}`}}}),
+	}
+	actions, _, err := generateTacticalPlan(context.Background(), tc, nil, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", "", &protocol.PhysicalState{Energy: 80}, nil, nil, slog.Default(), "", "", "", nil, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error after retries: %v", err)
+	}
+	if tc.calls != 3 {
+		t.Fatalf("got %d calls, want 3 (1 initial + 2 retries)", tc.calls)
+	}
+	if len(actions) != 1 {
+		t.Fatalf("got %d actions, want 1", len(actions))
+	}
+	if tc.resetCount != 1 {
+		t.Errorf("resetCount=%d, want 1", tc.resetCount)
+	}
+}
+
+func TestGenerateTacticalPlan_RetryExhausted(t *testing.T) {
+	// 连续 4 次 4001 → 重试 3 次后仍失败，最终返回错误。
+	tc := &sequenceCaller{seq: []error{venusErr4001, venusErr4001, venusErr4001, venusErr4001}}
+	_, _, err := generateTacticalPlan(context.Background(), tc, nil, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", "", nil, nil, nil, slog.Default(), "", "", "", nil, nil, nil, nil)
+	if err == nil {
+		t.Fatal("expected error after exhausting retries")
+	}
+	if tc.calls != 4 {
+		t.Fatalf("got %d calls, want 4 (1 initial + 3 retries)", tc.calls)
+	}
+}
+
+func TestGenerateTacticalPlan_NoRetryOnNon4001(t *testing.T) {
+	// 非 4001 错误（如超时/连接失败）不重试，仅调用 1 次。
+	tc := &sequenceCaller{seq: []error{errors.New("http do: Post: context deadline exceeded")}}
+	if _, _, err := generateTacticalPlan(context.Background(), tc, nil, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", "", nil, nil, nil, slog.Default(), "", "", "", nil, nil, nil, nil); err == nil {
+		t.Fatal("expected error")
+	}
+	if tc.calls != 1 {
+		t.Fatalf("got %d calls, want 1 (no retry for non-4001)", tc.calls)
+	}
+}
+
+func TestIsVenusErrorCode(t *testing.T) {
+	if !isVenusErrorCode(venusErr4001, "4001") {
+		t.Error("expected 4001 match")
+	}
+	if isVenusErrorCode(venusErr4001, "4002") {
+		t.Error("unexpected 4002 match")
+	}
+	if isVenusErrorCode(errors.New("http do: Post: context deadline exceeded"), "4001") {
+		t.Error("non-venus error should not match")
+	}
+	if isVenusErrorCode(nil, "4001") {
+		t.Error("nil error should not match")
+	}
+}
+
 // ─── buildTacticalPrompt ─────────────────────────────────────
 
 func TestBuildTacticalPrompt_NilPhysical(t *testing.T) {

@@ -28,6 +28,20 @@ type plannedAction = agentstate.PlannedAction
 // 且注意力漂移（如夜间仍按白天习惯工作），因此只保留最近若干轮。
 const maxTacticalHistoryRounds = 8
 
+// maxTacticalRetries 是战术层对 venus 4001（tools JSON 校验失败）的相同请求体重试上限。
+// 4001 是 venus 侧校验响应失败，重试相同请求体通常能绕开瞬时坏输出；超时/连接错误等
+// 其他失败不重试，交给调用方兜底（speak+look_around + 下一感知周期再分解）。
+const maxTacticalRetries = 3
+
+// isVenusErrorCode 判断 venus 网关返回的错误码。错误消息形如
+// "venus status 500: {\"error\":{...,\"code\":\"4001\",...}}"，按 "code":"<code>" 匹配。
+func isVenusErrorCode(err error, code string) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), `"code":"`+code+`"`)
+}
+
 // truncateConversationRounds 把会话历史裁剪为最近 maxRounds 轮完整轮次。
 // 以 assistant 消息为轮边界从后向前计数；保留起点一定是 assistant，其后
 // 的 tool 消息全部完整，保证 function-calling 消息配对不破坏。
@@ -197,7 +211,15 @@ func generateTacticalPlan(
 	messages = append(messages, conversation...)
 	messages = append(messages, llmtypes.Message{Role: "user", Content: promptText})
 
+	// 4001 重试：venus 校验 tools JSON 失败（code 4001）时以相同请求体重试，
+	// 上限 maxTacticalRetries 次。其余错误（超时/连接/非 4001 的 500）不重试，
+	// 由调用方兜底（speak+look_around + 下一感知周期再分解）。
 	resp, err := tc.SendMessagesTools(ctx, messages, ftools)
+	for attempt := 1; err != nil && isVenusErrorCode(err, "4001") && attempt <= maxTacticalRetries; attempt++ {
+		logger.Warn("[战术层] venus 4001，重试相同请求体",
+			"agent_id", agentID, "retry", attempt, "max", maxTacticalRetries, "err", err)
+		resp, err = tc.SendMessagesTools(ctx, messages, ftools)
+	}
 	// 实际 prompt 文档：记录 H-01 最新一次战术层请求体完整 JSON（无论成败）。
 	dumpLastRequestBody(agentID, "tactical", tc, logger)
 	if err != nil {
