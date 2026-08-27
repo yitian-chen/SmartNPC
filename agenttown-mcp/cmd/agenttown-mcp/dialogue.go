@@ -7,12 +7,12 @@ import (
 	"time"
 
 	"github.com/AgentTown/agenttown-mcp/pkg/agentstate"
+	"github.com/AgentTown/agenttown-mcp/pkg/contract"
 	"github.com/AgentTown/agenttown-mcp/pkg/profile"
 	"github.com/AgentTown/agenttown-mcp/pkg/prompt"
 	"github.com/AgentTown/agenttown-mcp/pkg/protocol"
 	"github.com/AgentTown/agenttown-mcp/pkg/storage"
 	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
-	"github.com/AgentTown/agenttown-mcp/pkg/wsserver"
 
 	"log/slog"
 	"strings"
@@ -60,7 +60,7 @@ const (
 //     hold mu for the LLM call + send + persist.
 type dialogueRunner struct {
 	ac       *agentContext
-	ws       *wsserver.Server
+	ws       contract.Transport
 	kb       *worldkb.KB
 	profiles map[string]*profile.Profile
 	logger   *slog.Logger
@@ -78,7 +78,7 @@ type dialogueRunner struct {
 // runner (phase=none); conversation state is populated on the first invite
 // or invite_rsp. deps may be nil when dialogue is disabled — callers should
 // nil-check the returned runner before invoking handlers.
-func newDialogueRunner(ac *agentContext, ws *wsserver.Server, kb *worldkb.KB, profiles map[string]*profile.Profile, logger *slog.Logger) *dialogueRunner {
+func newDialogueRunner(ac *agentContext, ws contract.Transport, kb *worldkb.KB, profiles map[string]*profile.Profile, logger *slog.Logger) *dialogueRunner {
 	if ac == nil || ws == nil {
 		return nil
 	}

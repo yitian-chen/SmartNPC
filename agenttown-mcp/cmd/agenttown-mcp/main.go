@@ -38,6 +38,7 @@ import (
 	"github.com/AgentTown/agenttown-mcp/adapters/agenttown/tools"
 	"github.com/AgentTown/agenttown-mcp/internal/log"
 	"github.com/AgentTown/agenttown-mcp/pkg/agentstate"
+	"github.com/AgentTown/agenttown-mcp/pkg/contract"
 	"github.com/AgentTown/agenttown-mcp/pkg/llmtypes"
 	"github.com/AgentTown/agenttown-mcp/pkg/ollama"
 	"github.com/AgentTown/agenttown-mcp/pkg/profile"
@@ -465,7 +466,7 @@ func (a *agentContext) loadRelationships(ctx context.Context, agentID string, kb
 // 反应层 replan 进行中（replanInProgress=true）时本方法仍可执行：schedule
 // 切换优先级高于反应层 replan，清掉的 in-flight 状态不会干扰 replan
 // （replan 自己会重新规划，且 replanInProgress 由 replan 路径自己清除）。
-func (a *agentContext) advanceSlotIfNeeded(ws *wsserver.Server, agentID string, logger *slog.Logger) {
+func (a *agentContext) advanceSlotIfNeeded(ws contract.Transport, agentID string, logger *slog.Logger) {
 	// 检查 slot 是否过期（AgentState 内部持锁判断）
 	_, slot, _ := a.as.SnapshotSchedule()
 	tod := a.as.LatestTimeOfDay()
@@ -688,7 +689,7 @@ func runPerceptionWorker(
 	ctx context.Context,
 	agentID string,
 	ac *agentContext,
-	ws *wsserver.Server,
+	ws contract.Transport,
 	kb *worldkb.KB,
 	profiles map[string]*profile.Profile,
 	weeklySched *weeklyschedule.Schedule,
@@ -830,7 +831,7 @@ func formatTodSec(todSec float64) string {
 }
 
 type guardedExecutor struct {
-	ws     *wsserver.Server
+	ws     contract.Transport
 	lookup func(string) *agentContext
 	caps   *CapabilityRegistry // per-agent cmd capability gate; nil = no check
 }
@@ -917,7 +918,7 @@ func (g *guardedExecutor) SendStopAction(agentID, actionID string) error {
 func (a *agentContext) armActionTimeout(
 	actionID string,
 	estDurationSec *float64,
-	ws *wsserver.Server,
+	ws contract.Transport,
 	agentID string,
 	lookup func(string) *agentContext,
 ) {
@@ -1067,7 +1068,7 @@ func isCompositeCmdDynamic(cmd string, registry *CapabilityRegistry) bool {
 // 不经过 MCP 工具 / guardedExecutor（无活跃 decision_epoch）。
 // 手动 recordActionStarted + armActionTimeout，source=tactical。
 func (a *agentContext) popAndSendQueueAction(ctx context.Context, agentID string,
-	ws *wsserver.Server, kb *worldkb.KB, logger *slog.Logger) {
+	ws contract.Transport, kb *worldkb.KB, logger *slog.Logger) {
 
 	pa, pendingStop, ok := a.as.PopActionIfIdle()
 	if !ok {
@@ -1255,7 +1256,7 @@ func snapshotUEErrors() []ueErrorEntry {
 // tacticalRefill 调战术层 LLM 流式分解当前时段 goal，边接收边入队，
 // 首 action 在流式期间即提前下发以降低体感延迟。成功返回 true。
 func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
-	ws *wsserver.Server, kb *worldkb.KB, profiles map[string]*profile.Profile, logger *slog.Logger) bool {
+	ws contract.Transport, kb *worldkb.KB, profiles map[string]*profile.Profile, logger *slog.Logger) bool {
 
 	// 1. 取当前时段 goal（先读快照，再原子守卫检查+清队列）
 	plan, _, _ := a.as.SnapshotSchedule()
@@ -1342,7 +1343,7 @@ func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
 //  3. 重置 redecomposeCount = 0（replan 即"重新开始"）
 //  4. 通过 replanHint 注入"上次中断原因"到战术层 prompt
 func (a *agentContext) tacticalRefillForReplan(
-	ctx context.Context, agentID string, ws *wsserver.Server,
+	ctx context.Context, agentID string, ws contract.Transport,
 	kb *worldkb.KB, profiles map[string]*profile.Profile, logger *slog.Logger, replanHint string,
 ) bool {
 	// 1. 取当前时段 goal —— 不检查 currentActionID（replan 允许在途规划）
@@ -2049,7 +2050,7 @@ func main() {
 }
 
 // runHTTP serves the MCP server over Streamable HTTP + a /status endpoint.
-func runHTTP(ctx context.Context, logger *slog.Logger, server *mcp.Server, addr string, allowAnyOrigin bool, apiKey string, ws *wsserver.Server, kb *worldkb.KB, lookupAgent func(string) *agentContext, listAgentIDs func() []string, registerAgent func(string) (*agentContext, bool)) {
+func runHTTP(ctx context.Context, logger *slog.Logger, server *mcp.Server, addr string, allowAnyOrigin bool, apiKey string, ws contract.Transport, kb *worldkb.KB, lookupAgent func(string) *agentContext, listAgentIDs func() []string, registerAgent func(string) (*agentContext, bool)) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/status", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -2240,7 +2241,7 @@ func buildDebugParams(cmd string, params map[string]any, kb *worldkb.KB) (map[st
 	return params, nil
 }
 
-func handleDebugAction(ctx context.Context, logger *slog.Logger, ws *wsserver.Server, kb *worldkb.KB, lookupAgent func(string) *agentContext, w http.ResponseWriter, r *http.Request) {
+func handleDebugAction(ctx context.Context, logger *slog.Logger, ws contract.Transport, kb *worldkb.KB, lookupAgent func(string) *agentContext, w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
 	if r.Method != http.MethodPost {
@@ -2347,10 +2348,10 @@ func handleDebugAction(ctx context.Context, logger *slog.Logger, ws *wsserver.Se
 
 	// Debug path: auto_queue=false (manual debug doesn't queue; tester
 	// wants to see the immediate rejected/accepted behavior).
-	ack, err := ws.Call(ctx, req.AgentID, protoCmd, params, false)
+	ack, err := ws.SendAction(ctx, req.AgentID, protoCmd, params, false)
 	if err != nil {
 		w.WriteHeader(http.StatusBadGateway)
-		_ = json.NewEncoder(w).Encode(debugActionResponse{Error: "ws.Call failed: " + err.Error()})
+		_ = json.NewEncoder(w).Encode(debugActionResponse{Error: "ws.SendAction failed: " + err.Error()})
 		return
 	}
 
@@ -2401,7 +2402,7 @@ func parseScheduleText(s string) (slot, goal string) {
 // 互斥：复用 replanInProgress（worker main.go:311 检查后 continue），防止
 // handler 调 LLM 期间 worker 并发 tacticalRefill 撞 tacticalHc session。
 // debugOverride 叠加设置防止 worker 在 stop→completion 信号驱动下补 idle wait。
-func handleDebugSchedule(ctx context.Context, logger *slog.Logger, ws *wsserver.Server, kb *worldkb.KB, lookupAgent func(string) *agentContext, registerAgent func(string) (*agentContext, bool), w http.ResponseWriter, r *http.Request) {
+func handleDebugSchedule(ctx context.Context, logger *slog.Logger, ws contract.Transport, kb *worldkb.KB, lookupAgent func(string) *agentContext, registerAgent func(string) (*agentContext, bool), w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
 	if r.Method != http.MethodPost {

@@ -15,6 +15,7 @@ import (
 	"github.com/coder/websocket"
 	"github.com/google/uuid"
 
+	"github.com/AgentTown/agenttown-mcp/pkg/contract"
 	"github.com/AgentTown/agenttown-mcp/pkg/protocol"
 )
 
@@ -46,17 +47,12 @@ var discreteReplayTypes = map[string]bool{
 	protocol.TypeChatTurn:          true,
 }
 
-// MessageHandler receives inbound envelopes from Mock UE (UE → Agent).
-// Called from the read loop, so long work should be offloaded to a goroutine.
-// It receives the message type, agent_id, and raw payload.
-type MessageHandler func(ctx context.Context, msgType, agentID string, payload json.RawMessage)
+// MessageHandler and DisconnectHandler live in pkg/contract (the shared
+// boundary). Aliases kept here so existing call sites keep compiling; the
+// concrete Server below satisfies contract.Transport.
+type MessageHandler = contract.MessageHandler
 
-// DisconnectHandler is invoked once when the current UE WebSocket connection
-// closes (read loop returned). It is NOT called when an existing connection
-// is replaced by a newer one — only when the active connection itself ends.
-// Used by main to stop all agentContexts so workers/reactive-layer goroutines
-// don't keep running against a dead UE.
-type DisconnectHandler func()
+type DisconnectHandler = contract.DisconnectHandler
 
 // Options configures New.
 type Options struct {
@@ -116,6 +112,9 @@ type Server struct {
 	// connection ends. Guarded by handlerMu (same pattern as handler).
 	onDisconnect DisconnectHandler
 }
+
+// Compile-time assertion: Server satisfies the shared Transport boundary.
+var _ contract.Transport = (*Server)(nil)
 
 type pendingCall struct {
 	agentID string
