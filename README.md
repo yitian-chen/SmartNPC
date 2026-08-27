@@ -20,8 +20,7 @@ agenttown-mcp/                  # 根 module：agent 决策 + 装配壳 + 领域
     weeklyschedule/             # 每周日程配置
     storage/                    # MySQL 持久化（内存模式默认）
   adapters/agenttown/tools/     # MCP 工具（5 复合 + 7 原子 + 2 特殊）
-  contract/                     # 契约 module（无依赖）：protocol（7 字段信封+消息类型）
-                                #   + Transport 接口（决策侧与连接侧的边界）
+  contract/                     # 契约 module（无依赖）：protocol（7 字段信封+消息类型）+ Transport 接口（决策侧与连接侧的边界）
   wsserver/                     # 连接 module：WS 收发/seq 重放/ACK，实现 contract.Transport
 assets/
   world_kb.yaml                 # 世界 KB：7 zones / 57 objects / 5 agents
