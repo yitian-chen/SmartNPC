@@ -9,7 +9,7 @@ import (
 
 	"github.com/AgentTown/agenttown-mcp/pkg/agentstate"
 	"github.com/AgentTown/agenttown-mcp/pkg/prompt"
-	"github.com/AgentTown/agenttown-mcp/pkg/protocol"
+	"github.com/AgentTown/agenttown-mcp/contract/protocol"
 )
 
 // TestBuildReactivePrompt_Defaults verifies the prompt template fills all

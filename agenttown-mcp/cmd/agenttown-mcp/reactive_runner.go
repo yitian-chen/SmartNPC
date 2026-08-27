@@ -29,7 +29,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/AgentTown/agenttown-mcp/pkg/contract"
+	"github.com/AgentTown/agenttown-mcp/contract"
 	"github.com/AgentTown/agenttown-mcp/pkg/ollama"
 	"github.com/AgentTown/agenttown-mcp/pkg/profile"
 	"github.com/AgentTown/agenttown-mcp/pkg/prompt"

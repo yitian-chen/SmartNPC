@@ -15,8 +15,8 @@ import (
 	"github.com/coder/websocket"
 	"github.com/google/uuid"
 
-	"github.com/AgentTown/agenttown-mcp/pkg/contract"
-	"github.com/AgentTown/agenttown-mcp/pkg/protocol"
+	"github.com/AgentTown/agenttown-mcp/contract"
+	"github.com/AgentTown/agenttown-mcp/contract/protocol"
 )
 
 // Default timeouts.
@@ -47,7 +47,7 @@ var discreteReplayTypes = map[string]bool{
 	protocol.TypeChatTurn:          true,
 }
 
-// MessageHandler and DisconnectHandler live in pkg/contract (the shared
+// MessageHandler and DisconnectHandler live in contract (the shared
 // boundary). Aliases kept here so existing call sites keep compiling; the
 // concrete Server below satisfies contract.Transport.
 type MessageHandler = contract.MessageHandler

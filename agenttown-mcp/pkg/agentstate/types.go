@@ -11,7 +11,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/AgentTown/agenttown-mcp/pkg/protocol"
+	"github.com/AgentTown/agenttown-mcp/contract/protocol"
 )
 
 // PlannedAction is a single step produced by the tactical layer that

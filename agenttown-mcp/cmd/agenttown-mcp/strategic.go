@@ -12,7 +12,7 @@ import (
 	"github.com/AgentTown/agenttown-mcp/pkg/llmtypes"
 	"github.com/AgentTown/agenttown-mcp/pkg/profile"
 	"github.com/AgentTown/agenttown-mcp/pkg/prompt"
-	"github.com/AgentTown/agenttown-mcp/pkg/protocol"
+	"github.com/AgentTown/agenttown-mcp/contract/protocol"
 	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
 )
 

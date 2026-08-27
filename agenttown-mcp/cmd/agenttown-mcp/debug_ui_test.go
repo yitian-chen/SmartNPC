@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/AgentTown/agenttown-mcp/pkg/protocol"
+	"github.com/AgentTown/agenttown-mcp/contract/protocol"
 )
 
 // TestHandleDebugUI_ReturnsHTML verifies /debug/ returns the embedded HTML page.

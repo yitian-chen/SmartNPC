@@ -10,9 +10,9 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/AgentTown/agenttown-mcp/adapters/agenttown/tools"
-	"github.com/AgentTown/agenttown-mcp/pkg/contract"
+	"github.com/AgentTown/agenttown-mcp/contract"
 	"github.com/AgentTown/agenttown-mcp/pkg/profile"
-	"github.com/AgentTown/agenttown-mcp/pkg/protocol"
+	"github.com/AgentTown/agenttown-mcp/contract/protocol"
 	"github.com/AgentTown/agenttown-mcp/pkg/weeklyschedule"
 	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
 )

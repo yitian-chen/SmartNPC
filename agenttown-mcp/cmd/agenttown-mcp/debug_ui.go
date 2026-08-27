@@ -23,7 +23,7 @@ import (
 
 	"github.com/AgentTown/agenttown-mcp/adapters/agenttown/tools"
 	"github.com/AgentTown/agenttown-mcp/internal/log"
-	"github.com/AgentTown/agenttown-mcp/pkg/protocol"
+	"github.com/AgentTown/agenttown-mcp/contract/protocol"
 	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
 )
 

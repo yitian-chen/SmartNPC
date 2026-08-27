@@ -7,10 +7,10 @@ import (
 	"time"
 
 	"github.com/AgentTown/agenttown-mcp/pkg/agentstate"
-	"github.com/AgentTown/agenttown-mcp/pkg/contract"
+	"github.com/AgentTown/agenttown-mcp/contract"
 	"github.com/AgentTown/agenttown-mcp/pkg/profile"
 	"github.com/AgentTown/agenttown-mcp/pkg/prompt"
-	"github.com/AgentTown/agenttown-mcp/pkg/protocol"
+	"github.com/AgentTown/agenttown-mcp/contract/protocol"
 	"github.com/AgentTown/agenttown-mcp/pkg/storage"
 	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
 

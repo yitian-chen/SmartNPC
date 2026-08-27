@@ -10,7 +10,7 @@
 //  3. Venus LLM Client — strategic/tactical layer backend (OpenAI Chat
 //     Completions API). Each call is independent (no session chain).
 //
-// Messages follow the 7-field envelope in pkg/protocol. The action
+// Messages follow the 7-field envelope in contract/protocol. The action
 // lifecycle is command → action_started(ACK) → action_completed; tools
 // return after ACK and completions are folded into the next perception.
 //
@@ -38,18 +38,18 @@ import (
 	"github.com/AgentTown/agenttown-mcp/adapters/agenttown/tools"
 	"github.com/AgentTown/agenttown-mcp/internal/log"
 	"github.com/AgentTown/agenttown-mcp/pkg/agentstate"
-	"github.com/AgentTown/agenttown-mcp/pkg/contract"
+	"github.com/AgentTown/agenttown-mcp/contract"
 	"github.com/AgentTown/agenttown-mcp/pkg/llmtypes"
 	"github.com/AgentTown/agenttown-mcp/pkg/ollama"
 	"github.com/AgentTown/agenttown-mcp/pkg/profile"
 	"github.com/AgentTown/agenttown-mcp/pkg/prompt"
-	"github.com/AgentTown/agenttown-mcp/pkg/protocol"
+	"github.com/AgentTown/agenttown-mcp/contract/protocol"
 	"github.com/AgentTown/agenttown-mcp/pkg/storage"
 	"github.com/AgentTown/agenttown-mcp/pkg/transport"
 	"github.com/AgentTown/agenttown-mcp/pkg/venus"
 	"github.com/AgentTown/agenttown-mcp/pkg/weeklyschedule"
 	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
-	"github.com/AgentTown/agenttown-mcp/pkg/wsserver"
+	"github.com/AgentTown/agenttown-mcp/wsserver"
 )
 
 var version = "0.1.0-dev"

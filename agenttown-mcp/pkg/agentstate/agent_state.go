@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/AgentTown/agenttown-mcp/pkg/llmtypes"
-	"github.com/AgentTown/agenttown-mcp/pkg/protocol"
+	"github.com/AgentTown/agenttown-mcp/contract/protocol"
 	"github.com/AgentTown/agenttown-mcp/pkg/storage"
 )
 

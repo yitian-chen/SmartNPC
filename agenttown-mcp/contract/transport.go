@@ -1,5 +1,5 @@
 // Package contract defines the interface boundary between the WS transport
-// layer (pkg/wsserver) and the agent decision layer (cmd/agenttown-mcp).
+// layer (wsserver) and the agent decision layer (cmd/agenttown-mcp).
 //
 // The agent side depends on Transport + MessageHandler/DisconnectHandler
 // instead of the concrete *wsserver.Server, so the two sides can be split
@@ -11,7 +11,7 @@ import (
 	"context"
 	"encoding/json"
 
-	"github.com/AgentTown/agenttown-mcp/pkg/protocol"
+	"github.com/AgentTown/agenttown-mcp/contract/protocol"
 )
 
 // MessageHandler receives inbound envelopes from UE (UE → Agent).

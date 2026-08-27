@@ -7,11 +7,11 @@ import (
 	"github.com/AgentTown/agenttown-mcp/pkg/agentstate"
 	"github.com/AgentTown/agenttown-mcp/pkg/llmtypes"
 	"github.com/AgentTown/agenttown-mcp/pkg/prompt"
-	"github.com/AgentTown/agenttown-mcp/pkg/protocol"
+	"github.com/AgentTown/agenttown-mcp/contract/protocol"
 	"github.com/AgentTown/agenttown-mcp/pkg/storage"
 	"github.com/AgentTown/agenttown-mcp/pkg/venus"
 	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
-	"github.com/AgentTown/agenttown-mcp/pkg/wsserver"
+	"github.com/AgentTown/agenttown-mcp/wsserver"
 	"log/slog"
 )
 

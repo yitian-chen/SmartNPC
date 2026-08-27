@@ -11,7 +11,7 @@ import (
 
 	"github.com/AgentTown/agenttown-mcp/pkg/agentstate"
 	"github.com/AgentTown/agenttown-mcp/pkg/prompt"
-	"github.com/AgentTown/agenttown-mcp/pkg/wsserver"
+	"github.com/AgentTown/agenttown-mcp/wsserver"
 )
 
 // testLogger 返回一个丢弃输出的 slog.Logger，供测试中 reactiveRunner 使用。

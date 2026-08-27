@@ -7,7 +7,7 @@ import (
 
 	"github.com/AgentTown/agenttown-mcp/adapters/agenttown/tools"
 	"github.com/AgentTown/agenttown-mcp/pkg/agentstate"
-	"github.com/AgentTown/agenttown-mcp/pkg/wsserver"
+	"github.com/AgentTown/agenttown-mcp/wsserver"
 )
 
 // guardedExecutor 的依赖 *wsserver.Server 是具体类型而非接口，难以用 mock

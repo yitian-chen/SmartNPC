@@ -6,7 +6,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/AgentTown/agenttown-mcp/pkg/protocol"
+	"github.com/AgentTown/agenttown-mcp/contract/protocol"
 )
 
 // CapabilityRegistry stores NPC capability declarations received via
