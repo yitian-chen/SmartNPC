@@ -9,7 +9,7 @@
 package prompt
 
 import (
-	"github.com/AgentTown/agenttown-mcp/pkg/protocol"
+	"github.com/AgentTown/agenttown-mcp/contract/protocol"
 )
 
 // defaultPhysical is the fallback physical state used when UE5 has not

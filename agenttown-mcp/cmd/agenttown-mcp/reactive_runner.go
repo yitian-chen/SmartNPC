@@ -29,11 +29,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/AgentTown/agenttown-mcp/contract"
 	"github.com/AgentTown/agenttown-mcp/pkg/ollama"
 	"github.com/AgentTown/agenttown-mcp/pkg/profile"
 	"github.com/AgentTown/agenttown-mcp/pkg/prompt"
 	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
-	"github.com/AgentTown/agenttown-mcp/pkg/wsserver"
 )
 
 // reactiveCallTimeout 是单次 Ollama 调用的硬超时（context deadline）。
@@ -51,7 +51,7 @@ const reactiveCallTimeout = 20 * time.Second
 // 通过 package-level `reactiveRunnerRef` 在 main() 中注入，WS handler 调用。
 type reactiveRunner struct {
 	ollama   *ollama.Client
-	ws       *wsserver.Server
+	ws       contract.Transport
 	kb       *worldkb.KB
 	profiles map[string]*profile.Profile // NPC persona override（profile.md），nil=禁用
 	logger   *slog.Logger
@@ -63,7 +63,7 @@ type reactiveRunner struct {
 }
 
 // newReactiveRunner 构造 reactiveRunner。client 为 nil 时返回 nil（反应层禁用）。
-func newReactiveRunner(client *ollama.Client, ws *wsserver.Server, kb *worldkb.KB, profiles map[string]*profile.Profile, logger *slog.Logger) *reactiveRunner {
+func newReactiveRunner(client *ollama.Client, ws contract.Transport, kb *worldkb.KB, profiles map[string]*profile.Profile, logger *slog.Logger) *reactiveRunner {
 	if client == nil {
 		return nil
 	}

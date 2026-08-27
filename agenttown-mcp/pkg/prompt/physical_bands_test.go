@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	"github.com/AgentTown/agenttown-mcp/pkg/profile"
-	"github.com/AgentTown/agenttown-mcp/pkg/protocol"
+	"github.com/AgentTown/agenttown-mcp/contract/protocol"
 )
 
 func TestBandOf_Boundaries(t *testing.T) {

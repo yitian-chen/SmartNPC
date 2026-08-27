@@ -17,7 +17,7 @@ import (
 	"fmt"
 
 	"github.com/AgentTown/agenttown-mcp/pkg/profile"
-	"github.com/AgentTown/agenttown-mcp/pkg/protocol"
+	"github.com/AgentTown/agenttown-mcp/contract/protocol"
 )
 
 // BandThresholds splits each physical attribute's 0-100 range into 4

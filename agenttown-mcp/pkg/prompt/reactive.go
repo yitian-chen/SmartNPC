@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/AgentTown/agenttown-mcp/pkg/protocol"
+	"github.com/AgentTown/agenttown-mcp/contract/protocol"
 )
 
 // ReactionKind enumerates reactive layer decision types.

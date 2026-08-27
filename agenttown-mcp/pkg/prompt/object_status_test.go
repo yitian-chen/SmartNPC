@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/AgentTown/agenttown-mcp/pkg/protocol"
+	"github.com/AgentTown/agenttown-mcp/contract/protocol"
 	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
 )
 

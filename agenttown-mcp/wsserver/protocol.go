@@ -1,7 +1,7 @@
 // Package wsserver hosts the WebSocket server that Mock UE connects to.
 //
 // Mock UE is the client; agenttown-mcp is the server. Messages use the
-// 7-field Envelope defined in pkg/protocol.
+// 7-field Envelope defined in contract/protocol.
 //
 // Phase 1: transport-level envelope + seq + agent_id routing. The action
 // lifecycle (command → ACK → completed) is introduced in Phase 5; until
@@ -9,10 +9,10 @@
 // backward compatibility with the existing tool layer.
 package wsserver
 
-import "github.com/AgentTown/agenttown-mcp/pkg/protocol"
+import "github.com/AgentTown/agenttown-mcp/contract/protocol"
 
 // Re-export protocol constants used by callers within this package and by
-// the tools layer, so they don't all need to import pkg/protocol directly.
+// the tools layer, so they don't all need to import contract/protocol directly.
 const (
 	TypePerceptionUpdate  = protocol.TypePerceptionUpdate
 	TypeActionCommand     = protocol.TypeActionCommand

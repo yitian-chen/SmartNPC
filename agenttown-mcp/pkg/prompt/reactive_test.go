@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/AgentTown/agenttown-mcp/pkg/protocol"
+	"github.com/AgentTown/agenttown-mcp/contract/protocol"
 )
 
 // TestBuildReactive_QueueStateSegment verifies the 【排队状态】 segment

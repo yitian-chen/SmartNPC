@@ -10,7 +10,7 @@
 //  3. Venus LLM Client — strategic/tactical layer backend (OpenAI Chat
 //     Completions API). Each call is independent (no session chain).
 //
-// Messages follow the 7-field envelope in pkg/protocol. The action
+// Messages follow the 7-field envelope in contract/protocol. The action
 // lifecycle is command → action_started(ACK) → action_completed; tools
 // return after ACK and completions are folded into the next perception.
 //
@@ -38,17 +38,18 @@ import (
 	"github.com/AgentTown/agenttown-mcp/adapters/agenttown/tools"
 	"github.com/AgentTown/agenttown-mcp/internal/log"
 	"github.com/AgentTown/agenttown-mcp/pkg/agentstate"
+	"github.com/AgentTown/agenttown-mcp/contract"
 	"github.com/AgentTown/agenttown-mcp/pkg/llmtypes"
 	"github.com/AgentTown/agenttown-mcp/pkg/ollama"
 	"github.com/AgentTown/agenttown-mcp/pkg/profile"
 	"github.com/AgentTown/agenttown-mcp/pkg/prompt"
-	"github.com/AgentTown/agenttown-mcp/pkg/protocol"
+	"github.com/AgentTown/agenttown-mcp/contract/protocol"
 	"github.com/AgentTown/agenttown-mcp/pkg/storage"
 	"github.com/AgentTown/agenttown-mcp/pkg/transport"
 	"github.com/AgentTown/agenttown-mcp/pkg/venus"
 	"github.com/AgentTown/agenttown-mcp/pkg/weeklyschedule"
 	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
-	"github.com/AgentTown/agenttown-mcp/pkg/wsserver"
+	"github.com/AgentTown/agenttown-mcp/wsserver"
 )
 
 var version = "0.1.0-dev"
@@ -465,7 +466,7 @@ func (a *agentContext) loadRelationships(ctx context.Context, agentID string, kb
 // 反应层 replan 进行中（replanInProgress=true）时本方法仍可执行：schedule
 // 切换优先级高于反应层 replan，清掉的 in-flight 状态不会干扰 replan
 // （replan 自己会重新规划，且 replanInProgress 由 replan 路径自己清除）。
-func (a *agentContext) advanceSlotIfNeeded(ws *wsserver.Server, agentID string, logger *slog.Logger) {
+func (a *agentContext) advanceSlotIfNeeded(ws contract.Transport, agentID string, logger *slog.Logger) {
 	// 检查 slot 是否过期（AgentState 内部持锁判断）
 	_, slot, _ := a.as.SnapshotSchedule()
 	tod := a.as.LatestTimeOfDay()
@@ -688,7 +689,7 @@ func runPerceptionWorker(
 	ctx context.Context,
 	agentID string,
 	ac *agentContext,
-	ws *wsserver.Server,
+	ws contract.Transport,
 	kb *worldkb.KB,
 	profiles map[string]*profile.Profile,
 	weeklySched *weeklyschedule.Schedule,
@@ -830,7 +831,7 @@ func formatTodSec(todSec float64) string {
 }
 
 type guardedExecutor struct {
-	ws     *wsserver.Server
+	ws     contract.Transport
 	lookup func(string) *agentContext
 	caps   *CapabilityRegistry // per-agent cmd capability gate; nil = no check
 }
@@ -917,7 +918,7 @@ func (g *guardedExecutor) SendStopAction(agentID, actionID string) error {
 func (a *agentContext) armActionTimeout(
 	actionID string,
 	estDurationSec *float64,
-	ws *wsserver.Server,
+	ws contract.Transport,
 	agentID string,
 	lookup func(string) *agentContext,
 ) {
@@ -1067,7 +1068,7 @@ func isCompositeCmdDynamic(cmd string, registry *CapabilityRegistry) bool {
 // 不经过 MCP 工具 / guardedExecutor（无活跃 decision_epoch）。
 // 手动 recordActionStarted + armActionTimeout，source=tactical。
 func (a *agentContext) popAndSendQueueAction(ctx context.Context, agentID string,
-	ws *wsserver.Server, kb *worldkb.KB, logger *slog.Logger) {
+	ws contract.Transport, kb *worldkb.KB, logger *slog.Logger) {
 
 	pa, pendingStop, ok := a.as.PopActionIfIdle()
 	if !ok {
@@ -1255,7 +1256,7 @@ func snapshotUEErrors() []ueErrorEntry {
 // tacticalRefill 调战术层 LLM 流式分解当前时段 goal，边接收边入队，
 // 首 action 在流式期间即提前下发以降低体感延迟。成功返回 true。
 func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
-	ws *wsserver.Server, kb *worldkb.KB, profiles map[string]*profile.Profile, logger *slog.Logger) bool {
+	ws contract.Transport, kb *worldkb.KB, profiles map[string]*profile.Profile, logger *slog.Logger) bool {
 
 	// 1. 取当前时段 goal（先读快照，再原子守卫检查+清队列）
 	plan, _, _ := a.as.SnapshotSchedule()
@@ -1342,7 +1343,7 @@ func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
 //  3. 重置 redecomposeCount = 0（replan 即"重新开始"）
 //  4. 通过 replanHint 注入"上次中断原因"到战术层 prompt
 func (a *agentContext) tacticalRefillForReplan(
-	ctx context.Context, agentID string, ws *wsserver.Server,
+	ctx context.Context, agentID string, ws contract.Transport,
 	kb *worldkb.KB, profiles map[string]*profile.Profile, logger *slog.Logger, replanHint string,
 ) bool {
 	// 1. 取当前时段 goal —— 不检查 currentActionID（replan 允许在途规划）
@@ -1763,276 +1764,27 @@ func main() {
 	// 热重连：不从 agents map 删除条目——保留注册状态，等 UE 重连后
 	// agent_registered 走 else 分支重启 worker。这样 perception_update
 	// 在断连间隙到达时不会被 "unregistered agent" 丢弃。
-	ws.SetDisconnectHandler(func() {
-		agentsMu.Lock()
-		stopped := make([]*agentContext, 0, len(agents))
-		for _, ac := range agents {
-			stopped = append(stopped, ac)
-			// 不 delete — 保留注册状态，等热重连恢复
-		}
-		agentsMu.Unlock()
-		for _, ac := range stopped {
-			ac.stop()
-		}
-		if len(stopped) > 0 {
-			logger.Info("ws disconnected, stopped all agents (agents kept for hot-reconnect)", "agent_count", len(stopped))
-		}
-	})
-
-	// ─── Wire inbound message handler ──────────────────────────
-	ws.SetMessageHandler(func(_ context.Context, msgType, agentID string, payload json.RawMessage) {
-		switch msgType {
-		case protocol.TypeCapabilityRegistry:
-			var cr protocol.CapabilityRegistryPayload
-			if err := json.Unmarshal(payload, &cr); err != nil {
-				logger.Warn("capability_registry parse failed", "err", err, "agent_id", agentID)
-				return
-			}
-			capabilityRegistry.Register(agentID, cr.Actions)
-			logger.Info("capability_registry registered",
-				"agent_id", agentID, "actions", len(cr.Actions))
-			// Reconcile MCP tool list so AddTool/RemoveTools reflects
-			// the new global capability set. Per-agent overrides
-			// don't change the global tool list — the guardedExecutor
-			// enforces per-agent capability at SendAction time.
-			tools.ReconcileTools(server, executor, kb, logger,
-				capabilityRegistry.EffectiveActions(protocol.SystemAgentID))
-		case protocol.TypeWorldKB:
-			// UE pushes the full world KB (generated + authored JSON blobs)
-			// on connection. MCP merges, persists, and swaps the in-memory
-			// KB. Only accepted before the first agent_registered — after
-			// that, worker goroutines hold kb pointers and hot-swap would
-			// race. Handler holds agentsMu for the full duration so a
-			// concurrent agent_registered cannot start workers mid-swap.
-			agentsMu.Lock()
-			newKB, normalizeChanges, err := worldKBSwap(firstAgentRegistered, payload, *worldKBPath, *worldKBManifest)
-			if err != nil {
-				agentsMu.Unlock()
-				if errors.Is(err, errAgentWindowClosed) {
-					logger.Warn("world_kb rejected: agents already registered, startup window closed",
-						"agent_id", agentID)
-				} else {
-					logger.Error("world_kb merge failed, keeping existing KB",
-						"err", err, "path", *worldKBPath)
-				}
-				return
-			}
-			if len(normalizeChanges) > 0 {
-				logger.Info("world_kb entity ids normalized to lowercase",
-					"changes", normalizeChanges)
-			}
-			kb = newKB
-			kbRef = newKB // sync /debug/kb handler
-			// Re-register tools so their closures capture the new kb.
-			// AddTool is idempotent (replaces same-named tools).
-			tools.RegisterAll(server, executor, kb, logger)
-			if reactiveRunnerRef != nil {
-				reactiveRunnerRef.kb = kb
-			}
-			agentsMu.Unlock()
-			logger.Info("world_kb merged and persisted",
-				"path", *worldKBPath,
-				"manifest", *worldKBManifest,
-				"zones", len(kb.Zones),
-				"objects", len(kb.Objects),
-				"agents", len(kb.Agents),
-			)
-		case protocol.TypeAgentRegistered:
-			// First registration = new day. Re-registration after reconnect =
-			// restore, keep the per-agent strategic/tactical sessions
-			// (§4.2: match by agent_id, don't wipe Agent Mind state).
-			ac, isNew := registerAgent(agentID)
-			if isNew {
-				logger.Info("agent_registered (new day)", "agent_id", agentID,
-					"agent_epoch", ac.agentEpoch, "payload", string(payload))
-			} else {
-				logger.Info("agent_registered (reconnect, session kept)", "agent_id", agentID,
-					"agent_epoch", ac.agentEpoch)
-				// 重连后唤醒 worker：UE 断线期间 wake 不会被消费，
-				// 此处 signal 让 worker 重新处理。无队列时 signal 无副作用。
-				ac.signal()
-			}
-
-		case protocol.TypeAgentUnregistered:
-			agentsMu.Lock()
-			ac := agents[agentID]
-			delete(agents, agentID)
-			agentsMu.Unlock()
-			if ac != nil {
-				ac.stop()
-			}
-			logger.Info("agent_unregistered", "agent_id", agentID, "perception_queue_cleared", true)
-
-		case protocol.TypeHeartbeat:
-			logger.Debug("heartbeat", "agent_id", agentID)
-
-		case protocol.TypeStateReport:
-			var sr protocol.StateReportPayload
-			if err := json.Unmarshal(payload, &sr); err != nil {
-				logger.Warn("state_report parse failed", "err", err)
-				return
-			}
-			ac := lookupAgent(agentID)
-			if ac == nil {
-				logger.Warn("state_report dropped for unregistered agent", "agent_id", agentID)
-				return
-			}
-			trigger, detail := ac.updateState(sr)
-			logger.Info("state_report", "agent_id", agentID,
-				"energy", sr.PhysicalState.Energy, "fatigue", sr.PhysicalState.Fatigue,
-				"joint_wear", sr.PhysicalState.JointWear)
-			if trigger != "" && autoPlanEnabled {
-				go reactiveRunnerRef.trigger(agentID, ac, trigger, detail)
-			}
-
-		case protocol.TypeActionCompleted:
-			var completed protocol.ActionCompletedPayload
-			if err := json.Unmarshal(payload, &completed); err != nil {
-				logger.Warn("action_completed parse failed", "err", err)
-				return
-			}
-			ac := lookupAgent(agentID)
-			if ac == nil {
-				logger.Warn("action_completed dropped for unregistered agent", "agent_id", agentID)
-				return
-			}
-			queued, trigger, detail := ac.recordActionCompletion(completed)
-			logger.Info("action_completed", "agent_id", agentID,
-				"action_id", completed.ActionID, "result", completed.Result,
-				"reason", completed.Reason, "progress", completed.Progress,
-				"decision_queued", queued)
-			if trigger != "" && autoPlanEnabled {
-				go reactiveRunnerRef.trigger(agentID, ac, trigger, detail)
-			}
-
-		case protocol.TypeActionQueued:
-			var aq protocol.ActionQueuedPayload
-			if err := json.Unmarshal(payload, &aq); err != nil {
-				logger.Warn("action_queued parse failed", "err", err)
-				return
-			}
-			ac := lookupAgent(agentID)
-			if ac == nil {
-				logger.Warn("action_queued dropped for unregistered agent", "agent_id", agentID)
-				return
-			}
-			ac.as.RecordQueueStatus(aq)
-			logger.Info("action_queued", "agent_id", agentID,
-				"action_id", aq.ActionID, "status", aq.Status,
-				"group", aq.Group, "position", aq.Position)
-			// 不触发反应层：queued 是信息性状态，下次 periodic/action_done 等
-			// 触发时反应层 prompt 的【排队状态】段会带上。timeout 后 UE 会补
-			// action_completed{failed, queue_timeout}，走现有 TriggerActionDone 路径。
-
-		case protocol.TypeEventNotification:
-			var event protocol.EventNotificationPayload
-			if err := json.Unmarshal(payload, &event); err != nil {
-				logger.Warn("event_notification parse failed", "err", err)
-				return
-			}
-			ac := lookupAgent(agentID)
-			if ac == nil {
-				logger.Warn("event_notification dropped for unregistered agent", "agent_id", agentID)
-				return
-			}
-			trigger, detail := ac.recordEventNotification(event)
-			logger.Info("event_notification", "agent_id", agentID,
-				"event_id", event.EventID, "perception_level", event.PerceptionLevel,
-				"trigger", trigger)
-			if trigger != "" && autoPlanEnabled {
-				go reactiveRunnerRef.trigger(agentID, ac, trigger, detail)
-			}
-
-		case protocol.TypeError:
-			var ep protocol.ErrorPayload
-			if err := json.Unmarshal(payload, &ep); err != nil {
-				logger.Warn("error from ue (payload parse failed)",
-					"agent_id", agentID, "raw", string(payload), "err", err)
-			} else {
-				logger.Warn("error from ue",
-					"agent_id", agentID,
-					"error_code", ep.ErrorCode, "message", ep.Message,
-					"action_id", ep.ActionID)
-				recordUEError(agentID, ep)
-			}
-
-		case protocol.TypePerceptionUpdate:
-			ac := lookupAgent(agentID)
-			if ac == nil {
-				logger.Warn("perception_update dropped for unregistered agent", "agent_id", agentID)
-				return
-			}
-			// 热重连恢复：断连时 ac.stop() cancel 了 workerCtx，worker 退出。
-			// UE 重连后不发 agent_registered，第一条 perception_update 到达时
-			// 检测 stopped 并自动重启 worker，恢复仿真。
-			ac.coordMu.Lock()
-			if ac.stopped {
-				ac.stopped = false
-				ac.online = true
-				workerCtx, cancel := context.WithCancel(ctx)
-				ac.cancel = cancel
-				ac.coordMu.Unlock()
-				logger.Info("agent hot-reconnected via perception, restarting worker", "agent_id", agentID)
-				go runPerceptionWorker(workerCtx, agentID, ac, ws, kb, profiles, weeklySched, logger)
-			} else {
-				ac.coordMu.Unlock()
-			}
-			trigger, detail, err := ac.observePerception(payload)
-			if err != nil {
-				logger.Warn("perception_update parse failed", "agent_id", agentID, "err", err)
-				return
-			}
-			if trigger != "" && autoPlanEnabled {
-				go reactiveRunnerRef.trigger(agentID, ac, trigger, detail)
-			}
-
-		case protocol.TypeChatInvite:
-			// UE → B: A 想找 B 聊天（Phase 2 Module C）。
-			var invite protocol.ChatInvitePayload
-			if err := json.Unmarshal(payload, &invite); err != nil {
-				logger.Warn("chat_invite parse failed", "err", err)
-				return
-			}
-			ac := lookupAgent(agentID)
-			if ac == nil || ac.dialogue == nil {
-				logger.Debug("chat_invite dropped (agent unregistered or dialogue disabled)", "agent_id", agentID)
-				return
-			}
-			go ac.dialogue.handleInvite(ctx, invite)
-
-		case protocol.TypeChatInviteRsp:
-			// B → UE（转发给 A）：B 的 accept/reject 决定。
-			var rsp protocol.ChatInviteRspPayload
-			if err := json.Unmarshal(payload, &rsp); err != nil {
-				logger.Warn("chat_invite_rsp parse failed", "err", err)
-				return
-			}
-			ac := lookupAgent(agentID)
-			if ac == nil || ac.dialogue == nil {
-				logger.Debug("chat_invite_rsp dropped (agent unregistered or dialogue disabled)", "agent_id", agentID)
-				return
-			}
-			go ac.dialogue.handleInviteRsp(ctx, rsp)
-
-		case protocol.TypeChatTurn:
-			// speaker → UE（转发给 peer）：一轮发言。
-			var turn protocol.ChatTurnPayload
-			if err := json.Unmarshal(payload, &turn); err != nil {
-				logger.Warn("chat_turn parse failed", "err", err)
-				return
-			}
-			ac := lookupAgent(agentID)
-			if ac == nil || ac.dialogue == nil {
-				logger.Debug("chat_turn dropped (agent unregistered or dialogue disabled)", "agent_id", agentID)
-				return
-			}
-			go ac.dialogue.handleTurn(ctx, turn)
-
-		default:
-			logger.Debug("unhandled message type", "type", msgType, "agent_id", agentID)
-		}
-	})
-
+	rt := &Runtime{
+		logger:               logger,
+		capabilityRegistry:   capabilityRegistry,
+		server:               server,
+		executor:             executor,
+		ws:                   ws,
+		profiles:             profiles,
+		weeklySched:          weeklySched,
+		registerAgent:        registerAgent,
+		lookupAgent:          lookupAgent,
+		agents:               agents,
+		agentsMu:             &agentsMu,
+		autoPlanEnabled:      autoPlanEnabled,
+		worldKBPath:          *worldKBPath,
+		worldKBManifest:      *worldKBManifest,
+		ctx:                  ctx,
+		kbPtr:                &kb,
+		firstAgentRegistered: &firstAgentRegistered,
+	}
+	ws.SetDisconnectHandler(rt.OnDisconnect)
+	ws.SetMessageHandler(rt.HandleMessage)
 	// ─── Start serving ─────────────────────────────────────────
 	go func() {
 		if err := ws.Serve(ctx); err != nil {
@@ -2049,7 +1801,7 @@ func main() {
 }
 
 // runHTTP serves the MCP server over Streamable HTTP + a /status endpoint.
-func runHTTP(ctx context.Context, logger *slog.Logger, server *mcp.Server, addr string, allowAnyOrigin bool, apiKey string, ws *wsserver.Server, kb *worldkb.KB, lookupAgent func(string) *agentContext, listAgentIDs func() []string, registerAgent func(string) (*agentContext, bool)) {
+func runHTTP(ctx context.Context, logger *slog.Logger, server *mcp.Server, addr string, allowAnyOrigin bool, apiKey string, ws contract.Transport, kb *worldkb.KB, lookupAgent func(string) *agentContext, listAgentIDs func() []string, registerAgent func(string) (*agentContext, bool)) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/status", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -2240,7 +1992,7 @@ func buildDebugParams(cmd string, params map[string]any, kb *worldkb.KB) (map[st
 	return params, nil
 }
 
-func handleDebugAction(ctx context.Context, logger *slog.Logger, ws *wsserver.Server, kb *worldkb.KB, lookupAgent func(string) *agentContext, w http.ResponseWriter, r *http.Request) {
+func handleDebugAction(ctx context.Context, logger *slog.Logger, ws contract.Transport, kb *worldkb.KB, lookupAgent func(string) *agentContext, w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
 	if r.Method != http.MethodPost {
@@ -2347,10 +2099,10 @@ func handleDebugAction(ctx context.Context, logger *slog.Logger, ws *wsserver.Se
 
 	// Debug path: auto_queue=false (manual debug doesn't queue; tester
 	// wants to see the immediate rejected/accepted behavior).
-	ack, err := ws.Call(ctx, req.AgentID, protoCmd, params, false)
+	ack, err := ws.SendAction(ctx, req.AgentID, protoCmd, params, false)
 	if err != nil {
 		w.WriteHeader(http.StatusBadGateway)
-		_ = json.NewEncoder(w).Encode(debugActionResponse{Error: "ws.Call failed: " + err.Error()})
+		_ = json.NewEncoder(w).Encode(debugActionResponse{Error: "ws.SendAction failed: " + err.Error()})
 		return
 	}
 
@@ -2401,7 +2153,7 @@ func parseScheduleText(s string) (slot, goal string) {
 // 互斥：复用 replanInProgress（worker main.go:311 检查后 continue），防止
 // handler 调 LLM 期间 worker 并发 tacticalRefill 撞 tacticalHc session。
 // debugOverride 叠加设置防止 worker 在 stop→completion 信号驱动下补 idle wait。
-func handleDebugSchedule(ctx context.Context, logger *slog.Logger, ws *wsserver.Server, kb *worldkb.KB, lookupAgent func(string) *agentContext, registerAgent func(string) (*agentContext, bool), w http.ResponseWriter, r *http.Request) {
+func handleDebugSchedule(ctx context.Context, logger *slog.Logger, ws contract.Transport, kb *worldkb.KB, lookupAgent func(string) *agentContext, registerAgent func(string) (*agentContext, bool), w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
 	if r.Method != http.MethodPost {

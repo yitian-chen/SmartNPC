@@ -2,25 +2,27 @@ package main
 
 import (
 	"context"
+	"log/slog"
 	"strings"
 	"testing"
 
 	"github.com/AgentTown/agenttown-mcp/adapters/agenttown/tools"
+	"github.com/AgentTown/agenttown-mcp/contract/protocol"
 	"github.com/AgentTown/agenttown-mcp/pkg/agentstate"
-	"github.com/AgentTown/agenttown-mcp/pkg/wsserver"
 )
 
-// guardedExecutor 的依赖 *wsserver.Server 是具体类型而非接口，难以用 mock
-// 替换。这里测能测的路径：
+// guardedExecutor 的依赖已从 *wsserver.Server 收敛为 contract.Transport，
+// 可用 fakeTransport（见 fake_transport_test.go）精确控制连接状态与下发记录。
+// 这里测：
 //   - validate 失败（未知 agent / UE 未连接）→ RequestScan / SendStopAction 返回 error
+//   - SendAction 的 capability gate 与 recordActionStarted 记账
 //   - SendStopAction 在 actionID 为空时查 agentContext.currentActionID
-//     （通过未连接 ws 的错误消息确认它走到了 ws.SendStopAction）
 
-// newTestExecutor 构造一个绑定未连接 ws 的 guardedExecutor + 一个已注册的 agent。
-// 未连接 ws 使 ws.RequestScan / ws.SendStopAction 必然失败，便于验证错误路径。
-func newTestExecutor(t *testing.T) (*guardedExecutor, *agentContext, *wsserver.Server) {
+// newTestExecutor 构造一个绑定未连接 fakeTransport 的 guardedExecutor + 一个已注册的 agent。
+// 未连接（connected=false）使 validate 的 IsConnected 检查失败，便于验证错误路径。
+func newTestExecutor(t *testing.T) (*guardedExecutor, *agentContext, *fakeTransport) {
 	t.Helper()
-	ws := wsserver.New(wsserver.Options{}) // 未连接
+	ws := &fakeTransport{} // 未连接（connected=false）
 	ac, _ := newAgentContext(context.Background())
 	lookup := func(id string) *agentContext {
 		if id == "H-01" {
@@ -117,4 +119,63 @@ func TestSendStopAction_ExplicitActionIDUsed(t *testing.T) {
 		return
 	}
 	t.Logf("ws 层错误（预期）: %v", err)
+}
+
+func TestSendAction_Disconnected(t *testing.T) {
+	ex, _, _ := newTestExecutor(t) // connected=false
+	_, err := ex.SendAction(context.Background(), "H-01", 0, "Speak", map[string]any{"content": "hi"})
+	if err == nil {
+		t.Fatal("expected error when UE disconnected")
+	}
+	if !strings.Contains(err.Error(), "UE disconnected") {
+		t.Fatalf("err should mention UE disconnected, got: %v", err)
+	}
+}
+
+func TestSendAction_CapabilityGate(t *testing.T) {
+	ws := &fakeTransport{connected: true}
+	ac, _ := newAgentContext(context.Background())
+	lookup := func(id string) *agentContext {
+		if id == "H-01" {
+			return ac
+		}
+		return nil
+	}
+	ex := &guardedExecutor{ws: ws, lookup: lookup, caps: NewCapabilityRegistry(slog.Default())}
+	if _, err := ex.SendAction(context.Background(), "H-01", 0, "MoveTo", map[string]any{}); err == nil {
+		t.Fatal("expected capability gate error")
+	} else if !strings.Contains(err.Error(), "lacks capability") {
+		t.Fatalf("err should mention lacks capability, got: %v", err)
+	}
+}
+
+func TestSendAction_Success(t *testing.T) {
+	ws := &fakeTransport{
+		connected:    true,
+		sendActionAck: &protocol.ActionStartedPayload{ActionID: "act_ok"},
+	}
+	ac, _ := newAgentContext(context.Background())
+	lookup := func(id string) *agentContext {
+		if id == "H-01" {
+			return ac
+		}
+		return nil
+	}
+	ex := &guardedExecutor{ws: ws, lookup: lookup}
+	ack, err := ex.SendAction(context.Background(), "H-01", 0, "Speak", map[string]any{"content": "hi"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if ack.ActionID != "act_ok" {
+		t.Fatalf("ack.ActionID=%q, want act_ok", ack.ActionID)
+	}
+	if len(ws.sentActions) != 1 {
+		t.Fatalf("sentActions=%d, want 1", len(ws.sentActions))
+	}
+	if ws.sentActions[0].cmd != "Speak" {
+		t.Fatalf("cmd=%q, want Speak", ws.sentActions[0].cmd)
+	}
+	if ac.as.CurrentActionID() != "act_ok" {
+		t.Fatalf("CurrentActionID=%q, want act_ok", ac.as.CurrentActionID())
+	}
 }
