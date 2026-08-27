@@ -44,7 +44,7 @@ flowchart TB
 
     subgraph MCP["agenttown-mcp（每 NPC 独立 worker）"]
         WS["wsserver<br/>消息收发 / seq 重放"]
-        AS["agentstate<br/>世界快照 · actionQueue(1-4段)<br/>多轮会话历史(截8轮) · dailyPlan"]
+        AS["agentstate<br/>世界快照 · actionQueue(1-4段)<br/>多轮会话历史 · dailyPlan"]
 
         subgraph W["worker 循环（事件驱动）"]
             ADV["advanceSlotIfNeeded<br/>slot 过期 → 清队列"]
@@ -160,8 +160,3 @@ go test ./...                   # 全量测试
 - **UE 端信息自动更新**：UE 连接后推送能力声明，MCP 据此动态增删工具；`world_kb` 推送合并落盘
 - **持久化**：默认内存模式；`MYSQL_DSN` 非空启用 MySQL（记忆 + 动作历史 + NPC 关系）
 - **日志**：`logs/YYYY-MM-DD/debug-mcp.log`（stable）或 `logs-dev/...`（dev），JSON Lines 全链路
-
-## 坑点
-
-- **战术层 LLM 输出坏 tools JSON**：deepseek-v4-flash 多轮场景偶发输出格式异常 tool_calls，存进历史后重放触发 venus 500 `trailing characters`。已做历史截断（8 轮）+ 失败兜底动作缓解，但根因在模型侧
-- **time_to_stop 漏设 → 队列卡死**：LLM 常给中间动作漏设 time_to_stop，导致 NPC 一直坐长椅/一直工作。已做代码层兜底（非队尾休息 1800s / 工作 5400s）
