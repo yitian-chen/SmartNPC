@@ -4,21 +4,25 @@ AI NPC 模拟系统：5 个 NPC（H-01~H-05）通过 MCP 协议驱动"感知 →
 
 ## 项目结构
 
+多 module 仓库：连接侧（contract + wsserver）与 agent 决策侧物理拆分，决策侧只依赖 `contract.Transport` 接口、不依赖 wsserver 实现。
+
 ```
-agenttown-mcp/                  # Go MCP 服务（核心）
+agenttown-mcp/                  # 根 module：agent 决策 + 装配壳 + 领域库
   cmd/agenttown-mcp/            # 入口 + 三层决策 + capability + debug UI + 记忆/关系层
   pkg/
     prompt/                     # 战略/战术层 prompt 构建（system/user 拆分、物理分档、设施映射）
     agentstate/                 # 每-NPC 业务状态（队列、会话历史、物理状态、schedule）
     venus/                      # Venus LLM 客户端（function calling + Structured Outputs）
     ollama/                     # 反应层本地 Ollama 客户端
-    protocol/                   # 7 字段信封 + 消息类型 + cmd 常量
-    wsserver/                   # WS 服务端（收发、seq、重放）
+    transport/                  # streamable HTTP（MCP /mcp 端点）
     worldkb/                    # 世界 KB 加载/合并/查询
     profile/                    # NPC 人设档案（assets/profiles/*.md）
     weeklyschedule/             # 每周日程配置
     storage/                    # MySQL 持久化（内存模式默认）
   adapters/agenttown/tools/     # MCP 工具（5 复合 + 7 原子 + 2 特殊）
+  contract/                     # 契约 module（无依赖）：protocol（7 字段信封+消息类型）
+                                #   + Transport 接口（决策侧与连接侧的边界）
+  wsserver/                     # 连接 module：WS 收发/seq 重放/ACK，实现 contract.Transport
 assets/
   world_kb.yaml                 # 世界 KB：7 zones / 57 objects / 5 agents
   profiles/H-01.md ~ H-05.md    # NPC 人设档案
@@ -29,6 +33,16 @@ start-debug.sh / start-dev.sh   # 启动脚本（stable / dev 实例）
 .env.example                    # 环境变量模板
 CODEBUDDY.md                    # 完整开发手册
 ```
+
+依赖方向（单向、无环）：
+
+```
+contract（协议 + Transport 接口）← 无依赖
+wsserver（连接实现）            ← 依赖 contract
+根 module（agent 决策 + 壳）     ← 依赖 contract + wsserver
+```
+
+根 `go.mod` 通过 `replace => ./contract` / `=> ./wsserver` 引用本地 module；发布时把 replace 换成 tag 版本即可独立替换 agent 侧。
 
 ## Agent 内部数据流
 
@@ -43,8 +57,8 @@ flowchart TB
     end
 
     subgraph MCP["agenttown-mcp（每 NPC 独立 worker）"]
-        WS["wsserver<br/>消息收发 / seq 重放"]
-        AS["agentstate<br/>世界快照 · actionQueue(1-4段)<br/>多轮会话历史 · dailyPlan"]
+        WS["wsserver（实现 contract.Transport）<br/>消息收发 / seq 重放"]
+        AS["agentstate<br/>世界快照 · actionQueue(1-4段)<br/>多轮会话历史（跨日清空） · dailyPlan"]
 
         subgraph W["worker 循环（事件驱动）"]
             ADV["advanceSlotIfNeeded<br/>slot 过期 → 清队列"]
@@ -91,7 +105,7 @@ flowchart TB
 
 | 目录 | 分支            | MCP HTTP / WS | MySQL 库 | 日志目录 |
 |------|---------------|---------------|----------|----------|
-| `/data/workspace/stable` | `master`      | `8760` / `9090` | `agenttown_stable` | `logs/` |
+| `/data/workspace/stable` | `master`      | `8760` / `9092` | `agenttown_stable` | `logs/` |
 | `/data/workspace/dev` | `dev-working` | `8770` / `9091` | `agenttown_dev` | `logs-dev/` |
 
 `start-dev.sh` 只是 `start-debug.sh` 的 wrapper（export 偏移端口 + dev 库名 + `logs-dev/`），实际启动逻辑都在 `start-debug.sh`。
@@ -112,7 +126,7 @@ cp /data/workspace/stable/.env.example /data/workspace/stable/.env   # 填入 VE
 cp /data/workspace/dev/.env.example    /data/workspace/dev/.env
 ```
 
-编译由启动脚本自动完成（`start-debug.sh` 内置 build step，会 `go build -o agenttown-mcp[-dev]` 到 `agenttown-mcp/` 下）。如需手动编译：
+编译由启动脚本自动完成（`start-debug.sh` 内置 build step，会 `go build -o agenttown-mcp[-dev]` 到 `agenttown-mcp/` 下；多 module 经根 `go.mod` 的 `replace` 自动解析本地 contract/wsserver，无需额外操作）。如需手动编译：
 
 ```bash
 cd /data/workspace/stable/agenttown-mcp && go build -o agenttown-mcp     ./cmd/agenttown-mcp
@@ -143,14 +157,19 @@ bash start-debug.sh --drop-tables    # 清空 stable 库后重启
 
 ```bash
 cd agenttown-mcp
-go build ./...                  # 编译检查
-go test ./...                   # 全量测试
+go build ./...                  # 编译检查（根 module，replace 自动解析本地 module）
+go test ./...                   # 根 module 全量测试
+
+# 连接侧两个 module 也可独立构建/测试
+cd contract  && go build ./... && go test ./...
+cd wsserver && go build ./... && go test ./...
 ```
 
 **debug 控制台**：`http://localhost:8770/debug/ `（dev）或 `:8760`（stable）——单 Action 下发、Schedule 注入、当日 schedule、战术层分解情况、MCP 日志。
 
 ## 关键信息
 
+- **模块化架构**：三 module（根=agent 决策+壳 / contract=契约 / wsserver=连接），依赖倒置——agent 决策侧只依赖 `contract.Transport` 接口，入站消息经 `Runtime.HandleMessage` 单入口分发，运输层与决策层互不耦合具体实现
 - **三层决策结构**：战略层（每日 07:00 生成 6-8 时段计划）→ 战术层（每时段把 goal 分解为 1-4 动作段）→ 反应层（当前由于延迟较高、表现不佳，默认禁用，Ollama 决策 continue/observe/replan）
 - **LLM 上下文工程**：战略层与战术层按照 `system`, `user`, `assistant`, `tool` 四个 role 来构建请求体中的 messages 字段，形成 agentic loop
 - **战略层工作原理**：生成 json 数组格式化日程安排，例如 `{"time":"07:00-9:00","goal":"在跑步机跑步锻炼"}`，注入后续战术层中
