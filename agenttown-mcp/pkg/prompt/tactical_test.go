@@ -108,10 +108,10 @@ func TestBuildTactical_RelationshipsEmpty(t *testing.T) {
 // empty → "", non-empty → header + one bullet per agent with name/id/distance.
 func TestNearbyAgentsLine(t *testing.T) {
 	// Empty → "" (caller skips segment).
-	if got := NearbyAgentsLine(nil); got != "" {
+	if got := NearbyAgentsLine(nil, nil); got != "" {
 		t.Errorf("NearbyAgentsLine(nil) = %q, want empty", got)
 	}
-	if got := NearbyAgentsLine([]protocol.VisibleAgent{}); got != "" {
+	if got := NearbyAgentsLine([]protocol.VisibleAgent{}, nil); got != "" {
 		t.Errorf("NearbyAgentsLine(empty) = %q, want empty", got)
 	}
 
@@ -120,7 +120,7 @@ func TestNearbyAgentsLine(t *testing.T) {
 		{ID: "H-02", Name: "老王", Distance: 420, CurrentAction: "idle"},
 		{ID: "H-05", Name: "老张", Distance: 980, CurrentAction: ""},
 	}
-	got := NearbyAgentsLine(agents)
+	got := NearbyAgentsLine(agents, nil)
 	if !strings.Contains(got, "【附近NPC】") {
 		t.Errorf("missing header: %q", got)
 	}
@@ -139,6 +139,27 @@ func TestNearbyAgentsLine(t *testing.T) {
 	}
 	if !strings.Contains(got, "老张（id=H-05）距离 10 米") {
 		t.Errorf("missing H-05 entry: %q", got)
+	}
+}
+
+// TestNearbyAgentsLine_NameFallbackToKB verifies that an empty UE-reported
+// visible_agents[].name falls back to the KB DisplayName (then id).
+func TestNearbyAgentsLine_NameFallbackToKB(t *testing.T) {
+	kb := &worldkb.KB{
+		Agents: []worldkb.Agent{
+			{ID: "H-02", DisplayName: "老王"},
+		},
+	}
+	agents := []protocol.VisibleAgent{
+		{ID: "H-02", Name: "", Distance: 420}, // UE 上报 name 空串
+	}
+	got := NearbyAgentsLine(agents, kb)
+	if !strings.Contains(got, "老王（id=H-02）") {
+		t.Errorf("empty name should fall back to KB DisplayName 老王:\n%s", got)
+	}
+	// KB 无该 agent → 回退 id。
+	if got := NearbyAgentsLine(agents, nil); !strings.Contains(got, "H-02（id=H-02）") {
+		t.Errorf("empty name with no KB should fall back to id:\n%s", got)
 	}
 }
 
@@ -218,6 +239,33 @@ func TestPickChatPeer_SingleAgent(t *testing.T) {
 	}
 	if peer := pickChatPeer(kb, "H-01"); peer != "" {
 		t.Errorf("pickChatPeer single agent = %q, want empty", peer)
+	}
+}
+
+// TestTacticalExample_SocialChat verifies the social_chat example is emitted
+// for chat/social goals (target = a non-self peer), and absent for other goals.
+func TestTacticalExample_SocialChat(t *testing.T) {
+	kb := &worldkb.KB{
+		Agents: []worldkb.Agent{
+			{ID: "H-01", DisplayName: "老陈"},
+			{ID: "H-02", DisplayName: "老王"},
+		},
+	}
+	got := TacticalExample(kb, "找老王聊聊天", "H-01")
+	if !strings.Contains(got, "social_chat") {
+		t.Errorf("social goal example should contain social_chat:\n%s", got)
+	}
+	if !strings.Contains(got, `"target_agent_id":"H-02"`) {
+		t.Errorf("social example should target a non-self peer H-02:\n%s", got)
+	}
+	// 非社交 goal 不应产生 social_chat 示例。
+	if got := TacticalExample(kb, "车间装配作业", "H-01"); strings.Contains(got, "social_chat") {
+		t.Errorf("non-social goal example should not contain social_chat:\n%s", got)
+	}
+	// 单 agent（无 peer）时社交 goal 不产生 social_chat 示例（回退 category fallback）。
+	single := &worldkb.KB{Agents: []worldkb.Agent{{ID: "H-01", DisplayName: "老陈"}}}
+	if got := TacticalExample(single, "找人聊天", "H-01"); strings.Contains(got, "social_chat") {
+		t.Errorf("single-agent KB should not produce social_chat example:\n%s", got)
 	}
 }
 

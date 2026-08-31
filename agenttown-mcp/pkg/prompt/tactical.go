@@ -108,7 +108,7 @@ func BuildTactical(in TacticalInput) string {
 			sb.WriteString("\n")
 		}
 	}
-	nearbyLine := NearbyAgentsLine(in.VisibleAgents)
+	nearbyLine := NearbyAgentsLine(in.VisibleAgents, in.KB)
 	if nearbyLine == "" && in.KB != nil {
 		// 附近无可见 NPC 时 fallback 到 KB 静态花名册，让 LLM 始终能看到
 		// NPC id 列表（social_chat 的 target_agent_id 需要 id 而非显示名）。
@@ -263,6 +263,16 @@ func TacticalExample(kb *worldkb.KB, goal, agentID string) string {
 	// if ex := exampleForGoal(kb, goal, agentID, zones, objs); ex != "" {
 	// 	return ex
 	// }
+
+	// 聊天/社交/对话 → speak + social_chat（主动找人聊天，走向对方+对话挂起）。
+	// 单独恢复社交分支（不恢复整段 exampleForGoal，避免长椅硬编码 bug 回归）。
+	// peer 优先从 KB 关系选熟悉度最高的，无关系回退首个非 self agent。
+	if kb != nil && containsAny(strings.ToLower(goal), "聊天", "社交", "对话", "chat", "social") && len(kb.Agents) >= 2 {
+		if peer := pickChatPeer(kb, agentID); peer != "" {
+			return fmt.Sprintf(`{"action":"speak","params":{"content":"去找同事聊两句"}}
+{"action":"social_chat","params":{"target_agent_id":"%s","content":"最近怎么样？"}}`, peer)
+		}
+	}
 
 	if len(zones) == 0 && len(objs) == 0 {
 		return genericExample

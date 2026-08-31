@@ -331,6 +331,26 @@ func TestDialogueRunner_HandleTurn_LLMEnds(t *testing.T) {
 	}
 }
 
+func TestDialogueRunner_HandleTurn_HardCapForcesEnd(t *testing.T) {
+	d, _, fake := newTestDialogueRunner("H-02")
+	d.mu.Lock()
+	d.convID = "conv-hardcap"
+	d.peerID = "H-01"
+	d.phase = phaseActive
+	d.turnCount = dialogueHardMaxTurns - 1 // 下一次 handleTurn 内递增后即达硬上限
+	d.mu.Unlock()
+	// LLM 返回 end=false，硬上限应强制优雅结束，防止对话不收敛。
+	fake.resp = makeDialogueResponse(`{"content": "还没聊完", "end": false}`)
+
+	d.handleTurn(context.Background(), protocol.ChatTurnPayload{
+		ConvID: "conv-hardcap", Content: "再聊聊呗",
+	})
+
+	if d.active() {
+		t.Error("after hard-cap turn, runner should be finalized (not active)")
+	}
+}
+
 func TestDialogueRunner_OnActionCompleted_Interrupted(t *testing.T) {
 	d, _, _ := newTestDialogueRunner("H-02")
 	d.mu.Lock()

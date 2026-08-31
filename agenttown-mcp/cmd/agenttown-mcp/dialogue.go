@@ -19,9 +19,13 @@ import (
 )
 
 // dialogueMaxTurns is the soft cap after which the LLM is urged to end
-// gracefully. Hard cap (force-end) is a few turns above this so the LLM
-// gets a chance to say goodbye.
-const dialogueMaxTurns = 6
+// gracefully (written into the prompt as "建议上限约 N 轮"). dialogueHardMaxTurns
+// is the hard cap — handleTurn force-sets end=true once reached, so a stubborn
+// LLM that keeps returning end=false cannot stall the conversation forever.
+const (
+	dialogueMaxTurns     = 6
+	dialogueHardMaxTurns = 8
+)
 
 // dialoguePhase tracks where this agent is in the 4-step handshake + turn
 // exchange. Mirrors the design doc's per-Mind conversation_state.phase.
@@ -281,6 +285,15 @@ func (d *dialogueRunner) handleTurn(_ context.Context, payload protocol.ChatTurn
 		d.mu.Unlock()
 		d.finalizeDialogue()
 		return
+	}
+
+	// 硬上限：达到 dialogueHardMaxTurns 时强制优雅结束，防止 LLM 持续返回
+	// end=false 导致对话不收敛（软上限 dialogueMaxTurns 只写进 prompt 提示）。
+	if count >= dialogueHardMaxTurns {
+		result.End = true
+		if strings.TrimSpace(result.Content) == "" {
+			result.Content = "（聊得差不多了）回头再聊。"
+		}
 	}
 
 	d.sendTurn(result.Content, result.End)
