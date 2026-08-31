@@ -6,8 +6,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/AgentTown/agenttown-mcp/pkg/profile"
 	"github.com/AgentTown/agenttown-mcp/contract/protocol"
+	"github.com/AgentTown/agenttown-mcp/pkg/profile"
 	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
 )
 
