@@ -57,30 +57,21 @@ func DefaultDailyPlan(kb *worldkb.KB) string {
 		"22:00-06:00: 夜间休眠"
 }
 
-// BuildStrategicSystemPrompt constructs the strategic layer's system message,
-// KB-derived modules (stable within a session):
-//  1. 【世界背景】 — world overview registered from the world KB: narrative
-//     setting/theme, zone roster, smart-object group roster, NPC roster.
+// BuildSharedSystemPrompt constructs the KB-derived modules shared by the
+// strategic, tactical, and dialogue layers' system prompts:
+//  1. 【世界背景】 — world overview (WorldOverview).
 //  2. 【人物背景】 — the current agent's profile (AgentRole).
-//  3. 【其他NPC】 — the KB's static peer roster (id + profession), so the LLM
-//     can name a social_chat target when planning at 07:00.
-//  4. 【世界详细信息】 — per-zone descriptions; smart objects grouped by
-//     semantic_group with per-interaction description, per-hour attribute
-//     effects and usage gates (from the KB's declared rates).
+//  3. 【世界详细信息】 — per-zone descriptions + facility groups with inline
+//     per-interaction effects (worldDetailCore).
+//  4. 【生产工作流】 — the production workflow overview.
 //
-// 复合动作清单不注入战略层——goal 只需映射到设施详情中的
-// (semantic_group, interaction) 组合，cmd 的选择属于战术层职责。
+// extraAfterRole, when non-empty, is appended immediately after 【人物背景】.
+// The strategic layer uses it to inject the 【其他NPC】 roster (social_chat
+// target list); the tactical and dialogue layers pass "".
 //
-// The seven planning rules (StrategicRules) live in the user message
-// (StrategicUserTemplate's third placeholder) so they sit adjacent to the
-// planning ask. Per-call dynamic data (physical state, weekly-schedule
-// context, yesterday summary) also lives in the user message
-// (BuildStrategicUserContext). The system prompt text is identical across
-// calls within a session (per agent), keeping it cacheable.
-//
-// kb == nil → modules 1/3 degrade to empty; profiles == nil → persona falls
-// back to the hardcoded fallback fields.
-func BuildStrategicSystemPrompt(kb *worldkb.KB, profiles map[string]*profile.Profile, agentID string) string {
+// kb == nil → modules degrade to empty; profiles == nil → persona falls back
+// to the hardcoded fallback fields.
+func BuildSharedSystemPrompt(kb *worldkb.KB, profiles map[string]*profile.Profile, agentID string, extraAfterRole string) string {
 	var sb strings.Builder
 
 	if m1 := WorldOverview(kb); m1 != "" {
@@ -91,14 +82,8 @@ func BuildStrategicSystemPrompt(kb *worldkb.KB, profiles map[string]*profile.Pro
 		sb.WriteString("\n【人物背景】\n")
 		sb.WriteString(role)
 	}
-	// 【其他NPC】段：列出 KB 中除自己外的所有 NPC（id + 职业），让战略层 LLM
-	// 在 07:00 规划时看到可聊天的同伴——social_chat 的 target_agent_id 需要
-	// 具体 id，没有这份花名册 LLM 会因"不得编造未提及的人物"规则而不安排
-	// 社交时段。与战术层的【附近NPC】不同：战术层用 UE 运行时感知，战略层用
-	// KB 静态花名册（任何 NPC id 都合法目标）。
-	if peers := OtherAgentsLine(kb, agentID); peers != "" {
-		sb.WriteString("\n【其他NPC】\n")
-		sb.WriteString(peers)
+	if extraAfterRole != "" {
+		sb.WriteString(extraAfterRole)
 	}
 	if m3 := worldDetailCore(kb); m3 != "" {
 		sb.WriteString("\n【世界详细信息】\n")
@@ -107,6 +92,23 @@ func BuildStrategicSystemPrompt(kb *worldkb.KB, profiles map[string]*profile.Pro
 	sb.WriteString("\n【生产工作流】\n")
 	sb.WriteString(ProductionWorkflowText)
 	return sb.String()
+}
+
+// BuildStrategicSystemPrompt constructs the strategic layer's system message:
+// the shared KB modules plus a 【其他NPC】 roster segment (so the LLM can name
+// a social_chat target at 07:00 planning). Planning rules live in the user
+// message (StrategicRules), not here.
+func BuildStrategicSystemPrompt(kb *worldkb.KB, profiles map[string]*profile.Profile, agentID string) string {
+	// 【其他NPC】段：列出 KB 中除自己外的所有 NPC（id + 职业），让战略层 LLM
+	// 在 07:00 规划时看到可聊天的同伴——social_chat 的 target_agent_id 需要
+	// 具体 id，没有这份花名册 LLM 会因"不得编造未提及的人物"规则而不安排
+	// 社交时段。与战术层的【附近NPC】不同：战术层用 UE 运行时感知，战略层用
+	// KB 静态花名册（任何 NPC id 都合法目标）。
+	var extra string
+	if peers := OtherAgentsLine(kb, agentID); peers != "" {
+		extra = "\n【其他NPC】\n" + peers
+	}
+	return BuildSharedSystemPrompt(kb, profiles, agentID, extra)
 }
 
 // WorldOverview renders the shared module 1: the world's basic situation —

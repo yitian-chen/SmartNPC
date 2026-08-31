@@ -4,14 +4,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	"github.com/AgentTown/agenttown-mcp/pkg/profile"
+	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
 )
 
-// DialogueInviteSystemPrompt is the dialogue invite layer's system message:
-// mechanism text only (module role, accept/reject guidance, JSON output
-// format). Fully static across agents and calls → cacheable. Per-call data
-// (persona, relationship, memories, peer's invite) goes in the user message
-// built by BuildDialogueInvite.
-const DialogueInviteSystemPrompt = `你是小镇居民 NPC 的对话决策模块。用户信息给出你的身份、性格、身体状态、与对方的关系、近期记忆，以及对方走过来的聊天邀请，请结合你的性格、当前状态、与对方的关系，决定是否接受这次聊天。
+// dialogueInviteMechanism is the invite layer's mechanism text (module role,
+// accept/reject guidance, JSON output format). Combined with the shared KB
+// modules by BuildDialogueInviteSystemPrompt.
+const dialogueInviteMechanism = `你是小镇居民 NPC 的对话决策模块。用户信息给出你的身份、性格、身体状态、与对方的关系、近期记忆，以及对方走过来的聊天邀请，请结合你的性格、当前状态、与对方的关系，决定是否接受这次聊天。
 - 如果你觉得现在适合聊天（空闲、状态尚可、关系不差），就接受并给出你的开场回应。
 - 如果你正忙、疲惫、或不想理对方，可以拒绝。
 - 回应要符合你的说话风格，简短自然（一般一两句话），不要扮演系统助手。
@@ -19,11 +20,10 @@ const DialogueInviteSystemPrompt = `你是小镇居民 NPC 的对话决策模块
 只输出一个 JSON 对象，格式：
 {"accept": true/false, "reply": "接受时给对方的开场回应，拒绝时留空"}`
 
-// DialogueTurnSystemPrompt is the dialogue turn layer's system message:
-// mechanism text only (module role, reply guidance, end-of-conversation
-// convention, JSON output format). Fully static → cacheable. Per-call data
-// goes in the user message built by BuildDialogueTurn.
-const DialogueTurnSystemPrompt = `你是小镇居民 NPC 的对话生成模块。用户信息给出你的身份、性格、与对方的关系、近期记忆、本场对话记录以及对方的最新发言，请生成你的下一句回应。
+// dialogueTurnMechanism is the turn layer's mechanism text (module role, reply
+// guidance, end-of-conversation convention, JSON output format). Combined with
+// the shared KB modules by BuildDialogueTurnSystemPrompt.
+const dialogueTurnMechanism = `你是小镇居民 NPC 的对话生成模块。用户信息给出你的身份、性格、与对方的关系、近期记忆、本场对话记录以及对方的最新发言，请生成你的下一句回应。
 - 符合你的性格和说话风格，简短自然（一般一两句话）。
 - 可以延续话题、引出新话题，或自然收尾。
 - 如果觉得聊得差不多了、没有新话题，或者已到建议上限，就用 end=true 优雅结束，并给出一句告别语。
@@ -31,6 +31,20 @@ const DialogueTurnSystemPrompt = `你是小镇居民 NPC 的对话生成模块�
 
 只输出一个 JSON 对象，格式：
 {"content": "你说的话", "end": true/false}`
+
+// BuildDialogueInviteSystemPrompt constructs the invite layer's system message:
+// the shared KB modules (BuildSharedSystemPrompt, same as strategic/tactical)
+// followed by the invite mechanism text. Persona now lives here (【人物背景】),
+// not in the user message.
+func BuildDialogueInviteSystemPrompt(kb *worldkb.KB, profiles map[string]*profile.Profile, agentID string) string {
+	return BuildSharedSystemPrompt(kb, profiles, agentID, "") + "\n" + dialogueInviteMechanism
+}
+
+// BuildDialogueTurnSystemPrompt constructs the turn layer's system message:
+// the shared KB modules + the turn mechanism text.
+func BuildDialogueTurnSystemPrompt(kb *worldkb.KB, profiles map[string]*profile.Profile, agentID string) string {
+	return BuildSharedSystemPrompt(kb, profiles, agentID, "") + "\n" + dialogueTurnMechanism
+}
 
 // DialogueInviteInput aggregates the inputs for BuildDialogueInvite — the
 // prompt used by B (the invitee) to decide whether to accept A's chat_invite
@@ -41,7 +55,6 @@ type DialogueInviteInput struct {
 	PeerID         string   // A's agent id
 	PeerName       string   // A's display name
 	PeerContent    string   // A's opening line (the content field of social_chat)
-	Persona        string   // B's 【你的角色】段 (personality/speech style), from AgentRole()
 	CurrentAction  string   // what B was doing before being interrupted; empty = idle
 	Physical       string   // formatted physical state line; empty = skip
 	TimeOfDay      string   // "HH:MM" game time
@@ -68,11 +81,6 @@ func BuildDialogueInvite(in DialogueInviteInput) string {
 		peer = in.PeerID
 	}
 	fmt.Fprintf(&sb, "你是 %s（id=%s）。当前游戏时间 %s。\n", self, in.AgentID, fallback(in.TimeOfDay, "未知"))
-	if in.Persona != "" {
-		sb.WriteString("\n【你的角色】\n")
-		sb.WriteString(in.Persona)
-		sb.WriteString("\n")
-	}
 	if in.Physical != "" {
 		sb.WriteString("\n【身体状态】\n")
 		sb.WriteString(in.Physical)
@@ -126,7 +134,6 @@ type DialogueTurnInput struct {
 	AgentName   string // display name; empty → fall back to AgentID
 	PeerID      string // peer's agent id
 	PeerName    string // peer's display name
-	Persona     string // 【你的角色】段
 	PeerContent string // peer's latest utterance (the turn being responded to)
 	// ShortTermContext holds the recent turns of THIS conversation (most
 	// recent last), capped to ~10 turns by the caller. Each entry records
@@ -167,11 +174,6 @@ func BuildDialogueTurn(in DialogueTurnInput) string {
 	}
 	fmt.Fprintf(&sb, "你是 %s（id=%s），正在和 %s（id=%s）聊天。当前游戏时间 %s。\n",
 		self, in.AgentID, peer, in.PeerID, fallback(in.TimeOfDay, "未知"))
-	if in.Persona != "" {
-		sb.WriteString("\n【你的角色】\n")
-		sb.WriteString(in.Persona)
-		sb.WriteString("\n")
-	}
 	if in.Relationship != "" {
 		sb.WriteString("\n【与对方的关系】\n")
 		sb.WriteString(in.Relationship)

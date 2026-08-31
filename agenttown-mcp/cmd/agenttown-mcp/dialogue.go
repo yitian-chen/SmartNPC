@@ -428,7 +428,6 @@ func (d *dialogueRunner) generateInviteDecision(snap agentstate.Snapshot, peerID
 		PeerID:         peerID,
 		PeerName:       d.peerName(peerID),
 		PeerContent:    peerContent,
-		Persona:        d.persona(agentID),
 		CurrentAction:  describeAction(snap.CurrentActionCmd, snap.CurrentActionParams),
 		Physical:       prompt.PhysicalLine(snap.LatestPhysical, prompt.BandThresholdsFor(d.profiles, agentID)),
 		TimeOfDay:      snap.LatestTimeOfDay(),
@@ -442,7 +441,7 @@ func (d *dialogueRunner) generateInviteDecision(snap agentstate.Snapshot, peerID
 	if hc == nil {
 		return prompt.DialogueInviteDecision{}, fmt.Errorf("no LLM client")
 	}
-	resp, err := hc.SendWithSummary(ctx, prompt.DialogueInviteSystemPrompt, promptText)
+	resp, err := hc.SendWithSummary(ctx, prompt.BuildDialogueInviteSystemPrompt(d.kb, d.profiles, agentID), promptText)
 	if err != nil {
 		return prompt.DialogueInviteDecision{}, fmt.Errorf("llm call: %w", err)
 	}
@@ -463,7 +462,6 @@ func (d *dialogueRunner) generateTurn(snap agentstate.Snapshot, peerID, peerCont
 		AgentName:        d.peerName(agentID),
 		PeerID:           peerID,
 		PeerName:         d.peerName(peerID),
-		Persona:          d.persona(agentID),
 		PeerContent:      peerContent,
 		ShortTermContext: ctx,
 		RecentMemories:   d.recentMemories(),
@@ -480,7 +478,7 @@ func (d *dialogueRunner) generateTurn(snap agentstate.Snapshot, peerID, peerCont
 	if hc == nil {
 		return prompt.DialogueTurnResult{}, fmt.Errorf("no LLM client")
 	}
-	resp, err := hc.SendWithSummary(callCtx, prompt.DialogueTurnSystemPrompt, promptText)
+	resp, err := hc.SendWithSummary(callCtx, prompt.BuildDialogueTurnSystemPrompt(d.kb, d.profiles, agentID), promptText)
 	if err != nil {
 		return prompt.DialogueTurnResult{}, fmt.Errorf("llm call: %w", err)
 	}
@@ -601,10 +599,6 @@ func (d *dialogueRunner) bumpRelationship(peerID string) {
 }
 
 // ─── prompt helpers (read-only, no mu needed) ───
-
-func (d *dialogueRunner) persona(agentID string) string {
-	return prompt.AgentRole(d.kb, d.profiles, agentID)
-}
 
 func (d *dialogueRunner) peerName(peerID string) string {
 	if d.kb != nil {

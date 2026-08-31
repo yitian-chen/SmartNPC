@@ -9,35 +9,15 @@ import (
 	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
 )
 
-// BuildTacticalSystemPrompt constructs the tactical layer's system message.
-// It shares the strategic layer's KB/cmd-derived modules ("绝大部分相同"),
-// stable within a session (per agent) and thus cacheable:
-//  1. 【世界背景】 — world overview (WorldOverview, shared with strategic).
-//  2. 【人物背景】 — the current agent's profile (AgentRole).
-//  3. 【世界详细信息】 — shared world detail core (zone descriptions +
-//     facility groups with inline per-interaction effects).
-//
+// BuildTacticalSystemPrompt constructs the tactical layer's system message:
+// the shared KB modules (BuildSharedSystemPrompt, same as strategic/dialogue).
 // The decomposition rules (TacticalRules) live in the user message so they
 // sit adjacent to the decomposition ask. Per-call data (full-day plan,
 // current slot goal, realtime state, example) also lives in the user
 // message (BuildTactical). The tool list itself is NOT rendered in the
 // prompt — it is passed via the function-calling `tools` request field.
 func BuildTacticalSystemPrompt(kb *worldkb.KB, profiles map[string]*profile.Profile, agentID string) string {
-	var sb strings.Builder
-
-	if m1 := WorldOverview(kb); m1 != "" {
-		sb.WriteString("【世界背景】\n")
-		sb.WriteString(m1)
-	}
-	if role := AgentRole(kb, profiles, agentID); role != "" {
-		sb.WriteString("\n【人物背景】\n")
-		sb.WriteString(role)
-	}
-	sb.WriteString("\n【世界详细信息】\n")
-	sb.WriteString(worldDetailCore(kb))
-	sb.WriteString("\n【生产工作流】\n")
-	sb.WriteString(ProductionWorkflowText)
-	return sb.String()
+	return BuildSharedSystemPrompt(kb, profiles, agentID, "")
 }
 
 // TacticalRules is the tactical decomposition rules, injected into the user
