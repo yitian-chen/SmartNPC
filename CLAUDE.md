@@ -491,7 +491,7 @@ Stage 5 在 Stage 3/4 之上接入 NPC 间关系数值动态维护：动作完�
 
 UE 推送新 `world_kb` 后，MCP 重启即自动适配全链路，无需改任何代码：
 
-- **战略/战术层 prompt 注入 KB + 角色**：`BuildStrategicSystemPrompt`/`BuildTacticalSystemPrompt` 共享三模块（【世界背景】`WorldOverview` + 【人物背景】`AgentRole` + 【世界详细信息】`worldDetailCore`）。角色段 `AgentRole(kb, profiles, agentID)` 三层 per-field 回退；世界详情 `worldDetailCore` 从 KB 派生各区域描述 + 设施映射表 + 属性影响/使用门槛，LLM 不会编造 KB 外概念
+- **三层共享 system prompt**：战略/战术/对话层的 system prompt 严格统一为 `BuildSharedSystemPrompt`（【世界背景】`WorldOverview` + 【人物背景】`AgentRole` + 【世界详细信息】`worldDetailCore` + 【生产工作流】），单次仿真内静态；所有层专属内容（规则、花名册、对话机制、JSON 格式）都在各层 user prompt。角色段 `AgentRole(kb, profiles, agentID)` 三层 per-field 回退；世界详情 `worldDetailCore` 从 KB 派生各区域描述 + 设施映射表 + 属性影响/使用门槛，LLM 不会编造 KB 外概念
 - **工具列表动态派生**：`capability_registry` 驱动 `ReconcileTools` 增删工具；战术层 tools 经 `tacticalToolsFromRegistry` 从 registry 对 agent 的有效能力集生成 function calling 的 `tools` 数组（`capabilityParamsSchema` 转 JSON Schema + 追加 time_to_stop）。新 cmd 由 `registerGenericActionTool` 自动注册
 - **反应层 prompt 注入角色**：`ReactiveInput.AgentRole` 由 `reactiveRunner.buildInput` 从 kb 取，注入反应层 prompt 开头。反应决策（continue/observe/replan）受 NPC 性格影响
 - **反应层决策简化**：反应层仅支持 `continue`/`observe`/`replan` 三种决策（已移除 `interrupt`/`act`）。物理告警时代码层 `upgradeIfPhysicalAlert` 强制升级 continue/observe → replan
@@ -570,8 +570,8 @@ sequenceDiagram
 ### LLM 调用
 
 MCP 直连 Venus（OpenAI Chat Completions 协议）。战略层用 Structured Outputs（json_schema strict），战术层用 function calling（tools + tool_choice=required + 多轮历史）。三层各自构造完整 prompt：
-- **战略层**：每日 07:00 一次调用，`SendWithSchema` + `dailyPlanSchema`，输入 = `BuildStrategicSystemPrompt`（三模块）+ user（物理状态/昨日总结/规则），输出 = 当日 plan JSON
-- **战术层**：每个时段开始时调用，`SendMessagesTools`，输入 = `BuildTacticalSystemPrompt`（三模块）+ user（全天日程/当前时段目标/实时状态/规则），工具经 `tools` 字段下发，输出 = tool_calls（1-4 动作段）
+- **战略层**：每日 07:00 一次调用，`SendWithSchema` + `dailyPlanSchema`，输入 = `BuildSharedSystemPrompt`（共享 system prompt）+ user（物理状态/其他NPC/昨日总结/规则），输出 = 当日 plan JSON
+- **战术层**：每个时段开始时调用，`SendMessagesTools`，输入 = `BuildSharedSystemPrompt`（共享 system prompt）+ user（全天日程/当前时段目标/实时状态/规则），工具经 `tools` 字段下发，输出 = tool_calls（1-4 动作段）
 - **反应层**：触发时调本地 Ollama（5-8s 超时），输入 = `buildReactivePrompt(in)`（含角色/状态/在途动作/触发原因），输出 = `{"reaction": "...", "reason": "..."}`
 
 ### 感知格式化
@@ -749,8 +749,8 @@ bash start-dev.sh       # 偏移端口 8770/9091 + logs-dev/ 日志目录
 | `agenttown-mcp/pkg/weeklyschedule/loader.go` | 每周日程配置加载：`Load` 解析 7 天 YAML + `Day` 查询 |
 | `agenttown-mcp/pkg/weeklyschedule/format.go` | `WeeklyLine(dayCount, sched)` 把 UE DayCount 映射到星期 + 注入【今日日程】段 |
 | `agenttown-mcp/pkg/prompt/agent_role.go` | `AgentRole(kb, profiles, agentID)` 三层 per-field 回退构造【你的角色】段 |
-| `agenttown-mcp/pkg/prompt/strategic.go` | 战略层 prompt：`BuildStrategicSystemPrompt`（三模块）+ `StrategicRules` + 生产工作流概述 |
-| `agenttown-mcp/pkg/prompt/tactical.go` | 战术层 prompt：`BuildTacticalSystemPrompt` + `TacticalRules`（规则迁 user prompt，工具走 function calling tools 字段） |
+| `agenttown-mcp/pkg/prompt/strategic.go` | 三层共享 system prompt `BuildSharedSystemPrompt` + 战略层 user prompt（`StrategicRules`/`BuildStrategicUserContext` 含【其他NPC】） |
+| `agenttown-mcp/pkg/prompt/tactical.go` | 战术层 user prompt：`BuildTactical` + `TacticalRules`（system prompt 用共享 `BuildSharedSystemPrompt`，工具走 function calling tools 字段） |
 | `agenttown-mcp/pkg/prompt/physical_bands.go` | 物理属性分档（电量/疲劳/关节磨损 3 阈值切 4 档）+ per-NPC `## 属性分段` 覆盖 |
 | `agenttown-mcp/pkg/prompt/cmd_effects.go` | 设施每小时属性影响 + 使用门槛（由 world KB 声明速率派生） |
 | `agenttown-mcp/pkg/prompt/kb_context.go` | 【世界详细信息】各区域可交互设施映射表（按实例真实分布） |

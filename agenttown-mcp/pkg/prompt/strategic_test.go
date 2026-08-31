@@ -62,12 +62,12 @@ func strategicDetailKB() *worldkb.KB {
 	}
 }
 
-// TestBuildStrategicSystemPrompt_ThreeModules verifies the three-module
-// structure: 【世界背景】(overview) → 【人物背景】(profile) →
-// 【世界详细信息】(details). The seven rules live in the user message
-// (StrategicRules + StrategicUserTemplate), not here.
-func TestBuildStrategicSystemPrompt_ThreeModules(t *testing.T) {
-	got := BuildStrategicSystemPrompt(strategicDetailKB(), nil, "H-01")
+// TestBuildSharedSystemPrompt_ThreeModules verifies the shared system
+// prompt's module structure: 【世界背景】(overview) → 【人物背景】(profile) →
+// 【世界详细信息】(details) → 【生产工作流】. All layer-specific rules and
+// rosters live in each layer's user message, not here.
+func TestBuildSharedSystemPrompt_ThreeModules(t *testing.T) {
+	got := BuildSharedSystemPrompt(strategicDetailKB(), nil, "H-01")
 	overIdx := strings.Index(got, "【世界背景】")
 	roleIdx := strings.Index(got, "【人物背景】")
 	detailIdx := strings.Index(got, "【世界详细信息】")
@@ -77,9 +77,12 @@ func TestBuildStrategicSystemPrompt_ThreeModules(t *testing.T) {
 	if !(overIdx < roleIdx && roleIdx < detailIdx) {
 		t.Errorf("module order wrong: bg=%d role=%d detail=%d", overIdx, roleIdx, detailIdx)
 	}
-	// 规则已迁至 user prompt，system prompt 不再包含。
+	// 规则与其他层专属内容已迁至各层 user prompt，system prompt 不再包含。
 	if strings.Contains(got, "规划要求：") {
 		t.Errorf("system prompt should not contain the rules module (moved to user prompt):\n%s", got)
+	}
+	if strings.Contains(got, "【其他NPC】") {
+		t.Errorf("system prompt should not contain the strategic 【其他NPC】 roster (moved to user prompt):\n%s", got)
 	}
 	// 模块 1 世界背景：narrative + 三份名册。
 	for _, want := range []string{
@@ -107,11 +110,11 @@ func TestBuildStrategicSystemPrompt_ThreeModules(t *testing.T) {
 	}
 }
 
-// TestBuildStrategicSystemPrompt_Module3Details verifies module 3 renders
+// TestBuildSharedSystemPrompt_Module3Details verifies module 3 renders
 // zone descriptions, per-group facilities with inline per-interaction
 // description + per-hour effects + gates, and the composite cmd list.
-func TestBuildStrategicSystemPrompt_Module3Details(t *testing.T) {
-	got := BuildStrategicSystemPrompt(strategicDetailKB(), nil, "H-01")
+func TestBuildSharedSystemPrompt_Module3Details(t *testing.T) {
+	got := BuildSharedSystemPrompt(strategicDetailKB(), nil, "H-01")
 	// zone 描述。
 	if !strings.Contains(got, "主生产车间（main_workshop）：小镇的生产核心") {
 		t.Errorf("module 3 missing zone description:\n%s", got)
@@ -156,9 +159,12 @@ func TestBuildStrategicSystemPrompt_Module3Details(t *testing.T) {
 // 断言随之过时。
 
 func TestBuildStrategicUserContext_EmptyDayContext(t *testing.T) {
-	got := BuildStrategicUserContext("H-01", nil, nil, "")
+	got := BuildStrategicUserContext("H-01", nil, nil, nil, "")
 	if strings.Contains(got, "【今日日程】") {
 		t.Errorf("empty dayContext should not produce 【今日日程】 segment in:\n%s", got)
+	}
+	if strings.Contains(got, "【其他NPC】") {
+		t.Errorf("nil kb should not produce 【其他NPC】 segment in:\n%s", got)
 	}
 }
 
@@ -224,21 +230,18 @@ func TestOtherAgentsLine_OmitsProfessionWhenEmpty(t *testing.T) {
 	}
 }
 
-// TestBuildStrategicSystemPrompt_InjectsOtherNPCsSegment 验证战略层 system
-// prompt 注入【其他NPC】花名册段（社交目标清单），排除 self、含 peer 职业。
-func TestBuildStrategicSystemPrompt_InjectsOtherNPCsSegment(t *testing.T) {
+// TestBuildStrategicUserContext_InjectsOtherNPCsSegment 验证战略层 user
+// prompt 注入【其他NPC】花名册段（社交目标清单），排除 self、含 peer 职业；
+// system prompt 严格三层统一，不含此段。
+func TestBuildStrategicUserContext_InjectsOtherNPCsSegment(t *testing.T) {
 	kb := strategicRosterKB()
-	got := BuildStrategicSystemPrompt(kb, nil, "H-01")
+	got := BuildStrategicUserContext("H-01", kb, nil, nil, "")
 	const header = "【其他NPC】\n"
 	npcIdx := strings.Index(got, header)
 	if npcIdx < 0 {
 		t.Fatalf("missing 【其他NPC】 segment header in:\n%s", got)
 	}
-	// 【其他NPC】段在【人物背景】之后、【世界详细信息】之前。
-	roleIdx := strings.Index(got, "【人物背景】")
-	if npcIdx <= roleIdx {
-		t.Errorf("【其他NPC】 should follow 【人物背景】 (role=%d npc=%d):\n%s", roleIdx, npcIdx, got)
-	}
+	// 【其他NPC】段在【物理状态】之后（preamble → 今日日程 → 物理状态 → 其他NPC）。
 	// self 不出现在花名册里。
 	npcSection := got[npcIdx:]
 	if strings.Contains(npcSection, "老陈（id=H-01）") {
@@ -250,6 +253,10 @@ func TestBuildStrategicSystemPrompt_InjectsOtherNPCsSegment(t *testing.T) {
 	}
 	if !strings.Contains(npcSection, "老李（id=H-03）职业：精密装配技术员") {
 		t.Errorf("peer 老李 with profession missing in roster:\n%s", npcSection)
+	}
+	// system prompt 不得含【其他NPC】（三层严格统一，层专属内容在 user）。
+	if sys := BuildSharedSystemPrompt(kb, nil, "H-01"); strings.Contains(sys, "【其他NPC】") {
+		t.Errorf("shared system prompt should not contain 【其他NPC】 roster:\n%s", sys)
 	}
 }
 
@@ -267,7 +274,7 @@ func TestStrategicSystemPrompt_HasSocialGuidance(t *testing.T) {
 	}
 	// 单 agent KB 不应产生【其他NPC】段（无 peer）。
 	single := &worldkb.KB{Version: "1.0", Agents: []worldkb.Agent{{ID: "H-01", DisplayName: "老陈"}}}
-	if got := BuildStrategicSystemPrompt(single, nil, "H-01"); strings.Contains(got, "【其他NPC】\n") {
+	if got := BuildStrategicUserContext("H-01", single, nil, nil, ""); strings.Contains(got, "【其他NPC】\n") {
 		t.Errorf("single-agent KB should not produce 【其他NPC】 segment:\n%s", got)
 	}
 }

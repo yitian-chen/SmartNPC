@@ -226,11 +226,11 @@ func isJitteredDefaultPlan(t *testing.T, plan string) bool {
 	return true
 }
 
-// ─── buildStrategicSystemPrompt ───────────────────────────────
+// ─── buildSharedSystemPrompt ───────────────────────────────
 
-func TestBuildStrategicSystemPrompt_WithKB(t *testing.T) {
+func TestBuildSharedSystemPrompt_WithKB(t *testing.T) {
 	kb := loadTestKB(t)
-	got := prompt.BuildStrategicSystemPrompt(kb, nil, "H-01")
+	got := prompt.BuildSharedSystemPrompt(kb, nil, "H-01")
 	if got == "" {
 		t.Fatal("got empty system prompt, want non-empty for valid KB")
 	}
@@ -257,10 +257,10 @@ func TestBuildStrategicSystemPrompt_WithKB(t *testing.T) {
 	}
 }
 
-func TestBuildStrategicSystemPrompt_NilKB(t *testing.T) {
+func TestBuildSharedSystemPrompt_NilKB(t *testing.T) {
 	// kb == nil 且 actions == nil：复合动作段为空（可用工具仅从 cmd 派生，
 	// 无内置兜底——UE 未连接时 LLM 不获知任何工具）。
-	got := prompt.BuildStrategicSystemPrompt(nil, nil, "H-01")
+	got := prompt.BuildSharedSystemPrompt(nil, nil, "H-01")
 	if strings.Contains(got, "复合动作（长时段活动用") {
 		t.Errorf("nil actions should not produce composite capability section: %q", got)
 	}
@@ -277,10 +277,10 @@ func TestBuildStrategicSystemPrompt_NilKB(t *testing.T) {
 	}
 }
 
-func TestBuildStrategicSystemPrompt_AgentNotFound(t *testing.T) {
+func TestBuildSharedSystemPrompt_AgentNotFound(t *testing.T) {
 	// KB 存在但 agentID 不在 KB 中：跳过人物背景段，仍注入世界模块。
 	kb := loadTestKB(t)
-	got := prompt.BuildStrategicSystemPrompt(kb, nil, "NONEXISTENT-99")
+	got := prompt.BuildSharedSystemPrompt(kb, nil, "NONEXISTENT-99")
 	if strings.Contains(got, "【人物背景】\n") {
 		t.Errorf("should not include persona module for unknown agent: %q", got)
 	}
@@ -927,12 +927,12 @@ func TestSelectPlanInjection_OvernightSlotEarlyMorning(t *testing.T) {
 	}
 }
 
-// TestBuildStrategicSystemPrompt_NoZoneObjectMapHeader 【区域设施映射】段
+// TestBuildSharedSystemPrompt_NoZoneObjectMapHeader 【区域设施映射】段
 // 已移除（模块 3 设施详情逐组标注所在 zone，信息不冗余）。
 // 日后若 LLM 又出现 zone-object 错配可重新启用并恢复此断言。
-func TestBuildStrategicSystemPrompt_NoZoneObjectMapHeader(t *testing.T) {
+func TestBuildSharedSystemPrompt_NoZoneObjectMapHeader(t *testing.T) {
 	kb := loadTestKB(t)
-	got := prompt.BuildStrategicSystemPrompt(kb, nil, "H-01")
+	got := prompt.BuildSharedSystemPrompt(kb, nil, "H-01")
 	if strings.Contains(got, "【区域设施映射】") {
 		t.Errorf("system prompt should NOT include '【区域设施映射】' section (superseded by module 3): %q", got)
 	}

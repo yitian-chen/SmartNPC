@@ -127,10 +127,11 @@ func generateTacticalPlan(
 	nearbyObjects []protocol.NearbyObject,
 	visibleAgents []protocol.VisibleAgent,
 ) ([]plannedAction, llmtypes.Message, error) {
-	// System prompt：与战略层共享三模块（世界背景/人物背景/世界详细
-	// 信息），会话内稳定可缓存；user prompt 携带四段结构，工具经
-	// function calling 的 tools 字段下发，不再注入 prompt 文本。
-	system := prompt.BuildTacticalSystemPrompt(kb, profiles, agentID)
+	// System prompt：与战略/对话层严格一致的共享 system prompt（世界背景/
+	// 人物背景/世界详细信息/生产工作流），单次仿真内静态可缓存；user prompt
+	// 携带四段结构（战术规则也在 user），工具经 function calling 的 tools
+	// 字段下发，不再注入 prompt 文本。
+	system := prompt.BuildSharedSystemPrompt(kb, profiles, agentID)
 	promptText := prompt.BuildTactical(prompt.TacticalInput{
 		Goal:          goal,
 		Zone:          zone,

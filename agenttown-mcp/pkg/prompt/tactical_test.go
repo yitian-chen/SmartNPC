@@ -269,12 +269,12 @@ func TestTacticalExample_SocialChat(t *testing.T) {
 	}
 }
 
-// TestBuildTacticalSystemPrompt_Structure verifies the tactical system prompt
-// shares the strategic layer's KB modules (世界背景/人物背景/世界详细信息)
-// plus the full tool list — and does NOT carry the decomposition rules
-// (they live in the user message).
-func TestBuildTacticalSystemPrompt_Structure(t *testing.T) {
-	got := BuildTacticalSystemPrompt(strategicDetailKB(), nil, "H-01")
+// TestBuildSharedSystemPrompt_NoTacticalRules verifies the shared system
+// prompt (injected verbatim into the tactical layer) carries the shared KB
+// modules but NOT the tactical decomposition rules or tool list — those live
+// in the tactical user message.
+func TestBuildSharedSystemPrompt_NoTacticalRules(t *testing.T) {
+	got := BuildSharedSystemPrompt(strategicDetailKB(), nil, "H-01")
 	overIdx := strings.Index(got, "【世界背景】")
 	roleIdx := strings.Index(got, "【人物背景】")
 	detailIdx := strings.Index(got, "【世界详细信息】")

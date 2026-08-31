@@ -441,7 +441,7 @@ func (d *dialogueRunner) generateInviteDecision(snap agentstate.Snapshot, peerID
 	if hc == nil {
 		return prompt.DialogueInviteDecision{}, fmt.Errorf("no LLM client")
 	}
-	resp, err := hc.SendWithSummary(ctx, prompt.BuildDialogueInviteSystemPrompt(d.kb, d.profiles, agentID), promptText)
+	resp, err := hc.SendWithSummary(ctx, prompt.BuildSharedSystemPrompt(d.kb, d.profiles, agentID), promptText)
 	if err != nil {
 		return prompt.DialogueInviteDecision{}, fmt.Errorf("llm call: %w", err)
 	}
@@ -478,7 +478,7 @@ func (d *dialogueRunner) generateTurn(snap agentstate.Snapshot, peerID, peerCont
 	if hc == nil {
 		return prompt.DialogueTurnResult{}, fmt.Errorf("no LLM client")
 	}
-	resp, err := hc.SendWithSummary(callCtx, prompt.BuildDialogueTurnSystemPrompt(d.kb, d.profiles, agentID), promptText)
+	resp, err := hc.SendWithSummary(callCtx, prompt.BuildSharedSystemPrompt(d.kb, d.profiles, agentID), promptText)
 	if err != nil {
 		return prompt.DialogueTurnResult{}, fmt.Errorf("llm call: %w", err)
 	}

@@ -4,47 +4,36 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
-
-	"github.com/AgentTown/agenttown-mcp/pkg/profile"
-	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
 )
 
-// dialogueInviteMechanism is the invite layer's mechanism text (module role,
-// accept/reject guidance, JSON output format). Combined with the shared KB
-// modules by BuildDialogueInviteSystemPrompt.
-const dialogueInviteMechanism = `你是小镇居民 NPC 的对话决策模块。用户信息给出你的身份、性格、身体状态、与对方的关系、近期记忆，以及对方走过来的聊天邀请，请结合你的性格、当前状态、与对方的关系，决定是否接受这次聊天。
+// dialogueInviteGuidance is the invite layer's mechanism text (module role +
+// accept/reject guidance), injected at the TOP of the invite user prompt.
+// The system prompt is shared verbatim across layers, so every
+// dialogue-specific text lives in the user message.
+const dialogueInviteGuidance = `你是小镇居民 NPC 的对话决策模块。系统信息中的【人物背景】给出你的身份与性格，用户信息给出你的身体状态、与对方的关系、近期记忆，以及对方走过来的聊天邀请。请结合你的性格、当前状态、与对方的关系，决定是否接受这次聊天。
 - 如果你觉得现在适合聊天（空闲、状态尚可、关系不差），就接受并给出你的开场回应。
 - 如果你正忙、疲惫、或不想理对方，可以拒绝。
-- 回应要符合你的说话风格，简短自然（一般一两句话），不要扮演系统助手。
+- 回应要符合你的说话风格，简短自然（一般一两句话），不要扮演系统助手。`
 
-只输出一个 JSON 对象，格式：
+// dialogueInviteFormat is the invite layer's JSON output-format text,
+// injected at the BOTTOM of the invite user prompt (recency effect: the
+// output format sits right next to the ask).
+const dialogueInviteFormat = `只输出一个 JSON 对象，格式：
 {"accept": true/false, "reply": "接受时给对方的开场回应，拒绝时留空"}`
 
-// dialogueTurnMechanism is the turn layer's mechanism text (module role, reply
-// guidance, end-of-conversation convention, JSON output format). Combined with
-// the shared KB modules by BuildDialogueTurnSystemPrompt.
-const dialogueTurnMechanism = `你是小镇居民 NPC 的对话生成模块。用户信息给出你的身份、性格、与对方的关系、近期记忆、本场对话记录以及对方的最新发言，请生成你的下一句回应。
+// dialogueTurnGuidance is the turn layer's mechanism text (module role +
+// reply guidance + end-of-conversation convention), injected at the TOP of
+// the turn user prompt.
+const dialogueTurnGuidance = `你是小镇居民 NPC 的对话生成模块。系统信息中的【人物背景】给出你的身份与性格，用户信息给出与对方的关系、近期记忆、本场对话记录以及对方的最新发言，请生成你的下一句回应。
 - 符合你的性格和说话风格，简短自然（一般一两句话）。
 - 可以延续话题、引出新话题，或自然收尾。
 - 如果觉得聊得差不多了、没有新话题，或者已到建议上限，就用 end=true 优雅结束，并给出一句告别语。
-- 不要扮演系统助手，不要输出除了 JSON 以外的内容。
+- 不要扮演系统助手，不要输出除了 JSON 以外的内容。`
 
-只输出一个 JSON 对象，格式：
+// dialogueTurnFormat is the turn layer's JSON output-format text, injected
+// at the BOTTOM of the turn user prompt.
+const dialogueTurnFormat = `只输出一个 JSON 对象，格式：
 {"content": "你说的话", "end": true/false}`
-
-// BuildDialogueInviteSystemPrompt constructs the invite layer's system message:
-// the shared KB modules (BuildSharedSystemPrompt, same as strategic/tactical)
-// followed by the invite mechanism text. Persona now lives here (【人物背景】),
-// not in the user message.
-func BuildDialogueInviteSystemPrompt(kb *worldkb.KB, profiles map[string]*profile.Profile, agentID string) string {
-	return BuildSharedSystemPrompt(kb, profiles, agentID, "") + "\n" + dialogueInviteMechanism
-}
-
-// BuildDialogueTurnSystemPrompt constructs the turn layer's system message:
-// the shared KB modules + the turn mechanism text.
-func BuildDialogueTurnSystemPrompt(kb *worldkb.KB, profiles map[string]*profile.Profile, agentID string) string {
-	return BuildSharedSystemPrompt(kb, profiles, agentID, "") + "\n" + dialogueTurnMechanism
-}
 
 // DialogueInviteInput aggregates the inputs for BuildDialogueInvite — the
 // prompt used by B (the invitee) to decide whether to accept A's chat_invite
@@ -62,8 +51,12 @@ type DialogueInviteInput struct {
 	RecentMemories []string // recent memory summaries for context
 }
 
-// BuildDialogueInvite builds the LLM prompt for the invitee's accept/reject
-// decision. The LLM must respond with a single JSON object:
+// BuildDialogueInvite builds the invite layer's USER message: the invite
+// mechanism guidance (top) + dynamic context (physical/relationship/memories/
+// current action/peer's invite) + the JSON output format (bottom, adjacent to
+// the ask). The system prompt is the shared BuildSharedSystemPrompt (KB
+// modules + persona), identical across the three layers. The LLM must respond
+// with a single JSON object:
 //
 //	{"accept": true, "reply": "好啊，正想歇会儿"}
 //
@@ -72,6 +65,8 @@ type DialogueInviteInput struct {
 // choice when busy or low-social, so B doesn't always say yes.
 func BuildDialogueInvite(in DialogueInviteInput) string {
 	var sb strings.Builder
+	sb.WriteString(dialogueInviteGuidance)
+	sb.WriteString("\n\n")
 	self := in.AgentName
 	if self == "" {
 		self = in.AgentID
@@ -103,7 +98,9 @@ func BuildDialogueInvite(in DialogueInviteInput) string {
 		sb.WriteString("\n你刚才处于空闲状态。\n")
 	}
 	fmt.Fprintf(&sb, "\n%s（id=%s）主动走过来想跟你聊天，开场白是：%s\n", peer, in.PeerID, quoteContent(in.PeerContent))
-	sb.WriteString("\n请决定是否接受这次聊天。\n")
+	sb.WriteString("\n请决定是否接受这次聊天。\n\n")
+	sb.WriteString(dialogueInviteFormat)
+	sb.WriteString("\n")
 	return sb.String()
 }
 
@@ -154,8 +151,11 @@ type DialogueTurnEntry struct {
 	Content     string
 }
 
-// BuildDialogueTurn builds the LLM prompt for generating one reply turn. The
-// LLM must respond with a single JSON object:
+// BuildDialogueTurn builds the turn layer's USER message: the turn mechanism
+// guidance (top) + dynamic context (relationship/memories/physical/short-term
+// context/peer's utterance) + the JSON output format (bottom). The system
+// prompt is the shared BuildSharedSystemPrompt, identical across the three
+// layers. The LLM must respond with a single JSON object:
 //
 //	{"content": "昨天那批零件我验过了", "end": false}
 //
@@ -164,6 +164,8 @@ type DialogueTurnEntry struct {
 // in-character replies.
 func BuildDialogueTurn(in DialogueTurnInput) string {
 	var sb strings.Builder
+	sb.WriteString(dialogueTurnGuidance)
+	sb.WriteString("\n\n")
 	self := in.AgentName
 	if self == "" {
 		self = in.AgentID
@@ -202,7 +204,9 @@ func BuildDialogueTurn(in DialogueTurnInput) string {
 	}
 	fmt.Fprintf(&sb, "\n对方刚才说：%s\n", quoteContent(in.PeerContent))
 	fmt.Fprintf(&sb, "\n目前已聊 %d 轮（建议上限约 %d 轮）。\n", in.TurnCount, in.MaxTurns)
-	sb.WriteString("\n请生成你的回应。\n")
+	sb.WriteString("\n请生成你的回应。\n\n")
+	sb.WriteString(dialogueTurnFormat)
+	sb.WriteString("\n")
 	return sb.String()
 }
 

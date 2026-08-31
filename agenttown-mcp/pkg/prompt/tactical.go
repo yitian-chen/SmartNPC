@@ -5,20 +5,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/AgentTown/agenttown-mcp/pkg/profile"
 	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
 )
-
-// BuildTacticalSystemPrompt constructs the tactical layer's system message:
-// the shared KB modules (BuildSharedSystemPrompt, same as strategic/dialogue).
-// The decomposition rules (TacticalRules) live in the user message so they
-// sit adjacent to the decomposition ask. Per-call data (full-day plan,
-// current slot goal, realtime state, example) also lives in the user
-// message (BuildTactical). The tool list itself is NOT rendered in the
-// prompt — it is passed via the function-calling `tools` request field.
-func BuildTacticalSystemPrompt(kb *worldkb.KB, profiles map[string]*profile.Profile, agentID string) string {
-	return BuildSharedSystemPrompt(kb, profiles, agentID, "")
-}
 
 // TacticalRules is the tactical decomposition rules, injected into the user
 // message (recency effect: instructions closer to the ask are followed more
@@ -49,7 +37,8 @@ const TacticalRules = `1. 第一个工具调用必须是 speak（用一段话表
 //  3. 分解规则 — TacticalRules (injected adjacent to the ask).
 //  4. 任务 — the decomposition ask + goal-specific example.
 //
-// KB/world/persona live in the system message (BuildTacticalSystemPrompt).
+// KB/world/persona live in the system message (BuildSharedSystemPrompt,
+// shared verbatim with the strategic and dialogue layers).
 func BuildTactical(in TacticalInput) string {
 	th := BandThresholdsFor(in.Profiles, in.AgentID)
 

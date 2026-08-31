@@ -527,7 +527,7 @@ func TestBuildTacticalPrompt_WithPhysical(t *testing.T) {
 func TestBuildTacticalPrompt_InjectsKBContext(t *testing.T) {
 	kb := loadTestKB(t)
 	// KB 世界信息已迁至 system prompt（与战略层共享三模块）。
-	promptText := prompt.BuildTacticalSystemPrompt(kb, nil, "")
+	promptText := prompt.BuildSharedSystemPrompt(kb, nil, "")
 	// 应包含 KB 中所有 zone（assets/world_kb.yaml 当前是 7-zone 工业园区）
 	for _, zID := range []string{"main_workshop", "central_plaza", "logistics_hub", "repair_bay", "residential_quarters", "archive_station", "recycling_yard"} {
 		if !strings.Contains(promptText, zID) {
@@ -654,7 +654,7 @@ func TestBuildTacticalPrompt_NilKB(t *testing.T) {
 func TestBuildTacticalPrompt_InjectsAgentRole(t *testing.T) {
 	kb := loadTestKB(t)
 	// 角色画像已迁至 system prompt 的【人物背景】模块。
-	promptText := prompt.BuildTacticalSystemPrompt(kb, nil, "H-01")
+	promptText := prompt.BuildSharedSystemPrompt(kb, nil, "H-01")
 	if !strings.Contains(promptText, "【人物背景】") {
 		t.Errorf("prompt missing '【人物背景】' section header, got: %s", promptText)
 	}
@@ -668,7 +668,7 @@ func TestBuildTacticalPrompt_InjectsAgentRole(t *testing.T) {
 // TestBuildTacticalPrompt_NilKBNoRole 验证 kb==nil 时 prompt 不含
 // 【你的角色】段（roleLine 降级为空串，prompt 中仅留空行）。
 func TestBuildTacticalPrompt_NilKBNoRole(t *testing.T) {
-	promptText := prompt.BuildTacticalSystemPrompt(nil, nil, "")
+	promptText := prompt.BuildSharedSystemPrompt(nil, nil, "")
 	if strings.Contains(promptText, "【人物背景】\n") {
 		t.Errorf("prompt should not contain '【人物背景】' when KB is nil, got: %s", promptText)
 	}

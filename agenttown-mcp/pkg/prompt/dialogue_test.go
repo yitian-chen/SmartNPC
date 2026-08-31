@@ -33,17 +33,24 @@ func TestBuildDialogueInvite_ContainsCoreContext(t *testing.T) {
 			t.Errorf("invite prompt missing %q\n--- prompt ---\n%s", s, got)
 		}
 	}
-	// persona 已移入 system prompt（【人物背景】），user prompt 不再含【你的角色】。
+	// persona 在共享 system prompt（【人物背景】），user prompt 不含【你的角色】。
 	if strings.Contains(got, "【你的角色】") {
-		t.Errorf("invite user prompt should not carry 【你的角色】 (persona moved to system):\n%s", got)
+		t.Errorf("invite user prompt should not carry 【你的角色】 (persona lives in the shared system prompt):\n%s", got)
 	}
-	// JSON 输出格式属机制文本，在 system prompt 中；system prompt 还注入共享 KB 模块。
-	sys := BuildDialogueInviteSystemPrompt(nil, nil, "H-02")
-	if !strings.Contains(sys, `{"accept": true/false, "reply":`) {
-		t.Errorf("BuildDialogueInviteSystemPrompt should carry the JSON output format")
+	// 对话机制文本与 JSON 输出格式已移入 user prompt（system prompt 三层严格统一）。
+	if !strings.Contains(got, "对话决策模块") {
+		t.Errorf("invite user prompt should open with the dialogue-invite mechanism guidance:\n%s", got)
 	}
+	if !strings.Contains(got, `{"accept": true/false, "reply":`) {
+		t.Errorf("invite user prompt should carry the JSON output format at the bottom:\n%s", got)
+	}
+	// 共享 system prompt 含【人物背景】，但不含对话机制文本。
+	sys := BuildSharedSystemPrompt(nil, nil, "H-02")
 	if !strings.Contains(sys, "【人物背景】") {
-		t.Errorf("BuildDialogueInviteSystemPrompt should inject the shared 【人物背景】 module")
+		t.Errorf("shared system prompt should inject the 【人物背景】 module")
+	}
+	if strings.Contains(sys, "对话决策模块") {
+		t.Errorf("shared system prompt should not carry dialogue-specific mechanism text")
 	}
 }
 
@@ -142,13 +149,20 @@ func TestBuildDialogueTurn_ContainsShortTermContext(t *testing.T) {
 			t.Errorf("turn prompt missing %q\n--- prompt ---\n%s", s, got)
 		}
 	}
-	// JSON 输出格式属机制文本，在 system prompt 中；system prompt 还注入共享 KB 模块。
-	sys := BuildDialogueTurnSystemPrompt(nil, nil, "H-01")
-	if !strings.Contains(sys, `{"content": "你说的话", "end": true/false}`) {
-		t.Errorf("BuildDialogueTurnSystemPrompt should carry the JSON output format")
+	// 对话机制文本与 JSON 输出格式已移入 user prompt（system prompt 三层严格统一）。
+	if !strings.Contains(got, "对话生成模块") {
+		t.Errorf("turn user prompt should open with the dialogue-turn mechanism guidance:\n%s", got)
 	}
+	if !strings.Contains(got, `{"content": "你说的话", "end": true/false}`) {
+		t.Errorf("turn user prompt should carry the JSON output format at the bottom:\n%s", got)
+	}
+	// 共享 system prompt 含【人物背景】，但不含对话机制文本。
+	sys := BuildSharedSystemPrompt(nil, nil, "H-01")
 	if !strings.Contains(sys, "【人物背景】") {
-		t.Errorf("BuildDialogueTurnSystemPrompt should inject the shared 【人物背景】 module")
+		t.Errorf("shared system prompt should inject the 【人物背景】 module")
+	}
+	if strings.Contains(sys, "对话生成模块") {
+		t.Errorf("shared system prompt should not carry dialogue-specific mechanism text")
 	}
 }
 

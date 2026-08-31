@@ -83,13 +83,14 @@ func generateDailyPlan(ctx context.Context, sc strategicCaller, agentID string, 
 	if yesterdaySummary == "" {
 		yesterdaySummary = yesterdaySummaryForFirstDay
 	}
-	// System prompt：三模块结构（世界背景/人物背景/世界详细信息），
-	// 由 world KB 派生，会话内稳定可缓存（复合动作清单不注入战略层——
-	// goal 只需映射到设施交互组合，cmd 选择是战术层职责）。
-	// User prompt：动态段（今日日程+物理状态+昨日总结）+ 七条规则 + 规划指令。
-	system := prompt.BuildStrategicSystemPrompt(kb, profiles, agentID)
+	// System prompt：与战术/对话层严格一致的共享 system prompt（世界背景/
+	// 人物背景/世界详细信息/生产工作流），由 world KB 派生，单次仿真内静态
+	// 可缓存。战略层专属内容（其他NPC花名册、规则）全在 user prompt。
+	// User prompt：动态段（今日日程+物理状态+其他NPC+昨日总结）+ 九条规则
+	// + 规划指令。
+	system := prompt.BuildSharedSystemPrompt(kb, profiles, agentID)
 	promptText := fmt.Sprintf(prompt.StrategicUserTemplate,
-		prompt.BuildStrategicUserContext(agentID, profiles, physical, dayContext),
+		prompt.BuildStrategicUserContext(agentID, kb, profiles, physical, dayContext),
 		"昨日总结："+yesterdaySummary,
 		prompt.StrategicRules)
 	logger.Info("[MCP→LLM/STRATEGIC-PROMPT]", "agent_id", agentID, "text", promptText)
