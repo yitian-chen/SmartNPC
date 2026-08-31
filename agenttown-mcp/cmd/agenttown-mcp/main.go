@@ -2121,6 +2121,16 @@ func handleDebugAction(ctx context.Context, logger *slog.Logger, ws contract.Tra
 		return
 	}
 
+	// Phase 2 Module C: /debug/action 手动下发 social_chat 时同样初始化
+	// 发起方（A）状态，否则 A 收不到 B 转发的 rsp/turn（phase=none 会被忽略）。
+	if protoCmd == protocol.CmdSocialChat && lookupAgent != nil {
+		if ac := lookupAgent(req.AgentID); ac != nil && ac.dialogue != nil {
+			if target, ok := params["target_agent_id"].(string); ok {
+				ac.dialogue.initiateDialogue(target, openingContent(params))
+			}
+		}
+	}
+
 	resp := debugActionResponse{
 		OK:       true,
 		ActionID: ack.ActionID,
