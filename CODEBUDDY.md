@@ -603,7 +603,7 @@ MCP 监听 `0.0.0.0:8760`（HTTP）+ `0.0.0.0:9092`（WS，stable 脚本默认�
 
 ## 环境配置
 
-### 本地 Windows + WSL 开发（默认）
+### 环境变量（.env）
 
 ```bash
 cp .env.example .env
@@ -742,8 +742,7 @@ bash start-dev.sh       # 偏移端口 8770/9091 + logs-dev/ 日志目录
 | `agenttown-mcp/pkg/worldkb/loader.go` | world_kb.yaml 加载 + 内存索引 |
 | `agenttown-mcp/pkg/worldkb/types.go` | KB/Zone/Object/Agent 权威类型（新 schema） |
 | `agenttown-mcp/pkg/worldkb/query.go` | KB 查询：GetPosition/WhichZone/WhichObject/ResolveTarget |
-| `agenttown-mcp/pkg/worldkb/schema.go` | merge 输入 JSON schema（GeneratedDoc/AuthoredDoc）+ 受保护字段白名单 |
-| `agenttown-mcp/pkg/worldkb/merger.go` | `Merge(gen, auth)` deep merge + `MergeAndWriteBytes`（UE 推送 world_kb 时合并+落盘） |
+| `agenttown-mcp/pkg/worldkb/merger.go` | `MergeMaps(gen, auth)` deep merge + 受保护字段白名单（protectedZone/Object/AgentFields）+ `MergeAndWriteBytes`（UE 推送 world_kb 时合并+落盘） |
 | `agenttown-mcp/pkg/worldkb/validator.go` | `Validate(kb)` — ID 格式、cross-reference 合法性 |
 | `agenttown-mcp/pkg/worldkb/serializer.go` | `WriteYAML`（按 ID 排序，原子替换）+ `WriteManifest`（SHA256 + RFC3339） |
 | `agenttown-mcp/pkg/profile/profile.go` | NPC profile.md 加载：`LoadDir` 扫描 `*.md` → agentID → Profile map |
@@ -763,9 +762,9 @@ bash start-dev.sh       # 偏移端口 8770/9091 + logs-dev/ 日志目录
 | `assets/world_kb.manifest.json` | merge 产物：源 SHA256 + 时间戳（UE 推送 world_kb 时写入） |
 | `assets/profiles/H-01.md` ~ `H-05.md` | NPC 人设档案（5 个）：纯 markdown 固定标题分段（名字/职业/背景/性格特质/说话风格/属性分段），三层决策 persona override |
 | `assets/weekly_schedule.yaml` | 每周日程配置：7 天周期（工作日/休息日/运动日/冥想日），战略层注入【今日日程】段 |
-| `start.sh` | 一键启动脚本（Windows+WSL 专用，本地开发用） |
 | `start-debug.sh` | 云环境启动脚本：拉起 MySQL + MCP + 读取 .env（stable 实例，端口 8760/9092，日志 logs/） |
 | `start-dev.sh` | dev 实例启动 wrapper（偏移端口 8770/9091，日志 logs-dev/） |
+| `start-tunnel.sh` | Windows 端 SSH 反向隧道脚本（云端 11435 → 本地 Ollama 11434，反应层用） |
 | `scripts/pretty_log.py` | 日志可读化工具（HTML 报告 + 终端渲染；--hermes 系列参数 DEPRECATED 仅供历史日志） |
 | `.env` | 环境变量（VENUS_API_KEY 等，不入库） |
 | `.env.example` | 环境变量模板（分组注释 + 默认值 + 读取方说明） |
