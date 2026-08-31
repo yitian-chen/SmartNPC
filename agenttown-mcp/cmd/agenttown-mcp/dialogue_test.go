@@ -421,6 +421,85 @@ func TestOpeningContent(t *testing.T) {
 	}
 }
 
+// TestDialogueRunner_InitiateDialogue verifies the initiator's state is seeded
+// on social_chat send: phase=inviting, role=initiator, empty convID (UE
+// generates it), and the opening line in short-term context.
+func TestDialogueRunner_InitiateDialogue(t *testing.T) {
+	d, _, _ := newTestDialogueRunner("H-01")
+	d.initiateDialogue("H-02", "老王，忙啥呢？")
+
+	d.mu.Lock()
+	phase := d.phase
+	role := d.role
+	conv := d.convID
+	peer := d.peerID
+	ctxLen := len(d.shortTermContext)
+	d.mu.Unlock()
+
+	if phase != phaseInviting {
+		t.Errorf("phase: got %q, want inviting", phase)
+	}
+	if role != roleInitiator {
+		t.Errorf("role: got %q, want initiator", role)
+	}
+	if conv != "" {
+		t.Errorf("convID should be empty until UE generates it, got %q", conv)
+	}
+	if peer != "H-02" {
+		t.Errorf("peerID: got %q, want H-02", peer)
+	}
+	if ctxLen != 1 {
+		t.Errorf("shortTermContext should hold the opening line, got %d entries", ctxLen)
+	}
+}
+
+// TestDialogueRunner_HandleInviteRsp_BackfillsConvID verifies the initiator
+// accepts the first rsp by binding the UE-generated convID (previously the
+// initiator's empty convID never matched, so B's rsp was dropped).
+func TestDialogueRunner_HandleInviteRsp_BackfillsConvID(t *testing.T) {
+	d, _, _ := newTestDialogueRunner("H-01")
+	d.initiateDialogue("H-02", "开场白")
+
+	d.handleInviteRsp(context.Background(), protocol.ChatInviteRspPayload{
+		ConvID: "conv-new", Accept: true,
+	})
+
+	d.mu.Lock()
+	conv := d.convID
+	phase := d.phase
+	d.mu.Unlock()
+	if conv != "conv-new" {
+		t.Errorf("convID should be backfilled to conv-new, got %q", conv)
+	}
+	if phase != phaseActive {
+		t.Errorf("phase: got %q, want active", phase)
+	}
+}
+
+// TestDialogueRunner_HandleTurn_InitiatorBackfillsConvID verifies a chat_turn
+// arriving before the rsp (async dispatch race) also backfills convID and
+// enters active, rather than being dropped as a stale turn.
+func TestDialogueRunner_HandleTurn_InitiatorBackfillsConvID(t *testing.T) {
+	d, _, fake := newTestDialogueRunner("H-01")
+	d.initiateDialogue("H-02", "开场白")
+	fake.resp = makeDialogueResponse(`{"content": "来了来了", "end": false}`)
+
+	d.handleTurn(context.Background(), protocol.ChatTurnPayload{
+		ConvID: "conv-turn-first", Content: "老王，忙啥呢？",
+	})
+
+	d.mu.Lock()
+	conv := d.convID
+	phase := d.phase
+	d.mu.Unlock()
+	if conv != "conv-turn-first" {
+		t.Errorf("convID should be backfilled to conv-turn-first, got %q", conv)
+	}
+	if phase != phaseActive {
+		t.Errorf("phase: got %q, want active", phase)
+	}
+}
+
 // errFakeLLM is a sentinel error for fakeDialogueLLM.err.
 var errFakeLLM = fakeLLMErr("llm unavailable")
 

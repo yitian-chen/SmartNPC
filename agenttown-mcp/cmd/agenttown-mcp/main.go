@@ -863,6 +863,13 @@ func (g *guardedExecutor) SendAction(ctx context.Context, agentID string, decisi
 	ack, err := g.ws.SendAction(ctx, agentID, cmd, params, shouldAutoQueue(cmd))
 	if err == nil && ack != nil {
 		ac.recordActionStarted(ack.ActionID, cmd, params, decisionEpoch, sourceTool, "")
+		// Phase 2 Module C: social_chat 下发后初始化对话发起方（A）状态，
+		// 否则 A 收不到 B 转发的 rsp/turn（phase=none 会被忽略）。
+		if cmd == protocol.CmdSocialChat && ac.dialogue != nil {
+			if target, ok := params["target_agent_id"].(string); ok {
+				ac.dialogue.initiateDialogue(target, openingContent(params))
+			}
+		}
 		// 长复合动作不设超时：它们持续执行直到下一 schedule 时段切换
 		// （advanceSlotIfNeeded 主动 stop + 重规划），自己不会超时。
 		// 用动态判断兜底 UE5 新推送的复合 cmd（如 WorkShift/SelfMaintenance）。
@@ -1121,6 +1128,14 @@ func (a *agentContext) popAndSendQueueAction(ctx context.Context, agentID string
 	if ack != nil {
 		// 复用现有记账 + 超时机制；source=tactical 让 completion 走队列路径
 		a.recordActionStarted(ack.ActionID, cmd, params, 0 /*无 decision_epoch*/, sourceTactical, pa.ToolCallID)
+		// Phase 2 Module C: social_chat 下发后初始化对话发起方（A）状态，
+		// 否则 A 的 dialogueRunner 一直 phase=none，收到 B 转发的 rsp/turn
+		// 会被当成"无会话"忽略，对话无法往返。
+		if cmd == protocol.CmdSocialChat && a.dialogue != nil {
+			if target, ok := params["target_agent_id"].(string); ok {
+				a.dialogue.initiateDialogue(target, openingContent(params))
+			}
+		}
 		// time_to_stop：长动作设了执行时长，记下目标 game_time 供 checkTimeToStop 轮询。
 		if hasTTS && tts > 0 {
 			if start := a.as.LatestGameTimeSec(); start > 0 {
