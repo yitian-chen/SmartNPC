@@ -345,6 +345,107 @@ func TestSendWithSchema_RequestIncludesResponseFormat(t *testing.T) {
 	if string(js.Schema) != string(schema) {
 		t.Errorf("schema = %s, want %s", js.Schema, schema)
 	}
+	// 无 tools 时 tool_choice 应省略，tools 也应省略。
+	if capturedRequest.Tools != nil {
+		t.Errorf("tools should be absent when none passed, got %+v", capturedRequest.Tools)
+	}
+	if capturedRequest.ToolChoice != nil {
+		t.Errorf("tool_choice should be absent when no tools, got %v", capturedRequest.ToolChoice)
+	}
+}
+
+// TestSendWithSchema_ToolChoiceNone verifies that passing tools to SendWithSchema
+// serializes the `tools` array but sets tool_choice="none" — the model sees the
+// action catalog yet must emit the schema-constrained JSON (no tool_calls).
+func TestSendWithSchema_ToolChoiceNone(t *testing.T) {
+	var capturedRequest request
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&capturedRequest)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"x","choices":[{"message":{"role":"assistant","content":"[]"}}],"usage":{}}`))
+	}))
+	defer server.Close()
+
+	c := newTestClient(t, server.URL)
+	schema := []byte(`{"type":"array","items":{"type":"object","properties":{"goal":{"type":"string"}}}}`)
+	tools := []Tool{{
+		Type: "function",
+		Function: ToolFunction{
+			Name:        "social_chat",
+			Description: "主动去找另一个 NPC 开始对话",
+			Parameters:  json.RawMessage(`{"type":"object","properties":{"target_agent_id":{"type":"string"}},"required":["target_agent_id"]}`),
+		},
+	}}
+	if _, err := c.SendWithSchema(context.Background(), "sys", "user", "daily_plan", schema, tools); err != nil {
+		t.Fatalf("SendWithSchema: %v", err)
+	}
+	if len(capturedRequest.Tools) != 1 {
+		t.Fatalf("tools len = %d, want 1", len(capturedRequest.Tools))
+	}
+	if capturedRequest.Tools[0].Function.Name != "social_chat" {
+		t.Errorf("tools[0].name = %q, want social_chat", capturedRequest.Tools[0].Function.Name)
+	}
+	// tool_choice 必须为 "none"：披露目录但不允许 tool_call（战略层产出 JSON 计划文本）。
+	choice, _ := capturedRequest.ToolChoice.(string)
+	if choice != "none" {
+		t.Errorf("tool_choice = %v, want \"none\"", capturedRequest.ToolChoice)
+	}
+	// response_format 仍应存在（schema 与 tools 可共存）。
+	if capturedRequest.ResponseFormat == nil {
+		t.Fatal("response_format should still be present alongside tools")
+	}
+}
+
+// TestSendWithSummary_ToolChoiceNone verifies that passing tools to
+// SendWithSummary (variadic) serializes `tools` and sets tool_choice="none" —
+// the dialogue layer advertises the catalog without forcing a tool call.
+// A separate test server confirms the no-tools call omits both fields.
+func TestSendWithSummary_ToolChoiceNone(t *testing.T) {
+	var capturedRequest request
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedRequest = request{} // 重置：避免前一次调用残留
+		_ = json.NewDecoder(r.Body).Decode(&capturedRequest)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"x","choices":[{"message":{"role":"assistant","content":"{\"accept\":true}"}}],"usage":{}}`))
+	}))
+	defer server.Close()
+
+	c := newTestClient(t, server.URL)
+	tools := []Tool{{Type: "function", Function: ToolFunction{Name: "social_chat"}}}
+	if _, err := c.SendWithSummary(context.Background(), "sys", "user", tools); err != nil {
+		t.Fatalf("SendWithSummary: %v", err)
+	}
+	if len(capturedRequest.Tools) != 1 {
+		t.Fatalf("tools len = %d, want 1", len(capturedRequest.Tools))
+	}
+	choice, _ := capturedRequest.ToolChoice.(string)
+	if choice != "none" {
+		t.Errorf("tool_choice = %v, want \"none\" (catalog disclosed, no forced call)", capturedRequest.ToolChoice)
+	}
+}
+
+// TestSendWithSummary_NoToolsOmitsToolFields verifies a no-tools SendWithSummary
+// call omits both `tools` and `tool_choice`.
+func TestSendWithSummary_NoToolsOmitsToolFields(t *testing.T) {
+	var capturedRequest request
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedRequest = request{}
+		_ = json.NewDecoder(r.Body).Decode(&capturedRequest)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"x","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{}}`))
+	}))
+	defer server.Close()
+
+	c := newTestClient(t, server.URL)
+	if _, err := c.SendWithSummary(context.Background(), "", "hi"); err != nil {
+		t.Fatalf("SendWithSummary: %v", err)
+	}
+	if capturedRequest.Tools != nil {
+		t.Errorf("tools should be absent when none passed, got %+v", capturedRequest.Tools)
+	}
+	if capturedRequest.ToolChoice != nil {
+		t.Errorf("tool_choice should be absent when no tools, got %v", capturedRequest.ToolChoice)
+	}
 }
 
 // TestSendWithSummary_NoResponseFormat verifies plain SendWithSummary does
@@ -602,9 +703,12 @@ func TestOpenaiResponse_ToHermes(t *testing.T) {
 // *venus.Client satisfies the llmClient interface expected by main.go.
 func TestVenusClient_MatchesLLMClientSignatures(t *testing.T) {
 	var _ interface {
-		SendWithSummary(ctx context.Context, system, user string) (*llmtypes.Response, error)
+		SendWithSummary(ctx context.Context, system, user string, tools ...[]Tool) (*llmtypes.Response, error)
 		SendStreaming(ctx context.Context, system, user string, onDelta func(string)) (*llmtypes.Response, error)
-		SendWithSchema(ctx context.Context, system, user, schemaName string, schema []byte) (*llmtypes.Response, error)
+		SendWithSchema(ctx context.Context, system, user, schemaName string, schema []byte, tools ...[]Tool) (*llmtypes.Response, error)
+		SendWithSummaryTools(ctx context.Context, system, user string, tools []Tool) (*llmtypes.Response, error)
+		SendStreamingTools(ctx context.Context, system, user string, tools []Tool, onDelta func(string), onToolCall func(llmtypes.ToolCall)) (*llmtypes.Response, error)
+		SendMessagesTools(ctx context.Context, messages []llmtypes.Message, tools []Tool) (*llmtypes.Response, error)
 		ResetSession()
 	} = (*Client)(nil)
 }

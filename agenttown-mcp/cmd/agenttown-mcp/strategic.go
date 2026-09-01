@@ -13,6 +13,7 @@ import (
 	"github.com/AgentTown/agenttown-mcp/pkg/profile"
 	"github.com/AgentTown/agenttown-mcp/pkg/prompt"
 	"github.com/AgentTown/agenttown-mcp/contract/protocol"
+	"github.com/AgentTown/agenttown-mcp/pkg/venus"
 	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
 )
 
@@ -38,9 +39,10 @@ type dailyPlanItem struct {
 // strategicCaller 是 LLM 客户端的窄接口，便于单测 mock。
 // SendWithSchema 用于战略层（Structured Outputs 硬约束）；
 // SendWithSummary 用于记忆层等无 schema 的调用。
+// 两者都接受可选 tools（披露行动目录），战略层注入时 tool_choice=none。
 type strategicCaller interface {
-	SendWithSummary(ctx context.Context, system, user string) (*llmtypes.Response, error)
-	SendWithSchema(ctx context.Context, system, user, schemaName string, schema []byte) (*llmtypes.Response, error)
+	SendWithSummary(ctx context.Context, system, user string, tools ...[]venus.Tool) (*llmtypes.Response, error)
+	SendWithSchema(ctx context.Context, system, user, schemaName string, schema []byte, tools ...[]venus.Tool) (*llmtypes.Response, error)
 	ResetSession()
 }
 
@@ -83,18 +85,26 @@ func generateDailyPlan(ctx context.Context, sc strategicCaller, agentID string, 
 	if yesterdaySummary == "" {
 		yesterdaySummary = yesterdaySummaryForFirstDay
 	}
-	// System prompt：三模块结构（世界背景/人物背景/世界详细信息），
-	// 由 world KB 派生，会话内稳定可缓存（复合动作清单不注入战略层——
-	// goal 只需映射到设施交互组合，cmd 选择是战术层职责）。
-	// User prompt：动态段（今日日程+物理状态+昨日总结）+ 七条规则 + 规划指令。
-	system := prompt.BuildStrategicSystemPrompt(kb, profiles, agentID)
+	// System prompt：与战术/对话层严格一致的共享 system prompt（世界背景/
+	// 人物背景/世界详细信息/生产工作流），由 world KB 派生，单次仿真内静态
+	// 可缓存。战略层专属内容（其他NPC花名册、规则）全在 user prompt。
+	// User prompt：动态段（今日日程+物理状态+其他NPC+昨日总结）+ 九条规则
+	// + 规划指令。
+	system := prompt.BuildSharedSystemPrompt(kb, profiles, agentID)
 	promptText := fmt.Sprintf(prompt.StrategicUserTemplate,
-		prompt.BuildStrategicUserContext(agentID, profiles, physical, dayContext),
+		prompt.BuildStrategicUserContext(agentID, kb, profiles, physical, dayContext),
 		"昨日总结："+yesterdaySummary,
 		prompt.StrategicRules)
 	logger.Info("[MCP→LLM/STRATEGIC-PROMPT]", "agent_id", agentID, "text", promptText)
 
-	resp, err := sc.SendWithSchema(ctx, system, promptText, "daily_plan", []byte(dailyPlanSchema))
+	// tools：披露与战术层一致的行动目录（含 social_chat），但 tool_choice=none
+	//——战略层产出 schema 约束的 JSON 计划文本，不调用工具。让 LLM 看到
+	// social_chat 是合法行动，配合规则 9 的社交建议产出社交时段。
+	var toolsOpt []venus.Tool
+	if capabilityRegistryRef != nil {
+		toolsOpt = tacticalToolsFromRegistry(capabilityRegistryRef, agentID)
+	}
+	resp, err := sc.SendWithSchema(ctx, system, promptText, "daily_plan", []byte(dailyPlanSchema), toolsOpt)
 	// 实际 prompt 文档：记录 H-01 最新一次战略层请求体完整 JSON。
 	dumpLastRequestBody(agentID, "strategic", sc, logger)
 	if err != nil {

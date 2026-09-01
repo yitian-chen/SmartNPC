@@ -12,6 +12,7 @@ import (
 	"github.com/AgentTown/agenttown-mcp/pkg/prompt"
 	"github.com/AgentTown/agenttown-mcp/contract/protocol"
 	"github.com/AgentTown/agenttown-mcp/pkg/storage"
+	"github.com/AgentTown/agenttown-mcp/pkg/venus"
 	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
 
 	"log/slog"
@@ -19,9 +20,13 @@ import (
 )
 
 // dialogueMaxTurns is the soft cap after which the LLM is urged to end
-// gracefully. Hard cap (force-end) is a few turns above this so the LLM
-// gets a chance to say goodbye.
-const dialogueMaxTurns = 6
+// gracefully (written into the prompt as "建议上限约 N 轮"). dialogueHardMaxTurns
+// is the hard cap — handleTurn force-sets end=true once reached, so a stubborn
+// LLM that keeps returning end=false cannot stall the conversation forever.
+const (
+	dialogueMaxTurns     = 6
+	dialogueHardMaxTurns = 8
+)
 
 // dialoguePhase tracks where this agent is in the 4-step handshake + turn
 // exchange. Mirrors the design doc's per-Mind conversation_state.phase.
@@ -102,6 +107,32 @@ func (d *dialogueRunner) active() bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return d.phase != phaseNone
+}
+
+// initiateDialogue is called when this agent (as A, the initiator) sends a
+// social_chat action_command. It marks the conversation as inviting before any
+// chat_invite_rsp/turn is forwarded back, so handleInviteRsp/handleTurn can
+// match. convID is left empty — it is UE-generated and backfilled on the first
+// forwarded rsp/turn. opening is A's opening line (the social_chat `content`
+// param), seeded into short-term context so the LLM remembers what A said first.
+func (d *dialogueRunner) initiateDialogue(peerID, opening string) {
+	if d == nil {
+		return
+	}
+	agentID := d.ac.as.AgentID()
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.convID = ""
+	d.peerID = peerID
+	d.role = roleInitiator
+	d.phase = phaseInviting
+	d.turnCount = 0
+	d.shortTermContext = nil
+	if opening != "" {
+		d.shortTermContext = []prompt.DialogueTurnEntry{
+			{SpeakerID: agentID, SpeakerName: d.peerName(agentID), Content: opening},
+		}
+	}
 }
 
 // handleInvite is called when this agent (as B, the target) receives a
@@ -187,10 +218,20 @@ func (d *dialogueRunner) handleInviteRsp(_ context.Context, payload protocol.Cha
 	}
 	agentID := d.ac.as.AgentID()
 	d.mu.Lock()
-	if d.phase != phaseInviting || d.convID != payload.ConvID {
+	// 只有 initiator（A）会收到 rsp；target（B）不经过此路径。
+	if d.phase != phaseInviting || d.role != roleInitiator {
 		d.mu.Unlock()
-		d.logger.Warn("[对话层/rsp] 非预期响应（未邀请或 conv 不匹配），忽略",
-			"agent_id", agentID, "phase", d.phase, "conv", payload.ConvID, "existing", d.convID)
+		d.logger.Warn("[对话层/rsp] 非预期响应（未发起邀请），忽略",
+			"agent_id", agentID, "phase", d.phase, "role", d.role, "conv", payload.ConvID)
+		return
+	}
+	// convID 由 UE 生成，发起时尚未知：首次收到 rsp 时绑定，之后要求匹配。
+	if d.convID == "" {
+		d.convID = payload.ConvID
+	} else if d.convID != payload.ConvID {
+		d.mu.Unlock()
+		d.logger.Warn("[对话层/rsp] conv 不匹配，忽略",
+			"agent_id", agentID, "conv", payload.ConvID, "existing", d.convID)
 		return
 	}
 	if !payload.Accept {
@@ -199,15 +240,8 @@ func (d *dialogueRunner) handleInviteRsp(_ context.Context, payload protocol.Cha
 		d.cleanup()
 		return
 	}
-	// Accepted: seed context with A's own opening line (from the in-flight
-	// social_chat action params) so the LLM remembers what A said first.
+	// Accepted：进入 active（开场白已由 initiateDialogue 注入 shortTermContext）。
 	d.phase = phaseActive
-	opening := openingContent(snapCurrentActionParams(d.ac).CurrentActionParams)
-	if opening != "" {
-		d.shortTermContext = append([]prompt.DialogueTurnEntry{{
-			SpeakerID: agentID, SpeakerName: d.peerName(agentID), Content: opening,
-		}}, d.shortTermContext...)
-	}
 	peer := d.peerID
 	d.mu.Unlock()
 	d.logger.Info("[对话层/rsp] 对方接受，进入对话", "agent_id", agentID, "peer", peer)
@@ -226,9 +260,21 @@ func (d *dialogueRunner) handleTurn(_ context.Context, payload protocol.ChatTurn
 
 	// Stale/unknown conv → ignore (session already closed on the peer side).
 	d.mu.Lock()
-	if d.phase == phaseNone || d.convID != payload.ConvID {
+	if d.phase == phaseNone {
 		d.mu.Unlock()
-		d.logger.Warn("[对话层/turn] 非预期 turn（无会话或 conv 不匹配），忽略",
+		d.logger.Warn("[对话层/turn] 非预期 turn（无会话），忽略",
+			"agent_id", agentID, "conv", payload.ConvID, "existing", d.convID, "phase", d.phase)
+		return
+	}
+	// initiator（A）首次收到 turn 可能先于 chat_invite_rsp 到达（两者异步分发）：
+	// 此时 convID 尚未绑定，绑定并进入 active，避免把 B 的开场白误当迟到消息忽略。
+	if d.role == roleInitiator && d.convID == "" {
+		d.convID = payload.ConvID
+		d.phase = phaseActive
+	}
+	if d.convID != payload.ConvID {
+		d.mu.Unlock()
+		d.logger.Warn("[对话层/turn] conv 不匹配，忽略",
 			"agent_id", agentID, "conv", payload.ConvID, "existing", d.convID, "phase", d.phase)
 		return
 	}
@@ -281,6 +327,15 @@ func (d *dialogueRunner) handleTurn(_ context.Context, payload protocol.ChatTurn
 		d.mu.Unlock()
 		d.finalizeDialogue()
 		return
+	}
+
+	// 硬上限：达到 dialogueHardMaxTurns 时强制优雅结束，防止 LLM 持续返回
+	// end=false 导致对话不收敛（软上限 dialogueMaxTurns 只写进 prompt 提示）。
+	if count >= dialogueHardMaxTurns {
+		result.End = true
+		if strings.TrimSpace(result.Content) == "" {
+			result.Content = "（聊得差不多了）回头再聊。"
+		}
 	}
 
 	d.sendTurn(result.Content, result.End)
@@ -352,13 +407,21 @@ func (d *dialogueRunner) cleanup() {
 		return
 	}
 	d.mu.Lock()
-	defer d.mu.Unlock()
 	d.convID = ""
 	d.peerID = ""
 	d.role = ""
 	d.phase = phaseNone
 	d.shortTermContext = nil
 	d.turnCount = 0
+	d.mu.Unlock()
+
+	// 对话状态清理后唤醒 worker：worker 检查 inDialogue()（已 false）后继续
+	// pop/refill，避免对话结束后 NPC 呆站。signal 非阻塞、幂等、不持锁；
+	// d.ac 在正常构造路径必非 nil（newDialogueRunner 保证），测试直接构造的
+	// dialogueRunner 可能为 nil，故判空。
+	if d.ac != nil {
+		d.ac.signal()
+	}
 }
 
 // ─── LLM generation ───
@@ -374,7 +437,6 @@ func (d *dialogueRunner) generateInviteDecision(snap agentstate.Snapshot, peerID
 		PeerID:         peerID,
 		PeerName:       d.peerName(peerID),
 		PeerContent:    peerContent,
-		Persona:        d.persona(agentID),
 		CurrentAction:  describeAction(snap.CurrentActionCmd, snap.CurrentActionParams),
 		Physical:       prompt.PhysicalLine(snap.LatestPhysical, prompt.BandThresholdsFor(d.profiles, agentID)),
 		TimeOfDay:      snap.LatestTimeOfDay(),
@@ -388,7 +450,13 @@ func (d *dialogueRunner) generateInviteDecision(snap agentstate.Snapshot, peerID
 	if hc == nil {
 		return prompt.DialogueInviteDecision{}, fmt.Errorf("no LLM client")
 	}
-	resp, err := hc.SendWithSummary(ctx, prompt.DialogueInviteSystemPrompt, promptText)
+	// tools：披露与战术层一致的行动目录，但 tool_choice=none——对话层产出
+	// JSON 文本（accept/reply），不调用工具。让 LLM 知道有哪些可做的动作。
+	var toolsOpt []venus.Tool
+	if capabilityRegistryRef != nil {
+		toolsOpt = tacticalToolsFromRegistry(capabilityRegistryRef, d.ac.as.AgentID())
+	}
+	resp, err := hc.SendWithSummary(ctx, prompt.BuildSharedSystemPrompt(d.kb, d.profiles, agentID), promptText, toolsOpt)
 	if err != nil {
 		return prompt.DialogueInviteDecision{}, fmt.Errorf("llm call: %w", err)
 	}
@@ -409,7 +477,6 @@ func (d *dialogueRunner) generateTurn(snap agentstate.Snapshot, peerID, peerCont
 		AgentName:        d.peerName(agentID),
 		PeerID:           peerID,
 		PeerName:         d.peerName(peerID),
-		Persona:          d.persona(agentID),
 		PeerContent:      peerContent,
 		ShortTermContext: ctx,
 		RecentMemories:   d.recentMemories(),
@@ -426,7 +493,13 @@ func (d *dialogueRunner) generateTurn(snap agentstate.Snapshot, peerID, peerCont
 	if hc == nil {
 		return prompt.DialogueTurnResult{}, fmt.Errorf("no LLM client")
 	}
-	resp, err := hc.SendWithSummary(callCtx, prompt.DialogueTurnSystemPrompt, promptText)
+	// tools：披露与战术层一致的行动目录，但 tool_choice=none——对话层产出
+	// JSON 文本（content/end），不调用工具。
+	var toolsOpt []venus.Tool
+	if capabilityRegistryRef != nil {
+		toolsOpt = tacticalToolsFromRegistry(capabilityRegistryRef, d.ac.as.AgentID())
+	}
+	resp, err := hc.SendWithSummary(callCtx, prompt.BuildSharedSystemPrompt(d.kb, d.profiles, agentID), promptText, toolsOpt)
 	if err != nil {
 		return prompt.DialogueTurnResult{}, fmt.Errorf("llm call: %w", err)
 	}
@@ -548,10 +621,6 @@ func (d *dialogueRunner) bumpRelationship(peerID string) {
 
 // ─── prompt helpers (read-only, no mu needed) ───
 
-func (d *dialogueRunner) persona(agentID string) string {
-	return prompt.AgentRole(d.kb, d.profiles, agentID)
-}
-
 func (d *dialogueRunner) peerName(peerID string) string {
 	if d.kb != nil {
 		if a := d.kb.GetAgent(peerID); a != nil {
@@ -642,10 +711,4 @@ func buildTranscript(ctx []prompt.DialogueTurnEntry, maxEntries int) string {
 		sb.WriteString(t.Content)
 	}
 	return sb.String()
-}
-
-// snapCurrentActionParams reads the current in-flight action params from
-// AgentState. Used by handleInviteRsp to recover A's opening content.
-func snapCurrentActionParams(ac *agentContext) agentstate.Snapshot {
-	return ac.as.Snapshot()
 }

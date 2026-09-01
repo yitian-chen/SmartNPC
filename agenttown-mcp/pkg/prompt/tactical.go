@@ -5,40 +5,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/AgentTown/agenttown-mcp/pkg/profile"
 	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
 )
-
-// BuildTacticalSystemPrompt constructs the tactical layer's system message.
-// It shares the strategic layer's KB/cmd-derived modules ("绝大部分相同"),
-// stable within a session (per agent) and thus cacheable:
-//  1. 【世界背景】 — world overview (WorldOverview, shared with strategic).
-//  2. 【人物背景】 — the current agent's profile (AgentRole).
-//  3. 【世界详细信息】 — shared world detail core (zone descriptions +
-//     facility groups with inline per-interaction effects).
-//
-// The decomposition rules (TacticalRules) live in the user message so they
-// sit adjacent to the decomposition ask. Per-call data (full-day plan,
-// current slot goal, realtime state, example) also lives in the user
-// message (BuildTactical). The tool list itself is NOT rendered in the
-// prompt — it is passed via the function-calling `tools` request field.
-func BuildTacticalSystemPrompt(kb *worldkb.KB, profiles map[string]*profile.Profile, agentID string) string {
-	var sb strings.Builder
-
-	if m1 := WorldOverview(kb); m1 != "" {
-		sb.WriteString("【世界背景】\n")
-		sb.WriteString(m1)
-	}
-	if role := AgentRole(kb, profiles, agentID); role != "" {
-		sb.WriteString("\n【人物背景】\n")
-		sb.WriteString(role)
-	}
-	sb.WriteString("\n【世界详细信息】\n")
-	sb.WriteString(worldDetailCore(kb))
-	sb.WriteString("\n【生产工作流】\n")
-	sb.WriteString(ProductionWorkflowText)
-	return sb.String()
-}
 
 // TacticalRules is the tactical decomposition rules, injected into the user
 // message (recency effect: instructions closer to the ask are followed more
@@ -69,7 +37,8 @@ const TacticalRules = `1. 第一个工具调用必须是 speak（用一段话表
 //  3. 分解规则 — TacticalRules (injected adjacent to the ask).
 //  4. 任务 — the decomposition ask + goal-specific example.
 //
-// KB/world/persona live in the system message (BuildTacticalSystemPrompt).
+// KB/world/persona live in the system message (BuildSharedSystemPrompt,
+// shared verbatim with the strategic and dialogue layers).
 func BuildTactical(in TacticalInput) string {
 	th := BandThresholdsFor(in.Profiles, in.AgentID)
 
@@ -108,7 +77,7 @@ func BuildTactical(in TacticalInput) string {
 			sb.WriteString("\n")
 		}
 	}
-	nearbyLine := NearbyAgentsLine(in.VisibleAgents)
+	nearbyLine := NearbyAgentsLine(in.VisibleAgents, in.KB)
 	if nearbyLine == "" && in.KB != nil {
 		// 附近无可见 NPC 时 fallback 到 KB 静态花名册，让 LLM 始终能看到
 		// NPC id 列表（social_chat 的 target_agent_id 需要 id 而非显示名）。
@@ -263,6 +232,16 @@ func TacticalExample(kb *worldkb.KB, goal, agentID string) string {
 	// if ex := exampleForGoal(kb, goal, agentID, zones, objs); ex != "" {
 	// 	return ex
 	// }
+
+	// 聊天/社交/对话 → speak + social_chat（主动找人聊天，走向对方+对话挂起）。
+	// 单独恢复社交分支（不恢复整段 exampleForGoal，避免长椅硬编码 bug 回归）。
+	// peer 优先从 KB 关系选熟悉度最高的，无关系回退首个非 self agent。
+	if kb != nil && containsAny(strings.ToLower(goal), "聊天", "社交", "对话", "chat", "social") && len(kb.Agents) >= 2 {
+		if peer := pickChatPeer(kb, agentID); peer != "" {
+			return fmt.Sprintf(`{"action":"speak","params":{"content":"去找同事聊两句"}}
+{"action":"social_chat","params":{"target_agent_id":"%s","content":"最近怎么样？"}}`, peer)
+		}
+	}
 
 	if len(zones) == 0 && len(objs) == 0 {
 		return genericExample

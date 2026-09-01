@@ -23,7 +23,7 @@ type fakeDialogueLLM struct {
 	resetCount int
 }
 
-func (f *fakeDialogueLLM) SendWithSummary(_ context.Context, _, _ string) (*llmtypes.Response, error) {
+func (f *fakeDialogueLLM) SendWithSummary(_ context.Context, _, _ string, _ ...[]venus.Tool) (*llmtypes.Response, error) {
 	return f.resp, f.err
 }
 
@@ -31,7 +31,7 @@ func (f *fakeDialogueLLM) SendStreaming(_ context.Context, _, _ string, _ func(s
 	return f.resp, f.err
 }
 
-func (f *fakeDialogueLLM) SendWithSchema(_ context.Context, _, _, _ string, _ []byte) (*llmtypes.Response, error) {
+func (f *fakeDialogueLLM) SendWithSchema(_ context.Context, _, _, _ string, _ []byte, _ ...[]venus.Tool) (*llmtypes.Response, error) {
 	return f.resp, f.err
 }
 
@@ -331,6 +331,26 @@ func TestDialogueRunner_HandleTurn_LLMEnds(t *testing.T) {
 	}
 }
 
+func TestDialogueRunner_HandleTurn_HardCapForcesEnd(t *testing.T) {
+	d, _, fake := newTestDialogueRunner("H-02")
+	d.mu.Lock()
+	d.convID = "conv-hardcap"
+	d.peerID = "H-01"
+	d.phase = phaseActive
+	d.turnCount = dialogueHardMaxTurns - 1 // 下一次 handleTurn 内递增后即达硬上限
+	d.mu.Unlock()
+	// LLM 返回 end=false，硬上限应强制优雅结束，防止对话不收敛。
+	fake.resp = makeDialogueResponse(`{"content": "还没聊完", "end": false}`)
+
+	d.handleTurn(context.Background(), protocol.ChatTurnPayload{
+		ConvID: "conv-hardcap", Content: "再聊聊呗",
+	})
+
+	if d.active() {
+		t.Error("after hard-cap turn, runner should be finalized (not active)")
+	}
+}
+
 func TestDialogueRunner_OnActionCompleted_Interrupted(t *testing.T) {
 	d, _, _ := newTestDialogueRunner("H-02")
 	d.mu.Lock()
@@ -398,6 +418,109 @@ func TestOpeningContent(t *testing.T) {
 	}
 	if got := openingContent(map[string]any{"content": 123}); got != "" {
 		t.Errorf("non-string content should return empty, got %q", got)
+	}
+}
+
+// TestDialogueRunner_InitiateDialogue verifies the initiator's state is seeded
+// on social_chat send: phase=inviting, role=initiator, empty convID (UE
+// generates it), and the opening line in short-term context.
+func TestDialogueRunner_InitiateDialogue(t *testing.T) {
+	d, _, _ := newTestDialogueRunner("H-01")
+	d.initiateDialogue("H-02", "老王，忙啥呢？")
+
+	d.mu.Lock()
+	phase := d.phase
+	role := d.role
+	conv := d.convID
+	peer := d.peerID
+	ctxLen := len(d.shortTermContext)
+	d.mu.Unlock()
+
+	if phase != phaseInviting {
+		t.Errorf("phase: got %q, want inviting", phase)
+	}
+	if role != roleInitiator {
+		t.Errorf("role: got %q, want initiator", role)
+	}
+	if conv != "" {
+		t.Errorf("convID should be empty until UE generates it, got %q", conv)
+	}
+	if peer != "H-02" {
+		t.Errorf("peerID: got %q, want H-02", peer)
+	}
+	if ctxLen != 1 {
+		t.Errorf("shortTermContext should hold the opening line, got %d entries", ctxLen)
+	}
+}
+
+// TestDialogueRunner_HandleInviteRsp_BackfillsConvID verifies the initiator
+// accepts the first rsp by binding the UE-generated convID (previously the
+// initiator's empty convID never matched, so B's rsp was dropped).
+func TestDialogueRunner_HandleInviteRsp_BackfillsConvID(t *testing.T) {
+	d, _, _ := newTestDialogueRunner("H-01")
+	d.initiateDialogue("H-02", "开场白")
+
+	d.handleInviteRsp(context.Background(), protocol.ChatInviteRspPayload{
+		ConvID: "conv-new", Accept: true,
+	})
+
+	d.mu.Lock()
+	conv := d.convID
+	phase := d.phase
+	d.mu.Unlock()
+	if conv != "conv-new" {
+		t.Errorf("convID should be backfilled to conv-new, got %q", conv)
+	}
+	if phase != phaseActive {
+		t.Errorf("phase: got %q, want active", phase)
+	}
+}
+
+// TestDialogueRunner_HandleTurn_InitiatorBackfillsConvID verifies a chat_turn
+// arriving before the rsp (async dispatch race) also backfills convID and
+// enters active, rather than being dropped as a stale turn.
+func TestDialogueRunner_HandleTurn_InitiatorBackfillsConvID(t *testing.T) {
+	d, _, fake := newTestDialogueRunner("H-01")
+	d.initiateDialogue("H-02", "开场白")
+	fake.resp = makeDialogueResponse(`{"content": "来了来了", "end": false}`)
+
+	d.handleTurn(context.Background(), protocol.ChatTurnPayload{
+		ConvID: "conv-turn-first", Content: "老王，忙啥呢？",
+	})
+
+	d.mu.Lock()
+	conv := d.convID
+	phase := d.phase
+	d.mu.Unlock()
+	if conv != "conv-turn-first" {
+		t.Errorf("convID should be backfilled to conv-turn-first, got %q", conv)
+	}
+	if phase != phaseActive {
+		t.Errorf("phase: got %q, want active", phase)
+	}
+}
+
+// TestDialogueRunner_CleanupSignalsWorker verifies that cleanup, after
+// resetting the conversation state, signals the worker via ac.wake so the NPC
+// resumes its schedule instead of standing idle after the dialogue ends.
+func TestDialogueRunner_CleanupSignalsWorker(t *testing.T) {
+	as := agentstate.New()
+	as.SetIdentity("H-01", storage.NoopStore{})
+	ac := &agentContext{
+		as:   as,
+		wake: make(chan struct{}, 1),
+	}
+	d := &dialogueRunner{ac: ac, phase: phaseActive}
+	d.cleanup()
+
+	select {
+	case <-ac.wake:
+		// 收到信号，符合预期。
+	default:
+		t.Error("cleanup should signal worker via wake channel")
+	}
+	if d.active() {
+		t.Error("after cleanup, runner should not be active")
 	}
 }
 

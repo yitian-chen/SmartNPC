@@ -1,6 +1,6 @@
-# CODEBUDDY.md
+# CLAUDE.md
 
-This file provides guidance to CodeBuddy Code when working with code in this repository.
+This file provides guidance to Claude Code when working with code in this repository.
 
 ## 项目定位
 

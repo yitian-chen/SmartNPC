@@ -860,9 +860,23 @@ func (g *guardedExecutor) SendAction(ctx context.Context, agentID string, decisi
 	if g.caps != nil && !g.caps.HasCmd(agentID, cmd) {
 		return nil, fmt.Errorf("agent %s lacks capability for cmd %s", agentID, cmd)
 	}
+	// Phase 2 Module C：social_chat 下发前检查目标 NPC 是否可搭话（多 NPC 抢
+	// 同一目标）。目标忙时拒绝发起，避免注定被拒的对话。
+	if cmd == protocol.CmdSocialChat {
+		if targetID, ok := params["target_agent_id"].(string); ok && !dialogueTargetAvailable(targetID) {
+			return nil, fmt.Errorf("dialogue target %s unavailable", targetID)
+		}
+	}
 	ack, err := g.ws.SendAction(ctx, agentID, cmd, params, shouldAutoQueue(cmd))
 	if err == nil && ack != nil {
 		ac.recordActionStarted(ack.ActionID, cmd, params, decisionEpoch, sourceTool, "")
+		// Phase 2 Module C: social_chat 下发后初始化对话发起方（A）状态，
+		// 否则 A 收不到 B 转发的 rsp/turn（phase=none 会被忽略）。
+		if cmd == protocol.CmdSocialChat && ac.dialogue != nil {
+			if target, ok := params["target_agent_id"].(string); ok {
+				ac.dialogue.initiateDialogue(target, openingContent(params))
+			}
+		}
 		// 长复合动作不设超时：它们持续执行直到下一 schedule 时段切换
 		// （advanceSlotIfNeeded 主动 stop + 重规划），自己不会超时。
 		// 用动态判断兜底 UE5 新推送的复合 cmd（如 WorkShift/SelfMaintenance）。
@@ -996,6 +1010,28 @@ func (a *agentContext) inDialogue() bool {
 	return a.dialogue != nil && a.dialogue.active()
 }
 
+// dialogueTargetAvailable 检查目标 NPC 是否可搭话（Phase 2 Module C）。
+// 返回 false 表示目标未注册、已下线、或已在对话中（dialogue.active()）。
+// A 发起 social_chat 前调用，避免发起注定被拒的对话——目标忙时 handleInvite
+// 会拒绝，A 的社交落空并可能重试同一目标造成混乱（多 NPC 抢同一目标）。
+func dialogueTargetAvailable(targetID string) bool {
+	if lookupAgentRef == nil {
+		return true // 未启用检查，降级为直接发起
+	}
+	ac := lookupAgentRef(targetID)
+	if ac == nil {
+		return false // 目标未注册/下线
+	}
+	ac.coordMu.Lock()
+	stopped := ac.stopped
+	ac.coordMu.Unlock()
+	if stopped {
+		return false
+	}
+	// 目标已在对话中（作为 target 被邀请/在聊，或作为 initiator 正在找别人）。
+	return ac.dialogue == nil || !ac.dialogue.active()
+}
+
 // queueLen 返回队列长度。
 func (a *agentContext) queueLen() int {
 	return a.as.QueueLen()
@@ -1097,6 +1133,20 @@ func (a *agentContext) popAndSendQueueAction(ctx context.Context, agentID string
 		return
 	}
 
+	// Phase 2 Module C：social_chat 下发前检查目标 NPC 是否可搭话。目标已在
+	// 对话中（多 NPC 抢同一目标）时跳过本动作，并注入 hint 引导战术层换目标
+	// 或改做别的，避免发起注定被拒的对话（被拒后重试同一目标造成混乱）。
+	if cmd == protocol.CmdSocialChat {
+		targetID, _ := params["target_agent_id"].(string)
+		if !dialogueTargetAvailable(targetID) {
+			logger.Info("[战术层] social_chat 目标不可用，跳过",
+				"agent_id", agentID, "target", targetID)
+			a.as.SetReplanHint(fmt.Sprintf("目标 %s 正在和别人聊天或不可用，请换一位【附近NPC】/【其他NPC】中的 NPC，或改做别的活动。", targetID))
+			a.signal()
+			return
+		}
+	}
+
 	// time_to_stop 是 MCP 侧控制字段（长动作定时终止），不传给 UE。
 	tts, hasTTS := numericParam(pa.Params["time_to_stop"])
 	delete(params, "time_to_stop")
@@ -1121,6 +1171,14 @@ func (a *agentContext) popAndSendQueueAction(ctx context.Context, agentID string
 	if ack != nil {
 		// 复用现有记账 + 超时机制；source=tactical 让 completion 走队列路径
 		a.recordActionStarted(ack.ActionID, cmd, params, 0 /*无 decision_epoch*/, sourceTactical, pa.ToolCallID)
+		// Phase 2 Module C: social_chat 下发后初始化对话发起方（A）状态，
+		// 否则 A 的 dialogueRunner 一直 phase=none，收到 B 转发的 rsp/turn
+		// 会被当成"无会话"忽略，对话无法往返。
+		if cmd == protocol.CmdSocialChat && a.dialogue != nil {
+			if target, ok := params["target_agent_id"].(string); ok {
+				a.dialogue.initiateDialogue(target, openingContent(params))
+			}
+		}
 		// time_to_stop：长动作设了执行时长，记下目标 game_time 供 checkTimeToStop 轮询。
 		if hasTTS && tts > 0 {
 			if start := a.as.LatestGameTimeSec(); start > 0 {
@@ -1180,9 +1238,9 @@ var tacticalCallTimeout = 60 * time.Second
 // SendWithSummaryTools/SendStreamingTools 用于战术层（function calling tools
 // 注入请求体）。
 type llmClient interface {
-	SendWithSummary(ctx context.Context, system, user string) (*llmtypes.Response, error)
+	SendWithSummary(ctx context.Context, system, user string, tools ...[]venus.Tool) (*llmtypes.Response, error)
 	SendStreaming(ctx context.Context, system, user string, onDelta func(string)) (*llmtypes.Response, error)
-	SendWithSchema(ctx context.Context, system, user, schemaName string, schema []byte) (*llmtypes.Response, error)
+	SendWithSchema(ctx context.Context, system, user, schemaName string, schema []byte, tools ...[]venus.Tool) (*llmtypes.Response, error)
 	SendWithSummaryTools(ctx context.Context, system, user string, tools []venus.Tool) (*llmtypes.Response, error)
 	SendStreamingTools(ctx context.Context, system, user string, tools []venus.Tool, onDelta func(string), onToolCall func(llmtypes.ToolCall)) (*llmtypes.Response, error)
 	SendMessagesTools(ctx context.Context, messages []llmtypes.Message, tools []venus.Tool) (*llmtypes.Response, error)
@@ -1201,6 +1259,11 @@ var reactiveRunnerRef *reactiveRunner
 // debug handler 引用，避免长串参数传递）。nil 表示未启用能力过滤（降级为全量
 // 内置工具）。main() 启动时赋值。
 var capabilityRegistryRef *CapabilityRegistry
+
+// lookupAgentRef 是进程级 agent 查找函数（package-level 供战术层 worker 在
+// social_chat 下发前检查目标 NPC 是否可搭话，避免长串参数传递）。main() 启动
+// 时赋值；nil 表示未启用目标可用性检查（降级为直接发起）。
+var lookupAgentRef func(string) *agentContext
 
 // kbRef 是当前生效的 world KB 指针（package-level 供 debug handler 引用）。
 // worldKBSwap 成功后同步更新；runHTTP 的 /debug/kb handler 读 kbRef 而不是
@@ -1308,6 +1371,18 @@ func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
 			logger.Info("[战术层] 分解失败，补发兜底动作避免呆站",
 				"agent_id", agentID, "fallback", "speak+look_around")
 		}
+		return false
+	}
+
+	// refill 的 LLM 调用期间（最长 30s），agent 可能已进入对话（收到
+	// chat_invite 或自己发起了 social_chat）。worker 主循环的 inDialogue()
+	// 守卫在 refill 之前，但 handleInvite 是异步 go routine，两者存在竞态：
+	// 本 refill 可能在对话建立后才返回。此时继续填充队列并下发，会触发
+	// UE 的 "dialogue:abandoned by B" 误判，打断刚建立的对话（2026-09-01
+	// 仿真：B 被邀请后 refill 返回并发下 Speak，UE 判 abandoned，双方呆站）。
+	// 丢弃这段战术动作：对话结束后 worker 被 signal 唤醒重新 refill。
+	if a.inDialogue() {
+		logger.Info("[战术层] refill 期间进入对话，丢弃战术动作", "agent_id", agentID)
 		return false
 	}
 	a.as.ReplaceQueue(actions)
@@ -1656,6 +1731,7 @@ func main() {
 		defer agentsMu.Unlock()
 		return agents[id]
 	}
+	lookupAgentRef = lookupAgent // expose to tactical worker for social_chat target availability check
 	// listAgentIDs 返回当前已注册的全部 agent ID（按字典序），供 debug 端点做默认值
 	// 选择（如 /debug/plan 在未显式指定 agent_id 时回落到首个注册 agent，而非硬编码）。
 	listAgentIDs := func() []string {
@@ -2104,6 +2180,16 @@ func handleDebugAction(ctx context.Context, logger *slog.Logger, ws contract.Tra
 		w.WriteHeader(http.StatusBadGateway)
 		_ = json.NewEncoder(w).Encode(debugActionResponse{Error: "ws.SendAction failed: " + err.Error()})
 		return
+	}
+
+	// Phase 2 Module C: /debug/action 手动下发 social_chat 时同样初始化
+	// 发起方（A）状态，否则 A 收不到 B 转发的 rsp/turn（phase=none 会被忽略）。
+	if protoCmd == protocol.CmdSocialChat && lookupAgent != nil {
+		if ac := lookupAgent(req.AgentID); ac != nil && ac.dialogue != nil {
+			if target, ok := params["target_agent_id"].(string); ok {
+				ac.dialogue.initiateDialogue(target, openingContent(params))
+			}
+		}
 	}
 
 	resp := debugActionResponse{

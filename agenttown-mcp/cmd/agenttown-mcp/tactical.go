@@ -127,10 +127,11 @@ func generateTacticalPlan(
 	nearbyObjects []protocol.NearbyObject,
 	visibleAgents []protocol.VisibleAgent,
 ) ([]plannedAction, llmtypes.Message, error) {
-	// System prompt：与战略层共享三模块（世界背景/人物背景/世界详细
-	// 信息），会话内稳定可缓存；user prompt 携带四段结构，工具经
-	// function calling 的 tools 字段下发，不再注入 prompt 文本。
-	system := prompt.BuildTacticalSystemPrompt(kb, profiles, agentID)
+	// System prompt：与战略/对话层严格一致的共享 system prompt（世界背景/
+	// 人物背景/世界详细信息/生产工作流），单次仿真内静态可缓存；user prompt
+	// 携带四段结构（战术规则也在 user），工具经 function calling 的 tools
+	// 字段下发，不再注入 prompt 文本。
+	system := prompt.BuildSharedSystemPrompt(kb, profiles, agentID)
 	promptText := prompt.BuildTactical(prompt.TacticalInput{
 		Goal:          goal,
 		Zone:          zone,
@@ -372,7 +373,7 @@ func tacticalToolsFromRegistry(registry *CapabilityRegistry, agentID string) []v
 			Function: venus.ToolFunction{
 				Name:        name,
 				Description: desc,
-				Parameters:  capabilityParamsSchema(act.Params),
+				Parameters:  capabilityParamsSchema(act.Params, name),
 			},
 		})
 	}
@@ -382,8 +383,10 @@ func tacticalToolsFromRegistry(registry *CapabilityRegistry, agentID string) []v
 // capabilityParamsSchema 把 CapabilityParam 列表转成 function calling 的
 // parameters JSON Schema（object 类型）。不包含 MCP 侧 meta 字段
 // （agent_id/decision_epoch）——function calling 的参数就是 UE cmd 的参数。
-// 额外追加一个可选的 time_to_stop（秒，MCP 侧控制字段，长动作定时终止）。
-func capabilityParamsSchema(params []protocol.CapabilityParam) json.RawMessage {
+// 额外追加一个可选的 time_to_stop（秒，MCP 侧控制字段，长动作定时终止），
+// 但 social_chat 除外——它是"挂起直到对话结束"的复合动作，time_to_stop
+// 到点会被 worker 打断对话，语义不适用。
+func capabilityParamsSchema(params []protocol.CapabilityParam, name string) json.RawMessage {
 	props := map[string]any{}
 	required := make([]string, 0, len(params))
 	for _, p := range params {
@@ -408,9 +411,12 @@ func capabilityParamsSchema(params []protocol.CapabilityParam) json.RawMessage {
 	}
 	// time_to_stop：长动作定时终止（MCP 侧轮询 game_time，不传 UE）。
 	// 描述与 TacticalRules 规则 8 对齐：队列中间动作必须设，仅末段可不设。
-	props["time_to_stop"] = map[string]any{
-		"type":        "number",
-		"description": "队列中间动作必须设置本参数（秒），到点后系统打断当前段并进入队列下一段；仅最后一个动作可不设，自然持续到时段切换。冥想/整理/上网等单段宜设 1800 秒左右，工作时长段可设 3600-7200",
+	// social_chat 不追加（对话挂起直到结束，time_to_stop 会打断对话）。
+	if name != "social_chat" {
+		props["time_to_stop"] = map[string]any{
+			"type":        "number",
+			"description": "队列中间动作必须设置本参数（秒），到点后系统打断当前段并进入队列下一段；仅最后一个动作可不设，自然持续到时段切换。冥想/整理/上网等单段宜设 1800 秒左右，工作时长段可设 3600-7200",
+		}
 	}
 	schema := map[string]any{
 		"type":       "object",

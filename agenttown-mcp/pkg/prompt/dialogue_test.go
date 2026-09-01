@@ -12,7 +12,6 @@ func TestBuildDialogueInvite_ContainsCoreContext(t *testing.T) {
 		PeerID:         "H-01",
 		PeerName:       "老陈",
 		PeerContent:    "最近装配线怎么样？",
-		Persona:        "你是老王，质检员，说话简短直接。",
 		CurrentAction:  "巡检设备",
 		Physical:       "电量 80%、疲劳 30%",
 		TimeOfDay:      "14:30",
@@ -23,7 +22,6 @@ func TestBuildDialogueInvite_ContainsCoreContext(t *testing.T) {
 	checks := []string{
 		"老王", "H-02", "老陈", "H-01",
 		"14:30",
-		"你是老王，质检员",
 		"电量 80%",
 		"与 老陈",
 		"昨天和老陈一起修过传送带",
@@ -35,9 +33,24 @@ func TestBuildDialogueInvite_ContainsCoreContext(t *testing.T) {
 			t.Errorf("invite prompt missing %q\n--- prompt ---\n%s", s, got)
 		}
 	}
-	// JSON 输出格式属机制文本，在 system prompt 中。
-	if !strings.Contains(DialogueInviteSystemPrompt, `{"accept": true/false, "reply":`) {
-		t.Errorf("DialogueInviteSystemPrompt should carry the JSON output format")
+	// persona 在共享 system prompt（【人物背景】），user prompt 不含【你的角色】。
+	if strings.Contains(got, "【你的角色】") {
+		t.Errorf("invite user prompt should not carry 【你的角色】 (persona lives in the shared system prompt):\n%s", got)
+	}
+	// 对话机制文本与 JSON 输出格式已移入 user prompt（system prompt 三层严格统一）。
+	if !strings.Contains(got, "对话决策模块") {
+		t.Errorf("invite user prompt should open with the dialogue-invite mechanism guidance:\n%s", got)
+	}
+	if !strings.Contains(got, `{"accept": true/false, "reply":`) {
+		t.Errorf("invite user prompt should carry the JSON output format at the bottom:\n%s", got)
+	}
+	// 共享 system prompt 含【人物背景】，但不含对话机制文本。
+	sys := BuildSharedSystemPrompt(nil, nil, "H-02")
+	if !strings.Contains(sys, "【人物背景】") {
+		t.Errorf("shared system prompt should inject the 【人物背景】 module")
+	}
+	if strings.Contains(sys, "对话决策模块") {
+		t.Errorf("shared system prompt should not carry dialogue-specific mechanism text")
 	}
 }
 
@@ -111,7 +124,6 @@ func TestBuildDialogueTurn_ContainsShortTermContext(t *testing.T) {
 		AgentName:   "老陈",
 		PeerID:      "H-02",
 		PeerName:    "老王",
-		Persona:     "你是老陈，装配工，说话带北方口音。",
 		PeerContent: "还行，就是昨天传送带有点问题。",
 		ShortTermContext: []DialogueTurnEntry{
 			{SpeakerID: "H-01", SpeakerName: "老陈", Content: "最近怎么样？"},
@@ -126,7 +138,6 @@ func TestBuildDialogueTurn_ContainsShortTermContext(t *testing.T) {
 	checks := []string{
 		"老陈", "H-01", "老王", "H-02",
 		"14:30",
-		"你是老陈，装配工",
 		"与 老王：熟悉度 5",
 		"老陈：最近怎么样？",
 		"老王：还行，就是昨天传送带有点问题。",
@@ -138,9 +149,20 @@ func TestBuildDialogueTurn_ContainsShortTermContext(t *testing.T) {
 			t.Errorf("turn prompt missing %q\n--- prompt ---\n%s", s, got)
 		}
 	}
-	// JSON 输出格式属机制文本，在 system prompt 中。
-	if !strings.Contains(DialogueTurnSystemPrompt, `{"content": "你说的话", "end": true/false}`) {
-		t.Errorf("DialogueTurnSystemPrompt should carry the JSON output format")
+	// 对话机制文本与 JSON 输出格式已移入 user prompt（system prompt 三层严格统一）。
+	if !strings.Contains(got, "对话生成模块") {
+		t.Errorf("turn user prompt should open with the dialogue-turn mechanism guidance:\n%s", got)
+	}
+	if !strings.Contains(got, `{"content": "你说的话", "end": true/false}`) {
+		t.Errorf("turn user prompt should carry the JSON output format at the bottom:\n%s", got)
+	}
+	// 共享 system prompt 含【人物背景】，但不含对话机制文本。
+	sys := BuildSharedSystemPrompt(nil, nil, "H-01")
+	if !strings.Contains(sys, "【人物背景】") {
+		t.Errorf("shared system prompt should inject the 【人物背景】 module")
+	}
+	if strings.Contains(sys, "对话生成模块") {
+		t.Errorf("shared system prompt should not carry dialogue-specific mechanism text")
 	}
 }
 

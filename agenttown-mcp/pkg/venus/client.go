@@ -92,26 +92,41 @@ func New(cfg Config) *Client {
 // the response. system carries mechanism/instruction text (rules, output
 // format); user carries the per-call context/data. system == "" sends a
 // single user message (backward compatible).
-func (c *Client) SendWithSummary(ctx context.Context, system, user string) (*llmtypes.Response, error) {
+//
+// tools, when non-empty, is serialized as the `tools` array (function
+// calling) so the LLM is aware of available actions — but tool_choice is set
+// to "none", forbidding the model from emitting tool_calls. This lets layers
+// that produce structured text/JSON (the dialogue layer's accept/reject and
+// turn responses) advertise the tool catalog without being forced to call a
+// tool. Callers that need forced tool calling use SendWithSummaryTools instead.
+func (c *Client) SendWithSummary(ctx context.Context, system, user string, tools ...[]Tool) (*llmtypes.Response, error) {
 	c.sendMu.Lock()
 	defer c.sendMu.Unlock()
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	return c.doSend(ctx, systemUserMessages(system, user), false, nil, nil, nil, nil)
+	var ts []Tool
+	var toolChoice string
+	if len(tools) > 0 {
+		ts = tools[0]
+		if len(ts) > 0 {
+			toolChoice = "none"
+		}
+	}
+	return c.doSend(ctx, systemUserMessages(system, user), false, nil, nil, nil, ts, toolChoice)
 }
 
 // SendWithSummaryTools is SendWithSummary plus a `tools` array (function
 // calling). The LLM may choose to call one of the tools instead of (or in
 // addition to) emitting free-form text; callers that only want the tools
-// advertised pass them here.
+// advertised pass them here. tool_choice is set to "required".
 func (c *Client) SendWithSummaryTools(ctx context.Context, system, user string, tools []Tool) (*llmtypes.Response, error) {
 	c.sendMu.Lock()
 	defer c.sendMu.Unlock()
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	return c.doSend(ctx, systemUserMessages(system, user), false, nil, nil, nil, tools)
+	return c.doSend(ctx, systemUserMessages(system, user), false, nil, nil, nil, tools, "required")
 }
 
 // SendStreaming POSTs a (system, user) message pair with stream:true and
@@ -124,7 +139,7 @@ func (c *Client) SendStreaming(ctx context.Context, system, user string, onDelta
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	return c.doSend(ctx, systemUserMessages(system, user), true, onDelta, nil, nil, nil)
+	return c.doSend(ctx, systemUserMessages(system, user), true, onDelta, nil, nil, nil, "")
 }
 
 // SendStreamingTools is SendStreaming plus a `tools` array (function calling).
@@ -138,7 +153,7 @@ func (c *Client) SendStreamingTools(ctx context.Context, system, user string, to
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	return c.doSend(ctx, systemUserMessages(system, user), true, onDelta, onToolCall, nil, tools)
+	return c.doSend(ctx, systemUserMessages(system, user), true, onDelta, onToolCall, nil, tools, "required")
 }
 
 // SendWithSchema POSTs a (system, user) message pair with OpenAI
@@ -149,14 +164,27 @@ func (c *Client) SendStreamingTools(ctx context.Context, system, user string, to
 // schemaName labels the schema for the gateway; schema is the raw JSON
 // Schema document (root may be any type). Gateways that ignore
 // response_format still accept the request — the schema is best-effort.
-func (c *Client) SendWithSchema(ctx context.Context, system, user, schemaName string, schema []byte) (*llmtypes.Response, error) {
+//
+// tools, when non-empty, is serialized as the `tools` array so the LLM sees
+// the available action catalog, but tool_choice is set to "none" — the model
+// must emit the schema-constrained JSON text, not a tool_call. The strategic
+// layer uses this to advertise actions while still producing a dailyPlan.
+func (c *Client) SendWithSchema(ctx context.Context, system, user, schemaName string, schema []byte, tools ...[]Tool) (*llmtypes.Response, error) {
 	c.sendMu.Lock()
 	defer c.sendMu.Unlock()
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	def := &JSONSchemaDef{Name: schemaName, Strict: true, Schema: json.RawMessage(schema)}
-	return c.doSend(ctx, systemUserMessages(system, user), false, nil, nil, def, nil)
+	var ts []Tool
+	var toolChoice string
+	if len(tools) > 0 {
+		ts = tools[0]
+		if len(ts) > 0 {
+			toolChoice = "none"
+		}
+	}
+	return c.doSend(ctx, systemUserMessages(system, user), false, nil, nil, def, ts, toolChoice)
 }
 
 // SendMessagesTools is the multi-turn variant: it sends an arbitrary
@@ -170,7 +198,7 @@ func (c *Client) SendMessagesTools(ctx context.Context, messages []llmtypes.Mess
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	return c.doSend(ctx, toVenusMessages(messages), false, nil, nil, nil, tools)
+	return c.doSend(ctx, toVenusMessages(messages), false, nil, nil, nil, tools, "required")
 }
 
 // systemUserMessages builds the default [system?, user] message pair.
@@ -229,9 +257,10 @@ func (c *Client) LastRequestBody() []byte {
 // requests, onDelta is invoked for each text delta and onToolCall for each
 // completed tool_call. A non-nil schema adds response_format (Structured
 // Outputs) to the request body; a non-nil tools slice adds the `tools`
-// array and sets tool_choice="required" (function calling). Caller MUST
-// hold sendMu.
-func (c *Client) doSend(ctx context.Context, msgs []message, stream bool, onDelta func(string), onToolCall func(llmtypes.ToolCall), schema *JSONSchemaDef, tools []Tool) (*llmtypes.Response, error) {
+// array. toolChoice controls tool_choice: "required" forces a tool call,
+// "none" forbids it (the model still sees the catalog but must emit text/
+// JSON), "" omits the field (model decides). Caller MUST hold sendMu.
+func (c *Client) doSend(ctx context.Context, msgs []message, stream bool, onDelta func(string), onToolCall func(llmtypes.ToolCall), schema *JSONSchemaDef, tools []Tool, toolChoice string) (*llmtypes.Response, error) {
 	body := request{
 		Model:     c.cfg.Model,
 		MaxTokens: c.cfg.MaxTokens,
@@ -239,8 +268,15 @@ func (c *Client) doSend(ctx context.Context, msgs []message, stream bool, onDelt
 		Stream:    stream,
 		Tools:     tools,
 	}
-	if len(tools) > 0 {
-		body.ToolChoice = "required"
+	// tool_choice: 显式传入优先（"required" / "none"）；未指定时仅在 tools
+	// 非空时默认 "required"（向后兼容：老调用方传 tools 必须能调工具）。
+	// 注意 "none" 路径：tools 非空但禁止 tool_call——供战略/对话层披露目录
+	// 而不强制调用。
+	if toolChoice == "" && len(tools) > 0 {
+		toolChoice = "required"
+	}
+	if toolChoice != "" {
+		body.ToolChoice = toolChoice
 	}
 	if schema != nil {
 		body.ResponseFormat = &ResponseFormat{Type: "json_schema", JSONSchema: schema}
