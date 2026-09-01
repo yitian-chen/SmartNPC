@@ -500,6 +500,30 @@ func TestDialogueRunner_HandleTurn_InitiatorBackfillsConvID(t *testing.T) {
 	}
 }
 
+// TestDialogueRunner_CleanupSignalsWorker verifies that cleanup, after
+// resetting the conversation state, signals the worker via ac.wake so the NPC
+// resumes its schedule instead of standing idle after the dialogue ends.
+func TestDialogueRunner_CleanupSignalsWorker(t *testing.T) {
+	as := agentstate.New()
+	as.SetIdentity("H-01", storage.NoopStore{})
+	ac := &agentContext{
+		as:   as,
+		wake: make(chan struct{}, 1),
+	}
+	d := &dialogueRunner{ac: ac, phase: phaseActive}
+	d.cleanup()
+
+	select {
+	case <-ac.wake:
+		// 收到信号，符合预期。
+	default:
+		t.Error("cleanup should signal worker via wake channel")
+	}
+	if d.active() {
+		t.Error("after cleanup, runner should not be active")
+	}
+}
+
 // errFakeLLM is a sentinel error for fakeDialogueLLM.err.
 var errFakeLLM = fakeLLMErr("llm unavailable")
 

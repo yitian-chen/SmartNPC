@@ -407,13 +407,21 @@ func (d *dialogueRunner) cleanup() {
 		return
 	}
 	d.mu.Lock()
-	defer d.mu.Unlock()
 	d.convID = ""
 	d.peerID = ""
 	d.role = ""
 	d.phase = phaseNone
 	d.shortTermContext = nil
 	d.turnCount = 0
+	d.mu.Unlock()
+
+	// 对话状态清理后唤醒 worker：worker 检查 inDialogue()（已 false）后继续
+	// pop/refill，避免对话结束后 NPC 呆站。signal 非阻塞、幂等、不持锁；
+	// d.ac 在正常构造路径必非 nil（newDialogueRunner 保证），测试直接构造的
+	// dialogueRunner 可能为 nil，故判空。
+	if d.ac != nil {
+		d.ac.signal()
+	}
 }
 
 // ─── LLM generation ───
