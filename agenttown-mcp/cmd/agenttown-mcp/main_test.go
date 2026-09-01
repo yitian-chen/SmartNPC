@@ -1501,3 +1501,66 @@ func TestCheckTimeToStop_KeepsQueue(t *testing.T) {
 		t.Errorf("slot = %q, want 09:00-12:00 preserved", slot)
 	}
 }
+
+// ─── dialogueTargetAvailable ─────────────────────────────────
+
+func TestDialogueTargetAvailable(t *testing.T) {
+	// 保存并恢复全局，避免污染其他测试。
+	orig := lookupAgentRef
+	defer func() { lookupAgentRef = orig }()
+
+	// 构造一个"空闲"的目标 agentContext（dialogue 为 nil 或 phase=none）。
+	mkAgent := func(id string) *agentContext {
+		as := agentstate.New()
+		as.SetIdentity(id, nil)
+		return &agentContext{as: as}
+	}
+
+	// 1. lookupAgentRef 为 nil → 未启用检查，直接放行。
+	lookupAgentRef = nil
+	if !dialogueTargetAvailable("H-02") {
+		t.Error("nil lookupAgentRef should return true (check disabled)")
+	}
+
+	// 2. 目标不存在 → false。
+	lookupAgentRef = func(id string) *agentContext {
+		m := map[string]*agentContext{"H-02": mkAgent("H-02")}
+		return m[id]
+	}
+	if dialogueTargetAvailable("H-99") {
+		t.Error("unknown target should be unavailable")
+	}
+
+	// 3. 目标空闲（无 dialogue）→ true。
+	if !dialogueTargetAvailable("H-02") {
+		t.Error("idle target should be available")
+	}
+
+	// 4. 目标已在对话中（dialogue.active()=true）→ false。
+	busy := mkAgent("H-02")
+	busy.dialogue = &dialogueRunner{phase: phaseActive}
+	lookupAgentRef = func(id string) *agentContext {
+		if id == "H-02" {
+			return busy
+		}
+		return nil
+	}
+	if dialogueTargetAvailable("H-02") {
+		t.Error("target already in dialogue should be unavailable")
+	}
+
+	// 5. 目标已下线（stopped=true）→ false。
+	stopped := mkAgent("H-02")
+	stopped.coordMu.Lock()
+	stopped.stopped = true
+	stopped.coordMu.Unlock()
+	lookupAgentRef = func(id string) *agentContext {
+		if id == "H-02" {
+			return stopped
+		}
+		return nil
+	}
+	if dialogueTargetAvailable("H-02") {
+		t.Error("stopped target should be unavailable")
+	}
+}
