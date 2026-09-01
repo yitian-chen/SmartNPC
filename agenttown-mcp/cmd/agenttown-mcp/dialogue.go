@@ -12,6 +12,7 @@ import (
 	"github.com/AgentTown/agenttown-mcp/pkg/prompt"
 	"github.com/AgentTown/agenttown-mcp/contract/protocol"
 	"github.com/AgentTown/agenttown-mcp/pkg/storage"
+	"github.com/AgentTown/agenttown-mcp/pkg/venus"
 	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
 
 	"log/slog"
@@ -441,7 +442,13 @@ func (d *dialogueRunner) generateInviteDecision(snap agentstate.Snapshot, peerID
 	if hc == nil {
 		return prompt.DialogueInviteDecision{}, fmt.Errorf("no LLM client")
 	}
-	resp, err := hc.SendWithSummary(ctx, prompt.BuildSharedSystemPrompt(d.kb, d.profiles, agentID), promptText)
+	// tools：披露与战术层一致的行动目录，但 tool_choice=none——对话层产出
+	// JSON 文本（accept/reply），不调用工具。让 LLM 知道有哪些可做的动作。
+	var toolsOpt []venus.Tool
+	if capabilityRegistryRef != nil {
+		toolsOpt = tacticalToolsFromRegistry(capabilityRegistryRef, d.ac.as.AgentID())
+	}
+	resp, err := hc.SendWithSummary(ctx, prompt.BuildSharedSystemPrompt(d.kb, d.profiles, agentID), promptText, toolsOpt)
 	if err != nil {
 		return prompt.DialogueInviteDecision{}, fmt.Errorf("llm call: %w", err)
 	}
@@ -478,7 +485,13 @@ func (d *dialogueRunner) generateTurn(snap agentstate.Snapshot, peerID, peerCont
 	if hc == nil {
 		return prompt.DialogueTurnResult{}, fmt.Errorf("no LLM client")
 	}
-	resp, err := hc.SendWithSummary(callCtx, prompt.BuildSharedSystemPrompt(d.kb, d.profiles, agentID), promptText)
+	// tools：披露与战术层一致的行动目录，但 tool_choice=none——对话层产出
+	// JSON 文本（content/end），不调用工具。
+	var toolsOpt []venus.Tool
+	if capabilityRegistryRef != nil {
+		toolsOpt = tacticalToolsFromRegistry(capabilityRegistryRef, d.ac.as.AgentID())
+	}
+	resp, err := hc.SendWithSummary(callCtx, prompt.BuildSharedSystemPrompt(d.kb, d.profiles, agentID), promptText, toolsOpt)
 	if err != nil {
 		return prompt.DialogueTurnResult{}, fmt.Errorf("llm call: %w", err)
 	}

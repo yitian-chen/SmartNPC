@@ -1195,9 +1195,9 @@ var tacticalCallTimeout = 60 * time.Second
 // SendWithSummaryTools/SendStreamingTools 用于战术层（function calling tools
 // 注入请求体）。
 type llmClient interface {
-	SendWithSummary(ctx context.Context, system, user string) (*llmtypes.Response, error)
+	SendWithSummary(ctx context.Context, system, user string, tools ...[]venus.Tool) (*llmtypes.Response, error)
 	SendStreaming(ctx context.Context, system, user string, onDelta func(string)) (*llmtypes.Response, error)
-	SendWithSchema(ctx context.Context, system, user, schemaName string, schema []byte) (*llmtypes.Response, error)
+	SendWithSchema(ctx context.Context, system, user, schemaName string, schema []byte, tools ...[]venus.Tool) (*llmtypes.Response, error)
 	SendWithSummaryTools(ctx context.Context, system, user string, tools []venus.Tool) (*llmtypes.Response, error)
 	SendStreamingTools(ctx context.Context, system, user string, tools []venus.Tool, onDelta func(string), onToolCall func(llmtypes.ToolCall)) (*llmtypes.Response, error)
 	SendMessagesTools(ctx context.Context, messages []llmtypes.Message, tools []venus.Tool) (*llmtypes.Response, error)

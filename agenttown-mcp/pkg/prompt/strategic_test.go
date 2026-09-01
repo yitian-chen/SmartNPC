@@ -261,11 +261,12 @@ func TestBuildStrategicUserContext_InjectsOtherNPCsSegment(t *testing.T) {
 }
 
 func TestStrategicSystemPrompt_HasSocialGuidance(t *testing.T) {
-	// 社交引导恢复：规则集应包含 social_chat 映射、社交频次建议，示例含
-	// social_chat 时段，让 LLM 把聊天当作合法计划项。
+	// 社交引导：规则集的 social_chat 映射 + 格式示例含 social_chat 时段，让
+	// LLM 把聊天当作合法计划项。社交频次建议（规则 9）已被删除——现在 social_chat
+	// 通过请求体 tools 字段披露给战略层（tool_choice=none），LLM 能自行决定是否
+	// 安排社交时段，不再需要 prompt 文本强行建议频次。
 	for _, want := range []string{
 		"聊天/社交/对话类活动用 social_chat 实现",
-		"建议每天安排 1 个社交时段",
 		"找老王聊聊天（social_chat）",
 	} {
 		if !strings.Contains(StrategicRules, want) {

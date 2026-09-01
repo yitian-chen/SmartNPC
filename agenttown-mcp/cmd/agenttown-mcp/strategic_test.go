@@ -23,7 +23,7 @@ type fakeStrategicCaller struct {
 	resetCalled        bool
 }
 
-func (f *fakeStrategicCaller) SendWithSummary(_ context.Context, _, user string) (*llmtypes.Response, error) {
+func (f *fakeStrategicCaller) SendWithSummary(_ context.Context, _, user string, _ ...[]venus.Tool) (*llmtypes.Response, error) {
 	f.capturedInput = user
 	return f.resp, f.err
 }
@@ -49,7 +49,7 @@ func (f *fakeStrategicCaller) SendStreamingTools(_ context.Context, _, _ string,
 	return f.resp, f.err
 }
 
-func (f *fakeStrategicCaller) SendWithSchema(_ context.Context, system, user, schemaName string, _ []byte) (*llmtypes.Response, error) {
+func (f *fakeStrategicCaller) SendWithSchema(_ context.Context, system, user, schemaName string, _ []byte, _ ...[]venus.Tool) (*llmtypes.Response, error) {
 	f.capturedSystem = system
 	f.capturedInput = user
 	f.capturedSchemaName = schemaName

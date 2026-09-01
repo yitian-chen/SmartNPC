@@ -23,7 +23,7 @@ type fakeDialogueLLM struct {
 	resetCount int
 }
 
-func (f *fakeDialogueLLM) SendWithSummary(_ context.Context, _, _ string) (*llmtypes.Response, error) {
+func (f *fakeDialogueLLM) SendWithSummary(_ context.Context, _, _ string, _ ...[]venus.Tool) (*llmtypes.Response, error) {
 	return f.resp, f.err
 }
 
@@ -31,7 +31,7 @@ func (f *fakeDialogueLLM) SendStreaming(_ context.Context, _, _ string, _ func(s
 	return f.resp, f.err
 }
 
-func (f *fakeDialogueLLM) SendWithSchema(_ context.Context, _, _, _ string, _ []byte) (*llmtypes.Response, error) {
+func (f *fakeDialogueLLM) SendWithSchema(_ context.Context, _, _, _ string, _ []byte, _ ...[]venus.Tool) (*llmtypes.Response, error) {
 	return f.resp, f.err
 }
 

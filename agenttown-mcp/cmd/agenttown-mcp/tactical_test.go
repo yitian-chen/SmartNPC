@@ -394,7 +394,7 @@ func (s *sequenceCaller) next() (*llmtypes.Response, error) {
 	return nil, err
 }
 
-func (s *sequenceCaller) SendWithSummary(_ context.Context, _, _ string) (*llmtypes.Response, error) {
+func (s *sequenceCaller) SendWithSummary(_ context.Context, _, _ string, _ ...[]venus.Tool) (*llmtypes.Response, error) {
 	return s.next()
 }
 func (s *sequenceCaller) SendWithSummaryTools(_ context.Context, _, _ string, _ []venus.Tool) (*llmtypes.Response, error) {
@@ -409,7 +409,7 @@ func (s *sequenceCaller) SendStreaming(_ context.Context, _, _ string, _ func(st
 func (s *sequenceCaller) SendStreamingTools(_ context.Context, _, _ string, _ []venus.Tool, _ func(string), _ func(llmtypes.ToolCall)) (*llmtypes.Response, error) {
 	return s.next()
 }
-func (s *sequenceCaller) SendWithSchema(_ context.Context, _, _, _ string, _ []byte) (*llmtypes.Response, error) {
+func (s *sequenceCaller) SendWithSchema(_ context.Context, _, _, _ string, _ []byte, _ ...[]venus.Tool) (*llmtypes.Response, error) {
 	return s.next()
 }
 func (s *sequenceCaller) ResetSession() { s.resetCount++ }
