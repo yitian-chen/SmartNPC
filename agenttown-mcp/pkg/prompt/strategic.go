@@ -354,9 +354,10 @@ func BuildStrategicUserContext(agentID string, kb *worldkb.KB, profiles map[stri
 	// 在 07:00 规划时看到可聊天的同伴——social_chat 的 target_agent_id 需要
 	// 具体 id，没有这份花名册 LLM 会因"不得编造未提及的人物"规则而不安排
 	// 社交时段。与战术层的【附近NPC】不同：战术层用 UE 运行时感知，战略层用
-	// KB 静态花名册（任何 NPC id 都合法目标）。
+	// KB 静态花名册（任何 NPC id 都合法目标）。段头点明"聊天是合法活动"，
+	// 提供正向引导（规则 9 删除后这是战略层唯一的社交触发点）。
 	if peers := OtherAgentsLine(kb, agentID); peers != "" {
-		sb.WriteString("【其他NPC】\n")
+		sb.WriteString("【其他NPC】（你可以主动找其中某位聊天 social_chat，维系人际关系）\n")
 		sb.WriteString(peers)
 		sb.WriteString("\n")
 	}

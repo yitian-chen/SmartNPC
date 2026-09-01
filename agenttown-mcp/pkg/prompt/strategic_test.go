@@ -236,10 +236,10 @@ func TestOtherAgentsLine_OmitsProfessionWhenEmpty(t *testing.T) {
 func TestBuildStrategicUserContext_InjectsOtherNPCsSegment(t *testing.T) {
 	kb := strategicRosterKB()
 	got := BuildStrategicUserContext("H-01", kb, nil, nil, "")
-	const header = "【其他NPC】\n"
+	const header = "【其他NPC】（你可以主动找其中某位聊天 social_chat"
 	npcIdx := strings.Index(got, header)
 	if npcIdx < 0 {
-		t.Fatalf("missing 【其他NPC】 segment header in:\n%s", got)
+		t.Fatalf("missing 【其他NPC】 segment header (with social guidance) in:\n%s", got)
 	}
 	// 【其他NPC】段在【物理状态】之后（preamble → 今日日程 → 物理状态 → 其他NPC）。
 	// self 不出现在花名册里。
@@ -275,7 +275,7 @@ func TestStrategicSystemPrompt_HasSocialGuidance(t *testing.T) {
 	}
 	// 单 agent KB 不应产生【其他NPC】段（无 peer）。
 	single := &worldkb.KB{Version: "1.0", Agents: []worldkb.Agent{{ID: "H-01", DisplayName: "老陈"}}}
-	if got := BuildStrategicUserContext("H-01", single, nil, nil, ""); strings.Contains(got, "【其他NPC】\n") {
+	if got := BuildStrategicUserContext("H-01", single, nil, nil, ""); strings.Contains(got, "【其他NPC】") {
 		t.Errorf("single-agent KB should not produce 【其他NPC】 segment:\n%s", got)
 	}
 }
