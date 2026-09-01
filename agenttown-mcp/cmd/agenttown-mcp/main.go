@@ -1325,6 +1325,18 @@ func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
 		}
 		return false
 	}
+
+	// refill 的 LLM 调用期间（最长 30s），agent 可能已进入对话（收到
+	// chat_invite 或自己发起了 social_chat）。worker 主循环的 inDialogue()
+	// 守卫在 refill 之前，但 handleInvite 是异步 go routine，两者存在竞态：
+	// 本 refill 可能在对话建立后才返回。此时继续填充队列并下发，会触发
+	// UE 的 "dialogue:abandoned by B" 误判，打断刚建立的对话（2026-09-01
+	// 仿真：B 被邀请后 refill 返回并发下 Speak，UE 判 abandoned，双方呆站）。
+	// 丢弃这段战术动作：对话结束后 worker 被 signal 唤醒重新 refill。
+	if a.inDialogue() {
+		logger.Info("[战术层] refill 期间进入对话，丢弃战术动作", "agent_id", agentID)
+		return false
+	}
 	a.as.ReplaceQueue(actions)
 	// append assistant（含 tool_calls）到会话历史，供下一轮 LLM 参考。
 	a.as.AppendConversationMessage(assistant)
