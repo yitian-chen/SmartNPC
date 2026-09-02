@@ -182,7 +182,7 @@ func strategicCtxForTest(sc *fakeStrategicCaller) *agentContext {
 
 func TestGenerateDailyPlan_HTTPError(t *testing.T) {
 	sc := &fakeStrategicCaller{err: errors.New("network down")}
-	plan := generateDailyPlan(context.Background(), strategicCtxForTest(sc), "H-01", nil, nil, slog.Default(), "", nil, "")
+	plan := strategicCtxForTest(sc).triggerStrategicPlanning(context.Background(), "H-01", nil, nil, slog.Default(), "", "", "早晨例行制定每日日程安排")
 	// HTTP 错误现在回退到 prompt.DefaultDailyPlan(nil) 的扰动版本
 	// （时间节点 ±planJitterMinutes 错峰），而不是空字符串，
 	// 保证战术层有目标可分解、仿真不瘫痪。
@@ -197,7 +197,7 @@ func TestGenerateDailyPlan_HTTPError(t *testing.T) {
 func TestGenerateDailyPlan_ValidResponse(t *testing.T) {
 	raw := `[{"time":"06:00-07:00","goal":"起床晨检"},{"time":"07:00-12:00","goal":"车间装配"}]`
 	sc := &fakeStrategicCaller{resp: makeStrategicResponse(raw)}
-	plan := generateDailyPlan(context.Background(), strategicCtxForTest(sc), "H-01", nil, nil, slog.Default(), "", nil, "")
+	plan := strategicCtxForTest(sc).triggerStrategicPlanning(context.Background(), "H-01", nil, nil, slog.Default(), "", "", "早晨例行制定每日日程安排")
 	if plan == "" {
 		t.Fatal("got empty plan, want non-empty")
 	}
@@ -215,7 +215,7 @@ func TestGenerateDailyPlan_ValidResponse(t *testing.T) {
 
 func TestGenerateDailyPlan_ParseFail(t *testing.T) {
 	sc := &fakeStrategicCaller{resp: makeStrategicResponse("今天天气不错，我打算去车间转转。")}
-	plan := generateDailyPlan(context.Background(), strategicCtxForTest(sc), "H-01", nil, nil, slog.Default(), "", nil, "")
+	plan := strategicCtxForTest(sc).triggerStrategicPlanning(context.Background(), "H-01", nil, nil, slog.Default(), "", "", "早晨例行制定每日日程安排")
 	// 解析失败现在回退到 prompt.DefaultDailyPlan(nil) 的扰动版本，
 	// 避免整天 Wait(60s) 瘫痪。
 	if !isJitteredDefaultPlan(t, plan) {
@@ -371,7 +371,7 @@ func TestGenerateDailyPlan_KBInjectedIntoPrompt(t *testing.T) {
 	kb := loadTestKB(t)
 	raw := `[{"time":"06:00-07:00","goal":"起床晨检"}]`
 	sc := &fakeStrategicCaller{resp: makeStrategicResponse(raw)}
-	_ = generateDailyPlan(context.Background(), strategicCtxForTest(sc), "H-01", kb, nil, slog.Default(), "", nil, "")
+	_ = strategicCtxForTest(sc).triggerStrategicPlanning(context.Background(), "H-01", kb, nil, slog.Default(), "", "", "早晨例行制定每日日程安排")
 
 	sys := sc.capturedSystem
 	if sys == "" {
@@ -460,7 +460,7 @@ func TestNormalizeDailyPlan_KeepsShortSlots(t *testing.T) {
 		{Time: "06:30-12:00", Goal: "上午工作"},
 		{Time: "12:00-22:00", Goal: "下午到晚上"},
 	}
-	got := normalizeDailyPlan(items)
+	got := normalizeDailyPlan(items, dayStartMinute)
 	if len(got) != 3 {
 		t.Fatalf("got %d items, want 3 (short slot kept)", len(got))
 	}
@@ -480,7 +480,7 @@ func TestNormalizeDailyPlan_FillsGap(t *testing.T) {
 		{Time: "06:00-10:00", Goal: "上午"},
 		{Time: "14:00-22:00", Goal: "下午"}, // 10:00-14:00 是空白
 	}
-	got := normalizeDailyPlan(items)
+	got := normalizeDailyPlan(items, dayStartMinute)
 	if len(got) != 2 {
 		t.Fatalf("got %d items, want 2", len(got))
 	}
@@ -498,9 +498,22 @@ func TestNormalizeDailyPlan_ExtendsFirstSlot(t *testing.T) {
 		{Time: "08:00-12:00", Goal: "上午"}, // 07:00-08:00 空白（06:00-07:00 是规划时间不覆盖）
 		{Time: "12:00-22:00", Goal: "下午"},
 	}
-	got := normalizeDailyPlan(items)
+	got := normalizeDailyPlan(items, dayStartMinute)
 	if got[0].Time != "07:00-12:00" {
 		t.Errorf("first slot should start at 07:00: got %q, want 07:00-12:00", got[0].Time)
+	}
+}
+
+func TestNormalizeDailyPlan_MidDayStartNotStretchedToMorning(t *testing.T) {
+	// 中途触发的战略规划：首段前伸到触发时刻（14:00），不回拉到 07:00
+	// 覆盖已流逝的上午。
+	items := []dailyPlanItem{
+		{Time: "15:00-18:00", Goal: "下午工作"},
+		{Time: "18:00-22:00", Goal: "广场休息"},
+	}
+	got := normalizeDailyPlan(items, 14*60)
+	if got[0].Time != "14:00-18:00" {
+		t.Errorf("first slot should stretch to trigger time 14:00, got %q", got[0].Time)
 	}
 }
 
@@ -509,7 +522,7 @@ func TestNormalizeDailyPlan_ExtendsLastSlot(t *testing.T) {
 		{Time: "07:00-12:00", Goal: "上午"},
 		{Time: "12:00-18:00", Goal: "下午"}, // 18:00-22:00 空白
 	}
-	got := normalizeDailyPlan(items)
+	got := normalizeDailyPlan(items, dayStartMinute)
 	if got[len(got)-1].Time != "12:00-22:00" {
 		t.Errorf("last slot should end at 22:00: got %q, want 12:00-22:00", got[len(got)-1].Time)
 	}
@@ -521,7 +534,7 @@ func TestNormalizeDailyPlan_KeepsAllShortSlots(t *testing.T) {
 		{Time: "06:00-06:30", Goal: "短1"},
 		{Time: "07:00-07:15", Goal: "短2"},
 	}
-	got := normalizeDailyPlan(items)
+	got := normalizeDailyPlan(items, dayStartMinute)
 	if got == nil || len(got) != 2 {
 		t.Fatalf("short slots should be kept, got %+v", got)
 	}
@@ -534,7 +547,7 @@ func TestNormalizeDailyPlan_AlreadyValid(t *testing.T) {
 		{Time: "12:00-22:00", Goal: "下午"},
 		{Time: "22:00-06:00", Goal: "夜间休息"},
 	}
-	got := normalizeDailyPlan(items)
+	got := normalizeDailyPlan(items, dayStartMinute)
 	if len(got) != 3 {
 		t.Fatalf("got %d items, want 3", len(got))
 	}
@@ -552,7 +565,7 @@ func TestNormalizeDailyPlan_ExtendsCrossMidnightLastSlot(t *testing.T) {
 		{Time: "12:00-22:00", Goal: "傍晚"},
 		{Time: "23:29-00:54", Goal: "休眠"}, // 跨午夜，只睡到 00:54
 	}
-	got := normalizeDailyPlan(items)
+	got := normalizeDailyPlan(items, dayStartMinute)
 	if len(got) != 3 {
 		t.Fatalf("got %d items, want 3", len(got))
 	}
@@ -570,7 +583,7 @@ func TestNormalizeDailyPlan_MergesAdjacentSameGoal(t *testing.T) {
 		{Time: "20:30-22:58", Goal: "睡觉"},
 		{Time: "22:58-07:16", Goal: "睡觉"},
 	}
-	got := normalizeDailyPlan(items)
+	got := normalizeDailyPlan(items, dayStartMinute)
 	if len(got) != 2 {
 		t.Fatalf("got %d items, want 2 (same-goal slots merged): %+v", len(got), got)
 	}
@@ -589,7 +602,7 @@ func TestNormalizeDailyPlan_NoMergeDifferentGoals(t *testing.T) {
 		{Time: "07:00-12:00", Goal: "上午工作"},
 		{Time: "12:00-18:00", Goal: "下午工作"},
 	}
-	got := normalizeDailyPlan(items)
+	got := normalizeDailyPlan(items, dayStartMinute)
 	if len(got) != 2 {
 		t.Fatalf("got %d items, want 2 (different goals must not merge)", len(got))
 	}
@@ -603,7 +616,7 @@ func TestNormalizeDailyPlan_NoMergeSleepSynonyms(t *testing.T) {
 		{Time: "20:49-23:25", Goal: "休眠舱居住区睡眠舱休息"},
 		{Time: "23:25-06:35", Goal: "休眠舱居住区睡眠舱睡眠"},
 	}
-	got := normalizeDailyPlan(items)
+	got := normalizeDailyPlan(items, dayStartMinute)
 	if len(got) != 3 {
 		t.Fatalf("got %d items, want 3 (different-goal sleep slots must not merge): %+v", len(got), got)
 	}
@@ -617,7 +630,7 @@ func TestNormalizeDailyPlan_NoMergeRunBeforeSleep(t *testing.T) {
 		{Time: "20:00-22:00", Goal: "休眠舱居住区跑步机跑步锻炼"},
 		{Time: "22:00-07:00", Goal: "休眠舱睡眠"},
 	}
-	got := normalizeDailyPlan(items)
+	got := normalizeDailyPlan(items, dayStartMinute)
 	if len(got) != 3 {
 		t.Fatalf("got %d items, want 3 (run and sleep must not merge): %+v", len(got), got)
 	}
@@ -952,5 +965,52 @@ func TestBuildSharedSystemPrompt_NoZoneObjectMapHeader(t *testing.T) {
 	got := prompt.BuildSharedSystemPrompt(kb, nil, "H-01")
 	if strings.Contains(got, "【区域设施映射】") {
 		t.Errorf("system prompt should NOT include '【区域设施映射】' section (superseded by module 3): %q", got)
+	}
+}
+
+// TestTriggerStrategicPlanning_ReadsTimeAndZoneFromSnapshot 验证通用战略
+// 触发钩子从快照读当前游戏时间与所在区域拼 user prompt，并携带 hint。
+func TestTriggerStrategicPlanning_ReadsTimeAndZoneFromSnapshot(t *testing.T) {
+	as := agentstate.New()
+	as.SetIdentity("H-01", nil)
+	// 预置感知：time_of_day_sec 14:30（52200 秒），zone=main_workshop。
+	raw := []byte(`{"environment":{"game_time_sec":52200,"time_of_day_sec":52200,"day_count":1},"location":{"current_zone":"main_workshop"}}`)
+	if _, err := as.SetPerception(raw); err != nil {
+		t.Fatalf("SetPerception: %v", err)
+	}
+	sc := &fakeStrategicCaller{resp: makeStrategicResponse(`[{"time":"14:30-18:00","goal":"下午工作"}]`)}
+	ac := &agentContext{as: as, strategicHc: sc}
+
+	_ = ac.triggerStrategicPlanning(context.Background(), "H-01", nil, nil, slog.Default(), "", "", "中午状态变化重规划")
+
+	if !strings.Contains(sc.capturedInput, "现在是仿真时间 14:30") {
+		t.Errorf("user prompt should carry snapshot time 14:30:\n%s", sc.capturedInput)
+	}
+	if !strings.Contains(sc.capturedInput, "你当前位于main_workshop") {
+		t.Errorf("user prompt should carry snapshot zone main_workshop:\n%s", sc.capturedInput)
+	}
+	if !strings.Contains(sc.capturedInput, "中午状态变化重规划") {
+		t.Errorf("user prompt should carry hint:\n%s", sc.capturedInput)
+	}
+}
+
+// TestTriggerStrategicPlanning_MorningFallbackNoPerception 验证冷启动（首条
+// 感知未到）时时间回落 07:00 且省略位置段。
+func TestTriggerStrategicPlanning_MorningFallbackNoPerception(t *testing.T) {
+	as := agentstate.New()
+	as.SetIdentity("H-01", nil)
+	sc := &fakeStrategicCaller{resp: makeStrategicResponse(`[{"time":"07:00-08:00","goal":"晨练"}]`)}
+	ac := &agentContext{as: as, strategicHc: sc}
+
+	_ = ac.triggerStrategicPlanning(context.Background(), "H-01", nil, nil, slog.Default(), "", "", "早晨例行制定每日日程安排")
+
+	if !strings.Contains(sc.capturedInput, "现在是仿真时间 07:00") {
+		t.Errorf("cold start should fall back to 07:00:\n%s", sc.capturedInput)
+	}
+	if strings.Contains(sc.capturedInput, "你当前位于") {
+		t.Errorf("cold start without perception should omit location clause:\n%s", sc.capturedInput)
+	}
+	if !strings.Contains(sc.capturedInput, "早晨例行制定每日日程安排") {
+		t.Errorf("morning hint missing:\n%s", sc.capturedInput)
 	}
 }

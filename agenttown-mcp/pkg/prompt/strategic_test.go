@@ -104,9 +104,9 @@ func TestBuildSharedSystemPrompt_ThreeModules(t *testing.T) {
 	if !strings.Contains(StrategicRules, "格式示例：[{\"time\":\"07:00-09:00\"") {
 		t.Errorf("StrategicRules missing format example:\n%s", StrategicRules)
 	}
-	// user 模板第三个占位符注入规则。
-	if !strings.Contains(StrategicUserTemplate, "规划要求：\n%s") {
-		t.Errorf("user template should carry the rules placeholder:\n%s", StrategicUserTemplate)
+	// user prompt builder 携带规则段。
+	if !strings.Contains(buildTestStrategicPrompt(), "规划要求：\n") {
+		t.Errorf("user prompt should carry the rules segment:\n%s", buildTestStrategicPrompt())
 	}
 }
 
@@ -283,30 +283,75 @@ func TestStrategicSystemPrompt_HasSocialGuidance(t *testing.T) {
 func TestStrategicSystemPrompt_GoalMustBeString(t *testing.T) {
 	// goal 字段类型显式声明（用户消息收尾处）。
 	// 起因：实际仿真中 LLM 把 goal 写成 {"goal":"...","cmd":"..."} 导致整包解析失败。
-	if !strings.Contains(StrategicUserTemplate, `"goal" 必须是字符串`) {
-		t.Error("user template should declare goal must be a plain string")
+	if !strings.Contains(buildTestStrategicPrompt(), `"goal" 必须是字符串`) {
+		t.Error("user prompt should declare goal must be a plain string")
 	}
 }
 
 func TestStrategicSystemPrompt_GoalStyleTerse(t *testing.T) {
 	// goal 文案干练简洁，人设语气不得进入 schedule 文字
 	// ——语气只属于战术层的 speak 动作。
-	if !strings.Contains(StrategicUserTemplate, "goal 文字一律干练简洁，不带人设语气") {
-		t.Error("user template should require terse objective goal text")
+	if !strings.Contains(buildTestStrategicPrompt(), "goal 文字一律干练简洁，不带人设语气") {
+		t.Error("user prompt should require terse objective goal text")
 	}
 	if !strings.Contains(StrategicRules, "每段安排 1 - 2 项任务") {
 		t.Error("system prompt should bound tasks per slot")
 	}
 }
 
-func TestStrategicUserTemplate_EndsWithFormatReminder(t *testing.T) {
+func TestBuildStrategicUserPrompt_EndsWithFormatReminder(t *testing.T) {
 	// user 消息末尾的格式提醒（recency effect：越靠后的指令遵从率越高）。
 	// 含 ≥30 分钟硬性约束的重复强调。
-	if !strings.Contains(StrategicUserTemplate, `"goal" 必须是字符串`) {
-		t.Error("user template should end with the JSON format reminder")
+	got := buildTestStrategicPrompt()
+	if !strings.Contains(got, `"goal" 必须是字符串`) {
+		t.Error("user prompt should end with the JSON format reminder")
 	}
-	if !strings.Contains(StrategicUserTemplate, "每个时段必须 ≥30 分钟") {
-		t.Error("user template should reiterate the ≥30-minute slot rule")
+	if !strings.Contains(got, "每个时段必须 ≥30 分钟") {
+		t.Error("user prompt should reiterate the ≥30-minute slot rule")
+	}
+}
+
+// buildTestStrategicPrompt 渲染一份泛化战略层 user prompt 供断言。
+func buildTestStrategicPrompt() string {
+	return BuildStrategicUserPrompt(StrategicPromptInput{
+		TimeOfDay:        "07:00",
+		Zone:             "residential_quarters",
+		Hint:             "早晨例行制定每日日程安排",
+		Context:          BuildStrategicUserContext("H-01", nil, nil, nil, ""),
+		YesterdaySummary: "昨日总结：昨天按计划完成了车间装配。",
+	})
+}
+
+// TestBuildStrategicUserPrompt_ContainsTimeZoneHint 验证泛化后的 user prompt
+// 携带当前时间、所在区域与触发原因；zone 为空时省略位置段。
+func TestBuildStrategicUserPrompt_ContainsTimeZoneHint(t *testing.T) {
+	got := buildTestStrategicPrompt()
+	for _, want := range []string{
+		"现在是仿真时间 07:00",
+		"你当前位于residential_quarters",
+		"早晨例行制定每日日程安排",
+		"规划从当前时间到次日 07:00 的活动安排",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("user prompt missing %q:\n%s", want, got)
+		}
+	}
+	// zone 为空 → 省略位置段。
+	noZone := BuildStrategicUserPrompt(StrategicPromptInput{
+		TimeOfDay:        "14:30",
+		Zone:             "",
+		Hint:             "中午重规划",
+		Context:          "ctx",
+		YesterdaySummary: "昨日总结：x",
+	})
+	if !strings.Contains(noZone, "现在是仿真时间 14:30。\n") {
+		t.Errorf("empty zone should omit location clause:\n%s", noZone)
+	}
+	if strings.Contains(noZone, "你当前位于") {
+		t.Errorf("empty zone should not carry location clause:\n%s", noZone)
+	}
+	if !strings.Contains(noZone, "中午重规划") {
+		t.Errorf("hint missing:\n%s", noZone)
 	}
 }
 
@@ -321,20 +366,21 @@ func TestStrategicSystemPrompt_SlotDurationRuleEmphasized(t *testing.T) {
 }
 
 func TestStrategicSystemPrompt_PlanStartsAtSeven(t *testing.T) {
-	// 规则 5：第一个时段从 07:00 开始，任何时段开始不得早于 07:00，
-	// 禁止 0:00-7:00 这类凌晨睡觉时段（凌晨睡眠由跨午夜末段覆盖）。
+	// 规则 4（泛化）：第一个时段从当前仿真时间开始，任何时段开始不得早于
+	// 当前时间；清晨规划时禁止 0:00-7:00 这类凌晨睡觉时段（凌晨睡眠由跨
+	// 午夜末段覆盖）。早晨触发时"不早于当前时间(07:00)"与旧约束等价。
 	for _, want := range []string{
-		"第一个时段必须从 07:00 开始",
-		"任何时段的开始时间不得早于 07:00",
+		"第一个时段必须从当前仿真时间开始",
+		"任何时段的开始时间不得早于当前时间",
 		"禁止输出 0:00-7:00",
 	} {
 		if !strings.Contains(StrategicRules, want) {
-			t.Errorf("system prompt missing %q", want)
+			t.Errorf("rules missing %q:\n%s", want, StrategicRules)
 		}
 	}
-	// user 模板收尾指令同样强调。
-	if !strings.Contains(StrategicUserTemplate, "任何时段的开始时间不得早于 07:00") {
-		t.Error("user template should reiterate the no-early-start rule")
+	// user prompt 收尾指令同样强调（泛化为当前时间）。
+	if !strings.Contains(buildTestStrategicPrompt(), "任何时段的开始时间不得早于当前时间") {
+		t.Error("user prompt should reiterate the no-early-start rule (relative to current time)")
 	}
 }
 

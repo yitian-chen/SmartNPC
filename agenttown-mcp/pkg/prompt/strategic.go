@@ -50,8 +50,8 @@ func DefaultDailyPlan(kb *worldkb.KB) string {
 		"22:00-06:00: 夜间休眠"
 }
 
-// StrategicRules is the seven planning rules, injected into the user message
-// (StrategicUserTemplate's third placeholder) so they sit adjacent to the
+// StrategicRules is the planning rules, injected into the user message
+// (BuildStrategicUserPrompt) so they sit adjacent to the
 // planning ask (recency effect: instructions closer to the ask are followed
 // more reliably). References to 【世界背景】/【人物背景】/【世界详细信息】
 // point at the system message's modules; references to 【物理状态】 point at
@@ -59,7 +59,7 @@ func DefaultDailyPlan(kb *worldkb.KB) string {
 const StrategicRules = `1. 【硬性要求】每个时段的结束时间减去开始时间必须 ≥30 分钟（不足 30 分钟的活动要么并入相邻时段，要么不安排）；每段安排 1 - 2 项任务，连续两个时段不得任务完全相同
 2. 规划每个时段时，先想清楚这个时段的活动用什么实现：goal 应能映射到【世界详细信息】设施详情中列出的某个 (semantic_group, interaction) 组合——不限于工种设备，睡眠舱的 sleep/meditate/tidy_up、长椅的 rest 都是合法活动，战术层会据此分解为对应的移动与长时段互动；映射不上的抽象活动（如"准备工具""巡查"）→ 换一个。锻炼类活动（晨练拉伸等原地动作）不需要设施，属例外；聊天/社交/对话类活动用 social_chat 实现（目标是【其他NPC】名单里的某位 NPC，不是设施），也属例外
 3. goal 中提到的地点、人物、设备必须是系统信息中【人物背景】和【世界详细信息】、或用户信息中【其他NPC】里存在的，不得编造未提及的人物或设施
-4. 第一个时段必须从 07:00 开始，且任何时段的开始时间不得早于 07:00——禁止输出 0:00-7:00 这类凌晨睡觉时段（凌晨睡眠已由前一晚的跨午夜末段覆盖，不要重复安排）。
+4. 第一个时段必须从当前仿真时间开始，且任何时段的开始时间不得早于当前时间（清晨规划时禁止输出 0:00-7:00 这类凌晨睡觉时段——凌晨睡眠已由前一晚的跨午夜末段覆盖，不要重复安排）。
 5. 首段禁止安排工作——早间可以安排晨练拉伸、上网、长椅放松、冥想醒神、整理舱位等非工作活动。午间可以选择锻炼、就近长椅小憩、休眠舱午睡等非产出性活动。夜间睡眠必须是一个连续的跨午夜时段：约 22:00 前后开始、次日 06:00-07:00 结束；不得拆成多个睡眠时段（禁止 20:30-22:58 睡觉 + 22:58-07:16 睡觉这样的连续两段），也不得在凌晨提前结束（禁止 23:00-01:00 这样的短睡眠段）。末段跨午夜时结束时间表示次日时刻
 6. 充电仅在规划时电量为"低"或"较低"时安排，规划时电量为"高"或"中"时严禁规划充电；维护仅在关节磨损达到"明显磨损"及以上时安排；睡眠只能在午间和晚上
 7. 综合用户信息中【物理状态】的四项状态调整安排侧重点：电量偏低→多充电少工作；疲劳偏高→提前休眠；磨损偏高→安排维护；余额低→多工作少花钱
@@ -67,23 +67,38 @@ const StrategicRules = `1. 【硬性要求】每个时段的结束时间减去�
 
 格式示例：[{"time":"07:00-09:00","goal":"晨练拉伸"},{"time":"09:00-12:00","goal":"上午车间装配作业"},{"time":"12:00-12:40","goal":"找老王聊聊天（social_chat）"},{"time":"12:40-18:00","goal":"下午继续装配作业"},{"time":"18:00-22:00","goal":"去中央广场长椅休息"},{"time":"22:00-07:00","goal":"夜间在睡眠舱休眠"}]`
 
-// StrategicUserTemplate is the strategic layer's user message template.
-// Placeholders: %s = dynamic context (BuildStrategicUserContext output:
-// today's weekly-schedule context + physical state), %s = yesterday summary,
-// %s = planning rules (StrategicRules). The instruction line stays in the
-// user message so the "plan today" ask sits immediately after the data and
-// rules it refers to.
-const StrategicUserTemplate = `[战略层/每日规划] 现在是仿真时间 07:00，新的一天开始了，你刚从休眠舱醒来，当前位于休眠舱区域。
+// StrategicPromptInput aggregates the strategic layer user-prompt inputs.
+type StrategicPromptInput struct {
+	TimeOfDay        string // 当前游戏时间 "HH:MM"（触发时刻）
+	Zone             string // 当前所在 zone id；空则省略位置段
+	Hint             string // 本次规划触发原因（如"早晨例行制定每日日程安排"）
+	Context          string // BuildStrategicUserContext 产出（动态上下文段）
+	YesterdaySummary string // 含"昨日总结："前缀
+}
 
-%s
-
-%s
-
-规划要求：
-%s
-
-请基于你的角色身份和性格，规划今天一天的活动安排（人设只影响选什么活动、怎么安排时段；goal 文字一律干练简洁，不带人设语气）。一天从 07:00 到次日 07:00，你从 07:00 开始活动。
-只输出 JSON 数组，每条形如 {"time":"HH:MM-HH:MM","goal":"纯文本一句话"}，"goal" 必须是字符串；第一个时段从 07:00 开始，任何时段的开始时间不得早于 07:00；分出6 - 8个时段，每个时段必须 ≥30 分钟；不要输出任何其他文字。`
+// BuildStrategicUserPrompt 组装战略层 user prompt——任意游戏时间可用。
+// 布局：情境行（时间+位置）→ 触发原因 → 动态上下文 → 昨日总结 → 规划要求
+// → 收尾指令。规划区间为「当前时间 → 次日 07:00」，第一个时段从当前仿真
+// 时间开始（早晨例行触发时等价于从 07:00 开始，行为与旧模板一致）。
+func BuildStrategicUserPrompt(in StrategicPromptInput) string {
+	var sb strings.Builder
+	sb.WriteString("[战略层/日程规划] 现在是仿真时间 " + in.TimeOfDay)
+	if in.Zone != "" {
+		sb.WriteString("，你当前位于" + in.Zone)
+	}
+	sb.WriteString("。\n\n")
+	if in.Hint != "" {
+		sb.WriteString(in.Hint + "\n\n")
+	}
+	sb.WriteString(in.Context + "\n\n")
+	sb.WriteString(in.YesterdaySummary + "\n\n")
+	sb.WriteString("规划要求：\n")
+	sb.WriteString(StrategicRules)
+	sb.WriteString("\n\n")
+	sb.WriteString(`请基于你的角色身份和性格，规划从当前时间到次日 07:00 的活动安排（人设只影响选什么活动、怎么安排时段；goal 文字一律干练简洁，不带人设语气）。
+只输出 JSON 数组，每条形如 {"time":"HH:MM-HH:MM","goal":"纯文本一句话"}，"goal" 必须是字符串；第一个时段从当前仿真时间开始，任何时段的开始时间不得早于当前时间；分出6 - 8个时段，每个时段必须 ≥30 分钟；不要输出任何其他文字。`)
+	return sb.String()
+}
 
 // BuildStrategicUserContext constructs the strategic layer user message's
 // dynamic context segment: 【今日日程】 (weekly schedule context, skipped
@@ -97,7 +112,7 @@ func BuildStrategicUserContext(agentID string, kb *worldkb.KB, profiles map[stri
 	// 【今日日程】段：每周日程上下文（星期几 + 工作日/休息日 + 当日提示）。
 	// dayContext 由调用方通过 weeklyschedule.WeeklyLine(dayCount, sched) 预格式化，
 	// pkg/prompt 不依赖 weeklyschedule 包（解耦）。空串=禁用或 dayCount<0，跳过。
-	sb.WriteString(`你是小镇居民 NPC 的战略规划模块。每天清晨 07:00，你根据系统信息中的【世界背景】【人物背景】【世界详细信息】，以及用户信息中的今日日程、物理状态、其他NPC、昨日总结与规划要求，规划当天 07:00 到次日 07:00 的活动安排。
+	sb.WriteString(`你是小镇居民 NPC 的战略规划模块。你根据系统信息中的【世界背景】【人物背景】【世界详细信息】，以及用户信息中的触发原因、今日日程、物理状态、其他NPC、昨日总结与规划要求，规划当前时间到次日 07:00 的活动安排。
 
 各活动对属性的每小时影响幅度见系统信息【世界详细信息】各设施的属性变动说明（由 world KB 声明生成）。规划时请综合权衡：产出性活动（工作）赚取余额但消耗体力、缓慢积攒关节磨损；恢复性活动（充电/维护/休息）花余额但延续工作能力。避免长时间连续工作导致体力耗尽，也避免频繁恢复导致余额入不敷出。
 
