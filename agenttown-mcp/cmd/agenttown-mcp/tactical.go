@@ -105,14 +105,14 @@ func physicalAlertOverrideGoal(hint, origGoal string, physical *protocol.Physica
 	}
 }
 
-// generateTacticalPlan 调战术层 LLM 分解当前时段 goal（非流式，多轮）。
-// conversation 是此前累积的对话历史（system 由本函数重建并置于最前）。
-// 返回分解出的 action 段 + assistant 消息（调用方 append 回 conversation）。
-// 任一步失败返回 err，调用方决定回退兜底。
+// generateTacticalPlan 调战术层 LLM 分解当前时段 goal（统一 agentic loop
+// 战术轮）。会话历史由 ac.agenticTurn 统一读写（[system, ...当天历史, user]，
+// 历史含战略轮与对话轮），成功后 user+assistant 自动追加进历史，tool 结果由
+// recordActionCompletion 回填。返回分解出的 action 段；任一步失败返回 err，
+// 调用方决定回退兜底。
 func generateTacticalPlan(
 	ctx context.Context,
-	tc llmClient,
-	conversation []llmtypes.Message,
+	ac *agentContext,
 	agentID string,
 	goal, zone, timeOfDay, slot, dailyPlan string,
 	physical *protocol.PhysicalState,
@@ -126,12 +126,7 @@ func generateTacticalPlan(
 	objectStatus map[string]protocol.ObjectCategoryStatus,
 	nearbyObjects []protocol.NearbyObject,
 	visibleAgents []protocol.VisibleAgent,
-) ([]plannedAction, llmtypes.Message, error) {
-	// System prompt：与战略/对话层严格一致的共享 system prompt（世界背景/
-	// 人物背景/世界详细信息/生产工作流），单次仿真内静态可缓存；user prompt
-	// 携带四段结构（战术规则也在 user），工具经 function calling 的 tools
-	// 字段下发，不再注入 prompt 文本。
-	system := prompt.BuildSharedSystemPrompt(kb, profiles, agentID)
+) ([]plannedAction, error) {
 	promptText := prompt.BuildTactical(prompt.TacticalInput{
 		Goal:          goal,
 		Zone:          zone,
@@ -151,33 +146,15 @@ func generateTacticalPlan(
 	})
 	logger.Info("[MCP→LLM/TACTICAL-PROMPT]",
 		"agent_id", agentID, "goal", goal, "game_time", timeOfDay, "text", promptText,
-		"replan_hint", hint, "history_turns", len(conversation))
-	// function calling tools：仅经请求体 tools 字段下发。
-	ftools := tacticalToolsFromRegistry(registry, agentID)
+		"replan_hint", hint, "history_turns", len(ac.as.Conversation()))
 
-	// 多轮 messages：[system, ...历史, user(最新实时状态)]。
-	// 历史不做滑动窗口截断：仅跨游戏日清空（main.go detectDayRollover 处
-	// ClearConversation），单日内保留完整对话，避免截断丢失上下文。
-	messages := make([]llmtypes.Message, 0, len(conversation)+2)
-	messages = append(messages, llmtypes.Message{Role: "system", Content: system})
-	messages = append(messages, conversation...)
-	messages = append(messages, llmtypes.Message{Role: "user", Content: promptText})
-
-	// 4001 重试：venus 校验 tools JSON 失败（code 4001）时以相同请求体重试，
-	// 上限 maxTacticalRetries 次。其余错误（超时/连接/非 4001 的 500）不重试，
-	// 由调用方兜底（speak+look_around + 下一感知周期再分解）。
-	resp, err := tc.SendMessagesTools(ctx, messages, ftools)
-	for attempt := 1; err != nil && isVenusErrorCode(err, "4001") && attempt <= maxTacticalRetries; attempt++ {
-		logger.Warn("[战术层] venus 4001，重试相同请求体",
-			"agent_id", agentID, "retry", attempt, "max", maxTacticalRetries, "err", err)
-		resp, err = tc.SendMessagesTools(ctx, messages, ftools)
-	}
-	// 实际 prompt 文档：记录 H-01 最新一次战术层请求体完整 JSON（无论成败）。
-	dumpLastRequestBody(agentID, "tactical", tc, logger)
+	// 统一 agentic loop 战术轮：tool_choice=required（必须调用工具），
+	// 4001 重试与历史追加由 agenticTurn 统一处理。
+	resp, err := ac.agenticTurn(ctx, ac.tacticalHc, kb, profiles, logger, agentID,
+		"tactical", promptText, "required", "", nil)
 	if err != nil {
-		return nil, llmtypes.Message{}, fmt.Errorf("tactical llm: %w", err)
+		return nil, fmt.Errorf("tactical llm: %w", err)
 	}
-	tc.ResetSession() // 战术调用一次性，立即清链（与战略层一致）
 
 	raw := resp.ExtractText()
 	logger.Info("[LLM→MCP/TACTICAL-RESPONSE]",
@@ -185,11 +162,11 @@ func generateTacticalPlan(
 		"tool_calls", len(resp.ToolCalls))
 
 	if len(resp.ToolCalls) == 0 {
-		return nil, llmtypes.Message{}, fmt.Errorf("tactical plan has no tool calls (raw=%s)", truncateText(raw, 200))
+		return nil, fmt.Errorf("tactical plan has no tool calls (raw=%s)", truncateText(raw, 200))
 	}
 	actions := parseToolCalls(resp.ToolCalls, registry, agentID)
 	if len(actions) == 0 {
-		return nil, llmtypes.Message{}, fmt.Errorf("tactical plan has no actions (raw=%s)", truncateText(raw, 200))
+		return nil, fmt.Errorf("tactical plan has no actions (raw=%s)", truncateText(raw, 200))
 	}
 	actions = fillDefaultTimeToStopForRest(actions)
 	actions = fillDefaultTimeToStopForWork(actions)
@@ -197,8 +174,7 @@ func generateTacticalPlan(
 	logger.Info("[战术层] 分解成功",
 		"agent_id", agentID, "steps", len(actions),
 		"actions", string(actionsJSON))
-	assistant := llmtypes.Message{Role: "assistant", Content: raw, ToolCalls: resp.ToolCalls}
-	return actions, assistant, nil
+	return actions, nil
 }
 
 // defaultRestTimeToStopSec 是非队尾休息类动作的默认 time_to_stop（30 分钟）。

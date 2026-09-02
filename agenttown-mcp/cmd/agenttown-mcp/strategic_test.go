@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/AgentTown/agenttown-mcp/pkg/agentstate"
 	"github.com/AgentTown/agenttown-mcp/pkg/llmtypes"
 	"github.com/AgentTown/agenttown-mcp/pkg/prompt"
 	"github.com/AgentTown/agenttown-mcp/pkg/venus"
@@ -52,6 +53,15 @@ func (f *fakeStrategicCaller) SendStreamingTools(_ context.Context, _, _ string,
 func (f *fakeStrategicCaller) SendWithSchema(_ context.Context, system, user, schemaName string, _ []byte, _ ...[]venus.Tool) (*llmtypes.Response, error) {
 	f.capturedSystem = system
 	f.capturedInput = user
+	f.capturedSchemaName = schemaName
+	return f.resp, f.err
+}
+
+func (f *fakeStrategicCaller) SendLoop(_ context.Context, messages []llmtypes.Message, _ []venus.Tool, _, schemaName string, _ []byte) (*llmtypes.Response, error) {
+	if len(messages) > 0 {
+		f.capturedSystem = messages[0].Content
+		f.capturedInput = messages[len(messages)-1].Content
+	}
 	f.capturedSchemaName = schemaName
 	return f.resp, f.err
 }
@@ -161,11 +171,18 @@ func TestFormatDailyPlan_MultipleItems(t *testing.T) {
 	}
 }
 
+
+// strategicCtxForTest 构造挂 fake 战略客户端的 agentContext（统一 agentic loop
+// 测试用）：as 为全新 AgentState（历史从空开始），strategicHc 接 fake。
+func strategicCtxForTest(sc *fakeStrategicCaller) *agentContext {
+	return &agentContext{as: agentstate.New(), strategicHc: sc}
+}
+
 // ─── generateDailyPlan ───────────────────────────────────────
 
 func TestGenerateDailyPlan_HTTPError(t *testing.T) {
 	sc := &fakeStrategicCaller{err: errors.New("network down")}
-	plan := generateDailyPlan(context.Background(), sc, "H-01", nil, nil, slog.Default(), "", nil, "")
+	plan := generateDailyPlan(context.Background(), strategicCtxForTest(sc), "H-01", nil, nil, slog.Default(), "", nil, "")
 	// HTTP 错误现在回退到 prompt.DefaultDailyPlan(nil) 的扰动版本
 	// （时间节点 ±planJitterMinutes 错峰），而不是空字符串，
 	// 保证战术层有目标可分解、仿真不瘫痪。
@@ -180,7 +197,7 @@ func TestGenerateDailyPlan_HTTPError(t *testing.T) {
 func TestGenerateDailyPlan_ValidResponse(t *testing.T) {
 	raw := `[{"time":"06:00-07:00","goal":"起床晨检"},{"time":"07:00-12:00","goal":"车间装配"}]`
 	sc := &fakeStrategicCaller{resp: makeStrategicResponse(raw)}
-	plan := generateDailyPlan(context.Background(), sc, "H-01", nil, nil, slog.Default(), "", nil, "")
+	plan := generateDailyPlan(context.Background(), strategicCtxForTest(sc), "H-01", nil, nil, slog.Default(), "", nil, "")
 	if plan == "" {
 		t.Fatal("got empty plan, want non-empty")
 	}
@@ -198,7 +215,7 @@ func TestGenerateDailyPlan_ValidResponse(t *testing.T) {
 
 func TestGenerateDailyPlan_ParseFail(t *testing.T) {
 	sc := &fakeStrategicCaller{resp: makeStrategicResponse("今天天气不错，我打算去车间转转。")}
-	plan := generateDailyPlan(context.Background(), sc, "H-01", nil, nil, slog.Default(), "", nil, "")
+	plan := generateDailyPlan(context.Background(), strategicCtxForTest(sc), "H-01", nil, nil, slog.Default(), "", nil, "")
 	// 解析失败现在回退到 prompt.DefaultDailyPlan(nil) 的扰动版本，
 	// 避免整天 Wait(60s) 瘫痪。
 	if !isJitteredDefaultPlan(t, plan) {
@@ -354,7 +371,7 @@ func TestGenerateDailyPlan_KBInjectedIntoPrompt(t *testing.T) {
 	kb := loadTestKB(t)
 	raw := `[{"time":"06:00-07:00","goal":"起床晨检"}]`
 	sc := &fakeStrategicCaller{resp: makeStrategicResponse(raw)}
-	_ = generateDailyPlan(context.Background(), sc, "H-01", kb, nil, slog.Default(), "", nil, "")
+	_ = generateDailyPlan(context.Background(), strategicCtxForTest(sc), "H-01", kb, nil, slog.Default(), "", nil, "")
 
 	sys := sc.capturedSystem
 	if sys == "" {

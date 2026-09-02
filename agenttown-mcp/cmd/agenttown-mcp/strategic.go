@@ -37,12 +37,13 @@ type dailyPlanItem struct {
 }
 
 // strategicCaller 是 LLM 客户端的窄接口，便于单测 mock。
-// SendWithSchema 用于战略层（Structured Outputs 硬约束）；
-// SendWithSummary 用于记忆层等无 schema 的调用。
-// 两者都接受可选 tools（披露行动目录），战略层注入时 tool_choice=none。
+// SendWithSummary 用于记忆层等无 schema 的调用；
+// SendLoop 用于战略层轮次（统一 agentic loop：messages + tools +
+// tool_choice=none + json_schema）。
 type strategicCaller interface {
 	SendWithSummary(ctx context.Context, system, user string, tools ...[]venus.Tool) (*llmtypes.Response, error)
 	SendWithSchema(ctx context.Context, system, user, schemaName string, schema []byte, tools ...[]venus.Tool) (*llmtypes.Response, error)
+	SendLoop(ctx context.Context, messages []llmtypes.Message, tools []venus.Tool, toolChoice, schemaName string, schema []byte) (*llmtypes.Response, error)
 	ResetSession()
 }
 
@@ -75,45 +76,36 @@ const yesterdaySummaryForFirstDay = "昨天按计划完成了车间装配。"
 // 仿真不瘫痪。返回 "" 仅表示连兜底计划都没用上（理论上不会发生）。
 // kb 用于注入【你的角色】+【世界知识】+【区域设施映射】段，让 LLM 看到 KB 内合法的
 // zone/object/agent 名，避免编造 KB 外概念（如换 KB 后仍写"车间"）。
-// registry 用于注入【可用能力】段，让 LLM 知道可用复合动作，避免规划无对应
-// 动作的 goal（如"整理仪容"）。profiles 是 NPC persona override（profile.md），
-// nil 时 AgentRole 仅走 KB → fallback。kb/registry/profiles == nil 时降级为对应段缺失。
+// profiles 是 NPC persona override（profile.md），nil 时 AgentRole 仅走
+// KB → fallback。kb/registry/profiles == nil 时降级为对应段缺失。
 // physical 注入【物理状态】段；nil 时 PhysicalLine 用默认满状态兜底。
 // dayContext 注入【今日日程】段（每周日程上下文，由 weeklyschedule.WeeklyLine
 // 预格式化）；"" 时跳过该段（禁用或 dayCount<0）。
-func generateDailyPlan(ctx context.Context, sc strategicCaller, agentID string, kb *worldkb.KB, profiles map[string]*profile.Profile, logger *slog.Logger, yesterdaySummary string, physical *protocol.PhysicalState, dayContext string) string {
+//
+// 统一 agentic loop：战略轮经 agenticTurn 走 [system, ...当天历史, user]，
+// 规划问答进入当天会话历史；tool_choice=none + json_schema（daily_plan）。
+func generateDailyPlan(ctx context.Context, ac *agentContext, agentID string, kb *worldkb.KB, profiles map[string]*profile.Profile, logger *slog.Logger, yesterdaySummary string, physical *protocol.PhysicalState, dayContext string) string {
 	if yesterdaySummary == "" {
 		yesterdaySummary = yesterdaySummaryForFirstDay
 	}
-	// System prompt：与战术/对话层严格一致的共享 system prompt（世界背景/
-	// 人物背景/世界详细信息/生产工作流），由 world KB 派生，单次仿真内静态
-	// 可缓存。战略层专属内容（其他NPC花名册、规则）全在 user prompt。
 	// User prompt：动态段（今日日程+物理状态+其他NPC+昨日总结）+ 九条规则
-	// + 规划指令。
-	system := prompt.BuildSharedSystemPrompt(kb, profiles, agentID)
+	// + 规划指令。system prompt 由 agenticTurn 统一拼装（三层共享）。
 	promptText := fmt.Sprintf(prompt.StrategicUserTemplate,
 		prompt.BuildStrategicUserContext(agentID, kb, profiles, physical, dayContext),
 		"昨日总结："+yesterdaySummary,
 		prompt.StrategicRules)
 	logger.Info("[MCP→LLM/STRATEGIC-PROMPT]", "agent_id", agentID, "text", promptText)
 
-	// tools：披露与战术层一致的行动目录（含 social_chat），但 tool_choice=none
-	//——战略层产出 schema 约束的 JSON 计划文本，不调用工具。让 LLM 看到
-	// social_chat 是合法行动，配合规则 9 的社交建议产出社交时段。
-	var toolsOpt []venus.Tool
-	if capabilityRegistryRef != nil {
-		toolsOpt = tacticalToolsFromRegistry(capabilityRegistryRef, agentID)
-	}
-	resp, err := sc.SendWithSchema(ctx, system, promptText, "daily_plan", []byte(dailyPlanSchema), toolsOpt)
-	// 实际 prompt 文档：记录 H-01 最新一次战略层请求体完整 JSON。
-	dumpLastRequestBody(agentID, "strategic", sc, logger)
+	// 统一 agentic loop 战略轮：[system, ...当天历史, user]，tool_choice=none
+	// + json_schema(daily_plan)，规划问答进入当天会话历史。
+	resp, err := ac.agenticTurn(ctx, ac.strategicHc, kb, profiles, logger, agentID,
+		"strategic", promptText, "none", "daily_plan", []byte(dailyPlanSchema))
 	if err != nil {
 		fallback := jitterPlanString(prompt.DefaultDailyPlan(kb))
 		logger.Warn("[战略层] 计划生成失败，使用默认计划兜底",
 			"agent_id", agentID, "err", err, "fallback", fallback)
 		return fallback
 	}
-	sc.ResetSession() // 战略调用一次性使用，立即清链
 
 	raw := resp.ExtractText()
 	logger.Info("[LLM→MCP/STRATEGIC-RESPONSE]",

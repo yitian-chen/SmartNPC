@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/AgentTown/agenttown-mcp/pkg/agentstate"
 	"github.com/AgentTown/agenttown-mcp/pkg/llmtypes"
 	"github.com/AgentTown/agenttown-mcp/pkg/prompt"
 	"github.com/AgentTown/agenttown-mcp/contract/protocol"
@@ -308,7 +309,7 @@ func makeToolCallResponse(tcs []llmtypes.ToolCall) *llmtypes.Response {
 
 func TestGenerateTacticalPlan_HTTPError(t *testing.T) {
 	tc := &fakeStrategicCaller{err: errors.New("network down")}
-	actions, _, err := generateTacticalPlan(context.Background(), tc, nil, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", "07:00-09:00: 上午准备\n09:00-12:00: 车间装配", &protocol.PhysicalState{Energy: 80, Fatigue: 20, JointWear: 10}, nil, nil, slog.Default(), "", "", "", nil, nil, nil, nil)
+	actions, err := generateTacticalPlan(context.Background(), tacticalCtxForTest(tc), "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", "07:00-09:00: 上午准备\n09:00-12:00: 车间装配", &protocol.PhysicalState{Energy: 80, Fatigue: 20, JointWear: 10}, nil, nil, slog.Default(), "", "", "", nil, nil, nil, nil)
 	if err == nil {
 		t.Fatal("expected error on HTTP failure")
 	}
@@ -326,7 +327,7 @@ func TestGenerateTacticalPlan_ValidResponse(t *testing.T) {
 		{Function: llmtypes.ToolFunction{Name: "move_to", Arguments: `{"target_type":"zone","target_id":"main_workshop"}`}},
 		{Function: llmtypes.ToolFunction{Name: "work_shift", Arguments: `{"semantic_group":"workbench_01","interaction":"assemble"}`}},
 	})}
-	actions, _, err := generateTacticalPlan(context.Background(), tc, nil, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", "07:00-09:00: 上午准备\n09:00-12:00: 车间装配", &protocol.PhysicalState{Energy: 80, Fatigue: 20, JointWear: 10}, nil, nil, slog.Default(), "", "", "", nil, nil, nil, nil)
+	actions, err := generateTacticalPlan(context.Background(), tacticalCtxForTest(tc), "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", "07:00-09:00: 上午准备\n09:00-12:00: 车间装配", &protocol.PhysicalState{Energy: 80, Fatigue: 20, JointWear: 10}, nil, nil, slog.Default(), "", "", "", nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -346,7 +347,7 @@ func TestGenerateTacticalPlan_ValidResponse(t *testing.T) {
 
 func TestGenerateTacticalPlan_NoToolCalls(t *testing.T) {
 	tc := &fakeStrategicCaller{resp: makeStrategicResponse("我今天打算去车间转转。")}
-	if _, _, err := generateTacticalPlan(context.Background(), tc, nil, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", "07:00-09:00: 上午准备\n09:00-12:00: 车间装配", nil, nil, nil, slog.Default(), "", "", "", nil, nil, nil, nil); err == nil {
+	if _, err := generateTacticalPlan(context.Background(), tacticalCtxForTest(tc), "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", "07:00-09:00: 上午准备\n09:00-12:00: 车间装配", nil, nil, nil, slog.Default(), "", "", "", nil, nil, nil, nil); err == nil {
 		t.Fatal("expected error when no tool calls returned")
 	}
 }
@@ -355,7 +356,7 @@ func TestGenerateTacticalPlan_AllFiltered(t *testing.T) {
 	tc := &fakeStrategicCaller{resp: makeToolCallResponse([]llmtypes.ToolCall{
 		{Function: llmtypes.ToolFunction{Name: "scan_area", Arguments: `{}`}},
 	})}
-	if _, _, err := generateTacticalPlan(context.Background(), tc, nil, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", "07:00-09:00: 上午准备\n09:00-12:00: 车间装配", nil, nil, nil, slog.Default(), "", "", "", nil, nil, nil, nil); err == nil {
+	if _, err := generateTacticalPlan(context.Background(), tacticalCtxForTest(tc), "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", "07:00-09:00: 上午准备\n09:00-12:00: 车间装配", nil, nil, nil, slog.Default(), "", "", "", nil, nil, nil, nil); err == nil {
 		t.Fatal("expected error when all tool calls filtered out")
 	}
 }
@@ -364,7 +365,7 @@ func TestGenerateTacticalPlan_ResetSessionCalled(t *testing.T) {
 	tc := &fakeStrategicCaller{resp: makeToolCallResponse([]llmtypes.ToolCall{
 		{Function: llmtypes.ToolFunction{Name: "speak", Arguments: `{"content":"开始"}`}},
 	})}
-	_, _, _ = generateTacticalPlan(context.Background(), tc, nil, "H-01", "等待", "main_workshop", "09:00", "09:00-12:00", "", nil, nil, nil, slog.Default(), "", "", "", nil, nil, nil, nil)
+	_, _ = generateTacticalPlan(context.Background(), tacticalCtxForTest(tc), "H-01", "等待", "main_workshop", "09:00", "09:00-12:00", "", nil, nil, nil, slog.Default(), "", "", "", nil, nil, nil, nil)
 	if !tc.resetCalled {
 		t.Error("ResetSession should be called after successful tactical generation")
 	}
@@ -394,6 +395,14 @@ func (s *sequenceCaller) next() (*llmtypes.Response, error) {
 	return nil, err
 }
 
+
+// tacticalCtxForTest 构造挂 fake 战术客户端的 agentContext（统一 agentic loop
+// 测试用）：as 为全新 AgentState，tacticalHc 接 fake（sequenceCaller 或
+// fakeStrategicCaller 均实现 llmClient）。
+func tacticalCtxForTest(hc llmClient) *agentContext {
+	return &agentContext{as: agentstate.New(), tacticalHc: hc}
+}
+
 func (s *sequenceCaller) SendWithSummary(_ context.Context, _, _ string, _ ...[]venus.Tool) (*llmtypes.Response, error) {
 	return s.next()
 }
@@ -412,6 +421,9 @@ func (s *sequenceCaller) SendStreamingTools(_ context.Context, _, _ string, _ []
 func (s *sequenceCaller) SendWithSchema(_ context.Context, _, _, _ string, _ []byte, _ ...[]venus.Tool) (*llmtypes.Response, error) {
 	return s.next()
 }
+func (s *sequenceCaller) SendLoop(_ context.Context, _ []llmtypes.Message, _ []venus.Tool, _, _ string, _ []byte) (*llmtypes.Response, error) {
+	return s.next()
+}
 func (s *sequenceCaller) ResetSession() { s.resetCount++ }
 
 // venusErr4001 模拟 venus 校验 tools JSON 失败的 500 响应（code 4001）。
@@ -423,7 +435,7 @@ func TestGenerateTacticalPlan_RetryOn4001(t *testing.T) {
 		seq:  []error{venusErr4001, venusErr4001, nil},
 		resp: makeToolCallResponse([]llmtypes.ToolCall{{Function: llmtypes.ToolFunction{Name: "speak", Arguments: `{"content":"重试成功"}`}}}),
 	}
-	actions, _, err := generateTacticalPlan(context.Background(), tc, nil, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", "", &protocol.PhysicalState{Energy: 80}, nil, nil, slog.Default(), "", "", "", nil, nil, nil, nil)
+	actions, err := generateTacticalPlan(context.Background(), tacticalCtxForTest(tc), "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", "", &protocol.PhysicalState{Energy: 80}, nil, nil, slog.Default(), "", "", "", nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error after retries: %v", err)
 	}
@@ -441,7 +453,7 @@ func TestGenerateTacticalPlan_RetryOn4001(t *testing.T) {
 func TestGenerateTacticalPlan_RetryExhausted(t *testing.T) {
 	// 连续 4 次 4001 → 重试 3 次后仍失败，最终返回错误。
 	tc := &sequenceCaller{seq: []error{venusErr4001, venusErr4001, venusErr4001, venusErr4001}}
-	_, _, err := generateTacticalPlan(context.Background(), tc, nil, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", "", nil, nil, nil, slog.Default(), "", "", "", nil, nil, nil, nil)
+	_, err := generateTacticalPlan(context.Background(), tacticalCtxForTest(tc), "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", "", nil, nil, nil, slog.Default(), "", "", "", nil, nil, nil, nil)
 	if err == nil {
 		t.Fatal("expected error after exhausting retries")
 	}
@@ -453,7 +465,7 @@ func TestGenerateTacticalPlan_RetryExhausted(t *testing.T) {
 func TestGenerateTacticalPlan_NoRetryOnNon4001(t *testing.T) {
 	// 非 4001 错误（如超时/连接失败）不重试，仅调用 1 次。
 	tc := &sequenceCaller{seq: []error{errors.New("http do: Post: context deadline exceeded")}}
-	if _, _, err := generateTacticalPlan(context.Background(), tc, nil, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", "", nil, nil, nil, slog.Default(), "", "", "", nil, nil, nil, nil); err == nil {
+	if _, err := generateTacticalPlan(context.Background(), tacticalCtxForTest(tc), "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", "", nil, nil, nil, slog.Default(), "", "", "", nil, nil, nil, nil); err == nil {
 		t.Fatal("expected error")
 	}
 	if tc.calls != 1 {

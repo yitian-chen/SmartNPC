@@ -201,6 +201,27 @@ func (c *Client) SendMessagesTools(ctx context.Context, messages []llmtypes.Mess
 	return c.doSend(ctx, toVenusMessages(messages), false, nil, nil, nil, tools, "required")
 }
 
+// SendLoop sends one turn of the unified per-NPC daily agentic loop: the
+// full multi-turn messages array plus the function-calling tools catalog.
+// toolChoice must be explicit — "none" (strategic/dialogue turns: tools are
+// disclosed for awareness but the model must answer in text/JSON) or
+// "required" (tactical turns: the model must call a tool). schemaName/schema,
+// when non-empty, add response_format (Structured Outputs) on top — used by
+// the strategic turn so the daily plan stays schema-constrained inside the
+// loop. This is the single entry point for the shared-loop layers.
+func (c *Client) SendLoop(ctx context.Context, messages []llmtypes.Message, tools []Tool, toolChoice, schemaName string, schema []byte) (*llmtypes.Response, error) {
+	c.sendMu.Lock()
+	defer c.sendMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	var def *JSONSchemaDef
+	if schemaName != "" {
+		def = &JSONSchemaDef{Name: schemaName, Strict: true, Schema: json.RawMessage(schema)}
+	}
+	return c.doSend(ctx, toVenusMessages(messages), false, nil, nil, def, tools, toolChoice)
+}
+
 // systemUserMessages builds the default [system?, user] message pair.
 func systemUserMessages(system, user string) []message {
 	msgs := make([]message, 0, 2)
