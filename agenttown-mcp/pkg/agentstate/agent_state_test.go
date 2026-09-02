@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -1106,6 +1107,76 @@ func TestConversation_AppendAndClear(t *testing.T) {
 	if got := a.Conversation(); len(got) != 0 {
 		t.Errorf("conversation after clear = %d, want 0", len(got))
 	}
+}
+
+// TestClosePendingToolCalls 验证悬空 tool_calls 闭环。
+func TestClosePendingToolCalls(t *testing.T) {
+	t.Run("末尾悬空 assistant 全补 cancelled", func(t *testing.T) {
+		a := New()
+		a.AppendConversationMessage(llmtypes.Message{Role: "user", Content: "分解"})
+		a.AppendConversationMessage(llmtypes.Message{Role: "assistant", ToolCalls: []llmtypes.ToolCall{
+			{ID: "c1"}, {ID: "c2"}, {ID: "c3"},
+		}})
+		a.ClosePendingToolCalls("slot_switch")
+
+		got := a.Conversation()
+		// user + assistant + 3 cancelled tool
+		if len(got) != 5 {
+			t.Fatalf("len = %d, want 5", len(got))
+		}
+		for i := 2; i < 5; i++ {
+			if got[i].Role != "tool" || got[i].ToolCallID == "" {
+				t.Errorf("got[%d] should be cancelled tool, got %+v", i, got[i])
+			}
+			if !strings.Contains(got[i].Content, "result=cancelled") {
+				t.Errorf("got[%d] content = %q, want cancelled", i, got[i].Content)
+			}
+		}
+	})
+
+	t.Run("部分回填只补未回填", func(t *testing.T) {
+		a := New()
+		a.AppendConversationMessage(llmtypes.Message{Role: "user", Content: "分解"})
+		a.AppendConversationMessage(llmtypes.Message{Role: "assistant", ToolCalls: []llmtypes.ToolCall{
+			{ID: "c1"}, {ID: "c2"},
+		}})
+		a.AppendConversationMessage(llmtypes.Message{Role: "tool", ToolCallID: "c1", Content: "result=success"})
+		a.ClosePendingToolCalls("time_to_stop")
+
+		got := a.Conversation()
+		if len(got) != 4 {
+			t.Fatalf("len = %d, want 4 (user+assistant+tool(c1)+cancelled(c2))", len(got))
+		}
+		if got[2].ToolCallID != "c1" {
+			t.Errorf("got[2] = %+v, want c1 tool", got[2])
+		}
+		if got[3].ToolCallID != "c2" || !strings.Contains(got[3].Content, "result=cancelled") {
+			t.Errorf("got[3] = %+v, want c2 cancelled tool", got[3])
+		}
+	})
+
+	t.Run("已翻篇无悬空不补", func(t *testing.T) {
+		a := New()
+		a.AppendConversationMessage(llmtypes.Message{Role: "user", Content: "分解"})
+		a.AppendConversationMessage(llmtypes.Message{Role: "assistant", ToolCalls: []llmtypes.ToolCall{{ID: "c1"}}})
+		a.AppendConversationMessage(llmtypes.Message{Role: "tool", ToolCallID: "c1", Content: "result=success"})
+		a.AppendConversationMessage(llmtypes.Message{Role: "user", Content: "下一轮"})
+		a.ClosePendingToolCalls("x")
+
+		if got := a.Conversation(); len(got) != 4 {
+			t.Errorf("len = %d, want 4 (翻篇后不补)", len(got))
+		}
+	})
+
+	t.Run("无 tool_calls 不补", func(t *testing.T) {
+		a := New()
+		a.AppendConversationMessage(llmtypes.Message{Role: "user", Content: "规划"})
+		a.AppendConversationMessage(llmtypes.Message{Role: "assistant", Content: "纯文本回复"})
+		a.ClosePendingToolCalls("x")
+		if got := a.Conversation(); len(got) != 2 {
+			t.Errorf("len = %d, want 2", len(got))
+		}
+	})
 }
 
 func TestTimeStop_ArmClear(t *testing.T) {

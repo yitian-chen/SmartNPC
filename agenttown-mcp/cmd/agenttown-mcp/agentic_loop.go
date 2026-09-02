@@ -52,6 +52,9 @@ func (a *agentContext) agenticTurn(ctx context.Context, hc llmClient, kb *worldk
 	// system 不入历史：每次发送时现拼（kb/profiles 单次仿真内不变，
 	// 对同一 agent 字节级一致，可缓存）。
 	system := prompt.BuildSharedSystemPrompt(kb, profiles, agentID)
+	// 闭环悬空的 tool_calls：上一轮战术分解若被清队列打断，未执行的段没有
+	// tool 消息回填，先补 cancelled，避免非法序列触发 Venus 4001。
+	a.as.ClosePendingToolCalls("interrupted")
 	history := a.as.Conversation()
 
 	// 请求 messages：[system, ...历史, user(本次)]。不先 append user——
