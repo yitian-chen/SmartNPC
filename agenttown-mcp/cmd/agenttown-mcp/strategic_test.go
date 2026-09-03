@@ -746,7 +746,7 @@ func TestJitterPlanNodes_NightEndNotBeforeSix(t *testing.T) {
 		{Time: "22:00-06:20", Goal: "夜间休息"},
 	}
 	for i := 0; i < 200; i++ {
-		got := clampNightEnd(jitterPlanNodes(base, planJitterMinutes))
+		got := clampNightEnd(jitterPlanNodes(base, planJitterMinutes, dayStartMinute))
 		_, e, ok := prompt.SplitPlanRange(got[len(got)-1].Time)
 		if !ok {
 			t.Fatalf("iteration %d: unparseable last slot %q", i, got[len(got)-1].Time)
@@ -770,7 +770,7 @@ func jitterTestPlan() []dailyPlanItem {
 
 func TestJitterPlanNodes_ZeroJitterNoop(t *testing.T) {
 	items := jitterTestPlan()
-	got := jitterPlanNodes(items, 0)
+	got := jitterPlanNodes(items, 0, dayStartMinute)
 	for i := range items {
 		if got[i].Time != items[i].Time {
 			t.Errorf("maxJitter=0 should be a no-op: got[%d]=%q want %q", i, got[i].Time, items[i].Time)
@@ -781,7 +781,7 @@ func TestJitterPlanNodes_ZeroJitterNoop(t *testing.T) {
 func TestJitterPlanNodes_OffsetsWithinRange(t *testing.T) {
 	orig := jitterTestPlan()
 	for round := 0; round < 100; round++ {
-		got := jitterPlanNodes(orig, planJitterMinutes)
+		got := jitterPlanNodes(orig, planJitterMinutes, dayStartMinute)
 		for i := range orig {
 			os, oe, _ := prompt.SplitPlanRange(orig[i].Time)
 			gs, ge, _ := prompt.SplitPlanRange(got[i].Time)
@@ -805,7 +805,7 @@ func TestJitterPlanNodes_OffsetsWithinRange(t *testing.T) {
 func TestJitterPlanNodes_ContiguityAndMinDuration(t *testing.T) {
 	orig := jitterTestPlan()
 	for round := 0; round < 100; round++ {
-		got := jitterPlanNodes(orig, planJitterMinutes)
+		got := jitterPlanNodes(orig, planJitterMinutes, dayStartMinute)
 		for i := range got {
 			if i < len(got)-1 {
 				// 共享边界：前段（非跨午夜）扰动后的 end 必须等于后段 start。
@@ -827,7 +827,7 @@ func TestJitterPlanNodes_ContiguityAndMinDuration(t *testing.T) {
 func TestJitterPlanNodes_OvernightSlotStaysOvernight(t *testing.T) {
 	orig := jitterTestPlan()
 	for round := 0; round < 100; round++ {
-		got := jitterPlanNodes(orig, planJitterMinutes)
+		got := jitterPlanNodes(orig, planJitterMinutes, dayStartMinute)
 		last := got[len(got)-1]
 		s, e, ok := prompt.SplitPlanRange(last.Time)
 		if !ok || e > s {
@@ -838,7 +838,7 @@ func TestJitterPlanNodes_OvernightSlotStaysOvernight(t *testing.T) {
 
 func TestJitterPlanNodes_GoalsPreserved(t *testing.T) {
 	orig := jitterTestPlan()
-	got := jitterPlanNodes(orig, planJitterMinutes)
+	got := jitterPlanNodes(orig, planJitterMinutes, dayStartMinute)
 	for i := range orig {
 		if got[i].Goal != orig[i].Goal {
 			t.Errorf("slot %d goal changed: got %q want %q", i, got[i].Goal, orig[i].Goal)
@@ -1102,5 +1102,72 @@ func TestTriggerStrategicPlanning_CrossDayUsesFixedStart(t *testing.T) {
 	}
 	if strings.Contains(sc.capturedInput, "现在是仿真时间 00:09") {
 		t.Errorf("cross-day planning should NOT use the late-night snapshot time 00:09:\n%s", sc.capturedInput)
+	}
+}
+
+// TestTriggerStrategicPlanning_PlanningWindowClampsToStart 验证冷启动落在
+// 规划窗口（06:00-07:00）时被钳位到 07:00：UE 每次启动 game_time 从 06:00
+// 起，若直接以 06:00 为规划起点，会生成"05:59 起的晨间冥想"这类规划窗口
+// 内活动段（2026-09-03 实测 H-01 计划 05:59-06:51），而该窗口是战略层
+// 规划时间、不应安排 schedule。
+func TestTriggerStrategicPlanning_PlanningWindowClampsToStart(t *testing.T) {
+	as := agentstate.New()
+	as.SetIdentity("H-01", nil)
+	// 预置感知：UE 刚启动的 06:30（规划窗口内）。
+	raw := []byte(`{"environment":{"game_time_sec":23400,"time_of_day_sec":23400,"day_count":0},"location":{"current_zone":"residential_quarters"}}`)
+	if _, err := as.SetPerception(raw); err != nil {
+		t.Fatalf("SetPerception: %v", err)
+	}
+	sc := &fakeStrategicCaller{resp: makeStrategicResponse(`[{"time":"07:00-08:00","goal":"晨练"}]`)}
+	ac := &agentContext{as: as, strategicHc: sc}
+
+	plan := ac.triggerStrategicPlanning(context.Background(), "H-01", nil, nil, slog.Default(), "", "", "早晨例行制定每日日程安排", "")
+
+	if !strings.Contains(sc.capturedInput, "现在是仿真时间 07:00") {
+		t.Errorf("cold start inside planning window should clamp to 07:00, got:\n%s", sc.capturedInput)
+	}
+	// 产出的计划首段不早于 07:00（LLM 从 07:00 规划 + jitter 下界钳位）。
+	items := parseFormattedPlan(plan)
+	if len(items) == 0 {
+		t.Fatalf("plan should have items, got %q", plan)
+	}
+	if s, _, _ := prompt.SplitPlanRange(items[0].Time); s < dayStartMinute {
+		t.Errorf("plan first slot starts at %d (before 07:00): %q", s, items[0].Time)
+	}
+}
+
+// TestTriggerStrategicPlanning_EarlyMorningNotClamped 验证凌晨（<06:00）
+// 不被钳位——旧计划的跨午夜末段仍在进行，中途触发按当前时间规划。
+func TestTriggerStrategicPlanning_EarlyMorningNotClamped(t *testing.T) {
+	as := agentstate.New()
+	as.SetIdentity("H-01", nil)
+	raw := []byte(`{"environment":{"game_time_sec":9000,"time_of_day_sec":9000,"day_count":1},"location":{"current_zone":"residential_quarters"}}`)
+	if _, err := as.SetPerception(raw); err != nil {
+		t.Fatalf("SetPerception: %v", err)
+	}
+	sc := &fakeStrategicCaller{resp: makeStrategicResponse(`[{"time":"02:30-07:00","goal":"继续休眠"}]`)}
+	ac := &agentContext{as: as, strategicHc: sc}
+
+	_ = ac.triggerStrategicPlanning(context.Background(), "H-01", nil, nil, slog.Default(), "", "", "测试触发", "")
+
+	if !strings.Contains(sc.capturedInput, "现在是仿真时间 02:30") {
+		t.Errorf("early-morning mid-day trigger should keep current time, got:\n%s", sc.capturedInput)
+	}
+}
+
+// TestJitterPlanNodes_FirstNodeNotBeforeStart 验证扰动不把首段起点抖早于
+// 规划语义起点（minStart）——多轮随机迭代验证不变量。
+func TestJitterPlanNodes_FirstNodeNotBeforeStart(t *testing.T) {
+	orig := jitterTestPlan() // 首段 07:00-12:00
+	for round := 0; round < 200; round++ {
+		got := jitterPlanNodes(orig, planJitterMinutes, dayStartMinute)
+		s, _, ok := prompt.SplitPlanRange(got[0].Time)
+		if !ok {
+			t.Fatalf("round %d: unparseable first slot %q", round, got[0].Time)
+		}
+		if s < dayStartMinute {
+			t.Fatalf("round %d: first slot %q starts %d before minStart %d",
+				round, got[0].Time, s, dayStartMinute)
+		}
 	}
 }
