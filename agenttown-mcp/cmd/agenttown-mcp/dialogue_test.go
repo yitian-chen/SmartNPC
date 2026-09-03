@@ -47,6 +47,10 @@ func (f *fakeDialogueLLM) SendMessagesTools(_ context.Context, _ []llmtypes.Mess
 	return f.resp, f.err
 }
 
+func (f *fakeDialogueLLM) SendLoop(_ context.Context, _ []llmtypes.Message, _ []venus.Tool, _, _ string, _ []byte) (*llmtypes.Response, error) {
+	return f.resp, f.err
+}
+
 func (f *fakeDialogueLLM) ResetSession() { f.resetCount++ }
 
 // makeDialogueResponse builds an llmtypes.Response whose ExtractText returns

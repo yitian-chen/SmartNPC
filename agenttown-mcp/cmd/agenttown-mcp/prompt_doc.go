@@ -27,6 +27,9 @@ import (
 // promptDocAgent 是落盘观察对象。换人观察时改这里。
 const promptDocAgent = "H-01"
 
+// promptDocLayers 是文档中按此顺序展示的 layer（可读预览 + 完整 JSON）。
+var promptDocLayers = []string{"strategic", "tactical", "dialogue"}
+
 var (
 	promptDocMu     sync.Mutex
 	promptDocPath   string                // --prompt-doc flag；空串 = 关闭
@@ -66,22 +69,35 @@ func dumpPromptDoc(agentID, layer string, body []byte, logger *slog.Logger) {
 	}
 	defer f.Close()
 
-	fmt.Fprintf(f, "# 实际 LLM 请求体留存\n\n记录 H-01 最新一次发给 LLM 的战略层/战术层请求体完整 JSON（model/messages/tools 等所有字段），由 MCP 运行时覆盖落盘。\n\n")
-	for _, l := range []string{"strategic", "tactical"} {
+	fmt.Fprintf(f, "# 实际 LLM 请求体留存\n\n记录 H-01 最新一次发给 LLM 的战略层/战术层/对话层请求体完整 JSON（model/messages/tools 等所有字段），由 MCP 运行时覆盖落盘。\n\n")
+
+	// 可读 Prompt 预览：每个 layer 的 system + user 内容，还原换行后放在
+	// 文档开头，便于快速查看核心 prompt 而不必在 JSON 里翻找。
+	fmt.Fprintf(f, "## 可读 Prompt 预览\n\n")
+	for _, l := range promptDocLayers {
 		b, ok := promptDocBodies[l]
 		if !ok {
 			continue
 		}
-		layerName := map[string]string{"strategic": "战略层", "tactical": "战术层"}[l]
-		if layerName == "" {
-			layerName = l
+		sys, usr := extractSystemUser(b)
+		if sys == "" && usr == "" {
+			continue
+		}
+		fmt.Fprintf(f, "### %s · system\n\n%s\n\n", layerNameOf(l), sys)
+		fmt.Fprintf(f, "### %s · user\n\n%s\n\n", layerNameOf(l), usr)
+	}
+
+	for _, l := range promptDocLayers {
+		b, ok := promptDocBodies[l]
+		if !ok {
+			continue
 		}
 		var pretty bytes.Buffer
 		if err := json.Indent(&pretty, b, "", "  "); err != nil {
 			pretty.Write(b)
 		}
 		fmt.Fprintf(f, "## %s · H-01 最新%s请求体\n\n```json\n%s\n```\n\n",
-			promptDocTimes[l], layerName, pretty.String())
+			promptDocTimes[l], layerNameOf(l), pretty.String())
 	}
 	logger.Info("[prompt-doc] 已落盘 H-01 最新请求体",
 		"path", promptDocPath, "layer", layerNameOf(layer), "bytes", len(body))
@@ -94,9 +110,35 @@ func layerNameOf(layer string) string {
 		return "战略层"
 	case "tactical":
 		return "战术层"
+	case "dialogue":
+		return "对话层"
 	default:
 		return layer
 	}
+}
+
+// extractSystemUser 从请求体 JSON 提取 system 与最后一条 user 的 content。
+func extractSystemUser(body []byte) (system, user string) {
+	var req struct {
+		Messages []struct {
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		return "", ""
+	}
+	for _, m := range req.Messages {
+		switch m.Role {
+		case "system":
+			if system == "" {
+				system = m.Content
+			}
+		case "user":
+			user = m.Content // 覆盖取最后一条
+		}
+	}
+	return system, user
 }
 
 // dumpLastRequestBody 读取 LLM 客户端最近一次发送的完整请求体并落盘。

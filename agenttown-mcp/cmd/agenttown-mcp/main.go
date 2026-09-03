@@ -224,17 +224,18 @@ func (a *agentContext) recordActionCompletion(completion protocol.ActionComplete
 	// Stage 5: 异步触发关系更新判断（Ollama 5s 超时，不阻塞主路径）。
 	if res.WasInFlight {
 		a.recordActionHistory(completion, res)
-		// 多轮对话：把动作执行结果作为 tool role 回填会话历史（关联
-		// assistant.tool_calls[].ID），供下一轮 LLM 参考。
+		// 多轮对话：动作执行结果以 user role 注入会话历史末尾，标记
+		// [系统注入] + tool_call_id 让 LLM 关联到具体动作。不再用 role=tool
+		// 回填（占位 tool 已在 assistant 后立即就位，真实结果 append 到末尾，
+		// 保护 conversation 前缀的 KV cache）。
 		if res.ToolCallID != "" {
 			content := fmt.Sprintf("result=%s duration_ms=%d", completion.Result, completion.DurationMs)
 			if completion.Reason != "" {
 				content += fmt.Sprintf(" reason=%s", completion.Reason)
 			}
 			a.as.AppendConversationMessage(llmtypes.Message{
-				Role:       "tool",
-				Content:    content,
-				ToolCallID: res.ToolCallID,
+				Role:    "user",
+				Content: fmt.Sprintf("[系统注入] 任务 tool_call_id=%s 已完成，结果如下：%s", res.ToolCallID, content),
 			})
 		}
 		// Phase 2 Module C: social_chat 走对话 runner 自己的关系增长路径，
@@ -701,7 +702,7 @@ func runPerceptionWorker(
 	// /debug/schedule 注入和 /debug/action 下发。
 	if autoPlanEnabled {
 		dayCtx := weeklyschedule.WeeklyLine(ac.as.LatestDayCount(), weeklySched)
-		plan := generateDailyPlan(ctx, ac.strategicHc, agentID, kb, profiles, logger, "", ac.as.Snapshot().LatestPhysical, dayCtx)
+		plan := ac.triggerStrategicPlanning(ctx, agentID, kb, profiles, logger, "", dayCtx, "早晨例行制定每日日程安排", "")
 		// 同步 currentDay：若首条 perception 已到则用其 day_count，否则保持 -1
 		// （由 detectDayRollover 在首条 perception 到达时同步）。
 		ac.as.SetDailyPlan(plan, ac.as.LatestDayCount())
@@ -744,16 +745,18 @@ func runPerceptionWorker(
 				// Stage 4: 日终记忆生成——从昨日 action_history 总结出
 				// narrative（注入战略层 prompt）+ 结构化 memories（存 DB）。
 				// 失败/冷启动返回 ""，generateDailyPlan 内部回退到常量。
+				// （读 DB action_history，不依赖 conversation，先于清空执行无影响。）
 				narrative := generateDailyMemories(ctx, ac.strategicHc, ac.as.Store(), agentID, kb, profiles, logger)
+				// 跨日清空统一 loop 会话历史：每个游戏日一份独立 loop，
+				// 新日的战略轮是 loop 第一轮。跨日记忆走昨日总结（narrative）。
+				ac.as.ClearConversation()
+				ac.as.ClearTimeStop()
 				dayCtx := weeklyschedule.WeeklyLine(newDay, weeklySched)
-				plan := generateDailyPlan(ctx, ac.strategicHc, agentID, kb, profiles, logger, narrative, ac.as.Snapshot().LatestPhysical, dayCtx)
+				plan := ac.triggerStrategicPlanning(ctx, agentID, kb, profiles, logger, narrative, dayCtx, "早晨例行制定每日日程安排", "07:00")
 				// 不清 currentSlot/actionQueue/currentActionID：让 NPC 自然睡眠到 07:00，
 				// 由 advanceSlotIfNeeded 打断后走 tacticalRefill 选新计划 slot。
 				// currentDay 已由 detectDayRollover 更新为 newDay。
 				ac.as.SetDailyPlan(plan, newDay)
-				// 跨日清空多轮对话历史：每个游戏日一份独立会话。
-				ac.as.ClearConversation()
-				ac.as.ClearTimeStop()
 			}
 		}
 
@@ -1147,9 +1150,9 @@ func (a *agentContext) popAndSendQueueAction(ctx context.Context, agentID string
 		}
 	}
 
-	// time_to_stop 是 MCP 侧控制字段（长动作定时终止），不传给 UE。
-	tts, hasTTS := numericParam(pa.Params["time_to_stop"])
-	delete(params, "time_to_stop")
+	// duration 是 MCP 侧控制字段（非瞬时动作的持续时长），不传给 UE。
+	tts, hasTTS := numericParam(pa.Params["duration"])
+	delete(params, "duration")
 
 	logger.Info("[战术层] 下发 action", "agent_id", agentID, "action", pa.Action, "cmd", cmd, "queue_left", a.queueLen())
 	ack, err := ws.SendAction(ctx, agentID, cmd, params, shouldAutoQueue(cmd))
@@ -1244,6 +1247,7 @@ type llmClient interface {
 	SendWithSummaryTools(ctx context.Context, system, user string, tools []venus.Tool) (*llmtypes.Response, error)
 	SendStreamingTools(ctx context.Context, system, user string, tools []venus.Tool, onDelta func(string), onToolCall func(llmtypes.ToolCall)) (*llmtypes.Response, error)
 	SendMessagesTools(ctx context.Context, messages []llmtypes.Message, tools []venus.Tool) (*llmtypes.Response, error)
+	SendLoop(ctx context.Context, messages []llmtypes.Message, tools []venus.Tool, toolChoice, schemaName string, schema []byte) (*llmtypes.Response, error)
 	ResetSession()
 }
 
@@ -1333,7 +1337,6 @@ func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
 	zone := prep.Zone
 	physical := prep.Physical
 	hint := prep.Hint
-	tacticalHc := a.tacticalHc
 	kbRef := kb
 
 	var actions []plannedAction
@@ -1350,10 +1353,8 @@ func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
 	tacticalCtx, tacticalCancel := context.WithTimeout(ctx, tacticalCallTimeout)
 	defer tacticalCancel()
 
-	// 多轮对话：读会话历史，每轮生成一段（以长动作结尾），append assistant。
-	conversation := a.as.Conversation()
-
-	actions, assistant, err := generateTacticalPlan(tacticalCtx, tacticalHc, conversation,
+	// 统一 agentic loop：会话历史（含战略/对话轮）由 agenticTurn 统一读写。
+	actions, err = generateTacticalPlan(tacticalCtx, a,
 		agentID, goal, zone, a.latestTimeOfDay(), slot, plan, physical, kbRef, profiles, logger,
 		hint, memories, relationships, capabilityRegistryRef,
 		a.as.LatestObjectStatus(), a.as.LatestNearbyObjects(), a.as.LatestVisibleAgents())
@@ -1386,8 +1387,7 @@ func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
 		return false
 	}
 	a.as.ReplaceQueue(actions)
-	// append assistant（含 tool_calls）到会话历史，供下一轮 LLM 参考。
-	a.as.AppendConversationMessage(assistant)
+	// assistant（含 tool_calls）已由 agenticTurn 追加进当天 loop 历史。
 	a.as.CommitTacticalRefill(slot, idx, prep.IsRedecompose)
 	queueLen := a.as.QueueLen()
 	redecomposeCount := a.as.RedecomposeCountSnapshot()
@@ -1437,7 +1437,6 @@ func (a *agentContext) tacticalRefillForReplan(
 	goal, slot, idx = prep.Goal, prep.Slot, prep.Index
 	zone := prep.Zone
 	physical := prep.Physical
-	tacticalHc := a.tacticalHc
 	kbRef := kb
 	hint := replanHint
 	dailyPlan := plan // 【全天日程】注入战术层 user prompt
@@ -1462,12 +1461,8 @@ func (a *agentContext) tacticalRefillForReplan(
 	// 单 agent 场景（kb.Agents ≤ 1）返回空串，不污染 prompt。
 	relationships := a.loadRelationships(ctx, agentID, kbRef)
 
-	var actions []plannedAction
-	var err error
-
-	// 多轮对话：replan 也携带会话历史，让 LLM 看到此前动作与结果。
-	conversation := a.as.Conversation()
-	actions, assistant, err := generateTacticalPlan(tacticalCtx, tacticalHc, conversation,
+	// 统一 agentic loop：replan 也走共享会话历史（含战略/对话轮）。
+	actions, err := generateTacticalPlan(tacticalCtx, a,
 		agentID, goal, zone, a.latestTimeOfDay(), slot, dailyPlan, physical, kbRef, profiles, logger,
 		hint, memories, relationships, capabilityRegistryRef,
 		a.as.LatestObjectStatus(), a.as.LatestNearbyObjects(), a.as.LatestVisibleAgents())
@@ -1481,7 +1476,7 @@ func (a *agentContext) tacticalRefillForReplan(
 	}
 
 	// 4. 成功：原子完成——覆盖旧队列、重置计数、清 hint、signal worker
-	a.as.AppendConversationMessage(assistant)
+	// assistant（含 tool_calls）已由 agenticTurn 追加进当天 loop 历史。
 	a.as.CommitReplan(actions, slot, idx)
 	queueLen := a.as.QueueLen()
 	queuedActions := a.as.QueueSnapshot()
@@ -2368,7 +2363,6 @@ func handleDebugSchedule(ctx context.Context, logger *slog.Logger, ws contract.T
 	zone := snap.LatestZone()
 	timeOfDay := snap.LatestTimeOfDay()
 	physical := snap.LatestPhysical
-	tacticalHc := ac.tacticalHc
 	hasPerception := len(snap.LatestPerception) > 0
 	ac.as.ClearForSlotSwitch()
 
@@ -2377,8 +2371,8 @@ func handleDebugSchedule(ctx context.Context, logger *slog.Logger, ws contract.T
 	tacticalCtx, tacticalCancel := context.WithTimeout(ctx, tacticalCallTimeout)
 	defer tacticalCancel()
 
-	actions, assistant, err := generateTacticalPlan(
-		tacticalCtx, tacticalHc, ac.as.Conversation(), req.AgentID,
+	actions, err := generateTacticalPlan(
+		tacticalCtx, ac, req.AgentID,
 		goal, zone, timeOfDay, slot, "", physical, kb, nil, logger, "", "", "", capabilityRegistryRef, nil, nil, nil,
 	)
 	if err != nil {
@@ -2390,7 +2384,6 @@ func handleDebugSchedule(ctx context.Context, logger *slog.Logger, ws contract.T
 		})
 		return
 	}
-	ac.as.AppendConversationMessage(assistant)
 
 	// 入队 + 记账。currentSlot 加 "__debug__" 前缀避免与 dailyPlan 同时段撞
 	// redecomposeCount >= 1 限制，保证 worker 下次 refill 必走"新时段"重置路径，

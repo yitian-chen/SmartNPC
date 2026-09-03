@@ -92,3 +92,27 @@ func resetPromptDocForTest(path string) {
 }
 
 // testLogger 复用 reactive_runner_test.go 中的实现（丢弃输出的 slog logger）。
+
+func TestExtractSystemUser(t *testing.T) {
+	body := []byte(`{"model":"m","messages":[
+		{"role":"system","content":"sys内容\n第二行"},
+		{"role":"user","content":"历史user1"},
+		{"role":"assistant","content":"a1"},
+		{"role":"user","content":"本次user\n含换行"}
+	]}`)
+	sys, usr := extractSystemUser(body)
+	if sys != "sys内容\n第二行" {
+		t.Errorf("system = %q, want sys内容\\n第二行", sys)
+	}
+	// 取最后一条 user
+	if usr != "本次user\n含换行" {
+		t.Errorf("user = %q, want 本次user\\n含换行", usr)
+	}
+}
+
+func TestExtractSystemUser_InvalidJSON(t *testing.T) {
+	sys, usr := extractSystemUser([]byte("not json"))
+	if sys != "" || usr != "" {
+		t.Errorf("invalid JSON should return empty, got %q/%q", sys, usr)
+	}
+}

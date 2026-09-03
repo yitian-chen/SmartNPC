@@ -12,7 +12,6 @@ import (
 	"github.com/AgentTown/agenttown-mcp/pkg/prompt"
 	"github.com/AgentTown/agenttown-mcp/contract/protocol"
 	"github.com/AgentTown/agenttown-mcp/pkg/storage"
-	"github.com/AgentTown/agenttown-mcp/pkg/venus"
 	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
 
 	"log/slog"
@@ -450,17 +449,14 @@ func (d *dialogueRunner) generateInviteDecision(snap agentstate.Snapshot, peerID
 	if hc == nil {
 		return prompt.DialogueInviteDecision{}, fmt.Errorf("no LLM client")
 	}
-	// tools：披露与战术层一致的行动目录，但 tool_choice=none——对话层产出
-	// JSON 文本（accept/reply），不调用工具。让 LLM 知道有哪些可做的动作。
-	var toolsOpt []venus.Tool
-	if capabilityRegistryRef != nil {
-		toolsOpt = tacticalToolsFromRegistry(capabilityRegistryRef, d.ac.as.AgentID())
-	}
-	resp, err := hc.SendWithSummary(ctx, prompt.BuildSharedSystemPrompt(d.kb, d.profiles, agentID), promptText, toolsOpt)
+	// 统一 agentic loop 对话轮：[system, ...当天历史, user]，tool_choice=none
+	//——对话层产出 JSON 文本（accept/reply），不调用工具；对话问答进入当天
+	// 会话历史（与战略/战术轮共享）。
+	resp, err := d.ac.agenticTurn(ctx, hc, d.kb, d.profiles, d.logger, agentID,
+		"dialogue", promptText, "none", "", nil)
 	if err != nil {
 		return prompt.DialogueInviteDecision{}, fmt.Errorf("llm call: %w", err)
 	}
-	hc.ResetSession()
 	decision, err := prompt.ParseDialogueInviteDecision(resp.ExtractText())
 	if err != nil {
 		return prompt.DialogueInviteDecision{}, fmt.Errorf("parse: %w", err)
@@ -493,17 +489,13 @@ func (d *dialogueRunner) generateTurn(snap agentstate.Snapshot, peerID, peerCont
 	if hc == nil {
 		return prompt.DialogueTurnResult{}, fmt.Errorf("no LLM client")
 	}
-	// tools：披露与战术层一致的行动目录，但 tool_choice=none——对话层产出
-	// JSON 文本（content/end），不调用工具。
-	var toolsOpt []venus.Tool
-	if capabilityRegistryRef != nil {
-		toolsOpt = tacticalToolsFromRegistry(capabilityRegistryRef, d.ac.as.AgentID())
-	}
-	resp, err := hc.SendWithSummary(callCtx, prompt.BuildSharedSystemPrompt(d.kb, d.profiles, agentID), promptText, toolsOpt)
+	// 统一 agentic loop 对话轮：tool_choice=none，回复 JSON（content/end）
+	// 进入当天会话历史。
+	resp, err := d.ac.agenticTurn(callCtx, hc, d.kb, d.profiles, d.logger, agentID,
+		"dialogue", promptText, "none", "", nil)
 	if err != nil {
 		return prompt.DialogueTurnResult{}, fmt.Errorf("llm call: %w", err)
 	}
-	hc.ResetSession()
 	result, err := prompt.ParseDialogueTurn(resp.ExtractText())
 	if err != nil {
 		return prompt.DialogueTurnResult{}, fmt.Errorf("parse: %w", err)

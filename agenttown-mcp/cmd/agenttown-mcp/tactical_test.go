@@ -4,12 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log/slog"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/AgentTown/agenttown-mcp/pkg/agentstate"
 	"github.com/AgentTown/agenttown-mcp/pkg/llmtypes"
 	"github.com/AgentTown/agenttown-mcp/pkg/prompt"
 	"github.com/AgentTown/agenttown-mcp/contract/protocol"
@@ -308,7 +308,7 @@ func makeToolCallResponse(tcs []llmtypes.ToolCall) *llmtypes.Response {
 
 func TestGenerateTacticalPlan_HTTPError(t *testing.T) {
 	tc := &fakeStrategicCaller{err: errors.New("network down")}
-	actions, _, err := generateTacticalPlan(context.Background(), tc, nil, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", "07:00-09:00: 上午准备\n09:00-12:00: 车间装配", &protocol.PhysicalState{Energy: 80, Fatigue: 20, JointWear: 10}, nil, nil, slog.Default(), "", "", "", nil, nil, nil, nil)
+	actions, err := generateTacticalPlan(context.Background(), tacticalCtxForTest(tc), "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", "07:00-09:00: 上午准备\n09:00-12:00: 车间装配", &protocol.PhysicalState{Energy: 80, Fatigue: 20, JointWear: 10}, nil, nil, slog.Default(), "", "", "", nil, nil, nil, nil)
 	if err == nil {
 		t.Fatal("expected error on HTTP failure")
 	}
@@ -326,7 +326,7 @@ func TestGenerateTacticalPlan_ValidResponse(t *testing.T) {
 		{Function: llmtypes.ToolFunction{Name: "move_to", Arguments: `{"target_type":"zone","target_id":"main_workshop"}`}},
 		{Function: llmtypes.ToolFunction{Name: "work_shift", Arguments: `{"semantic_group":"workbench_01","interaction":"assemble"}`}},
 	})}
-	actions, _, err := generateTacticalPlan(context.Background(), tc, nil, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", "07:00-09:00: 上午准备\n09:00-12:00: 车间装配", &protocol.PhysicalState{Energy: 80, Fatigue: 20, JointWear: 10}, nil, nil, slog.Default(), "", "", "", nil, nil, nil, nil)
+	actions, err := generateTacticalPlan(context.Background(), tacticalCtxForTest(tc), "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", "07:00-09:00: 上午准备\n09:00-12:00: 车间装配", &protocol.PhysicalState{Energy: 80, Fatigue: 20, JointWear: 10}, nil, nil, slog.Default(), "", "", "", nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -346,7 +346,7 @@ func TestGenerateTacticalPlan_ValidResponse(t *testing.T) {
 
 func TestGenerateTacticalPlan_NoToolCalls(t *testing.T) {
 	tc := &fakeStrategicCaller{resp: makeStrategicResponse("我今天打算去车间转转。")}
-	if _, _, err := generateTacticalPlan(context.Background(), tc, nil, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", "07:00-09:00: 上午准备\n09:00-12:00: 车间装配", nil, nil, nil, slog.Default(), "", "", "", nil, nil, nil, nil); err == nil {
+	if _, err := generateTacticalPlan(context.Background(), tacticalCtxForTest(tc), "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", "07:00-09:00: 上午准备\n09:00-12:00: 车间装配", nil, nil, nil, slog.Default(), "", "", "", nil, nil, nil, nil); err == nil {
 		t.Fatal("expected error when no tool calls returned")
 	}
 }
@@ -355,7 +355,7 @@ func TestGenerateTacticalPlan_AllFiltered(t *testing.T) {
 	tc := &fakeStrategicCaller{resp: makeToolCallResponse([]llmtypes.ToolCall{
 		{Function: llmtypes.ToolFunction{Name: "scan_area", Arguments: `{}`}},
 	})}
-	if _, _, err := generateTacticalPlan(context.Background(), tc, nil, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", "07:00-09:00: 上午准备\n09:00-12:00: 车间装配", nil, nil, nil, slog.Default(), "", "", "", nil, nil, nil, nil); err == nil {
+	if _, err := generateTacticalPlan(context.Background(), tacticalCtxForTest(tc), "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", "07:00-09:00: 上午准备\n09:00-12:00: 车间装配", nil, nil, nil, slog.Default(), "", "", "", nil, nil, nil, nil); err == nil {
 		t.Fatal("expected error when all tool calls filtered out")
 	}
 }
@@ -364,7 +364,7 @@ func TestGenerateTacticalPlan_ResetSessionCalled(t *testing.T) {
 	tc := &fakeStrategicCaller{resp: makeToolCallResponse([]llmtypes.ToolCall{
 		{Function: llmtypes.ToolFunction{Name: "speak", Arguments: `{"content":"开始"}`}},
 	})}
-	_, _, _ = generateTacticalPlan(context.Background(), tc, nil, "H-01", "等待", "main_workshop", "09:00", "09:00-12:00", "", nil, nil, nil, slog.Default(), "", "", "", nil, nil, nil, nil)
+	_, _ = generateTacticalPlan(context.Background(), tacticalCtxForTest(tc), "H-01", "等待", "main_workshop", "09:00", "09:00-12:00", "", nil, nil, nil, slog.Default(), "", "", "", nil, nil, nil, nil)
 	if !tc.resetCalled {
 		t.Error("ResetSession should be called after successful tactical generation")
 	}
@@ -394,6 +394,14 @@ func (s *sequenceCaller) next() (*llmtypes.Response, error) {
 	return nil, err
 }
 
+
+// tacticalCtxForTest 构造挂 fake 战术客户端的 agentContext（统一 agentic loop
+// 测试用）：as 为全新 AgentState，tacticalHc 接 fake（sequenceCaller 或
+// fakeStrategicCaller 均实现 llmClient）。
+func tacticalCtxForTest(hc llmClient) *agentContext {
+	return &agentContext{as: agentstate.New(), tacticalHc: hc}
+}
+
 func (s *sequenceCaller) SendWithSummary(_ context.Context, _, _ string, _ ...[]venus.Tool) (*llmtypes.Response, error) {
 	return s.next()
 }
@@ -412,6 +420,9 @@ func (s *sequenceCaller) SendStreamingTools(_ context.Context, _, _ string, _ []
 func (s *sequenceCaller) SendWithSchema(_ context.Context, _, _, _ string, _ []byte, _ ...[]venus.Tool) (*llmtypes.Response, error) {
 	return s.next()
 }
+func (s *sequenceCaller) SendLoop(_ context.Context, _ []llmtypes.Message, _ []venus.Tool, _, _ string, _ []byte) (*llmtypes.Response, error) {
+	return s.next()
+}
 func (s *sequenceCaller) ResetSession() { s.resetCount++ }
 
 // venusErr4001 模拟 venus 校验 tools JSON 失败的 500 响应（code 4001）。
@@ -423,7 +434,7 @@ func TestGenerateTacticalPlan_RetryOn4001(t *testing.T) {
 		seq:  []error{venusErr4001, venusErr4001, nil},
 		resp: makeToolCallResponse([]llmtypes.ToolCall{{Function: llmtypes.ToolFunction{Name: "speak", Arguments: `{"content":"重试成功"}`}}}),
 	}
-	actions, _, err := generateTacticalPlan(context.Background(), tc, nil, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", "", &protocol.PhysicalState{Energy: 80}, nil, nil, slog.Default(), "", "", "", nil, nil, nil, nil)
+	actions, err := generateTacticalPlan(context.Background(), tacticalCtxForTest(tc), "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", "", &protocol.PhysicalState{Energy: 80}, nil, nil, slog.Default(), "", "", "", nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error after retries: %v", err)
 	}
@@ -441,7 +452,7 @@ func TestGenerateTacticalPlan_RetryOn4001(t *testing.T) {
 func TestGenerateTacticalPlan_RetryExhausted(t *testing.T) {
 	// 连续 4 次 4001 → 重试 3 次后仍失败，最终返回错误。
 	tc := &sequenceCaller{seq: []error{venusErr4001, venusErr4001, venusErr4001, venusErr4001}}
-	_, _, err := generateTacticalPlan(context.Background(), tc, nil, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", "", nil, nil, nil, slog.Default(), "", "", "", nil, nil, nil, nil)
+	_, err := generateTacticalPlan(context.Background(), tacticalCtxForTest(tc), "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", "", nil, nil, nil, slog.Default(), "", "", "", nil, nil, nil, nil)
 	if err == nil {
 		t.Fatal("expected error after exhausting retries")
 	}
@@ -453,7 +464,7 @@ func TestGenerateTacticalPlan_RetryExhausted(t *testing.T) {
 func TestGenerateTacticalPlan_NoRetryOnNon4001(t *testing.T) {
 	// 非 4001 错误（如超时/连接失败）不重试，仅调用 1 次。
 	tc := &sequenceCaller{seq: []error{errors.New("http do: Post: context deadline exceeded")}}
-	if _, _, err := generateTacticalPlan(context.Background(), tc, nil, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", "", nil, nil, nil, slog.Default(), "", "", "", nil, nil, nil, nil); err == nil {
+	if _, err := generateTacticalPlan(context.Background(), tacticalCtxForTest(tc), "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", "", nil, nil, nil, slog.Default(), "", "", "", nil, nil, nil, nil); err == nil {
 		t.Fatal("expected error")
 	}
 	if tc.calls != 1 {
@@ -553,10 +564,10 @@ func TestBuildTacticalPrompt_InjectsKBContext(t *testing.T) {
 	}
 }
 
-// TestBuildTacticalPrompt_InjectsObjectStatus (Fix B) 验证战术层 prompt 注入
-// 【物体实时占用】段：当 ObjectStatus 非空且 KB 存在时，prompt 应包含按 category
-// 聚合的占用摘要 + 附近物体实例状态。
-func TestBuildTacticalPrompt_InjectsObjectStatus(t *testing.T) {
+// TestBuildTacticalPrompt_ObjectStatusTemporarilyRemoved 验证【物体实时占用】
+// 段已暂时移除：即使 ObjectStatus 非空、KB 存在，prompt 也不渲染该段。
+// 恢复时删掉本测试并取消 BuildTactical 中 ObjectStatusContext 调用的注释。
+func TestBuildTacticalPrompt_ObjectStatusTemporarilyRemoved(t *testing.T) {
 	kb := loadTestKB(t)
 	status := map[string]protocol.ObjectCategoryStatus{
 		"work":     {Total: 2, Idle: 1, Occupied: 1},
@@ -578,30 +589,18 @@ func TestBuildTacticalPrompt_InjectsObjectStatus(t *testing.T) {
 		ObjectStatus:  status,
 		NearbyObjects: nearby,
 	})
-	// 应包含段落标题
-	if !strings.Contains(promptText, "物体实时占用") {
-		t.Errorf("prompt should contain '物体实时占用' section, got: %s", promptText)
+	// 物体实时占用段暂时移除：不应出现段标题与段体。
+	if strings.Contains(promptText, "物体实时占用") {
+		t.Errorf("prompt should NOT contain '物体实时占用' (temporarily removed), got: %s", promptText)
 	}
-	// 应包含 work category 的占用摘要（1 空闲 / 1 占用）
-	if !strings.Contains(promptText, "1 空闲") || !strings.Contains(promptText, "1 占用") {
-		t.Errorf("prompt should show work category 1 idle / 1 occupied, got: %s", promptText)
+	if strings.Contains(promptText, "按 category 聚合") {
+		t.Errorf("prompt should NOT render object status body, got: %s", promptText)
 	}
-	// 应包含 charging category 全空闲
-	if !strings.Contains(promptText, "6 空闲") {
-		t.Errorf("prompt should show charging category 6 idle, got: %s", promptText)
-	}
-	// 应包含附近实例状态
-	if !strings.Contains(promptText, "WorkBench") {
-		t.Errorf("prompt should mention nearby WorkBench, got: %s", promptText)
-	}
-	// 应包含"日程不合理"相关的引导文本（规则 2：日程不合理/设施占用时
-	// 鼓励安排其他更合理的动作；含夜间工作反例）。
+	// 规则 2 的"日程不合理"引导仍保留（与物体占用段无关）。
 	if !strings.Contains(prompt.TacticalRules, "半夜不睡觉而是跑步/工作") ||
 		!strings.Contains(prompt.TacticalRules, "请下发更合理的动作") {
 		t.Errorf("system prompt should guide LLM to avoid doomed occupancy actions")
 	}
-	// 所有工种设备都可用 InteractSmartObject 直接工作（process/debug/dismantle
-	// 等无复合动作的工种依据）；同时锚定 action 字段名 interact 防止 LLM 写错工具名。
 	if !strings.Contains(prompt.TacticalRules, "所有工种设备都可用 InteractSmartObject") {
 		t.Error("system prompt should say InteractSmartObject works for any work device")
 	}
@@ -941,6 +940,35 @@ func TestMapTacticalAction_NewCmdPassthrough(t *testing.T) {
 	}
 }
 
+// TestMapTacticalAction_PassthroughStripsDuration 验证 passthrough 路径剔除
+// duration——它是 MCP 侧控制字段（worker 按 game_time 定时打断消费），
+// 不透传 UE。duration required 化（2026-09-03）后 LLM 会填，必须在此剥离。
+func TestMapTacticalAction_PassthroughStripsDuration(t *testing.T) {
+	reg := NewCapabilityRegistry(nil)
+	reg.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
+		{Cmd: "Exercise", Kind: "atomic", Params: []protocol.CapabilityParam{
+			{Name: "exercise_type", Type: "enum", Required: true, EnumValues: []string{"stretch", "walk"}},
+		}},
+	})
+	pa := plannedAction{Action: "exercise", Params: map[string]any{
+		"exercise_type": "stretch",
+		"duration":      float64(1800),
+	}}
+	cmd, params, err := mapTacticalAction(pa, "H-01", nil, reg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cmd != "Exercise" {
+		t.Errorf("cmd=%q, want Exercise", cmd)
+	}
+	if _, ok := params["duration"]; ok {
+		t.Errorf("params=%v, duration must be stripped before sending to UE", params)
+	}
+	if params["exercise_type"] != "stretch" {
+		t.Errorf("params=%v, want exercise_type=stretch kept", params)
+	}
+}
+
 // TestMapTacticalAction_NewCmdNilRegistryErrors verifies the default branch
 // returns an error when registry is nil (backward compat — unknown action).
 func TestMapTacticalAction_NewCmdNilRegistryErrors(t *testing.T) {
@@ -1009,9 +1037,38 @@ func TestTacticalToolsFromRegistry_BuildsTools(t *testing.T) {
 	if schema.Type != "object" {
 		t.Errorf("schema.type = %q, want object", schema.Type)
 	}
-	if len(schema.Required) != 2 {
-		t.Errorf("schema.required = %v, want [semantic_group interaction]", schema.Required)
+	// duration 是 MCP 侧控制字段，2026-09-03 起 required 化（LLM 只填
+	// required 参数，optional 从不被填导致动作时长失控）。
+	if len(schema.Required) != 3 {
+		t.Errorf("schema.required = %v, want [semantic_group interaction duration]", schema.Required)
 	}
+	hasDur := false
+	for _, r := range schema.Required {
+		if r == "duration" {
+			hasDur = true
+		}
+	}
+	if !hasDur {
+		t.Errorf("schema.required = %v, want duration included", schema.Required)
+	}
+	// social_chat 不追加 duration（对话挂起直到结束，duration 会打断对话）。
+	var sschema struct {
+		Properties map[string]any `json:"properties"`
+		Required   []string       `json:"required"`
+	}
+	if err := json.Unmarshal(byName["social_chat"].Function.Parameters, &sschema); err != nil {
+		t.Fatalf("social_chat parameters is not valid JSON: %v", err)
+	}
+	if _, ok := sschema.Properties["duration"]; ok {
+		t.Errorf("social_chat should not have duration property")
+	}
+	for _, r := range sschema.Required {
+		if r == "duration" {
+			t.Errorf("social_chat duration must not be required")
+		}
+	}
+	// 瞬时工具（speak/emote 等）不追加 duration 的验证见
+	// TestCapabilityParamsSchema_DurationRequiredForNonInstant。
 	// 校验 move_to 的 target_type enum。
 	var mschema struct {
 		Properties map[string]struct {
@@ -1032,6 +1089,53 @@ func TestTacticalToolsFromRegistry_NilRegistryEmpty(t *testing.T) {
 	}
 }
 
+func TestCapabilityParamsSchema_DurationRequiredForNonInstant(t *testing.T) {
+	params := []protocol.CapabilityParam{
+		{Name: "semantic_group", Type: "string", Required: true},
+	}
+	for _, name := range []string{"work_shift", "move_to", "interact", "exercise"} {
+		raw := capabilityParamsSchema(params, name)
+		var schema struct {
+			Properties map[string]any `json:"properties"`
+			Required   []string       `json:"required"`
+		}
+		if err := json.Unmarshal(raw, &schema); err != nil {
+			t.Fatalf("%s: invalid JSON: %v", name, err)
+		}
+		if _, ok := schema.Properties["duration"]; !ok {
+			t.Errorf("%s: duration property missing", name)
+		}
+		required := false
+		for _, r := range schema.Required {
+			if r == "duration" {
+				required = true
+			}
+		}
+		if !required {
+			t.Errorf("%s: duration not in required (got %v)", name, schema.Required)
+		}
+	}
+	// 瞬时工具：立即完成，无时长概念——不追加 duration prop。
+	for _, name := range []string{"speak", "emote", "turn_to", "generic_act"} {
+		raw := capabilityParamsSchema(params, name)
+		var schema struct {
+			Properties map[string]any `json:"properties"`
+			Required   []string       `json:"required"`
+		}
+		if err := json.Unmarshal(raw, &schema); err != nil {
+			t.Fatalf("%s: invalid JSON: %v", name, err)
+		}
+		if _, ok := schema.Properties["duration"]; ok {
+			t.Errorf("%s: instant tool should not have duration property", name)
+		}
+		for _, r := range schema.Required {
+			if r == "duration" {
+				t.Errorf("%s: instant tool must not require duration", name)
+			}
+		}
+	}
+}
+
 func TestTacticalToolsFromRegistry_SkipsNonQueueable(t *testing.T) {
 	reg := NewCapabilityRegistry(nil)
 	reg.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
@@ -1043,168 +1147,6 @@ func TestTacticalToolsFromRegistry_SkipsNonQueueable(t *testing.T) {
 		if tool.Function.Name == "wait" {
 			t.Errorf("wait is non-queueable and should be skipped")
 		}
-	}
-}
-
-// ─── buildTacticalExample (category-aware) ──────────────────
-
-func TestBuildTacticalExample_ChargingStationFirst(t *testing.T) {
-	// 回归测试：当前 KB 第一个 object（按 ID 排序）是 bench-1（category=rest），
-	// 示例走 default 分支：move_to + interact。
-	kb := loadTestKB(t)
-	got := prompt.TacticalExample(kb, "", "")
-	if !strings.Contains(got, "InteractSmartObject") {
-		t.Errorf("example should use interact for rest category: %q", got)
-	}
-	if !strings.Contains(got, "bench") {
-		t.Errorf("example should reference bench semantic_group: %q", got)
-	}
-}
-
-func TestBuildTacticalExample_WorkbenchOnly(t *testing.T) {
-	// KB 只含 workbench 时示例应用 work_shift。
-	kb := &worldkb.KB{
-		Zones: []worldkb.Zone{{ID: "main_workshop", DisplayName: "车间"}},
-		Objects: []worldkb.Object{{
-			ID:                    "wb_01",
-			DisplayName:           "工作台",
-			Category:              "workbench",
-			ZoneID:                "main_workshop",
-			AvailableInteractions: []string{"assemble", "inspect"},
-		}},
-	}
-	got := prompt.TacticalExample(kb, "", "")
-	if !strings.Contains(got, "work_shift") {
-		t.Errorf("example should use work_shift for workbench category: %q", got)
-	}
-	if !strings.Contains(got, "wb_01") {
-		t.Errorf("example should reference wb_01: %q", got)
-	}
-}
-
-func TestBuildTacticalExample_RestBenchOnly(t *testing.T) {
-	// KB 只含 rest_bench（category 无专用复合工具）时示例应用 interact + rest。
-	kb := &worldkb.KB{
-		Zones: []worldkb.Zone{{ID: "rest_area", DisplayName: "休息区"}},
-		Objects: []worldkb.Object{{
-			ID:                    "bench_01",
-			DisplayName:           "长椅",
-			Category:              "rest_bench",
-			ZoneID:                "rest_area",
-			AvailableInteractions: []string{"rest"},
-		}},
-	}
-	got := prompt.TacticalExample(kb, "", "")
-	if !strings.Contains(got, `"action":"InteractSmartObject"`) {
-		t.Errorf("example should use interact for rest_bench category: %q", got)
-	}
-	if !strings.Contains(got, `"interaction":"rest"`) {
-		t.Errorf("example should use interaction=rest: %q", got)
-	}
-	if strings.Contains(got, "work_shift") || strings.Contains(got, "charge_at_station") {
-		t.Errorf("example must NOT use composite tools for rest_bench: %q", got)
-	}
-}
-
-func TestBuildTacticalExample_NilKB(t *testing.T) {
-	// nil KB 返回通用占位示例，不引用任何具体 id。
-	got := prompt.TacticalExample(nil, "", "")
-	// 示例应包含 speak 作为首个 action（prompt 要求 NPC 执行动作前先 speak）
-	if !strings.Contains(got, `"action":"speak"`) {
-		t.Errorf("nil KB example should start with speak action: %q", got)
-	}
-	if strings.Contains(got, "inner_thought") {
-		t.Errorf("nil KB example should NOT contain deprecated inner_thought: %q", got)
-	}
-	if strings.Contains(got, "work_shift") || strings.Contains(got, "charge_at_station") {
-		t.Errorf("nil KB example should not reference specific composite tools: %q", got)
-	}
-}
-
-// TestBuildTacticalExample_ZoneObjectPairing 回归测试：示例中 move_to
-// 的 target_id 必须与示例 object 的 ZoneID 一致。旧版取 ListZones()[0] 作示例 zone，
-// 但 ListZones()[0]=archive_station 与 ListObjects()[0]=charge（在 central_plaza）
-// 不在同一 zone，示例本身错配，LLM 模仿后产生 zone-object 错配。
-//
-// 2026-08-11 修复后：复合动作示例（work_shift/charge_at_station）去掉 move_to 前置
-// （复合动作自带移动），只有 default 分支（interact 原子组合）才有 move_to。
-// 本测试改用 inline KB 构造一个 default 分支 object（category=rest_bench）验证配对。
-func TestBuildTacticalExample_ZoneObjectPairing(t *testing.T) {
-	kb := &worldkb.KB{
-		Zones: []worldkb.Zone{
-			{ID: "archive_station", DisplayName: "档案馆"},
-			{ID: "rest_area", DisplayName: "休息区"},
-		},
-		Objects: []worldkb.Object{{
-			ID:                    "bench_01",
-			DisplayName:           "长椅",
-			Category:              "rest_bench",
-			ZoneID:                "rest_area",
-			AvailableInteractions: []string{"rest"},
-		}},
-	}
-	objs := kb.ListObjects()
-	if len(objs) == 0 {
-		t.Skip("KB has no objects, pairing test not applicable")
-	}
-	firstObj := objs[0]
-	wantZone := firstObj.ZoneID
-	if wantZone == "" {
-		t.Skip("first object has no ZoneID, cannot verify pairing")
-	}
-	got := prompt.TacticalExample(kb, "", "")
-	// default 分支示例应包含 move_to 到 wantZone，且引用 firstObj.ID。
-	moveLine := fmt.Sprintf(`{"action":"move_to","params":{"target_type":"zone","target_id":"%s"}}`, wantZone)
-	if !strings.Contains(got, moveLine) {
-		t.Errorf("example should move_to(%s) to match object's ZoneID, got: %q", wantZone, got)
-	}
-	if !strings.Contains(got, firstObj.ID) {
-		t.Errorf("example should reference first object %q, got: %q", firstObj.ID, got)
-	}
-	// 反向验证：不应出现 ListZones()[0]（若它与 object 的 ZoneID 不同）。
-	firstZone := kb.ListZones()[0]
-	if firstZone.ID != wantZone {
-		badLine := fmt.Sprintf(`{"action":"move_to","params":{"target_type":"zone","target_id":"%s"}}`, firstZone.ID)
-		if strings.Contains(got, badLine) {
-			t.Errorf("example must NOT move_to(%s) — object %s is in %s, got: %q",
-				firstZone.ID, firstObj.ID, wantZone, got)
-		}
-	}
-}
-
-// ─── buildTacticalExample (goal-aware, P0-2) ──────────────────
-// 2026-08-24 停用：exampleForGoal 的 goal 关键词→示例路由已注释（"长椅/休息"
-// 分支硬编码 move_to central_plaza 是午休扎堆中央广场的根因）。goal 示例测试
-// 一并移除；剩余 fallback 测试（category-aware）继续覆盖 TacticalExample。
-
-func TestBuildTacticalExample_GoalFallbackOnMissingObject(t *testing.T) {
-	// goal=装配 但 KB 无 workbench object → 降级到默认示例（首个 object 的 category）
-	kb := &worldkb.KB{
-		Zones: []worldkb.Zone{{ID: "charging_station", DisplayName: "充电站"}},
-		Objects: []worldkb.Object{{
-			ID:                    "cs_01",
-			DisplayName:           "充电桩",
-			Category:              "charging_station",
-			ZoneID:                "charging_station",
-			AvailableInteractions: []string{"charge", "inspect"},
-		}},
-	}
-	got := prompt.TacticalExample(kb, "上午装配作业", "")
-	// 应降级到 charge_at_station（首个 object 的 category）
-	if !strings.Contains(got, "charge_at_station") {
-		t.Errorf("assembly goal with no workbench should fall back to charge example: %q", got)
-	}
-}
-
-func TestBuildTacticalExample_GoalEmptyFallback(t *testing.T) {
-	// 空 goal 应降级到默认示例（首个 object 是 bench-1，走 default interact 分支）
-	kb := loadTestKB(t)
-	got := prompt.TacticalExample(kb, "", "")
-	if !strings.Contains(got, "InteractSmartObject") {
-		t.Errorf("empty goal should fall back to first-object example: %q", got)
-	}
-	if !strings.Contains(got, "bench") {
-		t.Errorf("empty goal example should reference bench: %q", got)
 	}
 }
 
@@ -1348,29 +1290,29 @@ func TestBuildTacticalPrompt_NoPhysicalAlertConstraint(t *testing.T) {
 	}
 }
 
-// ─── fillDefaultTimeToStopForRest ────────────────────────────
+// ─── fillDefaultDurationForRest ────────────────────────────
 
 func TestFillDefaultTimeToStopForRest_MidQueueRestGetsDefault(t *testing.T) {
 	actions := []plannedAction{
 		{Action: "speak", Params: map[string]any{"content": "hi"}},
 		{Action: "InteractSmartObject", Params: map[string]any{"interaction": "rest", "semantic_group": "bench"}},
-		{Action: "work_shift", Params: map[string]any{"interaction": "assemble", "semantic_group": "workbench", "time_to_stop": 3600}},
+		{Action: "work_shift", Params: map[string]any{"interaction": "assemble", "semantic_group": "workbench", "duration": 3600}},
 	}
-	got := fillDefaultTimeToStopForRest(actions)
-	if v, ok := got[1].Params["time_to_stop"]; !ok || v != defaultRestTimeToStopSec {
-		t.Fatalf("mid-queue rest should get default time_to_stop=%d, got %v", defaultRestTimeToStopSec, got[1].Params["time_to_stop"])
+	got := fillDefaultDurationForRest(actions)
+	if v, ok := got[1].Params["duration"]; !ok || v != defaultRestDurationSec {
+		t.Fatalf("mid-queue rest should get default duration=%d, got %v", defaultRestDurationSec, got[1].Params["duration"])
 	}
 }
 
 func TestFillDefaultTimeToStopForRest_KeepsExisting(t *testing.T) {
 	actions := []plannedAction{
 		{Action: "speak", Params: map[string]any{"content": "hi"}},
-		{Action: "InteractSmartObject", Params: map[string]any{"interaction": "rest", "semantic_group": "bench", "time_to_stop": 900}},
+		{Action: "InteractSmartObject", Params: map[string]any{"interaction": "rest", "semantic_group": "bench", "duration": 900}},
 		{Action: "work_shift", Params: map[string]any{"interaction": "assemble", "semantic_group": "workbench"}},
 	}
-	got := fillDefaultTimeToStopForRest(actions)
-	if v, ok := got[1].Params["time_to_stop"]; !ok || v != 900 {
-		t.Fatalf("existing time_to_stop should be preserved, got %v", got[1].Params["time_to_stop"])
+	got := fillDefaultDurationForRest(actions)
+	if v, ok := got[1].Params["duration"]; !ok || v != 900 {
+		t.Fatalf("existing duration should be preserved, got %v", got[1].Params["duration"])
 	}
 }
 
@@ -1380,9 +1322,9 @@ func TestFillDefaultTimeToStopForRest_TailRestUntouched(t *testing.T) {
 		{Action: "work_shift", Params: map[string]any{"interaction": "assemble", "semantic_group": "workbench"}},
 		{Action: "InteractSmartObject", Params: map[string]any{"interaction": "rest", "semantic_group": "bench"}},
 	}
-	got := fillDefaultTimeToStopForRest(actions)
-	if _, ok := got[2].Params["time_to_stop"]; ok {
-		t.Fatalf("tail rest should stay without time_to_stop, got %v", got[2].Params)
+	got := fillDefaultDurationForRest(actions)
+	if _, ok := got[2].Params["duration"]; ok {
+		t.Fatalf("tail rest should stay without duration, got %v", got[2].Params)
 	}
 }
 
@@ -1392,10 +1334,10 @@ func TestFillDefaultTimeToStopForRest_NonRestUntouched(t *testing.T) {
 		{Action: "work_shift", Params: map[string]any{"interaction": "assemble", "semantic_group": "workbench"}},
 		{Action: "InteractSmartObject", Params: map[string]any{"interaction": "charge", "semantic_group": "charger"}},
 	}
-	got := fillDefaultTimeToStopForRest(actions)
+	got := fillDefaultDurationForRest(actions)
 	for i, a := range got {
-		if _, ok := a.Params["time_to_stop"]; ok {
-			t.Fatalf("non-rest action %d should not get time_to_stop, got %v", i, a.Params)
+		if _, ok := a.Params["duration"]; ok {
+			t.Fatalf("non-rest action %d should not get duration, got %v", i, a.Params)
 		}
 	}
 }
@@ -1404,23 +1346,23 @@ func TestFillDefaultTimeToStopForRest_SingleActionNoop(t *testing.T) {
 	actions := []plannedAction{
 		{Action: "InteractSmartObject", Params: map[string]any{"interaction": "rest", "semantic_group": "bench"}},
 	}
-	got := fillDefaultTimeToStopForRest(actions)
-	if _, ok := got[0].Params["time_to_stop"]; ok {
+	got := fillDefaultDurationForRest(actions)
+	if _, ok := got[0].Params["duration"]; ok {
 		t.Fatalf("single-action queue should be a no-op, got %v", got[0].Params)
 	}
 }
 
-// ─── fillDefaultTimeToStopForWork ────────────────────────────
+// ─── fillDefaultDurationForWork ────────────────────────────
 
 func TestFillDefaultTimeToStopForWork_MidQueueWorkGetsDefault(t *testing.T) {
 	actions := []plannedAction{
 		{Action: "speak", Params: map[string]any{"content": "hi"}},
 		{Action: "work_shift", Params: map[string]any{"interaction": "assemble", "semantic_group": "workbench"}},
-		{Action: "InteractSmartObject", Params: map[string]any{"interaction": "rest", "semantic_group": "bench", "time_to_stop": 900}},
+		{Action: "InteractSmartObject", Params: map[string]any{"interaction": "rest", "semantic_group": "bench", "duration": 900}},
 	}
-	got := fillDefaultTimeToStopForWork(actions)
-	if v, ok := got[1].Params["time_to_stop"]; !ok || v != defaultWorkTimeToStopSec {
-		t.Fatalf("mid-queue work should get default time_to_stop=%d, got %v", defaultWorkTimeToStopSec, got[1].Params["time_to_stop"])
+	got := fillDefaultDurationForWork(actions)
+	if v, ok := got[1].Params["duration"]; !ok || v != defaultWorkDurationSec {
+		t.Fatalf("mid-queue work should get default duration=%d, got %v", defaultWorkDurationSec, got[1].Params["duration"])
 	}
 }
 
@@ -1430,21 +1372,21 @@ func TestFillDefaultTimeToStopForWork_InteractWorkGetsDefault(t *testing.T) {
 		{Action: "InteractSmartObject", Params: map[string]any{"interaction": "sort_cargo", "semantic_group": "sorting_conveyor"}},
 		{Action: "InteractSmartObject", Params: map[string]any{"interaction": "rest", "semantic_group": "bench"}},
 	}
-	got := fillDefaultTimeToStopForWork(actions)
-	if v, ok := got[1].Params["time_to_stop"]; !ok || v != defaultWorkTimeToStopSec {
-		t.Fatalf("mid-queue InteractSmartObject work should get default time_to_stop, got %v", got[1].Params["time_to_stop"])
+	got := fillDefaultDurationForWork(actions)
+	if v, ok := got[1].Params["duration"]; !ok || v != defaultWorkDurationSec {
+		t.Fatalf("mid-queue InteractSmartObject work should get default duration, got %v", got[1].Params["duration"])
 	}
 }
 
 func TestFillDefaultTimeToStopForWork_KeepsExisting(t *testing.T) {
 	actions := []plannedAction{
 		{Action: "speak", Params: map[string]any{"content": "hi"}},
-		{Action: "work_shift", Params: map[string]any{"interaction": "assemble", "semantic_group": "workbench", "time_to_stop": 7200}},
+		{Action: "work_shift", Params: map[string]any{"interaction": "assemble", "semantic_group": "workbench", "duration": 7200}},
 		{Action: "work_shift", Params: map[string]any{"interaction": "assemble", "semantic_group": "workbench"}},
 	}
-	got := fillDefaultTimeToStopForWork(actions)
-	if v, ok := got[1].Params["time_to_stop"]; !ok || v != 7200 {
-		t.Fatalf("existing time_to_stop should be preserved, got %v", got[1].Params["time_to_stop"])
+	got := fillDefaultDurationForWork(actions)
+	if v, ok := got[1].Params["duration"]; !ok || v != 7200 {
+		t.Fatalf("existing duration should be preserved, got %v", got[1].Params["duration"])
 	}
 }
 
@@ -1454,9 +1396,9 @@ func TestFillDefaultTimeToStopForWork_TailWorkUntouched(t *testing.T) {
 		{Action: "InteractSmartObject", Params: map[string]any{"interaction": "rest", "semantic_group": "bench"}},
 		{Action: "work_shift", Params: map[string]any{"interaction": "assemble", "semantic_group": "workbench"}},
 	}
-	got := fillDefaultTimeToStopForWork(actions)
-	if _, ok := got[2].Params["time_to_stop"]; ok {
-		t.Fatalf("tail work should stay without time_to_stop, got %v", got[2].Params)
+	got := fillDefaultDurationForWork(actions)
+	if _, ok := got[2].Params["duration"]; ok {
+		t.Fatalf("tail work should stay without duration, got %v", got[2].Params)
 	}
 }
 
@@ -1466,10 +1408,10 @@ func TestFillDefaultTimeToStopForWork_NonWorkUntouched(t *testing.T) {
 		{Action: "InteractSmartObject", Params: map[string]any{"interaction": "rest", "semantic_group": "bench"}},
 		{Action: "surf_internet", Params: map[string]any{"interaction": "surf_internet", "semantic_group": "computer"}},
 	}
-	got := fillDefaultTimeToStopForWork(actions)
+	got := fillDefaultDurationForWork(actions)
 	for i, a := range got {
-		if _, ok := a.Params["time_to_stop"]; ok {
-			t.Fatalf("non-work action %d should not get time_to_stop, got %v", i, a.Params)
+		if _, ok := a.Params["duration"]; ok {
+			t.Fatalf("non-work action %d should not get duration, got %v", i, a.Params)
 		}
 	}
 }
@@ -1493,8 +1435,8 @@ func TestFallbackRetryActions(t *testing.T) {
 	if acts[1].Params["behavior"] != "look_around" {
 		t.Errorf("generic_act behavior should be look_around, got %v", acts[1].Params["behavior"])
 	}
-	if v, ok := acts[1].Params["time_to_stop"]; !ok || v != 30 {
-		t.Errorf("generic_act should have 30s time_to_stop, got %v", acts[1].Params["time_to_stop"])
+	if v, ok := acts[1].Params["duration"]; !ok || v != 30 {
+		t.Errorf("generic_act should have 30s duration, got %v", acts[1].Params["duration"])
 	}
 }
 

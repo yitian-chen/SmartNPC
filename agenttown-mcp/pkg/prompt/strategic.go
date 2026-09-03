@@ -3,19 +3,13 @@ package prompt
 
 import (
 	"fmt"
-	"sort"
+	"hash/fnv"
 	"strings"
 
 	"github.com/AgentTown/agenttown-mcp/contract/protocol"
 	"github.com/AgentTown/agenttown-mcp/pkg/profile"
 	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
 )
-
-// ProductionWorkflowText summarizes the town's production workflow (from
-// docs/AgentTown_Workflow.md) as a short natural-language paragraph. Injected
-// into both the strategic and tactical system prompts so both layers share
-// the same mental model of the production loop and job trade-offs.
-const ProductionWorkflowText = "小镇生产是一条概念流水线：物流转运站加工原料、分拣货物，主生产车间装配半成品、调试设备、质检成品，废料回收与再制造场拆解报废设备回收零件（当前阶段无物料/库存依赖，各工序彼此独立）。六类工种强度与收入成正比：质检轻松低薪；装配、加工、分拣强度与收入中等；调试、拆解高薪但更耗电量、更积磨损。机器人靠电量、疲劳、关节磨损、余额四项状态维持“打工循环”：工作挣余额，同时耗电量、涨疲劳、积磨损，又需花钱充电、休息、维修才能延续工作。规划时应按自身状态取舍：累了或电量低选轻松工种，缺钱时选高强度工种。"
 
 // defaultDailyPlan is the fallback plan when kb == nil.
 // Kept neutral (no KB-specific terms) so it adapts when KB changes.
@@ -25,269 +19,84 @@ const defaultDailyPlan = "07:00-12:00: 上午主要工作\n" +
 	"18:00-22:00: 前往中央广场休息\n" +
 	"22:00-07:00: 夜间休眠"
 
-// DefaultDailyPlan derives a fallback daily plan from KB.
+// DefaultDailyPlan derives a per-agent fallback daily plan from KB.
 // kb == nil → returns defaultDailyPlan (neutral, no KB-specific terms).
-// With KB: uses first zone display name as work location, first object display
-// name as work content for morning/afternoon slots. Avoids hardcoding
-// "车间"/"装配" so the fallback adapts to any KB.
-func DefaultDailyPlan(kb *worldkb.KB) string {
+//
+// 工作时段从 KB 的工作类设施（category=work）中按 agentID 稳定选择，
+// 而非机械取"首个 zone + 首个 object"——后者在 objects 按字典序排列的
+// KB 里会选中 bench-1（长椅，休息设施），拼出"在档案馆进行长椅作业"
+// 这种荒谬组合（2026-09-03 实测：venus 429 限流导致 5 NPC 全部兜底，
+// 且兜底内容完全相同）。按 agentID 选择让各 NPC 的兜底计划不同。
+// 无工作类设施时退化为中性表述（"主要工作"）。
+func DefaultDailyPlan(kb *worldkb.KB, agentID string) string {
 	if kb == nil {
 		return defaultDailyPlan
 	}
-	zoneName := "主要区域"
-	if zs := kb.ListZones(); len(zs) > 0 {
-		if zs[0].DisplayName != "" {
-			zoneName = zs[0].DisplayName
-		} else {
-			zoneName = zs[0].ID
+	workName := ""
+	workZoneName := ""
+	works := make([]worldkb.ObjectInfo, 0, len(kb.ListObjects()))
+	for _, o := range kb.ListObjects() {
+		if o.Category == "work" {
+			works = append(works, o)
 		}
 	}
-	workName := "工作"
-	if os := kb.ListObjects(); len(os) > 0 {
-		if os[0].DisplayName != "" {
-			workName = os[0].DisplayName
-		} else {
-			workName = os[0].ID
+	if len(works) > 0 {
+		pick := works[stableAgentPick(agentID, len(works))]
+		workName = pick.DisplayName
+		if workName == "" {
+			workName = pick.ID
+		}
+		workZoneName = zoneDisplayName(kb, pick.ZoneID)
+	}
+	if workName == "" {
+		workName = "主要工作"
+	}
+	if workZoneName == "" {
+		workZoneName = "主要区域"
+		if zs := kb.ListZones(); len(zs) > 0 {
+			if zs[0].DisplayName != "" {
+				workZoneName = zs[0].DisplayName
+			} else {
+				workZoneName = zs[0].ID
+			}
 		}
 	}
-	return fmt.Sprintf("07:00-12:00: 上午在%s进行%s作业\n", zoneName, workName) +
+	return fmt.Sprintf("07:00-12:00: 上午在%s进行%s作业\n", workZoneName, workName) +
 		"12:00-13:00: 午间停工与短暂休息\n" +
 		fmt.Sprintf("13:00-18:00: 下午继续%s作业\n", workName) +
 		"18:00-22:00: 保养休息\n" +
 		"22:00-06:00: 夜间休眠"
 }
 
-// BuildSharedSystemPrompt constructs THE system prompt, injected verbatim and
-// identically into the strategic, tactical, and dialogue layers:
-//  1. 【世界背景】 — world overview (WorldOverview).
-//  2. 【人物背景】 — the current agent's profile (AgentRole).
-//  3. 【世界详细信息】 — per-zone descriptions + facility groups with inline
-//     per-interaction effects (worldDetailCore).
-//  4. 【生产工作流】 — the production workflow overview.
-//
-// The output is byte-identical across the three layers and static for the
-// whole simulation (kb/profiles load once at startup, never hot-reload), so
-// it stays cache-friendly. ALL layer-specific content — planning rules,
-// decomposition rules, the strategic 【其他NPC】 roster, the dialogue
-// mechanism and JSON output formats — lives in each layer's user message.
-//
-// kb == nil → modules degrade to empty; profiles == nil → persona falls back
-// to the hardcoded fallback fields.
-func BuildSharedSystemPrompt(kb *worldkb.KB, profiles map[string]*profile.Profile, agentID string) string {
-	var sb strings.Builder
-
-	if m1 := WorldOverview(kb); m1 != "" {
-		sb.WriteString("【世界背景】\n")
-		sb.WriteString(m1)
+// stableAgentPick 按字符串稳定散列选择 [0,n) 桶——同一 agentID 每次选
+// 同一桶（兜底计划跨重试稳定），不同 agentID 尽量错开。
+func stableAgentPick(s string, n int) int {
+	if n <= 1 {
+		return 0
 	}
-	if role := AgentRole(kb, profiles, agentID); role != "" {
-		sb.WriteString("\n【人物背景】\n")
-		sb.WriteString(role)
-	}
-	if m3 := worldDetailCore(kb); m3 != "" {
-		sb.WriteString("\n【世界详细信息】\n")
-		sb.WriteString(m3)
-	}
-	sb.WriteString("\n【生产工作流】\n")
-	sb.WriteString(ProductionWorkflowText)
-	return sb.String()
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(s))
+	return int(h.Sum32() % uint32(n))
 }
 
-// WorldOverview renders the shared module 1: the world's basic situation —
-// narrative setting/theme, zone roster, smart-object group roster, and NPC
-// roster (compact inventories only; details live in module 3).
-func WorldOverview(kb *worldkb.KB) string {
-	if kb == nil {
+// zoneDisplayName 查 zone 显示名，找不到或为空时回退 zoneID，再回退空串。
+func zoneDisplayName(kb *worldkb.KB, zoneID string) string {
+	if zoneID == "" {
 		return ""
 	}
-	var lines []string
-	if kb.Narrative.Setting != "" {
-		lines = append(lines, "设定："+kb.Narrative.Setting)
-	}
-	if kb.Narrative.Theme != "" {
-		lines = append(lines, "主题："+kb.Narrative.Theme)
-	}
-	if zs := kb.ListZones(); len(zs) > 0 {
-		parts := make([]string, 0, len(zs))
-		for _, z := range zs {
-			if z.DisplayName != "" && z.DisplayName != z.ID {
-				parts = append(parts, fmt.Sprintf("%s（%s）", z.DisplayName, z.ID))
-			} else {
-				parts = append(parts, z.ID)
+	for _, z := range kb.ListZones() {
+		if z.ID == zoneID {
+			if z.DisplayName != "" {
+				return z.DisplayName
 			}
+			return z.ID
 		}
-		lines = append(lines, fmt.Sprintf("区域（%d 个）：%s。", len(zs), strings.Join(parts, "、")))
 	}
-	if os := kb.ListObjects(); len(os) > 0 {
-		parts := make([]string, 0)
-		for _, g := range groupObjectsBySemantic(os) {
-			label := g.SemanticGroup
-			if g.DisplayName != "" && g.DisplayName != g.SemanticGroup {
-				label = fmt.Sprintf("%s（%s）", g.DisplayName, g.SemanticGroup)
-			}
-			if g.InstanceCount > 1 {
-				label += fmt.Sprintf("，%d 个实例", g.InstanceCount)
-			}
-			parts = append(parts, label)
-		}
-		lines = append(lines, fmt.Sprintf("可交互设施类别（%d 类）：%s。", len(parts), strings.Join(parts, "、")))
-	}
-	if ags := kb.Agents; len(ags) > 0 {
-		parts := make([]string, 0, len(ags))
-		for _, a := range ags {
-			if a.DisplayName != "" && a.DisplayName != a.ID {
-				parts = append(parts, fmt.Sprintf("%s（%s）", a.DisplayName, a.ID))
-			} else {
-				parts = append(parts, a.ID)
-			}
-		}
-		lines = append(lines, fmt.Sprintf("居民（%d 位）：%s。", len(ags), strings.Join(parts, "、")))
-	}
-	if len(lines) == 0 {
-		return ""
-	}
-	return strings.Join(lines, "\n") + "\n"
+	return ""
 }
 
-// worldDetailCore renders the KB-derived world detail shared by the strategic
-// and tactical system prompts: per-zone descriptions + a per-zone
-// semantic_group map + smart objects grouped by semantic_group with
-// per-interaction description, per-hour attribute effects and usage gates
-// (from the KB's declared rates).
-func worldDetailCore(kb *worldkb.KB) string {
-	var sb strings.Builder
-	wroteZone := false
-	if kb != nil {
-		if zs := kb.ListZones(); len(zs) > 0 {
-			sb.WriteString("各区域详情：\n")
-			wroteZone = true
-			for _, z := range zs {
-				label := z.ID
-				if z.DisplayName != "" && z.DisplayName != z.ID {
-					label = fmt.Sprintf("%s（%s）", z.DisplayName, z.ID)
-				}
-				if d := strings.TrimSpace(z.Description); d != "" {
-					sb.WriteString("- " + label + "：" + d + "\n")
-				} else {
-					sb.WriteString("- " + label + "\n")
-				}
-			}
-		}
-	}
-	// 各区域可交互设施：按实例真实分布列出，跨 zone 的 semantic_group
-	//（如 bench 分布在中央广场/主生产车间/物流转运站）会在每个实际分布
-	// zone 下列出，避免"长椅只在中央广场"这类误导，供规划时直接按地点选设施。
-	if kb != nil {
-		if zs := kb.ListZones(); len(zs) > 0 {
-			if os := kb.ListObjects(); len(os) > 0 {
-				if wroteZone {
-					sb.WriteString("\n")
-				}
-				// zone → semantic_group 集合：按每个实例的 zone_id 聚合真实分布。
-				zoneGroups := make(map[string]map[string]bool, len(zs))
-				for _, o := range os {
-					if o.ZoneID == "" || o.SemanticGroup == "" {
-						continue
-					}
-					if zoneGroups[o.ZoneID] == nil {
-						zoneGroups[o.ZoneID] = make(map[string]bool)
-					}
-					zoneGroups[o.ZoneID][o.SemanticGroup] = true
-				}
-				// semantic_group → 显示名（取 group 的 DisplayName）。
-				display := make(map[string]string, len(os))
-				for _, g := range groupObjectsBySemantic(os) {
-					label := g.SemanticGroup
-					if g.DisplayName != "" && g.DisplayName != g.SemanticGroup {
-						label = fmt.Sprintf("%s（%s）", g.DisplayName, g.SemanticGroup)
-					}
-					display[g.SemanticGroup] = label
-				}
-				sb.WriteString("各区域可交互设施：\n")
-				for _, z := range zs {
-					gs := zoneGroups[z.ID]
-					if len(gs) == 0 {
-						continue
-					}
-					keys := make([]string, 0, len(gs))
-					for k := range gs {
-						keys = append(keys, k)
-					}
-					sort.Strings(keys)
-					names := make([]string, 0, len(keys))
-					for _, k := range keys {
-						if n, ok := display[k]; ok {
-							names = append(names, n)
-						} else {
-							names = append(names, k)
-						}
-					}
-					zlabel := z.ID
-					if z.DisplayName != "" && z.DisplayName != z.ID {
-						zlabel = fmt.Sprintf("%s（%s）", z.DisplayName, z.ID)
-					}
-					sb.WriteString("- " + zlabel + "：" + strings.Join(names, "、") + "\n")
-				}
-			}
-		}
-	}
-	// 设施详情：按 semantic_group 分组，交互行内联 KB 声明的描述与属性变动。
-	if kb != nil {
-		if os := kb.ListObjects(); len(os) > 0 {
-			if wroteZone {
-				sb.WriteString("\n")
-			}
-			sb.WriteString("设施详情（这些设施均为SmartObject，均附带有可交互的一个或多个interaction列在后面，可进行调用）：\n")
-			effects := effectLookup(kb)
-			for _, g := range groupObjectsBySemantic(os) {
-				label := g.SemanticGroup
-				if g.DisplayName != "" && g.DisplayName != g.SemanticGroup {
-					label = fmt.Sprintf("%s（%s）", g.DisplayName, g.SemanticGroup)
-				} else {
-					label = fmt.Sprintf("semantic_group=%s", g.SemanticGroup)
-				}
-				meta := ""
-				if g.InstanceCount > 1 {
-					meta += fmt.Sprintf("，%d 个实例", g.InstanceCount)
-				}
-				sb.WriteString("- " + label + meta + "：\n")
-				// 无速率声明的交互只列动词；有声明的带描述+属性变动+门槛。
-				if len(g.AvailableInteractions) == 0 {
-					if d := strings.TrimRight(strings.TrimSpace(g.Description), "。"); d != "" {
-						sb.WriteString("  " + d + "。\n")
-					}
-					continue
-				}
-				for _, itx := range g.AvailableInteractions {
-					if e, ok := effects[g.SemanticGroup+"/"+itx]; ok {
-						sb.WriteString("  - " + itx + "：" + describeEffect(e) + "\n")
-					} else {
-						sb.WriteString("  - " + itx + "\n")
-					}
-				}
-			}
-			sb.WriteString("\n")
-		}
-	}
-	return sb.String()
-}
-
-// effectLookup builds a (semantic_group, interaction) → InteractionEffect map
-// from the merged KB's declared interaction rates.
-func effectLookup(kb *worldkb.KB) map[string]InteractionEffect {
-	effects := InteractionEffectsFromKB(kb)
-	if len(effects) == 0 {
-		return nil
-	}
-	m := make(map[string]InteractionEffect, len(effects))
-	for _, e := range effects {
-		m[e.SemanticGroup+"/"+e.Interaction] = e
-	}
-	return m
-}
-
-// StrategicRules is the seven planning rules, injected into the user message
-// (StrategicUserTemplate's third placeholder) so they sit adjacent to the
+// StrategicRules is the planning rules, injected into the user message
+// (BuildStrategicUserPrompt) so they sit adjacent to the
 // planning ask (recency effect: instructions closer to the ask are followed
 // more reliably). References to 【世界背景】/【人物背景】/【世界详细信息】
 // point at the system message's modules; references to 【物理状态】 point at
@@ -295,7 +104,7 @@ func effectLookup(kb *worldkb.KB) map[string]InteractionEffect {
 const StrategicRules = `1. 【硬性要求】每个时段的结束时间减去开始时间必须 ≥30 分钟（不足 30 分钟的活动要么并入相邻时段，要么不安排）；每段安排 1 - 2 项任务，连续两个时段不得任务完全相同
 2. 规划每个时段时，先想清楚这个时段的活动用什么实现：goal 应能映射到【世界详细信息】设施详情中列出的某个 (semantic_group, interaction) 组合——不限于工种设备，睡眠舱的 sleep/meditate/tidy_up、长椅的 rest 都是合法活动，战术层会据此分解为对应的移动与长时段互动；映射不上的抽象活动（如"准备工具""巡查"）→ 换一个。锻炼类活动（晨练拉伸等原地动作）不需要设施，属例外；聊天/社交/对话类活动用 social_chat 实现（目标是【其他NPC】名单里的某位 NPC，不是设施），也属例外
 3. goal 中提到的地点、人物、设备必须是系统信息中【人物背景】和【世界详细信息】、或用户信息中【其他NPC】里存在的，不得编造未提及的人物或设施
-4. 第一个时段必须从 07:00 开始，且任何时段的开始时间不得早于 07:00——禁止输出 0:00-7:00 这类凌晨睡觉时段（凌晨睡眠已由前一晚的跨午夜末段覆盖，不要重复安排）。
+4. 第一个时段必须从当前仿真时间开始，且任何时段的开始时间不得早于当前时间（清晨规划时禁止输出 0:00-7:00 这类凌晨睡觉时段——凌晨睡眠已由前一晚的跨午夜末段覆盖，不要重复安排）。
 5. 首段禁止安排工作——早间可以安排晨练拉伸、上网、长椅放松、冥想醒神、整理舱位等非工作活动。午间可以选择锻炼、就近长椅小憩、休眠舱午睡等非产出性活动。夜间睡眠必须是一个连续的跨午夜时段：约 22:00 前后开始、次日 06:00-07:00 结束；不得拆成多个睡眠时段（禁止 20:30-22:58 睡觉 + 22:58-07:16 睡觉这样的连续两段），也不得在凌晨提前结束（禁止 23:00-01:00 这样的短睡眠段）。末段跨午夜时结束时间表示次日时刻
 6. 充电仅在规划时电量为"低"或"较低"时安排，规划时电量为"高"或"中"时严禁规划充电；维护仅在关节磨损达到"明显磨损"及以上时安排；睡眠只能在午间和晚上
 7. 综合用户信息中【物理状态】的四项状态调整安排侧重点：电量偏低→多充电少工作；疲劳偏高→提前休眠；磨损偏高→安排维护；余额低→多工作少花钱
@@ -303,23 +112,38 @@ const StrategicRules = `1. 【硬性要求】每个时段的结束时间减去�
 
 格式示例：[{"time":"07:00-09:00","goal":"晨练拉伸"},{"time":"09:00-12:00","goal":"上午车间装配作业"},{"time":"12:00-12:40","goal":"找老王聊聊天（social_chat）"},{"time":"12:40-18:00","goal":"下午继续装配作业"},{"time":"18:00-22:00","goal":"去中央广场长椅休息"},{"time":"22:00-07:00","goal":"夜间在睡眠舱休眠"}]`
 
-// StrategicUserTemplate is the strategic layer's user message template.
-// Placeholders: %s = dynamic context (BuildStrategicUserContext output:
-// today's weekly-schedule context + physical state), %s = yesterday summary,
-// %s = planning rules (StrategicRules). The instruction line stays in the
-// user message so the "plan today" ask sits immediately after the data and
-// rules it refers to.
-const StrategicUserTemplate = `[战略层/每日规划] 现在是仿真时间 07:00，新的一天开始了，你刚从休眠舱醒来，当前位于休眠舱区域。
+// StrategicPromptInput aggregates the strategic layer user-prompt inputs.
+type StrategicPromptInput struct {
+	TimeOfDay        string // 当前游戏时间 "HH:MM"（触发时刻）
+	Zone             string // 当前所在 zone id；空则省略位置段
+	Hint             string // 本次规划触发原因（如"早晨例行制定每日日程安排"）
+	Context          string // BuildStrategicUserContext 产出（动态上下文段）
+	YesterdaySummary string // 含"昨日总结："前缀
+}
 
-%s
-
-%s
-
-规划要求：
-%s
-
-请基于你的角色身份和性格，规划今天一天的活动安排（人设只影响选什么活动、怎么安排时段；goal 文字一律干练简洁，不带人设语气）。一天从 07:00 到次日 07:00，你从 07:00 开始活动。
-只输出 JSON 数组，每条形如 {"time":"HH:MM-HH:MM","goal":"纯文本一句话"}，"goal" 必须是字符串；第一个时段从 07:00 开始，任何时段的开始时间不得早于 07:00；分出6 - 8个时段，每个时段必须 ≥30 分钟；不要输出任何其他文字。`
+// BuildStrategicUserPrompt 组装战略层 user prompt——任意游戏时间可用。
+// 布局：情境行（时间+位置）→ 触发原因 → 动态上下文 → 昨日总结 → 规划要求
+// → 收尾指令。规划区间为「当前时间 → 次日 07:00」，第一个时段从当前仿真
+// 时间开始（早晨例行触发时等价于从 07:00 开始，行为与旧模板一致）。
+func BuildStrategicUserPrompt(in StrategicPromptInput) string {
+	var sb strings.Builder
+	sb.WriteString("[战略层/日程规划] 现在是仿真时间 " + in.TimeOfDay)
+	if in.Zone != "" {
+		sb.WriteString("，你当前位于" + in.Zone)
+	}
+	sb.WriteString("。\n\n")
+	if in.Hint != "" {
+		sb.WriteString(in.Hint + "\n\n")
+	}
+	sb.WriteString(in.Context + "\n\n")
+	sb.WriteString(in.YesterdaySummary + "\n\n")
+	sb.WriteString("规划要求：\n")
+	sb.WriteString(StrategicRules)
+	sb.WriteString("\n\n")
+	sb.WriteString(`请基于你的角色身份和性格，规划从当前时间到次日 07:00 的活动安排（人设只影响选什么活动、怎么安排时段；goal 文字一律干练简洁，不带人设语气）。
+只输出 JSON 数组，每条形如 {"time":"HH:MM-HH:MM","goal":"纯文本一句话"}，"goal" 必须是字符串；第一个时段从当前仿真时间开始，任何时段的开始时间不得早于当前时间；分出6 - 8个时段，每个时段必须 ≥30 分钟；不要输出任何其他文字。`)
+	return sb.String()
+}
 
 // BuildStrategicUserContext constructs the strategic layer user message's
 // dynamic context segment: 【今日日程】 (weekly schedule context, skipped
@@ -333,7 +157,7 @@ func BuildStrategicUserContext(agentID string, kb *worldkb.KB, profiles map[stri
 	// 【今日日程】段：每周日程上下文（星期几 + 工作日/休息日 + 当日提示）。
 	// dayContext 由调用方通过 weeklyschedule.WeeklyLine(dayCount, sched) 预格式化，
 	// pkg/prompt 不依赖 weeklyschedule 包（解耦）。空串=禁用或 dayCount<0，跳过。
-	sb.WriteString(`你是小镇居民 NPC 的战略规划模块。每天清晨 07:00，你根据系统信息中的【世界背景】【人物背景】【世界详细信息】，以及用户信息中的今日日程、物理状态、其他NPC、昨日总结与规划要求，规划当天 07:00 到次日 07:00 的活动安排。
+	sb.WriteString(`你是小镇居民 NPC 的战略规划模块。你根据系统信息中的【世界背景】【人物背景】【世界详细信息】，以及用户信息中的触发原因、今日日程、物理状态、其他NPC、昨日总结与规划要求，规划当前时间到次日 07:00 的活动安排。
 
 各活动对属性的每小时影响幅度见系统信息【世界详细信息】各设施的属性变动说明（由 world KB 声明生成）。规划时请综合权衡：产出性活动（工作）赚取余额但消耗体力、缓慢积攒关节磨损；恢复性活动（充电/维护/休息）花余额但延续工作能力。避免长时间连续工作导致体力耗尽，也避免频繁恢复导致余额入不敷出。
 

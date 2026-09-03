@@ -79,7 +79,7 @@ agents:
       type: Human
 narrative:
     setting: 工业机器人小镇
-    theme: 一座由机器人居民维持生产和日常生活的封闭工业园区。居民在车间、物流站、维修厂等工作，在广场社交、在居住区休息，构成了自给自足的工业生活共同体。
+    theme: 一座由机器人居民维持生产和日常生活的封闭工业园区。居民在车间、物流站、维修厂等工作，在广场社交、在居住区休息，构成了自给自足的工业生活共同体。偶尔会有外来的人类玩家进入小镇，他们可能对机器人居民发起攻击。
 objects:
     - actor_class: /AgentTownBridge/WorldKB/SmartObject/bench/BP_AT_Bench.BP_AT_Bench_C
       actor_position:

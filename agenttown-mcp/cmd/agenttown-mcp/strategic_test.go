@@ -7,9 +7,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/AgentTown/agenttown-mcp/pkg/agentstate"
 	"github.com/AgentTown/agenttown-mcp/pkg/llmtypes"
 	"github.com/AgentTown/agenttown-mcp/pkg/prompt"
 	"github.com/AgentTown/agenttown-mcp/pkg/venus"
+	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
 )
 
 // fakeStrategicCaller 实现 strategicCaller / llmClient 接口，用于单测。
@@ -52,6 +54,15 @@ func (f *fakeStrategicCaller) SendStreamingTools(_ context.Context, _, _ string,
 func (f *fakeStrategicCaller) SendWithSchema(_ context.Context, system, user, schemaName string, _ []byte, _ ...[]venus.Tool) (*llmtypes.Response, error) {
 	f.capturedSystem = system
 	f.capturedInput = user
+	f.capturedSchemaName = schemaName
+	return f.resp, f.err
+}
+
+func (f *fakeStrategicCaller) SendLoop(_ context.Context, messages []llmtypes.Message, _ []venus.Tool, _, schemaName string, _ []byte) (*llmtypes.Response, error) {
+	if len(messages) > 0 {
+		f.capturedSystem = messages[0].Content
+		f.capturedInput = messages[len(messages)-1].Content
+	}
 	f.capturedSchemaName = schemaName
 	return f.resp, f.err
 }
@@ -161,11 +172,18 @@ func TestFormatDailyPlan_MultipleItems(t *testing.T) {
 	}
 }
 
+
+// strategicCtxForTest 构造挂 fake 战略客户端的 agentContext（统一 agentic loop
+// 测试用）：as 为全新 AgentState（历史从空开始），strategicHc 接 fake。
+func strategicCtxForTest(sc *fakeStrategicCaller) *agentContext {
+	return &agentContext{as: agentstate.New(), strategicHc: sc}
+}
+
 // ─── generateDailyPlan ───────────────────────────────────────
 
 func TestGenerateDailyPlan_HTTPError(t *testing.T) {
 	sc := &fakeStrategicCaller{err: errors.New("network down")}
-	plan := generateDailyPlan(context.Background(), sc, "H-01", nil, nil, slog.Default(), "", nil, "")
+	plan := strategicCtxForTest(sc).triggerStrategicPlanning(context.Background(), "H-01", nil, nil, slog.Default(), "", "", "早晨例行制定每日日程安排", "")
 	// HTTP 错误现在回退到 prompt.DefaultDailyPlan(nil) 的扰动版本
 	// （时间节点 ±planJitterMinutes 错峰），而不是空字符串，
 	// 保证战术层有目标可分解、仿真不瘫痪。
@@ -180,7 +198,7 @@ func TestGenerateDailyPlan_HTTPError(t *testing.T) {
 func TestGenerateDailyPlan_ValidResponse(t *testing.T) {
 	raw := `[{"time":"06:00-07:00","goal":"起床晨检"},{"time":"07:00-12:00","goal":"车间装配"}]`
 	sc := &fakeStrategicCaller{resp: makeStrategicResponse(raw)}
-	plan := generateDailyPlan(context.Background(), sc, "H-01", nil, nil, slog.Default(), "", nil, "")
+	plan := strategicCtxForTest(sc).triggerStrategicPlanning(context.Background(), "H-01", nil, nil, slog.Default(), "", "", "早晨例行制定每日日程安排", "")
 	if plan == "" {
 		t.Fatal("got empty plan, want non-empty")
 	}
@@ -198,7 +216,7 @@ func TestGenerateDailyPlan_ValidResponse(t *testing.T) {
 
 func TestGenerateDailyPlan_ParseFail(t *testing.T) {
 	sc := &fakeStrategicCaller{resp: makeStrategicResponse("今天天气不错，我打算去车间转转。")}
-	plan := generateDailyPlan(context.Background(), sc, "H-01", nil, nil, slog.Default(), "", nil, "")
+	plan := strategicCtxForTest(sc).triggerStrategicPlanning(context.Background(), "H-01", nil, nil, slog.Default(), "", "", "早晨例行制定每日日程安排", "")
 	// 解析失败现在回退到 prompt.DefaultDailyPlan(nil) 的扰动版本，
 	// 避免整天 Wait(60s) 瘫痪。
 	if !isJitteredDefaultPlan(t, plan) {
@@ -210,7 +228,7 @@ func TestGenerateDailyPlan_ParseFail(t *testing.T) {
 // 行数一致、每条 goal 一致、时间可解析且为 "HH:MM-HH:MM" 格式。
 func isJitteredDefaultPlan(t *testing.T, plan string) bool {
 	t.Helper()
-	want := parseFormattedPlan(prompt.DefaultDailyPlan(nil))
+	want := parseFormattedPlan(prompt.DefaultDailyPlan(nil, "H-01"))
 	got := parseFormattedPlan(plan)
 	if len(got) != len(want) {
 		return false
@@ -354,7 +372,7 @@ func TestGenerateDailyPlan_KBInjectedIntoPrompt(t *testing.T) {
 	kb := loadTestKB(t)
 	raw := `[{"time":"06:00-07:00","goal":"起床晨检"}]`
 	sc := &fakeStrategicCaller{resp: makeStrategicResponse(raw)}
-	_ = generateDailyPlan(context.Background(), sc, "H-01", kb, nil, slog.Default(), "", nil, "")
+	_ = strategicCtxForTest(sc).triggerStrategicPlanning(context.Background(), "H-01", kb, nil, slog.Default(), "", "", "早晨例行制定每日日程安排", "")
 
 	sys := sc.capturedSystem
 	if sys == "" {
@@ -400,8 +418,8 @@ func TestGenerateDailyPlan_KBInjectedIntoPrompt(t *testing.T) {
 
 func TestBuildDefaultDailyPlan_NilKB(t *testing.T) {
 	// kb == nil 返回 defaultDailyPlan 常量（中性表述，无 KB 专属词）。
-	got := prompt.DefaultDailyPlan(nil)
-	want := prompt.DefaultDailyPlan(nil)
+	got := prompt.DefaultDailyPlan(nil, "H-01")
+	want := prompt.DefaultDailyPlan(nil, "H-01")
 	if got != want {
 		t.Errorf("got %q, want defaultDailyPlan %q", got, want)
 	}
@@ -414,23 +432,87 @@ func TestBuildDefaultDailyPlan_NilKB(t *testing.T) {
 }
 
 func TestBuildDefaultDailyPlan_WithKB(t *testing.T) {
-	// 有 KB 时：兜底计划应包含第一个 zone 显示名 + 第一个 object 显示名。
+	// 有 KB 时：工作时段从工作类设施（category=work）中按 agentID 稳定
+	// 选择——不再机械取"首个 zone + 首个 object"（KB objects 按字典序
+	// 首个是 bench-1 长椅，会拼出"在档案馆进行长椅作业"的荒谬组合，
+	// 2026-09-03 venus 429 全员兜底时实测出现）。
 	kb := loadTestKB(t)
-	got := prompt.DefaultDailyPlan(kb)
-	// 第一个 zone（按 ID 排序）是 archive_station（显示名"档案馆·图书馆与网络中心"）
-	if !strings.Contains(got, "档案馆·图书馆与网络中心") {
-		t.Errorf("KB-derived plan should contain first zone display name: %q", got)
+	got := prompt.DefaultDailyPlan(kb, "H-01")
+	// 兜底必须落在工作类设施里（工作台/调试台/加工机/分拣传送带等），
+	// 绝不能是休息类设施"长椅"。
+	workNames := map[string]bool{
+		"工作台": true, "调试台": true, "质检台": true,
+		"加工机": true, "分拣传送带": true, "拆解台": true,
 	}
-	// 第一个 object（按 ID 排序）是 bench-1（显示名"长椅"）
-	if !strings.Contains(got, "长椅") {
-		t.Errorf("KB-derived plan should contain first object display name: %q", got)
+	if !strings.Contains(got, "作业") {
+		t.Errorf("KB-derived plan should have work slots: %q", got)
 	}
-	// 跨日仿真：兜底计划含 5 个时段（07:00-12:00 / 12:00-14:00 / 14:00-18:00 /
-	// 18:00-22:00 / 22:00-06:00 跨午夜夜间段）。
+	foundWork := false
+	for name := range workNames {
+		if strings.Contains(got, name) {
+			foundWork = true
+		}
+	}
+	if !foundWork {
+		t.Errorf("plan should mention a work-category facility, got: %q", got)
+	}
+	if strings.Contains(got, "长椅作业") {
+		t.Errorf("plan must not pair rest facility with 作业: %q", got)
+	}
+	// 跨日仿真：兜底计划含 5 个时段。
 	items := parseFormattedPlan(got)
 	if len(items) != 5 {
 		t.Errorf("got %d plan items, want 5", len(items))
 	}
+	// 同一 agentID 多次调用稳定（跨重试不漂移）。
+	if again := prompt.DefaultDailyPlan(kb, "H-01"); again != got {
+		t.Errorf("DefaultDailyPlan not stable for same agentID:\nfirst:  %q\nsecond: %q", got, again)
+	}
+}
+
+func TestBuildDefaultDailyPlan_PerAgentDiffers(t *testing.T) {
+	// 5 个 NPC 并发兜底时计划应尽量错开（按 agentID 稳定哈希选择不同
+	// 工作设施），不再全员同一份"长椅作业"。
+	kb := loadTestKB(t)
+	plans := map[string]string{}
+	for _, id := range []string{"H-01", "H-02", "H-03", "H-04", "H-05"} {
+		plans[id] = prompt.DefaultDailyPlan(kb, id)
+	}
+	distinct := map[string]bool{}
+	for _, p := range plans {
+		distinct[p] = true
+	}
+	if len(distinct) < 2 {
+		t.Errorf("expected per-agent plans to differ, got %d distinct of 5:\n%s",
+			len(distinct), strings.Join(mapValues(plans), "\n---\n"))
+	}
+}
+
+func TestBuildDefaultDailyPlan_NoWorkCategory(t *testing.T) {
+	// KB 无工作类设施（category=work 为空）时退化为中性"主要工作"，
+	// 不引用休息设施。
+	kb := &worldkb.KB{
+		Zones: []worldkb.Zone{{ID: "plaza", DisplayName: "中央广场"}},
+		Objects: []worldkb.Object{
+			{ID: "bench-1", DisplayName: "长椅", Category: "rest", ZoneID: "plaza"},
+		},
+	}
+	got := prompt.DefaultDailyPlan(kb, "H-01")
+	if !strings.Contains(got, "主要工作") {
+		t.Errorf("no-work KB should fall back to neutral wording, got: %q", got)
+	}
+	if strings.Contains(got, "长椅") {
+		t.Errorf("no-work KB plan must not mention rest facility: %q", got)
+	}
+}
+
+// mapValues 提取 map 的值切片（测试辅助）。
+func mapValues(m map[string]string) []string {
+	out := make([]string, 0, len(m))
+	for _, v := range m {
+		out = append(out, v)
+	}
+	return out
 }
 
 // ─── normalizeDailyPlan ─────────────────────────────────────
@@ -443,7 +525,7 @@ func TestNormalizeDailyPlan_KeepsShortSlots(t *testing.T) {
 		{Time: "06:30-12:00", Goal: "上午工作"},
 		{Time: "12:00-22:00", Goal: "下午到晚上"},
 	}
-	got := normalizeDailyPlan(items)
+	got := normalizeDailyPlan(items, dayStartMinute)
 	if len(got) != 3 {
 		t.Fatalf("got %d items, want 3 (short slot kept)", len(got))
 	}
@@ -463,7 +545,7 @@ func TestNormalizeDailyPlan_FillsGap(t *testing.T) {
 		{Time: "06:00-10:00", Goal: "上午"},
 		{Time: "14:00-22:00", Goal: "下午"}, // 10:00-14:00 是空白
 	}
-	got := normalizeDailyPlan(items)
+	got := normalizeDailyPlan(items, dayStartMinute)
 	if len(got) != 2 {
 		t.Fatalf("got %d items, want 2", len(got))
 	}
@@ -481,9 +563,22 @@ func TestNormalizeDailyPlan_ExtendsFirstSlot(t *testing.T) {
 		{Time: "08:00-12:00", Goal: "上午"}, // 07:00-08:00 空白（06:00-07:00 是规划时间不覆盖）
 		{Time: "12:00-22:00", Goal: "下午"},
 	}
-	got := normalizeDailyPlan(items)
+	got := normalizeDailyPlan(items, dayStartMinute)
 	if got[0].Time != "07:00-12:00" {
 		t.Errorf("first slot should start at 07:00: got %q, want 07:00-12:00", got[0].Time)
+	}
+}
+
+func TestNormalizeDailyPlan_MidDayStartNotStretchedToMorning(t *testing.T) {
+	// 中途触发的战略规划：首段前伸到触发时刻（14:00），不回拉到 07:00
+	// 覆盖已流逝的上午。
+	items := []dailyPlanItem{
+		{Time: "15:00-18:00", Goal: "下午工作"},
+		{Time: "18:00-22:00", Goal: "广场休息"},
+	}
+	got := normalizeDailyPlan(items, 14*60)
+	if got[0].Time != "14:00-18:00" {
+		t.Errorf("first slot should stretch to trigger time 14:00, got %q", got[0].Time)
 	}
 }
 
@@ -492,7 +587,7 @@ func TestNormalizeDailyPlan_ExtendsLastSlot(t *testing.T) {
 		{Time: "07:00-12:00", Goal: "上午"},
 		{Time: "12:00-18:00", Goal: "下午"}, // 18:00-22:00 空白
 	}
-	got := normalizeDailyPlan(items)
+	got := normalizeDailyPlan(items, dayStartMinute)
 	if got[len(got)-1].Time != "12:00-22:00" {
 		t.Errorf("last slot should end at 22:00: got %q, want 12:00-22:00", got[len(got)-1].Time)
 	}
@@ -504,7 +599,7 @@ func TestNormalizeDailyPlan_KeepsAllShortSlots(t *testing.T) {
 		{Time: "06:00-06:30", Goal: "短1"},
 		{Time: "07:00-07:15", Goal: "短2"},
 	}
-	got := normalizeDailyPlan(items)
+	got := normalizeDailyPlan(items, dayStartMinute)
 	if got == nil || len(got) != 2 {
 		t.Fatalf("short slots should be kept, got %+v", got)
 	}
@@ -517,7 +612,7 @@ func TestNormalizeDailyPlan_AlreadyValid(t *testing.T) {
 		{Time: "12:00-22:00", Goal: "下午"},
 		{Time: "22:00-06:00", Goal: "夜间休息"},
 	}
-	got := normalizeDailyPlan(items)
+	got := normalizeDailyPlan(items, dayStartMinute)
 	if len(got) != 3 {
 		t.Fatalf("got %d items, want 3", len(got))
 	}
@@ -535,7 +630,7 @@ func TestNormalizeDailyPlan_ExtendsCrossMidnightLastSlot(t *testing.T) {
 		{Time: "12:00-22:00", Goal: "傍晚"},
 		{Time: "23:29-00:54", Goal: "休眠"}, // 跨午夜，只睡到 00:54
 	}
-	got := normalizeDailyPlan(items)
+	got := normalizeDailyPlan(items, dayStartMinute)
 	if len(got) != 3 {
 		t.Fatalf("got %d items, want 3", len(got))
 	}
@@ -553,7 +648,7 @@ func TestNormalizeDailyPlan_MergesAdjacentSameGoal(t *testing.T) {
 		{Time: "20:30-22:58", Goal: "睡觉"},
 		{Time: "22:58-07:16", Goal: "睡觉"},
 	}
-	got := normalizeDailyPlan(items)
+	got := normalizeDailyPlan(items, dayStartMinute)
 	if len(got) != 2 {
 		t.Fatalf("got %d items, want 2 (same-goal slots merged): %+v", len(got), got)
 	}
@@ -572,7 +667,7 @@ func TestNormalizeDailyPlan_NoMergeDifferentGoals(t *testing.T) {
 		{Time: "07:00-12:00", Goal: "上午工作"},
 		{Time: "12:00-18:00", Goal: "下午工作"},
 	}
-	got := normalizeDailyPlan(items)
+	got := normalizeDailyPlan(items, dayStartMinute)
 	if len(got) != 2 {
 		t.Fatalf("got %d items, want 2 (different goals must not merge)", len(got))
 	}
@@ -586,7 +681,7 @@ func TestNormalizeDailyPlan_NoMergeSleepSynonyms(t *testing.T) {
 		{Time: "20:49-23:25", Goal: "休眠舱居住区睡眠舱休息"},
 		{Time: "23:25-06:35", Goal: "休眠舱居住区睡眠舱睡眠"},
 	}
-	got := normalizeDailyPlan(items)
+	got := normalizeDailyPlan(items, dayStartMinute)
 	if len(got) != 3 {
 		t.Fatalf("got %d items, want 3 (different-goal sleep slots must not merge): %+v", len(got), got)
 	}
@@ -600,7 +695,7 @@ func TestNormalizeDailyPlan_NoMergeRunBeforeSleep(t *testing.T) {
 		{Time: "20:00-22:00", Goal: "休眠舱居住区跑步机跑步锻炼"},
 		{Time: "22:00-07:00", Goal: "休眠舱睡眠"},
 	}
-	got := normalizeDailyPlan(items)
+	got := normalizeDailyPlan(items, dayStartMinute)
 	if len(got) != 3 {
 		t.Fatalf("got %d items, want 3 (run and sleep must not merge): %+v", len(got), got)
 	}
@@ -651,7 +746,7 @@ func TestJitterPlanNodes_NightEndNotBeforeSix(t *testing.T) {
 		{Time: "22:00-06:20", Goal: "夜间休息"},
 	}
 	for i := 0; i < 200; i++ {
-		got := clampNightEnd(jitterPlanNodes(base, planJitterMinutes))
+		got := clampNightEnd(jitterPlanNodes(base, planJitterMinutes, dayStartMinute))
 		_, e, ok := prompt.SplitPlanRange(got[len(got)-1].Time)
 		if !ok {
 			t.Fatalf("iteration %d: unparseable last slot %q", i, got[len(got)-1].Time)
@@ -675,7 +770,7 @@ func jitterTestPlan() []dailyPlanItem {
 
 func TestJitterPlanNodes_ZeroJitterNoop(t *testing.T) {
 	items := jitterTestPlan()
-	got := jitterPlanNodes(items, 0)
+	got := jitterPlanNodes(items, 0, dayStartMinute)
 	for i := range items {
 		if got[i].Time != items[i].Time {
 			t.Errorf("maxJitter=0 should be a no-op: got[%d]=%q want %q", i, got[i].Time, items[i].Time)
@@ -686,7 +781,7 @@ func TestJitterPlanNodes_ZeroJitterNoop(t *testing.T) {
 func TestJitterPlanNodes_OffsetsWithinRange(t *testing.T) {
 	orig := jitterTestPlan()
 	for round := 0; round < 100; round++ {
-		got := jitterPlanNodes(orig, planJitterMinutes)
+		got := jitterPlanNodes(orig, planJitterMinutes, dayStartMinute)
 		for i := range orig {
 			os, oe, _ := prompt.SplitPlanRange(orig[i].Time)
 			gs, ge, _ := prompt.SplitPlanRange(got[i].Time)
@@ -710,7 +805,7 @@ func TestJitterPlanNodes_OffsetsWithinRange(t *testing.T) {
 func TestJitterPlanNodes_ContiguityAndMinDuration(t *testing.T) {
 	orig := jitterTestPlan()
 	for round := 0; round < 100; round++ {
-		got := jitterPlanNodes(orig, planJitterMinutes)
+		got := jitterPlanNodes(orig, planJitterMinutes, dayStartMinute)
 		for i := range got {
 			if i < len(got)-1 {
 				// 共享边界：前段（非跨午夜）扰动后的 end 必须等于后段 start。
@@ -732,7 +827,7 @@ func TestJitterPlanNodes_ContiguityAndMinDuration(t *testing.T) {
 func TestJitterPlanNodes_OvernightSlotStaysOvernight(t *testing.T) {
 	orig := jitterTestPlan()
 	for round := 0; round < 100; round++ {
-		got := jitterPlanNodes(orig, planJitterMinutes)
+		got := jitterPlanNodes(orig, planJitterMinutes, dayStartMinute)
 		last := got[len(got)-1]
 		s, e, ok := prompt.SplitPlanRange(last.Time)
 		if !ok || e > s {
@@ -743,7 +838,7 @@ func TestJitterPlanNodes_OvernightSlotStaysOvernight(t *testing.T) {
 
 func TestJitterPlanNodes_GoalsPreserved(t *testing.T) {
 	orig := jitterTestPlan()
-	got := jitterPlanNodes(orig, planJitterMinutes)
+	got := jitterPlanNodes(orig, planJitterMinutes, dayStartMinute)
 	for i := range orig {
 		if got[i].Goal != orig[i].Goal {
 			t.Errorf("slot %d goal changed: got %q want %q", i, got[i].Goal, orig[i].Goal)
@@ -935,5 +1030,144 @@ func TestBuildSharedSystemPrompt_NoZoneObjectMapHeader(t *testing.T) {
 	got := prompt.BuildSharedSystemPrompt(kb, nil, "H-01")
 	if strings.Contains(got, "【区域设施映射】") {
 		t.Errorf("system prompt should NOT include '【区域设施映射】' section (superseded by module 3): %q", got)
+	}
+}
+
+// TestTriggerStrategicPlanning_ReadsTimeAndZoneFromSnapshot 验证通用战略
+// 触发钩子从快照读当前游戏时间与所在区域拼 user prompt，并携带 hint。
+func TestTriggerStrategicPlanning_ReadsTimeAndZoneFromSnapshot(t *testing.T) {
+	as := agentstate.New()
+	as.SetIdentity("H-01", nil)
+	// 预置感知：time_of_day_sec 14:30（52200 秒），zone=main_workshop。
+	raw := []byte(`{"environment":{"game_time_sec":52200,"time_of_day_sec":52200,"day_count":1},"location":{"current_zone":"main_workshop"}}`)
+	if _, err := as.SetPerception(raw); err != nil {
+		t.Fatalf("SetPerception: %v", err)
+	}
+	sc := &fakeStrategicCaller{resp: makeStrategicResponse(`[{"time":"14:30-18:00","goal":"下午工作"}]`)}
+	ac := &agentContext{as: as, strategicHc: sc}
+
+	_ = ac.triggerStrategicPlanning(context.Background(), "H-01", nil, nil, slog.Default(), "", "", "中午状态变化重规划", "")
+
+	if !strings.Contains(sc.capturedInput, "现在是仿真时间 14:30") {
+		t.Errorf("user prompt should carry snapshot time 14:30:\n%s", sc.capturedInput)
+	}
+	if !strings.Contains(sc.capturedInput, "你当前位于main_workshop") {
+		t.Errorf("user prompt should carry snapshot zone main_workshop:\n%s", sc.capturedInput)
+	}
+	if !strings.Contains(sc.capturedInput, "中午状态变化重规划") {
+		t.Errorf("user prompt should carry hint:\n%s", sc.capturedInput)
+	}
+}
+
+// TestTriggerStrategicPlanning_MorningFallbackNoPerception 验证冷启动（首条
+// 感知未到）时时间回落 07:00 且省略位置段。
+func TestTriggerStrategicPlanning_MorningFallbackNoPerception(t *testing.T) {
+	as := agentstate.New()
+	as.SetIdentity("H-01", nil)
+	sc := &fakeStrategicCaller{resp: makeStrategicResponse(`[{"time":"07:00-08:00","goal":"晨练"}]`)}
+	ac := &agentContext{as: as, strategicHc: sc}
+
+	_ = ac.triggerStrategicPlanning(context.Background(), "H-01", nil, nil, slog.Default(), "", "", "早晨例行制定每日日程安排", "")
+
+	if !strings.Contains(sc.capturedInput, "现在是仿真时间 07:00") {
+		t.Errorf("cold start should fall back to 07:00:\n%s", sc.capturedInput)
+	}
+	if strings.Contains(sc.capturedInput, "你当前位于") {
+		t.Errorf("cold start without perception should omit location clause:\n%s", sc.capturedInput)
+	}
+	if !strings.Contains(sc.capturedInput, "早晨例行制定每日日程安排") {
+		t.Errorf("morning hint missing:\n%s", sc.capturedInput)
+	}
+}
+
+// TestTriggerStrategicPlanning_CrossDayUsesFixedStart 验证跨日触发（planningStart
+// 传 "07:00"）时，即使快照当前游戏时间是深夜，prompt 仍用 07:00 作为规划
+// 起点，避免 LLM 只规划"睡觉到清晨"的简略计划。
+func TestTriggerStrategicPlanning_CrossDayUsesFixedStart(t *testing.T) {
+	as := agentstate.New()
+	as.SetIdentity("H-01", nil)
+	// 预置感知：深夜 00:09（day_count 已递增，模拟 UE 在 00:00 即推进游戏日）。
+	raw := []byte(`{"environment":{"game_time_sec":540,"time_of_day_sec":540,"day_count":2},"location":{"current_zone":"residential_quarters"}}`)
+	if _, err := as.SetPerception(raw); err != nil {
+		t.Fatalf("SetPerception: %v", err)
+	}
+	sc := &fakeStrategicCaller{resp: makeStrategicResponse(`[{"time":"07:00-08:00","goal":"晨练"}]`)}
+	ac := &agentContext{as: as, strategicHc: sc}
+
+	_ = ac.triggerStrategicPlanning(context.Background(), "H-01", nil, nil, slog.Default(), "", "", "早晨例行制定每日日程安排", "07:00")
+
+	// 规划起点应为 07:00（而非快照的深夜 00:09）。
+	if !strings.Contains(sc.capturedInput, "现在是仿真时间 07:00") {
+		t.Errorf("cross-day planning should use 07:00 start, got:\n%s", sc.capturedInput)
+	}
+	if strings.Contains(sc.capturedInput, "现在是仿真时间 00:09") {
+		t.Errorf("cross-day planning should NOT use the late-night snapshot time 00:09:\n%s", sc.capturedInput)
+	}
+}
+
+// TestTriggerStrategicPlanning_PlanningWindowClampsToStart 验证冷启动落在
+// 规划窗口（06:00-07:00）时被钳位到 07:00：UE 每次启动 game_time 从 06:00
+// 起，若直接以 06:00 为规划起点，会生成"05:59 起的晨间冥想"这类规划窗口
+// 内活动段（2026-09-03 实测 H-01 计划 05:59-06:51），而该窗口是战略层
+// 规划时间、不应安排 schedule。
+func TestTriggerStrategicPlanning_PlanningWindowClampsToStart(t *testing.T) {
+	as := agentstate.New()
+	as.SetIdentity("H-01", nil)
+	// 预置感知：UE 刚启动的 06:30（规划窗口内）。
+	raw := []byte(`{"environment":{"game_time_sec":23400,"time_of_day_sec":23400,"day_count":0},"location":{"current_zone":"residential_quarters"}}`)
+	if _, err := as.SetPerception(raw); err != nil {
+		t.Fatalf("SetPerception: %v", err)
+	}
+	sc := &fakeStrategicCaller{resp: makeStrategicResponse(`[{"time":"07:00-08:00","goal":"晨练"}]`)}
+	ac := &agentContext{as: as, strategicHc: sc}
+
+	plan := ac.triggerStrategicPlanning(context.Background(), "H-01", nil, nil, slog.Default(), "", "", "早晨例行制定每日日程安排", "")
+
+	if !strings.Contains(sc.capturedInput, "现在是仿真时间 07:00") {
+		t.Errorf("cold start inside planning window should clamp to 07:00, got:\n%s", sc.capturedInput)
+	}
+	// 产出的计划首段不早于 07:00（LLM 从 07:00 规划 + jitter 下界钳位）。
+	items := parseFormattedPlan(plan)
+	if len(items) == 0 {
+		t.Fatalf("plan should have items, got %q", plan)
+	}
+	if s, _, _ := prompt.SplitPlanRange(items[0].Time); s < dayStartMinute {
+		t.Errorf("plan first slot starts at %d (before 07:00): %q", s, items[0].Time)
+	}
+}
+
+// TestTriggerStrategicPlanning_EarlyMorningNotClamped 验证凌晨（<06:00）
+// 不被钳位——旧计划的跨午夜末段仍在进行，中途触发按当前时间规划。
+func TestTriggerStrategicPlanning_EarlyMorningNotClamped(t *testing.T) {
+	as := agentstate.New()
+	as.SetIdentity("H-01", nil)
+	raw := []byte(`{"environment":{"game_time_sec":9000,"time_of_day_sec":9000,"day_count":1},"location":{"current_zone":"residential_quarters"}}`)
+	if _, err := as.SetPerception(raw); err != nil {
+		t.Fatalf("SetPerception: %v", err)
+	}
+	sc := &fakeStrategicCaller{resp: makeStrategicResponse(`[{"time":"02:30-07:00","goal":"继续休眠"}]`)}
+	ac := &agentContext{as: as, strategicHc: sc}
+
+	_ = ac.triggerStrategicPlanning(context.Background(), "H-01", nil, nil, slog.Default(), "", "", "测试触发", "")
+
+	if !strings.Contains(sc.capturedInput, "现在是仿真时间 02:30") {
+		t.Errorf("early-morning mid-day trigger should keep current time, got:\n%s", sc.capturedInput)
+	}
+}
+
+// TestJitterPlanNodes_FirstNodeNotBeforeStart 验证扰动不把首段起点抖早于
+// 规划语义起点（minStart）——多轮随机迭代验证不变量。
+func TestJitterPlanNodes_FirstNodeNotBeforeStart(t *testing.T) {
+	orig := jitterTestPlan() // 首段 07:00-12:00
+	for round := 0; round < 200; round++ {
+		got := jitterPlanNodes(orig, planJitterMinutes, dayStartMinute)
+		s, _, ok := prompt.SplitPlanRange(got[0].Time)
+		if !ok {
+			t.Fatalf("round %d: unparseable first slot %q", round, got[0].Time)
+		}
+		if s < dayStartMinute {
+			t.Fatalf("round %d: first slot %q starts %d before minStart %d",
+				round, got[0].Time, s, dayStartMinute)
+		}
 	}
 }

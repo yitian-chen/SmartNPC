@@ -36,6 +36,16 @@ func isVenusErrorCode(err error, code string) bool {
 	return strings.Contains(err.Error(), `"code":"`+code+`"`)
 }
 
+// isRateLimited 判断 venus 网关限流错误：HTTP 429 或 venus 错误码 4029
+// （"当前使用的是公共模型服务, 并发有限; 当前的限流为: 30/min"）。
+// 此类错误退避等待后重试可恢复（限流窗口按分钟滚动）。
+func isRateLimited(err error) bool {
+	if err == nil {
+		return false
+	}
+	return isVenusErrorCode(err, "4029") || strings.Contains(err.Error(), "status 429")
+}
+
 // actionSource 标识一个在途 action 由哪一层下发，决定 completion 后的路由。
 // 类型定义已迁移到 pkg/agentstate（导出名 ActionSource），此处保留 alias。
 type actionSource = agentstate.ActionSource
@@ -105,14 +115,14 @@ func physicalAlertOverrideGoal(hint, origGoal string, physical *protocol.Physica
 	}
 }
 
-// generateTacticalPlan 调战术层 LLM 分解当前时段 goal（非流式，多轮）。
-// conversation 是此前累积的对话历史（system 由本函数重建并置于最前）。
-// 返回分解出的 action 段 + assistant 消息（调用方 append 回 conversation）。
-// 任一步失败返回 err，调用方决定回退兜底。
+// generateTacticalPlan 调战术层 LLM 分解当前时段 goal（统一 agentic loop
+// 战术轮）。会话历史由 ac.agenticTurn 统一读写（[system, ...当天历史, user]，
+// 历史含战略轮与对话轮），成功后 user+assistant 自动追加进历史，tool 结果由
+// recordActionCompletion 回填。返回分解出的 action 段；任一步失败返回 err，
+// 调用方决定回退兜底。
 func generateTacticalPlan(
 	ctx context.Context,
-	tc llmClient,
-	conversation []llmtypes.Message,
+	ac *agentContext,
 	agentID string,
 	goal, zone, timeOfDay, slot, dailyPlan string,
 	physical *protocol.PhysicalState,
@@ -126,12 +136,7 @@ func generateTacticalPlan(
 	objectStatus map[string]protocol.ObjectCategoryStatus,
 	nearbyObjects []protocol.NearbyObject,
 	visibleAgents []protocol.VisibleAgent,
-) ([]plannedAction, llmtypes.Message, error) {
-	// System prompt：与战略/对话层严格一致的共享 system prompt（世界背景/
-	// 人物背景/世界详细信息/生产工作流），单次仿真内静态可缓存；user prompt
-	// 携带四段结构（战术规则也在 user），工具经 function calling 的 tools
-	// 字段下发，不再注入 prompt 文本。
-	system := prompt.BuildSharedSystemPrompt(kb, profiles, agentID)
+) ([]plannedAction, error) {
 	promptText := prompt.BuildTactical(prompt.TacticalInput{
 		Goal:          goal,
 		Zone:          zone,
@@ -151,33 +156,15 @@ func generateTacticalPlan(
 	})
 	logger.Info("[MCP→LLM/TACTICAL-PROMPT]",
 		"agent_id", agentID, "goal", goal, "game_time", timeOfDay, "text", promptText,
-		"replan_hint", hint, "history_turns", len(conversation))
-	// function calling tools：仅经请求体 tools 字段下发。
-	ftools := tacticalToolsFromRegistry(registry, agentID)
+		"replan_hint", hint, "history_turns", len(ac.as.Conversation()))
 
-	// 多轮 messages：[system, ...历史, user(最新实时状态)]。
-	// 历史不做滑动窗口截断：仅跨游戏日清空（main.go detectDayRollover 处
-	// ClearConversation），单日内保留完整对话，避免截断丢失上下文。
-	messages := make([]llmtypes.Message, 0, len(conversation)+2)
-	messages = append(messages, llmtypes.Message{Role: "system", Content: system})
-	messages = append(messages, conversation...)
-	messages = append(messages, llmtypes.Message{Role: "user", Content: promptText})
-
-	// 4001 重试：venus 校验 tools JSON 失败（code 4001）时以相同请求体重试，
-	// 上限 maxTacticalRetries 次。其余错误（超时/连接/非 4001 的 500）不重试，
-	// 由调用方兜底（speak+look_around + 下一感知周期再分解）。
-	resp, err := tc.SendMessagesTools(ctx, messages, ftools)
-	for attempt := 1; err != nil && isVenusErrorCode(err, "4001") && attempt <= maxTacticalRetries; attempt++ {
-		logger.Warn("[战术层] venus 4001，重试相同请求体",
-			"agent_id", agentID, "retry", attempt, "max", maxTacticalRetries, "err", err)
-		resp, err = tc.SendMessagesTools(ctx, messages, ftools)
-	}
-	// 实际 prompt 文档：记录 H-01 最新一次战术层请求体完整 JSON（无论成败）。
-	dumpLastRequestBody(agentID, "tactical", tc, logger)
+	// 统一 agentic loop 战术轮：tool_choice=required（必须调用工具），
+	// 4001 重试与历史追加由 agenticTurn 统一处理。
+	resp, err := ac.agenticTurn(ctx, ac.tacticalHc, kb, profiles, logger, agentID,
+		"tactical", promptText, "required", "", nil)
 	if err != nil {
-		return nil, llmtypes.Message{}, fmt.Errorf("tactical llm: %w", err)
+		return nil, fmt.Errorf("tactical llm: %w", err)
 	}
-	tc.ResetSession() // 战术调用一次性，立即清链（与战略层一致）
 
 	raw := resp.ExtractText()
 	logger.Info("[LLM→MCP/TACTICAL-RESPONSE]",
@@ -185,31 +172,30 @@ func generateTacticalPlan(
 		"tool_calls", len(resp.ToolCalls))
 
 	if len(resp.ToolCalls) == 0 {
-		return nil, llmtypes.Message{}, fmt.Errorf("tactical plan has no tool calls (raw=%s)", truncateText(raw, 200))
+		return nil, fmt.Errorf("tactical plan has no tool calls (raw=%s)", truncateText(raw, 200))
 	}
 	actions := parseToolCalls(resp.ToolCalls, registry, agentID)
 	if len(actions) == 0 {
-		return nil, llmtypes.Message{}, fmt.Errorf("tactical plan has no actions (raw=%s)", truncateText(raw, 200))
+		return nil, fmt.Errorf("tactical plan has no actions (raw=%s)", truncateText(raw, 200))
 	}
-	actions = fillDefaultTimeToStopForRest(actions)
-	actions = fillDefaultTimeToStopForWork(actions)
+	actions = fillDefaultDurationForRest(actions)
+	actions = fillDefaultDurationForWork(actions)
 	actionsJSON, _ := json.Marshal(actions)
 	logger.Info("[战术层] 分解成功",
 		"agent_id", agentID, "steps", len(actions),
 		"actions", string(actionsJSON))
-	assistant := llmtypes.Message{Role: "assistant", Content: raw, ToolCalls: resp.ToolCalls}
-	return actions, assistant, nil
+	return actions, nil
 }
 
-// defaultRestTimeToStopSec 是非队尾休息类动作的默认 time_to_stop（30 分钟）。
-// LLM 常给工作段设 time_to_stop 却给中间的"长椅休息"漏设，导致休息段自然
+// defaultRestDurationSec 是非队尾休息类动作的默认 duration（30 分钟）。
+// LLM 常给工作段设 duration 却给中间的"长椅休息"漏设，导致休息段自然
 // 持续到 slot 切换、卡住后续工作动作。此处为兜底，不依赖 LLM 自觉。
-const defaultRestTimeToStopSec = 1800
+const defaultRestDurationSec = 1800
 
-// fillDefaultTimeToStopForRest 给队列中"非队尾的休息类动作"补齐默认
-// time_to_stop（30 分钟）。只处理 InteractSmartObject + interaction=rest
+// fillDefaultDurationForRest 给队列中"非队尾的休息类动作"补齐默认
+// duration（30 分钟）。只处理 InteractSmartObject + interaction=rest
 // （长椅休息）；队尾动作保持不设（自然持续到时段切换）。
-func fillDefaultTimeToStopForRest(actions []plannedAction) []plannedAction {
+func fillDefaultDurationForRest(actions []plannedAction) []plannedAction {
 	if len(actions) < 2 {
 		return actions
 	}
@@ -218,13 +204,13 @@ func fillDefaultTimeToStopForRest(actions []plannedAction) []plannedAction {
 		if a.Action != "InteractSmartObject" || !paramIs(a.Params, "interaction", "rest") {
 			continue
 		}
-		if _, ok := a.Params["time_to_stop"]; ok {
+		if _, ok := a.Params["duration"]; ok {
 			continue
 		}
 		if a.Params == nil {
 			a.Params = map[string]any{}
 		}
-		a.Params["time_to_stop"] = defaultRestTimeToStopSec
+		a.Params["duration"] = defaultRestDurationSec
 	}
 	return actions
 }
@@ -252,17 +238,17 @@ func fallbackRetryActions() []plannedAction {
 			"content": "网络波动了，我稍等一下，正在重试……",
 		}},
 		{Action: "generic_act", Params: map[string]any{
-			"behavior":     "look_around",
-			"thought":      "网络波动，原地观察等待重试",
-			"time_to_stop": 30,
+			"behavior": "look_around",
+			"thought":  "网络波动，原地观察等待重试",
+			"duration": 30,
 		}},
 	}
 }
 
-// defaultWorkTimeToStopSec 是非队尾工作动作的默认 time_to_stop（90 分钟）。
-// LLM 偶尔会给中间的工作段漏设 time_to_stop，使其自然持续到 slot 切换、
+// defaultWorkDurationSec 是非队尾工作动作的默认 duration（90 分钟）。
+// LLM 偶尔会给中间的工作段漏设 duration，使其自然持续到 slot 切换、
 // 卡住后续动作。此处兜底，不依赖 LLM 自觉。
-const defaultWorkTimeToStopSec = 5400
+const defaultWorkDurationSec = 5400
 
 // workInteractions 是六种工种的交互动词（含 InteractSmartObject 直接工作）。
 var workInteractions = map[string]bool{
@@ -290,9 +276,9 @@ func isWorkAction(a *plannedAction) bool {
 	return workInteractions[inter]
 }
 
-// fillDefaultTimeToStopForWork 给队列中"非队尾的工作类动作"补齐默认
-// time_to_stop（90 分钟）。队尾动作保持不设（自然持续到时段切换）。
-func fillDefaultTimeToStopForWork(actions []plannedAction) []plannedAction {
+// fillDefaultDurationForWork 给队列中"非队尾的工作类动作"补齐默认
+// duration（90 分钟）。队尾动作保持不设（自然持续到时段切换）。
+func fillDefaultDurationForWork(actions []plannedAction) []plannedAction {
 	if len(actions) < 2 {
 		return actions
 	}
@@ -301,13 +287,13 @@ func fillDefaultTimeToStopForWork(actions []plannedAction) []plannedAction {
 		if !isWorkAction(a) {
 			continue
 		}
-		if _, ok := a.Params["time_to_stop"]; ok {
+		if _, ok := a.Params["duration"]; ok {
 			continue
 		}
 		if a.Params == nil {
 			a.Params = map[string]any{}
 		}
-		a.Params["time_to_stop"] = defaultWorkTimeToStopSec
+		a.Params["duration"] = defaultWorkDurationSec
 	}
 	return actions
 }
@@ -380,12 +366,27 @@ func tacticalToolsFromRegistry(registry *CapabilityRegistry, agentID string) []v
 	return out
 }
 
+// isInstantTacticalTool 判断工具是否为瞬时动作（立即完成、无持续时长）。
+// 这些工具不追加 duration 参数——schema 层无该字段 LLM 无从填写，与
+// TacticalRules"瞬时动作不填 duration"约定一致。
+func isInstantTacticalTool(name string) bool {
+	switch name {
+	case "speak", "emote", "turn_to", "generic_act":
+		return true
+	}
+	return false
+}
+
 // capabilityParamsSchema 把 CapabilityParam 列表转成 function calling 的
 // parameters JSON Schema（object 类型）。不包含 MCP 侧 meta 字段
 // （agent_id/decision_epoch）——function calling 的参数就是 UE cmd 的参数。
-// 额外追加一个可选的 time_to_stop（秒，MCP 侧控制字段，长动作定时终止），
-// 但 social_chat 除外——它是"挂起直到对话结束"的复合动作，time_to_stop
-// 到点会被 worker 打断对话，语义不适用。
+// 额外追加 duration（秒，MCP 侧控制字段，长动作定时终止）并列入 required
+// （2026-09-03：实测 LLM 在 function calling 中只填 required 参数，optional
+// 的 duration 从不被填——动作时长全靠 slot 切换兜底、队列频繁提前耗尽。
+// 必填后 LLM 被迫为每个非瞬时动作声明时长；"最后一段不设 duration 自然
+// 持续到 slot 切换"的旧约定改为"最后一段 duration = 时段剩余时长"，
+// TacticalRules 规则 7/8 已同步措辞）。例外：social_chat 是"挂起直到对话
+// 结束"的复合动作，duration 到点会打断对话；瞬时工具无时长概念。
 func capabilityParamsSchema(params []protocol.CapabilityParam, name string) json.RawMessage {
 	props := map[string]any{}
 	required := make([]string, 0, len(params))
@@ -409,14 +410,16 @@ func capabilityParamsSchema(params []protocol.CapabilityParam, name string) json
 			required = append(required, p.Name)
 		}
 	}
-	// time_to_stop：长动作定时终止（MCP 侧轮询 game_time，不传 UE）。
-	// 描述与 TacticalRules 规则 8 对齐：队列中间动作必须设，仅末段可不设。
-	// social_chat 不追加（对话挂起直到结束，time_to_stop 会打断对话）。
-	if name != "social_chat" {
-		props["time_to_stop"] = map[string]any{
+	// duration：非瞬时动作的持续时长（秒，MCP 侧轮询 game_time，不传 UE）。
+	// 描述与 TacticalRules 规则 8 对齐：末段 duration 设为时段剩余时长。
+	// social_chat 不追加（对话挂起直到结束，duration 会打断对话）；
+	// 瞬时工具不追加（立即完成，无时长概念）。
+	if name != "social_chat" && !isInstantTacticalTool(name) {
+		props["duration"] = map[string]any{
 			"type":        "number",
-			"description": "队列中间动作必须设置本参数（秒），到点后系统打断当前段并进入队列下一段；仅最后一个动作可不设，自然持续到时段切换。冥想/整理/上网等单段宜设 1800 秒左右，工作时长段可设 3600-7200",
+			"description": "该动作的持续时长（秒）。到点后系统打断当前段并进入队列下一段。中间动作按实际计划设置（冥想/整理等单段宜设 1800 秒左右，工作段可设 3600-7200 秒）；最后一个动作的 duration 设为当前时段的剩余时长，到点后系统自动切入下一时段。所有动作的 duration 总和应接近当前时段剩余时长。",
 		}
+		required = append(required, "duration")
 	}
 	schema := map[string]any{
 		"type":       "object",
@@ -569,9 +572,13 @@ func mapTacticalAction(pa plannedAction, agentID string, kb *worldkb.KB, registr
 			if tools.CmdToToolName(act.Cmd) != pa.Action {
 				continue
 			}
-			// 复制 params 避免调用方误改原 map
+			// 复制 params 避免调用方误改原 map；剔除 duration——它是 MCP 侧
+			// 控制字段（worker 按 game_time 定时打断消费），不透传 UE。
 			out := make(map[string]any, len(pa.Params))
 			for k, v := range pa.Params {
+				if k == "duration" {
+					continue
+				}
 				out[k] = v
 			}
 			return act.Cmd, out, nil

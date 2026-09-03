@@ -1429,7 +1429,7 @@ func TestShouldAutoQueue(t *testing.T) {
 	}
 }
 
-// ─── time_to_stop 到点 hint ────────────────────────────────────
+// ─── duration 到点 hint ────────────────────────────────────
 
 func TestTimeStopReplanHint(t *testing.T) {
 	// 复合长动作：cmd 反查工具名 + params 拼语义组/交互 + 时长分钟数。
@@ -1455,7 +1455,7 @@ func TestTimeStopReplanHint(t *testing.T) {
 	}
 }
 
-// TestCheckTimeToStop_KeepsQueue 验证 time_to_stop 到点后只打断当前段、
+// TestCheckTimeToStop_KeepsQueue 验证 duration 到点后只打断当前段、
 // 保留队列与 currentSlot（多段计划 工作→小憩→工作 的核心路径）：到点后
 // in-flight 清空、pendingStop 已设、队列仍可顺序弹出下一段。
 func TestCheckTimeToStop_KeepsQueue(t *testing.T) {

@@ -742,3 +742,68 @@ func TestLastRequestBody(t *testing.T) {
 		t.Fatalf("body messages = %v, want 2 entries", got["messages"])
 	}
 }
+
+// TestSendLoop_ToolChoiceAndSchema verifies SendLoop serializes the multi-turn
+// messages array with tools and the explicit tool_choice, plus response_format
+// when schemaName is non-empty — the unified per-NPC agentic loop entry.
+func TestSendLoop_ToolChoiceAndSchema(t *testing.T) {
+	var capturedRequest request
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedRequest = request{}
+		_ = json.NewDecoder(r.Body).Decode(&capturedRequest)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"x","choices":[{"message":{"role":"assistant","content":"[]"}}],"usage":{}}`))
+	}))
+	defer server.Close()
+
+	c := newTestClient(t, server.URL)
+	tools := []Tool{{Type: "function", Function: ToolFunction{Name: "social_chat"}}}
+	messages := []llmtypes.Message{
+		{Role: "system", Content: "sys"},
+		{Role: "user", Content: "u1"},
+		{Role: "assistant", Content: "a1", ToolCalls: []llmtypes.ToolCall{{ID: "t1", Type: "function", Function: llmtypes.ToolFunction{Name: "speak", Arguments: "{}"}}}},
+		{Role: "tool", Content: "result=success", ToolCallID: "t1"},
+		{Role: "user", Content: "u2"},
+	}
+	schema := []byte(`{"type":"array"}`)
+
+	// 战略轮形态：tool_choice=none + response_format。
+	if _, err := c.SendLoop(context.Background(), messages, tools, "none", "daily_plan", schema); err != nil {
+		t.Fatalf("SendLoop strategic: %v", err)
+	}
+	if len(capturedRequest.Tools) != 1 {
+		t.Fatalf("tools len = %d, want 1", len(capturedRequest.Tools))
+	}
+	choice, _ := capturedRequest.ToolChoice.(string)
+	if choice != "none" {
+		t.Errorf("tool_choice = %v, want none", capturedRequest.ToolChoice)
+	}
+	if capturedRequest.ResponseFormat == nil || capturedRequest.ResponseFormat.JSONSchema == nil {
+		t.Fatal("response_format should be present when schemaName non-empty")
+	}
+	if capturedRequest.ResponseFormat.JSONSchema.Name != "daily_plan" {
+		t.Errorf("json_schema name = %q, want daily_plan", capturedRequest.ResponseFormat.JSONSchema.Name)
+	}
+	if len(capturedRequest.Messages) != len(messages) {
+		t.Fatalf("messages len = %d, want %d", len(capturedRequest.Messages), len(messages))
+	}
+	// 多轮序列化：tool_calls 与 tool_call_id 随消息透传。
+	if len(capturedRequest.Messages[2].ToolCalls) != 1 || capturedRequest.Messages[2].ToolCalls[0].ID != "t1" {
+		t.Errorf("assistant tool_calls not serialized: %+v", capturedRequest.Messages[2])
+	}
+	if capturedRequest.Messages[3].ToolCallID != "t1" {
+		t.Errorf("tool message tool_call_id = %q, want t1", capturedRequest.Messages[3].ToolCallID)
+	}
+
+	// 战术轮形态：tool_choice=required、无 response_format。
+	if _, err := c.SendLoop(context.Background(), messages, tools, "required", "", nil); err != nil {
+		t.Fatalf("SendLoop tactical: %v", err)
+	}
+	choice, _ = capturedRequest.ToolChoice.(string)
+	if choice != "required" {
+		t.Errorf("tool_choice = %v, want required", capturedRequest.ToolChoice)
+	}
+	if capturedRequest.ResponseFormat != nil {
+		t.Errorf("response_format should be absent when schemaName empty, got %+v", capturedRequest.ResponseFormat)
+	}
+}

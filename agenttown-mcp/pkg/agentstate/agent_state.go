@@ -83,6 +83,10 @@ type AgentState struct {
 	lastReactiveAt     map[string]time.Time
 	perceptionCount    int
 	replanHint         string
+	// lastQueueOnlySpeak 记录最近一次战术层分解（ReplaceQueue 路径）的队列
+	// 是否只含 speak——用于 BeginTacticalRefill 在"队列提前耗尽"时生成
+	// 针对性 hint（LLM 只返回 1 个 speak、队列数秒即耗尽的场景）。
+	lastQueueOnlySpeak bool
 	lastReplanAt       time.Time
 	lastReplanGameTime string
 	// conversation is the multi-turn tactical dialogue history (system/
@@ -781,9 +785,23 @@ func (a *AgentState) ShouldDispatchFirst() bool {
 
 // ReplaceQueue replaces the entire action queue (used by non-streaming
 // tactical refill).
+// ReplaceQueue replaces the action queue with the given actions. It also
+// records whether the queue contains nothing but speak calls, so that the
+// next premature-exhaustion refill (BeginTacticalRefill) can inject a
+// targeted hint for the "LLM returned only speak, queue drained in seconds"
+// failure mode (observed 2026-09-03: H-04/H-02 repeatedly refilled with a
+// single speak, NPC idled between 5-10s LLM calls).
 func (a *AgentState) ReplaceQueue(actions []PlannedAction) {
 	a.mu.Lock()
 	a.actionQueue = actions
+	onlySpeak := len(actions) > 0
+	for _, act := range actions {
+		if act.Action != "speak" {
+			onlySpeak = false
+			break
+		}
+	}
+	a.lastQueueOnlySpeak = onlySpeak
 	a.mu.Unlock()
 }
 
@@ -848,9 +866,15 @@ func (a *AgentState) BeginTacticalRefill(goal, slot string, idx int, hasTactical
 			prep.ShouldSkip = true
 			return prep
 		}
-		// 注入"未安排长动作"hint
+		// 注入"未安排长动作"hint；上次队列只含 speak 时给出更具体的诊断
+		// （该失败模式实测高频：LLM 只返回 1 个 speak，队列数秒即耗尽，
+		// NPC 在两次 LLM 调用之间呆站）。
 		if a.replanHint == "" {
-			a.replanHint = "上次队列提前耗尽，未安排长动作收尾——本次请确保最后一个 action 是长复合动作或 InteractSmartObject 长动作（见 function calling 的 tools 字段），让 NPC 持续工作到下一时段"
+			if a.lastQueueOnlySpeak {
+				a.replanHint = "上次分解只返回了 1 个 speak，队列数秒即耗尽导致频繁重分解。本次必须在 speak 之后返回至少一个带 duration 的长动作（长复合动作或 InteractSmartObject 长动作），让 NPC 持续活动到时段结束"
+			} else {
+				a.replanHint = "上次队列提前耗尽，未安排长动作收尾——本次请确保最后一个 action 是长复合动作或 InteractSmartObject 长动作（见 function calling 的 tools 字段），让 NPC 持续工作到下一时段"
+			}
 		}
 	}
 	prep.IsRedecompose = slot == a.currentSlot

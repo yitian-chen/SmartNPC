@@ -12,7 +12,6 @@ import (
 	"github.com/AgentTown/agenttown-mcp/pkg/llmtypes"
 	"github.com/AgentTown/agenttown-mcp/pkg/profile"
 	"github.com/AgentTown/agenttown-mcp/pkg/prompt"
-	"github.com/AgentTown/agenttown-mcp/contract/protocol"
 	"github.com/AgentTown/agenttown-mcp/pkg/venus"
 	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
 )
@@ -37,12 +36,13 @@ type dailyPlanItem struct {
 }
 
 // strategicCaller 是 LLM 客户端的窄接口，便于单测 mock。
-// SendWithSchema 用于战略层（Structured Outputs 硬约束）；
-// SendWithSummary 用于记忆层等无 schema 的调用。
-// 两者都接受可选 tools（披露行动目录），战略层注入时 tool_choice=none。
+// SendWithSummary 用于记忆层等无 schema 的调用；
+// SendLoop 用于战略层轮次（统一 agentic loop：messages + tools +
+// tool_choice=none + json_schema）。
 type strategicCaller interface {
 	SendWithSummary(ctx context.Context, system, user string, tools ...[]venus.Tool) (*llmtypes.Response, error)
 	SendWithSchema(ctx context.Context, system, user, schemaName string, schema []byte, tools ...[]venus.Tool) (*llmtypes.Response, error)
+	SendLoop(ctx context.Context, messages []llmtypes.Message, tools []venus.Tool, toolChoice, schemaName string, schema []byte) (*llmtypes.Response, error)
 	ResetSession()
 }
 
@@ -70,50 +70,63 @@ const dailyPlanSchema = `{
 // 充电），不点名任何人物或具体设施，由 LLM 根据 KB 自行具象化。
 const yesterdaySummaryForFirstDay = "昨天按计划完成了车间装配。"
 
-// generateDailyPlan 调 LLM 生成当日计划，返回格式化字符串（每行 "时段: 目标"）。
-// 任一步失败均回退到 prompt.DefaultDailyPlan(kb)，保证战术层有目标可分解、
-// 仿真不瘫痪。返回 "" 仅表示连兜底计划都没用上（理论上不会发生）。
-// kb 用于注入【你的角色】+【世界知识】+【区域设施映射】段，让 LLM 看到 KB 内合法的
-// zone/object/agent 名，避免编造 KB 外概念（如换 KB 后仍写"车间"）。
-// registry 用于注入【可用能力】段，让 LLM 知道可用复合动作，避免规划无对应
-// 动作的 goal（如"整理仪容"）。profiles 是 NPC persona override（profile.md），
-// nil 时 AgentRole 仅走 KB → fallback。kb/registry/profiles == nil 时降级为对应段缺失。
-// physical 注入【物理状态】段；nil 时 PhysicalLine 用默认满状态兜底。
-// dayContext 注入【今日日程】段（每周日程上下文，由 weeklyschedule.WeeklyLine
-// 预格式化）；"" 时跳过该段（禁用或 dayCount<0）。
-func generateDailyPlan(ctx context.Context, sc strategicCaller, agentID string, kb *worldkb.KB, profiles map[string]*profile.Profile, logger *slog.Logger, yesterdaySummary string, physical *protocol.PhysicalState, dayContext string) string {
+// triggerStrategicPlanning 战略层通用触发钩子：按 hint（触发原因）触发一轮
+// 战略规划。从快照读当前游戏时间与所在区域拼 user prompt（任意游戏时间
+// 可用），经统一 agentic loop 发送战略轮（[system, ...当天历史, user]，
+// tool_choice=none + json_schema(daily_plan)），成功返回新 dailyPlan 格式化
+// 字符串（调用方 SetDailyPlan），任一步失败回退 prompt.DefaultDailyPlan(kb, agentID)
+// 保证战术层有目标可分解、仿真不瘫痪。
+//
+// planningStart 是规划起点（"HH:MM"）：跨日 rollover 触发时传 "07:00"（规划
+// 新一天全天，而非从当前深夜时刻起——UE 的 day_count 在 00:00 即递增，若用
+// 当前深夜时间，LLM 只会规划"睡觉到清晨"的简略计划）。中途触发（反应层/
+// 事件/debug）传 ""（用当前游戏时间，不覆盖已流逝时段）。冷启动首条感知
+// 未到时可传 ""（tod 为空回落 "07:00"）。
+func (a *agentContext) triggerStrategicPlanning(ctx context.Context, agentID string, kb *worldkb.KB, profiles map[string]*profile.Profile, logger *slog.Logger, yesterdaySummary, dayContext, hint, planningStart string) string {
 	if yesterdaySummary == "" {
 		yesterdaySummary = yesterdaySummaryForFirstDay
 	}
-	// System prompt：与战术/对话层严格一致的共享 system prompt（世界背景/
-	// 人物背景/世界详细信息/生产工作流），由 world KB 派生，单次仿真内静态
-	// 可缓存。战略层专属内容（其他NPC花名册、规则）全在 user prompt。
-	// User prompt：动态段（今日日程+物理状态+其他NPC+昨日总结）+ 九条规则
-	// + 规划指令。
-	system := prompt.BuildSharedSystemPrompt(kb, profiles, agentID)
-	promptText := fmt.Sprintf(prompt.StrategicUserTemplate,
-		prompt.BuildStrategicUserContext(agentID, kb, profiles, physical, dayContext),
-		"昨日总结："+yesterdaySummary,
-		prompt.StrategicRules)
-	logger.Info("[MCP→LLM/STRATEGIC-PROMPT]", "agent_id", agentID, "text", promptText)
-
-	// tools：披露与战术层一致的行动目录（含 social_chat），但 tool_choice=none
-	//——战略层产出 schema 约束的 JSON 计划文本，不调用工具。让 LLM 看到
-	// social_chat 是合法行动，配合规则 9 的社交建议产出社交时段。
-	var toolsOpt []venus.Tool
-	if capabilityRegistryRef != nil {
-		toolsOpt = tacticalToolsFromRegistry(capabilityRegistryRef, agentID)
+	// 从快照读当前游戏时间 / 所在区域 / 物理状态。
+	snap := a.as.Snapshot()
+	tod := snap.LatestTimeOfDay()
+	if planningStart != "" {
+		tod = planningStart // 跨日触发：固定新一天 07:00，而非当前深夜时间
 	}
-	resp, err := sc.SendWithSchema(ctx, system, promptText, "daily_plan", []byte(dailyPlanSchema), toolsOpt)
-	// 实际 prompt 文档：记录 H-01 最新一次战略层请求体完整 JSON。
-	dumpLastRequestBody(agentID, "strategic", sc, logger)
+	if tod == "" {
+		tod = "07:00" // 冷启动首条感知未到：回落清晨默认
+	}
+	// 冷启动落在规划窗口（06:00-07:00）：与跨日 rollover 同语义——规划
+	// 新一天从 07:00 起。UE 每次启动 game_time 从 06:00 起，此前会以 06:00
+	// 为规划起点生成"05:59 起的晨间冥想"这类窗口内活动段（2026-09-03
+	// 实测 H-01 计划 05:59-06:51），而该窗口是战略层规划时间、不应安排
+	// schedule。凌晨（<06:00）不钳位——旧计划的跨午夜末段仍在进行，
+	// 中途触发按当前时间规划。
+	if m := prompt.ParsePlanMinute(tod); m >= 6*60 && m < dayStartMinute {
+		tod = "07:00"
+	}
+	zone := snap.LatestZone()
+
+	// User prompt：情境行（时间+位置）→ 触发原因 → 动态段（今日日程+物理
+	// 状态+其他NPC）→ 昨日总结 → 九条规则 + 收尾指令。
+	promptText := prompt.BuildStrategicUserPrompt(prompt.StrategicPromptInput{
+		TimeOfDay:        tod,
+		Zone:             zone,
+		Hint:             hint,
+		Context:          prompt.BuildStrategicUserContext(agentID, kb, profiles, snap.LatestPhysical, dayContext),
+		YesterdaySummary: "昨日总结：" + yesterdaySummary,
+	})
+	logger.Info("[MCP→LLM/STRATEGIC-PROMPT]", "agent_id", agentID, "hint", hint, "text", promptText)
+
+	// 统一 agentic loop 战略轮：[system, ...当天历史, user]，规划问答进入
+	// 当天会话历史。
+	resp, err := a.agenticTurn(ctx, a.strategicHc, kb, profiles, logger, agentID,
+		"strategic", promptText, "none", "daily_plan", []byte(dailyPlanSchema))
 	if err != nil {
-		fallback := jitterPlanString(prompt.DefaultDailyPlan(kb))
+		fallback := jitterPlanString(prompt.DefaultDailyPlan(kb, agentID))
 		logger.Warn("[战略层] 计划生成失败，使用默认计划兜底",
 			"agent_id", agentID, "err", err, "fallback", fallback)
 		return fallback
 	}
-	sc.ResetSession() // 战略调用一次性使用，立即清链
 
 	raw := resp.ExtractText()
 	logger.Info("[LLM→MCP/STRATEGIC-RESPONSE]",
@@ -121,20 +134,26 @@ func generateDailyPlan(ctx context.Context, sc strategicCaller, agentID string, 
 
 	items, err := parseDailyPlan(raw)
 	if err != nil {
-		fallback := jitterPlanString(prompt.DefaultDailyPlan(kb))
+		fallback := jitterPlanString(prompt.DefaultDailyPlan(kb, agentID))
 		logger.Warn("[战略层] 计划解析失败，使用默认计划兜底",
 			"agent_id", agentID, "raw", truncateText(raw, 200), "err", err, "fallback", fallback)
 		return fallback
 	}
-	items = normalizeDailyPlan(items)
+	// 首段前伸到触发时刻：早晨触发（07:00）与旧行为一致；中午触发则从
+	// 当前时间起，不覆盖已流逝的时段。
+	startMinute := prompt.ParsePlanMinute(tod)
+	if startMinute < 0 {
+		startMinute = dayStartMinute
+	}
+	items = normalizeDailyPlan(items, startMinute)
 	if len(items) == 0 {
 		logger.Warn("[战略层] 计划校验后为空，使用默认计划兜底", "agent_id", agentID)
-		return jitterPlanString(prompt.DefaultDailyPlan(kb))
+		return jitterPlanString(prompt.DefaultDailyPlan(kb, agentID))
 	}
 	// 时间节点 ±planJitterMinutes 随机扰动：错开各 NPC 的活动开始时间，
 	// 时段切换（战术层分解触发点）随之落在扰动后的时间点上。
 	// 扰动后钳位夜间结束节点：不得早于 06:00（见 clampNightEnd 注释）。
-	items = clampNightEnd(jitterPlanNodes(items, planJitterMinutes))
+	items = clampNightEnd(jitterPlanNodes(items, planJitterMinutes, startMinute))
 	plan := formatDailyPlan(items)
 	logger.Info("[战略层] 每日计划生成成功", "agent_id", agentID, "items", len(items), "plan", plan)
 	return plan
@@ -180,7 +199,8 @@ func parseDailyPlan(raw string) ([]dailyPlanItem, error) {
 //     2.5 合并相邻同时段：LLM 偶发输出连续两个同名时段（实测连续两段睡眠
 //     20:30-22:58 + 22:58-07:16），每次边界到期都会打断睡眠重新分解，
 //     合并后由后续规则统一填补/后延
-//  3. 首段前伸到 07:00（dayStartMinute；06:00-07:00 是规划时间，不覆盖）
+//  3. 首段前伸到 startMinute（触发时刻；早晨例行触发传 dayStartMinute=07:00，
+//     中途触发传当前时间——不把首段拉回已流逝的时段）
 //  4. 填补中间空白：前段 end < 后段 start 时延长前段
 //  5. 末段后延到次日 06:00（若 LLM 只规划到 18:00，18:00-22:00 会触发 idle wait 瘫痪）；
 //     跨午夜末段结束早于 06:00 的（如 23:29-00:54）同样后延——否则凌晨出现
@@ -188,8 +208,8 @@ func parseDailyPlan(raw string) ([]dailyPlanItem, error) {
 //
 // 支持跨午夜 slot（如 "22:00-06:00"）：跨午夜时段时长按 end+1440-start 计算，
 // 末段若已跨午夜且覆盖到 06:00 及以后则不后延。
-// 全部被丢弃时返回 nil，调用方走 prompt.DefaultDailyPlan(kb) 兜底。
-func normalizeDailyPlan(items []dailyPlanItem) []dailyPlanItem {
+// 全部被丢弃时返回 nil，调用方走 prompt.DefaultDailyPlan(kb, agentID) 兜底。
+func normalizeDailyPlan(items []dailyPlanItem, startMinute int) []dailyPlanItem {
 	// 1. 过滤短时段。跨午夜 slot（end <= start）时长按 end+1440-start 计算。
 	valid := make([]dailyPlanItem, 0, len(items))
 	for _, it := range items {
@@ -233,9 +253,9 @@ func normalizeDailyPlan(items []dailyPlanItem) []dailyPlanItem {
 		merged = append(merged, it)
 	}
 	valid = merged
-	// 3. 首段前伸到 dayStart。
-	if s, e, ok := prompt.SplitPlanRange(valid[0].Time); ok && s > dayStartMinute {
-		valid[0].Time = prompt.FmtMinute(dayStartMinute) + "-" + prompt.FmtMinute(e)
+	// 3. 首段前伸到 startMinute（触发时刻）。
+	if s, e, ok := prompt.SplitPlanRange(valid[0].Time); ok && s > startMinute {
+		valid[0].Time = prompt.FmtMinute(startMinute) + "-" + prompt.FmtMinute(e)
 	}
 	// 4. 填补中间空白（仅在非跨午夜段间）。
 	for i := 0; i < len(valid)-1; i++ {
@@ -301,15 +321,21 @@ func clampNightEnd(items []dailyPlanItem) []dailyPlanItem {
 // 节点模型：相邻时段共享的边界（前段 end == 后段 start）视为同一节点，
 // 扰动一次，保证扰动后时段仍然连续无缝、不重叠。
 //
+// minStart 是首节点的下界（规划语义起点）：扰动不得把首段起点抖早于
+// 规划起点（2026-09-03 实测：06:00 起的计划被抖成 05:59，违反"任何时段
+// 不得早于当前时间"的规则）。normalizeDailyPlan 路径传 startMinute，
+// 兜底路径传 dayStartMinute（07:00）。
+//
 // 保证：
 //   - 每个节点偏移量 ∈ [-maxJitter, +maxJitter]
 //   - 相邻节点保持升序且间隔 ≥ planJitterMinGap（钳位实现），时段不会被压扁
+//   - 首节点 ≥ minStart
 //   - 跨午夜时段（如 "22:00-06:00"）扰动后仍是合法跨午夜时段
 //     （跨午夜 end 用 SlotRangeMinute 归一化 +1440 后参与排序）
 //
 // 下游无需改动：扰动写进计划字符串本身，SlotExpired / matchPlanSlot /
 // prompt 展示都会自然使用新的时间点触发战术层分解。
-func jitterPlanNodes(items []dailyPlanItem, maxJitter int) []dailyPlanItem {
+func jitterPlanNodes(items []dailyPlanItem, maxJitter, minStart int) []dailyPlanItem {
 	if len(items) == 0 || maxJitter <= 0 {
 		return items
 	}
@@ -328,11 +354,14 @@ func jitterPlanNodes(items []dailyPlanItem, maxJitter int) []dailyPlanItem {
 		nodes = append(nodes, n)
 	}
 	sort.Ints(nodes)
-	// 2. 逐节点随机扰动，向下钳位保证升序 + 最小间隔。
+	// 2. 逐节点随机扰动，向下钳位保证升序 + 最小间隔 + 首节点下界。
 	offset := make(map[int]int, len(nodes))
 	prev := -1 << 30
-	for _, n := range nodes {
+	for i, n := range nodes {
 		j := n + rand.IntN(2*maxJitter+1) - maxJitter
+		if i == 0 && j < minStart {
+			j = minStart // 首节点（当天最早活动起点）不早于规划起点
+		}
 		if j < prev+planJitterMinGap {
 			j = prev + planJitterMinGap
 		}
@@ -372,7 +401,7 @@ func jitterPlanString(s string) string {
 	if len(items) == 0 {
 		return s
 	}
-	return formatDailyPlan(clampNightEnd(jitterPlanNodes(items, planJitterMinutes)))
+	return formatDailyPlan(clampNightEnd(jitterPlanNodes(items, planJitterMinutes, dayStartMinute)))
 }
 
 // formatDailyPlan 把计划格式化为多行字符串。
