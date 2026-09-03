@@ -1197,29 +1197,29 @@ func TestBuildTacticalPrompt_NoPhysicalAlertConstraint(t *testing.T) {
 	}
 }
 
-// ─── fillDefaultTimeToStopForRest ────────────────────────────
+// ─── fillDefaultDurationForRest ────────────────────────────
 
 func TestFillDefaultTimeToStopForRest_MidQueueRestGetsDefault(t *testing.T) {
 	actions := []plannedAction{
 		{Action: "speak", Params: map[string]any{"content": "hi"}},
 		{Action: "InteractSmartObject", Params: map[string]any{"interaction": "rest", "semantic_group": "bench"}},
-		{Action: "work_shift", Params: map[string]any{"interaction": "assemble", "semantic_group": "workbench", "time_to_stop": 3600}},
+		{Action: "work_shift", Params: map[string]any{"interaction": "assemble", "semantic_group": "workbench", "duration": 3600}},
 	}
-	got := fillDefaultTimeToStopForRest(actions)
-	if v, ok := got[1].Params["time_to_stop"]; !ok || v != defaultRestTimeToStopSec {
-		t.Fatalf("mid-queue rest should get default time_to_stop=%d, got %v", defaultRestTimeToStopSec, got[1].Params["time_to_stop"])
+	got := fillDefaultDurationForRest(actions)
+	if v, ok := got[1].Params["duration"]; !ok || v != defaultRestDurationSec {
+		t.Fatalf("mid-queue rest should get default duration=%d, got %v", defaultRestDurationSec, got[1].Params["duration"])
 	}
 }
 
 func TestFillDefaultTimeToStopForRest_KeepsExisting(t *testing.T) {
 	actions := []plannedAction{
 		{Action: "speak", Params: map[string]any{"content": "hi"}},
-		{Action: "InteractSmartObject", Params: map[string]any{"interaction": "rest", "semantic_group": "bench", "time_to_stop": 900}},
+		{Action: "InteractSmartObject", Params: map[string]any{"interaction": "rest", "semantic_group": "bench", "duration": 900}},
 		{Action: "work_shift", Params: map[string]any{"interaction": "assemble", "semantic_group": "workbench"}},
 	}
-	got := fillDefaultTimeToStopForRest(actions)
-	if v, ok := got[1].Params["time_to_stop"]; !ok || v != 900 {
-		t.Fatalf("existing time_to_stop should be preserved, got %v", got[1].Params["time_to_stop"])
+	got := fillDefaultDurationForRest(actions)
+	if v, ok := got[1].Params["duration"]; !ok || v != 900 {
+		t.Fatalf("existing duration should be preserved, got %v", got[1].Params["duration"])
 	}
 }
 
@@ -1229,9 +1229,9 @@ func TestFillDefaultTimeToStopForRest_TailRestUntouched(t *testing.T) {
 		{Action: "work_shift", Params: map[string]any{"interaction": "assemble", "semantic_group": "workbench"}},
 		{Action: "InteractSmartObject", Params: map[string]any{"interaction": "rest", "semantic_group": "bench"}},
 	}
-	got := fillDefaultTimeToStopForRest(actions)
-	if _, ok := got[2].Params["time_to_stop"]; ok {
-		t.Fatalf("tail rest should stay without time_to_stop, got %v", got[2].Params)
+	got := fillDefaultDurationForRest(actions)
+	if _, ok := got[2].Params["duration"]; ok {
+		t.Fatalf("tail rest should stay without duration, got %v", got[2].Params)
 	}
 }
 
@@ -1241,10 +1241,10 @@ func TestFillDefaultTimeToStopForRest_NonRestUntouched(t *testing.T) {
 		{Action: "work_shift", Params: map[string]any{"interaction": "assemble", "semantic_group": "workbench"}},
 		{Action: "InteractSmartObject", Params: map[string]any{"interaction": "charge", "semantic_group": "charger"}},
 	}
-	got := fillDefaultTimeToStopForRest(actions)
+	got := fillDefaultDurationForRest(actions)
 	for i, a := range got {
-		if _, ok := a.Params["time_to_stop"]; ok {
-			t.Fatalf("non-rest action %d should not get time_to_stop, got %v", i, a.Params)
+		if _, ok := a.Params["duration"]; ok {
+			t.Fatalf("non-rest action %d should not get duration, got %v", i, a.Params)
 		}
 	}
 }
@@ -1253,23 +1253,23 @@ func TestFillDefaultTimeToStopForRest_SingleActionNoop(t *testing.T) {
 	actions := []plannedAction{
 		{Action: "InteractSmartObject", Params: map[string]any{"interaction": "rest", "semantic_group": "bench"}},
 	}
-	got := fillDefaultTimeToStopForRest(actions)
-	if _, ok := got[0].Params["time_to_stop"]; ok {
+	got := fillDefaultDurationForRest(actions)
+	if _, ok := got[0].Params["duration"]; ok {
 		t.Fatalf("single-action queue should be a no-op, got %v", got[0].Params)
 	}
 }
 
-// ─── fillDefaultTimeToStopForWork ────────────────────────────
+// ─── fillDefaultDurationForWork ────────────────────────────
 
 func TestFillDefaultTimeToStopForWork_MidQueueWorkGetsDefault(t *testing.T) {
 	actions := []plannedAction{
 		{Action: "speak", Params: map[string]any{"content": "hi"}},
 		{Action: "work_shift", Params: map[string]any{"interaction": "assemble", "semantic_group": "workbench"}},
-		{Action: "InteractSmartObject", Params: map[string]any{"interaction": "rest", "semantic_group": "bench", "time_to_stop": 900}},
+		{Action: "InteractSmartObject", Params: map[string]any{"interaction": "rest", "semantic_group": "bench", "duration": 900}},
 	}
-	got := fillDefaultTimeToStopForWork(actions)
-	if v, ok := got[1].Params["time_to_stop"]; !ok || v != defaultWorkTimeToStopSec {
-		t.Fatalf("mid-queue work should get default time_to_stop=%d, got %v", defaultWorkTimeToStopSec, got[1].Params["time_to_stop"])
+	got := fillDefaultDurationForWork(actions)
+	if v, ok := got[1].Params["duration"]; !ok || v != defaultWorkDurationSec {
+		t.Fatalf("mid-queue work should get default duration=%d, got %v", defaultWorkDurationSec, got[1].Params["duration"])
 	}
 }
 
@@ -1279,21 +1279,21 @@ func TestFillDefaultTimeToStopForWork_InteractWorkGetsDefault(t *testing.T) {
 		{Action: "InteractSmartObject", Params: map[string]any{"interaction": "sort_cargo", "semantic_group": "sorting_conveyor"}},
 		{Action: "InteractSmartObject", Params: map[string]any{"interaction": "rest", "semantic_group": "bench"}},
 	}
-	got := fillDefaultTimeToStopForWork(actions)
-	if v, ok := got[1].Params["time_to_stop"]; !ok || v != defaultWorkTimeToStopSec {
-		t.Fatalf("mid-queue InteractSmartObject work should get default time_to_stop, got %v", got[1].Params["time_to_stop"])
+	got := fillDefaultDurationForWork(actions)
+	if v, ok := got[1].Params["duration"]; !ok || v != defaultWorkDurationSec {
+		t.Fatalf("mid-queue InteractSmartObject work should get default duration, got %v", got[1].Params["duration"])
 	}
 }
 
 func TestFillDefaultTimeToStopForWork_KeepsExisting(t *testing.T) {
 	actions := []plannedAction{
 		{Action: "speak", Params: map[string]any{"content": "hi"}},
-		{Action: "work_shift", Params: map[string]any{"interaction": "assemble", "semantic_group": "workbench", "time_to_stop": 7200}},
+		{Action: "work_shift", Params: map[string]any{"interaction": "assemble", "semantic_group": "workbench", "duration": 7200}},
 		{Action: "work_shift", Params: map[string]any{"interaction": "assemble", "semantic_group": "workbench"}},
 	}
-	got := fillDefaultTimeToStopForWork(actions)
-	if v, ok := got[1].Params["time_to_stop"]; !ok || v != 7200 {
-		t.Fatalf("existing time_to_stop should be preserved, got %v", got[1].Params["time_to_stop"])
+	got := fillDefaultDurationForWork(actions)
+	if v, ok := got[1].Params["duration"]; !ok || v != 7200 {
+		t.Fatalf("existing duration should be preserved, got %v", got[1].Params["duration"])
 	}
 }
 
@@ -1303,9 +1303,9 @@ func TestFillDefaultTimeToStopForWork_TailWorkUntouched(t *testing.T) {
 		{Action: "InteractSmartObject", Params: map[string]any{"interaction": "rest", "semantic_group": "bench"}},
 		{Action: "work_shift", Params: map[string]any{"interaction": "assemble", "semantic_group": "workbench"}},
 	}
-	got := fillDefaultTimeToStopForWork(actions)
-	if _, ok := got[2].Params["time_to_stop"]; ok {
-		t.Fatalf("tail work should stay without time_to_stop, got %v", got[2].Params)
+	got := fillDefaultDurationForWork(actions)
+	if _, ok := got[2].Params["duration"]; ok {
+		t.Fatalf("tail work should stay without duration, got %v", got[2].Params)
 	}
 }
 
@@ -1315,10 +1315,10 @@ func TestFillDefaultTimeToStopForWork_NonWorkUntouched(t *testing.T) {
 		{Action: "InteractSmartObject", Params: map[string]any{"interaction": "rest", "semantic_group": "bench"}},
 		{Action: "surf_internet", Params: map[string]any{"interaction": "surf_internet", "semantic_group": "computer"}},
 	}
-	got := fillDefaultTimeToStopForWork(actions)
+	got := fillDefaultDurationForWork(actions)
 	for i, a := range got {
-		if _, ok := a.Params["time_to_stop"]; ok {
-			t.Fatalf("non-work action %d should not get time_to_stop, got %v", i, a.Params)
+		if _, ok := a.Params["duration"]; ok {
+			t.Fatalf("non-work action %d should not get duration, got %v", i, a.Params)
 		}
 	}
 }
@@ -1342,8 +1342,8 @@ func TestFallbackRetryActions(t *testing.T) {
 	if acts[1].Params["behavior"] != "look_around" {
 		t.Errorf("generic_act behavior should be look_around, got %v", acts[1].Params["behavior"])
 	}
-	if v, ok := acts[1].Params["time_to_stop"]; !ok || v != 30 {
-		t.Errorf("generic_act should have 30s time_to_stop, got %v", acts[1].Params["time_to_stop"])
+	if v, ok := acts[1].Params["duration"]; !ok || v != 30 {
+		t.Errorf("generic_act should have 30s duration, got %v", acts[1].Params["duration"])
 	}
 }
 

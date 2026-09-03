@@ -364,7 +364,7 @@ func TestClearForSlotSwitch(t *testing.T) {
 	}
 }
 
-// TestClearInFlightKeepQueue verifies the time_to_stop segment-switch path:
+// TestClearInFlightKeepQueue verifies the duration segment-switch path:
 // in-flight action is dropped (stash saved), but the queue and currentSlot
 // are preserved so popAndSendQueueAction can continue with the next segment
 // of a multi-segment plan (work → rest → work).

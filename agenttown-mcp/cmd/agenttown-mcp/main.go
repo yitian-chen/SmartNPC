@@ -1150,9 +1150,9 @@ func (a *agentContext) popAndSendQueueAction(ctx context.Context, agentID string
 		}
 	}
 
-	// time_to_stop 是 MCP 侧控制字段（长动作定时终止），不传给 UE。
-	tts, hasTTS := numericParam(pa.Params["time_to_stop"])
-	delete(params, "time_to_stop")
+	// duration 是 MCP 侧控制字段（非瞬时动作的持续时长），不传给 UE。
+	tts, hasTTS := numericParam(pa.Params["duration"])
+	delete(params, "duration")
 
 	logger.Info("[战术层] 下发 action", "agent_id", agentID, "action", pa.Action, "cmd", cmd, "queue_left", a.queueLen())
 	ack, err := ws.SendAction(ctx, agentID, cmd, params, shouldAutoQueue(cmd))

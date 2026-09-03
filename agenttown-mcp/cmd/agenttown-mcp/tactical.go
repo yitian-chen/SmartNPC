@@ -168,8 +168,8 @@ func generateTacticalPlan(
 	if len(actions) == 0 {
 		return nil, fmt.Errorf("tactical plan has no actions (raw=%s)", truncateText(raw, 200))
 	}
-	actions = fillDefaultTimeToStopForRest(actions)
-	actions = fillDefaultTimeToStopForWork(actions)
+	actions = fillDefaultDurationForRest(actions)
+	actions = fillDefaultDurationForWork(actions)
 	actionsJSON, _ := json.Marshal(actions)
 	logger.Info("[战术层] 分解成功",
 		"agent_id", agentID, "steps", len(actions),
@@ -177,15 +177,15 @@ func generateTacticalPlan(
 	return actions, nil
 }
 
-// defaultRestTimeToStopSec 是非队尾休息类动作的默认 time_to_stop（30 分钟）。
-// LLM 常给工作段设 time_to_stop 却给中间的"长椅休息"漏设，导致休息段自然
+// defaultRestDurationSec 是非队尾休息类动作的默认 duration（30 分钟）。
+// LLM 常给工作段设 duration 却给中间的"长椅休息"漏设，导致休息段自然
 // 持续到 slot 切换、卡住后续工作动作。此处为兜底，不依赖 LLM 自觉。
-const defaultRestTimeToStopSec = 1800
+const defaultRestDurationSec = 1800
 
-// fillDefaultTimeToStopForRest 给队列中"非队尾的休息类动作"补齐默认
-// time_to_stop（30 分钟）。只处理 InteractSmartObject + interaction=rest
+// fillDefaultDurationForRest 给队列中"非队尾的休息类动作"补齐默认
+// duration（30 分钟）。只处理 InteractSmartObject + interaction=rest
 // （长椅休息）；队尾动作保持不设（自然持续到时段切换）。
-func fillDefaultTimeToStopForRest(actions []plannedAction) []plannedAction {
+func fillDefaultDurationForRest(actions []plannedAction) []plannedAction {
 	if len(actions) < 2 {
 		return actions
 	}
@@ -194,13 +194,13 @@ func fillDefaultTimeToStopForRest(actions []plannedAction) []plannedAction {
 		if a.Action != "InteractSmartObject" || !paramIs(a.Params, "interaction", "rest") {
 			continue
 		}
-		if _, ok := a.Params["time_to_stop"]; ok {
+		if _, ok := a.Params["duration"]; ok {
 			continue
 		}
 		if a.Params == nil {
 			a.Params = map[string]any{}
 		}
-		a.Params["time_to_stop"] = defaultRestTimeToStopSec
+		a.Params["duration"] = defaultRestDurationSec
 	}
 	return actions
 }
@@ -228,17 +228,17 @@ func fallbackRetryActions() []plannedAction {
 			"content": "网络波动了，我稍等一下，正在重试……",
 		}},
 		{Action: "generic_act", Params: map[string]any{
-			"behavior":     "look_around",
-			"thought":      "网络波动，原地观察等待重试",
-			"time_to_stop": 30,
+			"behavior": "look_around",
+			"thought":  "网络波动，原地观察等待重试",
+			"duration": 30,
 		}},
 	}
 }
 
-// defaultWorkTimeToStopSec 是非队尾工作动作的默认 time_to_stop（90 分钟）。
-// LLM 偶尔会给中间的工作段漏设 time_to_stop，使其自然持续到 slot 切换、
+// defaultWorkDurationSec 是非队尾工作动作的默认 duration（90 分钟）。
+// LLM 偶尔会给中间的工作段漏设 duration，使其自然持续到 slot 切换、
 // 卡住后续动作。此处兜底，不依赖 LLM 自觉。
-const defaultWorkTimeToStopSec = 5400
+const defaultWorkDurationSec = 5400
 
 // workInteractions 是六种工种的交互动词（含 InteractSmartObject 直接工作）。
 var workInteractions = map[string]bool{
@@ -266,9 +266,9 @@ func isWorkAction(a *plannedAction) bool {
 	return workInteractions[inter]
 }
 
-// fillDefaultTimeToStopForWork 给队列中"非队尾的工作类动作"补齐默认
-// time_to_stop（90 分钟）。队尾动作保持不设（自然持续到时段切换）。
-func fillDefaultTimeToStopForWork(actions []plannedAction) []plannedAction {
+// fillDefaultDurationForWork 给队列中"非队尾的工作类动作"补齐默认
+// duration（90 分钟）。队尾动作保持不设（自然持续到时段切换）。
+func fillDefaultDurationForWork(actions []plannedAction) []plannedAction {
 	if len(actions) < 2 {
 		return actions
 	}
@@ -277,13 +277,13 @@ func fillDefaultTimeToStopForWork(actions []plannedAction) []plannedAction {
 		if !isWorkAction(a) {
 			continue
 		}
-		if _, ok := a.Params["time_to_stop"]; ok {
+		if _, ok := a.Params["duration"]; ok {
 			continue
 		}
 		if a.Params == nil {
 			a.Params = map[string]any{}
 		}
-		a.Params["time_to_stop"] = defaultWorkTimeToStopSec
+		a.Params["duration"] = defaultWorkDurationSec
 	}
 	return actions
 }
@@ -359,9 +359,9 @@ func tacticalToolsFromRegistry(registry *CapabilityRegistry, agentID string) []v
 // capabilityParamsSchema 把 CapabilityParam 列表转成 function calling 的
 // parameters JSON Schema（object 类型）。不包含 MCP 侧 meta 字段
 // （agent_id/decision_epoch）——function calling 的参数就是 UE cmd 的参数。
-// 额外追加一个可选的 time_to_stop（秒，MCP 侧控制字段，长动作定时终止），
-// 但 social_chat 除外——它是"挂起直到对话结束"的复合动作，time_to_stop
-// 到点会被 worker 打断对话，语义不适用。
+// 额外追加一个可选的 duration（秒，MCP 侧控制字段，长动作定时终止），
+// 但 social_chat 除外——它是"挂起直到对话结束"的复合动作，duration 到点
+// 会被 worker 打断对话，语义不适用。
 func capabilityParamsSchema(params []protocol.CapabilityParam, name string) json.RawMessage {
 	props := map[string]any{}
 	required := make([]string, 0, len(params))
@@ -385,13 +385,13 @@ func capabilityParamsSchema(params []protocol.CapabilityParam, name string) json
 			required = append(required, p.Name)
 		}
 	}
-	// time_to_stop：长动作定时终止（MCP 侧轮询 game_time，不传 UE）。
+	// duration：非瞬时动作的持续时长（秒，MCP 侧轮询 game_time，不传 UE）。
 	// 描述与 TacticalRules 规则 8 对齐：队列中间动作必须设，仅末段可不设。
-	// social_chat 不追加（对话挂起直到结束，time_to_stop 会打断对话）。
+	// social_chat 不追加（对话挂起直到结束，duration 会打断对话）。
 	if name != "social_chat" {
-		props["time_to_stop"] = map[string]any{
+		props["duration"] = map[string]any{
 			"type":        "number",
-			"description": "队列中间动作必须设置本参数（秒），到点后系统打断当前段并进入队列下一段；仅最后一个动作可不设，自然持续到时段切换。冥想/整理/上网等单段宜设 1800 秒左右，工作时长段可设 3600-7200",
+			"description": "该动作的持续时长（秒）。除最后一个动作外都必须设置，到点后系统打断当前段并进入队列下一段；仅最后一个动作可不设，自然持续到时段切换。冥想/整理/上网等单段宜设 1800 秒左右，工作时长段可设 3600-7200 秒；所有动作的 duration 总和应接近当前时段剩余时长。",
 		}
 	}
 	schema := map[string]any{
