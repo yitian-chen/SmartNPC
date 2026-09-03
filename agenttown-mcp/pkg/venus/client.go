@@ -143,10 +143,11 @@ func (c *Client) SendStreaming(ctx context.Context, system, user string, onDelta
 }
 
 // SendStreamingTools is SendStreaming plus a `tools` array (function calling).
-// onDelta receives text deltas (may be empty in pure tool-calling); onToolCall
-// receives each completed tool_call as soon as its streamed fragments are
-// complete (by index transition or stream end), so callers can dispatch the
-// first action before the stream finishes.
+// onDelta receives text deltas AND tool-call argument fragments (so pure
+// tool-calling streams still yield per-token callbacks for latency metrics);
+// onToolCall receives each completed tool_call as soon as its streamed
+// fragments are complete (by index transition or stream end), so callers can
+// dispatch the first action before the stream finishes.
 func (c *Client) SendStreamingTools(ctx context.Context, system, user string, tools []Tool, onDelta func(delta string), onToolCall func(llmtypes.ToolCall)) (*llmtypes.Response, error) {
 	c.sendMu.Lock()
 	defer c.sendMu.Unlock()
@@ -464,6 +465,13 @@ func (c *Client) parseStream(r io.Reader, onDelta func(string), onToolCall func(
 					tc.Function.Name = dtc.Function.Name
 				}
 				tc.Function.Arguments += dtc.Function.Arguments
+				// 把 arguments 分片也投递给 onDelta：纯 tool-calling 的
+				// 战术层（tool_choice=required）流式输出只有 delta.tool_calls、
+				// 没有 delta.content，若不在此投递，onDelta 收不到任何 token，
+				// TTFT/ITL 等流式指标采集为空。
+				if dtc.Function.Arguments != "" && onDelta != nil {
+					onDelta(dtc.Function.Arguments)
+				}
 			}
 		}
 		// Usage may appear in the final chunk (if stream_options.include_usage=true).

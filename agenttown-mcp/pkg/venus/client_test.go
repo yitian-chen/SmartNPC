@@ -697,6 +697,50 @@ func TestSendLoopStreaming_AccumulatesToolCallsWithUsage(t *testing.T) {
 	}
 }
 
+// TestSendStreamingTools_ArgumentFragmentsTriggerOnDelta 钉死修复：纯
+// tool-calling（tool_choice=required，无 delta.content）流式下，onDelta 仍
+// 要收到 tool_calls 的 arguments 分片——否则 TTFT/ITL 等流式指标采集为空。
+func TestSendStreamingTools_ArgumentFragmentsTriggerOnDelta(t *testing.T) {
+	mkChunk := func(delta map[string]any) string {
+		chunk := map[string]any{
+			"id":      "s1",
+			"choices": []any{map[string]any{"delta": delta}},
+		}
+		b, _ := json.Marshal(chunk)
+		return "data: " + string(b) + "\n\n"
+	}
+	sse := "" +
+		mkChunk(map[string]any{"tool_calls": []any{map[string]any{
+			"index": 0, "id": "call_1", "type": "function",
+			"function": map[string]any{"name": "speak", "arguments": `{"content":"`},
+		}}}) +
+		mkChunk(map[string]any{"tool_calls": []any{map[string]any{
+			"index":    0,
+			"function": map[string]any{"arguments": `hi"}`},
+		}}}) +
+		"data: [DONE]\n\n"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(sse))
+	}))
+	defer server.Close()
+
+	c := newTestClient(t, server.URL)
+	var deltas []string
+	if _, err := c.SendStreamingTools(context.Background(), "sys", "user",
+		[]Tool{{Type: "function", Function: ToolFunction{Name: "speak"}}},
+		func(d string) { deltas = append(deltas, d) }, nil); err != nil {
+		t.Fatalf("SendStreamingTools: %v", err)
+	}
+	if len(deltas) != 2 {
+		t.Fatalf("onDelta calls = %d, want 2 (two argument fragments)", len(deltas))
+	}
+	if deltas[0] != `{"content":"` || deltas[1] != `hi"}` {
+		t.Errorf("deltas = %q, want argument fragments", deltas)
+	}
+}
+
 // TestResetSession_NoOp verifies ResetSession is a safe no-op.
 func TestResetSession_NoOp(t *testing.T) {
 	c := newTestClient(t, "http://example.invalid")
