@@ -8,11 +8,11 @@ import (
 	"strings"
 
 	"github.com/AgentTown/agenttown-mcp/adapters/agenttown/tools"
+	"github.com/AgentTown/agenttown-mcp/contract/protocol"
 	"github.com/AgentTown/agenttown-mcp/pkg/agentstate"
 	"github.com/AgentTown/agenttown-mcp/pkg/llmtypes"
 	"github.com/AgentTown/agenttown-mcp/pkg/profile"
 	"github.com/AgentTown/agenttown-mcp/pkg/prompt"
-	"github.com/AgentTown/agenttown-mcp/contract/protocol"
 	"github.com/AgentTown/agenttown-mcp/pkg/venus"
 	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
 )
@@ -190,12 +190,18 @@ func generateTacticalPlan(
 		"tool_calls", len(resp.ToolCalls))
 
 	if len(resp.ToolCalls) == 0 {
+		llmMetricsCollector.RecordJSON("tactical", false)
 		return nil, fmt.Errorf("tactical plan has no tool calls (raw=%s)", truncateText(raw, 200))
 	}
 	actions := parseToolCalls(resp.ToolCalls, registry, agentID)
 	if len(actions) == 0 {
+		llmMetricsCollector.RecordJSON("tactical", false)
 		return nil, fmt.Errorf("tactical plan has no actions (raw=%s)", truncateText(raw, 200))
 	}
+	// JSON 正确率埋点：agenticTurn 成功后（LLM 已返回 tool_calls）按
+	// parseToolCalls 结果记 ok。venus 层的坏 JSON（4001）已在 agenticTurn
+	// 记作 bad_json_4001 错误类别，此处只记 MCP 层解析结果。
+	llmMetricsCollector.RecordJSON("tactical", true)
 	actions = fillDefaultDurationForRest(actions)
 	actions = fillDefaultDurationForWork(actions)
 	actionsJSON, _ := json.Marshal(actions)

@@ -3,7 +3,7 @@
 // 每个 NPC 每天的战略/战术/对话三层共用一份会话历史（AgentState.
 // conversation）：每次 LLM 调用（无论哪层）以 [system, ...历史, 本次 user]
 // 发送，成功后把 user + assistant 两条消息追加进历史；跨日
-//（detectDayRollover）清空历史重新开始，跨日记忆走既有 generateDailyMemories
+// （detectDayRollover）清空历史重新开始，跨日记忆走既有 generateDailyMemories
 // → 昨日总结注入次日战略轮 user 内容。
 //
 // 各层差异收敛为 agenticTurn 的三个参数：
@@ -24,8 +24,10 @@ import (
 	"fmt"
 	"log/slog"
 	"math/rand/v2"
+	"strings"
 	"time"
 
+	"github.com/AgentTown/agenttown-mcp/pkg/llmmetrics"
 	"github.com/AgentTown/agenttown-mcp/pkg/llmtypes"
 	"github.com/AgentTown/agenttown-mcp/pkg/profile"
 	"github.com/AgentTown/agenttown-mcp/pkg/prompt"
@@ -72,7 +74,38 @@ func (a *agentContext) agenticTurn(ctx context.Context, hc llmClient, kb *worldk
 		tools = tacticalToolsFromRegistry(capabilityRegistryRef, agentID)
 	}
 
-	resp, err := hc.SendLoop(ctx, messages, tools, toolChoice, schemaName, schema)
+	// 流式采集（仅战术层 + --tactical-stream）：非流式只能测 E2E，流式才能
+	// 测 TTFT/TPOT/ITL。onDelta 在 venus.parseStream 内同步回调，时间戳即
+	// token 到达时刻。
+	streaming := tacticalStreamingEnabled && layer == "tactical"
+	t0 := time.Now()
+	var (
+		ttft    time.Duration
+		itls    []time.Duration
+		lastTok time.Time
+	)
+	onDelta := func(delta string) {
+		if delta == "" {
+			return
+		}
+		now := time.Now()
+		if ttft == 0 {
+			ttft = now.Sub(t0)
+			lastTok = now
+			return
+		}
+		itls = append(itls, now.Sub(lastTok))
+		lastTok = now
+	}
+	send := func() (*llmtypes.Response, error) {
+		if streaming {
+			return hc.SendLoopStreaming(ctx, messages, tools, toolChoice, schemaName, schema, onDelta, nil)
+		}
+		return hc.SendLoop(ctx, messages, tools, toolChoice, schemaName, schema)
+	}
+
+	resp, err := send()
+	retries := 0
 	for attempt := 1; err != nil && attempt <= maxTacticalRetries; attempt++ {
 		if isVenusErrorCode(err, "4001") {
 			// LLM 输出坏 JSON：立即重试相同请求体，重采样即修复。
@@ -95,10 +128,35 @@ func (a *agentContext) agenticTurn(ctx context.Context, hc llmClient, kb *worldk
 			// 超时/连接/其他错误不重试。
 			break
 		}
-		resp, err = hc.SendLoop(ctx, messages, tools, toolChoice, schemaName, schema)
+		retries = attempt
+		resp, err = send()
 	}
 	// 实际 prompt 文档：记录 H-01 最新一次该层请求体完整 JSON（无论成败）。
 	dumpLastRequestBody(agentID, layer, hc, logger)
+
+	// 指标埋点：E2E/TTFT/TPOT/ITL/错误分类/重试（无论成败都采集）。
+	e2e := time.Since(t0)
+	var tpot time.Duration
+	var outputTokens int
+	if resp != nil {
+		outputTokens = resp.Usage.OutputTokens
+		if ttft > 0 && outputTokens > 1 {
+			tpot = (e2e - ttft) / time.Duration(outputTokens-1)
+		}
+	}
+	llmMetricsCollector.RecordCall(llmmetrics.CallSample{
+		Layer:        layer,
+		E2E:          e2e,
+		TTFT:         ttft,
+		TPOT:         tpot,
+		ITLs:         itls,
+		OutputTokens: outputTokens,
+		ErrClass:     classifyLLMError(err),
+		Retried:      retries > 0,
+		RetryCount:   retries,
+	})
+	dumpLLMMetrics(logger)
+
 	if err != nil {
 		return nil, err
 	}
@@ -132,3 +190,30 @@ const pendingToolResult = "result=pending"
 // rateLimitBackoffBase 是 429 限流重试的退避基础时长（实际退避 = base +
 // [0, 3/4·base) 随机抖动）。包级变量便于测试临时调小加速。
 var rateLimitBackoffBase = 2 * time.Second
+
+// classifyLLMError 把一次 LLM 调用的最终错误映射到指标错误类别。复用
+// 战术层的 isVenusErrorCode / isRateLimited 分类，再按错误文本区分超时/
+// HTTP/网络/其他。
+func classifyLLMError(err error) string {
+	if err == nil {
+		return llmmetrics.ErrSuccess
+	}
+	if isVenusErrorCode(err, "4001") {
+		return llmmetrics.ErrBadJSON4001
+	}
+	if isRateLimited(err) {
+		return llmmetrics.ErrRateLimited
+	}
+	s := err.Error()
+	if strings.Contains(s, "context deadline exceeded") || strings.Contains(s, "timeout") {
+		return llmmetrics.ErrTimeout
+	}
+	if strings.Contains(s, "venus status") {
+		return llmmetrics.ErrHTTPError
+	}
+	if strings.Contains(s, "connection refused") || strings.Contains(s, "connection reset") ||
+		strings.Contains(s, "no such host") || strings.Contains(s, "dial tcp") {
+		return llmmetrics.ErrNetwork
+	}
+	return llmmetrics.ErrOther
+}

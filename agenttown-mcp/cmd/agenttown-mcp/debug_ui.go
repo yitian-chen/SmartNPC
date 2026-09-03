@@ -22,8 +22,9 @@ import (
 	"strings"
 
 	"github.com/AgentTown/agenttown-mcp/adapters/agenttown/tools"
-	"github.com/AgentTown/agenttown-mcp/internal/log"
 	"github.com/AgentTown/agenttown-mcp/contract/protocol"
+	"github.com/AgentTown/agenttown-mcp/internal/log"
+	"github.com/AgentTown/agenttown-mcp/pkg/llmmetrics"
 	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
 )
 
@@ -212,6 +213,21 @@ func handleDebugUEErrors(w http.ResponseWriter, r *http.Request, logger *slog.Lo
 	}
 	if err := json.NewEncoder(w).Encode(entries); err != nil {
 		logger.Warn("[debug/ue-errors] encode failed", "err", err)
+	}
+}
+
+// handleDebugLLMMetrics 返回 LLM 调用表现聚合指标（各层 E2E/TTFT/TPOT/ITL
+// 分位数、错误分布、重试率、JSON 正确率），供更换推理服务端前后对比。
+// 数据源是进程级 llmMetricsCollector（agenticTurn / generateTacticalPlan 写入）。
+func handleDebugLLMMetrics(w http.ResponseWriter, r *http.Request, logger *slog.Logger) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+	rep := llmMetricsCollector.Snapshot()
+	if rep.Layers == nil {
+		rep.Layers = map[string]*llmmetrics.LayerReport{}
+	}
+	if err := json.NewEncoder(w).Encode(rep); err != nil {
+		logger.Warn("[debug/llm-metrics] encode failed", "err", err)
 	}
 }
 

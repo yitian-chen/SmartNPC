@@ -67,6 +67,10 @@ func (f *fakeStrategicCaller) SendLoop(_ context.Context, messages []llmtypes.Me
 	return f.resp, f.err
 }
 
+func (f *fakeStrategicCaller) SendLoopStreaming(_ context.Context, messages []llmtypes.Message, _ []venus.Tool, _, schemaName string, _ []byte, _ func(string), _ func(llmtypes.ToolCall)) (*llmtypes.Response, error) {
+	return f.SendLoop(context.Background(), messages, nil, "", schemaName, nil)
+}
+
 func (f *fakeStrategicCaller) ResetSession() { f.resetCalled = true }
 
 // makeStrategicResponse 构造一个 ExtractText 能提取出 text 的 Response。
@@ -171,7 +175,6 @@ func TestFormatDailyPlan_MultipleItems(t *testing.T) {
 		t.Errorf("got %q, want %q", got, want)
 	}
 }
-
 
 // strategicCtxForTest 构造挂 fake 战略客户端的 agentContext（统一 agentic loop
 // 测试用）：as 为全新 AgentState（历史从空开始），strategicHc 接 fake。

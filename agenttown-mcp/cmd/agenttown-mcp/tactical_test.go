@@ -9,10 +9,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/AgentTown/agenttown-mcp/contract/protocol"
 	"github.com/AgentTown/agenttown-mcp/pkg/agentstate"
 	"github.com/AgentTown/agenttown-mcp/pkg/llmtypes"
 	"github.com/AgentTown/agenttown-mcp/pkg/prompt"
-	"github.com/AgentTown/agenttown-mcp/contract/protocol"
 	"github.com/AgentTown/agenttown-mcp/pkg/venus"
 	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
 )
@@ -394,7 +394,6 @@ func (s *sequenceCaller) next() (*llmtypes.Response, error) {
 	return nil, err
 }
 
-
 // tacticalCtxForTest 构造挂 fake 战术客户端的 agentContext（统一 agentic loop
 // 测试用）：as 为全新 AgentState，tacticalHc 接 fake（sequenceCaller 或
 // fakeStrategicCaller 均实现 llmClient）。
@@ -421,6 +420,9 @@ func (s *sequenceCaller) SendWithSchema(_ context.Context, _, _, _ string, _ []b
 	return s.next()
 }
 func (s *sequenceCaller) SendLoop(_ context.Context, _ []llmtypes.Message, _ []venus.Tool, _, _ string, _ []byte) (*llmtypes.Response, error) {
+	return s.next()
+}
+func (s *sequenceCaller) SendLoopStreaming(_ context.Context, _ []llmtypes.Message, _ []venus.Tool, _, _ string, _ []byte, _ func(string), _ func(llmtypes.ToolCall)) (*llmtypes.Response, error) {
 	return s.next()
 }
 func (s *sequenceCaller) ResetSession() { s.resetCount++ }

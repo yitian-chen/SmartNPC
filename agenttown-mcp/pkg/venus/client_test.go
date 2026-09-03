@@ -644,6 +644,59 @@ func TestSendStreamingTools_AccumulatesToolCalls(t *testing.T) {
 	}
 }
 
+// TestSendLoopStreaming_AccumulatesToolCallsWithUsage verifies the streaming
+// loop variant carries tool_calls and usage back into the Response, and that
+// the request body sets stream + stream_options.include_usage.
+func TestSendLoopStreaming_AccumulatesToolCallsWithUsage(t *testing.T) {
+	var capturedReq struct {
+		Stream        bool `json:"stream"`
+		StreamOptions struct {
+			IncludeUsage bool `json:"include_usage"`
+		} `json:"stream_options"`
+	}
+	mkChunk := func(delta map[string]any, finish string) string {
+		chunk := map[string]any{
+			"id":      "s1",
+			"choices": []any{map[string]any{"delta": delta, "finish_reason": finish}},
+		}
+		b, _ := json.Marshal(chunk)
+		return "data: " + string(b) + "\n\n"
+	}
+	sse := "" +
+		mkChunk(map[string]any{"tool_calls": []any{map[string]any{
+			"index": 0, "id": "call_1", "type": "function",
+			"function": map[string]any{"name": "speak", "arguments": `{"content":"hi"}`},
+		}}}, "") +
+		mkChunk(map[string]any{}, "tool_calls") +
+		"data: {\"id\":\"s1\",\"choices\":[],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":4,\"total_tokens\":14}}\n\n" +
+		"data: [DONE]\n\n"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&capturedReq)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(sse))
+	}))
+	defer server.Close()
+
+	c := newTestClient(t, server.URL)
+	resp, err := c.SendLoopStreaming(context.Background(),
+		[]llmtypes.Message{{Role: "system", Content: "s"}, {Role: "user", Content: "u"}},
+		[]Tool{{Type: "function", Function: ToolFunction{Name: "speak"}}},
+		"required", "", nil, nil, nil)
+	if err != nil {
+		t.Fatalf("SendLoopStreaming: %v", err)
+	}
+	if !capturedReq.Stream || !capturedReq.StreamOptions.IncludeUsage {
+		t.Errorf("request stream=%v include_usage=%v, want true/true", capturedReq.Stream, capturedReq.StreamOptions.IncludeUsage)
+	}
+	if len(resp.ToolCalls) != 1 || resp.ToolCalls[0].Function.Name != "speak" {
+		t.Errorf("resp.ToolCalls = %+v, want one speak call", resp.ToolCalls)
+	}
+	if resp.Usage.OutputTokens != 4 {
+		t.Errorf("Usage.OutputTokens = %d, want 4 (from include_usage chunk)", resp.Usage.OutputTokens)
+	}
+}
+
 // TestResetSession_NoOp verifies ResetSession is a safe no-op.
 func TestResetSession_NoOp(t *testing.T) {
 	c := newTestClient(t, "http://example.invalid")
@@ -709,6 +762,8 @@ func TestVenusClient_MatchesLLMClientSignatures(t *testing.T) {
 		SendWithSummaryTools(ctx context.Context, system, user string, tools []Tool) (*llmtypes.Response, error)
 		SendStreamingTools(ctx context.Context, system, user string, tools []Tool, onDelta func(string), onToolCall func(llmtypes.ToolCall)) (*llmtypes.Response, error)
 		SendMessagesTools(ctx context.Context, messages []llmtypes.Message, tools []Tool) (*llmtypes.Response, error)
+		SendLoop(ctx context.Context, messages []llmtypes.Message, tools []Tool, toolChoice, schemaName string, schema []byte) (*llmtypes.Response, error)
+		SendLoopStreaming(ctx context.Context, messages []llmtypes.Message, tools []Tool, toolChoice, schemaName string, schema []byte, onDelta func(string), onToolCall func(llmtypes.ToolCall)) (*llmtypes.Response, error)
 		ResetSession()
 	} = (*Client)(nil)
 }

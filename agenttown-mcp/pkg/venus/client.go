@@ -222,6 +222,25 @@ func (c *Client) SendLoop(ctx context.Context, messages []llmtypes.Message, tool
 	return c.doSend(ctx, toVenusMessages(messages), false, nil, nil, def, tools, toolChoice)
 }
 
+// SendLoopStreaming is SendLoop's streaming variant: identical messages/
+// tools/toolChoice/schema semantics, but stream:true with onDelta invoked
+// per text delta and onToolCall per completed tool_call. The returned
+// Response.ToolCalls is assembled identically to SendLoop's, so callers can
+// swap transport path without changing downstream parsing. Used by the
+// tactical layer under --tactical-stream to measure TTFT/TPOT/ITL.
+func (c *Client) SendLoopStreaming(ctx context.Context, messages []llmtypes.Message, tools []Tool, toolChoice, schemaName string, schema []byte, onDelta func(string), onToolCall func(llmtypes.ToolCall)) (*llmtypes.Response, error) {
+	c.sendMu.Lock()
+	defer c.sendMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	var def *JSONSchemaDef
+	if schemaName != "" {
+		def = &JSONSchemaDef{Name: schemaName, Strict: true, Schema: json.RawMessage(schema)}
+	}
+	return c.doSend(ctx, toVenusMessages(messages), true, onDelta, onToolCall, def, tools, toolChoice)
+}
+
 // systemUserMessages builds the default [system?, user] message pair.
 func systemUserMessages(system, user string) []message {
 	msgs := make([]message, 0, 2)
@@ -288,6 +307,10 @@ func (c *Client) doSend(ctx context.Context, msgs []message, stream bool, onDelt
 		Messages:  msgs,
 		Stream:    stream,
 		Tools:     tools,
+	}
+	if stream {
+		// 流式请求显式请求 usage，使最终 chunk 携带 token 计数（供 TPOT 计算）。
+		body.StreamOptions = &streamOptions{IncludeUsage: true}
 	}
 	// tool_choice: 显式传入优先（"required" / "none"）；未指定时仅在 tools
 	// 非空时默认 "required"（向后兼容：老调用方传 tools 必须能调工具）。
@@ -507,9 +530,17 @@ type request struct {
 	MaxTokens      int             `json:"max_tokens"`
 	Messages       []message       `json:"messages"`
 	Stream         bool            `json:"stream,omitempty"`
+	StreamOptions  *streamOptions  `json:"stream_options,omitempty"`
 	ResponseFormat *ResponseFormat `json:"response_format,omitempty"`
 	Tools          []Tool          `json:"tools,omitempty"`
 	ToolChoice     any             `json:"tool_choice,omitempty"`
+}
+
+// streamOptions requests token usage in the final streaming chunk. Without
+// it, streaming responses omit `usage`, so output-token counts (and thus
+// TPOT) are unavailable on the streaming path.
+type streamOptions struct {
+	IncludeUsage bool `json:"include_usage"`
 }
 
 // Tool is one entry in the OpenAI `tools` array (function calling).

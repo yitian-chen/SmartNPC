@@ -7,8 +7,10 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/AgentTown/agenttown-mcp/contract/protocol"
+	"github.com/AgentTown/agenttown-mcp/pkg/llmmetrics"
 )
 
 // TestHandleDebugUI_ReturnsHTML verifies /debug/ returns the embedded HTML page.
@@ -329,5 +331,50 @@ func TestMapDebugCmd_StopNotMatched(t *testing.T) {
 		if _, ok := mapDebugCmd(input, reg, agentID); ok {
 			t.Errorf("mapDebugCmd(%q) = ok; want false (stop is handled by special-case dispatch, not mapDebugCmd)", input)
 		}
+	}
+}
+
+// TestHandleDebugLLMMetrics verifies /debug/llm-metrics returns aggregated
+// LLM metrics as JSON with a non-nil layers map.
+func TestHandleDebugLLMMetrics(t *testing.T) {
+	llmMetricsCollector = llmmetrics.New() // reset 隔离
+	llmMetricsCollector.RecordCall(llmmetrics.CallSample{Layer: "tactical", E2E: 100 * time.Millisecond, ErrClass: llmmetrics.ErrSuccess})
+
+	req := httptest.NewRequest(http.MethodGet, "/debug/llm-metrics", nil)
+	rec := httptest.NewRecorder()
+	handleDebugLLMMetrics(rec, req, slog.Default())
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "application/json") {
+		t.Errorf("Content-Type = %q, want application/json", ct)
+	}
+	var rep llmmetrics.Report
+	if err := json.Unmarshal(rec.Body.Bytes(), &rep); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if rep.Layers == nil {
+		t.Fatal("layers should be non-nil (empty map, not null)")
+	}
+	lr := rep.Layers["tactical"]
+	if lr == nil || lr.Calls != 1 || lr.E2E.P50Ms != 100 {
+		t.Errorf("tactical layer = %+v, want calls=1 E2E.P50=100", lr)
+	}
+}
+
+// TestHandleDebugLLMMetrics_Empty verifies an empty collector encodes layers
+// as {} rather than null.
+func TestHandleDebugLLMMetrics_Empty(t *testing.T) {
+	llmMetricsCollector = llmmetrics.New()
+	req := httptest.NewRequest(http.MethodGet, "/debug/llm-metrics", nil)
+	rec := httptest.NewRecorder()
+	handleDebugLLMMetrics(rec, req, slog.Default())
+	var rep llmmetrics.Report
+	if err := json.Unmarshal(rec.Body.Bytes(), &rep); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if rep.Layers == nil {
+		t.Error("empty snapshot should encode layers as {} not null")
 	}
 }

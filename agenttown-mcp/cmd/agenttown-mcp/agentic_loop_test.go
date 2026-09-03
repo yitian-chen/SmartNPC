@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/AgentTown/agenttown-mcp/pkg/agentstate"
+	"github.com/AgentTown/agenttown-mcp/pkg/llmmetrics"
 	"github.com/AgentTown/agenttown-mcp/pkg/llmtypes"
 	"github.com/AgentTown/agenttown-mcp/pkg/venus"
 )
@@ -19,6 +20,7 @@ type fakeLoopLLM struct {
 	resp         *llmtypes.Response
 	err          error
 	errs         []error
+	streamDeltas []string // SendLoopStreaming 时依次回调 onDelta（模拟 token 到达）
 	capturedMsgs []llmtypes.Message
 	capturedTool []venus.Tool
 	capturedTC   string
@@ -53,6 +55,25 @@ func (f *fakeLoopLLM) SendLoop(_ context.Context, msgs []llmtypes.Message, tools
 	f.capturedSc = schemaName
 	// errs 队列：前 N 次调用依次返回预设错误（模拟 429/4001 后恢复），
 	// 耗尽后回落到 resp/err。
+	if len(f.errs) > 0 {
+		e := f.errs[0]
+		f.errs = f.errs[1:]
+		return nil, e
+	}
+	return f.resp, f.err
+}
+
+func (f *fakeLoopLLM) SendLoopStreaming(_ context.Context, msgs []llmtypes.Message, tools []venus.Tool, toolChoice, schemaName string, _ []byte, onDelta func(string), onToolCall func(llmtypes.ToolCall)) (*llmtypes.Response, error) {
+	f.calls++
+	f.capturedMsgs = append([]llmtypes.Message(nil), msgs...)
+	f.capturedTool = tools
+	f.capturedTC = toolChoice
+	f.capturedSc = schemaName
+	for _, d := range f.streamDeltas {
+		if onDelta != nil {
+			onDelta(d)
+		}
+	}
 	if len(f.errs) > 0 {
 		e := f.errs[0]
 		f.errs = f.errs[1:]
@@ -294,5 +315,88 @@ func TestAgenticTurn_TimeoutErrorNoRetry(t *testing.T) {
 	}
 	if fake.calls != 1 {
 		t.Errorf("SendLoop calls = %d, want 1 (timeout must not retry)", fake.calls)
+	}
+}
+
+// TestAgenticTurn_StreamingTacticalCollectsTTFT 验证 --tactical-stream 开启时
+// 战术层走 SendLoopStreaming，onDelta 回调采集 TTFT/ITL 样本写入 collector。
+func TestAgenticTurn_StreamingTacticalCollectsTTFT(t *testing.T) {
+	orig := tacticalStreamingEnabled
+	tacticalStreamingEnabled = true
+	defer func() { tacticalStreamingEnabled = orig }()
+	llmMetricsCollector = llmmetrics.New() // reset 全局 collector 隔离测试
+
+	as := agentstate.New()
+	as.SetIdentity("H-01", nil)
+	fake := &fakeLoopLLM{
+		resp:         makeToolCallResponse([]llmtypes.ToolCall{{Function: llmtypes.ToolFunction{Name: "speak", Arguments: `{"content":"hi"}`}}}),
+		streamDeltas: []string{"a", "b", "c"},
+	}
+	ac := &agentContext{as: as, tacticalHc: fake}
+
+	if _, err := ac.agenticTurn(context.Background(), fake, nil, nil, slog.Default(), "H-01",
+		"tactical", "分解请求", "required", "", nil); err != nil {
+		t.Fatalf("agenticTurn: %v", err)
+	}
+	if fake.calls != 1 {
+		t.Fatalf("calls = %d, want 1", fake.calls)
+	}
+	rep := llmMetricsCollector.Snapshot()
+	lr := rep.Layers["tactical"]
+	if lr == nil {
+		t.Fatal("tactical layer missing from metrics")
+	}
+	if lr.TTFT == nil || lr.ITL == nil {
+		t.Errorf("streaming tactical should collect TTFT/ITL, got %+v", lr)
+	}
+}
+
+// TestAgenticTurn_NonStreamingSkipsTTFT 验证非流式（默认）战术轮只采集 E2E，
+// 不采集 TTFT/ITL。
+func TestAgenticTurn_NonStreamingSkipsTTFT(t *testing.T) {
+	llmMetricsCollector = llmmetrics.New() // reset
+
+	as := agentstate.New()
+	as.SetIdentity("H-01", nil)
+	fake := &fakeLoopLLM{
+		resp: makeToolCallResponse([]llmtypes.ToolCall{{Function: llmtypes.ToolFunction{Name: "speak", Arguments: `{"content":"hi"}`}}}),
+	}
+	ac := &agentContext{as: as, tacticalHc: fake}
+
+	if _, err := ac.agenticTurn(context.Background(), fake, nil, nil, slog.Default(), "H-01",
+		"tactical", "分解请求", "required", "", nil); err != nil {
+		t.Fatalf("agenticTurn: %v", err)
+	}
+	rep := llmMetricsCollector.Snapshot()
+	lr := rep.Layers["tactical"]
+	if lr == nil {
+		t.Fatal("tactical layer missing from metrics")
+	}
+	if lr.TTFT != nil || lr.ITL != nil {
+		t.Errorf("non-streaming should not collect TTFT/ITL: %+v", lr)
+	}
+	if lr.E2E.P50Ms <= 0 {
+		t.Errorf("E2E should have a sample")
+	}
+}
+
+// TestClassifyLLMError 验证错误分类映射（复用 isVenusErrorCode/isRateLimited）。
+func TestClassifyLLMError(t *testing.T) {
+	cases := []struct {
+		err  error
+		want string
+	}{
+		{nil, llmmetrics.ErrSuccess},
+		{venusErr4001, llmmetrics.ErrBadJSON4001},
+		{errors.New(`venus status 429: {"error":{"code":"4029"}}`), llmmetrics.ErrRateLimited},
+		{errors.New(`http do: context deadline exceeded`), llmmetrics.ErrTimeout},
+		{errors.New(`venus status 500: internal`), llmmetrics.ErrHTTPError},
+		{errors.New(`dial tcp: connection refused`), llmmetrics.ErrNetwork},
+		{errors.New(`something unknown`), llmmetrics.ErrOther},
+	}
+	for _, c := range cases {
+		if got := classifyLLMError(c.err); got != c.want {
+			t.Errorf("classifyLLMError(%v) = %q, want %q", c.err, got, c.want)
+		}
 	}
 }

@@ -4,10 +4,10 @@ import (
 	"context"
 	"testing"
 
+	"github.com/AgentTown/agenttown-mcp/contract/protocol"
 	"github.com/AgentTown/agenttown-mcp/pkg/agentstate"
 	"github.com/AgentTown/agenttown-mcp/pkg/llmtypes"
 	"github.com/AgentTown/agenttown-mcp/pkg/prompt"
-	"github.com/AgentTown/agenttown-mcp/contract/protocol"
 	"github.com/AgentTown/agenttown-mcp/pkg/storage"
 	"github.com/AgentTown/agenttown-mcp/pkg/venus"
 	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
@@ -48,6 +48,10 @@ func (f *fakeDialogueLLM) SendMessagesTools(_ context.Context, _ []llmtypes.Mess
 }
 
 func (f *fakeDialogueLLM) SendLoop(_ context.Context, _ []llmtypes.Message, _ []venus.Tool, _, _ string, _ []byte) (*llmtypes.Response, error) {
+	return f.resp, f.err
+}
+
+func (f *fakeDialogueLLM) SendLoopStreaming(_ context.Context, _ []llmtypes.Message, _ []venus.Tool, _, _ string, _ []byte, _ func(string), _ func(llmtypes.ToolCall)) (*llmtypes.Response, error) {
 	return f.resp, f.err
 }
 
