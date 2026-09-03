@@ -78,7 +78,8 @@ graph TB
 ### 关键机制
 
 - **worker 循环**：`runPerceptionWorker` 监听 `wake` 信号，队列空时调 `tacticalRefill` → `selectCurrentGoal` → `generateTacticalPlan` → 填 `actionQueue` → `popAndSendQueueAction` 下发
-- **战术层 function calling 多轮对话**：`generateTacticalPlan` 用 `SendMessagesTools` 携带多轮历史（assistant tool_calls + tool 结果）。**不做滑动窗口截断**（已取消，原 8 轮截断会丢上下文导致目标漂移/重复动作），仅跨游戏日 `ClearConversation` 清空，单日内保留完整对话
+- **战术层 function calling 多轮对话**：`generateTacticalPlan` 经统一 agentic loop（`agenticTurn` → `SendLoop`）携带多轮历史（user/assistant tool_calls/占位 tool）。**不做滑动窗口截断**（已取消，原 8 轮截断会丢上下文导致目标漂移/重复动作），仅跨游戏日 `ClearConversation` 清空，单日内保留完整对话
+- **战术层 user prompt 首条全量 + 后续精简引用**：日内不变块（【全天日程】+ 完整分解规则）只在每天第一条战术 user 消息出现；同计划后续轮次省略两块、改为核心约束速览 + 引用行（`TacticalInput.Compact`，实测每条 2100→~900 字符，-57%）。判定与置位：`AgentState.tacticalHeaderPlan` 记录"最近成功注入全量头的计划字符串"（成功 agenticTurn 后、parse 之前置位），与当前 dailyPlan 比对——不等（跨日/日内重规划）即重新全量注入；`ClearConversation` 随历史一起重置。dailyPlan=="" 的 `/debug/schedule` 路径永不精简
 - **venus 4001 重试**：战术层 LLM 调用返回 4001（venus 校验 tools JSON 失败，LLM 输出坏 JSON）时以相同请求体重试，上限 3 次（`maxTacticalRetries`，`isVenusErrorCode` 匹配错误码）；超时/连接错误不重试，走兜底。实测重试后 4001 全部被救回
 - **多段动作计划 + time_to_stop**：LLM 一次返回 1-4 个动作段，段间设 `time_to_stop` 控制时长；到点 `ClearInFlightKeepQueue` 打断当前段、保留队列继续下一段；末段不设 time_to_stop 自然持续到时段切换
 - **time_to_stop 兜底**（不依赖 LLM 自觉）：`fillDefaultTimeToStopForRest` 给非队尾休息动作补 1800s、`fillDefaultTimeToStopForWork` 给非队尾工作动作补 5400s——防止中间动作漏设导致队列卡死（NPC 一直坐长椅/一直工作）
@@ -571,7 +572,7 @@ sequenceDiagram
 
 MCP 直连 Venus（OpenAI Chat Completions 协议）。战略层用 Structured Outputs（json_schema strict），战术层用 function calling（tools + tool_choice=required + 多轮历史）。三层各自构造完整 prompt：
 - **战略层**：每日 07:00 一次调用，`SendWithSchema` + `dailyPlanSchema`，输入 = `BuildSharedSystemPrompt`（共享 system prompt）+ user（物理状态/其他NPC/昨日总结/规则），输出 = 当日 plan JSON
-- **战术层**：每个时段开始时调用，`SendMessagesTools`，输入 = `BuildSharedSystemPrompt`（共享 system prompt）+ user（全天日程/当前时段目标/实时状态/规则），工具经 `tools` 字段下发，输出 = tool_calls（1-4 动作段）
+- **战术层**：每个时段开始时调用，统一 agentic loop（`SendLoop`，tool_choice=required），输入 = `BuildSharedSystemPrompt`（共享 system prompt）+ user。user prompt 首条全量（全天日程/当前时段目标/实时状态/完整规则），同计划后续轮次精简（省略日程与完整规则，速览+引用行，见"TacticalInput.Compact"），工具经 `tools` 字段下发，输出 = tool_calls（1-4 动作段）
 - **反应层**：触发时调本地 Ollama（5-8s 超时），输入 = `buildReactivePrompt(in)`（含角色/状态/在途动作/触发原因），输出 = `{"reaction": "...", "reason": "..."}`
 
 ### 感知格式化

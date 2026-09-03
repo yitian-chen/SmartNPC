@@ -8,8 +8,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/AgentTown/agenttown-mcp/pkg/llmtypes"
 	"github.com/AgentTown/agenttown-mcp/contract/protocol"
+	"github.com/AgentTown/agenttown-mcp/pkg/llmtypes"
 	"github.com/AgentTown/agenttown-mcp/pkg/storage"
 )
 
@@ -77,16 +77,22 @@ type AgentState struct {
 	// so callers (recordActionHistory) still record the full action row
 	// for long-composite actions interrupted by slot switch or replan
 	// fallback. One-shot: matched → cleared. Overwritten by next clear.
-	clearedAction      *clearedActionInfo
-	prevZone           string
-	prevObjectIDs      []string
-	lastReactiveAt     map[string]time.Time
-	perceptionCount    int
-	replanHint         string
+	clearedAction   *clearedActionInfo
+	prevZone        string
+	prevObjectIDs   []string
+	lastReactiveAt  map[string]time.Time
+	perceptionCount int
+	replanHint      string
 	// lastQueueOnlySpeak 记录最近一次战术层分解（ReplaceQueue 路径）的队列
 	// 是否只含 speak——用于 BeginTacticalRefill 在"队列提前耗尽"时生成
 	// 针对性 hint（LLM 只返回 1 个 speak、队列数秒即耗尽的场景）。
 	lastQueueOnlySpeak bool
+	// tacticalHeaderPlan 记录最近一次成功注入全量头（【全天日程】+完整
+	// 【分解规则】）的战术层 user 消息所用的 dailyPlan 字符串；空 = 当天
+	// 尚未注入过全量头。跨日 ClearConversation 时随会话历史一起重置。
+	// 与 dailyPlan 内容比对决定战术层 prompt 走全量还是精简引用。
+	// 瞬态：不持久化、不进 Snapshot（与 lastQueueOnlySpeak 同级）。
+	tacticalHeaderPlan string
 	lastReplanAt       time.Time
 	lastReplanGameTime string
 	// conversation is the multi-turn tactical dialogue history (system/
@@ -513,10 +519,32 @@ func (a *AgentState) Conversation() []llmtypes.Message {
 }
 
 // ClearConversation drops the multi-turn dialogue history (called on day
-// rollover so each game day starts a fresh conversation).
+// rollover so each game day starts a fresh conversation). The tactical
+// full-header marker goes with it: the header lived in the dropped history,
+// so the day's first tactical prompt must be full again.
 func (a *AgentState) ClearConversation() {
 	a.mu.Lock()
 	a.conversation = nil
+	a.tacticalHeaderPlan = ""
+	a.mu.Unlock()
+}
+
+// TacticalHeaderPlan returns the dailyPlan string carried by the last
+// full-header tactical user message appended to the conversation. Empty =
+// no full header in today's history (next tactical prompt must be full).
+func (a *AgentState) TacticalHeaderPlan() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.tacticalHeaderPlan
+}
+
+// SetTacticalHeaderPlan records the dailyPlan of the just-appended full-header
+// tactical user message. Caller: generateTacticalPlan, right after the
+// agenticTurn carrying the full prompt succeeded (the message is in history
+// by then). Transient, not persisted.
+func (a *AgentState) SetTacticalHeaderPlan(plan string) {
+	a.mu.Lock()
+	a.tacticalHeaderPlan = plan
 	a.mu.Unlock()
 }
 

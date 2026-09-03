@@ -197,7 +197,6 @@ func TestBuildTactical_VisibleAgentsInjected(t *testing.T) {
 	}
 }
 
-
 // TestBuildSharedSystemPrompt_NoTacticalRules verifies the shared system
 // prompt (injected verbatim into the tactical layer) carries the shared KB
 // modules but NOT the tactical decomposition rules or tool list — those live
@@ -297,5 +296,142 @@ func TestBuildTactical_PhysicalNoDuplicatePrefix(t *testing.T) {
 	}
 	if strings.Contains(out, "\n物理状态：") {
 		t.Errorf("in-line '物理状态：' prefix should be stripped under the segment header:\n%s", out)
+	}
+}
+
+// TestBuildTactical_CompactOmitsScheduleAndRules verifies the compact form
+// (Compact=true) drops the per-day-invariant blocks — 【全天日程】 and the
+// full TacticalRules — and replaces them with the core-rules digest plus the
+// reference line, while keeping the current-slot goal.
+func TestBuildTactical_CompactOmitsScheduleAndRules(t *testing.T) {
+	out := BuildTactical(TacticalInput{
+		Goal:      "主生产车间工作台装配",
+		Zone:      "main_workshop",
+		TimeOfDay: "08:00",
+		Slot:      "07:00-12:00",
+		DailyPlan: "07:00-12:00: 主生产车间工作台装配\n12:00-14:00: 中央广场长椅休息",
+		AgentID:   "H-01",
+		Compact:   true,
+	})
+	// 断言用段头形态 "【全天日程】\n"：引用行里合法出现 "【全天日程】段"
+	// 字样，不构成日程段本身。
+	if strings.Contains(out, "【全天日程】\n") {
+		t.Errorf("compact form should omit the full-day schedule:\n%s", out)
+	}
+	if strings.Contains(out, "中央广场长椅休息") {
+		t.Errorf("compact form should omit DailyPlan content:\n%s", out)
+	}
+	// 完整规则的独有片段不得出现（速览里没有这些措辞）。
+	if strings.Contains(out, "推荐模式：工作段") || strings.Contains(out, "仅当目标确实没有匹配的长复合动作") {
+		t.Errorf("compact form should omit the full TacticalRules:\n%s", out)
+	}
+	if !strings.Contains(out, "首个工具调用必须是 speak") {
+		t.Errorf("compact form should carry the core-rules digest:\n%s", out)
+	}
+	if !strings.Contains(out, "完整分解规则与全天日程见本日第一条战术分解指令") {
+		t.Errorf("compact form should carry the reference line:\n%s", out)
+	}
+	if !strings.Contains(out, "【当前时段目标】主生产车间工作台装配") {
+		t.Errorf("compact form should keep the current-slot goal:\n%s", out)
+	}
+}
+
+// TestBuildTactical_CompactKeepsPerTurnSegments verifies every per-turn
+// segment survives the compact form: slot duration hint, position/time,
+// physical state, memories, relationships, nearby NPCs, replan hint and the
+// physical-alert constraints.
+func TestBuildTactical_CompactKeepsPerTurnSegments(t *testing.T) {
+	out := BuildTactical(TacticalInput{
+		Goal:          "车间装配",
+		Zone:          "main_workshop",
+		TimeOfDay:     "08:00",
+		Slot:          "07:00-12:00",
+		AgentID:       "H-01",
+		Physical:      &protocol.PhysicalState{Energy: 5, Fatigue: 30, JointWear: 5},
+		Memories:      "- 完成了一次装配任务（event）",
+		Relationships: "H-02（老王）：熟悉度 3，好感 0",
+		Hint:          "物理状态告警：电量过低",
+		Compact:       true,
+		VisibleAgents: []protocol.VisibleAgent{
+			{ID: "H-02", Name: "老王", Distance: 5.0, CurrentAction: "sort_cargo"},
+		},
+	})
+	if !strings.Contains(out, "当前时段 07:00-12:00，剩余约 240 分钟") {
+		t.Errorf("compact form should keep the slot duration hint:\n%s", out)
+	}
+	if !strings.Contains(out, "你目前在：main_workshop，游戏时间 08:00。") {
+		t.Errorf("compact form should keep the position/time line:\n%s", out)
+	}
+	if !strings.Contains(out, "【物理状态】\n") {
+		t.Errorf("compact form should keep the physical segment:\n%s", out)
+	}
+	if !strings.Contains(out, "【过往经验】") || !strings.Contains(out, "完成了一次装配任务") {
+		t.Errorf("compact form should keep the memories segment:\n%s", out)
+	}
+	if !strings.Contains(out, "【人际关系】") || !strings.Contains(out, "熟悉度 3") {
+		t.Errorf("compact form should keep the relationships segment:\n%s", out)
+	}
+	if !strings.Contains(out, "【附近NPC】") || !strings.Contains(out, "老王（id=H-02）") {
+		t.Errorf("compact form should keep the nearby-NPC segment:\n%s", out)
+	}
+	if !strings.Contains(out, "【上次中断原因】物理状态告警") {
+		t.Errorf("compact form should keep the replan hint:\n%s", out)
+	}
+	if !strings.Contains(out, "【物理告警强制约束】") {
+		t.Errorf("compact form should keep the physical-alert constraints:\n%s", out)
+	}
+}
+
+// TestBuildTactical_CompactKeepsFourPartSkeleton verifies the compact form
+// preserves the 一/二/三/四 layout announced by the preamble — sections 1 and
+// 3 are slimmed, not removed, keeping the model's mental model stable.
+func TestBuildTactical_CompactKeepsFourPartSkeleton(t *testing.T) {
+	out := BuildTactical(TacticalInput{
+		Goal: "车间装配", Zone: "main_workshop", TimeOfDay: "08:00",
+		Slot: "07:00-12:00", AgentID: "H-01", Compact: true,
+	})
+	p1 := strings.Index(out, "一、全天任务与当前时段任务")
+	p2 := strings.Index(out, "二、NPC与环境实时状态")
+	p3 := strings.Index(out, "三、分解规则")
+	p4 := strings.Index(out, "四、任务")
+	if p1 < 0 || p2 < 0 || p3 < 0 || p4 < 0 {
+		t.Fatalf("compact form missing four-part skeleton (%d %d %d %d):\n%s", p1, p2, p3, p4, out)
+	}
+	if !(p1 < p2 && p2 < p3 && p3 < p4) {
+		t.Errorf("compact form part order wrong: %d %d %d %d", p1, p2, p3, p4)
+	}
+}
+
+// TestBuildTactical_PreambleRealNewline pins the preamble bug fix: the
+// backtick string used to carry a literal two-char `\n` instead of a real
+// newline, gluing the preamble onto the "一、" heading.
+func TestBuildTactical_PreambleRealNewline(t *testing.T) {
+	out := BuildTactical(TacticalInput{
+		Goal: "车间装配", Zone: "main_workshop", TimeOfDay: "08:00",
+		Slot: "07:00-12:00", AgentID: "H-01",
+	})
+	if strings.Contains(out, "\\n") {
+		t.Errorf("preamble should use a real newline, found literal backslash-n:\n%s", out)
+	}
+	if !strings.Contains(out, "按顺序执行。\n一、全天任务与当前时段任务") {
+		t.Errorf("preamble should end with a real newline before part 1:\n%s", out)
+	}
+}
+
+// TestBuildTactical_CompactIgnoresDailyPlanField pins the precedence: Compact
+// vetoes the schedule segment even when DailyPlan is non-empty — the header
+// responsibility belongs to the day's first full-form message alone.
+func TestBuildTactical_CompactIgnoresDailyPlanField(t *testing.T) {
+	out := BuildTactical(TacticalInput{
+		Goal:      "车间装配",
+		Zone:      "main_workshop",
+		TimeOfDay: "08:00",
+		Slot:      "07:00-12:00",
+		DailyPlan: "07:00-12:00: 车间装配\n12:00-14:00: 休息",
+		AgentID:   "H-01",
+		Compact:   true,
+	})
+	if strings.Contains(out, "07:00-12:00: 车间装配") || strings.Contains(out, "12:00-14:00: 休息") {
+		t.Errorf("Compact should veto the schedule segment regardless of DailyPlan:\n%s", out)
 	}
 }
