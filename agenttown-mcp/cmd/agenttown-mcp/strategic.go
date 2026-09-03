@@ -74,7 +74,7 @@ const yesterdaySummaryForFirstDay = "昨天按计划完成了车间装配。"
 // 战略规划。从快照读当前游戏时间与所在区域拼 user prompt（任意游戏时间
 // 可用），经统一 agentic loop 发送战略轮（[system, ...当天历史, user]，
 // tool_choice=none + json_schema(daily_plan)），成功返回新 dailyPlan 格式化
-// 字符串（调用方 SetDailyPlan），任一步失败回退 prompt.DefaultDailyPlan(kb)
+// 字符串（调用方 SetDailyPlan），任一步失败回退 prompt.DefaultDailyPlan(kb, agentID)
 // 保证战术层有目标可分解、仿真不瘫痪。
 //
 // planningStart 是规划起点（"HH:MM"）：跨日 rollover 触发时传 "07:00"（规划
@@ -113,7 +113,7 @@ func (a *agentContext) triggerStrategicPlanning(ctx context.Context, agentID str
 	resp, err := a.agenticTurn(ctx, a.strategicHc, kb, profiles, logger, agentID,
 		"strategic", promptText, "none", "daily_plan", []byte(dailyPlanSchema))
 	if err != nil {
-		fallback := jitterPlanString(prompt.DefaultDailyPlan(kb))
+		fallback := jitterPlanString(prompt.DefaultDailyPlan(kb, agentID))
 		logger.Warn("[战略层] 计划生成失败，使用默认计划兜底",
 			"agent_id", agentID, "err", err, "fallback", fallback)
 		return fallback
@@ -125,7 +125,7 @@ func (a *agentContext) triggerStrategicPlanning(ctx context.Context, agentID str
 
 	items, err := parseDailyPlan(raw)
 	if err != nil {
-		fallback := jitterPlanString(prompt.DefaultDailyPlan(kb))
+		fallback := jitterPlanString(prompt.DefaultDailyPlan(kb, agentID))
 		logger.Warn("[战略层] 计划解析失败，使用默认计划兜底",
 			"agent_id", agentID, "raw", truncateText(raw, 200), "err", err, "fallback", fallback)
 		return fallback
@@ -139,7 +139,7 @@ func (a *agentContext) triggerStrategicPlanning(ctx context.Context, agentID str
 	items = normalizeDailyPlan(items, startMinute)
 	if len(items) == 0 {
 		logger.Warn("[战略层] 计划校验后为空，使用默认计划兜底", "agent_id", agentID)
-		return jitterPlanString(prompt.DefaultDailyPlan(kb))
+		return jitterPlanString(prompt.DefaultDailyPlan(kb, agentID))
 	}
 	// 时间节点 ±planJitterMinutes 随机扰动：错开各 NPC 的活动开始时间，
 	// 时段切换（战术层分解触发点）随之落在扰动后的时间点上。
@@ -199,7 +199,7 @@ func parseDailyPlan(raw string) ([]dailyPlanItem, error) {
 //
 // 支持跨午夜 slot（如 "22:00-06:00"）：跨午夜时段时长按 end+1440-start 计算，
 // 末段若已跨午夜且覆盖到 06:00 及以后则不后延。
-// 全部被丢弃时返回 nil，调用方走 prompt.DefaultDailyPlan(kb) 兜底。
+// 全部被丢弃时返回 nil，调用方走 prompt.DefaultDailyPlan(kb, agentID) 兜底。
 func normalizeDailyPlan(items []dailyPlanItem, startMinute int) []dailyPlanItem {
 	// 1. 过滤短时段。跨午夜 slot（end <= start）时长按 end+1440-start 计算。
 	valid := make([]dailyPlanItem, 0, len(items))

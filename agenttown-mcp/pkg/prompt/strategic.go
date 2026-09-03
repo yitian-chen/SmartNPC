@@ -3,6 +3,7 @@ package prompt
 
 import (
 	"fmt"
+	"hash/fnv"
 	"strings"
 
 	"github.com/AgentTown/agenttown-mcp/contract/protocol"
@@ -18,36 +19,80 @@ const defaultDailyPlan = "07:00-12:00: 上午主要工作\n" +
 	"18:00-22:00: 前往中央广场休息\n" +
 	"22:00-07:00: 夜间休眠"
 
-// DefaultDailyPlan derives a fallback daily plan from KB.
+// DefaultDailyPlan derives a per-agent fallback daily plan from KB.
 // kb == nil → returns defaultDailyPlan (neutral, no KB-specific terms).
-// With KB: uses first zone display name as work location, first object display
-// name as work content for morning/afternoon slots. Avoids hardcoding
-// "车间"/"装配" so the fallback adapts to any KB.
-func DefaultDailyPlan(kb *worldkb.KB) string {
+//
+// 工作时段从 KB 的工作类设施（category=work）中按 agentID 稳定选择，
+// 而非机械取"首个 zone + 首个 object"——后者在 objects 按字典序排列的
+// KB 里会选中 bench-1（长椅，休息设施），拼出"在档案馆进行长椅作业"
+// 这种荒谬组合（2026-09-03 实测：venus 429 限流导致 5 NPC 全部兜底，
+// 且兜底内容完全相同）。按 agentID 选择让各 NPC 的兜底计划不同。
+// 无工作类设施时退化为中性表述（"主要工作"）。
+func DefaultDailyPlan(kb *worldkb.KB, agentID string) string {
 	if kb == nil {
 		return defaultDailyPlan
 	}
-	zoneName := "主要区域"
-	if zs := kb.ListZones(); len(zs) > 0 {
-		if zs[0].DisplayName != "" {
-			zoneName = zs[0].DisplayName
-		} else {
-			zoneName = zs[0].ID
+	workName := ""
+	workZoneName := ""
+	works := make([]worldkb.ObjectInfo, 0, len(kb.ListObjects()))
+	for _, o := range kb.ListObjects() {
+		if o.Category == "work" {
+			works = append(works, o)
 		}
 	}
-	workName := "工作"
-	if os := kb.ListObjects(); len(os) > 0 {
-		if os[0].DisplayName != "" {
-			workName = os[0].DisplayName
-		} else {
-			workName = os[0].ID
+	if len(works) > 0 {
+		pick := works[stableAgentPick(agentID, len(works))]
+		workName = pick.DisplayName
+		if workName == "" {
+			workName = pick.ID
+		}
+		workZoneName = zoneDisplayName(kb, pick.ZoneID)
+	}
+	if workName == "" {
+		workName = "主要工作"
+	}
+	if workZoneName == "" {
+		workZoneName = "主要区域"
+		if zs := kb.ListZones(); len(zs) > 0 {
+			if zs[0].DisplayName != "" {
+				workZoneName = zs[0].DisplayName
+			} else {
+				workZoneName = zs[0].ID
+			}
 		}
 	}
-	return fmt.Sprintf("07:00-12:00: 上午在%s进行%s作业\n", zoneName, workName) +
+	return fmt.Sprintf("07:00-12:00: 上午在%s进行%s作业\n", workZoneName, workName) +
 		"12:00-13:00: 午间停工与短暂休息\n" +
 		fmt.Sprintf("13:00-18:00: 下午继续%s作业\n", workName) +
 		"18:00-22:00: 保养休息\n" +
 		"22:00-06:00: 夜间休眠"
+}
+
+// stableAgentPick 按字符串稳定散列选择 [0,n) 桶——同一 agentID 每次选
+// 同一桶（兜底计划跨重试稳定），不同 agentID 尽量错开。
+func stableAgentPick(s string, n int) int {
+	if n <= 1 {
+		return 0
+	}
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(s))
+	return int(h.Sum32() % uint32(n))
+}
+
+// zoneDisplayName 查 zone 显示名，找不到或为空时回退 zoneID，再回退空串。
+func zoneDisplayName(kb *worldkb.KB, zoneID string) string {
+	if zoneID == "" {
+		return ""
+	}
+	for _, z := range kb.ListZones() {
+		if z.ID == zoneID {
+			if z.DisplayName != "" {
+				return z.DisplayName
+			}
+			return z.ID
+		}
+	}
+	return ""
 }
 
 // StrategicRules is the planning rules, injected into the user message

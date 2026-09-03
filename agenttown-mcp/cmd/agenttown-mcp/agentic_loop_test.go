@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"testing"
+	"time"
 
 	"github.com/AgentTown/agenttown-mcp/pkg/agentstate"
 	"github.com/AgentTown/agenttown-mcp/pkg/llmtypes"
@@ -11,10 +13,12 @@ import (
 )
 
 // fakeLoopLLM 捕获 SendLoop 的参数（messages/tools/toolChoice/schemaName）
-// 并返回预设响应，用于 agenticTurn 单测。
+// 并返回预设响应，用于 agenticTurn 单测。errs 非空时前 len(errs) 次调用
+// 依次返回对应错误（之后回落 resp/err），用于重试路径测试。
 type fakeLoopLLM struct {
 	resp         *llmtypes.Response
 	err          error
+	errs         []error
 	capturedMsgs []llmtypes.Message
 	capturedTool []venus.Tool
 	capturedTC   string
@@ -47,6 +51,13 @@ func (f *fakeLoopLLM) SendLoop(_ context.Context, msgs []llmtypes.Message, tools
 	f.capturedTool = tools
 	f.capturedTC = toolChoice
 	f.capturedSc = schemaName
+	// errs 队列：前 N 次调用依次返回预设错误（模拟 429/4001 后恢复），
+	// 耗尽后回落到 resp/err。
+	if len(f.errs) > 0 {
+		e := f.errs[0]
+		f.errs = f.errs[1:]
+		return nil, e
+	}
 	return f.resp, f.err
 }
 func (f *fakeLoopLLM) ResetSession() { f.resetCount++ }
@@ -197,5 +208,91 @@ func TestAgenticTurn_AppendsPendingToolsForTactical(t *testing.T) {
 	// 占位 tool 的 tool_call_id 与 assistant 的 tool_calls 对齐。
 	if hist[2].ToolCallID != "tc-1" || hist[3].ToolCallID != "tc-2" {
 		t.Errorf("pending tool ids = %q,%q, want tc-1,tc-2", hist[2].ToolCallID, hist[3].ToolCallID)
+	}
+}
+
+// TestAgenticTurn_RateLimitRetrySucceeds 验证 429 限流（venus code 4029）
+// 触发退避重试且重试后成功：历史正常追加、调用次数 = 失败次数 + 1。
+// 2026-09-03 实测：5 NPC 战略轮同时撞限流（30/min），无重试直接全员
+// 兜底"长椅作业"。
+func TestAgenticTurn_RateLimitRetrySucceeds(t *testing.T) {
+	orig := rateLimitBackoffBase
+	rateLimitBackoffBase = time.Millisecond
+	defer func() { rateLimitBackoffBase = orig }()
+
+	as := agentstate.New()
+	as.SetIdentity("H-01", nil)
+	fake := &fakeLoopLLM{
+		resp: makeLoopTextResponse(`{"accept":true}`),
+		errs: []error{
+			errors.New(`venus status 429: {"error":{"message":"当前使用的是公共模型服务, 并发有限; 当前的限流为: 30/min","type":"venus_error","code":"4029"}}`),
+			errors.New(`venus status 429: {"error":{"message":"当前使用的是公共模型服务, 并发有限","type":"venus_error","code":"4029"}}`),
+		},
+	}
+	ac := &agentContext{as: as, strategicHc: fake}
+
+	resp, err := ac.agenticTurn(context.Background(), fake, nil, nil, slog.Default(), "H-01",
+		"strategic", "规划请求", "none", "daily_plan", nil)
+	if err != nil {
+		t.Fatalf("agenticTurn should succeed after rate-limit retries: %v", err)
+	}
+	if resp == nil {
+		t.Fatal("resp should be non-nil")
+	}
+	if fake.calls != 3 {
+		t.Errorf("SendLoop calls = %d, want 3 (2 rate-limited + 1 success)", fake.calls)
+	}
+	// 成功后历史正常追加（user + assistant）。
+	if hist := as.Conversation(); len(hist) != 2 {
+		t.Errorf("history len = %d, want 2 (user+assistant)", len(hist))
+	}
+}
+
+// TestAgenticTurn_RateLimitRetriesExhausted 验证持续限流时重试耗尽后
+// 返回错误且历史保持不变（失败不留半截）。
+func TestAgenticTurn_RateLimitRetriesExhausted(t *testing.T) {
+	orig := rateLimitBackoffBase
+	rateLimitBackoffBase = time.Millisecond
+	defer func() { rateLimitBackoffBase = orig }()
+
+	as := agentstate.New()
+	as.SetIdentity("H-01", nil)
+	rateErr := errors.New(`venus status 429: {"error":{"message":"并发有限","type":"venus_error","code":"4029"}}`)
+	fake := &fakeLoopLLM{
+		errs: []error{rateErr, rateErr, rateErr, rateErr, rateErr},
+	}
+	ac := &agentContext{as: as, strategicHc: fake}
+
+	_, err := ac.agenticTurn(context.Background(), fake, nil, nil, slog.Default(), "H-01",
+		"strategic", "规划请求", "none", "daily_plan", nil)
+	if err == nil {
+		t.Fatal("expected error after retries exhausted")
+	}
+	// 1 次首发 + 3 次重试 = 4 次调用。
+	if fake.calls != 1+maxTacticalRetries {
+		t.Errorf("SendLoop calls = %d, want %d", fake.calls, 1+maxTacticalRetries)
+	}
+	if hist := as.Conversation(); len(hist) != 0 {
+		t.Errorf("history should stay empty on failure, got %d msgs", len(hist))
+	}
+}
+
+// TestAgenticTurn_TimeoutErrorNoRetry 验证非限流/非 4001 错误（如超时）
+// 不重试——避免浪费战术层 30s 超时预算。
+func TestAgenticTurn_TimeoutErrorNoRetry(t *testing.T) {
+	as := agentstate.New()
+	as.SetIdentity("H-01", nil)
+	fake := &fakeLoopLLM{
+		err: errors.New(`tactical llm: http do: context deadline exceeded`),
+	}
+	ac := &agentContext{as: as, tacticalHc: fake}
+
+	_, err := ac.agenticTurn(context.Background(), fake, nil, nil, nil, "H-01",
+		"tactical", "分解请求", "required", "", nil)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if fake.calls != 1 {
+		t.Errorf("SendLoop calls = %d, want 1 (timeout must not retry)", fake.calls)
 	}
 }

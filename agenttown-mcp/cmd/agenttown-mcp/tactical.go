@@ -36,6 +36,16 @@ func isVenusErrorCode(err error, code string) bool {
 	return strings.Contains(err.Error(), `"code":"`+code+`"`)
 }
 
+// isRateLimited 判断 venus 网关限流错误：HTTP 429 或 venus 错误码 4029
+// （"当前使用的是公共模型服务, 并发有限; 当前的限流为: 30/min"）。
+// 此类错误退避等待后重试可恢复（限流窗口按分钟滚动）。
+func isRateLimited(err error) bool {
+	if err == nil {
+		return false
+	}
+	return isVenusErrorCode(err, "4029") || strings.Contains(err.Error(), "status 429")
+}
+
 // actionSource 标识一个在途 action 由哪一层下发，决定 completion 后的路由。
 // 类型定义已迁移到 pkg/agentstate（导出名 ActionSource），此处保留 alias。
 type actionSource = agentstate.ActionSource

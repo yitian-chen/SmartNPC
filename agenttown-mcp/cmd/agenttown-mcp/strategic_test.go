@@ -11,6 +11,7 @@ import (
 	"github.com/AgentTown/agenttown-mcp/pkg/llmtypes"
 	"github.com/AgentTown/agenttown-mcp/pkg/prompt"
 	"github.com/AgentTown/agenttown-mcp/pkg/venus"
+	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
 )
 
 // fakeStrategicCaller 实现 strategicCaller / llmClient 接口，用于单测。
@@ -227,7 +228,7 @@ func TestGenerateDailyPlan_ParseFail(t *testing.T) {
 // 行数一致、每条 goal 一致、时间可解析且为 "HH:MM-HH:MM" 格式。
 func isJitteredDefaultPlan(t *testing.T, plan string) bool {
 	t.Helper()
-	want := parseFormattedPlan(prompt.DefaultDailyPlan(nil))
+	want := parseFormattedPlan(prompt.DefaultDailyPlan(nil, "H-01"))
 	got := parseFormattedPlan(plan)
 	if len(got) != len(want) {
 		return false
@@ -417,8 +418,8 @@ func TestGenerateDailyPlan_KBInjectedIntoPrompt(t *testing.T) {
 
 func TestBuildDefaultDailyPlan_NilKB(t *testing.T) {
 	// kb == nil 返回 defaultDailyPlan 常量（中性表述，无 KB 专属词）。
-	got := prompt.DefaultDailyPlan(nil)
-	want := prompt.DefaultDailyPlan(nil)
+	got := prompt.DefaultDailyPlan(nil, "H-01")
+	want := prompt.DefaultDailyPlan(nil, "H-01")
 	if got != want {
 		t.Errorf("got %q, want defaultDailyPlan %q", got, want)
 	}
@@ -431,23 +432,87 @@ func TestBuildDefaultDailyPlan_NilKB(t *testing.T) {
 }
 
 func TestBuildDefaultDailyPlan_WithKB(t *testing.T) {
-	// 有 KB 时：兜底计划应包含第一个 zone 显示名 + 第一个 object 显示名。
+	// 有 KB 时：工作时段从工作类设施（category=work）中按 agentID 稳定
+	// 选择——不再机械取"首个 zone + 首个 object"（KB objects 按字典序
+	// 首个是 bench-1 长椅，会拼出"在档案馆进行长椅作业"的荒谬组合，
+	// 2026-09-03 venus 429 全员兜底时实测出现）。
 	kb := loadTestKB(t)
-	got := prompt.DefaultDailyPlan(kb)
-	// 第一个 zone（按 ID 排序）是 archive_station（显示名"档案馆·图书馆与网络中心"）
-	if !strings.Contains(got, "档案馆·图书馆与网络中心") {
-		t.Errorf("KB-derived plan should contain first zone display name: %q", got)
+	got := prompt.DefaultDailyPlan(kb, "H-01")
+	// 兜底必须落在工作类设施里（工作台/调试台/加工机/分拣传送带等），
+	// 绝不能是休息类设施"长椅"。
+	workNames := map[string]bool{
+		"工作台": true, "调试台": true, "质检台": true,
+		"加工机": true, "分拣传送带": true, "拆解台": true,
 	}
-	// 第一个 object（按 ID 排序）是 bench-1（显示名"长椅"）
-	if !strings.Contains(got, "长椅") {
-		t.Errorf("KB-derived plan should contain first object display name: %q", got)
+	if !strings.Contains(got, "作业") {
+		t.Errorf("KB-derived plan should have work slots: %q", got)
 	}
-	// 跨日仿真：兜底计划含 5 个时段（07:00-12:00 / 12:00-14:00 / 14:00-18:00 /
-	// 18:00-22:00 / 22:00-06:00 跨午夜夜间段）。
+	foundWork := false
+	for name := range workNames {
+		if strings.Contains(got, name) {
+			foundWork = true
+		}
+	}
+	if !foundWork {
+		t.Errorf("plan should mention a work-category facility, got: %q", got)
+	}
+	if strings.Contains(got, "长椅作业") {
+		t.Errorf("plan must not pair rest facility with 作业: %q", got)
+	}
+	// 跨日仿真：兜底计划含 5 个时段。
 	items := parseFormattedPlan(got)
 	if len(items) != 5 {
 		t.Errorf("got %d plan items, want 5", len(items))
 	}
+	// 同一 agentID 多次调用稳定（跨重试不漂移）。
+	if again := prompt.DefaultDailyPlan(kb, "H-01"); again != got {
+		t.Errorf("DefaultDailyPlan not stable for same agentID:\nfirst:  %q\nsecond: %q", got, again)
+	}
+}
+
+func TestBuildDefaultDailyPlan_PerAgentDiffers(t *testing.T) {
+	// 5 个 NPC 并发兜底时计划应尽量错开（按 agentID 稳定哈希选择不同
+	// 工作设施），不再全员同一份"长椅作业"。
+	kb := loadTestKB(t)
+	plans := map[string]string{}
+	for _, id := range []string{"H-01", "H-02", "H-03", "H-04", "H-05"} {
+		plans[id] = prompt.DefaultDailyPlan(kb, id)
+	}
+	distinct := map[string]bool{}
+	for _, p := range plans {
+		distinct[p] = true
+	}
+	if len(distinct) < 2 {
+		t.Errorf("expected per-agent plans to differ, got %d distinct of 5:\n%s",
+			len(distinct), strings.Join(mapValues(plans), "\n---\n"))
+	}
+}
+
+func TestBuildDefaultDailyPlan_NoWorkCategory(t *testing.T) {
+	// KB 无工作类设施（category=work 为空）时退化为中性"主要工作"，
+	// 不引用休息设施。
+	kb := &worldkb.KB{
+		Zones: []worldkb.Zone{{ID: "plaza", DisplayName: "中央广场"}},
+		Objects: []worldkb.Object{
+			{ID: "bench-1", DisplayName: "长椅", Category: "rest", ZoneID: "plaza"},
+		},
+	}
+	got := prompt.DefaultDailyPlan(kb, "H-01")
+	if !strings.Contains(got, "主要工作") {
+		t.Errorf("no-work KB should fall back to neutral wording, got: %q", got)
+	}
+	if strings.Contains(got, "长椅") {
+		t.Errorf("no-work KB plan must not mention rest facility: %q", got)
+	}
+}
+
+// mapValues 提取 map 的值切片（测试辅助）。
+func mapValues(m map[string]string) []string {
+	out := make([]string, 0, len(m))
+	for _, v := range m {
+		out = append(out, v)
+	}
+	return out
 }
 
 // ─── normalizeDailyPlan ─────────────────────────────────────

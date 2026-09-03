@@ -23,6 +23,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"math/rand/v2"
+	"time"
 
 	"github.com/AgentTown/agenttown-mcp/pkg/llmtypes"
 	"github.com/AgentTown/agenttown-mcp/pkg/profile"
@@ -42,8 +44,11 @@ import (
 // "dialogue"）。
 //
 // 4001 重试（venus 校验 tools JSON 失败）在此统一处理，三层共用：相同请求体
-// 重试上限 maxTacticalRetries 次；超时/连接/非 4001 错误不重试，由各层调用方
-// 自行兜底（战略层默认计划 / 战术层 fallback 动作 / 对话层默认拒绝或收尾）。
+// 立即重试上限 maxTacticalRetries 次。429 限流（公共模型服务并发有限，
+// 30/min）退避重试——退避 + 随机抖动既等限流窗口恢复，也让同时被拒的
+// 多个 NPC（如 5 个 worker 同时注册触发的战略轮）重试自然错峰。超时/
+// 连接/其他错误不重试，由各层调用方自行兜底（战略层默认计划 / 战术层
+// fallback 动作 / 对话层默认拒绝或收尾）。
 func (a *agentContext) agenticTurn(ctx context.Context, hc llmClient, kb *worldkb.KB, profiles map[string]*profile.Profile, logger *slog.Logger, agentID, layer, userContent, toolChoice, schemaName string, schema []byte) (*llmtypes.Response, error) {
 	if hc == nil {
 		return nil, fmt.Errorf("no LLM client")
@@ -68,9 +73,28 @@ func (a *agentContext) agenticTurn(ctx context.Context, hc llmClient, kb *worldk
 	}
 
 	resp, err := hc.SendLoop(ctx, messages, tools, toolChoice, schemaName, schema)
-	for attempt := 1; err != nil && isVenusErrorCode(err, "4001") && attempt <= maxTacticalRetries; attempt++ {
-		logger.Warn("[agentic-loop] venus 4001，重试相同请求体",
-			"agent_id", agentID, "layer", layer, "retry", attempt, "max", maxTacticalRetries, "err", err)
+	for attempt := 1; err != nil && attempt <= maxTacticalRetries; attempt++ {
+		if isVenusErrorCode(err, "4001") {
+			// LLM 输出坏 JSON：立即重试相同请求体，重采样即修复。
+			logger.Warn("[agentic-loop] venus 4001，重试相同请求体",
+				"agent_id", agentID, "layer", layer, "retry", attempt, "max", maxTacticalRetries, "err", err)
+		} else if isRateLimited(err) {
+			// 公共模型服务限流：退避 + 随机抖动后重试。等待期间 ctx
+			// 取消（进程关停/上层超时）则立即放弃。抖动让同时被拒的
+			// 多个 NPC 重试自然错峰。
+			backoff := rateLimitBackoffBase + time.Duration(rand.IntN(int(rateLimitBackoffBase)*3/4))
+			logger.Warn("[agentic-loop] venus 限流（429），退避后重试",
+				"agent_id", agentID, "layer", layer, "retry", attempt, "max", maxTacticalRetries,
+				"backoff_ms", backoff.Milliseconds(), "err", err)
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(backoff):
+			}
+		} else {
+			// 超时/连接/其他错误不重试。
+			break
+		}
 		resp, err = hc.SendLoop(ctx, messages, tools, toolChoice, schemaName, schema)
 	}
 	// 实际 prompt 文档：记录 H-01 最新一次该层请求体完整 JSON（无论成败）。
@@ -104,3 +128,7 @@ func (a *agentContext) agenticTurn(ctx context.Context, hc llmClient, kb *worldk
 // conversation 前缀稳定、Venus prefix cache 可复用。真实结果不覆盖它，
 // 而是以 user role 追加到末尾。
 const pendingToolResult = "result=pending"
+
+// rateLimitBackoffBase 是 429 限流重试的退避基础时长（实际退避 = base +
+// [0, 3/4·base) 随机抖动）。包级变量便于测试临时调小加速。
+var rateLimitBackoffBase = 2 * time.Second
