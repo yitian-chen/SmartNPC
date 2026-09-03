@@ -564,10 +564,10 @@ func TestBuildTacticalPrompt_InjectsKBContext(t *testing.T) {
 	}
 }
 
-// TestBuildTacticalPrompt_InjectsObjectStatus (Fix B) 验证战术层 prompt 注入
-// 【物体实时占用】段：当 ObjectStatus 非空且 KB 存在时，prompt 应包含按 category
-// 聚合的占用摘要 + 附近物体实例状态。
-func TestBuildTacticalPrompt_InjectsObjectStatus(t *testing.T) {
+// TestBuildTacticalPrompt_ObjectStatusTemporarilyRemoved 验证【物体实时占用】
+// 段已暂时移除：即使 ObjectStatus 非空、KB 存在，prompt 也不渲染该段。
+// 恢复时删掉本测试并取消 BuildTactical 中 ObjectStatusContext 调用的注释。
+func TestBuildTacticalPrompt_ObjectStatusTemporarilyRemoved(t *testing.T) {
 	kb := loadTestKB(t)
 	status := map[string]protocol.ObjectCategoryStatus{
 		"work":     {Total: 2, Idle: 1, Occupied: 1},
@@ -589,30 +589,18 @@ func TestBuildTacticalPrompt_InjectsObjectStatus(t *testing.T) {
 		ObjectStatus:  status,
 		NearbyObjects: nearby,
 	})
-	// 应包含段落标题
-	if !strings.Contains(promptText, "物体实时占用") {
-		t.Errorf("prompt should contain '物体实时占用' section, got: %s", promptText)
+	// 物体实时占用段暂时移除：不应出现段标题与段体。
+	if strings.Contains(promptText, "物体实时占用") {
+		t.Errorf("prompt should NOT contain '物体实时占用' (temporarily removed), got: %s", promptText)
 	}
-	// 应包含 work category 的占用摘要（1 空闲 / 1 占用）
-	if !strings.Contains(promptText, "1 空闲") || !strings.Contains(promptText, "1 占用") {
-		t.Errorf("prompt should show work category 1 idle / 1 occupied, got: %s", promptText)
+	if strings.Contains(promptText, "按 category 聚合") {
+		t.Errorf("prompt should NOT render object status body, got: %s", promptText)
 	}
-	// 应包含 charging category 全空闲
-	if !strings.Contains(promptText, "6 空闲") {
-		t.Errorf("prompt should show charging category 6 idle, got: %s", promptText)
-	}
-	// 应包含附近实例状态
-	if !strings.Contains(promptText, "WorkBench") {
-		t.Errorf("prompt should mention nearby WorkBench, got: %s", promptText)
-	}
-	// 应包含"日程不合理"相关的引导文本（规则 2：日程不合理/设施占用时
-	// 鼓励安排其他更合理的动作；含夜间工作反例）。
+	// 规则 2 的"日程不合理"引导仍保留（与物体占用段无关）。
 	if !strings.Contains(prompt.TacticalRules, "半夜不睡觉而是跑步/工作") ||
 		!strings.Contains(prompt.TacticalRules, "请下发更合理的动作") {
 		t.Errorf("system prompt should guide LLM to avoid doomed occupancy actions")
 	}
-	// 所有工种设备都可用 InteractSmartObject 直接工作（process/debug/dismantle
-	// 等无复合动作的工种依据）；同时锚定 action 字段名 interact 防止 LLM 写错工具名。
 	if !strings.Contains(prompt.TacticalRules, "所有工种设备都可用 InteractSmartObject") {
 		t.Error("system prompt should say InteractSmartObject works for any work device")
 	}

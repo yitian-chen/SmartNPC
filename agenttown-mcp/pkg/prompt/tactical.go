@@ -87,12 +87,15 @@ func BuildTactical(in TacticalInput) string {
 			sb.WriteString("\n")
 		}
 	}
-	if os := ObjectStatusContext(in.ObjectStatus, in.NearbyObjects, in.KB); os != "" {
-		sb.WriteString(os)
-		if !strings.HasSuffix(os, "\n") {
-			sb.WriteString("\n")
-		}
-	}
+	// 物体实时占用模块暂时移除：ObjectStatusContext 会注入【物体实时占用】段，
+	// 列出各类设施的空闲/占用数量。当前仿真中该段信息量大、且与战术层
+	// duration 约束叠加后可能干扰 LLM 的时长规划，先注释停用，需要时恢复。
+	// if os := ObjectStatusContext(in.ObjectStatus, in.NearbyObjects, in.KB); os != "" {
+	// 	sb.WriteString(os)
+	// 	if !strings.HasSuffix(os, "\n") {
+	// 		sb.WriteString("\n")
+	// 	}
+	// }
 	hintLine := tacticalHintLine(in, th)
 	if hintLine != "" {
 		sb.WriteString(hintLine)
