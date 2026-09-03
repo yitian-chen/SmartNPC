@@ -13,7 +13,7 @@ import (
 // 【附近NPC】/【物体实时占用】 point at the user message's dynamic segments.
 // The available tools are NOT listed here — they arrive via the
 // function-calling `tools` request field.
-const TacticalRules = `1. 第一个工具调用必须是 speak（用一段话表达此刻内心想法或独白），随后可返回 1-6 个动作段，按执行顺序排列。每段是长复合动作或 InteractSmartObject 长动作，段间用 duration 控制时长；最后一段以长动作收尾（不设 duration，自然持续到时段切换）。可以在动作之间穿插speak表达现在的情况。
+const TacticalRules = `1. 第一个工具调用必须是 speak（用一段话表达此刻内心想法或独白），随后可返回 1-6 个动作段，按执行顺序排列。长复合动作或 InteractSmartObject 长动作必须用 duration 设置时长。可以在动作之间穿插speak表达现在的情况。
 2. 你可以根据当前NPC的实际属性、实际游戏时间等信息灵活安排，如果当前此条日程并不合理，例如半夜不睡觉而是跑步/工作、电量不为低时就去充电等情况，请下发更合理的动作，不必遵守原有日程规定。
 3. 复合动作已包含自动移动到对应位置的逻辑，禁止在复合动作前调用 move_to——直接调用单个长复合动作即可。
 4. 仅当目标确实没有匹配的长复合动作时，才用原子动作组合实现目标。禁止把同一动作连续重复多次填充时段（工作段之间应穿插休息段）。
