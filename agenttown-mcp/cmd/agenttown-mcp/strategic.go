@@ -77,19 +77,21 @@ const yesterdaySummaryForFirstDay = "昨天按计划完成了车间装配。"
 // 字符串（调用方 SetDailyPlan），任一步失败回退 prompt.DefaultDailyPlan(kb)
 // 保证战术层有目标可分解、仿真不瘫痪。
 //
-// 早晨例行触发（worker 冷启动 + 跨日 rollover）传
-// hint="早晨例行制定每日日程安排"；其他触发方（反应层/事件/debug）按需传
-// 各自的触发原因。当前游戏时间/所在区域/物理状态均从快照读：
-// 冷启动首条感知未到时 tod 为空 → 回落 "07:00"（清晨默认）；首段前伸目标
-// = 触发时刻（normalizeDailyPlan 的 startMinute），中午触发不会把首段错误
-// 前伸到 07:00 覆盖已流逝的上午。
-func (a *agentContext) triggerStrategicPlanning(ctx context.Context, agentID string, kb *worldkb.KB, profiles map[string]*profile.Profile, logger *slog.Logger, yesterdaySummary, dayContext, hint string) string {
+// planningStart 是规划起点（"HH:MM"）：跨日 rollover 触发时传 "07:00"（规划
+// 新一天全天，而非从当前深夜时刻起——UE 的 day_count 在 00:00 即递增，若用
+// 当前深夜时间，LLM 只会规划"睡觉到清晨"的简略计划）。中途触发（反应层/
+// 事件/debug）传 ""（用当前游戏时间，不覆盖已流逝时段）。冷启动首条感知
+// 未到时可传 ""（tod 为空回落 "07:00"）。
+func (a *agentContext) triggerStrategicPlanning(ctx context.Context, agentID string, kb *worldkb.KB, profiles map[string]*profile.Profile, logger *slog.Logger, yesterdaySummary, dayContext, hint, planningStart string) string {
 	if yesterdaySummary == "" {
 		yesterdaySummary = yesterdaySummaryForFirstDay
 	}
 	// 从快照读当前游戏时间 / 所在区域 / 物理状态。
 	snap := a.as.Snapshot()
 	tod := snap.LatestTimeOfDay()
+	if planningStart != "" {
+		tod = planningStart // 跨日触发：固定新一天 07:00，而非当前深夜时间
+	}
 	if tod == "" {
 		tod = "07:00" // 冷启动首条感知未到：回落清晨默认
 	}

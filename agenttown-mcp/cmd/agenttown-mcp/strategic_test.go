@@ -182,7 +182,7 @@ func strategicCtxForTest(sc *fakeStrategicCaller) *agentContext {
 
 func TestGenerateDailyPlan_HTTPError(t *testing.T) {
 	sc := &fakeStrategicCaller{err: errors.New("network down")}
-	plan := strategicCtxForTest(sc).triggerStrategicPlanning(context.Background(), "H-01", nil, nil, slog.Default(), "", "", "早晨例行制定每日日程安排")
+	plan := strategicCtxForTest(sc).triggerStrategicPlanning(context.Background(), "H-01", nil, nil, slog.Default(), "", "", "早晨例行制定每日日程安排", "")
 	// HTTP 错误现在回退到 prompt.DefaultDailyPlan(nil) 的扰动版本
 	// （时间节点 ±planJitterMinutes 错峰），而不是空字符串，
 	// 保证战术层有目标可分解、仿真不瘫痪。
@@ -197,7 +197,7 @@ func TestGenerateDailyPlan_HTTPError(t *testing.T) {
 func TestGenerateDailyPlan_ValidResponse(t *testing.T) {
 	raw := `[{"time":"06:00-07:00","goal":"起床晨检"},{"time":"07:00-12:00","goal":"车间装配"}]`
 	sc := &fakeStrategicCaller{resp: makeStrategicResponse(raw)}
-	plan := strategicCtxForTest(sc).triggerStrategicPlanning(context.Background(), "H-01", nil, nil, slog.Default(), "", "", "早晨例行制定每日日程安排")
+	plan := strategicCtxForTest(sc).triggerStrategicPlanning(context.Background(), "H-01", nil, nil, slog.Default(), "", "", "早晨例行制定每日日程安排", "")
 	if plan == "" {
 		t.Fatal("got empty plan, want non-empty")
 	}
@@ -215,7 +215,7 @@ func TestGenerateDailyPlan_ValidResponse(t *testing.T) {
 
 func TestGenerateDailyPlan_ParseFail(t *testing.T) {
 	sc := &fakeStrategicCaller{resp: makeStrategicResponse("今天天气不错，我打算去车间转转。")}
-	plan := strategicCtxForTest(sc).triggerStrategicPlanning(context.Background(), "H-01", nil, nil, slog.Default(), "", "", "早晨例行制定每日日程安排")
+	plan := strategicCtxForTest(sc).triggerStrategicPlanning(context.Background(), "H-01", nil, nil, slog.Default(), "", "", "早晨例行制定每日日程安排", "")
 	// 解析失败现在回退到 prompt.DefaultDailyPlan(nil) 的扰动版本，
 	// 避免整天 Wait(60s) 瘫痪。
 	if !isJitteredDefaultPlan(t, plan) {
@@ -371,7 +371,7 @@ func TestGenerateDailyPlan_KBInjectedIntoPrompt(t *testing.T) {
 	kb := loadTestKB(t)
 	raw := `[{"time":"06:00-07:00","goal":"起床晨检"}]`
 	sc := &fakeStrategicCaller{resp: makeStrategicResponse(raw)}
-	_ = strategicCtxForTest(sc).triggerStrategicPlanning(context.Background(), "H-01", kb, nil, slog.Default(), "", "", "早晨例行制定每日日程安排")
+	_ = strategicCtxForTest(sc).triggerStrategicPlanning(context.Background(), "H-01", kb, nil, slog.Default(), "", "", "早晨例行制定每日日程安排", "")
 
 	sys := sc.capturedSystem
 	if sys == "" {
@@ -981,7 +981,7 @@ func TestTriggerStrategicPlanning_ReadsTimeAndZoneFromSnapshot(t *testing.T) {
 	sc := &fakeStrategicCaller{resp: makeStrategicResponse(`[{"time":"14:30-18:00","goal":"下午工作"}]`)}
 	ac := &agentContext{as: as, strategicHc: sc}
 
-	_ = ac.triggerStrategicPlanning(context.Background(), "H-01", nil, nil, slog.Default(), "", "", "中午状态变化重规划")
+	_ = ac.triggerStrategicPlanning(context.Background(), "H-01", nil, nil, slog.Default(), "", "", "中午状态变化重规划", "")
 
 	if !strings.Contains(sc.capturedInput, "现在是仿真时间 14:30") {
 		t.Errorf("user prompt should carry snapshot time 14:30:\n%s", sc.capturedInput)
@@ -1002,7 +1002,7 @@ func TestTriggerStrategicPlanning_MorningFallbackNoPerception(t *testing.T) {
 	sc := &fakeStrategicCaller{resp: makeStrategicResponse(`[{"time":"07:00-08:00","goal":"晨练"}]`)}
 	ac := &agentContext{as: as, strategicHc: sc}
 
-	_ = ac.triggerStrategicPlanning(context.Background(), "H-01", nil, nil, slog.Default(), "", "", "早晨例行制定每日日程安排")
+	_ = ac.triggerStrategicPlanning(context.Background(), "H-01", nil, nil, slog.Default(), "", "", "早晨例行制定每日日程安排", "")
 
 	if !strings.Contains(sc.capturedInput, "现在是仿真时间 07:00") {
 		t.Errorf("cold start should fall back to 07:00:\n%s", sc.capturedInput)
@@ -1012,5 +1012,30 @@ func TestTriggerStrategicPlanning_MorningFallbackNoPerception(t *testing.T) {
 	}
 	if !strings.Contains(sc.capturedInput, "早晨例行制定每日日程安排") {
 		t.Errorf("morning hint missing:\n%s", sc.capturedInput)
+	}
+}
+
+// TestTriggerStrategicPlanning_CrossDayUsesFixedStart 验证跨日触发（planningStart
+// 传 "07:00"）时，即使快照当前游戏时间是深夜，prompt 仍用 07:00 作为规划
+// 起点，避免 LLM 只规划"睡觉到清晨"的简略计划。
+func TestTriggerStrategicPlanning_CrossDayUsesFixedStart(t *testing.T) {
+	as := agentstate.New()
+	as.SetIdentity("H-01", nil)
+	// 预置感知：深夜 00:09（day_count 已递增，模拟 UE 在 00:00 即推进游戏日）。
+	raw := []byte(`{"environment":{"game_time_sec":540,"time_of_day_sec":540,"day_count":2},"location":{"current_zone":"residential_quarters"}}`)
+	if _, err := as.SetPerception(raw); err != nil {
+		t.Fatalf("SetPerception: %v", err)
+	}
+	sc := &fakeStrategicCaller{resp: makeStrategicResponse(`[{"time":"07:00-08:00","goal":"晨练"}]`)}
+	ac := &agentContext{as: as, strategicHc: sc}
+
+	_ = ac.triggerStrategicPlanning(context.Background(), "H-01", nil, nil, slog.Default(), "", "", "早晨例行制定每日日程安排", "07:00")
+
+	// 规划起点应为 07:00（而非快照的深夜 00:09）。
+	if !strings.Contains(sc.capturedInput, "现在是仿真时间 07:00") {
+		t.Errorf("cross-day planning should use 07:00 start, got:\n%s", sc.capturedInput)
+	}
+	if strings.Contains(sc.capturedInput, "现在是仿真时间 00:09") {
+		t.Errorf("cross-day planning should NOT use the late-night snapshot time 00:09:\n%s", sc.capturedInput)
 	}
 }

@@ -702,7 +702,7 @@ func runPerceptionWorker(
 	// /debug/schedule 注入和 /debug/action 下发。
 	if autoPlanEnabled {
 		dayCtx := weeklyschedule.WeeklyLine(ac.as.LatestDayCount(), weeklySched)
-		plan := ac.triggerStrategicPlanning(ctx, agentID, kb, profiles, logger, "", dayCtx, "早晨例行制定每日日程安排")
+		plan := ac.triggerStrategicPlanning(ctx, agentID, kb, profiles, logger, "", dayCtx, "早晨例行制定每日日程安排", "")
 		// 同步 currentDay：若首条 perception 已到则用其 day_count，否则保持 -1
 		// （由 detectDayRollover 在首条 perception 到达时同步）。
 		ac.as.SetDailyPlan(plan, ac.as.LatestDayCount())
@@ -752,7 +752,7 @@ func runPerceptionWorker(
 				ac.as.ClearConversation()
 				ac.as.ClearTimeStop()
 				dayCtx := weeklyschedule.WeeklyLine(newDay, weeklySched)
-				plan := ac.triggerStrategicPlanning(ctx, agentID, kb, profiles, logger, narrative, dayCtx, "早晨例行制定每日日程安排")
+				plan := ac.triggerStrategicPlanning(ctx, agentID, kb, profiles, logger, narrative, dayCtx, "早晨例行制定每日日程安排", "07:00")
 				// 不清 currentSlot/actionQueue/currentActionID：让 NPC 自然睡眠到 07:00，
 				// 由 advanceSlotIfNeeded 打断后走 tacticalRefill 选新计划 slot。
 				// currentDay 已由 detectDayRollover 更新为 newDay。
