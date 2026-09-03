@@ -567,6 +567,7 @@ start_mcp() {
             --venus-api-key "$venus_key" \
             --world-kb "$PROJECT_DIR/assets/world_kb.yaml" \
             --auto-plan="${AGENTTOWN_MCP_AUTO_PLAN:-true}" \
+            --tactical-stream \
             "${mysql_args[@]}" \
             "${ollama_args[@]}" \
             --log-level info >> "$MCP_LOG" 2>&1 &
@@ -584,7 +585,7 @@ start_mcp() {
         cat > "$bat_file" << EOF
 @echo off
 pushd "$cwd_win"
-"$mcp_exe_win" --http ":$HTTP_PORT" --ws ":$WS_PORT" --venus-api-key "$venus_key" --world-kb "$world_kb_win" --auto-plan="${AGENTTOWN_MCP_AUTO_PLAN:-true}" $ollama_args_str --log-level info >> "$mcp_log_win" 2>&1
+"$mcp_exe_win" --http ":$HTTP_PORT" --ws ":$WS_PORT" --venus-api-key "$venus_key" --world-kb "$world_kb_win" --auto-plan="${AGENTTOWN_MCP_AUTO_PLAN:-true}" --tactical-stream $ollama_args_str --log-level info >> "$mcp_log_win" 2>&1
 EOF
         if $IN_WSL; then
             local bat_win
