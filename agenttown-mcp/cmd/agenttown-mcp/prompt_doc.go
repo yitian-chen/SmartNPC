@@ -68,12 +68,20 @@ func dumpPromptDoc(agentID, layer string, body []byte, logger *slog.Logger) {
 
 	fmt.Fprintf(f, "# 实际 LLM 请求体留存\n\n记录 H-01 最新一次发给 LLM 的战略层/战术层请求体完整 JSON（model/messages/tools 等所有字段），由 MCP 运行时覆盖落盘。\n\n")
 
-	// 可读 Prompt 预览：取最近更新的 layer 的 system + user 内容，还原换行
-	// 后放在文档开头，便于快速查看核心 prompt 而不必在 JSON 里翻找。
-	if sys, usr, layer, ok := latestSystemUser(); ok {
-		fmt.Fprintf(f, "## 可读 Prompt 预览（最新一次 · %s）\n\n", layerNameOf(layer))
-		fmt.Fprintf(f, "### system\n\n%s\n\n", sys)
-		fmt.Fprintf(f, "### user\n\n%s\n\n", usr)
+	// 可读 Prompt 预览：每个 layer 的 system + user 内容，还原换行后放在
+	// 文档开头，便于快速查看核心 prompt 而不必在 JSON 里翻找。
+	fmt.Fprintf(f, "## 可读 Prompt 预览\n\n")
+	for _, l := range []string{"strategic", "tactical"} {
+		b, ok := promptDocBodies[l]
+		if !ok {
+			continue
+		}
+		sys, usr := extractSystemUser(b)
+		if sys == "" && usr == "" {
+			continue
+		}
+		fmt.Fprintf(f, "### %s · system\n\n%s\n\n", layerNameOf(l), sys)
+		fmt.Fprintf(f, "### %s · user\n\n%s\n\n", layerNameOf(l), usr)
 	}
 
 	for _, l := range []string{"strategic", "tactical"} {
@@ -106,28 +114,6 @@ func layerNameOf(layer string) string {
 	default:
 		return layer
 	}
-}
-
-// latestSystemUser 返回最近更新的 layer（strategic/tactical 中时间更晚者）
-// 的 system 与最后一条 user 的 content。system 三层共享、各 layer 相同；
-// user 取 messages 中最后一条 role=user（即该层最新一次请求的正文）。
-// 无任何请求体时返回 ok=false。
-func latestSystemUser() (system, user, layer string, ok bool) {
-	// 找最近更新的 layer。
-	var latest string
-	for _, l := range []string{"strategic", "tactical"} {
-		if _, exists := promptDocBodies[l]; !exists {
-			continue
-		}
-		if latest == "" || promptDocTimes[l] > promptDocTimes[latest] {
-			latest = l
-		}
-	}
-	if latest == "" {
-		return "", "", "", false
-	}
-	sys, usr := extractSystemUser(promptDocBodies[latest])
-	return sys, usr, latest, true
 }
 
 // extractSystemUser 从请求体 JSON 提取 system 与最后一条 user 的 content。
