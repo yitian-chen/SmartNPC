@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -538,6 +539,44 @@ func TestSetReplanHint(t *testing.T) {
 	snap := a.Snapshot()
 	if snap.ReplanHint != "zone changed to workshop" {
 		t.Errorf("ReplanHint = %q", snap.ReplanHint)
+	}
+}
+
+// TestBeginTacticalRefill_OnlySpeakHint 验证"队列提前耗尽"hint 的定制：
+// 上次队列只含 speak 时 hint 明确指出"只返回了 1 个 speak"（该失败模式
+// 实测高频：LLM 只返回 speak，队列数秒即耗尽，NPC 在两次 LLM 调用之间
+// 呆站）；含其他动作时保持通用措辞。
+func TestBeginTacticalRefill_OnlySpeakHint(t *testing.T) {
+	a := New()
+	a.SetDailyPlan("09:00-12:00: 装配\n12:00-13:00: 休息", 0)
+
+	// 场景 1：上次队列只有 speak → 针对性措辞。
+	a.ReplaceQueue([]PlannedAction{{Action: "speak", Params: map[string]any{"content": "hi"}}})
+	a.CommitTacticalRefill("09:00-12:00", 0, false)
+	// 队列耗尽后同 slot 重分解（模拟 speak 完成、队列清空）。
+	a.PopAction()
+	prep := a.BeginTacticalRefill("装配", "09:00-12:00", 0, true)
+	if prep.ShouldSkip {
+		t.Fatal("refill should proceed")
+	}
+	if !strings.Contains(prep.Hint, "只返回了 1 个 speak") {
+		t.Errorf("hint = %q, want only-speak diagnosis", prep.Hint)
+	}
+
+	// 场景 2：上次队列含非 speak 动作 → 通用措辞。
+	a.ReplaceQueue([]PlannedAction{
+		{Action: "speak", Params: map[string]any{"content": "hi"}},
+		{Action: "work_shift", Params: map[string]any{"semantic_group": "workbench"}},
+	})
+	a.CommitTacticalRefill("09:00-12:00", 0, true) // redecompose，保持同 slot
+	a.PopAction()
+	a.PopAction()
+	prep2 := a.BeginTacticalRefill("装配", "09:00-12:00", 0, true)
+	if prep2.ShouldSkip {
+		t.Fatal("refill should proceed")
+	}
+	if !strings.Contains(prep2.Hint, "未安排长动作收尾") {
+		t.Errorf("hint = %q, want generic exhaustion wording", prep2.Hint)
 	}
 }
 

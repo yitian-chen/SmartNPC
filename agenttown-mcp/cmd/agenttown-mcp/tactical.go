@@ -356,12 +356,27 @@ func tacticalToolsFromRegistry(registry *CapabilityRegistry, agentID string) []v
 	return out
 }
 
+// isInstantTacticalTool 判断工具是否为瞬时动作（立即完成、无持续时长）。
+// 这些工具不追加 duration 参数——schema 层无该字段 LLM 无从填写，与
+// TacticalRules"瞬时动作不填 duration"约定一致。
+func isInstantTacticalTool(name string) bool {
+	switch name {
+	case "speak", "emote", "turn_to", "generic_act":
+		return true
+	}
+	return false
+}
+
 // capabilityParamsSchema 把 CapabilityParam 列表转成 function calling 的
 // parameters JSON Schema（object 类型）。不包含 MCP 侧 meta 字段
 // （agent_id/decision_epoch）——function calling 的参数就是 UE cmd 的参数。
-// 额外追加一个可选的 duration（秒，MCP 侧控制字段，长动作定时终止），
-// 但 social_chat 除外——它是"挂起直到对话结束"的复合动作，duration 到点
-// 会被 worker 打断对话，语义不适用。
+// 额外追加 duration（秒，MCP 侧控制字段，长动作定时终止）并列入 required
+// （2026-09-03：实测 LLM 在 function calling 中只填 required 参数，optional
+// 的 duration 从不被填——动作时长全靠 slot 切换兜底、队列频繁提前耗尽。
+// 必填后 LLM 被迫为每个非瞬时动作声明时长；"最后一段不设 duration 自然
+// 持续到 slot 切换"的旧约定改为"最后一段 duration = 时段剩余时长"，
+// TacticalRules 规则 7/8 已同步措辞）。例外：social_chat 是"挂起直到对话
+// 结束"的复合动作，duration 到点会打断对话；瞬时工具无时长概念。
 func capabilityParamsSchema(params []protocol.CapabilityParam, name string) json.RawMessage {
 	props := map[string]any{}
 	required := make([]string, 0, len(params))
@@ -386,13 +401,15 @@ func capabilityParamsSchema(params []protocol.CapabilityParam, name string) json
 		}
 	}
 	// duration：非瞬时动作的持续时长（秒，MCP 侧轮询 game_time，不传 UE）。
-	// 描述与 TacticalRules 规则 8 对齐：队列中间动作必须设，仅末段可不设。
-	// social_chat 不追加（对话挂起直到结束，duration 会打断对话）。
-	if name != "social_chat" {
+	// 描述与 TacticalRules 规则 8 对齐：末段 duration 设为时段剩余时长。
+	// social_chat 不追加（对话挂起直到结束，duration 会打断对话）；
+	// 瞬时工具不追加（立即完成，无时长概念）。
+	if name != "social_chat" && !isInstantTacticalTool(name) {
 		props["duration"] = map[string]any{
 			"type":        "number",
-			"description": "该动作的持续时长（秒）。除最后一个动作外都必须设置，到点后系统打断当前段并进入队列下一段；仅最后一个动作可不设，自然持续到时段切换。冥想/整理/上网等单段宜设 1800 秒左右，工作时长段可设 3600-7200 秒；所有动作的 duration 总和应接近当前时段剩余时长。",
+			"description": "该动作的持续时长（秒）。到点后系统打断当前段并进入队列下一段。中间动作按实际计划设置（冥想/整理等单段宜设 1800 秒左右，工作段可设 3600-7200 秒）；最后一个动作的 duration 设为当前时段的剩余时长，到点后系统自动切入下一时段。所有动作的 duration 总和应接近当前时段剩余时长。",
 		}
+		required = append(required, "duration")
 	}
 	schema := map[string]any{
 		"type":       "object",
@@ -545,9 +562,13 @@ func mapTacticalAction(pa plannedAction, agentID string, kb *worldkb.KB, registr
 			if tools.CmdToToolName(act.Cmd) != pa.Action {
 				continue
 			}
-			// 复制 params 避免调用方误改原 map
+			// 复制 params 避免调用方误改原 map；剔除 duration——它是 MCP 侧
+			// 控制字段（worker 按 game_time 定时打断消费），不透传 UE。
 			out := make(map[string]any, len(pa.Params))
 			for k, v := range pa.Params {
+				if k == "duration" {
+					continue
+				}
 				out[k] = v
 			}
 			return act.Cmd, out, nil

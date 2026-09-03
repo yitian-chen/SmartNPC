@@ -20,8 +20,8 @@ const TacticalRules = `1. 第一个工具调用必须是 speak（用一段话表
 5. InteractSmartObject 和复合动作的 semantic_group 必须严格使用设施详情中给出的 semantic_group 值，禁止编造、禁止用实例 id（如 Charge-1）。
 6. 复合动作与 semantic_group 必须严格对应，禁止跨类别组合。
    - 补充：所有工种设备都可用 InteractSmartObject 原子动作直接工作——semantic_group 填工作设备、interaction 填对应动词即可（如 加工机 process、调试台 debug、拆解台 dismantle，以及 workbench/assemble、sorting_conveyor/sort_cargo、inspection_table/inspect）；work_shift 只是其中三类工种设备的快捷复合动作，没有复合动作的工种一律用 InteractSmartObject。
-7. 所有非瞬时动作（移动、长复合动作、InteractSmartObject 互动等需要持续一段时间的）都必须填写 duration 参数（秒）标明该动作持续多久；瞬时动作（speak、emote 等立即完成的）不填 duration。duration 要合理：冥想、整理床铺等单段设 1800 秒左右，不宜超过 1 小时；工作段可设 3600-7200 秒。到点后系统会打断该段并继续执行后续动作段；只有全部动作执行完，系统才会再次询问。推荐模式：工作段（设 duration，如 1.5 小时）→ 长椅小憩/原地拉伸段（设 duration，不超过 30 分钟）→ 返回工作段（不设，持续到时段结束）。
-8. 工具调用队列除了最后一个调用，其他都需要设置 duration；每次生成的最后一个动作必须是不设 duration 的长动作，确保 NPC 不会在时间结束后呆站。所有动作的 duration 总和应接近当前时段的剩余时长（见上文"剩余约 X 分钟"提示），避免过短导致队列提前耗尽触发重分解、或过长拖到下一时段。
+7. 所有非瞬时动作（移动、长复合动作、InteractSmartObject 互动等需要持续一段时间的）都必须填写 duration 参数（秒，schema 必填）；瞬时动作（speak、emote 等立即完成的）不填 duration。duration 要合理：冥想、整理床铺等单段设 1800 秒左右，不宜超过 1 小时；工作段可设 3600-7200 秒。到点后系统会打断该段并继续执行后续动作段；只有全部动作执行完，系统才会再次询问。推荐模式：工作段（如 1.5 小时）→ 长椅小憩/原地拉伸段（不超过 30 分钟）→ 返回工作段（duration 设为时段剩余时长）。
+8. 每次生成的最后一个动作必须是长动作（长复合动作或 InteractSmartObject 长动作），其 duration 设为当前时段的剩余时长（见上文"剩余约 X 分钟"提示）——到点后系统自动切入下一时段，NPC 不会呆站。所有动作的 duration 总和应接近当前时段的剩余时长，避免过短导致队列提前耗尽触发重分解、或过长拖到下一时段。
 9. 如果是调用 InteractSmartObject 工具，若当前日程目标明确指定了区域（如"去中央广场长椅休息"），**必须**在该工具的 zone 参数中填写对应区域 id（如 central_plaza、logistics_hub）。`
 
 // BuildTactical constructs the tactical layer's user message, four parts:

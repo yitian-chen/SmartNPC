@@ -940,6 +940,35 @@ func TestMapTacticalAction_NewCmdPassthrough(t *testing.T) {
 	}
 }
 
+// TestMapTacticalAction_PassthroughStripsDuration 验证 passthrough 路径剔除
+// duration——它是 MCP 侧控制字段（worker 按 game_time 定时打断消费），
+// 不透传 UE。duration required 化（2026-09-03）后 LLM 会填，必须在此剥离。
+func TestMapTacticalAction_PassthroughStripsDuration(t *testing.T) {
+	reg := NewCapabilityRegistry(nil)
+	reg.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
+		{Cmd: "Exercise", Kind: "atomic", Params: []protocol.CapabilityParam{
+			{Name: "exercise_type", Type: "enum", Required: true, EnumValues: []string{"stretch", "walk"}},
+		}},
+	})
+	pa := plannedAction{Action: "exercise", Params: map[string]any{
+		"exercise_type": "stretch",
+		"duration":      float64(1800),
+	}}
+	cmd, params, err := mapTacticalAction(pa, "H-01", nil, reg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cmd != "Exercise" {
+		t.Errorf("cmd=%q, want Exercise", cmd)
+	}
+	if _, ok := params["duration"]; ok {
+		t.Errorf("params=%v, duration must be stripped before sending to UE", params)
+	}
+	if params["exercise_type"] != "stretch" {
+		t.Errorf("params=%v, want exercise_type=stretch kept", params)
+	}
+}
+
 // TestMapTacticalAction_NewCmdNilRegistryErrors verifies the default branch
 // returns an error when registry is nil (backward compat — unknown action).
 func TestMapTacticalAction_NewCmdNilRegistryErrors(t *testing.T) {
@@ -1008,9 +1037,38 @@ func TestTacticalToolsFromRegistry_BuildsTools(t *testing.T) {
 	if schema.Type != "object" {
 		t.Errorf("schema.type = %q, want object", schema.Type)
 	}
-	if len(schema.Required) != 2 {
-		t.Errorf("schema.required = %v, want [semantic_group interaction]", schema.Required)
+	// duration 是 MCP 侧控制字段，2026-09-03 起 required 化（LLM 只填
+	// required 参数，optional 从不被填导致动作时长失控）。
+	if len(schema.Required) != 3 {
+		t.Errorf("schema.required = %v, want [semantic_group interaction duration]", schema.Required)
 	}
+	hasDur := false
+	for _, r := range schema.Required {
+		if r == "duration" {
+			hasDur = true
+		}
+	}
+	if !hasDur {
+		t.Errorf("schema.required = %v, want duration included", schema.Required)
+	}
+	// social_chat 不追加 duration（对话挂起直到结束，duration 会打断对话）。
+	var sschema struct {
+		Properties map[string]any `json:"properties"`
+		Required   []string       `json:"required"`
+	}
+	if err := json.Unmarshal(byName["social_chat"].Function.Parameters, &sschema); err != nil {
+		t.Fatalf("social_chat parameters is not valid JSON: %v", err)
+	}
+	if _, ok := sschema.Properties["duration"]; ok {
+		t.Errorf("social_chat should not have duration property")
+	}
+	for _, r := range sschema.Required {
+		if r == "duration" {
+			t.Errorf("social_chat duration must not be required")
+		}
+	}
+	// 瞬时工具（speak/emote 等）不追加 duration 的验证见
+	// TestCapabilityParamsSchema_DurationRequiredForNonInstant。
 	// 校验 move_to 的 target_type enum。
 	var mschema struct {
 		Properties map[string]struct {
@@ -1028,6 +1086,53 @@ func TestTacticalToolsFromRegistry_BuildsTools(t *testing.T) {
 func TestTacticalToolsFromRegistry_NilRegistryEmpty(t *testing.T) {
 	if got := tacticalToolsFromRegistry(nil, "H-01"); got != nil {
 		t.Fatalf("nil registry should return nil tools, got %v", got)
+	}
+}
+
+func TestCapabilityParamsSchema_DurationRequiredForNonInstant(t *testing.T) {
+	params := []protocol.CapabilityParam{
+		{Name: "semantic_group", Type: "string", Required: true},
+	}
+	for _, name := range []string{"work_shift", "move_to", "interact", "exercise"} {
+		raw := capabilityParamsSchema(params, name)
+		var schema struct {
+			Properties map[string]any `json:"properties"`
+			Required   []string       `json:"required"`
+		}
+		if err := json.Unmarshal(raw, &schema); err != nil {
+			t.Fatalf("%s: invalid JSON: %v", name, err)
+		}
+		if _, ok := schema.Properties["duration"]; !ok {
+			t.Errorf("%s: duration property missing", name)
+		}
+		required := false
+		for _, r := range schema.Required {
+			if r == "duration" {
+				required = true
+			}
+		}
+		if !required {
+			t.Errorf("%s: duration not in required (got %v)", name, schema.Required)
+		}
+	}
+	// 瞬时工具：立即完成，无时长概念——不追加 duration prop。
+	for _, name := range []string{"speak", "emote", "turn_to", "generic_act"} {
+		raw := capabilityParamsSchema(params, name)
+		var schema struct {
+			Properties map[string]any `json:"properties"`
+			Required   []string       `json:"required"`
+		}
+		if err := json.Unmarshal(raw, &schema); err != nil {
+			t.Fatalf("%s: invalid JSON: %v", name, err)
+		}
+		if _, ok := schema.Properties["duration"]; ok {
+			t.Errorf("%s: instant tool should not have duration property", name)
+		}
+		for _, r := range schema.Required {
+			if r == "duration" {
+				t.Errorf("%s: instant tool must not require duration", name)
+			}
+		}
 	}
 }
 
