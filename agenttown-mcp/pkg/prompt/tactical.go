@@ -24,6 +24,22 @@ const TacticalRules = `1. 第一个工具调用必须是 speak（用一段话表
 8. 每次生成的最后一个动作必须是长动作（长复合动作或 InteractSmartObject 长动作），其 duration 设为当前时段的剩余时长（见上文"剩余约 X 分钟"提示）——到点后系统自动切入下一时段，NPC 不会呆站。所有动作的 duration 总和应接近当前时段的剩余时长，避免过短导致队列提前耗尽触发重分解、或过长拖到下一时段。
 9. 如果是调用 InteractSmartObject 工具，若当前日程目标明确指定了区域（如"去中央广场长椅休息"），**必须**在该工具的 zone 参数中填写对应区域 id（如 central_plaza、logistics_hub）。`
 
+// tacticalCoreRules 是精简模式（Compact=true）下替代完整 TacticalRules 的
+// 核心约束速览，覆盖实测高频失败模式（speak-only 队列、duration 漏填、
+// 末段非长动作、semantic_group 编造）。完整规则经 tacticalCompactRefLine
+// 指向本日第一条战术 user 消息，不再逐轮重复。
+const tacticalCoreRules = `- 首个工具调用必须是 speak；仅返回 speak 会让队列数秒耗尽，禁止。
+- 非瞬时动作（移动、长复合动作、InteractSmartObject）必须填 duration（秒）。
+- 最后一个动作必须是长动作，duration 设为当前时段剩余时长。
+- semantic_group / interaction 严格使用系统信息设施详情给出的值，禁止编造、禁止用实例 id。`
+
+// tacticalCompactRefLine 是精简模式的引用行：指向本日第一条战术消息的
+// 全量头。"以最新一份为准"覆盖跨日交错等边界下历史出现多份全量头的情况。
+// 引用行带"战术规划模块"开头标记——历史中夹杂 [战略层/日程规划] 开头的
+// 战略消息、[系统注入] 工具结果与对话层消息，该前缀是战术消息唯一无歧义
+// 的识别特征。
+const tacticalCompactRefLine = `完整分解规则与全天日程见本日第一条战术分解指令（以"你是小镇居民 NPC 的战术规划模块"开头、含【分解规则】与【全天日程】段的消息），全部要求继续适用；若历史中有多份，以最新一份为准。`
+
 // BuildTactical constructs the tactical layer's user message, four parts:
 //  1. 全天任务与当前时段任务 — full-day schedule + current slot goal +
 //     slot duration hint.
@@ -41,11 +57,13 @@ func BuildTactical(in TacticalInput) string {
 	th := BandThresholdsFor(in.Profiles, in.AgentID)
 
 	var sb strings.Builder
-	sb.WriteString(`你是小镇居民 NPC 的战术规划模块。你根据系统信息中的【世界背景】【人物背景】【世界详细信息】，以及用户信息中的全天任务与当前时段任务、NPC与环境实时状态、分解规则，把当前时段目标分解为一个或多个 action，按顺序执行。\n`)
+	sb.WriteString("你是小镇居民 NPC 的战术规划模块。你根据系统信息中的【世界背景】【人物背景】【世界详细信息】，以及用户信息中的全天任务与当前时段任务、NPC与环境实时状态、分解规则，把当前时段目标分解为一个或多个 action，按顺序执行。\n")
 
 	// ── 一、全天任务与当前时段任务 ──
 	sb.WriteString("一、全天任务与当前时段任务\n")
-	if in.DailyPlan != "" {
+	// 精简模式（Compact=true）省略【全天日程】：日内不变块只在每天第一条
+	// 战术 user 消息出现，后续轮次经 tacticalCompactRefLine 引用。
+	if in.DailyPlan != "" && !in.Compact {
 		sb.WriteString("【全天日程】\n")
 		sb.WriteString(in.DailyPlan)
 		if !strings.HasSuffix(in.DailyPlan, "\n") {
@@ -106,8 +124,15 @@ func BuildTactical(in TacticalInput) string {
 
 	// ── 三、分解规则 ──
 	sb.WriteString("\n三、分解规则\n")
-	sb.WriteString(TacticalRules)
-	sb.WriteString("\n")
+	if in.Compact {
+		sb.WriteString(tacticalCoreRules)
+		sb.WriteString("\n")
+		sb.WriteString(tacticalCompactRefLine)
+		sb.WriteString("\n")
+	} else {
+		sb.WriteString(TacticalRules)
+		sb.WriteString("\n")
+	}
 
 	// ── 四、任务 ──
 	sb.WriteString("\n四、任务\n")

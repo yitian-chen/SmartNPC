@@ -472,6 +472,167 @@ func TestGenerateTacticalPlan_NoRetryOnNon4001(t *testing.T) {
 	}
 }
 
+// ─── 精简引用（compact）模式 ─────────────────────────────────
+
+// lastUserPromptOf 取 SendLoop 捕获请求的末条 user 内容（[system,...历史,user]）。
+func lastUserPromptOf(t *testing.T, msgs []llmtypes.Message) string {
+	t.Helper()
+	if len(msgs) == 0 {
+		t.Fatal("captured messages empty")
+	}
+	last := msgs[len(msgs)-1]
+	if last.Role != "user" {
+		t.Fatalf("last message role = %q, want user", last.Role)
+	}
+	return last.Content
+}
+
+// speakToolCallResp 构造单个 speak 工具调用的成功响应（战术轮最小可用形态）。
+func speakToolCallResp() *llmtypes.Response {
+	return makeToolCallResponse([]llmtypes.ToolCall{
+		{Function: llmtypes.ToolFunction{Name: "speak", Arguments: `{"content":"开始"}`}},
+	})
+}
+
+// TestGenerateTacticalPlan_FirstTurnFullSecondCompact 验证同一天同一计划：
+// 首轮全量头（【全天日程】+完整规则）注入并置位标记，次轮精简（省略两块、
+// 含引用行），且次轮请求的历史前缀携带首轮的全量 user。
+func TestGenerateTacticalPlan_FirstTurnFullSecondCompact(t *testing.T) {
+	plan := "07:00-09:00: 上午准备\n09:00-12:00: 车间装配"
+	fake := &fakeLoopLLM{resp: speakToolCallResp()}
+	ac := tacticalCtxForTest(fake)
+
+	if _, err := generateTacticalPlan(context.Background(), ac, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", plan, nil, nil, nil, slog.Default(), "", "", "", nil, nil, nil, nil); err != nil {
+		t.Fatalf("first turn: %v", err)
+	}
+	first := lastUserPromptOf(t, fake.capturedMsgs)
+	if !strings.Contains(first, "【全天日程】\n") || !strings.Contains(first, "推荐模式：工作段") {
+		t.Errorf("first turn should be full form (schedule + full rules):\n%s", first)
+	}
+	if got := ac.as.TacticalHeaderPlan(); got != plan {
+		t.Errorf("TacticalHeaderPlan after first turn = %q, want the plan", got)
+	}
+
+	if _, err := generateTacticalPlan(context.Background(), ac, "H-01", "装配", "main_workshop", "12:00", "12:00-14:00", plan, nil, nil, nil, slog.Default(), "", "", "", nil, nil, nil, nil); err != nil {
+		t.Fatalf("second turn: %v", err)
+	}
+	second := lastUserPromptOf(t, fake.capturedMsgs)
+	if strings.Contains(second, "推荐模式：工作段") {
+		t.Errorf("second turn should omit the full rules:\n%s", second)
+	}
+	if !strings.Contains(second, "完整分解规则与全天日程见本日第一条战术分解指令") {
+		t.Errorf("second turn should carry the reference line:\n%s", second)
+	}
+	// 次轮请求的历史前缀包含首轮全量 user（引用行指向的内容确实在历史里）。
+	found := false
+	for _, m := range fake.capturedMsgs[:len(fake.capturedMsgs)-1] {
+		if m.Role == "user" && strings.Contains(m.Content, "【全天日程】\n") {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("second request history should carry the first turn's full user message")
+	}
+}
+
+// TestGenerateTacticalPlan_FailureKeepsFullMode 验证 LLM 失败轮不置位标记
+// （与 agenticTurn 失败不落历史对齐），重试成功后仍走全量形态。
+func TestGenerateTacticalPlan_FailureKeepsFullMode(t *testing.T) {
+	plan := "07:00-09:00: 上午准备\n09:00-12:00: 车间装配"
+	fake := &fakeLoopLLM{errs: []error{errors.New("network down")}}
+	ac := tacticalCtxForTest(fake)
+
+	if _, err := generateTacticalPlan(context.Background(), ac, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", plan, nil, nil, nil, slog.Default(), "", "", "", nil, nil, nil, nil); err == nil {
+		t.Fatal("expected error on first turn")
+	}
+	if got := ac.as.TacticalHeaderPlan(); got != "" {
+		t.Errorf("failed turn must not mark the header, got %q", got)
+	}
+
+	fake.errs = nil
+	fake.resp = speakToolCallResp()
+	if _, err := generateTacticalPlan(context.Background(), ac, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", plan, nil, nil, nil, slog.Default(), "", "", "", nil, nil, nil, nil); err != nil {
+		t.Fatalf("retry turn: %v", err)
+	}
+	user := lastUserPromptOf(t, fake.capturedMsgs)
+	if !strings.Contains(user, "推荐模式：工作段") {
+		t.Errorf("retry after failure should still be full form:\n%s", user)
+	}
+}
+
+// TestGenerateTacticalPlan_EmptyDailyPlanNeverCompact 验证 /debug/schedule
+// 路径（dailyPlan=""）永不精简——手动调试要确定性，且不置位标记。
+func TestGenerateTacticalPlan_EmptyDailyPlanNeverCompact(t *testing.T) {
+	fake := &fakeLoopLLM{resp: speakToolCallResp()}
+	ac := tacticalCtxForTest(fake)
+
+	for i := 0; i < 2; i++ {
+		if _, err := generateTacticalPlan(context.Background(), ac, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", "", nil, nil, nil, slog.Default(), "", "", "", nil, nil, nil, nil); err != nil {
+			t.Fatalf("turn %d: %v", i+1, err)
+		}
+		user := lastUserPromptOf(t, fake.capturedMsgs)
+		if !strings.Contains(user, "推荐模式：工作段") {
+			t.Errorf("empty dailyPlan (debug path) turn %d must stay full form:\n%s", i+1, user)
+		}
+	}
+	if got := ac.as.TacticalHeaderPlan(); got != "" {
+		t.Errorf("debug path must not mark the header, got %q", got)
+	}
+}
+
+// TestGenerateTacticalPlan_PlanChangeReinjectsFull 验证日内计划变化
+// （未来反应层/事件触发的战略重规划）时标记比对不等 → 重新全量注入新计划。
+func TestGenerateTacticalPlan_PlanChangeReinjectsFull(t *testing.T) {
+	planA := "07:00-09:00: 上午准备\n09:00-12:00: 车间装配"
+	planB := "07:00-09:00: 晨间维护\n09:00-12:00: 分拣作业"
+	fake := &fakeLoopLLM{resp: speakToolCallResp()}
+	ac := tacticalCtxForTest(fake)
+
+	if _, err := generateTacticalPlan(context.Background(), ac, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", planA, nil, nil, nil, slog.Default(), "", "", "", nil, nil, nil, nil); err != nil {
+		t.Fatalf("first turn: %v", err)
+	}
+	if _, err := generateTacticalPlan(context.Background(), ac, "H-01", "分拣", "logistics_hub", "09:00", "09:00-12:00", planB, nil, nil, nil, slog.Default(), "", "", "", nil, nil, nil, nil); err != nil {
+		t.Fatalf("plan-change turn: %v", err)
+	}
+	user := lastUserPromptOf(t, fake.capturedMsgs)
+	if !strings.Contains(user, "【全天日程】\n") || !strings.Contains(user, "分拣作业") {
+		t.Errorf("plan change should re-inject the full header with the new plan:\n%s", user)
+	}
+	if got := ac.as.TacticalHeaderPlan(); got != planB {
+		t.Errorf("TacticalHeaderPlan after plan change = %q, want planB", got)
+	}
+}
+
+// TestGenerateTacticalPlan_ParseFailureStillSetsHeader 钉死置位时机：置位
+// 在 agenticTurn 成功（err==nil）后、tool_calls 解析之前——即使解析失败
+// 返回 err，全量头也已落进历史，标记已置位，下一轮走精简。
+func TestGenerateTacticalPlan_ParseFailureStillSetsHeader(t *testing.T) {
+	plan := "07:00-09:00: 上午准备\n09:00-12:00: 车间装配"
+	fake := &fakeLoopLLM{resp: makeLoopTextResponse("我今天打算去车间转转。")}
+	ac := tacticalCtxForTest(fake)
+
+	if _, err := generateTacticalPlan(context.Background(), ac, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", plan, nil, nil, nil, slog.Default(), "", "", "", nil, nil, nil, nil); err == nil {
+		t.Fatal("expected error when no tool calls returned")
+	}
+	if got := ac.as.TacticalHeaderPlan(); got != plan {
+		t.Errorf("header should be marked once the full user message is in history, got %q", got)
+	}
+	// 失败轮的 user 消息确实在历史里（agenticTurn 已追加）。
+	if hist := ac.as.Conversation(); len(hist) == 0 {
+		t.Error("history should carry the full user message after parse failure")
+	}
+
+	// 下一轮（同计划）走精简。
+	fake.resp = speakToolCallResp()
+	if _, err := generateTacticalPlan(context.Background(), ac, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", plan, nil, nil, nil, slog.Default(), "", "", "", nil, nil, nil, nil); err != nil {
+		t.Fatalf("next turn: %v", err)
+	}
+	user := lastUserPromptOf(t, fake.capturedMsgs)
+	if strings.Contains(user, "推荐模式：工作段") {
+		t.Errorf("turn after parse failure should be compact:\n%s", user)
+	}
+}
+
 func TestIsVenusErrorCode(t *testing.T) {
 	if !isVenusErrorCode(venusErr4001, "4001") {
 		t.Error("expected 4001 match")

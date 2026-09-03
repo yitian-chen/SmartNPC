@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/AgentTown/agenttown-mcp/pkg/llmtypes"
 	"github.com/AgentTown/agenttown-mcp/contract/protocol"
+	"github.com/AgentTown/agenttown-mcp/pkg/llmtypes"
 	"github.com/AgentTown/agenttown-mcp/pkg/storage"
 )
 
@@ -1144,6 +1144,44 @@ func TestConversation_AppendAndClear(t *testing.T) {
 	a.ClearConversation()
 	if got := a.Conversation(); len(got) != 0 {
 		t.Errorf("conversation after clear = %d, want 0", len(got))
+	}
+}
+
+func TestTacticalHeaderPlan_SetAndGet(t *testing.T) {
+	a := New()
+	if got := a.TacticalHeaderPlan(); got != "" {
+		t.Fatalf("fresh TacticalHeaderPlan = %q, want empty", got)
+	}
+	a.SetTacticalHeaderPlan("07:00-11:00: 车间装配作业")
+	if got := a.TacticalHeaderPlan(); got != "07:00-11:00: 车间装配作业" {
+		t.Fatalf("TacticalHeaderPlan = %q", got)
+	}
+}
+
+func TestTacticalHeaderPlan_ClearConversationResets(t *testing.T) {
+	a := New()
+	a.SetDailyPlan("07:00-11:00: 车间装配作业", 0)
+	a.SetTacticalHeaderPlan("07:00-11:00: 车间装配作业")
+	a.ClearConversation()
+	if got := a.TacticalHeaderPlan(); got != "" {
+		t.Errorf("TacticalHeaderPlan after ClearConversation = %q, want empty", got)
+	}
+	// 重置只针对注入标记，dailyPlan 等持久化调度字段不受影响。
+	if got := a.Snapshot().DailyPlan; got != "07:00-11:00: 车间装配作业" {
+		t.Errorf("DailyPlan should survive ClearConversation, got %q", got)
+	}
+}
+
+func TestTacticalHeaderPlan_NotPersistedNoStoreWrite(t *testing.T) {
+	fs := newFakeStore()
+	a := New()
+	a.SetIdentity("H-01", fs)
+	a.SetTacticalHeaderPlan("07:00-11:00: 车间装配作业")
+	if fs.saveCount() != 0 {
+		t.Errorf("SetTacticalHeaderPlan should not trigger SaveScheduleState, got %d writes", fs.saveCount())
+	}
+	if _, ok := fs.snapshot("H-01"); ok {
+		t.Error("SetTacticalHeaderPlan should not write any schedule snapshot")
 	}
 }
 

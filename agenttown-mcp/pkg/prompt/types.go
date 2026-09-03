@@ -12,8 +12,8 @@
 package prompt
 
 import (
-	"github.com/AgentTown/agenttown-mcp/pkg/profile"
 	"github.com/AgentTown/agenttown-mcp/contract/protocol"
+	"github.com/AgentTown/agenttown-mcp/pkg/profile"
 	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
 )
 
@@ -27,13 +27,21 @@ type TacticalInput struct {
 	// DailyPlan is the agent's full-day schedule (formatted "HH:MM-HH:MM: goal"
 	// lines), injected as 【全天日程】 so the tactical LLM sees the day's
 	// context around the current slot. Empty = skip the segment.
-	DailyPlan     string
+	DailyPlan string
+	// Compact switches the tactical user message to the compact form: the
+	// per-day-invariant blocks (【全天日程】 and the full TacticalRules) are
+	// replaced by a short core-rules digest plus a reference line pointing at
+	// the day's first tactical message which carried them in full. Caller
+	// (generateTacticalPlan) sets it only when that full header is already in
+	// the conversation history. Zero value false = full form (backward
+	// compatible).
+	Compact       bool
 	Physical      *protocol.PhysicalState
 	KB            *worldkb.KB
 	Profiles      map[string]*profile.Profile // NPC persona override; nil → AgentRole falls back to KB then hardcoded
 	Hint          string
-	Memories      string                      // Stage 4: formatted bullet list of recent memories; empty = skip segment
-	Relationships string                      // Stage 5: formatted relationship list for 【人际关系】段; empty = skip segment (single-NPC scenario)
+	Memories      string // Stage 4: formatted bullet list of recent memories; empty = skip segment
+	Relationships string // Stage 5: formatted relationship list for 【人际关系】段; empty = skip segment (single-NPC scenario)
 	AgentID       string
 	// ObjectStatus is UE5's per-category smart object availability aggregate
 	// (cross-zone). Injected into the tactical prompt as 【物体实时占用】 so

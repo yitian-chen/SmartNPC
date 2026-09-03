@@ -118,8 +118,9 @@ func physicalAlertOverrideGoal(hint, origGoal string, physical *protocol.Physica
 // generateTacticalPlan 调战术层 LLM 分解当前时段 goal（统一 agentic loop
 // 战术轮）。会话历史由 ac.agenticTurn 统一读写（[system, ...当天历史, user]，
 // 历史含战略轮与对话轮），成功后 user+assistant 自动追加进历史，tool 结果由
-// recordActionCompletion 回填。返回分解出的 action 段；任一步失败返回 err，
-// 调用方决定回退兜底。
+// recordActionCompletion 回填。当天同计划的第二条及后续轮次走精简形态
+// （省略【全天日程】与完整规则，见 TacticalInput.Compact）。返回分解出的
+// action 段；任一步失败返回 err，调用方决定回退兜底。
 func generateTacticalPlan(
 	ctx context.Context,
 	ac *agentContext,
@@ -137,12 +138,22 @@ func generateTacticalPlan(
 	nearbyObjects []protocol.NearbyObject,
 	visibleAgents []protocol.VisibleAgent,
 ) ([]plannedAction, error) {
+	// 精简引用判定：当天同一 dailyPlan 的全量头（【全天日程】+完整
+	// 【分解规则】）已在本日会话历史中（由上一次成功全量轮写入
+	// tacticalHeaderPlan 标记）→ 本轮省略日内不变块，改为核心约束速览 +
+	// 引用行。dailyPlan==""（/debug/schedule 手动分解）永不精简：手动
+	// 调试要确定性，且 auto-plan=false 时历史可能从无全量头，纯引用会
+	// 指向不存在的规则。计划变化（日内重规划）→ 比对不等 → 重新全量
+	// 注入。单次读取存局部变量，判定与置位复用同一值。
+	headerPlan := ac.as.TacticalHeaderPlan()
+	compact := dailyPlan != "" && headerPlan == dailyPlan
 	promptText := prompt.BuildTactical(prompt.TacticalInput{
 		Goal:          goal,
 		Zone:          zone,
 		TimeOfDay:     timeOfDay,
 		Slot:          slot,
 		DailyPlan:     dailyPlan,
+		Compact:       compact,
 		Physical:      physical,
 		KB:            kb,
 		Profiles:      profiles,
@@ -155,7 +166,7 @@ func generateTacticalPlan(
 		VisibleAgents: visibleAgents,
 	})
 	logger.Info("[MCP→LLM/TACTICAL-PROMPT]",
-		"agent_id", agentID, "goal", goal, "game_time", timeOfDay, "text", promptText,
+		"agent_id", agentID, "goal", goal, "game_time", timeOfDay, "compact", compact, "text", promptText,
 		"replan_hint", hint, "history_turns", len(ac.as.Conversation()))
 
 	// 统一 agentic loop 战术轮：tool_choice=required（必须调用工具），
@@ -164,6 +175,13 @@ func generateTacticalPlan(
 		"tactical", promptText, "required", "", nil)
 	if err != nil {
 		return nil, fmt.Errorf("tactical llm: %w", err)
+	}
+	// 全量轮成功：含全量头的 user 消息已由 agenticTurn 落进历史，此刻
+	// 置位。放在 parse 校验之前——即使后续 tool_calls 解析失败，全量头
+	// 也确已在历史中，下一轮走精简是安全的（置位 ⟺ 全量 user 消息
+	// 已在历史）。
+	if !compact && dailyPlan != "" {
+		ac.as.SetTacticalHeaderPlan(dailyPlan)
 	}
 
 	raw := resp.ExtractText()
