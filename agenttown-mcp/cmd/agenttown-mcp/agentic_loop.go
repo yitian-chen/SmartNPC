@@ -52,9 +52,6 @@ func (a *agentContext) agenticTurn(ctx context.Context, hc llmClient, kb *worldk
 	// system 不入历史：每次发送时现拼（kb/profiles 单次仿真内不变，
 	// 对同一 agent 字节级一致，可缓存）。
 	system := prompt.BuildSharedSystemPrompt(kb, profiles, agentID)
-	// 闭环悬空的 tool_calls：上一轮战术分解若被清队列打断，未执行的段没有
-	// tool 消息回填，先补 cancelled，避免非法序列触发 Venus 4001。
-	a.as.ClosePendingToolCalls("interrupted")
 	history := a.as.Conversation()
 
 	// 请求 messages：[system, ...历史, user(本次)]。不先 append user——
@@ -83,10 +80,27 @@ func (a *agentContext) agenticTurn(ctx context.Context, hc llmClient, kb *worldk
 	}
 
 	// 成功：user + assistant 追加进当天 loop 历史。战术轮的 assistant 携带
-	// tool_calls，其 tool 结果由 recordActionCompletion 按 ToolCallID 回填。
+	// tool_calls，立即在其后 append 占位 tool（result=pending）闭环序列——
+	// 满足 "assistant(tool_calls) 后必须紧跟 tool 消息" 的协议硬约束，且占位
+	// 字节稳定不变以吃 prefix cache。真实结果由 recordActionCompletion 以
+	// user role 注入到末尾（见 systemInjectedToolResult）。
 	assistant := llmtypes.Message{Role: "assistant", Content: resp.ExtractText(), ToolCalls: resp.ToolCalls}
 	a.as.AppendConversationMessage(messages[len(messages)-1])
 	a.as.AppendConversationMessage(assistant)
+	for _, tc := range resp.ToolCalls {
+		if tc.ID != "" {
+			a.as.AppendConversationMessage(llmtypes.Message{
+				Role:       "tool",
+				Content:    pendingToolResult,
+				ToolCallID: tc.ID,
+			})
+		}
+	}
 	hc.ResetSession() // no-op（Venus 无状态），保留接口语义
 	return resp, nil
 }
+
+// pendingToolResult 是 tool 占位消息的固定 content——字节级不变，保证
+// conversation 前缀稳定、Venus prefix cache 可复用。真实结果不覆盖它，
+// 而是以 user role 追加到末尾。
+const pendingToolResult = "result=pending"

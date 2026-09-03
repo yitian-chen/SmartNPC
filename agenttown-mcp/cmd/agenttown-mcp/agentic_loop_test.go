@@ -159,3 +159,43 @@ func TestAgenticTurn_SchemaPassThrough(t *testing.T) {
 		t.Errorf("tool_choice = %q, want none", fake.capturedTC)
 	}
 }
+
+// TestAgenticTurn_AppendsPendingToolsForTactical 验证战术轮（带 tool_calls）
+// 成功后，assistant 之后紧跟 N 条占位 tool（result=pending），闭环
+// "assistant(tool_calls) → tool" 协议约束。
+func TestAgenticTurn_AppendsPendingToolsForTactical(t *testing.T) {
+	as := agentstate.New()
+	as.SetIdentity("H-01", nil)
+	resp := &llmtypes.Response{
+		Status: "completed",
+		ToolCalls: []llmtypes.ToolCall{
+			{ID: "tc-1", Type: "function", Function: llmtypes.ToolFunction{Name: "speak", Arguments: `{"content":"hi"}`}},
+			{ID: "tc-2", Type: "function", Function: llmtypes.ToolFunction{Name: "move_to", Arguments: `{"target_type":"zone"}`}},
+		},
+	}
+	fake := &fakeLoopLLM{resp: resp}
+	ac := &agentContext{as: as, tacticalHc: fake}
+
+	if _, err := ac.agenticTurn(context.Background(), fake, nil, nil, nil, "H-01",
+		"tactical", "分解请求", "required", "", nil); err != nil {
+		t.Fatalf("agenticTurn: %v", err)
+	}
+
+	hist := as.Conversation()
+	// user + assistant + 2 占位 tool
+	if len(hist) != 4 {
+		t.Fatalf("history len = %d, want 4 (user+assistant+2 pending tools)", len(hist))
+	}
+	if hist[0].Role != "user" || hist[1].Role != "assistant" || len(hist[1].ToolCalls) != 2 {
+		t.Fatalf("hist[0..1] = %+v, want user+assistant(2 tool_calls)", hist[:2])
+	}
+	for i := 2; i < 4; i++ {
+		if hist[i].Role != "tool" || hist[i].Content != "result=pending" {
+			t.Errorf("hist[%d] = %+v, want tool(result=pending)", i, hist[i])
+		}
+	}
+	// 占位 tool 的 tool_call_id 与 assistant 的 tool_calls 对齐。
+	if hist[2].ToolCallID != "tc-1" || hist[3].ToolCallID != "tc-2" {
+		t.Errorf("pending tool ids = %q,%q, want tc-1,tc-2", hist[2].ToolCallID, hist[3].ToolCallID)
+	}
+}

@@ -516,52 +516,6 @@ func (a *AgentState) ClearConversation() {
 	a.mu.Unlock()
 }
 
-// ClosePendingToolCalls 闭环 conversation 里悬空的 tool_calls。战术层一轮
-// 可能输出 N 个 action 段（N 个 tool_calls），若 slot 切换 / replan / 清队列
-// 打断了执行，未执行的段被丢弃、其 action_completed 永远不会到达，tool
-// 消息无从回填——形成 "assistant(tool_calls) 后无 tool 消息" 的非法序列，
-// 会让 Venus 网关在后续 tool_choice=required 轮校验 FunctionDefinition 报
-// 4001（Invalid JSON: trailing characters）。
-//
-// 策略：从后往前扫，一旦遇到 user（新一轮已开启）即止——只处理"当前执行中
-// 轮次"的悬空；定位最后一条带 ToolCalls 的 assistant，对其尚未回填的
-// tool_call 各补一条 result=cancelled 的 tool 消息，闭环序列。
-func (a *AgentState) ClosePendingToolCalls(reason string) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	n := len(a.conversation)
-	idx := -1
-	for i := n - 1; i >= 0; i-- {
-		m := a.conversation[i]
-		if m.Role == "user" {
-			// 上一轮已正常翻篇，无悬空。
-			return
-		}
-		if m.Role == "assistant" && len(m.ToolCalls) > 0 {
-			idx = i
-			break
-		}
-	}
-	if idx < 0 {
-		return
-	}
-	answered := make(map[string]bool)
-	for _, m := range a.conversation[idx+1:] {
-		if m.Role == "tool" && m.ToolCallID != "" {
-			answered[m.ToolCallID] = true
-		}
-	}
-	for _, tc := range a.conversation[idx].ToolCalls {
-		if tc.ID != "" && !answered[tc.ID] {
-			a.conversation = append(a.conversation, llmtypes.Message{
-				Role:       "tool",
-				Content:    "result=cancelled reason=" + reason,
-				ToolCallID: tc.ID,
-			})
-		}
-	}
-}
-
 // ArmTimeStop sets the time_to_stop target for an in-flight long action.
 // targetGameSec is the authoritative GameTimeSec at which the action should
 // be interrupted; actionID identifies the in-flight action; durationSec is

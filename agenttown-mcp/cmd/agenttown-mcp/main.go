@@ -224,17 +224,18 @@ func (a *agentContext) recordActionCompletion(completion protocol.ActionComplete
 	// Stage 5: 异步触发关系更新判断（Ollama 5s 超时，不阻塞主路径）。
 	if res.WasInFlight {
 		a.recordActionHistory(completion, res)
-		// 多轮对话：把动作执行结果作为 tool role 回填会话历史（关联
-		// assistant.tool_calls[].ID），供下一轮 LLM 参考。
+		// 多轮对话：动作执行结果以 user role 注入会话历史末尾，标记
+		// [系统注入] + tool_call_id 让 LLM 关联到具体动作。不再用 role=tool
+		// 回填（占位 tool 已在 assistant 后立即就位，真实结果 append 到末尾，
+		// 保护 conversation 前缀的 KV cache）。
 		if res.ToolCallID != "" {
 			content := fmt.Sprintf("result=%s duration_ms=%d", completion.Result, completion.DurationMs)
 			if completion.Reason != "" {
 				content += fmt.Sprintf(" reason=%s", completion.Reason)
 			}
 			a.as.AppendConversationMessage(llmtypes.Message{
-				Role:       "tool",
-				Content:    content,
-				ToolCallID: res.ToolCallID,
+				Role:    "user",
+				Content: fmt.Sprintf("[系统注入] 任务 tool_call_id=%s 已完成，结果如下：%s", res.ToolCallID, content),
 			})
 		}
 		// Phase 2 Module C: social_chat 走对话 runner 自己的关系增长路径，
