@@ -361,9 +361,7 @@ func TestGenerateTacticalPlan_AllFiltered(t *testing.T) {
 }
 
 func TestGenerateTacticalPlan_ResetSessionCalled(t *testing.T) {
-	tc := &fakeStrategicCaller{resp: makeToolCallResponse([]llmtypes.ToolCall{
-		{Function: llmtypes.ToolFunction{Name: "speak", Arguments: `{"content":"开始"}`}},
-	})}
+	tc := &fakeStrategicCaller{resp: speakToolCallResp()}
 	_, _ = generateTacticalPlan(context.Background(), tacticalCtxForTest(tc), "H-01", "等待", "main_workshop", "09:00", "09:00-12:00", "", nil, nil, nil, slog.Default(), "", "", "", nil, nil, nil, nil)
 	if !tc.resetCalled {
 		t.Error("ResetSession should be called after successful tactical generation")
@@ -434,7 +432,7 @@ func TestGenerateTacticalPlan_RetryOn4001(t *testing.T) {
 	// 前两次 4001，第三次成功 → 重试后成功，共调用 3 次（1 首调 + 2 重试）。
 	tc := &sequenceCaller{
 		seq:  []error{venusErr4001, venusErr4001, nil},
-		resp: makeToolCallResponse([]llmtypes.ToolCall{{Function: llmtypes.ToolFunction{Name: "speak", Arguments: `{"content":"重试成功"}`}}}),
+		resp: speakToolCallResp(),
 	}
 	actions, err := generateTacticalPlan(context.Background(), tacticalCtxForTest(tc), "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", "", &protocol.PhysicalState{Energy: 80}, nil, nil, slog.Default(), "", "", "", nil, nil, nil, nil)
 	if err != nil {
@@ -443,8 +441,8 @@ func TestGenerateTacticalPlan_RetryOn4001(t *testing.T) {
 	if tc.calls != 3 {
 		t.Fatalf("got %d calls, want 3 (1 initial + 2 retries)", tc.calls)
 	}
-	if len(actions) != 1 {
-		t.Fatalf("got %d actions, want 1", len(actions))
+	if len(actions) != 2 {
+		t.Fatalf("got %d actions, want 2 (speak + work_shift)", len(actions))
 	}
 	if tc.resetCount != 1 {
 		t.Errorf("resetCount=%d, want 1", tc.resetCount)
@@ -489,10 +487,13 @@ func lastUserPromptOf(t *testing.T, msgs []llmtypes.Message) string {
 	return last.Content
 }
 
-// speakToolCallResp 构造单个 speak 工具调用的成功响应（战术轮最小可用形态）。
+// speakToolCallResp 构造一个有效的战术成功响应：speak（首动作）+ work_shift
+// 长动作。speak-only 已被视为空结果（isEmptyTacticalResult），故此处必须带
+// 一个长动作，否则 agenticTurn 会判空重试。
 func speakToolCallResp() *llmtypes.Response {
 	return makeToolCallResponse([]llmtypes.ToolCall{
 		{Function: llmtypes.ToolFunction{Name: "speak", Arguments: `{"content":"开始"}`}},
+		{Function: llmtypes.ToolFunction{Name: "work_shift", Arguments: `{"semantic_group":"workbench","interaction":"assemble","duration":3600}`}},
 	})
 }
 
@@ -606,15 +607,20 @@ func TestGenerateTacticalPlan_PlanChangeReinjectsFull(t *testing.T) {
 }
 
 // TestGenerateTacticalPlan_ParseFailureStillSetsHeader 钉死置位时机：置位
-// 在 agenticTurn 成功（err==nil）后、tool_calls 解析之前——即使解析失败
-// 返回 err，全量头也已落进历史，标记已置位，下一轮走精简。
+// 在 agenticTurn 成功（err==nil）后、tool_calls 解析之前——即使解析（全被
+// filterValidActions 过滤）返回 err，全量头也已落进历史，标记已置位，下一轮
+// 走精简。
 func TestGenerateTacticalPlan_ParseFailureStillSetsHeader(t *testing.T) {
 	plan := "07:00-09:00: 上午准备\n09:00-12:00: 车间装配"
-	fake := &fakeLoopLLM{resp: makeLoopTextResponse("我今天打算去车间转转。")}
+	// scan_area 会被 filterValidActions 过滤 → 解析后 0 个 action（parse 失败），
+	// 但 agenticTurn 层（tool_calls 非空、非 speak）返回成功。
+	fake := &fakeLoopLLM{resp: makeToolCallResponse([]llmtypes.ToolCall{
+		{Function: llmtypes.ToolFunction{Name: "scan_area", Arguments: `{}`}},
+	})}
 	ac := tacticalCtxForTest(fake)
 
 	if _, err := generateTacticalPlan(context.Background(), ac, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", plan, nil, nil, nil, slog.Default(), "", "", "", nil, nil, nil, nil); err == nil {
-		t.Fatal("expected error when no tool calls returned")
+		t.Fatal("expected error when all tool calls filtered")
 	}
 	if got := ac.as.TacticalHeaderPlan(); got != plan {
 		t.Errorf("header should be marked once the full user message is in history, got %q", got)
@@ -1755,4 +1761,44 @@ func TestTacticalToolsFromRegistry_MoveToNoDuration(t *testing.T) {
 		return
 	}
 	t.Fatal("move_to tool not found")
+}
+
+// TestInsertRestBetweenDuplicateWork 验证相邻相同 work_shift（同 semantic_group
+// + interaction）之间插入一个休息段，且休息段带 duration。
+func TestInsertRestBetweenDuplicateWork(t *testing.T) {
+	mk := func(sg, it string) plannedAction {
+		return plannedAction{Action: "work_shift", Params: map[string]any{"semantic_group": sg, "interaction": it}}
+	}
+	in := []plannedAction{
+		mk("workbench", "assemble"),
+		mk("workbench", "assemble"), // 相邻重复
+		mk("process_machine", "process"),
+	}
+	out := insertRestBetweenDuplicateWork(in)
+	if len(out) != 4 {
+		t.Fatalf("len = %d, want 4 (3 work + 1 rest inserted)", len(out))
+	}
+	// 插入的休息段在索引 1（两个 work_shift 之间）。
+	rest := out[1]
+	if rest.Action != "exercise" && rest.Action != "InteractSmartObject" {
+		t.Errorf("out[1] = %+v, want a rest segment (exercise/InteractSmartObject)", rest)
+	}
+	if d, _ := rest.Params["duration"].(int); d != defaultRestDurationSec {
+		t.Errorf("rest duration = %v, want %d", rest.Params["duration"], defaultRestDurationSec)
+	}
+}
+
+// TestInsertRestBetweenDuplicateWork_NoDuplicate 验证不同地点/非相邻不插入。
+func TestInsertRestBetweenDuplicateWork_NoDuplicate(t *testing.T) {
+	mk := func(sg string) plannedAction {
+		return plannedAction{Action: "work_shift", Params: map[string]any{"semantic_group": sg}}
+	}
+	out := insertRestBetweenDuplicateWork([]plannedAction{mk("workbench"), mk("process_machine")})
+	if len(out) != 2 {
+		t.Errorf("len = %d, want 2 (different semantic_group, no insert)", len(out))
+	}
+	// 单个 work_shift 不插。
+	if len(insertRestBetweenDuplicateWork([]plannedAction{mk("workbench")})) != 1 {
+		t.Error("single work_shift should not insert")
+	}
 }

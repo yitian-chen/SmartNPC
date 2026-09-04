@@ -12,6 +12,7 @@ const (
 	ErrSuccess          = "success"
 	ErrBadJSON4001      = "bad_json_4001"      // venus rejected malformed tool_calls JSON
 	ErrEmptyCompletion  = "empty_completion"   // venus returned 200 with an empty stream (no content/tool_calls)
+	ErrEmptyResult      = "empty_result"       // LLM succeeded but 0 tool_calls / all speak (tactical nothing to do)
 	ErrRateLimited      = "rate_limited"       // 429 / code 4029
 	ErrTimeout          = "timeout"            // context deadline exceeded / client timeout
 	ErrHTTPError        = "http_error"         // non-200 status that isn't 4001/429

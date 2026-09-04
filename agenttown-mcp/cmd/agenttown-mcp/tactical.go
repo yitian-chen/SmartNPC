@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"math/rand/v2"
 	"strings"
 
 	"github.com/AgentTown/agenttown-mcp/adapters/agenttown/tools"
@@ -204,6 +205,7 @@ func generateTacticalPlan(
 	llmMetricsCollector.RecordJSON("tactical", true)
 	actions = fillDefaultDurationForRest(actions)
 	actions = fillDefaultDurationForWork(actions)
+	actions = insertRestBetweenDuplicateWork(actions)
 	actionsJSON, _ := json.Marshal(actions)
 	logger.Info("[战术层] 分解成功",
 		"agent_id", agentID, "steps", len(actions),
@@ -320,6 +322,51 @@ func fillDefaultDurationForWork(actions []plannedAction) []plannedAction {
 		a.Params["duration"] = defaultWorkDurationSec
 	}
 	return actions
+}
+
+// restSegmentBetweenWork 返回一个"相邻重复 work_shift 之间"插入的休息/活动段，
+// 随机三选一：原地拉伸（exercise/stretch）、长椅休息（InteractSmartObject bench
+// rest）、散步（exercise/walk）。duration 用 defaultRestDurationSec（30 分钟）。
+func restSegmentBetweenWork() plannedAction {
+	switch rand.IntN(3) {
+	case 0:
+		return plannedAction{Action: "exercise", Params: map[string]any{"exercise_type": "stretch", "duration": defaultRestDurationSec}}
+	case 1:
+		return plannedAction{Action: "InteractSmartObject", Params: map[string]any{"semantic_group": "bench", "interaction": "rest", "duration": defaultRestDurationSec}}
+	default:
+		return plannedAction{Action: "exercise", Params: map[string]any{"exercise_type": "walk", "duration": defaultRestDurationSec}}
+	}
+}
+
+// sameParam 判断两个 params map 的同一 string 参数是否相等（都缺失视为不等）。
+func sameParam(a, b map[string]any, key string) bool {
+	av, aok := a[key].(string)
+	bv, bok := b[key].(string)
+	return aok && bok && av == bv
+}
+
+// insertRestBetweenDuplicateWork 在相邻的"相同 work_shift（同 semantic_group +
+// interaction）"之间随机插入一个休息段，打破"连续两次 work_shift 同地点"。
+// 规则 4 已禁止但 LLM 常无视，此处做执行层兜底。只处理非队尾的相邻对（队尾
+// 保持自然持续到时段切换，不插）。
+func insertRestBetweenDuplicateWork(actions []plannedAction) []plannedAction {
+	if len(actions) < 2 {
+		return actions
+	}
+	out := make([]plannedAction, 0, len(actions)+2)
+	for i, a := range actions {
+		out = append(out, a)
+		if i == len(actions)-1 {
+			break
+		}
+		cur, nxt := a, actions[i+1]
+		if cur.Action == "work_shift" && nxt.Action == "work_shift" &&
+			sameParam(cur.Params, nxt.Params, "semantic_group") &&
+			sameParam(cur.Params, nxt.Params, "interaction") {
+			out = append(out, restSegmentBetweenWork())
+		}
+	}
+	return out
 }
 
 // parseToolCalls 把 LLM 返回的 tool_calls 解析为 plannedAction 队列。

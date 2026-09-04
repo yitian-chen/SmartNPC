@@ -934,3 +934,22 @@ func TestSendLoop_ToolChoiceAndSchema(t *testing.T) {
 		t.Errorf("response_format should be absent when schemaName empty, got %+v", capturedRequest.ResponseFormat)
 	}
 }
+
+// TestSendWithSummary_EmptyCompletion 验证非流式空完成（200 但 content 空、无
+// tool_calls）返回 ErrEmptyCompletion，对齐流式 parseStream 的空完成检查。
+func TestSendWithSummary_EmptyCompletion(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl-123","model":"default","choices":[{"message":{"role":"assistant","content":""},"finish_reason":"stop"}]}`))
+	}))
+	defer server.Close()
+
+	c := newTestClient(t, server.URL)
+	_, err := c.SendWithSummary(context.Background(), "", "hi")
+	if err == nil {
+		t.Fatal("expected ErrEmptyCompletion for empty non-streaming response")
+	}
+	if !errors.Is(err, ErrEmptyCompletion) {
+		t.Errorf("expected ErrEmptyCompletion, got: %v", err)
+	}
+}
