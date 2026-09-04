@@ -135,7 +135,7 @@ func (a *agentContext) agenticTurn(ctx context.Context, hc llmClient, kb *worldk
 				// 超时/连接/其他错误不重试。
 				break
 			}
-		} else if isEmptyTacticalResult(resp, toolChoice) {
+		} else if isEmptyTacticalResult(resp, toolChoice, agentID) {
 			// 战术层空结果（tool_choice=required 但 0 tool_calls / 全是 speak）：
 			// 立即重试相同请求体，重采样通常能拿到正常分解。
 			logger.Warn("[agentic-loop] 战术层空结果，重试相同请求体",
@@ -162,7 +162,7 @@ func (a *agentContext) agenticTurn(ctx context.Context, hc llmClient, kb *worldk
 		}
 	}
 	errClass := classifyLLMError(err)
-	if err == nil && isEmptyTacticalResult(resp, toolChoice) {
+	if err == nil && isEmptyTacticalResult(resp, toolChoice, agentID) {
 		errClass = llmmetrics.ErrEmptyResult
 	}
 	llmMetricsCollector.RecordCall(llmmetrics.CallSample{
@@ -181,7 +181,7 @@ func (a *agentContext) agenticTurn(ctx context.Context, hc llmClient, kb *worldk
 	if err != nil {
 		return nil, err
 	}
-	if isEmptyTacticalResult(resp, toolChoice) {
+	if isEmptyTacticalResult(resp, toolChoice, agentID) {
 		// 重试耗尽后仍是空结果：返回错误，不追加空历史（避免 pending tool 占位残留）。
 		return nil, fmt.Errorf("tactical empty result: %d tool_calls", len(resp.ToolCalls))
 	}
@@ -217,10 +217,15 @@ const pendingToolResult = "result=pending"
 var rateLimitBackoffBase = 2 * time.Second
 
 // isEmptyTacticalResult 判断 tool_choice=required 的响应是否为"空结果"：
-// 0 个 tool_calls（LLM 无视 required 返回文本/空体），或全是 speak（speak-only，
-// 无长动作填充时段）。战术层需要至少一个带 duration 的长动作，空结果应
-// 重试而非入队（入队会让 NPC 秒空队列 → 高频重分解 → 呆站）。
-func isEmptyTacticalResult(resp *llmtypes.Response, toolChoice string) bool {
+//   - 0 个 tool_calls（LLM 无视 required 返回文本/空体）；
+//   - 全是 speak（speak-only，无长动作）；
+//   - 除 speak 外全会被 filterValidActions 过滤（scan_area/stop/wait/未知），
+//     即过滤后只剩 speak、无有效长动作。
+//
+// 战术层需要至少一个带 duration 的长动作，空结果应重试而非入队（入队会让
+// NPC 秒空队列 → 高频重分解 → 呆站）。用 tacticalActionAvailable 与
+// generateTacticalPlan 的 filterValidActions 保持同一判定口径。
+func isEmptyTacticalResult(resp *llmtypes.Response, toolChoice, agentID string) bool {
 	if toolChoice != "required" || resp == nil {
 		return false
 	}
@@ -228,11 +233,14 @@ func isEmptyTacticalResult(resp *llmtypes.Response, toolChoice string) bool {
 		return true
 	}
 	for _, tc := range resp.ToolCalls {
-		if tc.Function.Name != "speak" {
-			return false
+		if tc.Function.Name == "speak" {
+			continue // 首动作 speak 不算长动作
+		}
+		if tacticalActionAvailable(tc.Function.Name, agentID, capabilityRegistryRef) {
+			return false // 有一个能被 filterValidActions 接受的长动作
 		}
 	}
-	return true
+	return true // 全是 speak，或非 speak 全被过滤
 }
 
 // classifyLLMError 把一次 LLM 调用的最终错误映射到指标错误类别。复用

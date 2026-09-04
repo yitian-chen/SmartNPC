@@ -612,15 +612,16 @@ func TestGenerateTacticalPlan_PlanChangeReinjectsFull(t *testing.T) {
 // 走精简。
 func TestGenerateTacticalPlan_ParseFailureStillSetsHeader(t *testing.T) {
 	plan := "07:00-09:00: 上午准备\n09:00-12:00: 车间装配"
-	// scan_area 会被 filterValidActions 过滤 → 解析后 0 个 action（parse 失败），
-	// 但 agenticTurn 层（tool_calls 非空、非 speak）返回成功。
+	// work_shift 是合法工具（isEmptyTacticalResult 判非空），但 arguments 非法
+	// JSON → parseToolCalls 跳过 → 0 个 action（parse 失败），agenticTurn 层
+	// 已返回成功并追加历史。
 	fake := &fakeLoopLLM{resp: makeToolCallResponse([]llmtypes.ToolCall{
-		{Function: llmtypes.ToolFunction{Name: "scan_area", Arguments: `{}`}},
+		{Function: llmtypes.ToolFunction{Name: "work_shift", Arguments: `not-json`}},
 	})}
 	ac := tacticalCtxForTest(fake)
 
 	if _, err := generateTacticalPlan(context.Background(), ac, "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", plan, nil, nil, nil, slog.Default(), "", "", "", nil, nil, nil, nil); err == nil {
-		t.Fatal("expected error when all tool calls filtered")
+		t.Fatal("expected error when tool call arguments invalid")
 	}
 	if got := ac.as.TacticalHeaderPlan(); got != plan {
 		t.Errorf("header should be marked once the full user message is in history, got %q", got)
