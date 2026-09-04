@@ -1633,3 +1633,33 @@ func TestMapTacticalAction_InteractZonePassthrough(t *testing.T) {
 		t.Errorf("zone should be absent when not provided: %+v", params2)
 	}
 }
+
+// TestTacticalToolsFromRegistry_AppendsUsageHint 验证 tools 字段携带
+// capability_registry 声明的 usage_hint（"何时使用"提示）。此前被遗漏——
+// tools 只有动作描述、没有使用时机，LLM 选型时看不到"电量低时使用"这类引导。
+func TestTacticalToolsFromRegistry_AppendsUsageHint(t *testing.T) {
+	r := NewCapabilityRegistry(slog.Default())
+	r.Register(protocol.SystemAgentID, BuiltinCmdCapabilities)
+
+	desc := func(name string) string {
+		for _, tl := range tacticalToolsFromRegistry(r, "H-01") {
+			if tl.Function.Name == name {
+				return tl.Function.Description
+			}
+		}
+		t.Fatalf("tool %s not found", name)
+		return ""
+	}
+
+	// 带 usage_hint 的工具：hint 以"。"追加到描述末尾。
+	if got := desc("charge_at_station"); !strings.HasSuffix(got, "电量低时使用") {
+		t.Errorf("charge_at_station = %q, want suffix 电量低时使用", got)
+	}
+	if got := desc("self_maintenance"); !strings.HasSuffix(got, "磨损高或需要维护时使用") {
+		t.Errorf("self_maintenance = %q, want suffix 磨损高或需要维护时使用", got)
+	}
+	// 无 usage_hint 的工具（speak）描述保持不变。
+	if got := desc("speak"); got != "讲话" {
+		t.Errorf("speak = %q, want 讲话 (no hint appended)", got)
+	}
+}

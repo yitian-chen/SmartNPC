@@ -13,7 +13,7 @@ import (
 // 【附近NPC】/【物体实时占用】 point at the user message's dynamic segments.
 // The available tools are NOT listed here — they arrive via the
 // function-calling `tools` request field.
-const TacticalRules = `1. 第一个工具调用必须是 speak（用一段话表达此刻内心想法或独白），随后可返回 1-6 个动作段，按执行顺序排列。长复合动作或 InteractSmartObject 长动作必须用 duration 设置时长。可以在动作之间穿插speak表达现在的情况。
+const TacticalRules = `1. 第一个工具调用必须是 speak（用一段话表达此刻内心想法或独白），随后返回 1-6 个动作段，按执行顺序排列。长复合动作或 InteractSmartObject 长动作必须用 duration 设置时长。可以在动作之间穿插speak表达现在的情况。
 2. 你可以根据当前NPC的实际属性、实际游戏时间等信息灵活安排，如果当前此条日程并不合理，例如半夜不睡觉而是跑步/工作、电量不为低时就去充电等情况，请下发更合理的动作，不必遵守原有日程规定。
 3. 复合动作已包含自动移动到对应位置的逻辑，禁止在复合动作前调用 move_to——直接调用单个长复合动作即可。
 4. 仅当目标确实没有匹配的长复合动作时，才用原子动作组合实现目标。禁止把同一动作连续重复多次填充时段（工作段之间应穿插休息段）。
@@ -28,10 +28,9 @@ const TacticalRules = `1. 第一个工具调用必须是 speak（用一段话表
 // 核心约束速览，覆盖实测高频失败模式（speak-only 队列、duration 漏填、
 // 末段非长动作、semantic_group 编造）。完整规则经 tacticalCompactRefLine
 // 指向本日第一条战术 user 消息，不再逐轮重复。
-const tacticalCoreRules = `- 首个工具调用必须是 speak；仅返回 speak 会让队列数秒耗尽，禁止。
-- 非瞬时动作（移动、长复合动作、InteractSmartObject）必须填 duration（秒）。
-- 最后一个动作必须是长动作，duration 设为当前时段剩余时长。
-- semantic_group / interaction 严格使用系统信息设施详情给出的值，禁止编造、禁止用实例 id。`
+const tacticalCoreRules = `- 首个工具调用必须是 speak；随后返回 1-6 个动作段，按执行顺序排列。
+- 除了speak和移动，其他必须填 duration（秒）。
+- 最后一个动作必须是长动作，duration 设为当前时段剩余时长。`
 
 // tacticalCompactRefLine 是精简模式的引用行：指向本日第一条战术消息的
 // 全量头。"以最新一份为准"覆盖跨日交错等边界下历史出现多份全量头的情况。

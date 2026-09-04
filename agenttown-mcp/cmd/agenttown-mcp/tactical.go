@@ -378,6 +378,13 @@ func tacticalToolsFromRegistry(registry *CapabilityRegistry, agentID string) []v
 		if desc == "" {
 			desc = name
 		}
+		// UsageHint 是 UE capability_registry 声明的"何时使用该工具"提示
+		// （如"能量低时使用""磨损高或需要维护时使用"），对 LLM 在 function
+		// calling 阶段选型有直接帮助。此前被遗漏——tools 字段只有动作描述、
+		// 没有使用时机，LLM 只能靠 system prompt 里的设施详情间接推断。
+		if act.UsageHint != "" {
+			desc = strings.TrimRight(desc, "。") + "。" + strings.TrimRight(act.UsageHint, "。")
+		}
 		out = append(out, venus.Tool{
 			Type: "function",
 			Function: venus.ToolFunction{
