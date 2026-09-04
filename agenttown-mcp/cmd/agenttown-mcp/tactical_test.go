@@ -1256,7 +1256,7 @@ func TestCapabilityParamsSchema_DurationRequiredForNonInstant(t *testing.T) {
 	params := []protocol.CapabilityParam{
 		{Name: "semantic_group", Type: "string", Required: true},
 	}
-	for _, name := range []string{"work_shift", "move_to", "interact", "exercise"} {
+	for _, name := range []string{"work_shift", "interact", "exercise"} {
 		raw := capabilityParamsSchema(params, name)
 		var schema struct {
 			Properties map[string]any `json:"properties"`
@@ -1278,8 +1278,8 @@ func TestCapabilityParamsSchema_DurationRequiredForNonInstant(t *testing.T) {
 			t.Errorf("%s: duration not in required (got %v)", name, schema.Required)
 		}
 	}
-	// 瞬时工具：立即完成，无时长概念——不追加 duration prop。
-	for _, name := range []string{"speak", "emote", "turn_to", "generic_act"} {
+	// 瞬时工具 + move_to（UE 寻路决定时长）：均不追加 duration prop。
+	for _, name := range []string{"speak", "emote", "turn_to", "generic_act", "move_to"} {
 		raw := capabilityParamsSchema(params, name)
 		var schema struct {
 			Properties map[string]any `json:"properties"`
@@ -1730,4 +1730,29 @@ func TestBuildTactical_CompactCarriesDurationMagnitude(t *testing.T) {
 	if !strings.Contains(out, "3600-7200") {
 		t.Errorf("compact prompt should carry duration magnitude (3600-7200):\n%s", out)
 	}
+}
+
+// TestTacticalToolsFromRegistry_MoveToNoDuration 验证 move_to 不追加 duration
+// 参数（移动时长由 UE 寻路决定，LLM 无需填，UE usage_hint 已声明）。
+func TestTacticalToolsFromRegistry_MoveToNoDuration(t *testing.T) {
+	r := NewCapabilityRegistry(slog.Default())
+	r.Register(protocol.SystemAgentID, BuiltinCmdCapabilities)
+
+	for _, tl := range tacticalToolsFromRegistry(r, "H-01") {
+		if tl.Function.Name != "move_to" {
+			continue
+		}
+		var schema struct {
+			Properties map[string]any `json:"properties"`
+			Required   []string       `json:"required"`
+		}
+		if err := json.Unmarshal(tl.Function.Parameters, &schema); err != nil {
+			t.Fatalf("unmarshal params: %v", err)
+		}
+		if _, has := schema.Properties["duration"]; has {
+			t.Errorf("move_to should NOT have duration param, properties=%v", schema.Properties)
+		}
+		return
+	}
+	t.Fatal("move_to tool not found")
 }

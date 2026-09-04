@@ -397,12 +397,16 @@ func tacticalToolsFromRegistry(registry *CapabilityRegistry, agentID string) []v
 	return out
 }
 
-// isInstantTacticalTool 判断工具是否为瞬时动作（立即完成、无持续时长）。
-// 这些工具不追加 duration 参数——schema 层无该字段 LLM 无从填写，与
-// TacticalRules"瞬时动作不填 duration"约定一致。
-func isInstantTacticalTool(name string) bool {
+// noDurationTool 判断工具是否不追加 duration 参数。两类：
+//   - 瞬时动作（speak/emote/turn_to/generic_act）：立即完成，无时长概念；
+//   - move_to：移动时长由 UE 寻路决定，LLM 不设置（UE usage_hint 声明
+//     "此动作无需传入 duration"）。
+//
+// 这些工具 schema 层不暴露 duration，LLM 无从填写，与 TacticalRules 规则 7
+// "瞬时动作不填 duration、move_to 由 UE 决定"的约定一致。
+func noDurationTool(name string) bool {
 	switch name {
-	case "speak", "emote", "turn_to", "generic_act":
+	case "speak", "emote", "turn_to", "generic_act", "move_to":
 		return true
 	}
 	return false
@@ -456,8 +460,8 @@ func capabilityParamsSchema(params []protocol.CapabilityParam, name string) json
 	// prompt 分解规则（TacticalRules 规则 7/8 + tacticalCoreRules 精简版），此处
 	// 只留执行语义，避免 10 个工具重复一份长描述。
 	// social_chat 不追加（对话挂起直到结束，duration 会打断对话）；
-	// 瞬时工具不追加（立即完成，无时长概念）。
-	if name != "social_chat" && !isInstantTacticalTool(name) {
+	// 瞬时工具 + move_to 不追加（见 noDurationTool）。
+	if name != "social_chat" && !noDurationTool(name) {
 		props["duration"] = map[string]any{
 			"type":        "number",
 			"description": "持续时长（秒）。到点后系统打断当前段并进入队列下一段；末段设为时段剩余时长。",
