@@ -285,6 +285,27 @@
     margin-left: 6px;
     vertical-align: middle;
   }
+  .metrics-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+    font-family: "Consolas", "Monaco", monospace;
+    margin-bottom: 10px;
+  }
+  .metrics-table th, .metrics-table td {
+    padding: 5px 8px;
+    text-align: right;
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+  }
+  .metrics-table th {
+    color: var(--text-muted);
+    font-weight: 600;
+  }
+  .metrics-table th:first-child, .metrics-table td:first-child {
+    text-align: left;
+  }
+  .metrics-table tr:hover td { background: rgba(255,255,255,0.03); }
   .curl-preview {
     margin-top: 12px;
     padding-top: 12px;
@@ -515,6 +536,17 @@
     </div>
   </section>
 
+  <!-- 全宽：LLM 服务指标 -->
+  <section class="panel panel-llm-metrics" style="grid-column: 1 / -1;">
+    <h2>LLM 服务指标 <span id="llm-metrics-count" class="count-badge" style="display:none; background: var(--accent);">0</span></h2>
+    <div class="hint" style="margin-bottom:10px;">
+      各层 E2E/TTFT/TPOT/ITL 分位数（ms）、错误类型分布、重试率、JSON 正确率（每 5s 刷新；TTFT/TPOT/ITL 仅 --tactical-stream 流式下可得）
+    </div>
+    <div id="llm-metrics-list">
+      <div class="empty-state">暂无 LLM 调用数据</div>
+    </div>
+  </section>
+
   <!-- 全宽：MCP 日志 -->
   <section class="panel panel-logs" style="grid-column: 1 / -1;">
     <h2>MCP 日志 <span id="log-count" class="count-badge" style="display:none; background: var(--accent);">0</span></h2>
@@ -546,16 +578,17 @@ let registeredAgents = ['H-01']; // 已注册 agent 列表（来自 /debug/agent
 
 // ─── 初始化 ──────────────────────────────────────────────
 async function init() {
-  await Promise.all([loadStatus(), loadKB(), loadCap(), loadTactical(), loadLogs(), loadPlan(), loadAgents()]);
+  await Promise.all([loadStatus(), loadKB(), loadCap(), loadTactical(), loadLogs(), loadPlan(), loadAgents(), loadLLMMetrics()]);
   onCmdChange();
   updateSchedCurlPreview();
-  // 定时刷新状态徽章 + capability + 战术层分解 + MCP 日志 + schedule + agent 列表（每 5s）
+  // 定时刷新状态徽章 + capability + 战术层分解 + MCP 日志 + schedule + agent 列表 + LLM 指标（每 5s）
   setInterval(loadStatus, 5000);
   setInterval(loadCap, 5000);
   setInterval(loadTactical, 5000);
   setInterval(loadLogs, 5000);
   setInterval(loadPlan, 5000);
   setInterval(loadAgents, 5000);
+  setInterval(loadLLMMetrics, 5000);
 }
 
 async function loadStatus() {
@@ -662,6 +695,88 @@ function renderTactical(entries) {
       ${queueBody}
     </div>`;
   }).join('');
+}
+
+// ─── LLM 服务指标加载和渲染 ────────────────────────────
+async function loadLLMMetrics() {
+  try {
+    const r = await fetch('/debug/llm-metrics');
+    if (!r.ok) return;
+    const j = await r.json();
+    renderLLMMetrics(j);
+  } catch (e) {
+    console.warn('loadLLMMetrics failed:', e);
+  }
+}
+
+const LLM_LAYER_ORDER = ['strategic', 'tactical', 'dialogue'];
+const LLM_LAYER_NAMES = { strategic: '战略层', tactical: '战术层', dialogue: '对话层', unknown: '未知' };
+const LLM_ERR_KEYS = ['success', 'bad_json_4001', 'empty_completion', 'rate_limited', 'timeout', 'http_error', 'network', 'other'];
+
+function fmtMs(v) {
+  if (v == null) return '-';
+  return Number(v).toFixed(1);
+}
+function fmtPct(v) {
+  if (v == null) return '-';
+  return (Number(v) * 100).toFixed(1) + '%';
+}
+
+function renderLLMMetrics(rep) {
+  const list = document.getElementById('llm-metrics-list');
+  const badge = document.getElementById('llm-metrics-count');
+  const layers = (rep && rep.layers) || {};
+  const ids = LLM_LAYER_ORDER.filter(l => layers[l]);
+  for (const k of Object.keys(layers)) if (!ids.includes(k)) ids.push(k);
+  if (!ids.length) {
+    list.innerHTML = '<div class="empty-state">暂无 LLM 调用数据</div>';
+    badge.style.display = 'none';
+    return;
+  }
+  let totalCalls = 0;
+  ids.forEach(l => { totalCalls += layers[l].calls || 0; });
+  badge.style.display = '';
+  badge.textContent = totalCalls;
+
+  let html = '<table class="metrics-table"><thead><tr>' +
+    '<th>层</th><th>调用</th>' +
+    '<th>E2E P50</th><th>E2E P99</th>' +
+    '<th>TTFT P50</th><th>TTFT P99</th>' +
+    '<th>TPOT P50</th><th>TPOT P99</th>' +
+    '<th>ITL P50</th><th>ITL P99</th>' +
+    '<th>重试率</th><th>JSON正确率</th>' +
+    '</tr></thead><tbody>';
+  for (const l of ids) {
+    const lr = layers[l];
+    html += '<tr>' +
+      `<td>${escapeHtml(LLM_LAYER_NAMES[l] || l)}</td>` +
+      `<td>${lr.calls || 0}</td>` +
+      `<td>${fmtMs(lr.e2e && lr.e2e.p50_ms)}</td><td>${fmtMs(lr.e2e && lr.e2e.p99_ms)}</td>` +
+      `<td>${fmtMs(lr.ttft && lr.ttft.p50_ms)}</td><td>${fmtMs(lr.ttft && lr.ttft.p99_ms)}</td>` +
+      `<td>${fmtMs(lr.tpot && lr.tpot.p50_ms)}</td><td>${fmtMs(lr.tpot && lr.tpot.p99_ms)}</td>` +
+      `<td>${fmtMs(lr.itl && lr.itl.p50_ms)}</td><td>${fmtMs(lr.itl && lr.itl.p99_ms)}</td>` +
+      `<td>${fmtPct(lr.retry_rate)}</td>` +
+      `<td>${fmtPct(lr.json_rate)}</td>` +
+      '</tr>';
+  }
+  html += '</tbody></table>';
+
+  html += '<div class="hint" style="margin-top:12px;">错误类型分布</div>';
+  html += '<table class="metrics-table"><thead><tr><th>层</th>' +
+    LLM_ERR_KEYS.map(k => `<th>${k}</th>`).join('') +
+    '</tr></thead><tbody>';
+  for (const l of ids) {
+    const ed = layers[l].error_dist || {};
+    html += `<tr><td>${escapeHtml(LLM_LAYER_NAMES[l] || l)}</td>` +
+      LLM_ERR_KEYS.map(k => `<td>${ed[k] || 0}</td>`).join('') +
+      '</tr>';
+  }
+  html += '</tbody></table>';
+
+  if (rep.updated_at) {
+    html += `<div class="hint">更新于 ${escapeHtml(new Date(rep.updated_at).toLocaleTimeString())}</div>`;
+  }
+  list.innerHTML = html;
 }
 
 // ─── 当日 schedule 加载和渲染 ───────────────────────────

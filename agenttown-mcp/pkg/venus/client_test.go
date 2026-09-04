@@ -312,6 +312,34 @@ func TestSendStreaming_EmptyStream(t *testing.T) {
 	}
 }
 
+// TestSendStreaming_EmptyCompletionWithDone verifies a stream that terminates
+// cleanly ([DONE]) — or with only an id/role chunk — without producing any
+// content or tool calls is treated as an empty completion (ErrEmptyCompletion),
+// not a silent empty success. This is the overloaded-backend case: HTTP 200
+// with an immediate [DONE].
+func TestSendStreaming_EmptyCompletionWithDone(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, _ := w.(http.Flusher)
+		// role-only first chunk carrying an id, then [DONE] — no content,
+		// no tool_calls, no usage.
+		_, _ = w.Write([]byte("data: {\"id\":\"chatcmpl-abc\",\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\n"))
+		flusher.Flush()
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+		flusher.Flush()
+	}))
+	defer server.Close()
+
+	c := newTestClient(t, server.URL)
+	_, err := c.SendStreaming(context.Background(), "", "hi", nil)
+	if err == nil {
+		t.Fatal("expected error for empty completion with [DONE]")
+	}
+	if !errors.Is(err, ErrEmptyCompletion) {
+		t.Errorf("expected ErrEmptyCompletion, got: %v", err)
+	}
+}
+
 // TestSendWithSchema_RequestIncludesResponseFormat verifies SendWithSchema
 // adds response_format (json_schema, strict) to the request body and the
 // schema document round-trips.
@@ -644,6 +672,103 @@ func TestSendStreamingTools_AccumulatesToolCalls(t *testing.T) {
 	}
 }
 
+// TestSendLoopStreaming_AccumulatesToolCallsWithUsage verifies the streaming
+// loop variant carries tool_calls and usage back into the Response, and that
+// the request body sets stream + stream_options.include_usage.
+func TestSendLoopStreaming_AccumulatesToolCallsWithUsage(t *testing.T) {
+	var capturedReq struct {
+		Stream        bool `json:"stream"`
+		StreamOptions struct {
+			IncludeUsage bool `json:"include_usage"`
+		} `json:"stream_options"`
+	}
+	mkChunk := func(delta map[string]any, finish string) string {
+		chunk := map[string]any{
+			"id":      "s1",
+			"choices": []any{map[string]any{"delta": delta, "finish_reason": finish}},
+		}
+		b, _ := json.Marshal(chunk)
+		return "data: " + string(b) + "\n\n"
+	}
+	sse := "" +
+		mkChunk(map[string]any{"tool_calls": []any{map[string]any{
+			"index": 0, "id": "call_1", "type": "function",
+			"function": map[string]any{"name": "speak", "arguments": `{"content":"hi"}`},
+		}}}, "") +
+		mkChunk(map[string]any{}, "tool_calls") +
+		"data: {\"id\":\"s1\",\"choices\":[],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":4,\"total_tokens\":14}}\n\n" +
+		"data: [DONE]\n\n"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&capturedReq)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(sse))
+	}))
+	defer server.Close()
+
+	c := newTestClient(t, server.URL)
+	resp, err := c.SendLoopStreaming(context.Background(),
+		[]llmtypes.Message{{Role: "system", Content: "s"}, {Role: "user", Content: "u"}},
+		[]Tool{{Type: "function", Function: ToolFunction{Name: "speak"}}},
+		"required", "", nil, nil, nil)
+	if err != nil {
+		t.Fatalf("SendLoopStreaming: %v", err)
+	}
+	if !capturedReq.Stream || !capturedReq.StreamOptions.IncludeUsage {
+		t.Errorf("request stream=%v include_usage=%v, want true/true", capturedReq.Stream, capturedReq.StreamOptions.IncludeUsage)
+	}
+	if len(resp.ToolCalls) != 1 || resp.ToolCalls[0].Function.Name != "speak" {
+		t.Errorf("resp.ToolCalls = %+v, want one speak call", resp.ToolCalls)
+	}
+	if resp.Usage.OutputTokens != 4 {
+		t.Errorf("Usage.OutputTokens = %d, want 4 (from include_usage chunk)", resp.Usage.OutputTokens)
+	}
+}
+
+// TestSendStreamingTools_ArgumentFragmentsTriggerOnDelta 钉死修复：纯
+// tool-calling（tool_choice=required，无 delta.content）流式下，onDelta 仍
+// 要收到 tool_calls 的 arguments 分片——否则 TTFT/ITL 等流式指标采集为空。
+func TestSendStreamingTools_ArgumentFragmentsTriggerOnDelta(t *testing.T) {
+	mkChunk := func(delta map[string]any) string {
+		chunk := map[string]any{
+			"id":      "s1",
+			"choices": []any{map[string]any{"delta": delta}},
+		}
+		b, _ := json.Marshal(chunk)
+		return "data: " + string(b) + "\n\n"
+	}
+	sse := "" +
+		mkChunk(map[string]any{"tool_calls": []any{map[string]any{
+			"index": 0, "id": "call_1", "type": "function",
+			"function": map[string]any{"name": "speak", "arguments": `{"content":"`},
+		}}}) +
+		mkChunk(map[string]any{"tool_calls": []any{map[string]any{
+			"index":    0,
+			"function": map[string]any{"arguments": `hi"}`},
+		}}}) +
+		"data: [DONE]\n\n"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(sse))
+	}))
+	defer server.Close()
+
+	c := newTestClient(t, server.URL)
+	var deltas []string
+	if _, err := c.SendStreamingTools(context.Background(), "sys", "user",
+		[]Tool{{Type: "function", Function: ToolFunction{Name: "speak"}}},
+		func(d string) { deltas = append(deltas, d) }, nil); err != nil {
+		t.Fatalf("SendStreamingTools: %v", err)
+	}
+	if len(deltas) != 2 {
+		t.Fatalf("onDelta calls = %d, want 2 (two argument fragments)", len(deltas))
+	}
+	if deltas[0] != `{"content":"` || deltas[1] != `hi"}` {
+		t.Errorf("deltas = %q, want argument fragments", deltas)
+	}
+}
+
 // TestResetSession_NoOp verifies ResetSession is a safe no-op.
 func TestResetSession_NoOp(t *testing.T) {
 	c := newTestClient(t, "http://example.invalid")
@@ -709,6 +834,8 @@ func TestVenusClient_MatchesLLMClientSignatures(t *testing.T) {
 		SendWithSummaryTools(ctx context.Context, system, user string, tools []Tool) (*llmtypes.Response, error)
 		SendStreamingTools(ctx context.Context, system, user string, tools []Tool, onDelta func(string), onToolCall func(llmtypes.ToolCall)) (*llmtypes.Response, error)
 		SendMessagesTools(ctx context.Context, messages []llmtypes.Message, tools []Tool) (*llmtypes.Response, error)
+		SendLoop(ctx context.Context, messages []llmtypes.Message, tools []Tool, toolChoice, schemaName string, schema []byte) (*llmtypes.Response, error)
+		SendLoopStreaming(ctx context.Context, messages []llmtypes.Message, tools []Tool, toolChoice, schemaName string, schema []byte, onDelta func(string), onToolCall func(llmtypes.ToolCall)) (*llmtypes.Response, error)
 		ResetSession()
 	} = (*Client)(nil)
 }

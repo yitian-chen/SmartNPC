@@ -235,6 +235,7 @@ MCP 启动后暴露 HTTP debug 端点（dev 端口 `:8770`，stable `:8760`，�
 | `GET /debug/plan` | GET | 返回指定 agent 当日 dailyPlan 快照（items/current_slot/game_time） |
 | `GET /debug/tactical` | GET | 返回所有 agent 战术层分解情况（当前时段 goal + 在途 action 及参数 + 待执行队列） |
 | `GET /debug/ue-errors` | GET | 返回最近 UE 上报 error 消息（环形缓冲 50 条） |
+| `GET /debug/llm-metrics` | GET | 返回 LLM 调用表现聚合指标（各层 E2E/TTFT/TPOT/ITL 分位数 + 错误分布 + 重试率 + JSON 正确率） |
 
 ### `/debug/schedule`（2026-07 新增）
 
@@ -630,7 +631,8 @@ cp .env.example .env
 | `--venus-strategic-model` | `deepseek-v4-pro` | 战略层模型 ID（空值回退到 `--venus-model`） |
 | `--venus-timeout` | `60s` | Venus 调用超时 |
 | `--tactical-timeout` | `60s` | 战术层 LLM 调用超时（time_scale=90 下 ≈90 游戏分钟，slot 切换拖尾主因之一） |
-| `--tactical-stream` | `false` | 战术层流式输出（实验性，默认关） |
+| `--tactical-stream` | `false` | 战术层流式输出（`true` 时战术层走 `SendLoopStreaming`，可采集 TTFT/TPOT/ITL；非流式只能测 E2E） |
+| `--llm-metrics-doc` | `docs/llm_metrics.md` | LLM 指标 markdown 报告落盘路径（每次 LLM 调用后 best-effort 覆盖写入；空串关闭） |
 | `--auto-plan` | `true` | 自动规划总开关（false=手动模式，跳过战略/战术/反应层自动决策，仅响应 /debug/schedule 注入和 /debug/action 手动下发） |
 | `--mysql-dsn` | `""` | MySQL DSN（空=内存模式无持久化；非空启用 Stage 3 存储层，DSN 需含 `parseTime=true`）。env 回退 `MYSQL_DSN` |
 | `--ollama-url` | `""` | Ollama URL（**默认空串=禁用反应层**；设为 `http://localhost:11434` 启用） |
@@ -727,13 +729,15 @@ bash start-dev.sh       # 偏移端口 8770/9091 + logs-dev/ 日志目录
 | `agenttown-mcp/cmd/agenttown-mcp/memory.go` | Stage 4 记忆层：日终 LLM 总结 action_history → 结构化 memories + narrative |
 | `agenttown-mcp/cmd/agenttown-mcp/relationship.go` | Stage 5 关系层：Ollama 判断 + 关系格式化 + KB 种子导入 |
 | `agenttown-mcp/cmd/agenttown-mcp/capability.go` | NPC 能力注册表：per-agent cmd 能力声明（system 全局默认 + 具体 agent 覆盖） |
-| `agenttown-mcp/cmd/agenttown-mcp/debug_ui.go` | `/debug/` 浏览器控制台 + `/debug/{kb,cap,agents,logs,plan,tactical,ue-errors}` JSON 端点 |
+| `agenttown-mcp/cmd/agenttown-mcp/debug_ui.go` | `/debug/` 浏览器控制台 + `/debug/{kb,cap,agents,logs,plan,tactical,ue-errors,llm-metrics}` JSON 端点 |
+| `agenttown-mcp/cmd/agenttown-mcp/metrics.go` | LLM 指标收集器单例 + `dumpLLMMetrics` 落盘 docs/llm_metrics.md（best-effort，仿 prompt_doc） |
 | `agenttown-mcp/cmd/agenttown-mcp/web/debug.html` | debug 控制台单页 HTML（单 Action + Schedule 注入 + 当日 schedule + 战术层分解情况 + MCP 日志多面板） |
 | `agenttown-mcp/contract/transport.go` | **契约 module**：Transport 接口 + MessageHandler/DisconnectHandler（决策侧与连接侧边界，无依赖） |
 | `agenttown-mcp/contract/protocol/envelope.go` | Envelope + 12 消息类型 + 12 cmd + error_code 常量 |
 | `agenttown-mcp/contract/protocol/messages.go` | 各消息 payload 结构体 + resync/event_lost/capability_registry |
 | `agenttown-mcp/wsserver/server.go` | **连接 module**：WS 服务端，实现 contract.Transport（收发信封、seq、send buffer、重放、SendAction ACK 等待） |
 | `agenttown-mcp/pkg/llmtypes/types.go` | LLM 共享响应类型（Response/Block/Content/Usage），venus/战略/战术层复用 |
+| `agenttown-mcp/pkg/llmmetrics/` | LLM 指标聚合（E2E/TTFT/TPOT/ITL 分位数 + 错误分布 + 重试率 + JSON 正确率），手写最近秩分位数，无第三方依赖 |
 | `agenttown-mcp/pkg/venus/client.go` | Venus 客户端：OpenAI Chat Completions 协议直连（唯一战略/战术层后端） |
 | `agenttown-mcp/pkg/ollama/client.go` | Ollama 客户端：反应层专用，非流式 |
 | `agenttown-mcp/pkg/storage/store.go` | 持久化 Store 接口 + NoopStore（内存模式）+ ScheduleState |

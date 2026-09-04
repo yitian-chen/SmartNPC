@@ -13,14 +13,14 @@ import (
 // 【附近NPC】/【物体实时占用】 point at the user message's dynamic segments.
 // The available tools are NOT listed here — they arrive via the
 // function-calling `tools` request field.
-const TacticalRules = `1. 第一个工具调用必须是 speak（用一段话表达此刻内心想法或独白），随后可返回 1-6 个动作段，按执行顺序排列。长复合动作或 InteractSmartObject 长动作必须用 duration 设置时长。可以在动作之间穿插speak表达现在的情况。
+const TacticalRules = `1. 第一个工具调用必须是 speak（用一段话表达此刻内心想法或独白），随后返回 1-6 个动作段，按执行顺序排列。长复合动作或 InteractSmartObject 长动作必须用 duration 设置时长。可以在动作之间穿插speak表达现在的情况。
 2. 你可以根据当前NPC的实际属性、实际游戏时间等信息灵活安排，如果当前此条日程并不合理，例如半夜不睡觉而是跑步/工作、电量不为低时就去充电等情况，请下发更合理的动作，不必遵守原有日程规定。
 3. 复合动作已包含自动移动到对应位置的逻辑，禁止在复合动作前调用 move_to——直接调用单个长复合动作即可。
 4. 仅当目标确实没有匹配的长复合动作时，才用原子动作组合实现目标。禁止把同一动作连续重复多次填充时段（工作段之间应穿插休息段）。
 5. InteractSmartObject 和复合动作的 semantic_group 必须严格使用设施详情中给出的 semantic_group 值，禁止编造、禁止用实例 id（如 Charge-1）。
 6. 复合动作与 semantic_group 必须严格对应，禁止跨类别组合。
    - 补充：所有工种设备都可用 InteractSmartObject 原子动作直接工作——semantic_group 填工作设备、interaction 填对应动词即可（如 加工机 process、调试台 debug、拆解台 dismantle，以及 workbench/assemble、sorting_conveyor/sort_cargo、inspection_table/inspect）；work_shift 只是其中三类工种设备的快捷复合动作，没有复合动作的工种一律用 InteractSmartObject。
-7. 所有非瞬时动作（移动、长复合动作、InteractSmartObject 互动等需要持续一段时间的）都必须填写 duration 参数（秒，schema 必填）；瞬时动作（speak、emote 等立即完成的）不填 duration。duration 要合理：冥想、整理床铺等单段设 1800 秒左右，不宜超过 1 小时；工作段可设 3600-7200 秒。到点后系统会打断该段并继续执行后续动作段；只有全部动作执行完，系统才会再次询问。推荐模式：工作段（如 1.5 小时）→ 长椅小憩/原地拉伸段（不超过 30 分钟）→ 返回工作段（duration 设为时段剩余时长）。
+7. 所有非瞬时动作（长复合动作、InteractSmartObject 互动等需要持续一段时间的）都必须填写 duration 参数（秒，schema 必填）；move_to 的移动时长由 UE 自动决定、无需填 duration；瞬时动作（speak、emote 等立即完成的）也不填 duration。duration 要合理：冥想、整理床铺等单段设 1800 秒左右，不宜超过 1 小时；工作段可设 3600-7200 秒。到点后系统会打断该段并继续执行后续动作段；只有全部动作执行完，系统才会再次询问。推荐模式：工作段（如 1.5 小时）→ 长椅小憩/原地拉伸段（不超过 30 分钟）→ 返回工作段（duration 设为时段剩余时长）。
 8. 每次生成的最后一个动作必须是长动作（长复合动作或 InteractSmartObject 长动作），其 duration 设为当前时段的剩余时长（见上文"剩余约 X 分钟"提示）——到点后系统自动切入下一时段，NPC 不会呆站。所有动作的 duration 总和应接近当前时段的剩余时长，避免过短导致队列提前耗尽触发重分解、或过长拖到下一时段。
 9. 如果是调用 InteractSmartObject 工具，若当前日程目标明确指定了区域（如"去中央广场长椅休息"），**必须**在该工具的 zone 参数中填写对应区域 id（如 central_plaza、logistics_hub）。`
 
@@ -28,10 +28,9 @@ const TacticalRules = `1. 第一个工具调用必须是 speak（用一段话表
 // 核心约束速览，覆盖实测高频失败模式（speak-only 队列、duration 漏填、
 // 末段非长动作、semantic_group 编造）。完整规则经 tacticalCompactRefLine
 // 指向本日第一条战术 user 消息，不再逐轮重复。
-const tacticalCoreRules = `- 首个工具调用必须是 speak；仅返回 speak 会让队列数秒耗尽，禁止。
-- 非瞬时动作（移动、长复合动作、InteractSmartObject）必须填 duration（秒）。
-- 最后一个动作必须是长动作，duration 设为当前时段剩余时长。
-- semantic_group / interaction 严格使用系统信息设施详情给出的值，禁止编造、禁止用实例 id。`
+const tacticalCoreRules = `- 首个工具调用必须是 speak；随后返回 1-6 个动作段，按执行顺序排列。
+- 除了speak和移动，其他必须填 duration（秒）：中间动作约 1800 秒、工作段 3600-7200 秒。
+- 最后一个动作必须是长动作，duration 设为当前时段剩余时长。`
 
 // tacticalCompactRefLine 是精简模式的引用行：指向本日第一条战术消息的
 // 全量头。"以最新一份为准"覆盖跨日交错等边界下历史出现多份全量头的情况。

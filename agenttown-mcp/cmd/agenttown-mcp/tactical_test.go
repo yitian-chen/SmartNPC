@@ -9,10 +9,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/AgentTown/agenttown-mcp/contract/protocol"
 	"github.com/AgentTown/agenttown-mcp/pkg/agentstate"
 	"github.com/AgentTown/agenttown-mcp/pkg/llmtypes"
 	"github.com/AgentTown/agenttown-mcp/pkg/prompt"
-	"github.com/AgentTown/agenttown-mcp/contract/protocol"
 	"github.com/AgentTown/agenttown-mcp/pkg/venus"
 	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
 )
@@ -394,7 +394,6 @@ func (s *sequenceCaller) next() (*llmtypes.Response, error) {
 	return nil, err
 }
 
-
 // tacticalCtxForTest 构造挂 fake 战术客户端的 agentContext（统一 agentic loop
 // 测试用）：as 为全新 AgentState，tacticalHc 接 fake（sequenceCaller 或
 // fakeStrategicCaller 均实现 llmClient）。
@@ -421,6 +420,9 @@ func (s *sequenceCaller) SendWithSchema(_ context.Context, _, _, _ string, _ []b
 	return s.next()
 }
 func (s *sequenceCaller) SendLoop(_ context.Context, _ []llmtypes.Message, _ []venus.Tool, _, _ string, _ []byte) (*llmtypes.Response, error) {
+	return s.next()
+}
+func (s *sequenceCaller) SendLoopStreaming(_ context.Context, _ []llmtypes.Message, _ []venus.Tool, _, _ string, _ []byte, _ func(string), _ func(llmtypes.ToolCall)) (*llmtypes.Response, error) {
 	return s.next()
 }
 func (s *sequenceCaller) ResetSession() { s.resetCount++ }
@@ -1254,7 +1256,7 @@ func TestCapabilityParamsSchema_DurationRequiredForNonInstant(t *testing.T) {
 	params := []protocol.CapabilityParam{
 		{Name: "semantic_group", Type: "string", Required: true},
 	}
-	for _, name := range []string{"work_shift", "move_to", "interact", "exercise"} {
+	for _, name := range []string{"work_shift", "interact", "exercise"} {
 		raw := capabilityParamsSchema(params, name)
 		var schema struct {
 			Properties map[string]any `json:"properties"`
@@ -1276,8 +1278,8 @@ func TestCapabilityParamsSchema_DurationRequiredForNonInstant(t *testing.T) {
 			t.Errorf("%s: duration not in required (got %v)", name, schema.Required)
 		}
 	}
-	// 瞬时工具：立即完成，无时长概念——不追加 duration prop。
-	for _, name := range []string{"speak", "emote", "turn_to", "generic_act"} {
+	// 瞬时工具 + move_to（UE 寻路决定时长）：均不追加 duration prop。
+	for _, name := range []string{"speak", "emote", "turn_to", "generic_act", "move_to"} {
 		raw := capabilityParamsSchema(params, name)
 		var schema struct {
 			Properties map[string]any `json:"properties"`
@@ -1630,4 +1632,127 @@ func TestMapTacticalAction_InteractZonePassthrough(t *testing.T) {
 	if _, has := params2["zone"]; has {
 		t.Errorf("zone should be absent when not provided: %+v", params2)
 	}
+}
+
+// TestTacticalToolsFromRegistry_AppendsUsageHint 验证 tools 字段携带
+// capability_registry 声明的 usage_hint（"何时使用"提示）。此前被遗漏——
+// tools 只有动作描述、没有使用时机，LLM 选型时看不到"电量低时使用"这类引导。
+func TestTacticalToolsFromRegistry_AppendsUsageHint(t *testing.T) {
+	r := NewCapabilityRegistry(slog.Default())
+	r.Register(protocol.SystemAgentID, BuiltinCmdCapabilities)
+
+	desc := func(name string) string {
+		for _, tl := range tacticalToolsFromRegistry(r, "H-01") {
+			if tl.Function.Name == name {
+				return tl.Function.Description
+			}
+		}
+		t.Fatalf("tool %s not found", name)
+		return ""
+	}
+
+	// 带 usage_hint 的工具：hint 以"。"追加到描述末尾。
+	if got := desc("charge_at_station"); !strings.HasSuffix(got, "电量低时使用") {
+		t.Errorf("charge_at_station = %q, want suffix 电量低时使用", got)
+	}
+	if got := desc("self_maintenance"); !strings.HasSuffix(got, "磨损高或需要维护时使用") {
+		t.Errorf("self_maintenance = %q, want suffix 磨损高或需要维护时使用", got)
+	}
+	// 无 usage_hint 的工具（speak）描述保持不变。
+	if got := desc("speak"); got != "讲话" {
+		t.Errorf("speak = %q, want 讲话 (no hint appended)", got)
+	}
+}
+
+// paramDescOf 从 tool 的 parameters JSON Schema 里取指定参数的 description，
+// 供精简相关测试断言用。
+func paramDescOf(t *testing.T, tl venus.Tool, param string) string {
+	t.Helper()
+	var schema struct {
+		Properties map[string]struct {
+			Description string `json:"description"`
+		} `json:"properties"`
+	}
+	if err := json.Unmarshal(tl.Function.Parameters, &schema); err != nil {
+		t.Fatalf("unmarshal params: %v", err)
+	}
+	return schema.Properties[param].Description
+}
+
+// TestTacticalToolsFromRegistry_SlimParams 验证 ① ② 精简：duration 描述去掉
+// 时长档位（迁到 prompt 规则）、semantic_group 精简为通用短句，无 enum 的
+// interaction 保留配对。
+func TestTacticalToolsFromRegistry_SlimParams(t *testing.T) {
+	r := NewCapabilityRegistry(slog.Default())
+	r.Register(protocol.SystemAgentID, BuiltinCmdCapabilities)
+
+	var workShift, charge, inter *venus.Tool
+	tools := tacticalToolsFromRegistry(r, "H-01")
+	for i := range tools {
+		tl := &tools[i]
+		switch tl.Function.Name {
+		case "work_shift":
+			workShift = tl
+		case "charge_at_station":
+			charge = tl
+		case "InteractSmartObject":
+			inter = tl
+		}
+	}
+	if workShift == nil || charge == nil || inter == nil {
+		t.Fatal("work_shift/charge_at_station/InteractSmartObject not found")
+	}
+
+	// ① duration 去重：不再含时长档位（3600-7200），只留执行语义。
+	if d := paramDescOf(t, *workShift, "duration"); strings.Contains(d, "3600-7200") {
+		t.Errorf("duration description should be slimmed, got %q", d)
+	} else if !strings.Contains(d, "末段设为时段剩余时长") {
+		t.Errorf("duration description should keep execution semantics, got %q", d)
+	}
+
+	// ② semantic_group 精简为通用短句（不再"固定为charger"）。
+	if d := paramDescOf(t, *charge, "semantic_group"); strings.Contains(d, "固定为charger") {
+		t.Errorf("semantic_group description should drop '固定为charger', got %q", d)
+	} else if !strings.Contains(d, "勿传具体编号") {
+		t.Errorf("semantic_group description should keep '勿传具体编号', got %q", d)
+	}
+
+	// ② 无 enum 的 interaction（InteractSmartObject）保留原配对描述，不被精简。
+	if d := paramDescOf(t, *inter, "interaction"); d == "交互动作类型（合法值见 enum）" {
+		t.Errorf("InteractSmartObject interaction (no enum) should keep pairing description, got generic %q", d)
+	}
+}
+
+// TestBuildTactical_CompactCarriesDurationMagnitude 验证精简模式把时长档位
+// （3600-7200）下沉到 tacticalCoreRules，补偿 duration 描述去重后丢掉的档位。
+func TestBuildTactical_CompactCarriesDurationMagnitude(t *testing.T) {
+	out := prompt.BuildTactical(prompt.TacticalInput{Goal: "装配", Compact: true})
+	if !strings.Contains(out, "3600-7200") {
+		t.Errorf("compact prompt should carry duration magnitude (3600-7200):\n%s", out)
+	}
+}
+
+// TestTacticalToolsFromRegistry_MoveToNoDuration 验证 move_to 不追加 duration
+// 参数（移动时长由 UE 寻路决定，LLM 无需填，UE usage_hint 已声明）。
+func TestTacticalToolsFromRegistry_MoveToNoDuration(t *testing.T) {
+	r := NewCapabilityRegistry(slog.Default())
+	r.Register(protocol.SystemAgentID, BuiltinCmdCapabilities)
+
+	for _, tl := range tacticalToolsFromRegistry(r, "H-01") {
+		if tl.Function.Name != "move_to" {
+			continue
+		}
+		var schema struct {
+			Properties map[string]any `json:"properties"`
+			Required   []string       `json:"required"`
+		}
+		if err := json.Unmarshal(tl.Function.Parameters, &schema); err != nil {
+			t.Fatalf("unmarshal params: %v", err)
+		}
+		if _, has := schema.Properties["duration"]; has {
+			t.Errorf("move_to should NOT have duration param, properties=%v", schema.Properties)
+		}
+		return
+	}
+	t.Fatal("move_to tool not found")
 }

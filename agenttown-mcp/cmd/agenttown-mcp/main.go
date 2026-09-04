@@ -36,14 +36,14 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/AgentTown/agenttown-mcp/adapters/agenttown/tools"
+	"github.com/AgentTown/agenttown-mcp/contract"
+	"github.com/AgentTown/agenttown-mcp/contract/protocol"
 	"github.com/AgentTown/agenttown-mcp/internal/log"
 	"github.com/AgentTown/agenttown-mcp/pkg/agentstate"
-	"github.com/AgentTown/agenttown-mcp/contract"
 	"github.com/AgentTown/agenttown-mcp/pkg/llmtypes"
 	"github.com/AgentTown/agenttown-mcp/pkg/ollama"
 	"github.com/AgentTown/agenttown-mcp/pkg/profile"
 	"github.com/AgentTown/agenttown-mcp/pkg/prompt"
-	"github.com/AgentTown/agenttown-mcp/contract/protocol"
 	"github.com/AgentTown/agenttown-mcp/pkg/storage"
 	"github.com/AgentTown/agenttown-mcp/pkg/transport"
 	"github.com/AgentTown/agenttown-mcp/pkg/venus"
@@ -1218,9 +1218,9 @@ func numericParam(v any) (float64, bool) {
 	}
 }
 
-// tacticalStreamingEnabled 已废弃：多轮对话（agentic loop）下战术层统一走
-// 非流式 SendMessagesTools，每轮输出很短，流式的首动作提前下发收益不再明显。
-// --tactical-stream flag 仍保留以兼容启动命令，但不再驱动任何逻辑分支。
+// tacticalStreamingEnabled 由 --tactical-stream flag 设置。true 时战术层
+// 走流式 SendLoopStreaming（其余层保持非流式 SendLoop），使 agenticTurn 能
+// 采集 TTFT/TPOT/ITL 指标（非流式只能拿到 E2E）。默认 false 保持非流式。
 var tacticalStreamingEnabled bool
 
 // autoPlanEnabled 是自动规划总开关，由 --auto-plan flag 解引用设置。
@@ -1248,6 +1248,7 @@ type llmClient interface {
 	SendStreamingTools(ctx context.Context, system, user string, tools []venus.Tool, onDelta func(string), onToolCall func(llmtypes.ToolCall)) (*llmtypes.Response, error)
 	SendMessagesTools(ctx context.Context, messages []llmtypes.Message, tools []venus.Tool) (*llmtypes.Response, error)
 	SendLoop(ctx context.Context, messages []llmtypes.Message, tools []venus.Tool, toolChoice, schemaName string, schema []byte) (*llmtypes.Response, error)
+	SendLoopStreaming(ctx context.Context, messages []llmtypes.Message, tools []venus.Tool, toolChoice, schemaName string, schema []byte, onDelta func(string), onToolCall func(llmtypes.ToolCall)) (*llmtypes.Response, error)
 	ResetSession()
 }
 
@@ -1517,8 +1518,10 @@ func main() {
 			"path to weekly schedule YAML (empty disables weekly context injection)")
 		promptDocFlag = flag.String("prompt-doc", "docs/actual_prompts.md",
 			"actual-prompt doc: append H-01's first strategic/tactical prompt (system+user) per simulation run (empty disables)")
+		llmMetricsDocFlag = flag.String("llm-metrics-doc", "docs/llm_metrics.md",
+			"LLM metrics markdown report path (empty disables; written by dumpLLMMetrics each LLM call)")
 		tacticalStream = flag.Bool("tactical-stream", false,
-			"enable streaming for tactical layer LLM calls (experimental: only helps if upstream LLM emits tokens incrementally)")
+			"enable streaming for tactical layer LLM calls (also enables TTFT/TPOT/ITL measurement; non-streaming only yields E2E)")
 		ollamaURL = flag.String("ollama-url", "",
 			"Ollama base URL for reactive layer (default empty disables reactive layer — reactive layer is opt-in due to high misjudgment rate and latency cost; set to http://localhost:11434 to enable via cloud dev env's local Ollama, or http://localhost:11435 for SSH reverse tunnel to a remote Windows host)")
 		ollamaModel = flag.String("ollama-model", "qwen2.5:7b-instruct-q4_K_M",
@@ -1558,6 +1561,7 @@ func main() {
 	)
 	flag.Parse()
 	setPromptDocPath(*promptDocFlag)
+	setLLMMetricsDocPath(*llmMetricsDocFlag)
 	if *showVersion {
 		fmt.Fprintln(os.Stderr, version)
 		return
@@ -1936,6 +1940,12 @@ func runHTTP(ctx context.Context, logger *slog.Logger, server *mcp.Server, addr 
 		// 数据源是 agents map（agent_registered 写入），不是 capability_registry。
 		if r.URL.Path == "/debug/agents" {
 			handleDebugAgents(w, r, listAgentIDs, logger)
+			return
+		}
+		// /debug/llm-metrics — 返回 LLM 调用表现聚合指标（E2E/TTFT/TPOT/ITL
+		// 分位数、错误分布、重试率、JSON 正确率），供更换服务端前后对比。
+		if r.URL.Path == "/debug/llm-metrics" {
+			handleDebugLLMMetrics(w, r, logger)
 			return
 		}
 		http.NotFound(w, r)

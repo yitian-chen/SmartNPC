@@ -27,6 +27,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -42,6 +43,14 @@ const (
 	defaultHTTPTimeout = 60 * time.Second
 	defaultMaxTokens   = 4096
 )
+
+// ErrEmptyCompletion is returned by parseStream when a streaming response
+// terminates (cleanly via [DONE], or with only an id/role chunk) without
+// producing any text or tool calls. Under tool_choice=required this is a
+// backend failure — an overloaded Venus returns HTTP 200 with an immediate
+// [DONE] — not a valid result. Callers retry on it, and metrics count it as
+// an error instead of a silent "success" with zero actions.
+var ErrEmptyCompletion = errors.New("empty completion: no content and no tool calls")
 
 // Config configures the Client.
 type Config struct {
@@ -143,10 +152,11 @@ func (c *Client) SendStreaming(ctx context.Context, system, user string, onDelta
 }
 
 // SendStreamingTools is SendStreaming plus a `tools` array (function calling).
-// onDelta receives text deltas (may be empty in pure tool-calling); onToolCall
-// receives each completed tool_call as soon as its streamed fragments are
-// complete (by index transition or stream end), so callers can dispatch the
-// first action before the stream finishes.
+// onDelta receives text deltas AND tool-call argument fragments (so pure
+// tool-calling streams still yield per-token callbacks for latency metrics);
+// onToolCall receives each completed tool_call as soon as its streamed
+// fragments are complete (by index transition or stream end), so callers can
+// dispatch the first action before the stream finishes.
 func (c *Client) SendStreamingTools(ctx context.Context, system, user string, tools []Tool, onDelta func(delta string), onToolCall func(llmtypes.ToolCall)) (*llmtypes.Response, error) {
 	c.sendMu.Lock()
 	defer c.sendMu.Unlock()
@@ -222,6 +232,25 @@ func (c *Client) SendLoop(ctx context.Context, messages []llmtypes.Message, tool
 	return c.doSend(ctx, toVenusMessages(messages), false, nil, nil, def, tools, toolChoice)
 }
 
+// SendLoopStreaming is SendLoop's streaming variant: identical messages/
+// tools/toolChoice/schema semantics, but stream:true with onDelta invoked
+// per text delta and onToolCall per completed tool_call. The returned
+// Response.ToolCalls is assembled identically to SendLoop's, so callers can
+// swap transport path without changing downstream parsing. Used by the
+// tactical layer under --tactical-stream to measure TTFT/TPOT/ITL.
+func (c *Client) SendLoopStreaming(ctx context.Context, messages []llmtypes.Message, tools []Tool, toolChoice, schemaName string, schema []byte, onDelta func(string), onToolCall func(llmtypes.ToolCall)) (*llmtypes.Response, error) {
+	c.sendMu.Lock()
+	defer c.sendMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	var def *JSONSchemaDef
+	if schemaName != "" {
+		def = &JSONSchemaDef{Name: schemaName, Strict: true, Schema: json.RawMessage(schema)}
+	}
+	return c.doSend(ctx, toVenusMessages(messages), true, onDelta, onToolCall, def, tools, toolChoice)
+}
+
 // systemUserMessages builds the default [system?, user] message pair.
 func systemUserMessages(system, user string) []message {
 	msgs := make([]message, 0, 2)
@@ -288,6 +317,10 @@ func (c *Client) doSend(ctx context.Context, msgs []message, stream bool, onDelt
 		Messages:  msgs,
 		Stream:    stream,
 		Tools:     tools,
+	}
+	if stream {
+		// 流式请求显式请求 usage，使最终 chunk 携带 token 计数（供 TPOT 计算）。
+		body.StreamOptions = &streamOptions{IncludeUsage: true}
 	}
 	// tool_choice: 显式传入优先（"required" / "none"）；未指定时仅在 tools
 	// 非空时默认 "required"（向后兼容：老调用方传 tools 必须能调工具）。
@@ -441,6 +474,13 @@ func (c *Client) parseStream(r io.Reader, onDelta func(string), onToolCall func(
 					tc.Function.Name = dtc.Function.Name
 				}
 				tc.Function.Arguments += dtc.Function.Arguments
+				// 把 arguments 分片也投递给 onDelta：纯 tool-calling 的
+				// 战术层（tool_choice=required）流式输出只有 delta.tool_calls、
+				// 没有 delta.content，若不在此投递，onDelta 收不到任何 token，
+				// TTFT/ITL 等流式指标采集为空。
+				if dtc.Function.Arguments != "" && onDelta != nil {
+					onDelta(dtc.Function.Arguments)
+				}
 			}
 		}
 		// Usage may appear in the final chunk (if stream_options.include_usage=true).
@@ -453,9 +493,20 @@ func (c *Client) parseStream(r io.Reader, onDelta func(string), onToolCall func(
 		return nil, fmt.Errorf("sse read: %w", err)
 	}
 
-	// Stream ended without [DONE] but with content — graceful degradation.
-	if !gotDone && textBuf.Len() == 0 && len(toolCalls) == 0 && respID == "" {
+	// Stream ended without [DONE] and produced nothing — truncated (network/
+	// backend cut the stream mid-flight).
+	if !gotDone && textBuf.Len() == 0 && len(toolCalls) == 0 {
 		return nil, fmt.Errorf("sse stream ended without terminal event: %w", io.ErrUnexpectedEOF)
+	}
+
+	// Terminated (cleanly via [DONE], or with only an id/role chunk) but
+	// produced zero text and zero tool calls — an empty completion. Under
+	// tool_choice=required this is a backend failure (overloaded Venus returns
+	// HTTP 200 + immediate [DONE]), not a valid result. Surface it so callers
+	// retry and metrics count it as an error, not a silent "success" with no
+	// actions.
+	if textBuf.Len() == 0 && len(toolCalls) == 0 {
+		return nil, fmt.Errorf("%w", ErrEmptyCompletion)
 	}
 
 	// Flush the final tool_call (its fragments ended with the stream).
@@ -507,9 +558,17 @@ type request struct {
 	MaxTokens      int             `json:"max_tokens"`
 	Messages       []message       `json:"messages"`
 	Stream         bool            `json:"stream,omitempty"`
+	StreamOptions  *streamOptions  `json:"stream_options,omitempty"`
 	ResponseFormat *ResponseFormat `json:"response_format,omitempty"`
 	Tools          []Tool          `json:"tools,omitempty"`
 	ToolChoice     any             `json:"tool_choice,omitempty"`
+}
+
+// streamOptions requests token usage in the final streaming chunk. Without
+// it, streaming responses omit `usage`, so output-token counts (and thus
+// TPOT) are unavailable on the streaming path.
+type streamOptions struct {
+	IncludeUsage bool `json:"include_usage"`
 }
 
 // Tool is one entry in the OpenAI `tools` array (function calling).
