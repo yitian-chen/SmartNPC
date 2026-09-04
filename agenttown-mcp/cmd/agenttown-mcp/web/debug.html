@@ -741,6 +741,7 @@ function renderLLMMetrics(rep) {
   let html = '<table class="metrics-table"><thead><tr>' +
     '<th>层</th><th>调用</th>' +
     '<th>E2E P50</th><th>E2E P99</th>' +
+    '<th>E2E流式 P50</th><th>E2E流式 P99</th>' +
     '<th>TTFT P50</th><th>TTFT P99</th>' +
     '<th>TPOT P50</th><th>TPOT P99</th>' +
     '<th>ITL P50</th><th>ITL P99</th>' +
@@ -752,6 +753,7 @@ function renderLLMMetrics(rep) {
       `<td>${escapeHtml(LLM_LAYER_NAMES[l] || l)}</td>` +
       `<td>${lr.calls || 0}</td>` +
       `<td>${fmtMs(lr.e2e && lr.e2e.p50_ms)}</td><td>${fmtMs(lr.e2e && lr.e2e.p99_ms)}</td>` +
+      `<td>${fmtMs(lr.e2e_stream && lr.e2e_stream.p50_ms)}</td><td>${fmtMs(lr.e2e_stream && lr.e2e_stream.p99_ms)}</td>` +
       `<td>${fmtMs(lr.ttft && lr.ttft.p50_ms)}</td><td>${fmtMs(lr.ttft && lr.ttft.p99_ms)}</td>` +
       `<td>${fmtMs(lr.tpot && lr.tpot.p50_ms)}</td><td>${fmtMs(lr.tpot && lr.tpot.p99_ms)}</td>` +
       `<td>${fmtMs(lr.itl && lr.itl.p50_ms)}</td><td>${fmtMs(lr.itl && lr.itl.p99_ms)}</td>` +

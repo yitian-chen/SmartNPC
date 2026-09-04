@@ -16,15 +16,16 @@ type Percentiles struct {
 type LayerReport struct {
 	Calls     int64            `json:"calls"`
 	E2E       Percentiles      `json:"e2e"`
-	TTFT      *Percentiles     `json:"ttft,omitempty"`      // streaming only
-	TPOT      *Percentiles     `json:"tpot,omitempty"`      // streaming only
-	ITL       *Percentiles     `json:"itl,omitempty"`       // streaming only
-	ErrorDist map[string]int64 `json:"error_dist"`          // errClass → count
-	RetryRate float64          `json:"retry_rate"`          // calls with ≥1 retry / calls
-	RetryAvg  float64          `json:"retry_avg"`           // cumulative retries / calls
-	JSONOK    int64            `json:"json_ok"`             // parseToolCalls successes
-	JSONFail  int64            `json:"json_fail"`           // parseToolCalls failures
-	JSONRate  *float64         `json:"json_rate,omitempty"` // OK/(OK+Fail), nil when no samples
+	E2EStream *Percentiles     `json:"e2e_stream,omitempty"` // E2E over streaming calls only (same set as TTFT)
+	TTFT      *Percentiles     `json:"ttft,omitempty"`       // streaming only
+	TPOT      *Percentiles     `json:"tpot,omitempty"`       // streaming only
+	ITL       *Percentiles     `json:"itl,omitempty"`        // streaming only
+	ErrorDist map[string]int64 `json:"error_dist"`           // errClass → count
+	RetryRate float64          `json:"retry_rate"`           // calls with ≥1 retry / calls
+	RetryAvg  float64          `json:"retry_avg"`            // cumulative retries / calls
+	JSONOK    int64            `json:"json_ok"`              // parseToolCalls successes
+	JSONFail  int64            `json:"json_fail"`            // parseToolCalls failures
+	JSONRate  *float64         `json:"json_rate,omitempty"`  // OK/(OK+Fail), nil when no samples
 }
 
 // Report is the full aggregated snapshot, ready for JSON encoding or
@@ -90,6 +91,7 @@ func (c *Collector) Snapshot() Report {
 		if p50, p99 := percentiles(c.e2e[layer]); len(c.e2e[layer]) > 0 {
 			lr.E2E = Percentiles{P50Ms: ms(p50), P99Ms: ms(p99)}
 		}
+		lr.E2EStream = optPct(c.e2eStream[layer])
 		lr.TTFT = optPct(c.ttft[layer])
 		lr.TPOT = optPct(c.tpot[layer])
 		lr.ITL = optPct(c.itl[layer])
@@ -117,19 +119,21 @@ func (r Report) ToMarkdown() string {
 	sb.WriteString(fmt.Sprintf("生成时间：%s\n\n", r.UpdatedAt.Format("2006-01-02 15:04:05")))
 
 	sb.WriteString("## 延迟与正确率\n\n")
-	sb.WriteString("| 层 | 调用数 | E2E P50 | E2E P99 | TTFT P50 | TTFT P99 | TPOT P50 | TPOT P99 | ITL P50 | ITL P99 | 重试率 | JSON正确率 |\n")
-	sb.WriteString("|---|---|---|---|---|---|---|---|---|---|---|---|\n")
+	sb.WriteString("| 层 | 调用数 | E2E P50 | E2E P99 | E2E流式 P50 | E2E流式 P99 | TTFT P50 | TTFT P99 | TPOT P50 | TPOT P99 | ITL P50 | ITL P99 | 重试率 | JSON正确率 |\n")
+	sb.WriteString("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n")
 	for _, l := range layerOrder() {
 		lr, ok := r.Layers[l]
 		if !ok {
 			continue
 		}
+		e2eStreamP50, e2eStreamP99 := pctMs(lr.E2EStream)
 		ttftP50, ttftP99 := pctMs(lr.TTFT)
 		tpotP50, tpotP99 := pctMs(lr.TPOT)
 		itlP50, itlP99 := pctMs(lr.ITL)
-		sb.WriteString(fmt.Sprintf("| %s | %d | %.1f | %.1f | %s | %s | %s | %s | %s | %s | %.1f%% | %s |\n",
+		sb.WriteString(fmt.Sprintf("| %s | %d | %.1f | %.1f | %s | %s | %s | %s | %s | %s | %s | %s | %.1f%% | %s |\n",
 			layerDisplay(l), lr.Calls,
 			lr.E2E.P50Ms, lr.E2E.P99Ms,
+			e2eStreamP50, e2eStreamP99,
 			ttftP50, ttftP99,
 			tpotP50, tpotP99,
 			itlP50, itlP99,

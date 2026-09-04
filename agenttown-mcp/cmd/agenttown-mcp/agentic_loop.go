@@ -267,7 +267,8 @@ func classifyLLMError(err error) string {
 		return llmmetrics.ErrHTTPError
 	}
 	if strings.Contains(s, "connection refused") || strings.Contains(s, "connection reset") ||
-		strings.Contains(s, "no such host") || strings.Contains(s, "dial tcp") {
+		strings.Contains(s, "no such host") || strings.Contains(s, "dial tcp") ||
+		strings.Contains(s, "http do") || strings.Contains(s, "EOF") {
 		return llmmetrics.ErrNetwork
 	}
 	return llmmetrics.ErrOther

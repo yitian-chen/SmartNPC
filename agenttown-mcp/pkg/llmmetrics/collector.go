@@ -42,6 +42,7 @@ type Collector struct {
 	mu sync.Mutex
 
 	e2e      map[string][]time.Duration
+	e2eStream map[string][]time.Duration // E2E 仅对"有 TTFT 的流式调用"记录，与 TTFT 同口径可比
 	ttft     map[string][]time.Duration
 	tpot     map[string][]time.Duration
 	itl      map[string][]time.Duration
@@ -57,6 +58,7 @@ type Collector struct {
 func New() *Collector {
 	return &Collector{
 		e2e:      map[string][]time.Duration{},
+		e2eStream: map[string][]time.Duration{},
 		ttft:     map[string][]time.Duration{},
 		tpot:     map[string][]time.Duration{},
 		itl:      map[string][]time.Duration{},
@@ -91,6 +93,11 @@ func (c *Collector) RecordCall(s CallSample) {
 	}
 	if s.TTFT > 0 {
 		c.ttft[layer] = append(c.ttft[layer], s.TTFT)
+		// 同口径 E2E：只对"有 TTFT 的流式调用"记录，与 TTFT 同集合可比。
+		// 全量 E2E（含无 token 的失败调用）仍走 c.e2e，两者分开暴露。
+		if s.E2E > 0 {
+			c.e2eStream[layer] = append(c.e2eStream[layer], s.E2E)
+		}
 	}
 	if s.TPOT > 0 {
 		c.tpot[layer] = append(c.tpot[layer], s.TPOT)

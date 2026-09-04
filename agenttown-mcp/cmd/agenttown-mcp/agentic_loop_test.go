@@ -423,6 +423,7 @@ func TestClassifyLLMError(t *testing.T) {
 		{errors.New(`http do: context deadline exceeded`), llmmetrics.ErrTimeout},
 		{errors.New(`venus status 500: internal`), llmmetrics.ErrHTTPError},
 		{errors.New(`dial tcp: connection refused`), llmmetrics.ErrNetwork},
+		{errors.New(`http do: Post "http://x/v1/chat/completions": EOF`), llmmetrics.ErrNetwork},
 		{errors.New(`something unknown`), llmmetrics.ErrOther},
 	}
 	for _, c := range cases {

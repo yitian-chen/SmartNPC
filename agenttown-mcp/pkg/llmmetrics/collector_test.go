@@ -123,3 +123,21 @@ func TestReport_ToMarkdown(t *testing.T) {
 		}
 	}
 }
+
+func TestCollector_E2EStream(t *testing.T) {
+	c := New()
+	// 非流式调用（无 TTFT）：E2E 计入全量，但不计 e2eStream。
+	c.RecordCall(CallSample{Layer: "tactical", E2E: 100 * time.Millisecond, ErrClass: ErrSuccess})
+	// 流式调用（有 TTFT）：E2E 同时计入全量与 e2eStream。
+	c.RecordCall(CallSample{Layer: "tactical", E2E: 500 * time.Millisecond, TTFT: 80 * time.Millisecond, ErrClass: ErrSuccess})
+	rep := c.Snapshot()
+	lr := rep.Layers["tactical"]
+	// 全量 E2E：两个样本。
+	if lr.E2E.P50Ms != 100 || lr.E2E.P99Ms != 500 {
+		t.Errorf("E2E = %+v, want P50=100 P99=500", lr.E2E)
+	}
+	// e2eStream：只有流式那一个样本（与 TTFT 同集合）。
+	if lr.E2EStream == nil || lr.E2EStream.P50Ms != 500 || lr.E2EStream.P99Ms != 500 {
+		t.Errorf("E2EStream = %+v, want P50=P99=500", lr.E2EStream)
+	}
+}
