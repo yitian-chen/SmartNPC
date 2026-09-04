@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"testing"
 	"time"
@@ -318,6 +319,34 @@ func TestAgenticTurn_TimeoutErrorNoRetry(t *testing.T) {
 	}
 }
 
+// TestAgenticTurn_EmptyCompletionRetrySucceeds 验证空完成（后端过载返回空流，
+// venus.ErrEmptyCompletion）触发立即重试且重试后成功：调用次数 = 失败 + 1。
+func TestAgenticTurn_EmptyCompletionRetrySucceeds(t *testing.T) {
+	as := agentstate.New()
+	as.SetIdentity("H-01", nil)
+	fake := &fakeLoopLLM{
+		resp: makeToolCallResponse([]llmtypes.ToolCall{{Function: llmtypes.ToolFunction{Name: "speak", Arguments: `{"content":"hi"}`}}}),
+		errs: []error{venus.ErrEmptyCompletion},
+	}
+	ac := &agentContext{as: as, tacticalHc: fake}
+
+	resp, err := ac.agenticTurn(context.Background(), fake, nil, nil, slog.Default(), "H-01",
+		"tactical", "分解请求", "required", "", nil)
+	if err != nil {
+		t.Fatalf("agenticTurn should succeed after empty-completion retry: %v", err)
+	}
+	if resp == nil {
+		t.Fatal("resp should be non-nil")
+	}
+	if fake.calls != 2 {
+		t.Errorf("SendLoop calls = %d, want 2 (1 empty completion + 1 success)", fake.calls)
+	}
+	// 成功后历史正常追加（user + assistant）。
+	if hist := as.Conversation(); len(hist) != 2 {
+		t.Errorf("history len = %d, want 2 (user+assistant)", len(hist))
+	}
+}
+
 // TestAgenticTurn_StreamingTacticalCollectsTTFT 验证 --tactical-stream 开启时
 // 战术层走 SendLoopStreaming，onDelta 回调采集 TTFT/ITL 样本写入 collector。
 func TestAgenticTurn_StreamingTacticalCollectsTTFT(t *testing.T) {
@@ -388,6 +417,8 @@ func TestClassifyLLMError(t *testing.T) {
 	}{
 		{nil, llmmetrics.ErrSuccess},
 		{venusErr4001, llmmetrics.ErrBadJSON4001},
+		{venus.ErrEmptyCompletion, llmmetrics.ErrEmptyCompletion},
+		{fmt.Errorf("wrapped: %w", venus.ErrEmptyCompletion), llmmetrics.ErrEmptyCompletion},
 		{errors.New(`venus status 429: {"error":{"code":"4029"}}`), llmmetrics.ErrRateLimited},
 		{errors.New(`http do: context deadline exceeded`), llmmetrics.ErrTimeout},
 		{errors.New(`venus status 500: internal`), llmmetrics.ErrHTTPError},

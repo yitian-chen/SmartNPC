@@ -27,6 +27,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -42,6 +43,14 @@ const (
 	defaultHTTPTimeout = 60 * time.Second
 	defaultMaxTokens   = 4096
 )
+
+// ErrEmptyCompletion is returned by parseStream when a streaming response
+// terminates (cleanly via [DONE], or with only an id/role chunk) without
+// producing any text or tool calls. Under tool_choice=required this is a
+// backend failure — an overloaded Venus returns HTTP 200 with an immediate
+// [DONE] — not a valid result. Callers retry on it, and metrics count it as
+// an error instead of a silent "success" with zero actions.
+var ErrEmptyCompletion = errors.New("empty completion: no content and no tool calls")
 
 // Config configures the Client.
 type Config struct {
@@ -484,9 +493,20 @@ func (c *Client) parseStream(r io.Reader, onDelta func(string), onToolCall func(
 		return nil, fmt.Errorf("sse read: %w", err)
 	}
 
-	// Stream ended without [DONE] but with content — graceful degradation.
-	if !gotDone && textBuf.Len() == 0 && len(toolCalls) == 0 && respID == "" {
+	// Stream ended without [DONE] and produced nothing — truncated (network/
+	// backend cut the stream mid-flight).
+	if !gotDone && textBuf.Len() == 0 && len(toolCalls) == 0 {
 		return nil, fmt.Errorf("sse stream ended without terminal event: %w", io.ErrUnexpectedEOF)
+	}
+
+	// Terminated (cleanly via [DONE], or with only an id/role chunk) but
+	// produced zero text and zero tool calls — an empty completion. Under
+	// tool_choice=required this is a backend failure (overloaded Venus returns
+	// HTTP 200 + immediate [DONE]), not a valid result. Surface it so callers
+	// retry and metrics count it as an error, not a silent "success" with no
+	// actions.
+	if textBuf.Len() == 0 && len(toolCalls) == 0 {
+		return nil, fmt.Errorf("%w", ErrEmptyCompletion)
 	}
 
 	// Flush the final tool_call (its fragments ended with the stream).

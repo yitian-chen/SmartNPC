@@ -21,6 +21,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math/rand/v2"
@@ -111,6 +112,11 @@ func (a *agentContext) agenticTurn(ctx context.Context, hc llmClient, kb *worldk
 			// LLM 输出坏 JSON：立即重试相同请求体，重采样即修复。
 			logger.Warn("[agentic-loop] venus 4001，重试相同请求体",
 				"agent_id", agentID, "layer", layer, "retry", attempt, "max", maxTacticalRetries, "err", err)
+		} else if errors.Is(err, venus.ErrEmptyCompletion) {
+			// 后端过载返回空流（200 + 立即 [DONE]，无 content/tool_calls）：
+			// 立即重试相同请求体，重采样通常能拿到正常补全。
+			logger.Warn("[agentic-loop] venus 空完成，重试相同请求体",
+				"agent_id", agentID, "layer", layer, "retry", attempt, "max", maxTacticalRetries, "err", err)
 		} else if isRateLimited(err) {
 			// 公共模型服务限流：退避 + 随机抖动后重试。等待期间 ctx
 			// 取消（进程关停/上层超时）则立即放弃。抖动让同时被拒的
@@ -197,6 +203,9 @@ var rateLimitBackoffBase = 2 * time.Second
 func classifyLLMError(err error) string {
 	if err == nil {
 		return llmmetrics.ErrSuccess
+	}
+	if errors.Is(err, venus.ErrEmptyCompletion) {
+		return llmmetrics.ErrEmptyCompletion
 	}
 	if isVenusErrorCode(err, "4001") {
 		return llmmetrics.ErrBadJSON4001

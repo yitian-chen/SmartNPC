@@ -9,13 +9,14 @@ import (
 // the call's final error (reusing the tactical layer's isVenusErrorCode /
 // isRateLimited classification, plus a timeout discriminator).
 const (
-	ErrSuccess     = "success"
-	ErrBadJSON4001 = "bad_json_4001" // venus rejected malformed tool_calls JSON
-	ErrRateLimited = "rate_limited"  // 429 / code 4029
-	ErrTimeout     = "timeout"       // context deadline exceeded / client timeout
-	ErrHTTPError   = "http_error"    // non-200 status that isn't 4001/429
-	ErrNetwork     = "network"       // connection refused / reset / dial error
-	ErrOther       = "other"
+	ErrSuccess          = "success"
+	ErrBadJSON4001      = "bad_json_4001"      // venus rejected malformed tool_calls JSON
+	ErrEmptyCompletion  = "empty_completion"   // venus returned 200 with an empty stream (no content/tool_calls)
+	ErrRateLimited      = "rate_limited"       // 429 / code 4029
+	ErrTimeout          = "timeout"            // context deadline exceeded / client timeout
+	ErrHTTPError        = "http_error"         // non-200 status that isn't 4001/429
+	ErrNetwork          = "network"            // connection refused / reset / dial error
+	ErrOther            = "other"
 )
 
 // CallSample is one LLM call's measured metrics. Zero-valued TTFT/TPOT and

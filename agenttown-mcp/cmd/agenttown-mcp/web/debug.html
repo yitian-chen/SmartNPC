@@ -711,7 +711,7 @@ async function loadLLMMetrics() {
 
 const LLM_LAYER_ORDER = ['strategic', 'tactical', 'dialogue'];
 const LLM_LAYER_NAMES = { strategic: '战略层', tactical: '战术层', dialogue: '对话层', unknown: '未知' };
-const LLM_ERR_KEYS = ['success', 'bad_json_4001', 'rate_limited', 'timeout', 'http_error', 'network', 'other'];
+const LLM_ERR_KEYS = ['success', 'bad_json_4001', 'empty_completion', 'rate_limited', 'timeout', 'http_error', 'network', 'other'];
 
 function fmtMs(v) {
   if (v == null) return '-';

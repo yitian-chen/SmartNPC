@@ -312,6 +312,34 @@ func TestSendStreaming_EmptyStream(t *testing.T) {
 	}
 }
 
+// TestSendStreaming_EmptyCompletionWithDone verifies a stream that terminates
+// cleanly ([DONE]) — or with only an id/role chunk — without producing any
+// content or tool calls is treated as an empty completion (ErrEmptyCompletion),
+// not a silent empty success. This is the overloaded-backend case: HTTP 200
+// with an immediate [DONE].
+func TestSendStreaming_EmptyCompletionWithDone(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, _ := w.(http.Flusher)
+		// role-only first chunk carrying an id, then [DONE] — no content,
+		// no tool_calls, no usage.
+		_, _ = w.Write([]byte("data: {\"id\":\"chatcmpl-abc\",\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\n"))
+		flusher.Flush()
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+		flusher.Flush()
+	}))
+	defer server.Close()
+
+	c := newTestClient(t, server.URL)
+	_, err := c.SendStreaming(context.Background(), "", "hi", nil)
+	if err == nil {
+		t.Fatal("expected error for empty completion with [DONE]")
+	}
+	if !errors.Is(err, ErrEmptyCompletion) {
+		t.Errorf("expected ErrEmptyCompletion, got: %v", err)
+	}
+}
+
 // TestSendWithSchema_RequestIncludesResponseFormat verifies SendWithSchema
 // adds response_format (json_schema, strict) to the request body and the
 // schema document round-trips.
