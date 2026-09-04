@@ -423,11 +423,21 @@ func capabilityParamsSchema(params []protocol.CapabilityParam, name string) json
 	required := make([]string, 0, len(params))
 	for _, p := range params {
 		desc := p.Description
-		// zone 字段（UE 声明为可选）：增强描述，让 LLM 在日程明确指定区域时
-		// 必须填 zone，否则默认只会找 NPC 所在 zone 的设施（如"去中央广场
-		// 休息"若不填 zone 就会在本地随便找长椅）。
-		if p.Name == "zone" {
-			desc = "目标设施所在的 zone（区域）id。若当前日程目标明确指定了区域（如\"去中央广场休息\"\"到物流站工作\"），必须填写该区域 id（如 central_plaza、logistics_hub）；不填则默认优先找 NPC 自己所在 zone 的设施，找不到再跨 zone，会导致\"去指定区域\"的日程落空。"
+		// 参数描述精简：enum 已约束合法值、system prompt 有完整设施详情，
+		// 这里只保留防止 LLM 犯错的关键语义，去掉"固定为 X""如 xxx、yyy"等
+		// 与 enum / system prompt 重复的内容。
+		switch p.Name {
+		case "zone":
+			desc = "目标设施所在的 zone id。日程明确指定区域时必须填该区域 id（如 central_plaza、logistics_hub）；不填默认优先找 NPC 自己所在 zone 的设施。"
+		case "semantic_group":
+			desc = "设施语义组名（UE 从该组自动选一个空闲实例，勿传具体编号）"
+		case "interaction":
+			// 有 enum 的固定值工具，"固定为 X"与 enum 重复，可精简；无 enum
+			// 的（work_shift/use_exercise_equipment/InteractSmartObject）描述
+			// 含 semantic_group↔interaction 配对，删掉会丢关键信息，保留。
+			if len(p.EnumValues) > 0 {
+				desc = "交互动作类型（合法值见 enum）"
+			}
 		}
 		prop := map[string]any{
 			"type":        capabilityJSONSchemaType(p.Type),
@@ -442,13 +452,15 @@ func capabilityParamsSchema(params []protocol.CapabilityParam, name string) json
 		}
 	}
 	// duration：非瞬时动作的持续时长（秒，MCP 侧轮询 game_time，不传 UE）。
-	// 描述与 TacticalRules 规则 8 对齐：末段 duration 设为时段剩余时长。
+	// 时长档位（中间动作约 1800 秒、工作段 3600-7200 秒、末段=剩余时长）已迁到
+	// prompt 分解规则（TacticalRules 规则 7/8 + tacticalCoreRules 精简版），此处
+	// 只留执行语义，避免 10 个工具重复一份长描述。
 	// social_chat 不追加（对话挂起直到结束，duration 会打断对话）；
 	// 瞬时工具不追加（立即完成，无时长概念）。
 	if name != "social_chat" && !isInstantTacticalTool(name) {
 		props["duration"] = map[string]any{
 			"type":        "number",
-			"description": "该动作的持续时长（秒）。到点后系统打断当前段并进入队列下一段。中间动作按实际计划设置（冥想/整理等单段宜设 1800 秒左右，工作段可设 3600-7200 秒）；最后一个动作的 duration 设为当前时段的剩余时长，到点后系统自动切入下一时段。所有动作的 duration 总和应接近当前时段剩余时长。",
+			"description": "持续时长（秒）。到点后系统打断当前段并进入队列下一段；末段设为时段剩余时长。",
 		}
 		required = append(required, "duration")
 	}

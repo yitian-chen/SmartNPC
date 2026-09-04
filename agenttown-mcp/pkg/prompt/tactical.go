@@ -29,7 +29,7 @@ const TacticalRules = `1. 第一个工具调用必须是 speak（用一段话表
 // 末段非长动作、semantic_group 编造）。完整规则经 tacticalCompactRefLine
 // 指向本日第一条战术 user 消息，不再逐轮重复。
 const tacticalCoreRules = `- 首个工具调用必须是 speak；随后返回 1-6 个动作段，按执行顺序排列。
-- 除了speak和移动，其他必须填 duration（秒）。
+- 除了speak和移动，其他必须填 duration（秒）：中间动作约 1800 秒、工作段 3600-7200 秒。
 - 最后一个动作必须是长动作，duration 设为当前时段剩余时长。`
 
 // tacticalCompactRefLine 是精简模式的引用行：指向本日第一条战术消息的
