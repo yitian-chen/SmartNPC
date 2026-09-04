@@ -325,7 +325,7 @@ func TestAgenticTurn_EmptyCompletionRetrySucceeds(t *testing.T) {
 	as := agentstate.New()
 	as.SetIdentity("H-01", nil)
 	fake := &fakeLoopLLM{
-		resp: makeToolCallResponse([]llmtypes.ToolCall{{Function: llmtypes.ToolFunction{Name: "speak", Arguments: `{"content":"hi"}`}}}),
+		resp: speakToolCallResp(),
 		errs: []error{venus.ErrEmptyCompletion},
 	}
 	ac := &agentContext{as: as, tacticalHc: fake}
@@ -358,7 +358,7 @@ func TestAgenticTurn_StreamingTacticalCollectsTTFT(t *testing.T) {
 	as := agentstate.New()
 	as.SetIdentity("H-01", nil)
 	fake := &fakeLoopLLM{
-		resp:         makeToolCallResponse([]llmtypes.ToolCall{{Function: llmtypes.ToolFunction{Name: "speak", Arguments: `{"content":"hi"}`}}}),
+		resp:         speakToolCallResp(),
 		streamDeltas: []string{"a", "b", "c"},
 	}
 	ac := &agentContext{as: as, tacticalHc: fake}
@@ -388,7 +388,7 @@ func TestAgenticTurn_NonStreamingSkipsTTFT(t *testing.T) {
 	as := agentstate.New()
 	as.SetIdentity("H-01", nil)
 	fake := &fakeLoopLLM{
-		resp: makeToolCallResponse([]llmtypes.ToolCall{{Function: llmtypes.ToolFunction{Name: "speak", Arguments: `{"content":"hi"}`}}}),
+		resp: speakToolCallResp(),
 	}
 	ac := &agentContext{as: as, tacticalHc: fake}
 
@@ -429,5 +429,66 @@ func TestClassifyLLMError(t *testing.T) {
 		if got := classifyLLMError(c.err); got != c.want {
 			t.Errorf("classifyLLMError(%v) = %q, want %q", c.err, got, c.want)
 		}
+	}
+}
+
+// TestAgenticTurn_EmptyResultRetries 验证战术层空结果（tool_choice=required 但
+// 全是 speak）触发重试；重试耗尽后返回错误并计入 empty_result。
+func TestAgenticTurn_EmptyResultRetries(t *testing.T) {
+	llmMetricsCollector = llmmetrics.New() // reset
+
+	as := agentstate.New()
+	as.SetIdentity("H-01", nil)
+	// 一直返回 speak-only：重试耗尽后应返回错误。
+	fake := &fakeLoopLLM{
+		resp: makeToolCallResponse([]llmtypes.ToolCall{{Function: llmtypes.ToolFunction{Name: "speak", Arguments: `{"content":"hi"}`}}}),
+	}
+	ac := &agentContext{as: as, tacticalHc: fake}
+
+	_, err := ac.agenticTurn(context.Background(), fake, nil, nil, slog.Default(), "H-01",
+		"tactical", "分解请求", "required", "", nil)
+	if err == nil {
+		t.Fatal("expected empty-result error after retries exhausted")
+	}
+	if fake.calls != 1+maxTacticalRetries {
+		t.Errorf("SendLoop calls = %d, want %d (1 initial + 3 retries)", fake.calls, 1+maxTacticalRetries)
+	}
+	// 历史不应追加（失败不留半截）。
+	if hist := as.Conversation(); len(hist) != 0 {
+		t.Errorf("history should stay empty on empty-result failure, got %d msgs", len(hist))
+	}
+	// 错误分布应计入 empty_result。
+	rep := llmMetricsCollector.Snapshot()
+	lr := rep.Layers["tactical"]
+	if lr == nil || lr.ErrorDist[llmmetrics.ErrEmptyResult] != 1 {
+		t.Errorf("error_dist should record empty_result=1, got %+v", rep.Layers["tactical"])
+	}
+}
+
+// TestAgenticTurn_FilteredToSpeakOnlyRetries 验证"过滤后只剩 speak"（非 speak
+// 的 tool_calls 全被 filterValidActions 过滤）也被判为空结果：重试 + 计 empty_result。
+func TestAgenticTurn_FilteredToSpeakOnlyRetries(t *testing.T) {
+	llmMetricsCollector = llmmetrics.New()
+
+	as := agentstate.New()
+	as.SetIdentity("H-01", nil)
+	// speak + scan_area：scan_area 会被 tacticalActionAvailable 过滤，只剩 speak。
+	fake := &fakeLoopLLM{
+		resp: makeToolCallResponse([]llmtypes.ToolCall{
+			{Function: llmtypes.ToolFunction{Name: "speak", Arguments: `{"content":"hi"}`}},
+			{Function: llmtypes.ToolFunction{Name: "scan_area", Arguments: `{}`}},
+		}),
+	}
+	ac := &agentContext{as: as, tacticalHc: fake}
+
+	_, err := ac.agenticTurn(context.Background(), fake, nil, nil, slog.Default(), "H-01",
+		"tactical", "分解请求", "required", "", nil)
+	if err == nil {
+		t.Fatal("expected empty-result error for filtered-to-speak-only")
+	}
+	rep := llmMetricsCollector.Snapshot()
+	lr := rep.Layers["tactical"]
+	if lr == nil || lr.ErrorDist[llmmetrics.ErrEmptyResult] != 1 {
+		t.Errorf("error_dist should record empty_result=1, got %+v", rep.Layers["tactical"])
 	}
 }

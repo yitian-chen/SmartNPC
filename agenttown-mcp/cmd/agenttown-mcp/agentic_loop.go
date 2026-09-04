@@ -107,31 +107,42 @@ func (a *agentContext) agenticTurn(ctx context.Context, hc llmClient, kb *worldk
 
 	resp, err := send()
 	retries := 0
-	for attempt := 1; err != nil && attempt <= maxTacticalRetries; attempt++ {
-		if isVenusErrorCode(err, "4001") {
-			// LLM 输出坏 JSON：立即重试相同请求体，重采样即修复。
-			logger.Warn("[agentic-loop] venus 4001，重试相同请求体",
-				"agent_id", agentID, "layer", layer, "retry", attempt, "max", maxTacticalRetries, "err", err)
-		} else if errors.Is(err, venus.ErrEmptyCompletion) {
-			// 后端过载返回空流（200 + 立即 [DONE]，无 content/tool_calls）：
-			// 立即重试相同请求体，重采样通常能拿到正常补全。
-			logger.Warn("[agentic-loop] venus 空完成，重试相同请求体",
-				"agent_id", agentID, "layer", layer, "retry", attempt, "max", maxTacticalRetries, "err", err)
-		} else if isRateLimited(err) {
-			// 公共模型服务限流：退避 + 随机抖动后重试。等待期间 ctx
-			// 取消（进程关停/上层超时）则立即放弃。抖动让同时被拒的
-			// 多个 NPC 重试自然错峰。
-			backoff := rateLimitBackoffBase + time.Duration(rand.IntN(int(rateLimitBackoffBase)*3/4))
-			logger.Warn("[agentic-loop] venus 限流（429），退避后重试",
-				"agent_id", agentID, "layer", layer, "retry", attempt, "max", maxTacticalRetries,
-				"backoff_ms", backoff.Milliseconds(), "err", err)
-			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			case <-time.After(backoff):
+	for attempt := 1; attempt <= maxTacticalRetries; attempt++ {
+		if err != nil {
+			if isVenusErrorCode(err, "4001") {
+				// LLM 输出坏 JSON：立即重试相同请求体，重采样即修复。
+				logger.Warn("[agentic-loop] venus 4001，重试相同请求体",
+					"agent_id", agentID, "layer", layer, "retry", attempt, "max", maxTacticalRetries, "err", err)
+			} else if errors.Is(err, venus.ErrEmptyCompletion) {
+				// 后端过载返回空流（200 + 立即 [DONE]，无 content/tool_calls）：
+				// 立即重试相同请求体，重采样通常能拿到正常补全。
+				logger.Warn("[agentic-loop] venus 空完成，重试相同请求体",
+					"agent_id", agentID, "layer", layer, "retry", attempt, "max", maxTacticalRetries, "err", err)
+			} else if isRateLimited(err) {
+				// 公共模型服务限流：退避 + 随机抖动后重试。等待期间 ctx
+				// 取消（进程关停/上层超时）则立即放弃。抖动让同时被拒的
+				// 多个 NPC 重试自然错峰。
+				backoff := rateLimitBackoffBase + time.Duration(rand.IntN(int(rateLimitBackoffBase)*3/4))
+				logger.Warn("[agentic-loop] venus 限流（429），退避后重试",
+					"agent_id", agentID, "layer", layer, "retry", attempt, "max", maxTacticalRetries,
+					"backoff_ms", backoff.Milliseconds(), "err", err)
+				select {
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				case <-time.After(backoff):
+				}
+			} else {
+				// 超时/连接/其他错误不重试。
+				break
 			}
+		} else if isEmptyTacticalResult(resp, toolChoice, agentID) {
+			// 战术层空结果（tool_choice=required 但 0 tool_calls / 全是 speak）：
+			// 立即重试相同请求体，重采样通常能拿到正常分解。
+			logger.Warn("[agentic-loop] 战术层空结果，重试相同请求体",
+				"agent_id", agentID, "layer", layer, "retry", attempt, "max", maxTacticalRetries,
+				"tool_calls", len(resp.ToolCalls))
 		} else {
-			// 超时/连接/其他错误不重试。
+			// 成功且非空结果。
 			break
 		}
 		retries = attempt
@@ -150,6 +161,10 @@ func (a *agentContext) agenticTurn(ctx context.Context, hc llmClient, kb *worldk
 			tpot = (e2e - ttft) / time.Duration(outputTokens-1)
 		}
 	}
+	errClass := classifyLLMError(err)
+	if err == nil && isEmptyTacticalResult(resp, toolChoice, agentID) {
+		errClass = llmmetrics.ErrEmptyResult
+	}
 	llmMetricsCollector.RecordCall(llmmetrics.CallSample{
 		Layer:        layer,
 		E2E:          e2e,
@@ -157,7 +172,7 @@ func (a *agentContext) agenticTurn(ctx context.Context, hc llmClient, kb *worldk
 		TPOT:         tpot,
 		ITLs:         itls,
 		OutputTokens: outputTokens,
-		ErrClass:     classifyLLMError(err),
+		ErrClass:     errClass,
 		Retried:      retries > 0,
 		RetryCount:   retries,
 	})
@@ -165,6 +180,10 @@ func (a *agentContext) agenticTurn(ctx context.Context, hc llmClient, kb *worldk
 
 	if err != nil {
 		return nil, err
+	}
+	if isEmptyTacticalResult(resp, toolChoice, agentID) {
+		// 重试耗尽后仍是空结果：返回错误，不追加空历史（避免 pending tool 占位残留）。
+		return nil, fmt.Errorf("tactical empty result: %d tool_calls", len(resp.ToolCalls))
 	}
 
 	// 成功：user + assistant 追加进当天 loop 历史。战术轮的 assistant 携带
@@ -196,6 +215,33 @@ const pendingToolResult = "result=pending"
 // rateLimitBackoffBase 是 429 限流重试的退避基础时长（实际退避 = base +
 // [0, 3/4·base) 随机抖动）。包级变量便于测试临时调小加速。
 var rateLimitBackoffBase = 2 * time.Second
+
+// isEmptyTacticalResult 判断 tool_choice=required 的响应是否为"空结果"：
+//   - 0 个 tool_calls（LLM 无视 required 返回文本/空体）；
+//   - 全是 speak（speak-only，无长动作）；
+//   - 除 speak 外全会被 filterValidActions 过滤（scan_area/stop/wait/未知），
+//     即过滤后只剩 speak、无有效长动作。
+//
+// 战术层需要至少一个带 duration 的长动作，空结果应重试而非入队（入队会让
+// NPC 秒空队列 → 高频重分解 → 呆站）。用 tacticalActionAvailable 与
+// generateTacticalPlan 的 filterValidActions 保持同一判定口径。
+func isEmptyTacticalResult(resp *llmtypes.Response, toolChoice, agentID string) bool {
+	if toolChoice != "required" || resp == nil {
+		return false
+	}
+	if len(resp.ToolCalls) == 0 {
+		return true
+	}
+	for _, tc := range resp.ToolCalls {
+		if tc.Function.Name == "speak" {
+			continue // 首动作 speak 不算长动作
+		}
+		if tacticalActionAvailable(tc.Function.Name, agentID, capabilityRegistryRef) {
+			return false // 有一个能被 filterValidActions 接受的长动作
+		}
+	}
+	return true // 全是 speak，或非 speak 全被过滤
+}
 
 // classifyLLMError 把一次 LLM 调用的最终错误映射到指标错误类别。复用
 // 战术层的 isVenusErrorCode / isRateLimited 分类，再按错误文本区分超时/

@@ -137,17 +137,17 @@ func (r Report) ToMarkdown() string {
 	}
 
 	sb.WriteString("\n## 错误类型分布\n\n")
-	sb.WriteString("| 层 | success | bad_json_4001 | empty_completion | rate_limited | timeout | http_error | network | other |\n")
-	sb.WriteString("|---|---|---|---|---|---|---|---|---|\n")
+	sb.WriteString("| 层 | success | bad_json_4001 | empty_completion | empty_result | rate_limited | timeout | http_error | network | other |\n")
+	sb.WriteString("|---|---|---|---|---|---|---|---|---|---|\n")
 	for _, l := range layerOrder() {
 		lr, ok := r.Layers[l]
 		if !ok {
 			continue
 		}
-		sb.WriteString(fmt.Sprintf("| %s | %d | %d | %d | %d | %d | %d | %d | %d |\n",
+		sb.WriteString(fmt.Sprintf("| %s | %d | %d | %d | %d | %d | %d | %d | %d | %d |\n",
 			layerDisplay(l),
 			lr.ErrorDist[ErrSuccess], lr.ErrorDist[ErrBadJSON4001],
-			lr.ErrorDist[ErrEmptyCompletion],
+			lr.ErrorDist[ErrEmptyCompletion], lr.ErrorDist[ErrEmptyResult],
 			lr.ErrorDist[ErrRateLimited], lr.ErrorDist[ErrTimeout],
 			lr.ErrorDist[ErrHTTPError], lr.ErrorDist[ErrNetwork],
 			lr.ErrorDist[ErrOther]))

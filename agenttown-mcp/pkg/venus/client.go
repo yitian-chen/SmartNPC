@@ -385,7 +385,14 @@ func (c *Client) parseResponse(r io.Reader) (*llmtypes.Response, error) {
 	if err := json.Unmarshal(raw, &or); err != nil {
 		return nil, fmt.Errorf("unmarshal response: %w", err)
 	}
-	return or.toLlmTypes(c.cfg.Model), nil
+	resp := or.toLlmTypes(c.cfg.Model)
+	// 非流式空完成检查：与 parseStream 的 ErrEmptyCompletion 对齐。Venus 过载
+	// 返回 200 但空体（无 content、无 tool_calls）时，流式路径已能识别，此处
+	// 补上非流式路径，让默认（非流式）配置下空完成也走 agenticTurn 的重试+计数。
+	if resp.ExtractText() == "" && len(resp.ToolCalls) == 0 {
+		return nil, fmt.Errorf("%w", ErrEmptyCompletion)
+	}
+	return resp, nil
 }
 
 // parseStream decodes an SSE stream from the OpenAI Chat Completions API.
