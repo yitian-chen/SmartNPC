@@ -1586,8 +1586,8 @@ func main() {
 			logger.Error("failed to load llm config", "path", *llmConfigPath, "err", err)
 			os.Exit(1)
 		}
-		if llmCfg.BaseURL != "" {
-			*venusURL = llmCfg.BaseURL
+		if url := llmCfg.ResolvedBaseURL(); url != "" {
+			*venusURL = url
 		}
 		if llmCfg.APIKey != "" {
 			*venusAPIKey = llmCfg.APIKey

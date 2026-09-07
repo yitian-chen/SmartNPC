@@ -1,15 +1,21 @@
 # LLM 推理服务配置（OpenAI Chat Completions 兼容）
 #
-# Venus 与自建 SGLang 共用同一份 OpenAI 兼容协议，仅 base_url / model / api_key
-# 不同。切换后端只需改下面 base_url/model/api_key，然后带
+# Venus 与自建 SGLang 共用同一份 OpenAI 兼容协议，仅 host/port/model/api_key
+# 不同。切换后端只需改下面几项，然后带
 #   --llm-config=assets/llm_backend.yaml
 # 重启 MCP（不传该 flag 时走 --venus-url 等原有 flag）。
 #
-# 注意：base_url 是服务根地址，客户端会自动拼接 /v1/chat/completions，
+# 地址二选一：
+#   - 自建服务用 host + port；
+#   - 带路径的服务（如 Venus）用 base_url 覆盖 host+port。
+# 注意：地址是服务根地址，客户端会自动拼接 /v1/chat/completions，
 # 不要在这里带 /v1 后缀。
 
-# ─── 自建 SGLang（Qwen2.5-7B-Instruct-GPTQ-Int4）───
-base_url: "http://21.6.67.160:30000"
+# ─── 自建推理服务 ───
+host: "21.6.67.160"
+port: 30000
+# base_url: ""   # 覆盖 host+port 的完整地址（带路径的服务用，如 Venus）
+
 api_key: ""                                          # 自建服务通常无需认证
 model: "Qwen2.5-7B-Instruct-GPTQ-Int4"               # 战术层模型
 strategic_model: "Qwen2.5-7B-Instruct-GPTQ-Int4"     # 战略层模型（留空回退 model）
@@ -17,6 +23,8 @@ timeout_sec: 120                                     # 单次调用 HTTP 超时�
 
 # ─── Venus（腾讯内部）───
 # base_url: "http://v2.open.venus.oa.com/llmproxy"
+# host: ""
+# port: 0
 # api_key: ""                    # 留空则读 VENUS_API_KEY 环境变量
 # model: "deepseek-v4-flash"
 # strategic_model: "deepseek-v4-pro"

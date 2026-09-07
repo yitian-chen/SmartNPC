@@ -17,8 +17,14 @@ import (
 // Config is the LLM backend connection settings. Both the strategic and
 // tactical layers share base_url/api_key/timeout; the model may differ per
 // layer (StrategicModel empty → fall back to Model).
+//
+// The service address is given either as host + port (self-hosted SGLang) or
+// as a full base_url (path-bearing services like Venus). base_url wins when
+// both are present.
 type Config struct {
-	BaseURL        string `yaml:"base_url"`
+	Host           string `yaml:"host"`
+	Port           int    `yaml:"port"`
+	BaseURL        string `yaml:"base_url"` // optional full URL (host:port/path), overrides host+port
 	APIKey         string `yaml:"api_key"`
 	Model          string `yaml:"model"`
 	StrategicModel string `yaml:"strategic_model"`
@@ -34,12 +40,27 @@ func (c *Config) Timeout() time.Duration {
 	return time.Duration(c.TimeoutSec) * time.Second
 }
 
-// Load reads and parses the YAML config at path. base_url and model are
-// required; api_key / strategic_model / timeout_sec are optional.
+// ResolvedBaseURL returns the service root URL: base_url when set, otherwise
+// "http://host" (or "http://host:port" when Port > 0).
+func (c *Config) ResolvedBaseURL() string {
+	if c.BaseURL != "" {
+		return c.BaseURL
+	}
+	if c.Host == "" {
+		return ""
+	}
+	if c.Port > 0 {
+		return fmt.Sprintf("http://%s:%d", c.Host, c.Port)
+	}
+	return "http://" + c.Host
+}
+
+// Load reads and parses the YAML config at path. The service address
+// (base_url, or host) and model are required; port / api_key /
+// strategic_model / timeout_sec are optional.
 //
-// Note: base_url is the service root — the client appends /v1/chat/completions,
-// so do not include a /v1 suffix (e.g. SGLang "http://host:30000", not
-// "http://host:30000/v1").
+// Note: the address is the service root — the client appends
+// /v1/chat/completions, so do not include a /v1 suffix.
 func Load(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -49,8 +70,8 @@ func Load(path string) (*Config, error) {
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("parse llm config %s: %w", path, err)
 	}
-	if cfg.BaseURL == "" {
-		return nil, fmt.Errorf("llm config %s: base_url is required", path)
+	if cfg.ResolvedBaseURL() == "" {
+		return nil, fmt.Errorf("llm config %s: base_url or host is required", path)
 	}
 	if cfg.Model == "" {
 		return nil, fmt.Errorf("llm config %s: model is required", path)
