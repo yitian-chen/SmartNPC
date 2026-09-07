@@ -40,6 +40,7 @@ import (
 	"github.com/AgentTown/agenttown-mcp/contract/protocol"
 	"github.com/AgentTown/agenttown-mcp/internal/log"
 	"github.com/AgentTown/agenttown-mcp/pkg/agentstate"
+	"github.com/AgentTown/agenttown-mcp/pkg/llmconfig"
 	"github.com/AgentTown/agenttown-mcp/pkg/llmtypes"
 	"github.com/AgentTown/agenttown-mcp/pkg/ollama"
 	"github.com/AgentTown/agenttown-mcp/pkg/profile"
@@ -1545,6 +1546,8 @@ func main() {
 			"Venus HTTP timeout per call")
 		tacticalTimeout = flag.Duration("tactical-timeout", 60*time.Second,
 			"hard timeout for a single tactical-layer LLM call (streaming or not)")
+		llmConfigPath = flag.String("llm-config", "",
+			"path to LLM backend config YAML (OpenAI-compatible; when set, overrides --venus-url/--venus-model/--venus-strategic-model/--venus-api-key/--venus-timeout)")
 		// autoPlanFlag 是自动规划总开关。关闭（false）时 MCP 进入手动模式：
 		// 不调战略层 generateDailyPlan、不调战术层 tacticalRefill、不主动发 idle wait、
 		// 不触发反应层 Ollama 决策。仅 /debug/schedule 注入和 /debug/action 手动下发
@@ -1572,6 +1575,38 @@ func main() {
 	tacticalStreamingEnabled = *tacticalStream
 	tacticalCallTimeout = *tacticalTimeout
 	autoPlanEnabled = *autoPlanFlag
+
+	// ─── LLM 推理服务配置（动态后端切换）────────────────────────
+	// --llm-config 非空时加载 YAML，覆盖 flags 里的 venus 参数。
+	// Venus 与自建 SGLang 都是 OpenAI Chat Completions 兼容，共用同一个
+	// 客户端，仅 base_url/model/api_key 不同，因此只需改这几个值即可切换。
+	if *llmConfigPath != "" {
+		llmCfg, err := llmconfig.Load(*llmConfigPath)
+		if err != nil {
+			logger.Error("failed to load llm config", "path", *llmConfigPath, "err", err)
+			os.Exit(1)
+		}
+		if llmCfg.BaseURL != "" {
+			*venusURL = llmCfg.BaseURL
+		}
+		if llmCfg.APIKey != "" {
+			*venusAPIKey = llmCfg.APIKey
+		}
+		if llmCfg.Model != "" {
+			*venusModel = llmCfg.Model
+		}
+		if llmCfg.StrategicModel != "" {
+			*venusStrategicModel = llmCfg.StrategicModel
+		}
+		if llmCfg.Timeout() > 0 {
+			*venusTimeout = llmCfg.Timeout()
+		}
+		logger.Info("LLM backend loaded from config",
+			"path", *llmConfigPath,
+			"base_url", *venusURL,
+			"model", *venusModel,
+			"strategic_model", *venusStrategicModel)
+	}
 
 	// ─── Persistence store (Stage 3) ──────────────────────────
 	// 空 DSN → NoopStore（内存模式，当前行为）；非空 → MySQLStore（含迁移）。
