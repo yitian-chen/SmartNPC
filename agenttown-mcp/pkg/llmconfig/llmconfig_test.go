@@ -7,14 +7,17 @@ import (
 	"time"
 )
 
-func TestLoad_HostPort(t *testing.T) {
+func TestLoad(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "llm.yaml")
-	content := `host: "21.6.67.160"
-port: 30000
-model: "Qwen2.5-7B-Instruct-GPTQ-Int4"
-strategic_model: "Qwen2.5-7B-Instruct-GPTQ-Int4"
-timeout_sec: 120
+	content := `strategic:
+  base_url: "http://v2.open.venus.oa.com/llmproxy"
+  model: "deepseek-v4-pro"
+tactical:
+  host: "21.6.67.160"
+  port: 8000
+  model: "Qwen2.5-7B-Instruct-GPTQ-Int4"
+  timeout_sec: 120
 `
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("write: %v", err)
@@ -23,73 +26,81 @@ timeout_sec: 120
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if got := cfg.ResolvedBaseURL(); got != "http://21.6.67.160:30000" {
-		t.Errorf("ResolvedBaseURL = %q, want http://21.6.67.160:30000", got)
+	if got := cfg.Strategic.ResolvedBaseURL(); got != "http://v2.open.venus.oa.com/llmproxy" {
+		t.Errorf("strategic base URL = %q", got)
 	}
-	if cfg.Model != "Qwen2.5-7B-Instruct-GPTQ-Int4" {
-		t.Errorf("Model = %q", cfg.Model)
+	if cfg.Strategic.Model != "deepseek-v4-pro" {
+		t.Errorf("strategic model = %q", cfg.Strategic.Model)
 	}
-	if cfg.Timeout() != 120*time.Second {
-		t.Errorf("Timeout = %v, want 120s", cfg.Timeout())
+	if got := cfg.Tactical.ResolvedBaseURL(); got != "http://21.6.67.160:8000" {
+		t.Errorf("tactical base URL = %q", got)
+	}
+	if cfg.Tactical.Model != "Qwen2.5-7B-Instruct-GPTQ-Int4" {
+		t.Errorf("tactical model = %q", cfg.Tactical.Model)
+	}
+	if cfg.Tactical.Timeout() != 120*time.Second {
+		t.Errorf("tactical timeout = %v, want 120s", cfg.Tactical.Timeout())
 	}
 }
 
-func TestLoad_HostNoPort(t *testing.T) {
+func TestResolvedBaseURL(t *testing.T) {
+	b := Backend{Host: "h", Port: 8000}
+	if got := b.ResolvedBaseURL(); got != "http://h:8000" {
+		t.Errorf("host+port = %q", got)
+	}
+	b = Backend{Host: "h"}
+	if got := b.ResolvedBaseURL(); got != "http://h" {
+		t.Errorf("host only = %q", got)
+	}
+	b = Backend{Host: "h", Port: 8000, BaseURL: "http://x/y"}
+	if got := b.ResolvedBaseURL(); got != "http://x/y" {
+		t.Errorf("base_url override = %q", got)
+	}
+}
+
+func TestLoad_MissingStrategic(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "llm.yaml")
-	content := `host: "21.6.67.160"
-model: "m"
+	content := `tactical:
+  host: "h"
+  model: "m"
 `
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	cfg, err := Load(path)
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if got := cfg.ResolvedBaseURL(); got != "http://21.6.67.160" {
-		t.Errorf("ResolvedBaseURL = %q, want http://21.6.67.160", got)
-	}
-}
-
-func TestLoad_BaseURLOverridesHostPort(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "llm.yaml")
-	content := `host: "21.6.67.160"
-port: 30000
-base_url: "http://v2.open.venus.oa.com/llmproxy"
-model: "m"
-`
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	cfg, err := Load(path)
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if got := cfg.ResolvedBaseURL(); got != "http://v2.open.venus.oa.com/llmproxy" {
-		t.Errorf("ResolvedBaseURL = %q, want base_url (override host+port)", got)
-	}
-}
-
-func TestLoad_MissingAddress(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "llm.yaml")
-	if err := os.WriteFile(path, []byte("model: x\n"), 0o644); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 	if _, err := Load(path); err == nil {
-		t.Fatal("expected error for missing base_url/host")
+		t.Fatal("expected error for missing strategic backend")
+	}
+}
+
+func TestLoad_MissingTactical(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "llm.yaml")
+	content := `strategic:
+  host: "h"
+  model: "m"
+`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected error for missing tactical backend")
 	}
 }
 
 func TestLoad_MissingModel(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "llm.yaml")
-	if err := os.WriteFile(path, []byte("host: x\n"), 0o644); err != nil {
+	content := `strategic:
+  host: "h"
+  model: "m"
+tactical:
+  host: "h"
+`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 	if _, err := Load(path); err == nil {
-		t.Fatal("expected error for missing model")
+		t.Fatal("expected error for missing tactical model")
 	}
 }

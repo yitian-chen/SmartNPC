@@ -1,9 +1,10 @@
-// Package llmconfig loads the LLM inference backend configuration.
+// Package llmconfig loads the per-layer LLM inference backend configuration.
 //
-// Venus and a self-hosted SGLang service both speak the OpenAI Chat
-// Completions protocol, so they share the same client and differ only in
-// base_url / model / api_key. A YAML file lets operators switch backends
-// (or swap models) without recompiling.
+// The strategic layer and the tactical/dialogue layers point at separate
+// Backends (Venus or a self-hosted OpenAI-compatible service). This lets
+// operators, for example, keep the strategic layer on a strong hosted model
+// (Venus DeepSeek-v4-pro) while running the higher-frequency tactical and
+// dialogue layers on a self-hosted service.
 package llmconfig
 
 import (
@@ -14,50 +15,52 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Config is the LLM backend connection settings. Both the strategic and
-// tactical layers share base_url/api_key/timeout; the model may differ per
-// layer (StrategicModel empty → fall back to Model).
-//
-// The service address is given either as host + port (self-hosted SGLang) or
-// as a full base_url (path-bearing services like Venus). base_url wins when
-// both are present.
-type Config struct {
-	Host           string `yaml:"host"`
-	Port           int    `yaml:"port"`
-	BaseURL        string `yaml:"base_url"` // optional full URL (host:port/path), overrides host+port
-	APIKey         string `yaml:"api_key"`
-	Model          string `yaml:"model"`
-	StrategicModel string `yaml:"strategic_model"`
-	TimeoutSec     int    `yaml:"timeout_sec"`
+// Backend is one inference endpoint. The address is given either as
+// host + port (self-hosted service) or as a full base_url (path-bearing
+// services like Venus); base_url wins when both are present.
+type Backend struct {
+	Host       string `yaml:"host"`
+	Port       int    `yaml:"port"`
+	BaseURL    string `yaml:"base_url"`
+	APIKey     string `yaml:"api_key"`
+	Model      string `yaml:"model"`
+	TimeoutSec int    `yaml:"timeout_sec"`
 }
 
 // Timeout returns the per-call HTTP timeout, or 0 when unset (the client
 // then uses its own default).
-func (c *Config) Timeout() time.Duration {
-	if c.TimeoutSec <= 0 {
+func (b *Backend) Timeout() time.Duration {
+	if b.TimeoutSec <= 0 {
 		return 0
 	}
-	return time.Duration(c.TimeoutSec) * time.Second
+	return time.Duration(b.TimeoutSec) * time.Second
 }
 
 // ResolvedBaseURL returns the service root URL: base_url when set, otherwise
 // "http://host" (or "http://host:port" when Port > 0).
-func (c *Config) ResolvedBaseURL() string {
-	if c.BaseURL != "" {
-		return c.BaseURL
+func (b *Backend) ResolvedBaseURL() string {
+	if b.BaseURL != "" {
+		return b.BaseURL
 	}
-	if c.Host == "" {
+	if b.Host == "" {
 		return ""
 	}
-	if c.Port > 0 {
-		return fmt.Sprintf("http://%s:%d", c.Host, c.Port)
+	if b.Port > 0 {
+		return fmt.Sprintf("http://%s:%d", b.Host, b.Port)
 	}
-	return "http://" + c.Host
+	return "http://" + b.Host
 }
 
-// Load reads and parses the YAML config at path. The service address
-// (base_url, or host) and model are required; port / api_key /
-// strategic_model / timeout_sec are optional.
+// Config holds the per-layer inference backends. The dialogue layer shares
+// the tactical backend's client.
+type Config struct {
+	Strategic Backend `yaml:"strategic"`
+	Tactical  Backend `yaml:"tactical"`
+}
+
+// Load reads and parses the YAML config at path. Both backends must specify
+// an address (base_url or host) and a model; api_key / timeout_sec are
+// optional.
 //
 // Note: the address is the service root — the client appends
 // /v1/chat/completions, so do not include a /v1 suffix.
@@ -70,11 +73,17 @@ func Load(path string) (*Config, error) {
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("parse llm config %s: %w", path, err)
 	}
-	if cfg.ResolvedBaseURL() == "" {
-		return nil, fmt.Errorf("llm config %s: base_url or host is required", path)
+	if cfg.Strategic.ResolvedBaseURL() == "" {
+		return nil, fmt.Errorf("llm config %s: strategic.base_url or strategic.host is required", path)
 	}
-	if cfg.Model == "" {
-		return nil, fmt.Errorf("llm config %s: model is required", path)
+	if cfg.Strategic.Model == "" {
+		return nil, fmt.Errorf("llm config %s: strategic.model is required", path)
+	}
+	if cfg.Tactical.ResolvedBaseURL() == "" {
+		return nil, fmt.Errorf("llm config %s: tactical.base_url or tactical.host is required", path)
+	}
+	if cfg.Tactical.Model == "" {
+		return nil, fmt.Errorf("llm config %s: tactical.model is required", path)
 	}
 	return &cfg, nil
 }
