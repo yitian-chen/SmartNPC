@@ -99,6 +99,13 @@ type AgentState struct {
 	// user/assistant/tool messages). Cleared once per game day (on day
 	// rollover). In-process only, not persisted.
 	conversation []llmtypes.Message
+	// conversationSummary is the stable compaction digest that replaces the
+	// evicted older history when the conversation exceeds the token budget.
+	// It is inserted between system and the raw tail on every request and
+	// rewritten only at compaction boundaries, so the [system + tools +
+	// summary] prefix stays byte-stable for KV cache reuse. In-process only,
+	// not persisted (cleared with conversation on day rollover).
+	conversationSummary string
 	// timeStopTargetGameSec is the target authoritative game_time (GameTimeSec)
 	// at which the current long action's time_to_stop should fire; -1 = no
 	// time_to_stop armed. timeStopActionID is the in-flight action it tracks,
@@ -525,6 +532,7 @@ func (a *AgentState) Conversation() []llmtypes.Message {
 func (a *AgentState) ClearConversation() {
 	a.mu.Lock()
 	a.conversation = nil
+	a.conversationSummary = ""
 	a.tacticalHeaderPlan = ""
 	a.mu.Unlock()
 }
@@ -545,6 +553,26 @@ func (a *AgentState) TacticalHeaderPlan() string {
 func (a *AgentState) SetTacticalHeaderPlan(plan string) {
 	a.mu.Lock()
 	a.tacticalHeaderPlan = plan
+	a.mu.Unlock()
+}
+
+// ConversationSummary returns the stable compaction digest, or "" when the
+// conversation has not been compacted yet (or the digest was cleared).
+func (a *AgentState) ConversationSummary() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.conversationSummary
+}
+
+// CompactConversation atomically replaces the conversation with tail, records
+// summary as the new stable digest, and resets the tactical full-header marker
+// (the day's first full-header user message lived in the evicted history, so
+// the next tactical prompt must re-inject the full schedule + rules).
+func (a *AgentState) CompactConversation(summary string, tail []llmtypes.Message) {
+	a.mu.Lock()
+	a.conversationSummary = summary
+	a.conversation = append([]llmtypes.Message(nil), tail...)
+	a.tacticalHeaderPlan = ""
 	a.mu.Unlock()
 }
 

@@ -1172,6 +1172,39 @@ func TestTacticalHeaderPlan_ClearConversationResets(t *testing.T) {
 	}
 }
 
+func TestCompactConversation(t *testing.T) {
+	a := New()
+	a.SetTacticalHeaderPlan("07:00-11:00: 车间装配作业")
+	a.AppendConversationMessage(llmtypes.Message{Role: "user", Content: "old"})
+	a.AppendConversationMessage(llmtypes.Message{Role: "assistant", Content: "", ToolCalls: []llmtypes.ToolCall{{ID: "c1"}}})
+	tail := []llmtypes.Message{{Role: "assistant", Content: "", ToolCalls: []llmtypes.ToolCall{{ID: "c2"}}}}
+
+	a.CompactConversation("摘要内容", tail)
+
+	if got := a.ConversationSummary(); got != "摘要内容" {
+		t.Errorf("ConversationSummary = %q, want 摘要内容", got)
+	}
+	if got := a.Conversation(); len(got) != 1 || got[0].ToolCalls[0].ID != "c2" {
+		t.Errorf("conversation after compact = %+v, want tail only", got)
+	}
+	if got := a.TacticalHeaderPlan(); got != "" {
+		t.Errorf("TacticalHeaderPlan after compact = %q, want empty (full header evicted)", got)
+	}
+}
+
+func TestClearConversation_ClearsSummary(t *testing.T) {
+	a := New()
+	a.CompactConversation("摘要", []llmtypes.Message{{Role: "assistant", Content: "x"}})
+	a.ClearConversation()
+	if got := a.ConversationSummary(); got != "" {
+		t.Errorf("ConversationSummary after ClearConversation = %q, want empty", got)
+	}
+	if got := a.Conversation(); len(got) != 0 {
+		t.Errorf("conversation after clear = %d, want 0", len(got))
+	}
+}
+
+
 func TestTacticalHeaderPlan_NotPersistedNoStoreWrite(t *testing.T) {
 	fs := newFakeStore()
 	a := New()

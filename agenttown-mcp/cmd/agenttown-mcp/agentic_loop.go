@@ -60,20 +60,30 @@ func (a *agentContext) agenticTurn(ctx context.Context, hc llmClient, kb *worldk
 	// system 不入历史：每次发送时现拼（kb/profiles 单次仿真内不变，
 	// 对同一 agent 字节级一致，可缓存）。
 	system := prompt.BuildSharedSystemPrompt(kb, profiles, agentID)
-	history := a.as.Conversation()
-
-	// 请求 messages：[system, ...历史, user(本次)]。不先 append user——
-	// 成功才落历史，失败不留半截。
-	messages := make([]llmtypes.Message, 0, len(history)+2)
-	messages = append(messages, llmtypes.Message{Role: "system", Content: system})
-	messages = append(messages, history...)
-	messages = append(messages, llmtypes.Message{Role: "user", Content: userContent})
 
 	// tools 每次都传：与战术层一致的完整行动目录（含 social_chat）。
 	var tools []venus.Tool
 	if capabilityRegistryRef != nil {
 		tools = tacticalToolsFromRegistry(capabilityRegistryRef, agentID)
 	}
+
+	// 上下文压缩：估算输入 token，超阈值时把旧历史摘要成稳定 digest、
+	// 只保留最近几轮原始尾（保护 [system + tools + 摘要块] 前缀的 KV cache）。
+	a.maybeCompactConversation(ctx, system, tools, userContent, agentID, kb, profiles, logger)
+
+	// 重新读历史（压缩可能已改写）+ 摘要块。
+	history := a.as.Conversation()
+	summary := a.as.ConversationSummary()
+
+	// 请求 messages：[system, (摘要块), ...历史, user(本次)]。不先 append
+	// user——成功才落历史，失败不留半截。
+	messages := make([]llmtypes.Message, 0, len(history)+3)
+	messages = append(messages, llmtypes.Message{Role: "system", Content: system})
+	if summary != "" {
+		messages = append(messages, llmtypes.Message{Role: "user", Content: "【上下文摘要】\n" + summary})
+	}
+	messages = append(messages, history...)
+	messages = append(messages, llmtypes.Message{Role: "user", Content: userContent})
 
 	// 流式采集（仅战术层 + --tactical-stream）：非流式只能测 E2E，流式才能
 	// 测 TTFT/TPOT/ITL。onDelta 在 venus.parseStream 内同步回调，时间戳即
