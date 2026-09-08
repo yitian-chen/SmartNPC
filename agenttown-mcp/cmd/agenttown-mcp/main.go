@@ -40,6 +40,7 @@ import (
 	"github.com/AgentTown/agenttown-mcp/contract/protocol"
 	"github.com/AgentTown/agenttown-mcp/internal/log"
 	"github.com/AgentTown/agenttown-mcp/pkg/agentstate"
+	"github.com/AgentTown/agenttown-mcp/pkg/llmconfig"
 	"github.com/AgentTown/agenttown-mcp/pkg/llmtypes"
 	"github.com/AgentTown/agenttown-mcp/pkg/ollama"
 	"github.com/AgentTown/agenttown-mcp/pkg/profile"
@@ -1545,6 +1546,8 @@ func main() {
 			"Venus HTTP timeout per call")
 		tacticalTimeout = flag.Duration("tactical-timeout", 60*time.Second,
 			"hard timeout for a single tactical-layer LLM call (streaming or not)")
+		llmConfigPath = flag.String("llm-config", "",
+			"path to LLM backend config YAML (OpenAI-compatible; when set, overrides --venus-url/--venus-model/--venus-strategic-model/--venus-api-key/--venus-timeout)")
 		// autoPlanFlag 是自动规划总开关。关闭（false）时 MCP 进入手动模式：
 		// 不调战略层 generateDailyPlan、不调战术层 tacticalRefill、不主动发 idle wait、
 		// 不触发反应层 Ollama 决策。仅 /debug/schedule 注入和 /debug/action 手动下发
@@ -1572,6 +1575,24 @@ func main() {
 	tacticalStreamingEnabled = *tacticalStream
 	tacticalCallTimeout = *tacticalTimeout
 	autoPlanEnabled = *autoPlanFlag
+
+	// ─── LLM 推理服务分层配置 ─────────────────────────────────
+	// --llm-config 非空时加载 YAML，按层（战略 / 战术+对话）分别配置后端。
+	// 默认（不传 flag）走 --venus-url 等 flags：战略/战术共用同一 Venus，
+	// 仅 model 分开（--venus-strategic-model vs --venus-model）。
+	var llmCfg *llmconfig.Config
+	if *llmConfigPath != "" {
+		var err error
+		llmCfg, err = llmconfig.Load(*llmConfigPath)
+		if err != nil {
+			logger.Error("failed to load llm config", "path", *llmConfigPath, "err", err)
+			os.Exit(1)
+		}
+		logger.Info("LLM backend loaded from config",
+			"path", *llmConfigPath,
+			"strategic", llmCfg.Strategic.ResolvedBaseURL()+"/"+llmCfg.Strategic.Model,
+			"tactical", llmCfg.Tactical.ResolvedBaseURL()+"/"+llmCfg.Tactical.Model)
+	}
 
 	// ─── Persistence store (Stage 3) ──────────────────────────
 	// 空 DSN → NoopStore（内存模式，当前行为）；非空 → MySQLStore（含迁移）。
@@ -1782,7 +1803,8 @@ func main() {
 			}
 		}
 		// 战略层/战术层各用一个独立 LLM client 实例。
-		// Venus 直连（OpenAI Chat Completions API），是唯一的战略/战术层后端。
+		// 默认走 flags（战略/战术共用 --venus-url/--venus-api-key，model 分开）；
+		// --llm-config 提供分层覆盖（战略层 vs 战术+对话层各自的后端）。
 		venusAPIKeyValue := *venusAPIKey
 		if venusAPIKeyValue == "" {
 			venusAPIKeyValue = os.Getenv("VENUS_API_KEY")
@@ -1792,19 +1814,49 @@ func main() {
 		if strategicModel == "" {
 			strategicModel = *venusModel
 		}
+
+		strategicBaseURL, strategicKey, strategicTimeout := *venusURL, venusAPIKeyValue, *venusTimeout
+		tacticalBaseURL, tacticalKey, tacticalModel, tacticalTimeout := *venusURL, venusAPIKeyValue, *venusModel, *venusTimeout
+		if llmCfg != nil {
+			if url := llmCfg.Strategic.ResolvedBaseURL(); url != "" {
+				strategicBaseURL = url
+			}
+			if llmCfg.Strategic.APIKey != "" {
+				strategicKey = llmCfg.Strategic.APIKey
+			}
+			if llmCfg.Strategic.Model != "" {
+				strategicModel = llmCfg.Strategic.Model
+			}
+			if t := llmCfg.Strategic.Timeout(); t > 0 {
+				strategicTimeout = t
+			}
+			if url := llmCfg.Tactical.ResolvedBaseURL(); url != "" {
+				tacticalBaseURL = url
+			}
+			if llmCfg.Tactical.APIKey != "" {
+				tacticalKey = llmCfg.Tactical.APIKey
+			}
+			if llmCfg.Tactical.Model != "" {
+				tacticalModel = llmCfg.Tactical.Model
+			}
+			if t := llmCfg.Tactical.Timeout(); t > 0 {
+				tacticalTimeout = t
+			}
+		}
+
 		ac.strategicHc = venus.New(venus.Config{
-			BaseURL: *venusURL,
-			APIKey:  venusAPIKeyValue,
+			BaseURL: strategicBaseURL,
+			APIKey:  strategicKey,
 			Model:   strategicModel,
 			Logger:  logger,
-			Timeout: *venusTimeout,
+			Timeout: strategicTimeout,
 		})
 		ac.tacticalHc = venus.New(venus.Config{
-			BaseURL: *venusURL,
-			APIKey:  venusAPIKeyValue,
-			Model:   *venusModel,
+			BaseURL: tacticalBaseURL,
+			APIKey:  tacticalKey,
+			Model:   tacticalModel,
 			Logger:  logger,
-			Timeout: *venusTimeout,
+			Timeout: tacticalTimeout,
 		})
 		// Stage 5: 注入 Ollama 客户端供关系层判断。nil 表示 --ollama-url=""
 		// 显式禁用反应层时，maybeUpdateRelationship 会早返回不调用 Ollama。

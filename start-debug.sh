@@ -100,6 +100,7 @@ if [ -f "$ENV_FILE" ]; then
             VENUS_*) export "$key=$value" ;;
             AGENTTOWN_MCP_*) export "$key=$value" ;;
             OLLAMA_*) export "$key=$value" ;;
+            LLM_*) export "$key=$value" ;;
         esac
     done < "$ENV_FILE"
 fi
@@ -507,15 +508,23 @@ start_mcp() {
         fail "MCP binary not found: $MCP_EXE. Run build step first."
     fi
 
-    # 从 .env 读取 VENUS_API_KEY（MCP 直连 Venus 必需）
+    # 从 .env 读取 VENUS_API_KEY（MCP 直连 Venus 必需；用 LLM_CONFIG 切自建后端时可不设）
     local venus_key=""
     if [ -f "$ENV_FILE" ]; then
         if grep -q "^VENUS_API_KEY=" "$ENV_FILE" 2>/dev/null; then
             venus_key=$(grep "^VENUS_API_KEY=" "$ENV_FILE" | cut -d= -f2-)
         fi
     fi
-    if [ -z "$venus_key" ]; then
-        fail "VENUS_API_KEY not found in $ENV_FILE. MCP 直连 Venus 必需此凭据。"
+    # LLM 后端参数：LLM_CONFIG 非空时走配置文件（自建 SGLang / Venus 切换），
+    # 否则直连 Venus 用 VENUS_API_KEY。
+    local llm_args=()
+    if [ -n "${LLM_CONFIG:-}" ]; then
+        llm_args=(--llm-config "$LLM_CONFIG")
+    else
+        if [ -z "$venus_key" ]; then
+            fail "VENUS_API_KEY not found in $ENV_FILE. MCP 直连 Venus 必需此凭据（或设 LLM_CONFIG 指向自建后端配置文件）。"
+        fi
+        llm_args=(--venus-api-key "$venus_key")
     fi
 
     mkdir -p "$LOG_SUBDIR"
@@ -564,7 +573,7 @@ start_mcp() {
         # Go flag 包对 bool flag 特殊：--auto-plan true 里的 true 被当 positional arg，
         # 导致 flag 解析停止，后续 --mysql-dsn 等不被解析。必须用 --auto-plan=value 形式。
         nohup "$MCP_EXE" --http ":$HTTP_PORT" --ws ":$WS_PORT" \
-            --venus-api-key "$venus_key" \
+            "${llm_args[@]}" \
             --world-kb "$PROJECT_DIR/assets/world_kb.yaml" \
             --auto-plan="${AGENTTOWN_MCP_AUTO_PLAN:-true}" \
             --tactical-stream \
@@ -582,10 +591,17 @@ start_mcp() {
         if [ -n "$OLLAMA_URL" ]; then
             ollama_args_str="--ollama-url \"$OLLAMA_URL\" --ollama-model \"$OLLAMA_MODEL\" --ollama-num-thread $OLLAMA_NUM_THREAD"
         fi
+        # LLM 后端参数：LLM_CONFIG 非空走配置文件，否则直连 Venus。
+        local llm_args_str=""
+        if [ -n "${LLM_CONFIG:-}" ]; then
+            llm_args_str="--llm-config \"$LLM_CONFIG\""
+        else
+            llm_args_str="--venus-api-key \"$venus_key\""
+        fi
         cat > "$bat_file" << EOF
 @echo off
 pushd "$cwd_win"
-"$mcp_exe_win" --http ":$HTTP_PORT" --ws ":$WS_PORT" --venus-api-key "$venus_key" --world-kb "$world_kb_win" --auto-plan="${AGENTTOWN_MCP_AUTO_PLAN:-true}" --tactical-stream $ollama_args_str --log-level info >> "$mcp_log_win" 2>&1
+"$mcp_exe_win" --http ":$HTTP_PORT" --ws ":$WS_PORT" $llm_args_str --world-kb "$world_kb_win" --auto-plan="${AGENTTOWN_MCP_AUTO_PLAN:-true}" --tactical-stream $ollama_args_str --log-level info >> "$mcp_log_win" 2>&1
 EOF
         if $IN_WSL; then
             local bat_win
@@ -621,7 +637,11 @@ print_summary() {
     echo ""
     echo -e "  ${BOLD}本机服务${NC}"
     echo -e "    MCP:        0.0.0.0:$WS_PORT (WS) + :$HTTP_PORT (HTTP)"
-    echo -e "    LLM 后端:   Venus 直连（$VENUS_URL, model=$VENUS_MODEL）"
+    if [ -n "${LLM_CONFIG:-}" ]; then
+        echo -e "    LLM 后端:   配置文件（$LLM_CONFIG）"
+    else
+        echo -e "    LLM 后端:   Venus 直连（$VENUS_URL, model=$VENUS_MODEL）"
+    fi
     if $IN_LINUX && [ "${SKIP_MYSQL:-0}" != "1" ]; then
         echo -e "    MySQL:      127.0.0.1:3306 (socket=$MYSQL_SOCKET, db=$MYSQL_DB)"
         echo -e "                DSN: ${MYSQL_DSN:-$MYSQL_DSN_DEFAULT}"
