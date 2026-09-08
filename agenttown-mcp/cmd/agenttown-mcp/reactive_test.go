@@ -3,39 +3,45 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"strconv"
 	"strings"
 	"testing"
 
-	"github.com/AgentTown/agenttown-mcp/pkg/protocol"
+	"github.com/AgentTown/agenttown-mcp/pkg/agentstate"
+	"github.com/AgentTown/agenttown-mcp/pkg/prompt"
+	"github.com/AgentTown/agenttown-mcp/contract/protocol"
 )
 
 // TestBuildReactivePrompt_Defaults verifies the prompt template fills all
 // placeholders and contains the expected Chinese keywords.
 func TestBuildReactivePrompt_Defaults(t *testing.T) {
 	in := ReactiveInput{
-		AgentID:       "H-01",
-		TimeOfDay:     "14:30",
-		Zone:          "main_workshop",
-		Energy:        45,
-		Fatigue:       30,
-		Health:        90,
-		CurrentAction: "work_assemble(target=workbench_01, duration_min=60)",
-		ElapsedSec:    120,
-		ActionSrc:     "tactical",
-		CurrentSlot:   "14:00-18:00",
-		DailyPlan:     "14:00-18:00 工作组装",
-		Trigger:       TriggerZoneChange,
-		TriggerDetail: "zone rest_area→main_workshop",
+		AgentID:           "H-01",
+		TimeOfDay:         "14:30",
+		Zone:              "main_workshop",
+		Energy:            45,
+		Fatigue:           30,
+		JointWear:         15,
+		PhysicalAvailable: true,
+		CurrentAction:     "WorkShift(smart_object=workbench_01, interaction=assemble)",
+		ElapsedSec:        120,
+		ActionSrc:         "tactical",
+		CurrentSlot:       "14:00-18:00",
+		DailyPlan:         "14:00-18:00 工作组装",
+		Trigger:           TriggerZoneChange,
+		TriggerDetail:     "zone rest_area→main_workshop",
 	}
-	prompt := buildReactivePrompt(in)
+	promptText := prompt.BuildReactive(in)
 	for _, want := range []string{
-		"14:30", "main_workshop", "45", "30", "90",
-		"work_assemble(target=workbench_01, duration_min=60)",
+		"14:30", "main_workshop",
+		// 物理状态以分段标签呈现（45→较低、30→精神饱满、15→未有磨损），余额保留数值
+		"电量 较低", "疲劳 精神饱满", "关节磨损 未有磨损", "余额 0",
+		"WorkShift(smart_object=workbench_01, interaction=assemble)",
 		"tactical", "14:00-18:00", "14:00-18:00 工作组装",
 		"zone rest_area→main_workshop",
 	} {
-		if !strings.Contains(prompt, want) {
-			t.Errorf("prompt missing %q\nFull prompt:\n%s", want, prompt)
+		if !strings.Contains(promptText, want) {
+			t.Errorf("prompt missing %q\nFull prompt:\n%s", want, promptText)
 		}
 	}
 }
@@ -51,9 +57,9 @@ func TestBuildReactivePrompt_NoCurrentAction(t *testing.T) {
 		CurrentAction: "",
 		Trigger:       TriggerEventNotify,
 	}
-	prompt := buildReactivePrompt(in)
-	if !strings.Contains(prompt, "无在途动作") {
-		t.Errorf("empty CurrentAction should render as 无在途动作, got:\n%s", prompt)
+	promptText := prompt.BuildReactive(in)
+	if !strings.Contains(promptText, "无在途动作") {
+		t.Errorf("empty CurrentAction should render as 无在途动作, got:\n%s", promptText)
 	}
 }
 
@@ -66,10 +72,10 @@ func TestBuildReactivePrompt_EmptyContext(t *testing.T) {
 		Zone:      "main_workshop",
 		Trigger:   TriggerPeriodic,
 	}
-	prompt := buildReactivePrompt(in)
+	promptText := prompt.BuildReactive(in)
 	for _, want := range []string{"无在途动作", "未分解", "（未生成）", "periodic"} {
-		if !strings.Contains(prompt, want) {
-			t.Errorf("empty context should render %q, got:\n%s", want, prompt)
+		if !strings.Contains(promptText, want) {
+			t.Errorf("empty context should render %q, got:\n%s", want, promptText)
 		}
 	}
 }
@@ -84,65 +90,21 @@ func TestBuildReactivePrompt_EmptyTriggerDetail(t *testing.T) {
 		Trigger:       TriggerEventNotify,
 		TriggerDetail: "",
 	}
-	prompt := buildReactivePrompt(in)
-	if !strings.Contains(prompt, "event_notify") {
-		t.Errorf("empty detail should fall back to trigger enum, got:\n%s", prompt)
+	promptText := prompt.BuildReactive(in)
+	if !strings.Contains(promptText, "event_notify") {
+		t.Errorf("empty detail should fall back to trigger enum, got:\n%s", promptText)
 	}
 }
 
 // TestParseReactiveDecision_Continue verifies a clean continue decision.
 func TestParseReactiveDecision_Continue(t *testing.T) {
 	raw := `{"reaction":"continue","reason":"无需打断"}`
-	dec := parseReactiveDecision(raw)
+	dec := prompt.ParseReactiveDecision(raw)
 	if dec.Reaction != ReactionContinue {
 		t.Errorf("reaction: got %q, want continue", dec.Reaction)
 	}
 	if dec.Reason != "无需打断" {
 		t.Errorf("reason: got %q, want 无需打断", dec.Reason)
-	}
-	if dec.Action != nil {
-		t.Errorf("action should be nil for continue, got %+v", dec.Action)
-	}
-}
-
-// TestParseReactiveDecision_ActValid verifies act with valid cmd + params.
-func TestParseReactiveDecision_ActValid(t *testing.T) {
-	raw := `{"reaction":"act","reason":"紧急避让","action":{"cmd":"move_to","params":{"target":"rest_area"}}}`
-	dec := parseReactiveDecision(raw)
-	if dec.Reaction != ReactionAct {
-		t.Errorf("reaction: got %q, want act", dec.Reaction)
-	}
-	if dec.Action == nil || dec.Action.Cmd != "move_to" {
-		t.Errorf("action: got %+v, want move_to", dec.Action)
-	}
-	if dec.Action.Params["target"] != "rest_area" {
-		t.Errorf("params.target: got %v, want rest_area", dec.Action.Params["target"])
-	}
-}
-
-// TestParseReactiveDecision_ActMissingAction verifies that act without
-// action field downgrades to interrupt.
-func TestParseReactiveDecision_ActMissingAction(t *testing.T) {
-	raw := `{"reaction":"act","reason":"想打断"}`
-	dec := parseReactiveDecision(raw)
-	if dec.Reaction != ReactionInterrupt {
-		t.Errorf("reaction: got %q, want interrupt (downgrade)", dec.Reaction)
-	}
-	if !strings.Contains(dec.Reason, "act_downgrade") {
-		t.Errorf("reason should mention downgrade: %q", dec.Reason)
-	}
-	if dec.Action != nil {
-		t.Errorf("action should be nil after downgrade")
-	}
-}
-
-// TestParseReactiveDecision_ActInvalidCmd verifies that act with unknown
-// cmd downgrades to interrupt.
-func TestParseReactiveDecision_ActInvalidCmd(t *testing.T) {
-	raw := `{"reaction":"act","reason":"x","action":{"cmd":"fly","params":{}}}`
-	dec := parseReactiveDecision(raw)
-	if dec.Reaction != ReactionInterrupt {
-		t.Errorf("reaction: got %q, want interrupt (invalid cmd downgrade)", dec.Reaction)
 	}
 }
 
@@ -150,7 +112,7 @@ func TestParseReactiveDecision_ActInvalidCmd(t *testing.T) {
 // falls back to continue.
 func TestParseReactiveDecision_MalformedJSON(t *testing.T) {
 	raw := `这不是 JSON`
-	dec := parseReactiveDecision(raw)
+	dec := prompt.ParseReactiveDecision(raw)
 	if dec.Reaction != ReactionContinue {
 		t.Errorf("reaction: got %q, want continue (parse fail fallback)", dec.Reaction)
 	}
@@ -163,7 +125,7 @@ func TestParseReactiveDecision_MalformedJSON(t *testing.T) {
 // outside the enum falls back to continue.
 func TestParseReactiveDecision_UnknownReaction(t *testing.T) {
 	raw := `{"reaction":"dance","reason":"x"}`
-	dec := parseReactiveDecision(raw)
+	dec := prompt.ParseReactiveDecision(raw)
 	if dec.Reaction != ReactionContinue {
 		t.Errorf("reaction: got %q, want continue (unknown enum fallback)", dec.Reaction)
 	}
@@ -174,51 +136,71 @@ func TestParseReactiveDecision_UnknownReaction(t *testing.T) {
 
 func TestParseReactiveDecision_Replan(t *testing.T) {
 	raw := `{"reaction":"replan","reason":"fatigue=75 已突破警戒带，当前装配任务不合理"}`
-	dec := parseReactiveDecision(raw)
+	dec := prompt.ParseReactiveDecision(raw)
 	if dec.Reaction != ReactionReplan {
 		t.Errorf("reaction: got %q, want replan", dec.Reaction)
 	}
 	if dec.Reason != "fatigue=75 已突破警戒带，当前装配任务不合理" {
 		t.Errorf("reason: got %q", dec.Reason)
 	}
-	// replan 不应携带 action 字段
-	if dec.Action != nil {
-		t.Errorf("replan should not carry action, got: %+v", dec.Action)
+}
+
+// TestBuildReactivePrompt_InjectsAgentRole 验证反应层 prompt 注入
+// 【你的角色】段：传 AgentRole 后，prompt 应包含该角色画像字段。
+// 这是 C4 的核心——反应层决策（continue/observe/replan）应受 NPC
+// 性格影响（如"沉稳"性格更倾向 observe 而非频繁 replan）。
+func TestBuildReactivePrompt_InjectsAgentRole(t *testing.T) {
+	role := "名字：老陈\n职业：车间主管\n性格特质：沉稳、念旧、重视工艺\n说话风格：简洁，偶尔念叨老物件\n"
+	in := ReactiveInput{
+		AgentID:   "H-01",
+		AgentName: "老陈",
+		AgentRole: role,
+		TimeOfDay: "14:30",
+		Zone:      "main_workshop",
+		Energy:    45, Fatigue: 30,
+		CurrentAction: "WorkShift(smart_object=workbench_01)",
+		ActionSrc:     "tactical",
+		CurrentSlot:   "14:00-18:00",
+		DailyPlan:     "14:00-18:00 工作组装",
+		Trigger:       TriggerPeriodic,
+	}
+	promptText := prompt.BuildReactive(in)
+	if !strings.Contains(promptText, "【你的角色】") {
+		t.Errorf("prompt missing '【你的角色】' section header, got: %s", promptText)
+	}
+	for _, want := range []string{"老陈", "车间主管", "沉稳"} {
+		if !strings.Contains(promptText, want) {
+			t.Errorf("prompt missing role field %q, got: %s", want, promptText)
+		}
 	}
 }
 
-func TestBuildReactivePrompt_ReplanOption(t *testing.T) {
+// TestBuildReactivePrompt_EmptyAgentRole 验证 AgentRole 为空串时
+// prompt 中该段降级为"（无角色信息）"——保留段落占位让 LLM 知道
+// 该字段存在但当前不可用，不让 prompt 结构破碎。
+func TestBuildReactivePrompt_EmptyAgentRole(t *testing.T) {
 	in := ReactiveInput{
-		AgentID:      "H-01",
-		TimeOfDay:    "14:00",
-		Zone:         "main_workshop",
-		Energy:       80, Fatigue: 75, Health: 90,
-		CurrentAction: "work_assemble(target=workbench_01)",
-		ActionSrc:     "tactical",
-		CurrentSlot:   "13:00-17:00",
-		DailyPlan:     "13:00-17:00 下午装配",
-		Trigger:       TriggerPeriodic,
-		TriggerDetail: "周期性评估",
+		AgentID:   "H-01",
+		TimeOfDay: "14:30",
+		Zone:      "main_workshop",
+		Trigger:   TriggerPeriodic,
 	}
-	prompt := buildReactivePrompt(in)
-	if !strings.Contains(prompt, "replan") {
-		t.Errorf("prompt should mention 'replan' option, got: %s", prompt)
+	promptText := prompt.BuildReactive(in)
+	if !strings.Contains(promptText, "【你的角色】") {
+		t.Errorf("prompt should still contain '【你的角色】' header when role empty, got: %s", promptText)
 	}
-	if !strings.Contains(prompt, "30 分钟内至多触发 1 次") {
-		t.Errorf("prompt should mention replan frequency limit, got: %s", prompt)
-	}
-	if !strings.Contains(prompt, "continue|observe|interrupt|act|replan") {
-		t.Errorf("prompt JSON schema should include replan, got: %s", prompt)
+	if !strings.Contains(promptText, "（无角色信息）") {
+		t.Errorf("prompt should fallback to '（无角色信息）' for empty AgentRole, got: %s", promptText)
 	}
 }
 
 // TestParseReactiveDecision_CodeFence verifies that ```json ... ``` wrapped
 // output is correctly extracted.
 func TestParseReactiveDecision_CodeFence(t *testing.T) {
-	raw := "```json\n{\"reaction\":\"interrupt\",\"reason\":\"体力过低\"}\n```"
-	dec := parseReactiveDecision(raw)
-	if dec.Reaction != ReactionInterrupt {
-		t.Errorf("reaction: got %q, want interrupt", dec.Reaction)
+	raw := "```json\n{\"reaction\":\"replan\",\"reason\":\"体力过低\"}\n```"
+	dec := prompt.ParseReactiveDecision(raw)
+	if dec.Reaction != ReactionReplan {
+		t.Errorf("reaction: got %q, want replan", dec.Reaction)
 	}
 	if dec.Reason != "体力过低" {
 		t.Errorf("reason: got %q, want 体力过低", dec.Reason)
@@ -233,21 +215,36 @@ func TestParseReactiveDecision_AllEnums(t *testing.T) {
 	}{
 		{`{"reaction":"continue"}`, ReactionContinue},
 		{`{"reaction":"observe"}`, ReactionObserve},
-		{`{"reaction":"interrupt"}`, ReactionInterrupt},
-		{`{"reaction":"act","action":{"cmd":"wait","params":{"duration_sec":5}}}`, ReactionAct},
 		{`{"reaction":"replan","reason":"fatigue 过高"}`, ReactionReplan},
 	}
 	for _, c := range cases {
-		dec := parseReactiveDecision(c.raw)
+		dec := prompt.ParseReactiveDecision(c.raw)
 		if dec.Reaction != c.want {
 			t.Errorf("raw %q: reaction got %q, want %q", c.raw, dec.Reaction, c.want)
 		}
 	}
 }
 
+// TestParseReactiveDecision_LegacyEnumsDowngrade verifies that removed enums
+// (interrupt/act) are downgraded to continue rather than causing errors.
+func TestParseReactiveDecision_LegacyEnumsDowngrade(t *testing.T) {
+	for _, raw := range []string{
+		`{"reaction":"interrupt","reason":"旧版本输出"}`,
+		`{"reaction":"act","reason":"旧版本输出"}`,
+	} {
+		dec := prompt.ParseReactiveDecision(raw)
+		if dec.Reaction != ReactionContinue {
+			t.Errorf("legacy enum %q: got %q, want continue (downgrade)", raw, dec.Reaction)
+		}
+		if !strings.Contains(dec.Reason, "unknown_reaction") {
+			t.Errorf("reason should mention unknown_reaction: %q", dec.Reason)
+		}
+	}
+}
+
 // TestShouldTriggerReactive_ZoneChange verifies zone change detection.
 func TestShouldTriggerReactive_ZoneChange(t *testing.T) {
-	trig, detail := shouldTriggerReactive("rest_area", "main_workshop", nil, nil, nil, nil)
+	trig, detail := prompt.ShouldTriggerReactive("rest_area", "main_workshop", nil, nil, nil, nil, prompt.BandThresholds{})
 	if trig != TriggerZoneChange {
 		t.Errorf("trigger: got %q, want zone_change", trig)
 	}
@@ -258,7 +255,7 @@ func TestShouldTriggerReactive_ZoneChange(t *testing.T) {
 
 // TestShouldTriggerReactive_SameZone verifies no trigger when zone unchanged.
 func TestShouldTriggerReactive_SameZone(t *testing.T) {
-	trig, _ := shouldTriggerReactive("main_workshop", "main_workshop", nil, nil, nil, nil)
+	trig, _ := prompt.ShouldTriggerReactive("main_workshop", "main_workshop", nil, nil, nil, nil, prompt.BandThresholds{})
 	if trig != "" {
 		t.Errorf("trigger: got %q, want empty (same zone)", trig)
 	}
@@ -266,11 +263,12 @@ func TestShouldTriggerReactive_SameZone(t *testing.T) {
 
 // TestShouldTriggerReactive_NewObject verifies new object detection.
 func TestShouldTriggerReactive_NewObject(t *testing.T) {
-	trig, detail := shouldTriggerReactive(
+	trig, detail := prompt.ShouldTriggerReactive(
 		"main_workshop", "main_workshop",
 		[]string{"workbench_01"},
 		[]string{"workbench_01", "charging_station_01"},
 		nil, nil,
+		prompt.BandThresholds{},
 	)
 	if trig != TriggerNewObject {
 		t.Errorf("trigger: got %q, want new_object", trig)
@@ -282,9 +280,9 @@ func TestShouldTriggerReactive_NewObject(t *testing.T) {
 
 // TestShouldTriggerReactive_EnergyAlert verifies energy threshold crossing.
 func TestShouldTriggerReactive_EnergyAlert(t *testing.T) {
-	prev := &protocol.PhysicalState{Energy: 45, Health: 90, Fatigue: 30}
-	cur := &protocol.PhysicalState{Energy: 38, Health: 90, Fatigue: 30}
-	trig, detail := shouldTriggerReactive("z", "z", nil, nil, prev, cur)
+	prev := &protocol.PhysicalState{Energy: 45, Fatigue: 30}
+	cur := &protocol.PhysicalState{Energy: 38, Fatigue: 30}
+	trig, detail := prompt.ShouldTriggerReactive("z", "z", nil, nil, prev, cur, prompt.BandThresholds{})
 	if trig != TriggerPhysicalAlert {
 		t.Errorf("trigger: got %q, want physical_alert", trig)
 	}
@@ -296,44 +294,55 @@ func TestShouldTriggerReactive_EnergyAlert(t *testing.T) {
 // TestShouldTriggerReactive_EnergyStaysLow verifies no trigger when energy
 // stays below threshold (already in alert zone, no new crossing).
 func TestShouldTriggerReactive_EnergyStaysLow(t *testing.T) {
-	prev := &protocol.PhysicalState{Energy: 38, Health: 90, Fatigue: 30}
-	cur := &protocol.PhysicalState{Energy: 35, Health: 90, Fatigue: 30}
-	trig, _ := shouldTriggerReactive("z", "z", nil, nil, prev, cur)
+	prev := &protocol.PhysicalState{Energy: 38, Fatigue: 30}
+	cur := &protocol.PhysicalState{Energy: 35, Fatigue: 30}
+	trig, _ := prompt.ShouldTriggerReactive("z", "z", nil, nil, prev, cur, prompt.BandThresholds{})
 	if trig != "" {
 		t.Errorf("trigger: got %q, want empty (already in alert)", trig)
 	}
 }
 
-// TestShouldTriggerReactive_HealthAlert verifies health threshold crossing.
-func TestShouldTriggerReactive_HealthAlert(t *testing.T) {
-	prev := &protocol.PhysicalState{Energy: 50, Health: 55, Fatigue: 30}
-	cur := &protocol.PhysicalState{Energy: 50, Health: 48, Fatigue: 30}
-	trig, detail := shouldTriggerReactive("z", "z", nil, nil, prev, cur)
+// TestShouldTriggerReactive_FatigueAlert verifies fatigue threshold crossing.
+func TestShouldTriggerReactive_FatigueAlert(t *testing.T) {
+	prev := &protocol.PhysicalState{Energy: 50, Fatigue: 75}
+	cur := &protocol.PhysicalState{Energy: 50, Fatigue: 82}
+	trig, detail := prompt.ShouldTriggerReactive("z", "z", nil, nil, prev, cur, prompt.BandThresholds{})
 	if trig != TriggerPhysicalAlert {
 		t.Errorf("trigger: got %q, want physical_alert", trig)
 	}
-	if !strings.Contains(detail, "health") || !strings.Contains(detail, "50") {
-		t.Errorf("detail should mention health + 50: %q", detail)
+	if !strings.Contains(detail, "fatigue") || !strings.Contains(detail, "80") {
+		t.Errorf("detail should mention fatigue + 80: %q", detail)
 	}
 }
 
-// TestShouldTriggerReactive_FatigueAlert verifies fatigue threshold crossing.
-func TestShouldTriggerReactive_FatigueAlert(t *testing.T) {
-	prev := &protocol.PhysicalState{Energy: 50, Health: 90, Fatigue: 55}
-	cur := &protocol.PhysicalState{Energy: 50, Health: 90, Fatigue: 62}
-	trig, detail := shouldTriggerReactive("z", "z", nil, nil, prev, cur)
+// TestShouldTriggerReactive_JointWearAlert verifies joint_wear threshold crossing.
+func TestShouldTriggerReactive_JointWearAlert(t *testing.T) {
+	prev := &protocol.PhysicalState{Energy: 50, Fatigue: 30, JointWear: 65}
+	cur := &protocol.PhysicalState{Energy: 50, Fatigue: 30, JointWear: 72}
+	trig, detail := prompt.ShouldTriggerReactive("z", "z", nil, nil, prev, cur, prompt.BandThresholds{})
 	if trig != TriggerPhysicalAlert {
 		t.Errorf("trigger: got %q, want physical_alert", trig)
 	}
-	if !strings.Contains(detail, "fatigue") || !strings.Contains(detail, "60") {
-		t.Errorf("detail should mention fatigue + 60: %q", detail)
+	if !strings.Contains(detail, "joint_wear") || !strings.Contains(detail, "70") {
+		t.Errorf("detail should mention joint_wear + 70: %q", detail)
+	}
+}
+
+// TestShouldTriggerReactive_JointWearStaysHigh verifies no trigger when joint_wear
+// stays above threshold (already in alert zone, no new crossing).
+func TestShouldTriggerReactive_JointWearStaysHigh(t *testing.T) {
+	prev := &protocol.PhysicalState{Energy: 50, Fatigue: 30, JointWear: 72}
+	cur := &protocol.PhysicalState{Energy: 50, Fatigue: 30, JointWear: 75}
+	trig, _ := prompt.ShouldTriggerReactive("z", "z", nil, nil, prev, cur, prompt.BandThresholds{})
+	if trig != "" {
+		t.Errorf("trigger: got %q, want empty (already in alert)", trig)
 	}
 }
 
 // TestShouldTriggerReactive_NoPhysical verifies no trigger when physical
 // states are nil.
 func TestShouldTriggerReactive_NoPhysical(t *testing.T) {
-	trig, _ := shouldTriggerReactive("z", "z", nil, nil, nil, nil)
+	trig, _ := prompt.ShouldTriggerReactive("z", "z", nil, nil, nil, nil, prompt.BandThresholds{})
 	if trig != "" {
 		t.Errorf("trigger: got %q, want empty", trig)
 	}
@@ -343,19 +352,19 @@ func TestShouldTriggerReactive_NoPhysical(t *testing.T) {
 // periodicTriggerInterval perceptions.
 func TestShouldTriggerPeriodic(t *testing.T) {
 	// 第 0 次或负数：不触发
-	trig, _ := shouldTriggerPeriodic(0)
+	trig, _ := prompt.ShouldTriggerPeriodic(0)
 	if trig != "" {
 		t.Errorf("count=0: got %q, want empty", trig)
 	}
 	// 第 1/2/3 次：不触发（间隔为 4）
 	for i := 1; i < periodicTriggerInterval; i++ {
-		trig, _ := shouldTriggerPeriodic(i)
+		trig, _ := prompt.ShouldTriggerPeriodic(i)
 		if trig != "" {
 			t.Errorf("count=%d: got %q, want empty", i, trig)
 		}
 	}
 	// 第 4 次：触发
-	trig, detail := shouldTriggerPeriodic(periodicTriggerInterval)
+	trig, detail := prompt.ShouldTriggerPeriodic(periodicTriggerInterval)
 	if trig != TriggerPeriodic {
 		t.Errorf("count=%d: got %q, want %q", periodicTriggerInterval, trig, TriggerPeriodic)
 	}
@@ -363,13 +372,13 @@ func TestShouldTriggerPeriodic(t *testing.T) {
 		t.Errorf("detail should mention 周期性评估: %q", detail)
 	}
 	// 第 8 次：再次触发
-	trig, _ = shouldTriggerPeriodic(periodicTriggerInterval * 2)
+	trig, _ = prompt.ShouldTriggerPeriodic(periodicTriggerInterval * 2)
 	if trig != TriggerPeriodic {
 		t.Errorf("count=%d: got %q, want %q", periodicTriggerInterval*2, trig, TriggerPeriodic)
 	}
 	// 第 5/6/7 次：不触发
 	for i := periodicTriggerInterval + 1; i < periodicTriggerInterval*2; i++ {
-		trig, _ := shouldTriggerPeriodic(i)
+		trig, _ := prompt.ShouldTriggerPeriodic(i)
 		if trig != "" {
 			t.Errorf("count=%d: got %q, want empty", i, trig)
 		}
@@ -385,11 +394,11 @@ func TestDescribeAction(t *testing.T) {
 		want   string
 	}{
 		{"empty cmd", "", nil, ""},
-		{"no params", "wait", nil, "wait"},
-		{"empty params map", "move_to", map[string]any{}, "move_to"},
-		{"target", "move_to", map[string]any{"target": "workbench_01"}, "move_to(target=workbench_01)"},
-		{"multiple keys", "work_assemble", map[string]any{"target": "workbench_01", "duration_min": 60}, "work_assemble(target=workbench_01, duration_min=60)"},
-		{"irrelevant keys ignored", "speak", map[string]any{"foo": "bar", "content": "hello"}, "speak(content=hello)"},
+		{"no params", protocol.CmdWait, nil, protocol.CmdWait},
+		{"empty params map", protocol.CmdMoveTo, map[string]any{}, protocol.CmdMoveTo},
+		{"target_id", protocol.CmdMoveTo, map[string]any{"target_id": "workbench_01"}, "MoveTo(target_id=workbench_01)"},
+		{"multiple keys", protocol.CmdWorkShift, map[string]any{"semantic_group": "workbench_01", "interaction": "assemble"}, "WorkShift(semantic_group=workbench_01, interaction=assemble)"},
+		{"irrelevant keys ignored", protocol.CmdSpeak, map[string]any{"foo": "bar", "content": "hello"}, "Speak(content=hello)"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -403,7 +412,7 @@ func TestDescribeAction(t *testing.T) {
 
 // TestDedupeKey verifies the dedupe key format.
 func TestDedupeKey(t *testing.T) {
-	key := dedupeKey("H-01", TriggerZoneChange, "zone A→B")
+	key := prompt.DedupeKey("H-01", TriggerZoneChange, "zone A→B")
 	want := "H-01|zone_change|zone A→B"
 	if key != want {
 		t.Errorf("dedupeKey: got %q, want %q", key, want)
@@ -412,7 +421,7 @@ func TestDedupeKey(t *testing.T) {
 
 // TestDiffStrings verifies set difference.
 func TestDiffStrings(t *testing.T) {
-	got := diffStrings([]string{"a", "b", "c"}, []string{"a"})
+	got := prompt.DiffStrings([]string{"a", "b", "c"}, []string{"a"})
 	want := []string{"b", "c"}
 	if len(got) != len(want) {
 		t.Fatalf("len: got %d, want %d", len(got), len(want))
@@ -427,7 +436,7 @@ func TestDiffStrings(t *testing.T) {
 // TestStripCodeFence_NoFence verifies plain JSON passes through.
 func TestStripCodeFence_NoFence(t *testing.T) {
 	in := `{"reaction":"continue"}`
-	if out := stripCodeFence(in); out != in {
+	if out := prompt.StripCodeFence(in); out != in {
 		t.Errorf("got %q, want %q", out, in)
 	}
 }
@@ -436,7 +445,7 @@ func TestStripCodeFence_NoFence(t *testing.T) {
 func TestStripCodeFence_WithFence(t *testing.T) {
 	in := "```json\n{\"reaction\":\"continue\"}\n```"
 	want := `{"reaction":"continue"}`
-	if out := stripCodeFence(in); out != want {
+	if out := prompt.StripCodeFence(in); out != want {
 		t.Errorf("got %q, want %q", out, want)
 	}
 }
@@ -477,7 +486,7 @@ func TestExtractObjectIDs(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := extractObjectIDs(c.p)
+			got := prompt.ExtractObjectIDs(c.p)
 			if len(got) != len(c.want) {
 				t.Fatalf("len: got %d, want %d (got=%v)", len(got), len(c.want), got)
 			}
@@ -507,72 +516,16 @@ func TestReactiveRunner_EmptyTriggerNoOp(t *testing.T) {
 	r.trigger("H-01", ac, "", "detail")
 }
 
-// TestMapReactionAction verifies reaction action maps to protocol cmd via tactical mapper.
-func TestMapReactionAction(t *testing.T) {
-	kb := loadTestKB(t)
-	cases := []struct {
-		name    string
-		ra      ReactionAction
-		wantCmd string
-		wantErr bool
-	}{
-		{
-			name:    "move_to valid",
-			ra:      ReactionAction{Cmd: "move_to", Params: map[string]any{"target": "workbench_01"}},
-			wantCmd: protocol.CmdMoveTo,
-		},
-		{
-			name:    "wait valid",
-			ra:      ReactionAction{Cmd: "wait", Params: map[string]any{"duration_sec": 30}},
-			wantCmd: protocol.CmdWait,
-		},
-		{
-			name:    "speak valid",
-			ra:      ReactionAction{Cmd: "speak", Params: map[string]any{"content": "hello"}},
-			wantCmd: protocol.CmdSpeak,
-		},
-		{
-			name:    "move_to unknown target",
-			ra:      ReactionAction{Cmd: "move_to", Params: map[string]any{"target": "nonexistent"}},
-			wantErr: true,
-		},
-		{
-			name:    "unknown cmd",
-			ra:      ReactionAction{Cmd: "fly_to", Params: map[string]any{}},
-			wantErr: true,
-		},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			cmd, _, err := mapReactionAction(c.ra, kb)
-			if c.wantErr {
-				if err == nil {
-					t.Fatal("expected error, got nil")
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if cmd != c.wantCmd {
-				t.Errorf("cmd: got %q, want %q", cmd, c.wantCmd)
-			}
-		})
-	}
-}
-
 // TestReactiveRunner_BuildInput verifies buildInput reads agentContext state correctly.
 func TestReactiveRunner_BuildInput(t *testing.T) {
 	r := &reactiveRunner{}
 	ac, _ := newAgentContext(context.Background())
 	zone := "main_workshop"
-	ac.mu.Lock()
-	ac.latestPerception = mustMarshalPerception(t, zone, "14:30")
-	ac.latestPhysical = &protocol.PhysicalState{Energy: 18, Fatigue: 85, Health: 75, JointWear: 20}
-	ac.currentActionID = "act_001"
-	ac.currentActionCmd = "work_assemble"
-	ac.currentActionParams = map[string]any{"target": "workbench_01", "duration_min": 60}
-	ac.mu.Unlock()
+	if _, err := ac.as.SetPerception(mustMarshalPerception(t, zone, "14:30")); err != nil {
+		t.Fatalf("SetPerception: %v", err)
+	}
+	ac.as.SetPhysicalState(&protocol.PhysicalState{Energy: 18, Fatigue: 85, JointWear: 20}, nil)
+	ac.as.RecordActionStarted("act_001", protocol.CmdWorkShift, map[string]any{"semantic_group": "workbench_01", "interaction": "assemble"}, agentstate.SourceTactical, "")
 
 	in := r.buildInput("H-01", ac, TriggerPhysicalAlert, "energy 22→18")
 	if in.AgentID != "H-01" {
@@ -590,11 +543,11 @@ func TestReactiveRunner_BuildInput(t *testing.T) {
 	if in.Fatigue != 85 {
 		t.Errorf("Fatigue: got %v, want 85", in.Fatigue)
 	}
-	if in.Health != 75 {
-		t.Errorf("Health: got %v, want 75", in.Health)
+	if in.JointWear != 20 {
+		t.Errorf("JointWear: got %v, want 20", in.JointWear)
 	}
 	// CurrentAction 现在是可读描述（cmd + 关键 params），不再是 actionID
-	if in.CurrentAction != "work_assemble(target=workbench_01, duration_min=60)" {
+	if in.CurrentAction != "WorkShift(semantic_group=workbench_01, interaction=assemble)" {
 		t.Errorf("CurrentAction: got %q, want readable description", in.CurrentAction)
 	}
 	if in.Trigger != TriggerPhysicalAlert {
@@ -606,7 +559,7 @@ func TestReactiveRunner_BuildInput(t *testing.T) {
 }
 
 // TestReactiveRunner_BuildInput_DefaultsPhysicalWhenNil verifies default physical
-// values when state_report has not yet arrived (latestPhysical == nil).
+// values when perception_update has not yet arrived (latestPhysical == nil).
 func TestReactiveRunner_BuildInput_DefaultsPhysicalWhenNil(t *testing.T) {
 	r := &reactiveRunner{}
 	ac, _ := newAgentContext(context.Background())
@@ -615,25 +568,103 @@ func TestReactiveRunner_BuildInput_DefaultsPhysicalWhenNil(t *testing.T) {
 	if in.Energy != 100 {
 		t.Errorf("Energy default: got %v, want 100", in.Energy)
 	}
-	if in.Health != 100 {
-		t.Errorf("Health default: got %v, want 100", in.Health)
-	}
 	if in.Fatigue != 0 {
 		t.Errorf("Fatigue default: got %v, want 0", in.Fatigue)
+	}
+	if in.JointWear != 0 {
+		t.Errorf("JointWear default: got %v, want 0", in.JointWear)
 	}
 }
 
 // mustMarshalPerception constructs a minimal perception JSON for testing.
+// tod 是 "HH:MM" 格式，按约定 19 转为 time_of_day_sec / game_time_sec 等字段。
 func mustMarshalPerception(t *testing.T, zone, tod string) json.RawMessage {
 	t.Helper()
 	zonePtr := zone
+	todSec := parseTodToSec(t, tod)
 	p := protocol.PerceptionPayload{
 		Location:    protocol.Location{CurrentZone: &zonePtr},
-		Environment: protocol.Environment{TimeOfDay: tod},
+		Environment: protocol.Environment{GameTimeSec: todSec, TimeOfDaySec: todSec, DayCount: 0, TimeScale: 60},
 	}
 	b, err := json.Marshal(p)
 	if err != nil {
 		t.Fatalf("marshal perception: %v", err)
 	}
 	return b
+}
+
+// parseTodToSec 把 "HH:MM" 转为当天秒数（测试辅助）。
+func parseTodToSec(t *testing.T, tod string) float64 {
+	t.Helper()
+	parts := strings.Split(tod, ":")
+	if len(parts) != 2 {
+		t.Fatalf("parseTodToSec: invalid tod %q", tod)
+	}
+	h, err := strconv.Atoi(parts[0])
+	if err != nil {
+		t.Fatalf("parseTodToSec: invalid hour %q: %v", tod, err)
+	}
+	m, err := strconv.Atoi(parts[1])
+	if err != nil {
+		t.Fatalf("parseTodToSec: invalid minute %q: %v", tod, err)
+	}
+	return float64(h*3600 + m*60)
+}
+
+// ─── 动态 cmd 派生（Phase 2） ────────────────────────────────
+//
+// 反应层现已移除 act/interrupt，仅保留 continue/observe/replan。
+// isValidReactionCmd / buildReactiveCmdList / mapReactionAction 及相关测试
+// 已随之移除。
+
+// ─── gameTimeDeltaMinutes（replan 游戏时间去抖） ───────────────
+
+func TestGameTimeDeltaMinutes_Normal(t *testing.T) {
+	got := prompt.GameTimeDeltaMinutes("06:00", "07:30")
+	if got != 90 {
+		t.Errorf("delta 06:00→07:30 = %d, want 90", got)
+	}
+}
+
+func TestGameTimeDeltaMinutes_SameTime(t *testing.T) {
+	got := prompt.GameTimeDeltaMinutes("11:00", "11:00")
+	if got != 0 {
+		t.Errorf("delta same time = %d, want 0", got)
+	}
+}
+
+func TestGameTimeDeltaMinutes_BelowWindow(t *testing.T) {
+	// 30 分钟差，应返回 30（< 60 分钟去抖窗口）
+	got := prompt.GameTimeDeltaMinutes("11:00", "11:30")
+	if got != 30 {
+		t.Errorf("delta 11:00→11:30 = %d, want 30", got)
+	}
+}
+
+func TestGameTimeDeltaMinutes_DayWrap(t *testing.T) {
+	// 跨日：23:30 → 00:30 应为 60 分钟，不是 -1380
+	got := prompt.GameTimeDeltaMinutes("23:30", "00:30")
+	if got != 60 {
+		t.Errorf("delta 23:30→00:30 = %d, want 60 (day wrap)", got)
+	}
+}
+
+func TestGameTimeDeltaMinutes_EmptyArgs(t *testing.T) {
+	// 任一为空返回 0（无去抖信息，允许触发）
+	if got := prompt.GameTimeDeltaMinutes("", "12:00"); got != 0 {
+		t.Errorf("delta empty prev = %d, want 0", got)
+	}
+	if got := prompt.GameTimeDeltaMinutes("12:00", ""); got != 0 {
+		t.Errorf("delta empty cur = %d, want 0", got)
+	}
+}
+
+func TestGameTimeDeltaMinutes_InvalidArgs(t *testing.T) {
+	// 解析失败返回 0
+	if got := prompt.GameTimeDeltaMinutes("abc", "12:00"); got != 0 {
+		t.Errorf("delta invalid prev = %d, want 0", got)
+	}
+	if got := prompt.GameTimeDeltaMinutes("12:00", "xyz"); got != 0 {
+		t.Errorf("delta invalid cur = %d, want 0", got)
+	}
 }

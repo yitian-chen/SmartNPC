@@ -10,7 +10,8 @@ import (
 	"strings"
 )
 
-// New returns a slog.Logger that writes JSON to stderr.
+// New returns a slog.Logger that writes JSON to stderr,同时把每条日志
+// 捕获到内存环形缓冲供 debug web (/debug/logs) 浏览。
 func New(level string) *slog.Logger {
 	var lvl slog.Level
 	switch strings.ToLower(level) {
@@ -23,10 +24,10 @@ func New(level string) *slog.Logger {
 	default:
 		lvl = slog.LevelInfo
 	}
-	h := slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{
+	inner := slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{
 		Level: lvl,
 		// AddSource 关闭：方向标记 [UE→MCP] 等已隐含来源，
 		// source 字段每条多 ~150 字节，对排查帮助有限。
 	})
-	return slog.New(h)
+	return slog.New(&capturingHandler{inner: inner})
 }

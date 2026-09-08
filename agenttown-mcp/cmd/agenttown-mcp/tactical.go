@@ -5,479 +5,678 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"math/rand/v2"
 	"strings"
 
-	"github.com/AgentTown/agenttown-mcp/pkg/protocol"
+	"github.com/AgentTown/agenttown-mcp/adapters/agenttown/tools"
+	"github.com/AgentTown/agenttown-mcp/contract/protocol"
+	"github.com/AgentTown/agenttown-mcp/pkg/agentstate"
+	"github.com/AgentTown/agenttown-mcp/pkg/llmtypes"
+	"github.com/AgentTown/agenttown-mcp/pkg/profile"
+	"github.com/AgentTown/agenttown-mcp/pkg/prompt"
+	"github.com/AgentTown/agenttown-mcp/pkg/venus"
 	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
 )
 
 // plannedAction 是战术层分解出的单步 action，对应一个 MCP 工具调用。
-type plannedAction struct {
-	Action string         `json:"action"` // 工具名：work_assemble / move_to / ...
-	Params map[string]any `json:"params"` // 工具参数（LLM 原样输出，duration_min 等未换算）
+// 类型定义已迁移到 pkg/agentstate（导出名 PlannedAction），此处保留
+// alias 供 main 包过渡期使用，避免一次性重命名几十处引用。
+type plannedAction = agentstate.PlannedAction
+
+// maxTacticalRetries 是战术层对 venus 4001（tools JSON 校验失败）的相同请求体重试上限。
+// 4001 是 venus 侧校验响应失败，重试相同请求体通常能绕开瞬时坏输出；超时/连接错误等
+// 其他失败不重试，交给调用方兜底（speak+look_around + 下一感知周期再分解）。
+const maxTacticalRetries = 3
+
+// isVenusErrorCode 判断 venus 网关返回的错误码。错误消息形如
+// "venus status 500: {\"error\":{...,\"code\":\"4001\",...}}"，按 "code":"<code>" 匹配。
+func isVenusErrorCode(err error, code string) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), `"code":"`+code+`"`)
 }
 
-// ndjsonLine 是战术层 NDJSON 输出的单行判别联合体：要么是 inner_thought，要么是一个 action。
-type ndjsonLine struct {
-	InnerThought string         `json:"inner_thought,omitempty"`
-	Action       string         `json:"action,omitempty"`
-	Params       map[string]any `json:"params,omitempty"`
+// isRateLimited 判断 venus 网关限流错误：HTTP 429 或 venus 错误码 4029
+// （"当前使用的是公共模型服务, 并发有限; 当前的限流为: 30/min"）。
+// 此类错误退避等待后重试可恢复（限流窗口按分钟滚动）。
+func isRateLimited(err error) bool {
+	if err == nil {
+		return false
+	}
+	return isVenusErrorCode(err, "4029") || strings.Contains(err.Error(), "status 429")
 }
 
 // actionSource 标识一个在途 action 由哪一层下发，决定 completion 后的路由。
-type actionSource string
+// 类型定义已迁移到 pkg/agentstate（导出名 ActionSource），此处保留 alias。
+type actionSource = agentstate.ActionSource
 
 const (
-	sourceHermes   actionSource = "hermes"
-	sourceTactical actionSource = "tactical"
+	sourceTool     actionSource = agentstate.SourceTool
+	sourceTactical actionSource = agentstate.SourceTactical
 )
 
-// tacticalValidActions 列出战术层允许使用的工具（不含 scan_area/stop）。
-var tacticalValidActions = map[string]bool{
-	"move_to":          true,
-	"turn_to":          true,
-	"speak":            true,
-	"emote":            true,
-	"interact":         true,
-	"wait":             true,
-	"work_assemble":    true,
-	"patrol_route":     true,
-	"charge_at":        true,
-	"repair_target":    true,
-	"social_chat_with": true,
-	"rest_idle":        true,
-	"archive_research": true,
-}
-
-const tacticalPromptTemplate = `[战术层/任务分解] 当前时段目标：%s
-你目前在：%s，游戏时间 %s。
-物理状态：能量 %.0f、疲劳 %.0f、关节磨损 %.0f、健康 %.0f。
-
-请把这个目标分解为 3-5 步具体的 action，按顺序执行。
-%s
-%s
-%s
-可用工具（仅限以下 13 个，禁止使用 scan_area / stop）：
-- move_to: 移动到目标位置。params: {"target":"区域或位置id"}
-- turn_to: 转向目标。params: {"target":"实体id"}
-- speak: 说话。params: {"content":"...","target":"目标agent_id（可空）"}
-- emote: 表达情绪。params: {"emotion":"happy|sad|...","mode":"oneshot|sustained"}
-- interact: 与智能物体交互。params: {"object_id":"...","action":"动词"}
-- wait: 原地等待。params: {"duration_sec":秒数}
-- work_assemble: 在工作台装配。params: {"target":"工作台id","duration_min":分钟}
-- patrol_route: 巡逻路线。params: {"route_id":"路线id"}
-- charge_at: 充电。params: {"station_id":"充电站id","duration_min":分钟}
-- repair_target: 修理其他agent。params: {"target_agent_id":"..."}
-- social_chat_with: 与其他agent聊天。params: {"target_agent_id":"..."}
-- rest_idle: 休息。params: {"duration_min":分钟}
-- archive_research: 档案研究。params: {"duration_min":分钟}
-
-要求：
-1. 第一行输出 {"inner_thought":"一句话内心独白"}
-2. 后续每行输出一个 {"action":"工具名","params":{...}}，3-5 步，按执行顺序排列
-3. 第一步通常是 move_to 到目标区域
-4. move_to 的 target、interact 的 object_id、work_assemble 的 target 必须从上面的可用列表中选取，禁止编造
-5. 每行一个 JSON 对象，不要输出 JSON 数组，不要输出 markdown 围栏，不要输出任何其他文字
-6. 必须以字符 {"inner_thought 开头，不要输出步骤说明、不要解释、不要编号列表、不要 markdown 加粗
-7. 步骤总时长应接近当前 slot 时长，避免过短导致队列提前耗尽触发重分解
-
-示例：
-{"inner_thought":"先去车间再开始装配"}
-{"action":"move_to","params":{"target":"main_workshop"}}
-{"action":"work_assemble","params":{"target":"workbench_01","duration_min":240}}`
-
-// buildTacticalPrompt 填充战术层 prompt 模板。kb 用于注入可用 zone/location/object
-// 列表，避免 LLM 编造不存在的 ID（如 workbench_02、archives）。
-// slot 形如 "HH:MM-HH:MM"，用于在 prompt 里提示当前时段时长，引导 LLM
-// 给出总时长接近 slot 时长的步骤，减少队列提前耗尽导致的重分解。
-// slot 为空或解析失败时该提示行降级为空，保持旧行为。
-func buildTacticalPrompt(goal, zone, timeOfDay, slot string, physical *protocol.PhysicalState, kb *worldkb.KB, hint string) string {
-	e, f, j, h := 0.0, 0.0, 0.0, 0.0
-	if physical != nil {
-		e, f, j, h = physical.Energy, physical.Fatigue, physical.JointWear, physical.Health
+// tacticalActionAvailable 判断 action 是否为战术层可用工具，且其依赖的
+// cmd 在 registry 中对 agentID 有效。registry == nil 时降级为仅检查是否
+// 内置战术工具（向后兼容测试与未启用 capability 的场景）。
+//
+// scan_area / stop 不属于战术层排队工具，无论 registry 是否 nil 都返回 false。
+// wait 同样返回 false：长复合动作应持续到时段切换由 advanceSlotIfNeeded
+// 打断，队列空时由 tacticalRefill 重新分解，不应输出 wait。
+func tacticalActionAvailable(action, agentID string, registry *CapabilityRegistry) bool {
+	if action == "wait" {
+		return false
 	}
-	hintLine := ""
-	if hint != "" {
-		hintLine = "【上次中断原因】" + hint + "（请据此调整本轮规划）"
+	// 旧工具名 interact 已改名 InteractSmartObject（与 UE 注册 cmd 同名）；
+	// LLM 偶发输出旧名时按新名处理，避免动作被静默丢弃。
+	if action == "interact" {
+		action = "InteractSmartObject"
 	}
-	return fmt.Sprintf(tacticalPromptTemplate, goal, zone, timeOfDay, e, f, j, h,
-		hintLine, buildSlotDurationHint(slot), buildKBContext(kb))
-}
-
-// buildSlotDurationHint 根据slot "HH:MM-HH:MM" 构造一行提示文本。
-// 解析失败或时长 ≤ 0 返回空串（prompt 该行降级为空）。
-func buildSlotDurationHint(slot string) string {
-	min := slotDurationMinute(slot)
-	if min <= 0 {
-		return ""
-	}
-	return fmt.Sprintf("当前时段 %s，约 %d 分钟；请让步骤总时长接近此时长，避免过短导致队列提前耗尽触发重分解。\n", slot, min)
-}
-
-// slotDurationMinute 解析 "HH:MM-HH:MM" 形如的 slot，返回 (end - start) 的分钟数。
-// 解析失败或 end ≤ start 返回 -1。
-func slotDurationMinute(slot string) int {
-	parts := strings.SplitN(slot, "-", 2)
-	if len(parts) != 2 {
-		return -1
-	}
-	start := parsePlanMinute(parts[0])
-	end := parsePlanMinute(parts[1])
-	if start < 0 || end < 0 || end <= start {
-		return -1
-	}
-	return end - start
-}
-
-// buildKBContext 拼接可用 zone/location/object 列表段落，供战术层 prompt 注入。
-func buildKBContext(kb *worldkb.KB) string {
-	if kb == nil {
-		return ""
-	}
-	var lines []string
-	if zs := kb.ListZones(); len(zs) > 0 {
-		parts := make([]string, 0, len(zs))
-		for _, z := range zs {
-			if z.Name != "" && z.Name != z.ID {
-				parts = append(parts, fmt.Sprintf("%s(%s)", z.Name, z.ID))
-			} else {
-				parts = append(parts, z.ID)
+	if registry == nil {
+		for _, spec := range tools.BuiltinToolSpecs() {
+			if spec.Name == action && spec.Name != "scan_area" && spec.Name != "stop" {
+				return true
 			}
 		}
-		lines = append(lines, "可前往区域: "+strings.Join(parts, "、")+"。")
+		return false
 	}
-	if ls := kb.ListLocations(); len(ls) > 0 {
-		parts := make([]string, 0, len(ls))
-		for _, l := range ls {
-			if l.Name != "" && l.Name != l.ID {
-				parts = append(parts, fmt.Sprintf("%s(%s)", l.Name, l.ID))
-			} else {
-				parts = append(parts, l.ID)
-			}
+	for _, act := range registry.EffectiveActions(agentID) {
+		if tools.CmdToToolName(act.Cmd) == action {
+			return true
 		}
-		lines = append(lines, "可前往地点: "+strings.Join(parts, "、")+"。")
 	}
-	if os := kb.ListObjects(); len(os) > 0 {
-		parts := make([]string, 0, len(os))
-		for _, o := range os {
-			label := o.ID
-			if o.Name != "" && o.Name != o.ID {
-				label = fmt.Sprintf("%s(%s)", o.Name, o.ID)
-			}
-			if len(o.AvailableActions) > 0 {
-				label += "[" + strings.Join(o.AvailableActions, "/") + "]"
-			}
-			parts = append(parts, label)
-		}
-		lines = append(lines, "可交互物体: "+strings.Join(parts, "、")+"。")
-	}
-	if len(lines) == 0 {
-		return ""
-	}
-	return strings.Join(lines, "\n") + "\n"
+	return false
 }
 
-// generateTacticalPlan 调战术层 LLM 分解当前时段 goal（非流式路径）。
-// 返回分解出的 action 列表 + inner_thought（作为整个时段独白）。
-// 任一步失败返回 err，调用方决定回退到 Hermes。
-// 复用 strategicCaller 接口（hermes.Client 已满足）。
+// physicalAlertOverrideGoal 检测 replanHint 是否含物理告警标记，
+// 若是则根据 physical 状态生成恢复类 goal 替换原 goal。
+//
+// 动机：反应层 upgradeIfPhysicalAlert 强制升级 continue/observe → replan 后，
+// replanHint 含"物理状态告警自动升级(...)"。但战术层仍用原 goal 调 LLM，
+// LLM 看到原 goal "车间装配作业" + 软引导 hint，仍规划 work_at_workbench。
+// 此函数在代码层强制把 goal 改为恢复类 goal，配合 prompt 强约束段双保险。
+//
+// 返回 (overrideGoal, true) 当 hint 含"物理状态告警"且 physical 确有告警；
+// 否则返回 (origGoal, false)。th 为该 NPC 的 per-NPC 分段阈值（profile
+// ## 属性分段），零值回退全局默认。
+func physicalAlertOverrideGoal(hint, origGoal string, physical *protocol.PhysicalState, th prompt.BandThresholds) (string, bool) {
+	if !strings.Contains(hint, "物理状态告警") || physical == nil || physical.IsZero() {
+		return origGoal, false
+	}
+	th = th.OrDefault()
+	switch {
+	case physical.Fatigue > th.FatigueAlert():
+		return "前往充电站休息补能（疲劳过高，停止工作）", true
+	case physical.Energy < th.EnergyAlert():
+		return "前往充电站补能（体力过低）", true
+	case physical.JointWear > th.JointWearAlert():
+		return "前往维护点进行保养检修（关节磨损过高）", true
+	default:
+		return origGoal, false
+	}
+}
+
+// generateTacticalPlan 调战术层 LLM 分解当前时段 goal（统一 agentic loop
+// 战术轮）。会话历史由 ac.agenticTurn 统一读写（[system, ...当天历史, user]，
+// 历史含战略轮与对话轮），成功后 user+assistant 自动追加进历史，tool 结果由
+// recordActionCompletion 回填。当天同计划的第二条及后续轮次走精简形态
+// （省略【全天日程】与完整规则，见 TacticalInput.Compact）。返回分解出的
+// action 段；任一步失败返回 err，调用方决定回退兜底。
 func generateTacticalPlan(
 	ctx context.Context,
-	tc strategicCaller,
+	ac *agentContext,
 	agentID string,
-	goal, zone, timeOfDay, slot string,
+	goal, zone, timeOfDay, slot, dailyPlan string,
 	physical *protocol.PhysicalState,
 	kb *worldkb.KB,
+	profiles map[string]*profile.Profile,
 	logger *slog.Logger,
 	hint string,
-) ([]plannedAction, string, error) {
-	prompt := buildTacticalPrompt(goal, zone, timeOfDay, slot, physical, kb, hint)
-	logger.Info("[MCP→Hermes/TACTICAL-PROMPT]",
-		"agent_id", agentID, "goal", goal, "game_time", timeOfDay, "text", prompt,
-		"replan_hint", hint)
-
-	resp, err := tc.SendWithSummary(ctx, prompt, "")
-	if err != nil {
-		return nil, "", fmt.Errorf("tactical llm: %w", err)
-	}
-	tc.ResetSession() // 战术调用一次性，立即清链（与战略层一致）
-
-	raw := resp.ExtractText()
-	logger.Info("[Hermes→MCP/TACTICAL-RESPONSE]",
-		"agent_id", agentID, "tokens", resp.Usage.TotalTokens, "raw_len", len(raw), "raw", raw)
-
-	actions, thought, err := parseTacticalNDJSON(raw)
-	if err != nil {
-		return nil, "", fmt.Errorf("tactical parse: %w (raw=%s)", err, truncateText(raw, 200))
-	}
-	if len(actions) == 0 {
-		return nil, "", fmt.Errorf("tactical plan has no actions (raw=%s)", truncateText(raw, 200))
-	}
-	actionsJSON, _ := json.Marshal(actions)
-	logger.Info("[战术层] 分解成功",
-		"agent_id", agentID, "steps", len(actions),
-		"thought", thought, "actions", string(actionsJSON))
-	return actions, thought, nil
-}
-
-// generateTacticalPlanStreaming 是 generateTacticalPlan 的流式版本：
-// 调 LLM 客户端 SendStreaming 边接收边增量解析 NDJSON，每解析出一个
-// action 即调 onAction 回调，使调用方能在首 action 到达时立即下发，
-// 将首动作体感延迟从 ~14s 降至 ~2-3s。
-//
-// 走 llmClient 接口（hermes.Client 和 venus.Client 均实现），由 main.go
-// 的 --llm-backend 决定具体后端。
-func generateTacticalPlanStreaming(
-	ctx context.Context,
-	tc llmClient,
-	agentID, goal, zone, timeOfDay, slot string,
-	physical *protocol.PhysicalState,
-	kb *worldkb.KB,
-	logger *slog.Logger,
-	hint string,
-	onAction func(plannedAction),
-) ([]plannedAction, string, error) {
-	prompt := buildTacticalPrompt(goal, zone, timeOfDay, slot, physical, kb, hint)
-	logger.Info("[MCP→Hermes/TACTICAL-PROMPT]",
-		"agent_id", agentID, "goal", goal, "game_time", timeOfDay, "text", prompt,
-		"streaming", true, "replan_hint", hint)
-
-	var actions []plannedAction
-	acc := &streamAccumulator{
-		onComplete: func(pa plannedAction) {
-			actions = append(actions, pa)
-			if onAction != nil {
-				onAction(pa)
-			}
-		},
-	}
-
-	resp, err := tc.SendStreaming(ctx, prompt, func(delta string) {
-		acc.feed(delta)
+	memories string,
+	relationships string,
+	registry *CapabilityRegistry,
+	objectStatus map[string]protocol.ObjectCategoryStatus,
+	nearbyObjects []protocol.NearbyObject,
+	visibleAgents []protocol.VisibleAgent,
+) ([]plannedAction, error) {
+	// 精简引用判定：当天同一 dailyPlan 的全量头（【全天日程】+完整
+	// 【分解规则】）已在本日会话历史中（由上一次成功全量轮写入
+	// tacticalHeaderPlan 标记）→ 本轮省略日内不变块，改为核心约束速览 +
+	// 引用行。dailyPlan==""（/debug/schedule 手动分解）永不精简：手动
+	// 调试要确定性，且 auto-plan=false 时历史可能从无全量头，纯引用会
+	// 指向不存在的规则。计划变化（日内重规划）→ 比对不等 → 重新全量
+	// 注入。单次读取存局部变量，判定与置位复用同一值。
+	headerPlan := ac.as.TacticalHeaderPlan()
+	compact := dailyPlan != "" && headerPlan == dailyPlan
+	promptText := prompt.BuildTactical(prompt.TacticalInput{
+		Goal:          goal,
+		Zone:          zone,
+		TimeOfDay:     timeOfDay,
+		Slot:          slot,
+		DailyPlan:     dailyPlan,
+		Compact:       compact,
+		Physical:      physical,
+		KB:            kb,
+		Profiles:      profiles,
+		Hint:          hint,
+		Memories:      memories,
+		Relationships: relationships,
+		AgentID:       agentID,
+		ObjectStatus:  objectStatus,
+		NearbyObjects: nearbyObjects,
+		VisibleAgents: visibleAgents,
 	})
+	logger.Info("[MCP→LLM/TACTICAL-PROMPT]",
+		"agent_id", agentID, "goal", goal, "game_time", timeOfDay, "compact", compact, "text", promptText,
+		"replan_hint", hint, "history_turns", len(ac.as.Conversation()))
+
+	// 统一 agentic loop 战术轮：tool_choice=required（必须调用工具），
+	// 4001 重试与历史追加由 agenticTurn 统一处理。
+	resp, err := ac.agenticTurn(ctx, ac.tacticalHc, kb, profiles, logger, agentID,
+		"tactical", promptText, "required", "", nil)
 	if err != nil {
-		logger.Warn("[Hermes→MCP/TACTICAL-STREAM] stream error, keeping actions already parsed",
-			"agent_id", agentID, "parsed_actions", len(actions), "err", err)
-		return actions, acc.thought, fmt.Errorf("tactical llm stream: %w", err)
+		return nil, fmt.Errorf("tactical llm: %w", err)
 	}
-	acc.flush()
-	tc.ResetSession()
+	// 全量轮成功：含全量头的 user 消息已由 agenticTurn 落进历史，此刻
+	// 置位。放在 parse 校验之前——即使后续 tool_calls 解析失败，全量头
+	// 也确已在历史中，下一轮走精简是安全的（置位 ⟺ 全量 user 消息
+	// 已在历史）。
+	if !compact && dailyPlan != "" {
+		ac.as.SetTacticalHeaderPlan(dailyPlan)
+	}
 
 	raw := resp.ExtractText()
-	logger.Info("[Hermes→MCP/TACTICAL-RESPONSE]",
-		"agent_id", agentID, "tokens", resp.Usage.TotalTokens, "raw_len", len(raw), "raw", raw, "streaming", true)
+	logger.Info("[LLM→MCP/TACTICAL-RESPONSE]",
+		"agent_id", agentID, "tokens", resp.Usage.TotalTokens, "raw_len", len(raw), "raw", raw,
+		"tool_calls", len(resp.ToolCalls))
 
-	if len(actions) == 0 {
-		return nil, "", fmt.Errorf("tactical plan has no actions (raw=%s)", truncateText(raw, 200))
+	if len(resp.ToolCalls) == 0 {
+		llmMetricsCollector.RecordJSON("tactical", false)
+		return nil, fmt.Errorf("tactical plan has no tool calls (raw=%s)", truncateText(raw, 200))
 	}
+	actions := parseToolCalls(resp.ToolCalls, registry, agentID)
+	if len(actions) == 0 {
+		llmMetricsCollector.RecordJSON("tactical", false)
+		return nil, fmt.Errorf("tactical plan has no actions (raw=%s)", truncateText(raw, 200))
+	}
+	// JSON 正确率埋点：agenticTurn 成功后（LLM 已返回 tool_calls）按
+	// parseToolCalls 结果记 ok。venus 层的坏 JSON（4001）已在 agenticTurn
+	// 记作 bad_json_4001 错误类别，此处只记 MCP 层解析结果。
+	llmMetricsCollector.RecordJSON("tactical", true)
+	actions = fillDefaultDurationForRest(actions)
+	actions = fillDefaultDurationForWork(actions)
+	actions = insertRestBetweenDuplicateWork(actions)
 	actionsJSON, _ := json.Marshal(actions)
 	logger.Info("[战术层] 分解成功",
 		"agent_id", agentID, "steps", len(actions),
-		"thought", acc.thought, "actions", string(actionsJSON))
-	return actions, acc.thought, nil
+		"actions", string(actionsJSON))
+	return actions, nil
 }
 
-// parseTacticalNDJSON 从 LLM 的 NDJSON 输出解析 action 列表 + inner_thought。
-// 容错：剥 ```json 围栏 → 按行解析 → 跳过空行/parse 失败行 → 过滤非法工具。
-// 返回的 actions 已经过 filterValidActions。
-func parseTacticalNDJSON(raw string) ([]plannedAction, string, error) {
-	s := strings.TrimSpace(raw)
-	// 剥 markdown 围栏（LLM 可能仍加，即使 prompt 禁止）
-	if strings.HasPrefix(s, "```json") {
-		s = strings.TrimPrefix(s, "```json")
-		s = strings.TrimSuffix(s, "```")
-		s = strings.TrimSpace(s)
-	} else if strings.HasPrefix(s, "```") {
-		s = strings.TrimPrefix(s, "```")
-		s = strings.TrimSuffix(s, "```")
-		s = strings.TrimSpace(s)
-	}
+// defaultRestDurationSec 是非队尾休息类动作的默认 duration（30 分钟）。
+// LLM 常给工作段设 duration 却给中间的"长椅休息"漏设，导致休息段自然
+// 持续到 slot 切换、卡住后续工作动作。此处为兜底，不依赖 LLM 自觉。
+const defaultRestDurationSec = 1800
 
-	var actions []plannedAction
-	var thought string
-	for _, line := range strings.Split(s, "\n") {
-		pa, th, isAction, ok := parseTacticalNDJSONLine(line)
-		if !ok {
+// fillDefaultDurationForRest 给队列中"非队尾的休息类动作"补齐默认
+// duration（30 分钟）。只处理 InteractSmartObject + interaction=rest
+// （长椅休息）；队尾动作保持不设（自然持续到时段切换）。
+func fillDefaultDurationForRest(actions []plannedAction) []plannedAction {
+	if len(actions) < 2 {
+		return actions
+	}
+	for i := 0; i < len(actions)-1; i++ {
+		a := &actions[i]
+		if a.Action != "InteractSmartObject" || !paramIs(a.Params, "interaction", "rest") {
 			continue
 		}
-		if isAction {
-			actions = append(actions, pa)
-		} else {
-			thought = th
+		if _, ok := a.Params["duration"]; ok {
+			continue
 		}
+		if a.Params == nil {
+			a.Params = map[string]any{}
+		}
+		a.Params["duration"] = defaultRestDurationSec
 	}
-	actions = filterValidActions(actions)
-	return actions, thought, nil
+	return actions
 }
 
-// parseTacticalNDJSONLine 解析单行 NDJSON。返回 (action, thought, isAction, ok)。
-// ok=false 表示空行或 parse 失败（调用方跳过）。isAction=true 表示该行是 action；
-// isAction=false 且 ok=true 表示该行是 inner_thought。
-func parseTacticalNDJSONLine(line string) (pa plannedAction, thought string, isAction bool, ok bool) {
-	line = strings.TrimSpace(line)
-	if line == "" {
-		return plannedAction{}, "", false, false
+// paramIs 判断 Params 中 key 对应的字符串值是否等于 want。
+func paramIs(params map[string]any, key, want string) bool {
+	if params == nil {
+		return false
 	}
-	var nl ndjsonLine
-	if err := json.Unmarshal([]byte(line), &nl); err != nil {
-		return plannedAction{}, "", false, false
-	}
-	if nl.Action != "" {
-		return plannedAction{Action: nl.Action, Params: nl.Params}, "", true, true
-	}
-	if nl.InnerThought != "" {
-		return plannedAction{}, nl.InnerThought, false, true
-	}
-	return plannedAction{}, "", false, false
-}
-
-// streamAccumulator 是流式回调的增量 NDJSON 解析器。
-// feed(delta) 追加 delta 到内部 buffer，按 \n 分割出完整行并即时解析；
-// 最后一行（可能不完整）保留在 buffer 等下次 feed 补全。
-// flush() 在流结束后调用，处理 buffer 中的残余内容。
-type streamAccumulator struct {
-	buf        strings.Builder
-	onComplete func(plannedAction) // 每完整解析出一个合法 action 调一次
-	thought    string
-}
-
-// feed 追加一段 delta 文本并处理所有已完成的行（以 \n 结尾）。
-func (a *streamAccumulator) feed(delta string) {
-	a.buf.WriteString(delta)
-	content := a.buf.String()
-	lines := strings.Split(content, "\n")
-	// 除最后一行外都是完整行（以 \n 结尾）。
-	for _, line := range lines[:len(lines)-1] {
-		a.processLine(line)
-	}
-	// 最后一行可能不完整，留在 buffer 等下次 feed。
-	a.buf.Reset()
-	a.buf.WriteString(lines[len(lines)-1])
-}
-
-// flush 在流结束后调用，处理 buffer 中残余的最后一行。
-func (a *streamAccumulator) flush() {
-	remaining := strings.TrimSpace(a.buf.String())
-	a.buf.Reset()
-	if remaining == "" {
-		return
-	}
-	a.processLine(remaining)
-}
-
-// processLine 解析单行：合法 action 调 onComplete，inner_thought 存入 thought。
-func (a *streamAccumulator) processLine(line string) {
-	pa, thought, isAction, ok := parseTacticalNDJSONLine(line)
+	v, ok := params[key]
 	if !ok {
-		return
+		return false
 	}
-	if isAction {
-		if !tacticalValidActions[pa.Action] {
-			return // 过滤非法工具（与 parseTacticalNDJSON 一致）
-		}
-		if a.onComplete != nil {
-			a.onComplete(pa)
-		}
-	} else {
-		a.thought = thought
+	s, _ := v.(string)
+	return s == want
+}
+
+// fallbackRetryActions 构造战术层 LLM 分解失败时的兜底动作序列：
+// speak 告知网络波动 + generic_act(behavior=look_around) 原地观察，
+// 避免队列空时 NPC 呆站。兜底动作执行期间形成自然退避——执行完成后
+// completion 唤醒 worker 再重试分解，而不会每轮感知都立即重试。
+func fallbackRetryActions() []plannedAction {
+	return []plannedAction{
+		{Action: "speak", Params: map[string]any{
+			"content": "网络波动了，我稍等一下，正在重试……",
+		}},
+		{Action: "generic_act", Params: map[string]any{
+			"behavior": "look_around",
+			"thought":  "网络波动，原地观察等待重试",
+			"duration": 30,
+		}},
 	}
+}
+
+// defaultWorkDurationSec 是非队尾工作动作的默认 duration（90 分钟）。
+// LLM 偶尔会给中间的工作段漏设 duration，使其自然持续到 slot 切换、
+// 卡住后续动作。此处兜底，不依赖 LLM 自觉。
+const defaultWorkDurationSec = 5400
+
+// workInteractions 是六种工种的交互动词（含 InteractSmartObject 直接工作）。
+var workInteractions = map[string]bool{
+	"assemble":   true, // 工作台装配
+	"sort_cargo": true, // 分拣
+	"dismantle":  true, // 拆解
+	"debug":      true, // 调试
+	"inspect":    true, // 质检
+	"process":    true, // 加工
+}
+
+// isWorkAction 判断是否为"工作类"动作：work_shift 复合工作，或
+// InteractSmartObject + 工种交互动词（assemble/sort_cargo 等）。
+func isWorkAction(a *plannedAction) bool {
+	if a.Action == "work_shift" {
+		return true
+	}
+	if a.Action != "InteractSmartObject" {
+		return false
+	}
+	inter := ""
+	if v, ok := a.Params["interaction"].(string); ok {
+		inter = v
+	}
+	return workInteractions[inter]
+}
+
+// fillDefaultDurationForWork 给队列中"非队尾的工作类动作"补齐默认
+// duration（90 分钟）。队尾动作保持不设（自然持续到时段切换）。
+func fillDefaultDurationForWork(actions []plannedAction) []plannedAction {
+	if len(actions) < 2 {
+		return actions
+	}
+	for i := 0; i < len(actions)-1; i++ {
+		a := &actions[i]
+		if !isWorkAction(a) {
+			continue
+		}
+		if _, ok := a.Params["duration"]; ok {
+			continue
+		}
+		if a.Params == nil {
+			a.Params = map[string]any{}
+		}
+		a.Params["duration"] = defaultWorkDurationSec
+	}
+	return actions
+}
+
+// restSegmentBetweenWork 返回一个"相邻重复 work_shift 之间"插入的休息/活动段，
+// 随机三选一：原地拉伸（exercise/stretch）、长椅休息（InteractSmartObject bench
+// rest）、散步（exercise/walk）。duration 用 defaultRestDurationSec（30 分钟）。
+func restSegmentBetweenWork() plannedAction {
+	switch rand.IntN(3) {
+	case 0:
+		return plannedAction{Action: "exercise", Params: map[string]any{"exercise_type": "stretch", "duration": defaultRestDurationSec}}
+	case 1:
+		return plannedAction{Action: "InteractSmartObject", Params: map[string]any{"semantic_group": "bench", "interaction": "rest", "duration": defaultRestDurationSec}}
+	default:
+		return plannedAction{Action: "exercise", Params: map[string]any{"exercise_type": "walk", "duration": defaultRestDurationSec}}
+	}
+}
+
+// sameParam 判断两个 params map 的同一 string 参数是否相等（都缺失视为不等）。
+func sameParam(a, b map[string]any, key string) bool {
+	av, aok := a[key].(string)
+	bv, bok := b[key].(string)
+	return aok && bok && av == bv
+}
+
+// insertRestBetweenDuplicateWork 在相邻的"相同 work_shift（同 semantic_group +
+// interaction）"之间随机插入一个休息段，打破"连续两次 work_shift 同地点"。
+// 规则 4 已禁止但 LLM 常无视，此处做执行层兜底。只处理非队尾的相邻对（队尾
+// 保持自然持续到时段切换，不插）。
+func insertRestBetweenDuplicateWork(actions []plannedAction) []plannedAction {
+	if len(actions) < 2 {
+		return actions
+	}
+	out := make([]plannedAction, 0, len(actions)+2)
+	for i, a := range actions {
+		out = append(out, a)
+		if i == len(actions)-1 {
+			break
+		}
+		cur, nxt := a, actions[i+1]
+		if cur.Action == "work_shift" && nxt.Action == "work_shift" &&
+			sameParam(cur.Params, nxt.Params, "semantic_group") &&
+			sameParam(cur.Params, nxt.Params, "interaction") {
+			out = append(out, restSegmentBetweenWork())
+		}
+	}
+	return out
+}
+
+// parseToolCalls 把 LLM 返回的 tool_calls 解析为 plannedAction 队列。
+// function.name → Action；function.arguments（JSON）→ Params。arguments
+// 解析失败或 name 为空时跳过该条；末尾过 filterValidActions。
+func parseToolCalls(tcs []llmtypes.ToolCall, registry *CapabilityRegistry, agentID string) []plannedAction {
+	var actions []plannedAction
+	for _, tc := range tcs {
+		name := tc.Function.Name
+		if name == "interact" { // 旧工具名，保留兼容 LLM 偶发输出
+			name = "InteractSmartObject"
+		}
+		if name == "" {
+			continue
+		}
+		params := map[string]any{}
+		if args := strings.TrimSpace(tc.Function.Arguments); args != "" {
+			if err := json.Unmarshal([]byte(args), &params); err != nil {
+				continue // arguments 不是合法 JSON，跳过该工具调用
+			}
+		}
+		actions = append(actions, plannedAction{Action: name, Params: params, ToolCallID: tc.ID})
+	}
+	return filterValidActions(actions, registry, agentID)
 }
 
 // filterValidActions 过滤掉 scan_area/stop/未知工具，保留可排队工具。
-func filterValidActions(actions []plannedAction) []plannedAction {
+// registry 非 nil 时同时过滤依赖 cmd 对 agentID 不可用的工具。
+func filterValidActions(actions []plannedAction, registry *CapabilityRegistry, agentID string) []plannedAction {
 	out := make([]plannedAction, 0, len(actions))
 	for _, a := range actions {
-		if tacticalValidActions[a.Action] {
+		if tacticalActionAvailable(a.Action, agentID, registry) {
 			out = append(out, a)
 		}
 	}
 	return out
 }
 
-// mapTacticalAction 把战术层 plannedAction 映射到 ws.SendAction 的 (cmd, params)。
-// 复合工具 → CmdExecuteComposite；原子工具 → 各自 cmd；move_to 需 KB 解析坐标。
-// 映射规则与 composite.go/atomic.go 工具处理函数一致。
-// 非法/不可排队工具返回 err，调用方跳过。
-func mapTacticalAction(pa plannedAction, kb *worldkb.KB) (cmd string, params map[string]any, err error) {
-	switch pa.Action {
-	// ─── 复合工具 → ExecuteComposite ───
-	case "work_assemble":
-		return protocol.CmdExecuteComposite, map[string]any{
-			"name":         "work_assemble",
-			"target":       pa.Params["target"],
-			"duration_sec": toFloat(pa.Params["duration_min"]) * 60,
-		}, nil
-	case "patrol_route":
-		return protocol.CmdExecuteComposite, map[string]any{
-			"name":     "patrol_route",
-			"route_id": pa.Params["route_id"],
-		}, nil
-	case "charge_at":
-		return protocol.CmdExecuteComposite, map[string]any{
-			"name":         "charge_at",
-			"station_id":   pa.Params["station_id"],
-			"duration_sec": toFloat(pa.Params["duration_min"]) * 60,
-		}, nil
-	case "repair_target":
-		return protocol.CmdExecuteComposite, map[string]any{
-			"name":            "repair_target",
-			"target_agent_id": pa.Params["target_agent_id"],
-		}, nil
-	case "social_chat_with":
-		return protocol.CmdExecuteComposite, map[string]any{
-			"name":            "social_chat_with",
-			"target_agent_id": pa.Params["target_agent_id"],
-		}, nil
-	case "rest_idle":
-		return protocol.CmdExecuteComposite, map[string]any{
-			"name":         "rest_idle",
-			"duration_sec": toFloat(pa.Params["duration_min"]) * 60,
-		}, nil
-	case "archive_research":
-		return protocol.CmdExecuteComposite, map[string]any{
-			"name":         "archive_research",
-			"duration_sec": toFloat(pa.Params["duration_min"]) * 60,
-		}, nil
-	// ─── 原子工具 ───
-	case "move_to":
-		target, _ := pa.Params["target"].(string)
-		coord, kind, e := kb.GetPosition(target) // 与 atomic.go:95 一致
-		if e != nil {
-			return "", nil, fmt.Errorf("move_to resolve %q: %w", target, e)
+// tacticalToolsFromRegistry 从 capability registry 派生 OpenAI function
+// calling 的 tools 数组，注入战术层请求体。工具名由 CmdToToolName 生成，
+// 描述与参数 schema 来自 CapabilityAction。跳过 scan_area/stop/wait
+// （非战术层排队工具）。registry == nil → nil（UE 未连接时请求体不带
+// tools）。工具清单仅经此下发，不再注入 prompt 文本。
+func tacticalToolsFromRegistry(registry *CapabilityRegistry, agentID string) []venus.Tool {
+	if registry == nil {
+		return nil
+	}
+	actions := registry.EffectiveActions(agentID)
+	out := make([]venus.Tool, 0, len(actions))
+	for _, act := range actions {
+		name := tools.CmdToToolName(act.Cmd)
+		if name == "scan_area" || name == "stop" || name == "wait" {
+			continue
 		}
-		return protocol.CmdMoveTo, map[string]any{
-			"dest":   []float64{coord[0], coord[1], coord[2]},
-			"target": target,
-			"kind":   kind,
-			"speed":  "walk",
+		desc := act.Description
+		if desc == "" {
+			desc = name
+		}
+		// UsageHint 是 UE capability_registry 声明的"何时使用该工具"提示
+		// （如"能量低时使用""磨损高或需要维护时使用"），对 LLM 在 function
+		// calling 阶段选型有直接帮助。此前被遗漏——tools 字段只有动作描述、
+		// 没有使用时机，LLM 只能靠 system prompt 里的设施详情间接推断。
+		if act.UsageHint != "" {
+			desc = strings.TrimRight(desc, "。") + "。" + strings.TrimRight(act.UsageHint, "。")
+		}
+		out = append(out, venus.Tool{
+			Type: "function",
+			Function: venus.ToolFunction{
+				Name:        name,
+				Description: desc,
+				Parameters:  capabilityParamsSchema(act.Params, name),
+			},
+		})
+	}
+	return out
+}
+
+// noDurationTool 判断工具是否不追加 duration 参数。两类：
+//   - 瞬时动作（speak/emote/turn_to/generic_act）：立即完成，无时长概念；
+//   - move_to：移动时长由 UE 寻路决定，LLM 不设置（UE usage_hint 声明
+//     "此动作无需传入 duration"）。
+//
+// 这些工具 schema 层不暴露 duration，LLM 无从填写，与 TacticalRules 规则 7
+// "瞬时动作不填 duration、move_to 由 UE 决定"的约定一致。
+func noDurationTool(name string) bool {
+	switch name {
+	case "speak", "emote", "turn_to", "generic_act", "move_to":
+		return true
+	}
+	return false
+}
+
+// capabilityParamsSchema 把 CapabilityParam 列表转成 function calling 的
+// parameters JSON Schema（object 类型）。不包含 MCP 侧 meta 字段
+// （agent_id/decision_epoch）——function calling 的参数就是 UE cmd 的参数。
+// 额外追加 duration（秒，MCP 侧控制字段，长动作定时终止）并列入 required
+// （2026-09-03：实测 LLM 在 function calling 中只填 required 参数，optional
+// 的 duration 从不被填——动作时长全靠 slot 切换兜底、队列频繁提前耗尽。
+// 必填后 LLM 被迫为每个非瞬时动作声明时长；"最后一段不设 duration 自然
+// 持续到 slot 切换"的旧约定改为"最后一段 duration = 时段剩余时长"，
+// TacticalRules 规则 7/8 已同步措辞）。例外：social_chat 是"挂起直到对话
+// 结束"的复合动作，duration 到点会打断对话；瞬时工具无时长概念。
+func capabilityParamsSchema(params []protocol.CapabilityParam, name string) json.RawMessage {
+	props := map[string]any{}
+	required := make([]string, 0, len(params))
+	for _, p := range params {
+		desc := p.Description
+		// 参数描述精简：enum 已约束合法值、system prompt 有完整设施详情，
+		// 这里只保留防止 LLM 犯错的关键语义，去掉"固定为 X""如 xxx、yyy"等
+		// 与 enum / system prompt 重复的内容。
+		switch p.Name {
+		case "zone":
+			desc = "目标设施所在的 zone id。日程明确指定区域时必须填该区域 id（如 central_plaza、logistics_hub）；不填默认优先找 NPC 自己所在 zone 的设施。"
+		case "semantic_group":
+			desc = "设施语义组名（UE 从该组自动选一个空闲实例，勿传具体编号）"
+		case "interaction":
+			// 有 enum 的固定值工具，"固定为 X"与 enum 重复，可精简；无 enum
+			// 的（work_shift/use_exercise_equipment/InteractSmartObject）描述
+			// 含 semantic_group↔interaction 配对，删掉会丢关键信息，保留。
+			if len(p.EnumValues) > 0 {
+				desc = "交互动作类型（合法值见 enum）"
+			}
+		}
+		prop := map[string]any{
+			"type":        capabilityJSONSchemaType(p.Type),
+			"description": desc,
+		}
+		if len(p.EnumValues) > 0 {
+			prop["enum"] = p.EnumValues
+		}
+		props[p.Name] = prop
+		if p.Required {
+			required = append(required, p.Name)
+		}
+	}
+	// duration：非瞬时动作的持续时长（秒，MCP 侧轮询 game_time，不传 UE）。
+	// 时长档位（中间动作约 1800 秒、工作段 3600-7200 秒、末段=剩余时长）已迁到
+	// prompt 分解规则（TacticalRules 规则 7/8 + tacticalCoreRules 精简版），此处
+	// 只留执行语义，避免 10 个工具重复一份长描述。
+	// social_chat 不追加（对话挂起直到结束，duration 会打断对话）；
+	// 瞬时工具 + move_to 不追加（见 noDurationTool）。
+	if name != "social_chat" && !noDurationTool(name) {
+		props["duration"] = map[string]any{
+			"type":        "number",
+			"description": "持续时长（秒）。到点后系统打断当前段并进入队列下一段；末段设为时段剩余时长。",
+		}
+		required = append(required, "duration")
+	}
+	schema := map[string]any{
+		"type":       "object",
+		"properties": props,
+		"required":   required,
+	}
+	b, err := json.Marshal(schema)
+	if err != nil {
+		return nil
+	}
+	return b
+}
+
+// capabilityJSONSchemaType 映射 CapabilityParam.Type 到 JSON Schema type。
+// vector→"array"（UE5 [x,y,z]）；enum→"string"（配合 enum 字段）。
+func capabilityJSONSchemaType(t string) string {
+	switch t {
+	case "string", "enum":
+		return "string"
+	case "number":
+		return "number"
+	case "bool":
+		return "boolean"
+	case "vector":
+		return "array"
+	default:
+		return "string"
+	}
+}
+
+// mapTacticalAction 把战术层 plannedAction 映射到 ws.SendAction 的 (cmd, params)。
+// 复合工具 → 各自 Composite cmd；原子工具 → 各自 Atomic cmd。
+// 映射规则与 composite.go/atomic.go 工具处理函数一致。非法/不可排队工具返回 err，调用方跳过。
+//
+// 新 12 cmd 体系（2026-08-11）：MoveTo 不再做 MCP 侧 KB 解析，UE 自己解析
+// target_type + target_id/target_position。InteractSmartObject / 5 个复合 cmd
+// 统一用 semantic_group 引用 world_kb 中对应 category 的物体 id（语义组名），
+// auto_queue 作为 params 内字段传 "true"（复合）/ true（interact），符合真实 UE5
+// capability_registry 声明。
+//
+// registry != nil 时，未匹配内置 case 的 action 走默认 passthrough 路径：
+// 从 registry.EffectiveActions(agentID) 反查 cmd，params 原样转发。这覆盖
+// UE 通过 capability_registry 新推送的 cmd（无强类型 Go struct，依赖通用工具
+// 注册路径）。registry == nil 时默认分支返回 err（向后兼容旧测试）。
+func mapTacticalAction(pa plannedAction, agentID string, kb *worldkb.KB, registry *CapabilityRegistry) (cmd string, params map[string]any, err error) {
+	switch pa.Action {
+	// ─── Composite tools → 各自 cmd ───
+	case "work_shift":
+		return protocol.CmdWorkShift, map[string]any{
+			"semantic_group": pa.Params["semantic_group"],
+			"interaction":    pa.Params["interaction"],
+			"auto_queue":     "true",
 		}, nil
+	case "charge_at_station":
+		return protocol.CmdChargeAtStation, map[string]any{
+			"semantic_group": pa.Params["semantic_group"],
+			"interaction":    pa.Params["interaction"],
+			"auto_queue":     "true",
+		}, nil
+	case "self_maintenance":
+		return protocol.CmdSelfMaintenance, map[string]any{
+			"semantic_group": pa.Params["semantic_group"],
+			"interaction":    pa.Params["interaction"],
+			"auto_queue":     "true",
+		}, nil
+	case "rest_at_residence":
+		return protocol.CmdRestAtResidence, map[string]any{
+			"semantic_group": pa.Params["semantic_group"],
+			"interaction":    pa.Params["interaction"],
+			"auto_queue":     "true",
+		}, nil
+	case "surf_internet":
+		return protocol.CmdSurfInternet, map[string]any{
+			"semantic_group": pa.Params["semantic_group"],
+			"interaction":    pa.Params["interaction"],
+			"auto_queue":     "true",
+		}, nil
+	case "social_chat":
+		// Phase 2 Module C: proactive dialogue. params are target_agent_id
+		// + content only — no semantic_group/interaction (target is an NPC,
+		// not a Smart Object) and no auto_queue (not queueable).
+		return protocol.CmdSocialChat, map[string]any{
+			"target_agent_id": pa.Params["target_agent_id"],
+			"content":         pa.Params["content"],
+		}, nil
+	// ─── Atomic tools ───
+	case "generic_act":
+		params := map[string]any{
+			"thought": pa.Params["thought"],
+		}
+		if b, ok := pa.Params["behavior"].(string); ok && b != "" {
+			params["behavior"] = b
+		}
+		return protocol.CmdGenericAct, params, nil
+	case "move_to":
+		params := map[string]any{}
+		if t, ok := pa.Params["target_type"].(string); ok && t != "" {
+			params["target_type"] = t
+		}
+		if id, ok := pa.Params["target_id"].(string); ok && id != "" {
+			params["target_id"] = id
+		}
+		if pos, ok := pa.Params["target_position"].([]float64); ok && len(pos) > 0 {
+			params["target_position"] = pos
+		}
+		return protocol.CmdMoveTo, params, nil
 	case "turn_to":
-		return protocol.CmdTurnTo, map[string]any{"target": pa.Params["target"]}, nil
+		params := map[string]any{}
+		if t, ok := pa.Params["target_type"].(string); ok && t != "" {
+			params["target_type"] = t
+		}
+		if id, ok := pa.Params["target_id"].(string); ok && id != "" {
+			params["target_id"] = id
+		}
+		if pos, ok := pa.Params["target_position"].([]float64); ok && len(pos) > 0 {
+			params["target_position"] = pos
+		}
+		return protocol.CmdTurnTo, params, nil
 	case "speak":
 		return protocol.CmdSpeak, map[string]any{
-			"content":   pa.Params["content"],
-			"target":    pa.Params["target"],
-			"audio_url": nil,
+			"content": pa.Params["content"],
 		}, nil
 	case "emote":
-		mode, _ := pa.Params["mode"].(string)
-		if mode == "" {
-			mode = "oneshot"
-		}
 		return protocol.CmdEmote, map[string]any{
 			"emotion": pa.Params["emotion"],
-			"mode":    mode,
 		}, nil
-	case "interact":
-		return protocol.CmdInteractSmartObject, map[string]any{
-			"object_id": pa.Params["object_id"],
-			"action":    pa.Params["action"],
-		}, nil
+	case "InteractSmartObject", "interact": // interact 为旧工具名，保留兼容 LLM 偶发输出
+		params := map[string]any{
+			"semantic_group": pa.Params["semantic_group"],
+			"interaction":    pa.Params["interaction"],
+			"auto_queue":     true,
+		}
+		// zone 是 UE 明确支持的参数（capability_registry 声明），透传给 UE。
+		// 否则"去中央广场长椅"等指定区域的日程会被落下到 NPC 所在 zone 的
+		// 设施（如主生产车间的长椅），指定区域的意图落空。
+		if z, ok := pa.Params["zone"].(string); ok && z != "" {
+			params["zone"] = z
+		}
+		return protocol.CmdInteractSmartObject, params, nil
 	case "wait":
 		return protocol.CmdWait, map[string]any{
 			"duration_sec": toFloat(pa.Params["duration_sec"]),
 		}, nil
 	default:
+		// 新 cmd passthrough：从 registry 反查 cmd，params 原样转发
+		if registry == nil {
+			return "", nil, fmt.Errorf("unknown/unsupported tactical action: %s", pa.Action)
+		}
+		for _, act := range registry.EffectiveActions(agentID) {
+			if tools.CmdToToolName(act.Cmd) != pa.Action {
+				continue
+			}
+			// 复制 params 避免调用方误改原 map；剔除 duration——它是 MCP 侧
+			// 控制字段（worker 按 game_time 定时打断消费），不透传 UE。
+			out := make(map[string]any, len(pa.Params))
+			for k, v := range pa.Params {
+				if k == "duration" {
+					continue
+				}
+				out[k] = v
+			}
+			return act.Cmd, out, nil
+		}
 		return "", nil, fmt.Errorf("unknown/unsupported tactical action: %s", pa.Action)
 	}
 }
@@ -512,6 +711,15 @@ func toFloat(v any) float64 {
 // 调用方用返回的 slot 与自身 currentSlot 比较来决定是否重复分解。
 func selectCurrentGoal(dailyPlan, timeOfDay string) (goal, slot string, index int) {
 	if dailyPlan == "" {
+		return "", "", -1
+	}
+	// 06:00-07:00 是战略规划时间（dayStartMinute=07:00），屏蔽战术层分解。
+	// 避免 LLM 生成的夜间 slot（如 "22:00-07:00"）在 06:00-07:00 仍被
+	// matchPlanSlot 的跨午夜分支命中（cur < end），导致战术层反复分解
+	// 夜间睡眠任务。活动从 07:00 开始，此窗口内 NPC 保持空闲——若在途
+	// composite 仍执行，由 advanceSlotIfNeeded 在 slot 过期时打断。
+	cur := prompt.ParsePlanMinute(timeOfDay)
+	if cur >= 0 && cur >= dayStartMinute-60 && cur < dayStartMinute {
 		return "", "", -1
 	}
 	items := parseFormattedPlan(dailyPlan)

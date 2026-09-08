@@ -1,49 +1,27 @@
 .idea
 .env
 
-# ─── Hermes Profile 运行时文件 ───────────────────────────────
-# 只保留手写的 SOUL.md / SKILL.md / MEMORY.md / config.yaml，
-# 其余均为 Hermes Gateway 运行时产物。
-
-hermes/profiles/*/skills/
-hermes/profiles/*/logs/
-hermes/profiles/*/cron/
-hermes/profiles/*/sessions/
-hermes/profiles/*/sandboxes/
-hermes/profiles/*/platforms/
-hermes/profiles/*/hooks/
-hermes/profiles/*/memories/
-hermes/profiles/*/pairing/
-hermes/profiles/*/audio_cache/
-hermes/profiles/*/image_cache/
-hermes/profiles/*/bin/
-hermes/profiles/*/kanban/
-hermes/profiles/*/state.db*
-hermes/profiles/*/response_store.db*
-hermes/profiles/*/kanban.db*
-hermes/profiles/*/gateway.lock
-hermes/profiles/*/gateway.pid
-hermes/profiles/*/gateway_state.json
-hermes/profiles/*/channel_directory.json
-hermes/profiles/*/auth.lock
-hermes/profiles/*/.tirith-install-failed
-hermes/profiles/*/.skills_prompt_snapshot.json
-hermes/profiles/*/.bundled_manifest
-hermes/profiles/*/plan.md
-
 # ─── Mock UE 运行时输出 ─────────────────────────────────────
 logs/
 logs-dev/
 __pycache__/
 models_dev_cache.json
 
-# ─── Hermes 运行时标记 ───────────────────────────────────────
-hermes/profiles/*/.clean_shutdown
-
 # ─── 编译产物与临时目录 ───────────────────────────────────────
 agenttown-mcp/agenttown-mcp
 agenttown-mcp/agenttown-mcp.exe
+agenttown-mcp/agenttown-mcp-dev
 agenttown-mcp/agenttown-mcp-dev.exe
 agenttown-mcp/tmp/
 tmp/
+mcp
 scripts/analyze_latency.py
+
+# ─── world_kb 运行时产物 ─────────────────────────────────────
+# manifest.json 由 MCP 在 UE 推送 world_kb 时落盘（含 SHA256 + 时间戳），
+# 属于运行时产物，不应入库；world_kb.yaml 是手写权威源仍保留 tracked。
+assets/world_kb.manifest.json
+
+
+docs/actual_prompts.md
+docs/llm_metrics.md

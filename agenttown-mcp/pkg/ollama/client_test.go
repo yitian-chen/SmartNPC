@@ -27,6 +27,9 @@ func TestNew_Defaults(t *testing.T) {
 	if c.numPredict != defaultNumPredict {
 		t.Errorf("numPredict: got %d, want %d", c.numPredict, defaultNumPredict)
 	}
+	if c.numThread != defaultNumThread {
+		t.Errorf("numThread: got %d, want %d", c.numThread, defaultNumThread)
+	}
 }
 
 // TestNew_CustomOptions verifies that explicit Options are honored,
@@ -37,6 +40,7 @@ func TestNew_CustomOptions(t *testing.T) {
 		Model:      "qwen2.5:14b",
 		Timeout:    2 * time.Second,
 		NumPredict: 200,
+		NumThread:  8,
 	})
 	if c.baseURL != "http://127.0.0.1:11434" {
 		t.Errorf("baseURL: got %q, want trimmed %q", c.baseURL, "http://127.0.0.1:11434")
@@ -49,6 +53,18 @@ func TestNew_CustomOptions(t *testing.T) {
 	}
 	if c.numPredict != 200 {
 		t.Errorf("numPredict: got %d, want 200", c.numPredict)
+	}
+	if c.numThread != 8 {
+		t.Errorf("numThread: got %d, want 8", c.numThread)
+	}
+}
+
+// TestNew_NumThreadOmit verifies that NumThread=-1 produces a Client that
+// omits num_thread from the request (letting Ollama decide).
+func TestNew_NumThreadOmit(t *testing.T) {
+	c := New(Options{NumThread: -1})
+	if c.numThread != -1 {
+		t.Errorf("numThread: got %d, want -1", c.numThread)
 	}
 }
 
@@ -79,7 +95,7 @@ func TestChat_Success(t *testing.T) {
 	defer srv.Close()
 
 	c := New(Options{BaseURL: srv.URL, Model: "test-model"})
-	out, err := c.Chat(context.Background(), "test prompt")
+	out, err := c.Chat(context.Background(), "", "test prompt")
 	if err != nil {
 		t.Fatalf("Chat err: %v", err)
 	}
@@ -101,6 +117,31 @@ func TestChat_Success(t *testing.T) {
 	if gotReq.Options.NumPredict != defaultNumPredict {
 		t.Errorf("options.num_predict: got %d, want %d", gotReq.Options.NumPredict, defaultNumPredict)
 	}
+	if gotReq.Options.NumThread != defaultNumThread {
+		t.Errorf("options.num_thread: got %d, want %d", gotReq.Options.NumThread, defaultNumThread)
+	}
+}
+
+// TestChat_NumThreadOmit verifies that a Client with NumThread=-1 omits
+// num_thread from the request body, letting Ollama choose its default.
+func TestChat_NumThreadOmit(t *testing.T) {
+	var gotReq chatRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&gotReq)
+		_ = json.NewEncoder(w).Encode(chatResponse{
+			Message: chatMessage{Role: "assistant", Content: "{}"},
+			Done:    true,
+		})
+	}))
+	defer srv.Close()
+
+	c := New(Options{BaseURL: srv.URL, NumThread: -1})
+	if _, err := c.Chat(context.Background(), "", "x"); err != nil {
+		t.Fatalf("Chat err: %v", err)
+	}
+	if gotReq.Options.NumThread != 0 {
+		t.Errorf("num_thread should be omitted (0 in struct), got %d", gotReq.Options.NumThread)
+	}
 }
 
 // TestChat_Non200 verifies that a non-200 response produces an error
@@ -113,7 +154,7 @@ func TestChat_Non200(t *testing.T) {
 	defer srv.Close()
 
 	c := New(Options{BaseURL: srv.URL})
-	_, err := c.Chat(context.Background(), "x")
+	_, err := c.Chat(context.Background(), "", "x")
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -134,7 +175,7 @@ func TestChat_MalformedJSON(t *testing.T) {
 	defer srv.Close()
 
 	c := New(Options{BaseURL: srv.URL})
-	_, err := c.Chat(context.Background(), "x")
+	_, err := c.Chat(context.Background(), "", "x")
 	if err == nil || !strings.Contains(err.Error(), "decode response") {
 		t.Errorf("expected decode error, got: %v", err)
 	}
@@ -154,7 +195,7 @@ func TestChat_ContextCanceled(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 
-	_, err := c.Chat(ctx, "x")
+	_, err := c.Chat(ctx, "", "x")
 	if err == nil {
 		t.Fatal("expected context deadline error, got nil")
 	}
@@ -169,7 +210,7 @@ func TestChat_ContextCanceled(t *testing.T) {
 func TestChat_ConnectionRefused(t *testing.T) {
 	// Use a port that's almost certainly closed.
 	c := New(Options{BaseURL: "http://127.0.0.1:1", Timeout: 200 * time.Millisecond})
-	_, err := c.Chat(context.Background(), "x")
+	_, err := c.Chat(context.Background(), "", "x")
 	if err == nil {
 		t.Fatal("expected connection error, got nil")
 	}

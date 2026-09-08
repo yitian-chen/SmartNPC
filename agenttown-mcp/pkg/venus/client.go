@@ -1,14 +1,14 @@
 // Package venus provides an HTTP client for the Venus LLM proxy's
-// OpenAI-compatible /v1/chat/completions endpoint. It is a drop-in
-// alternative to pkg/hermes for the strategic and tactical layers,
-// returning the same *hermes.Response shape so callers
-// (generateDailyPlan, generateTacticalPlan, generateTacticalPlanStreaming)
-// need no changes beyond accepting an interface.
+// OpenAI-compatible /v1/chat/completions endpoint. It is the strategic
+// and tactical layer LLM backend, returning the shared *llmtypes.Response
+// shape so callers (generateDailyPlan, generateTacticalPlan,
+// generateTacticalPlanStreaming) need no changes beyond accepting an
+// interface.
 //
-// Unlike hermes.Client, venus.Client does not maintain a session chain
-// (previous_response_id): each call is independent. This matches current
-// usage where both strategic and tactical layers call ResetSession()
-// immediately after every Send, so no cross-call state is required.
+// venus.Client does not maintain a session chain (previous_response_id):
+// each call is independent. This matches current usage where both
+// strategic and tactical layers call ResetSession() immediately after
+// every Send, so no cross-call state is required.
 //
 // The Venus proxy speaks the OpenAI Chat Completions API protocol:
 //
@@ -16,7 +16,7 @@
 //	  Authorization: Bearer {APIKey}
 //	  Venus-Sticky-Routing: token
 //	  Content-Type: application/json
-//	  body: {"model":..., "max_tokens":..., "messages":[{"role":"user","content":...}]}
+//	  body: {"model":..., "max_tokens":..., "messages":[{"role":"system",...},{"role":"user",...}]}
 //
 // Streaming adds "stream":true; the SSE response is a sequence of
 // "data: {json chunk}" lines terminated by "data: [DONE]".
@@ -27,6 +27,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -35,13 +36,21 @@ import (
 	"sync"
 	"time"
 
-	"github.com/AgentTown/agenttown-mcp/pkg/hermes"
+	"github.com/AgentTown/agenttown-mcp/pkg/llmtypes"
 )
 
 const (
 	defaultHTTPTimeout = 60 * time.Second
 	defaultMaxTokens   = 4096
 )
+
+// ErrEmptyCompletion is returned by parseStream when a streaming response
+// terminates (cleanly via [DONE], or with only an id/role chunk) without
+// producing any text or tool calls. Under tool_choice=required this is a
+// backend failure — an overloaded Venus returns HTTP 200 with an immediate
+// [DONE] — not a valid result. Callers retry on it, and metrics count it as
+// an error instead of a silent "success" with zero actions.
+var ErrEmptyCompletion = errors.New("empty completion: no content and no tool calls")
 
 // Config configures the Client.
 type Config struct {
@@ -55,14 +64,19 @@ type Config struct {
 
 // Client POSTs prompts to the Venus /v1/chat/completions endpoint.
 //
-// All calls are serialized via sendMu — same contract as hermes.Client,
-// so callers that swap between backends do not see concurrency behavior
-// changes.
+// All calls are serialized via sendMu — same contract as a session-chain
+// backend, so callers that swap between backends do not see concurrency
+// behavior changes.
 type Client struct {
 	cfg    Config
 	http   *http.Client
 	log    *slog.Logger
 	sendMu sync.Mutex
+
+	// lastRequestBody is the JSON body of the most recent request sent via
+	// this client (set in doSend after marshalling). Used to dump the actual
+	// request to docs/actual_prompts.md. Guarded by sendMu.
+	lastRequestBody []byte
 }
 
 // New creates a Client.
@@ -83,56 +97,250 @@ func New(cfg Config) *Client {
 	}
 }
 
-// SendWithSummary POSTs input to Venus and returns the response.
+// SendWithSummary POSTs a (system, user) message pair to Venus and returns
+// the response. system carries mechanism/instruction text (rules, output
+// format); user carries the per-call context/data. system == "" sends a
+// single user message (backward compatible).
 //
-// The summary parameter is accepted for hermes.Client signature compatibility
-// but is currently unused: both strategic and tactical layers pass "" and
-// rely on independent per-call sessions (no cross-call state to preserve).
-func (c *Client) SendWithSummary(ctx context.Context, input, summary string) (*hermes.Response, error) {
+// tools, when non-empty, is serialized as the `tools` array (function
+// calling) so the LLM is aware of available actions — but tool_choice is set
+// to "none", forbidding the model from emitting tool_calls. This lets layers
+// that produce structured text/JSON (the dialogue layer's accept/reject and
+// turn responses) advertise the tool catalog without being forced to call a
+// tool. Callers that need forced tool calling use SendWithSummaryTools instead.
+func (c *Client) SendWithSummary(ctx context.Context, system, user string, tools ...[]Tool) (*llmtypes.Response, error) {
 	c.sendMu.Lock()
 	defer c.sendMu.Unlock()
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	_ = summary // unused (see doc comment)
-	return c.doSend(ctx, input, false, nil)
+	var ts []Tool
+	var toolChoice string
+	if len(tools) > 0 {
+		ts = tools[0]
+		if len(ts) > 0 {
+			toolChoice = "none"
+		}
+	}
+	return c.doSend(ctx, systemUserMessages(system, user), false, nil, nil, nil, ts, toolChoice)
 }
 
-// SendStreaming POSTs input with stream:true and invokes onDelta for each
-// text delta received. It blocks until the stream terminates (data: [DONE]
-// or error) and returns the final Response assembled from the accumulated
-// deltas.
-func (c *Client) SendStreaming(ctx context.Context, input string, onDelta func(delta string)) (*hermes.Response, error) {
+// SendWithSummaryTools is SendWithSummary plus a `tools` array (function
+// calling). The LLM may choose to call one of the tools instead of (or in
+// addition to) emitting free-form text; callers that only want the tools
+// advertised pass them here. tool_choice is set to "required".
+func (c *Client) SendWithSummaryTools(ctx context.Context, system, user string, tools []Tool) (*llmtypes.Response, error) {
 	c.sendMu.Lock()
 	defer c.sendMu.Unlock()
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	return c.doSend(ctx, input, true, onDelta)
+	return c.doSend(ctx, systemUserMessages(system, user), false, nil, nil, nil, tools, "required")
+}
+
+// SendStreaming POSTs a (system, user) message pair with stream:true and
+// invokes onDelta for each text delta received. It blocks until the stream
+// terminates (data: [DONE] or error) and returns the final Response
+// assembled from the accumulated deltas.
+func (c *Client) SendStreaming(ctx context.Context, system, user string, onDelta func(delta string)) (*llmtypes.Response, error) {
+	c.sendMu.Lock()
+	defer c.sendMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return c.doSend(ctx, systemUserMessages(system, user), true, onDelta, nil, nil, nil, "")
+}
+
+// SendStreamingTools is SendStreaming plus a `tools` array (function calling).
+// onDelta receives text deltas AND tool-call argument fragments (so pure
+// tool-calling streams still yield per-token callbacks for latency metrics);
+// onToolCall receives each completed tool_call as soon as its streamed
+// fragments are complete (by index transition or stream end), so callers can
+// dispatch the first action before the stream finishes.
+func (c *Client) SendStreamingTools(ctx context.Context, system, user string, tools []Tool, onDelta func(delta string), onToolCall func(llmtypes.ToolCall)) (*llmtypes.Response, error) {
+	c.sendMu.Lock()
+	defer c.sendMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return c.doSend(ctx, systemUserMessages(system, user), true, onDelta, onToolCall, nil, tools, "required")
+}
+
+// SendWithSchema POSTs a (system, user) message pair with OpenAI
+// Structured Outputs constraints (response_format json_schema, strict).
+// The model is constrained at decoding time to emit only JSON matching
+// schema — field-type violations (e.g. a nested object where a string is
+// required) become impossible instead of merely discouraged.
+// schemaName labels the schema for the gateway; schema is the raw JSON
+// Schema document (root may be any type). Gateways that ignore
+// response_format still accept the request — the schema is best-effort.
+//
+// tools, when non-empty, is serialized as the `tools` array so the LLM sees
+// the available action catalog, but tool_choice is set to "none" — the model
+// must emit the schema-constrained JSON text, not a tool_call. The strategic
+// layer uses this to advertise actions while still producing a dailyPlan.
+func (c *Client) SendWithSchema(ctx context.Context, system, user, schemaName string, schema []byte, tools ...[]Tool) (*llmtypes.Response, error) {
+	c.sendMu.Lock()
+	defer c.sendMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	def := &JSONSchemaDef{Name: schemaName, Strict: true, Schema: json.RawMessage(schema)}
+	var ts []Tool
+	var toolChoice string
+	if len(tools) > 0 {
+		ts = tools[0]
+		if len(ts) > 0 {
+			toolChoice = "none"
+		}
+	}
+	return c.doSend(ctx, systemUserMessages(system, user), false, nil, nil, def, ts, toolChoice)
+}
+
+// SendMessagesTools is the multi-turn variant: it sends an arbitrary
+// messages array (e.g. [system, ...assistant/tool/user history, user]) with
+// function calling tools. The tactical layer uses it to carry conversation
+// context across rounds of an agentic loop. tool_choice is set to "required"
+// when tools are non-empty.
+func (c *Client) SendMessagesTools(ctx context.Context, messages []llmtypes.Message, tools []Tool) (*llmtypes.Response, error) {
+	c.sendMu.Lock()
+	defer c.sendMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return c.doSend(ctx, toVenusMessages(messages), false, nil, nil, nil, tools, "required")
+}
+
+// SendLoop sends one turn of the unified per-NPC daily agentic loop: the
+// full multi-turn messages array plus the function-calling tools catalog.
+// toolChoice must be explicit — "none" (strategic/dialogue turns: tools are
+// disclosed for awareness but the model must answer in text/JSON) or
+// "required" (tactical turns: the model must call a tool). schemaName/schema,
+// when non-empty, add response_format (Structured Outputs) on top — used by
+// the strategic turn so the daily plan stays schema-constrained inside the
+// loop. This is the single entry point for the shared-loop layers.
+func (c *Client) SendLoop(ctx context.Context, messages []llmtypes.Message, tools []Tool, toolChoice, schemaName string, schema []byte) (*llmtypes.Response, error) {
+	c.sendMu.Lock()
+	defer c.sendMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	var def *JSONSchemaDef
+	if schemaName != "" {
+		def = &JSONSchemaDef{Name: schemaName, Strict: true, Schema: json.RawMessage(schema)}
+	}
+	return c.doSend(ctx, toVenusMessages(messages), false, nil, nil, def, tools, toolChoice)
+}
+
+// SendLoopStreaming is SendLoop's streaming variant: identical messages/
+// tools/toolChoice/schema semantics, but stream:true with onDelta invoked
+// per text delta and onToolCall per completed tool_call. The returned
+// Response.ToolCalls is assembled identically to SendLoop's, so callers can
+// swap transport path without changing downstream parsing. Used by the
+// tactical layer under --tactical-stream to measure TTFT/TPOT/ITL.
+func (c *Client) SendLoopStreaming(ctx context.Context, messages []llmtypes.Message, tools []Tool, toolChoice, schemaName string, schema []byte, onDelta func(string), onToolCall func(llmtypes.ToolCall)) (*llmtypes.Response, error) {
+	c.sendMu.Lock()
+	defer c.sendMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	var def *JSONSchemaDef
+	if schemaName != "" {
+		def = &JSONSchemaDef{Name: schemaName, Strict: true, Schema: json.RawMessage(schema)}
+	}
+	return c.doSend(ctx, toVenusMessages(messages), true, onDelta, onToolCall, def, tools, toolChoice)
+}
+
+// systemUserMessages builds the default [system?, user] message pair.
+func systemUserMessages(system, user string) []message {
+	msgs := make([]message, 0, 2)
+	if system != "" {
+		msgs = append(msgs, message{Role: "system", Content: system})
+	}
+	msgs = append(msgs, message{Role: "user", Content: user})
+	return msgs
+}
+
+// toVenusMessages converts shared llmtypes.Message entries into the wire
+// message shape (tool_calls / tool_call_id included).
+func toVenusMessages(in []llmtypes.Message) []message {
+	out := make([]message, 0, len(in))
+	for _, m := range in {
+		wire := message{
+			Role:       m.Role,
+			Content:    m.Content,
+			ToolCallID: m.ToolCallID,
+		}
+		for _, tc := range m.ToolCalls {
+			wire.ToolCalls = append(wire.ToolCalls, openaiToolCall{
+				ID:   tc.ID,
+				Type: tc.Type,
+				Function: openaiToolFunction{
+					Name:      tc.Function.Name,
+					Arguments: tc.Function.Arguments,
+				},
+			})
+		}
+		out = append(out, wire)
+	}
+	return out
 }
 
 // ResetSession is a no-op for venus.Client. Venus has no session chain
 // (each /v1/chat/completions call is independent), but the method is
-// required to satisfy the llmClient interface shared with hermes.Client.
+// required to satisfy the llmClient interface shared with backends that
+// do maintain session state.
 func (c *Client) ResetSession() {
 	// Intentionally empty.
 }
 
+// LastRequestBody returns a copy of the JSON body of the most recent request
+// sent via this client. Empty if no request has been sent yet. Used to dump
+// the actual request (docs/actual_prompts.md) without re-marshalling.
+func (c *Client) LastRequestBody() []byte {
+	c.sendMu.Lock()
+	defer c.sendMu.Unlock()
+	return append([]byte(nil), c.lastRequestBody...)
+}
+
 // doSend performs the HTTP POST and parses the response. For streaming
-// requests, onDelta is invoked for each text delta. Caller MUST hold sendMu.
-func (c *Client) doSend(ctx context.Context, input string, stream bool, onDelta func(string)) (*hermes.Response, error) {
+// requests, onDelta is invoked for each text delta and onToolCall for each
+// completed tool_call. A non-nil schema adds response_format (Structured
+// Outputs) to the request body; a non-nil tools slice adds the `tools`
+// array. toolChoice controls tool_choice: "required" forces a tool call,
+// "none" forbids it (the model still sees the catalog but must emit text/
+// JSON), "" omits the field (model decides). Caller MUST hold sendMu.
+func (c *Client) doSend(ctx context.Context, msgs []message, stream bool, onDelta func(string), onToolCall func(llmtypes.ToolCall), schema *JSONSchemaDef, tools []Tool, toolChoice string) (*llmtypes.Response, error) {
 	body := request{
 		Model:     c.cfg.Model,
 		MaxTokens: c.cfg.MaxTokens,
-		Messages: []message{
-			{Role: "user", Content: input},
-		},
-		Stream: stream,
+		Messages:  msgs,
+		Stream:    stream,
+		Tools:     tools,
+	}
+	if stream {
+		// 流式请求显式请求 usage，使最终 chunk 携带 token 计数（供 TPOT 计算）。
+		body.StreamOptions = &streamOptions{IncludeUsage: true}
+	}
+	// tool_choice: 显式传入优先（"required" / "none"）；未指定时仅在 tools
+	// 非空时默认 "required"（向后兼容：老调用方传 tools 必须能调工具）。
+	// 注意 "none" 路径：tools 非空但禁止 tool_call——供战略/对话层披露目录
+	// 而不强制调用。
+	if toolChoice == "" && len(tools) > 0 {
+		toolChoice = "required"
+	}
+	if toolChoice != "" {
+		body.ToolChoice = toolChoice
+	}
+	if schema != nil {
+		body.ResponseFormat = &ResponseFormat{Type: "json_schema", JSONSchema: schema}
 	}
 	payload, err := json.Marshal(body)
 	if err != nil {
 		return nil, fmt.Errorf("marshal request: %w", err)
 	}
+	// 记录完整请求体（供 docs/actual_prompts.md 留存最新一次发给 LLM 的内容）。
+	c.lastRequestBody = payload
 
 	url := strings.TrimRight(c.cfg.BaseURL, "/") + "/v1/chat/completions"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
@@ -161,14 +369,14 @@ func (c *Client) doSend(ctx context.Context, input string, stream bool, onDelta 
 	}
 
 	if stream {
-		return c.parseStream(resp.Body, onDelta)
+		return c.parseStream(resp.Body, onDelta, onToolCall)
 	}
 	return c.parseResponse(resp.Body)
 }
 
 // parseResponse decodes a non-streaming OpenAI Chat Completions response
-// and converts it to *hermes.Response.
-func (c *Client) parseResponse(r io.Reader) (*hermes.Response, error) {
+// and converts it to *llmtypes.Response.
+func (c *Client) parseResponse(r io.Reader) (*llmtypes.Response, error) {
 	raw, err := io.ReadAll(r)
 	if err != nil {
 		return nil, fmt.Errorf("read body: %w", err)
@@ -177,7 +385,14 @@ func (c *Client) parseResponse(r io.Reader) (*hermes.Response, error) {
 	if err := json.Unmarshal(raw, &or); err != nil {
 		return nil, fmt.Errorf("unmarshal response: %w", err)
 	}
-	return or.toHermes(c.cfg.Model), nil
+	resp := or.toLlmTypes(c.cfg.Model)
+	// 非流式空完成检查：与 parseStream 的 ErrEmptyCompletion 对齐。Venus 过载
+	// 返回 200 但空体（无 content、无 tool_calls）时，流式路径已能识别，此处
+	// 补上非流式路径，让默认（非流式）配置下空完成也走 agenticTurn 的重试+计数。
+	if resp.ExtractText() == "" && len(resp.ToolCalls) == 0 {
+		return nil, fmt.Errorf("%w", ErrEmptyCompletion)
+	}
+	return resp, nil
 }
 
 // parseStream decodes an SSE stream from the OpenAI Chat Completions API.
@@ -189,17 +404,19 @@ func (c *Client) parseResponse(r io.Reader) (*hermes.Response, error) {
 //	data: [DONE]
 //
 // Comment / keepalive lines start with ':'.
-func (c *Client) parseStream(r io.Reader, onDelta func(string)) (*hermes.Response, error) {
+func (c *Client) parseStream(r io.Reader, onDelta func(string), onToolCall func(llmtypes.ToolCall)) (*llmtypes.Response, error) {
 	sc := bufio.NewScanner(r)
 	// SSE events can carry a large chunk payload; allow up to 1MB per line.
 	sc.Buffer(make([]byte, 0, 64*1024), 1<<20)
 
 	var (
-		hr       hermes.Response
-		textBuf  strings.Builder
-		respID   string
-		usage    *openaiUsage
-		gotDone  bool
+		hr         llmtypes.Response
+		textBuf    strings.Builder
+		respID     string
+		usage      *openaiUsage
+		gotDone    bool
+		toolCalls  []llmtypes.ToolCall
+		pendingIdx = -1
 	)
 
 	for sc.Scan() {
@@ -235,13 +452,41 @@ func (c *Client) parseStream(r io.Reader, onDelta func(string)) (*hermes.Respons
 		if chunk.ID != "" {
 			respID = chunk.ID
 		}
-		// Extract text delta from first choice.
+		// Extract text delta and tool-call fragments from first choice.
 		if len(chunk.Choices) > 0 {
-			delta := chunk.Choices[0].Delta.Content
-			if delta != "" {
-				textBuf.WriteString(delta)
+			delta := chunk.Choices[0].Delta
+			if delta.Content != "" {
+				textBuf.WriteString(delta.Content)
 				if onDelta != nil {
-					onDelta(delta)
+					onDelta(delta.Content)
+				}
+			}
+			for _, dtc := range delta.ToolCalls {
+				// A new index signals the previous tool_call is complete.
+				if dtc.Index != pendingIdx {
+					if pendingIdx != -1 && len(toolCalls) > 0 && onToolCall != nil {
+						onToolCall(toolCalls[len(toolCalls)-1])
+					}
+					pendingIdx = dtc.Index
+					toolCalls = append(toolCalls, llmtypes.ToolCall{})
+				}
+				tc := &toolCalls[len(toolCalls)-1]
+				if dtc.ID != "" {
+					tc.ID = dtc.ID
+				}
+				if dtc.Type != "" {
+					tc.Type = dtc.Type
+				}
+				if dtc.Function.Name != "" {
+					tc.Function.Name = dtc.Function.Name
+				}
+				tc.Function.Arguments += dtc.Function.Arguments
+				// 把 arguments 分片也投递给 onDelta：纯 tool-calling 的
+				// 战术层（tool_choice=required）流式输出只有 delta.tool_calls、
+				// 没有 delta.content，若不在此投递，onDelta 收不到任何 token，
+				// TTFT/ITL 等流式指标采集为空。
+				if dtc.Function.Arguments != "" && onDelta != nil {
+					onDelta(dtc.Function.Arguments)
 				}
 			}
 		}
@@ -255,33 +500,50 @@ func (c *Client) parseStream(r io.Reader, onDelta func(string)) (*hermes.Respons
 		return nil, fmt.Errorf("sse read: %w", err)
 	}
 
-	// Stream ended without [DONE] but with content — graceful degradation.
-	if !gotDone && textBuf.Len() == 0 && respID == "" {
+	// Stream ended without [DONE] and produced nothing — truncated (network/
+	// backend cut the stream mid-flight).
+	if !gotDone && textBuf.Len() == 0 && len(toolCalls) == 0 {
 		return nil, fmt.Errorf("sse stream ended without terminal event: %w", io.ErrUnexpectedEOF)
 	}
 
-	c.finalizeStream(&hr, &textBuf, respID, usage)
+	// Terminated (cleanly via [DONE], or with only an id/role chunk) but
+	// produced zero text and zero tool calls — an empty completion. Under
+	// tool_choice=required this is a backend failure (overloaded Venus returns
+	// HTTP 200 + immediate [DONE]), not a valid result. Surface it so callers
+	// retry and metrics count it as an error, not a silent "success" with no
+	// actions.
+	if textBuf.Len() == 0 && len(toolCalls) == 0 {
+		return nil, fmt.Errorf("%w", ErrEmptyCompletion)
+	}
+
+	// Flush the final tool_call (its fragments ended with the stream).
+	if len(toolCalls) > 0 && onToolCall != nil {
+		onToolCall(toolCalls[len(toolCalls)-1])
+	}
+
+	c.finalizeStream(&hr, &textBuf, toolCalls, respID, usage)
 	return &hr, nil
 }
 
-// finalizeStream populates the hermes.Response fields from accumulated
+// finalizeStream populates the llmtypes.Response fields from accumulated
 // stream state. If usage is nil (stream_options not supported), token
 // counts are left as zero — they're only used for logging, not for
 // session reset logic.
-func (c *Client) finalizeStream(hr *hermes.Response, textBuf *strings.Builder, respID string, usage *openaiUsage) {
+func (c *Client) finalizeStream(hr *llmtypes.Response, textBuf *strings.Builder, toolCalls []llmtypes.ToolCall, respID string, usage *openaiUsage) {
 	hr.ID = respID
 	hr.Status = "completed"
 	hr.Model = c.cfg.Model
-	hr.Output = []hermes.Block{{
+	hr.ToolCalls = toolCalls
+	hr.Output = []llmtypes.Block{{
 		Type: "message",
 		Role: "assistant",
-		Content: []hermes.Content{{
+		Content: []llmtypes.Content{{
 			Type: "output_text",
 			Text: textBuf.String(),
 		}},
 	}}
 	if usage != nil {
-		hr.Usage = hermes.Usage{
+		hr.Usage = llmtypes.Usage{
 			InputTokens:  usage.PromptTokens,
 			OutputTokens: usage.CompletionTokens,
 			TotalTokens:  usage.TotalTokens,
@@ -299,16 +561,62 @@ func truncate(s string, maxLen int) string {
 
 // request is the body sent to /v1/chat/completions.
 type request struct {
-	Model     string    `json:"model"`
-	MaxTokens int       `json:"max_tokens"`
-	Messages  []message `json:"messages"`
-	Stream    bool      `json:"stream,omitempty"`
+	Model          string          `json:"model"`
+	MaxTokens      int             `json:"max_tokens"`
+	Messages       []message       `json:"messages"`
+	Stream         bool            `json:"stream,omitempty"`
+	StreamOptions  *streamOptions  `json:"stream_options,omitempty"`
+	ResponseFormat *ResponseFormat `json:"response_format,omitempty"`
+	Tools          []Tool          `json:"tools,omitempty"`
+	ToolChoice     any             `json:"tool_choice,omitempty"`
 }
 
-// message is one entry in the Messages array.
+// streamOptions requests token usage in the final streaming chunk. Without
+// it, streaming responses omit `usage`, so output-token counts (and thus
+// TPOT) are unavailable on the streaming path.
+type streamOptions struct {
+	IncludeUsage bool `json:"include_usage"`
+}
+
+// Tool is one entry in the OpenAI `tools` array (function calling).
+// The function's Parameters is a raw JSON Schema document describing the
+// arguments object; venus.Client treats it as an opaque blob so it stays
+// decoupled from the capability registry that produces the schema.
+type Tool struct {
+	Type     string       `json:"type"` // "function"
+	Function ToolFunction `json:"function"`
+}
+
+// ToolFunction is the `function` object inside a Tool entry.
+type ToolFunction struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description,omitempty"`
+	Parameters  json.RawMessage `json:"parameters,omitempty"`
+}
+
+// ResponseFormat is the OpenAI response_format field (Structured Outputs).
+// Type "json_schema" with a strict JSONSchemaDef constrains decoding so the
+// output is guaranteed to match the schema.
+type ResponseFormat struct {
+	Type       string         `json:"type"` // "json_schema"
+	JSONSchema *JSONSchemaDef `json:"json_schema,omitempty"`
+}
+
+// JSONSchemaDef is the named strict JSON Schema sent inside response_format.
+type JSONSchemaDef struct {
+	Name   string          `json:"name"`
+	Strict bool            `json:"strict"`
+	Schema json.RawMessage `json:"schema"`
+}
+
+// message is one entry in the Messages array. ToolCalls is populated on
+// assistant messages (function calling); ToolCallID is populated on tool
+// messages to associate the result with the assistant's tool_calls[].ID.
 type message struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role       string           `json:"role"`
+	Content    string           `json:"content,omitempty"`
+	ToolCalls  []openaiToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string           `json:"tool_call_id,omitempty"`
 }
 
 // openaiResponse is the (subset of the) OpenAI Chat Completions response.
@@ -326,8 +634,24 @@ type openaiChoice struct {
 }
 
 type openaiMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role      string           `json:"role"`
+	Content   string           `json:"content"`
+	ToolCalls []openaiToolCall `json:"tool_calls,omitempty"`
+}
+
+// openaiToolCall is one entry in message.tool_calls (non-streaming) or
+// delta.tool_calls (streaming). Index is only populated on streaming deltas;
+// non-streaming tool_calls rely on array order.
+type openaiToolCall struct {
+	Index    int                `json:"index"`
+	ID       string             `json:"id"`
+	Type     string             `json:"type"`
+	Function openaiToolFunction `json:"function"`
+}
+
+type openaiToolFunction struct {
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"`
 }
 
 type openaiUsage struct {
@@ -343,32 +667,44 @@ type openaiChunk struct {
 	Usage   *openaiUsage   `json:"usage,omitempty"`
 }
 
-// toHermes converts the OpenAI response to *hermes.Response so callers
+// toLlmTypes converts the OpenAI response to *llmtypes.Response so callers
 // can use ExtractText() and Usage.TotalTokens unchanged.
 // modelFallback is used when the response Model is empty or "default"
 // (Venus returns "default" rather than the actual model name).
-func (or *openaiResponse) toHermes(modelFallback string) *hermes.Response {
+func (or *openaiResponse) toLlmTypes(modelFallback string) *llmtypes.Response {
 	var text string
+	var toolCalls []llmtypes.ToolCall
 	for _, ch := range or.Choices {
 		text += ch.Message.Content
+		for _, tc := range ch.Message.ToolCalls {
+			toolCalls = append(toolCalls, llmtypes.ToolCall{
+				ID:   tc.ID,
+				Type: tc.Type,
+				Function: llmtypes.ToolFunction{
+					Name:      tc.Function.Name,
+					Arguments: tc.Function.Arguments,
+				},
+			})
+		}
 	}
 	model := or.Model
 	if model == "" || model == "default" {
 		model = modelFallback
 	}
-	return &hermes.Response{
-		ID:     or.ID,
-		Status: "completed",
-		Model:  model,
-		Output: []hermes.Block{{
+	return &llmtypes.Response{
+		ID:        or.ID,
+		Status:    "completed",
+		Model:     model,
+		ToolCalls: toolCalls,
+		Output: []llmtypes.Block{{
 			Type: "message",
 			Role: "assistant",
-			Content: []hermes.Content{{
+			Content: []llmtypes.Content{{
 				Type: "output_text",
 				Text: text,
 			}},
 		}},
-		Usage: hermes.Usage{
+		Usage: llmtypes.Usage{
 			InputTokens:  or.Usage.PromptTokens,
 			OutputTokens: or.Usage.CompletionTokens,
 			TotalTokens:  or.Usage.TotalTokens,

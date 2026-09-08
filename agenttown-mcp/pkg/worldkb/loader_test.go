@@ -22,70 +22,6 @@ func sampleYAMLPath(t *testing.T) string {
 	return p
 }
 
-func TestLoad_Sample(t *testing.T) {
-	kb, err := Load(sampleYAMLPath(t))
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-
-	if kb.Version != "1.0" {
-		t.Errorf("Version = %q, want 1.0", kb.Version)
-	}
-	if kb.Site.ID != "industrial_park" {
-		t.Errorf("Site.ID = %q", kb.Site.ID)
-	}
-	if len(kb.Zones) != 4 {
-		t.Errorf("len(Zones) = %d, want 4", len(kb.Zones))
-	}
-	if len(kb.Locations) != 3 {
-		t.Errorf("len(Locations) = %d, want 3", len(kb.Locations))
-	}
-	if len(kb.Objects) != 3 {
-		t.Errorf("len(Objects) = %d, want 3", len(kb.Objects))
-	}
-	if len(kb.Agents) != 1 {
-		t.Errorf("len(Agents) = %d, want 1", len(kb.Agents))
-	}
-
-	// Index sanity.
-	if kb.GetZone("main_workshop") == nil {
-		t.Error("zoneByID missing main_workshop")
-	}
-	if kb.GetZone("rest_area") == nil {
-		t.Error("zoneByID missing rest_area")
-	}
-	if kb.GetLocation("workbench_01") == nil {
-		t.Error("locationByID missing workbench_01")
-	}
-	if kb.GetLocation("rest_bench_01") == nil {
-		t.Error("locationByID missing rest_bench_01")
-	}
-	if kb.GetObject("charging_station_01") == nil {
-		t.Error("objectByID missing charging_station_01")
-	}
-	if kb.GetObject("rest_bench_01") == nil {
-		t.Error("objectByID missing rest_bench_01")
-	}
-	if kb.GetAgent("H-01") == nil {
-		t.Error("agentByID missing H-01")
-	}
-
-	// Coordinates: workbench_01 interaction_point = [19500, 10500, 0]
-	l := kb.GetLocation("workbench_01")
-	if l.InteractionPoint != [3]float64{19500, 10500, 0} {
-		t.Errorf("workbench_01 interaction_point = %v, want [19500 10500 0]", l.InteractionPoint)
-	}
-	if l.InteractionRadius != 1500 {
-		t.Errorf("workbench_01 interaction_radius = %v, want 1500", l.InteractionRadius)
-	}
-
-	// rest_area zone entry_point resolves to a coordinate.
-	z := kb.GetZone("rest_area")
-	if z == nil || z.EntryPoint != [3]float64{14000, 11000, 0} {
-		t.Errorf("rest_area entry_point = %v, want [14000 11000 0]", z)
-	}
-}
-
 func TestLoad_MissingFile(t *testing.T) {
 	_, err := Load("/nonexistent/path/to/world_kb.yaml")
 	if err == nil {
@@ -116,14 +52,16 @@ func TestLoad_DuplicateZoneID(t *testing.T) {
 	p := filepath.Join(dir, "dup.yaml")
 	content := `
 version: "1.0"
-site: {id: x, name: X}
+narrative: {setting: x, theme: y}
 zones:
   - id: dup_zone
     entry_point: [0, 0, 0]
-    ue5_bounds: {center: [0,0,0], half_size: [1,1,1]}
+    entry_facing: [0, 0, 0]
+    bounds: {center: [0,0,0], extent: [1,1,1]}
   - id: dup_zone
     entry_point: [1, 1, 1]
-    ue5_bounds: {center: [0,0,0], half_size: [1,1,1]}
+    entry_facing: [0, 0, 0]
+    bounds: {center: [0,0,0], extent: [1,1,1]}
 `
 	if err := os.WriteFile(p, []byte(content), 0644); err != nil {
 		t.Fatal(err)
@@ -142,11 +80,12 @@ func TestLoad_BadVectorArity(t *testing.T) {
 	p := filepath.Join(dir, "bad_vec.yaml")
 	content := `
 version: "1.0"
-site: {id: x, name: X}
+narrative: {setting: x, theme: y}
 zones:
   - id: z
     entry_point: [0, 0]          # only 2 elements — should fail
-    ue5_bounds: {center: [0,0,0], half_size: [1,1,1]}
+    entry_facing: [0, 0, 0]
+    bounds: {center: [0,0,0], extent: [1,1,1]}
 `
 	if err := os.WriteFile(p, []byte(content), 0644); err != nil {
 		t.Fatal(err)

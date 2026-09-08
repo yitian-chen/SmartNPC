@@ -1,0 +1,1448 @@
+package agentstate
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log/slog"
+	"sync"
+	"time"
+
+	"github.com/AgentTown/agenttown-mcp/contract/protocol"
+	"github.com/AgentTown/agenttown-mcp/pkg/llmtypes"
+	"github.com/AgentTown/agenttown-mcp/pkg/storage"
+)
+
+// AgentState holds per-agent business state: persistent fields (survive
+// restart, will be backed by MySQL in stage 3) and transient fields
+// (in-process only). All fields are private; access goes through
+// semantics-named methods. Coordination fields (wake channel, cancel,
+// pending timers, replan-in-progress flag, debug override) live in the
+// main package's agentContext, which holds a *AgentState pointer.
+type AgentState struct {
+	mu sync.Mutex
+
+	// Identity + persistence handle. Set once via SetIdentity by the main
+	// package's registerAgent, before LoadPersistent and before any
+	// write-through can fire. When store == nil (tests / in-memory mode),
+	// persistence calls are skipped — the struct behaves as pure in-memory.
+	agentID string
+	store   storage.Store
+
+	// Persistent fields (cross-session, backed by MySQL when store != nil)
+	dailyPlan        string
+	currentDay       int // -1 = unplanned
+	currentPlanIndex int
+	currentSlot      string // "HH:MM-HH:MM" or "__debug__"-prefixed
+
+	// Transient fields (in-process, not persisted)
+	online           bool
+	latestPhysical   *protocol.PhysicalState
+	latestPerception json.RawMessage
+	// latestVisibleAgents is the visible-NPC list from the latest
+	// perception_update (Phase 2 Module C). UE pushes visible_agents on
+	// every perception; MCP injects this into the tactical prompt as
+	// 【附近NPC】 so the LLM can pick a social_chat target. Stored as a
+	// deep copy under mu; nil when no perception or no visible agents.
+	latestVisibleAgents []protocol.VisibleAgent
+	currentTask         *protocol.CurrentTaskProgress
+	currentActionID     string
+	currentActionCmd    string
+	currentActionParams map[string]any
+	currentActionStart  time.Time
+	currentActionSrc    ActionSource
+	// currentActionToolCallID is the assistant tool_calls[].ID that produced
+	// the in-flight action (multi-turn conversation). Empty for hand-built
+	// actions (debug path). Cleared alongside currentActionID.
+	currentActionToolCallID string
+	// Queue state (约定21): when an auto_queue=true action targets an
+	// occupied Smart Object, UE queues the agent and notifies via
+	// action_queued. These fields track the latest queue status so the
+	// reactive layer prompt can mention "正在排队等待…". Cleared on
+	// action completion, slot switch, replan, and agent offline.
+	queuedActionID      string
+	queuedGroup         string
+	queuedPosition      *int
+	queuedEstimatedWait *float64
+	queuedAt            time.Time
+	actionQueue         []PlannedAction
+	redecomposeCount    int
+	pendingStopActionID string
+	selfStopInProgress  string
+	// clearedAction stashes the most recently cleared in-flight action
+	// (cmd/params/start/src) when ClearForSlotSwitch / ClearForReplan
+	// drops in-flight tracking before the delayed stop_action's
+	// action_completed(interrupted) arrives. RecordActionCompletion
+	// consumes the stash on actionID match and restores WasInFlight=true,
+	// so callers (recordActionHistory) still record the full action row
+	// for long-composite actions interrupted by slot switch or replan
+	// fallback. One-shot: matched → cleared. Overwritten by next clear.
+	clearedAction   *clearedActionInfo
+	prevZone        string
+	prevObjectIDs   []string
+	lastReactiveAt  map[string]time.Time
+	perceptionCount int
+	replanHint      string
+	// lastQueueOnlySpeak 记录最近一次战术层分解（ReplaceQueue 路径）的队列
+	// 是否只含 speak——用于 BeginTacticalRefill 在"队列提前耗尽"时生成
+	// 针对性 hint（LLM 只返回 1 个 speak、队列数秒即耗尽的场景）。
+	lastQueueOnlySpeak bool
+	// tacticalHeaderPlan 记录最近一次成功注入全量头（【全天日程】+完整
+	// 【分解规则】）的战术层 user 消息所用的 dailyPlan 字符串；空 = 当天
+	// 尚未注入过全量头。跨日 ClearConversation 时随会话历史一起重置。
+	// 与 dailyPlan 内容比对决定战术层 prompt 走全量还是精简引用。
+	// 瞬态：不持久化、不进 Snapshot（与 lastQueueOnlySpeak 同级）。
+	tacticalHeaderPlan string
+	lastReplanAt       time.Time
+	lastReplanGameTime string
+	// conversation is the multi-turn tactical dialogue history (system/
+	// user/assistant/tool messages). Cleared once per game day (on day
+	// rollover). In-process only, not persisted.
+	conversation []llmtypes.Message
+	// conversationSummary is the stable compaction digest that replaces the
+	// evicted older history when the conversation exceeds the token budget.
+	// It is inserted between system and the raw tail on every request and
+	// rewritten only at compaction boundaries, so the [system + tools +
+	// summary] prefix stays byte-stable for KV cache reuse. In-process only,
+	// not persisted (cleared with conversation on day rollover).
+	conversationSummary string
+	// timeStopTargetGameSec is the target authoritative game_time (GameTimeSec)
+	// at which the current long action's time_to_stop should fire; -1 = no
+	// time_to_stop armed. timeStopActionID is the in-flight action it tracks,
+	// timeStopDurationSec the preset duration (seconds) the LLM set via
+	// time_to_stop (used to tell the next tactical round how long it ran).
+	timeStopTargetGameSec float64
+	timeStopActionID      string
+	timeStopDurationSec   float64
+}
+
+// clearedActionInfo is the stash dropped by ClearForSlotSwitch/ClearForReplan
+// and consumed by RecordActionCompletion when a delayed stop completion arrives.
+type clearedActionInfo struct {
+	ActionID   string
+	Cmd        string
+	Params     map[string]any
+	Start      time.Time
+	Src        ActionSource
+	ToolCallID string
+}
+
+// New creates an AgentState with default zero values. currentDay starts
+// at -1 (unplanned); the worker sets it after the first perception or
+// after generateDailyPlan on startup.
+func New() *AgentState {
+	return &AgentState{
+		currentDay:            -1,
+		timeStopTargetGameSec: -1,
+		lastReactiveAt:        make(map[string]time.Time),
+	}
+}
+
+// SetIdentity binds the agent's identity and persistence store. Must be
+// called once after New, before LoadPersistent and before any setter that
+// triggers write-through. When store == nil, all persistence is skipped
+// (in-memory mode for tests and quick-smoke runs without MySQL).
+//
+// Passing a non-nil store over a previously-nil one is allowed (used by
+// registerAgent on first registration); the store is then used by all
+// subsequent setters. Re-binding a non-nil store to another non-nil store
+// is not supported — each AgentState is scoped to one agent lifecycle.
+func (a *AgentState) SetIdentity(agentID string, store storage.Store) {
+	a.mu.Lock()
+	a.agentID = agentID
+	a.store = store
+	a.mu.Unlock()
+}
+
+// AgentID returns the bound agent identity (empty before SetIdentity).
+// Callers use this to scope store calls (SaveMemory, SaveActionRecord, etc.)
+// without having to thread the agent ID separately.
+func (a *AgentState) AgentID() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.agentID
+}
+
+// Store returns the bound persistence store (nil in in-memory mode).
+// Callers use this to access memory/action_history methods directly,
+// checking for nil before proceeding.
+func (a *AgentState) Store() storage.Store {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.store
+}
+
+// LoadPersistent hydrates the four persistent fields from the store.
+// Called by registerAgent after SetIdentity, before spawning the worker.
+//
+//   - ErrNotFound (first run / cold start): keeps defaults (currentDay=-1),
+//     so the worker generates a fresh daily plan as if no DB existed.
+//   - Other errors: logs a warning and keeps defaults — the agent
+//     degrades to re-planning rather than failing to start.
+//   - Success: overwrites the four fields; the worker sees currentDay
+//     matches today and skips generateDailyPlan (plan survives restart).
+func (a *AgentState) LoadPersistent(ctx context.Context) error {
+	if a.store == nil {
+		return nil
+	}
+	snap, err := a.store.LoadScheduleState(ctx, a.agentID)
+	if err == storage.ErrNotFound {
+		return nil
+	}
+	if err != nil {
+		slog.Default().Warn("[agentstate] load persistent state failed, degrading to cold start",
+			"agent_id", a.agentID, "err", err)
+		return err
+	}
+	a.mu.Lock()
+	a.dailyPlan = snap.DailyPlan
+	a.currentDay = snap.CurrentDay
+	a.currentPlanIndex = snap.CurrentPlanIndex
+	a.currentSlot = snap.CurrentSlot
+	a.mu.Unlock()
+	return nil
+}
+
+// SnapshotPersistent returns a copy of the four persistent fields. Used by
+// tests and diagnostics to assert write-through state without touching the
+// store.
+func (a *AgentState) SnapshotPersistent() storage.ScheduleState {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.snapshotPersistentLocked()
+}
+
+// snapshotPersistentLocked reads the four persistent fields; caller holds a.mu.
+func (a *AgentState) snapshotPersistentLocked() storage.ScheduleState {
+	return storage.ScheduleState{
+		DailyPlan:        a.dailyPlan,
+		CurrentDay:       a.currentDay,
+		CurrentPlanIndex: a.currentPlanIndex,
+		CurrentSlot:      a.currentSlot,
+	}
+}
+
+// persistSchedule write-throughs the snapshot to the store. Caller must NOT
+// hold a.mu (DB I/O outside the lock avoids blocking other goroutines).
+// Errors are logged as warnings — the in-memory state is already correct,
+// and the DB will catch up on the next successful write. This matches the
+// "log and continue" pattern: persistence is best-effort, never blocks the
+// decision pipeline.
+func (a *AgentState) persistSchedule(snap storage.ScheduleState) {
+	if a.store == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := a.store.SaveScheduleState(ctx, a.agentID, snap); err != nil {
+		slog.Default().Warn("[agentstate] persist schedule state failed",
+			"agent_id", a.agentID, "err", err)
+	}
+}
+
+// PerceptionUpdate carries the before/after deltas computed by SetPerception,
+// so the caller (agentContext.observePerception) can run trigger detection
+// without holding the AgentState lock.
+type PerceptionUpdate struct {
+	CurZone         string
+	CurObjectIDs    []string
+	PrevZone        string
+	PrevObjectIDs   []string
+	PrevPhysical    *protocol.PhysicalState
+	CurPhysical     *protocol.PhysicalState
+	PerceptionCount int
+}
+
+// SetPerception stores the latest perception payload and advances the
+// perception counter. It returns the zone/object/physical deltas so the
+// caller can run reactive trigger detection. The caller is responsible
+// for the stopped-check (coordination field, lives in agentContext).
+//
+// 物理状态数据源：perception_update 携带全量 3 项（energy/fatigue/joint_wear）
+// 通过 PhysicalStateDelta map 上传。若 map 非空则构造 PhysicalState 写入
+// latestPhysical（覆盖式），作为三层决策的主物理状态来源。map 为空时保持
+// 旧值（PrevPhysical == CurPhysical），跳过物理警戒带检测。
+func (a *AgentState) SetPerception(payload json.RawMessage) (PerceptionUpdate, error) {
+	var p protocol.PerceptionPayload
+	if err := json.Unmarshal(payload, &p); err != nil {
+		return PerceptionUpdate{}, fmt.Errorf("parse perception: %w", err)
+	}
+	curZone := ""
+	if p.Location.CurrentZone != nil {
+		curZone = *p.Location.CurrentZone
+	}
+	curObjectIDs := extractObjectIDs(p)
+
+	// 从 PhysicalStateDelta map 构造全量 PhysicalState（UE5 上传 4 项：
+	// energy/fatigue/joint_wear/money）。money 是 NPC 经济余额，工作赚取、
+	// 充电/维修/睡觉消耗，用于让 NPC 平衡各设备工作并考虑必要性。
+	var newPhysical *protocol.PhysicalState
+	if len(p.PhysicalStateDelta) > 0 {
+		newPhysical = &protocol.PhysicalState{
+			Energy:    p.PhysicalStateDelta["energy"],
+			Fatigue:   p.PhysicalStateDelta["fatigue"],
+			JointWear: p.PhysicalStateDelta["joint_wear"],
+			Money:     p.PhysicalStateDelta["money"],
+		}
+	}
+
+	a.mu.Lock()
+	prevZone := a.prevZone
+	prevObjectIDs := a.prevObjectIDs
+	prevPhysical := a.latestPhysical
+	curPhysical := prevPhysical
+	if newPhysical != nil {
+		a.latestPhysical = newPhysical
+		curPhysical = newPhysical
+	}
+	a.latestPerception = cloneRawMessage(payload)
+	// Deep-copy visible agents so callers can't mutate the stored slice.
+	// nil when empty (latestVisibleAgents() returns nil → prompt skips
+	// the 【附近NPC】 segment).
+	if len(p.VisibleAgents) > 0 {
+		a.latestVisibleAgents = make([]protocol.VisibleAgent, len(p.VisibleAgents))
+		copy(a.latestVisibleAgents, p.VisibleAgents)
+	} else {
+		a.latestVisibleAgents = nil
+	}
+	a.prevZone = curZone
+	a.prevObjectIDs = curObjectIDs
+	a.perceptionCount++
+	count := a.perceptionCount
+	a.mu.Unlock()
+
+	return PerceptionUpdate{
+		CurZone:         curZone,
+		CurObjectIDs:    curObjectIDs,
+		PrevZone:        prevZone,
+		PrevObjectIDs:   prevObjectIDs,
+		PrevPhysical:    prevPhysical,
+		CurPhysical:     curPhysical,
+		PerceptionCount: count,
+	}, nil
+}
+
+// SetPhysicalState stores the authoritative physical/task state and
+// returns the previous physical state for reactive trigger detection.
+func (a *AgentState) SetPhysicalState(physical *protocol.PhysicalState, task *protocol.CurrentTaskProgress) (prev *protocol.PhysicalState) {
+	a.mu.Lock()
+	prev = a.latestPhysical
+	a.latestPhysical = physical
+	a.currentTask = task
+	a.mu.Unlock()
+	return prev
+}
+
+// SetOnline sets the agent online flag.
+func (a *AgentState) SetOnline(v bool) {
+	a.mu.Lock()
+	a.online = v
+	a.mu.Unlock()
+}
+
+// RecordActionStarted records a newly-dispatched in-flight action.
+func (a *AgentState) RecordActionStarted(actionID, cmd string, params map[string]any, src ActionSource, toolCallID string) {
+	a.mu.Lock()
+	a.currentActionID = actionID
+	a.currentActionSrc = src
+	a.currentActionCmd = cmd
+	a.currentActionParams = params
+	a.currentActionStart = time.Now()
+	a.currentActionToolCallID = toolCallID
+	a.mu.Unlock()
+}
+
+// CompletionResult carries the flags computed by RecordActionCompletion
+// so the caller (agentContext.recordActionCompletion) can handle
+// coordination fields (pendingActionTimeouts, completedBeforeArm) and
+// reactive trigger decisions.
+//
+// Stage 4 adds Cmd/Params/Start: captured BEFORE clearing in-flight tracking,
+// so the caller can record a full action_history row at completion time.
+type CompletionResult struct {
+	WasInFlight    bool
+	WasPendingStop bool
+	WasSelfStop    bool
+	Src            ActionSource
+	Cmd            string
+	Params         map[string]any
+	Start          time.Time
+	ToolCallID     string
+}
+
+// RecordActionCompletion clears in-flight tracking for the given action
+// and resolves pendingStop/selfStop markers. Returns flags describing
+// what was cleared so the caller can handle coordination timers
+// (pendingActionTimeouts, completedBeforeArm) and reactive triggers.
+func (a *AgentState) RecordActionCompletion(actionID string) CompletionResult {
+	a.mu.Lock()
+	if a.currentTask != nil && a.currentTask.ActionID == actionID {
+		a.currentTask = nil
+	}
+	wasInFlight := a.currentActionID == actionID
+	// Stage 4: capture in-flight fields BEFORE clearing, for action_history.
+	var cmd string
+	var params map[string]any
+	var start time.Time
+	var src ActionSource
+	var toolCallID string
+	if wasInFlight {
+		cmd = a.currentActionCmd
+		params = a.currentActionParams
+		start = a.currentActionStart
+		src = a.currentActionSrc
+		toolCallID = a.currentActionToolCallID
+		a.currentActionID = ""
+		a.currentActionCmd = ""
+		a.currentActionParams = nil
+		a.currentActionStart = time.Time{}
+		a.currentActionToolCallID = ""
+	} else if a.clearedAction != nil && a.clearedAction.ActionID == actionID {
+		// Delayed stop completion for a long-composite action whose
+		// in-flight tracking was already dropped by ClearForSlotSwitch /
+		// ClearForReplan (slot switch or replan fallback). Restore the
+		// stashed fields so the caller records a full action_history
+		// row. One-shot consume.
+		cmd = a.clearedAction.Cmd
+		params = a.clearedAction.Params
+		start = a.clearedAction.Start
+		src = a.clearedAction.Src
+		toolCallID = a.clearedAction.ToolCallID
+		wasInFlight = true
+		a.clearedAction = nil
+	}
+	wasPendingStop := a.pendingStopActionID == actionID
+	if wasPendingStop {
+		a.pendingStopActionID = ""
+	}
+	wasSelfStop := a.selfStopInProgress == actionID
+	if wasSelfStop {
+		a.selfStopInProgress = ""
+	}
+	if wasInFlight {
+		a.currentActionSrc = ""
+	}
+	// 约定21: action 完成（无论 success/failed/interrupted）都清排队状态。
+	// timeout 路径下 action_queued{timeout} 已先行清理，这里兜底覆盖其他分支。
+	a.clearQueueStatusLocked()
+	a.mu.Unlock()
+
+	return CompletionResult{
+		WasInFlight:    wasInFlight,
+		WasPendingStop: wasPendingStop,
+		WasSelfStop:    wasSelfStop,
+		Src:            src,
+		Cmd:            cmd,
+		Params:         params,
+		Start:          start,
+		ToolCallID:     toolCallID,
+	}
+}
+
+// RecordQueueStatus updates the agent's queue tracking state based on an
+// incoming action_queued message (约定21). Caller is the WS handler in
+// main.go. Behavior by status:
+//   - queued:   write queue fields (agent is now waiting for the object)
+//   - advanced: clear queue fields (the action is now executing — queue
+//     phase is over, normal action_started/completed lifecycle resumes)
+//   - timeout:  clear queue fields (UE will follow with
+//     action_completed{failed, reason=queue_timeout} which also clears)
+//
+// Unknown action_id (e.g. queue notification for an already-cancelled
+// action) is tolerated: we still update fields on queued, since the UE
+// side is the source of truth for queue membership.
+func (a *AgentState) RecordQueueStatus(payload protocol.ActionQueuedPayload) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	switch payload.Status {
+	case protocol.QueueStatusQueued:
+		a.queuedActionID = payload.ActionID
+		a.queuedGroup = payload.Group
+		a.queuedPosition = payload.Position
+		a.queuedEstimatedWait = payload.EstimatedWaitSec
+		a.queuedAt = time.Now()
+	case protocol.QueueStatusAdvanced, protocol.QueueStatusTimeout:
+		a.clearQueueStatusLocked()
+	}
+}
+
+// clearQueueStatusLocked resets all queue tracking fields. Caller must
+// hold a.mu.
+func (a *AgentState) clearQueueStatusLocked() {
+	a.queuedActionID = ""
+	a.queuedGroup = ""
+	a.queuedPosition = nil
+	a.queuedEstimatedWait = nil
+	a.queuedAt = time.Time{}
+}
+
+// ClearInFlightAction clears in-flight tracking for the given actionID if it
+// matches the current action. Used by recordActionStarted's TOCTOU recovery:
+// when a completion arrives in the microsecond window between the
+// completedBeforeArm check and RecordActionStarted setting currentActionID,
+// the completion runs with wasInFlight=false (currentActionID was still empty)
+// and never clears the field. This method clears the stale currentActionID
+// so the worker's hasInFlightAction() gate doesn't block forever.
+func (a *AgentState) ClearInFlightAction(actionID string) {
+	a.mu.Lock()
+	if a.currentActionID == actionID {
+		a.currentActionID = ""
+		a.currentActionCmd = ""
+		a.currentActionParams = nil
+		a.currentActionStart = time.Time{}
+		a.currentActionSrc = ""
+	}
+	a.mu.Unlock()
+}
+
+// SetPendingStopActionID records a long-composite action ID that should be
+// stopped after the next tactical refill (slot switch deferred-stop strategy).
+func (a *AgentState) SetPendingStopActionID(id string) {
+	a.mu.Lock()
+	a.pendingStopActionID = id
+	a.mu.Unlock()
+}
+
+// PendingStopActionID returns the current pending-stop action ID.
+func (a *AgentState) PendingStopActionID() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.pendingStopActionID
+}
+
+// AppendConversationMessage appends one message (system/user/assistant/tool)
+// to the multi-turn tactical dialogue history.
+func (a *AgentState) AppendConversationMessage(m llmtypes.Message) {
+	a.mu.Lock()
+	a.conversation = append(a.conversation, m)
+	a.mu.Unlock()
+}
+
+// Conversation returns a copy of the multi-turn dialogue history.
+func (a *AgentState) Conversation() []llmtypes.Message {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return append([]llmtypes.Message(nil), a.conversation...)
+}
+
+// ClearConversation drops the multi-turn dialogue history (called on day
+// rollover so each game day starts a fresh conversation). The tactical
+// full-header marker goes with it: the header lived in the dropped history,
+// so the day's first tactical prompt must be full again.
+func (a *AgentState) ClearConversation() {
+	a.mu.Lock()
+	a.conversation = nil
+	a.conversationSummary = ""
+	a.tacticalHeaderPlan = ""
+	a.mu.Unlock()
+}
+
+// TacticalHeaderPlan returns the dailyPlan string carried by the last
+// full-header tactical user message appended to the conversation. Empty =
+// no full header in today's history (next tactical prompt must be full).
+func (a *AgentState) TacticalHeaderPlan() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.tacticalHeaderPlan
+}
+
+// SetTacticalHeaderPlan records the dailyPlan of the just-appended full-header
+// tactical user message. Caller: generateTacticalPlan, right after the
+// agenticTurn carrying the full prompt succeeded (the message is in history
+// by then). Transient, not persisted.
+func (a *AgentState) SetTacticalHeaderPlan(plan string) {
+	a.mu.Lock()
+	a.tacticalHeaderPlan = plan
+	a.mu.Unlock()
+}
+
+// ConversationSummary returns the stable compaction digest, or "" when the
+// conversation has not been compacted yet (or the digest was cleared).
+func (a *AgentState) ConversationSummary() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.conversationSummary
+}
+
+// CompactConversation atomically replaces the conversation with tail, records
+// summary as the new stable digest, and resets the tactical full-header marker
+// (the day's first full-header user message lived in the evicted history, so
+// the next tactical prompt must re-inject the full schedule + rules).
+func (a *AgentState) CompactConversation(summary string, tail []llmtypes.Message) {
+	a.mu.Lock()
+	a.conversationSummary = summary
+	a.conversation = append([]llmtypes.Message(nil), tail...)
+	a.tacticalHeaderPlan = ""
+	a.mu.Unlock()
+}
+
+// ArmTimeStop sets the time_to_stop target for an in-flight long action.
+// targetGameSec is the authoritative GameTimeSec at which the action should
+// be interrupted; actionID identifies the in-flight action; durationSec is
+// the preset duration (seconds) so the next tactical round can be told how
+// long the action already ran.
+func (a *AgentState) ArmTimeStop(actionID string, targetGameSec float64, durationSec float64) {
+	a.mu.Lock()
+	a.timeStopActionID = actionID
+	a.timeStopTargetGameSec = targetGameSec
+	a.timeStopDurationSec = durationSec
+	a.mu.Unlock()
+}
+
+// TimeStop returns the armed time_to_stop target and preset duration.
+// armed=false means no time_to_stop is currently armed.
+func (a *AgentState) TimeStop() (targetGameSec float64, durationSec float64, actionID string, armed bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.timeStopTargetGameSec < 0 {
+		return 0, 0, "", false
+	}
+	return a.timeStopTargetGameSec, a.timeStopDurationSec, a.timeStopActionID, true
+}
+
+// ClearTimeStop disarms time_to_stop tracking (e.g. after the action ends
+// or the stop has been dispatched).
+func (a *AgentState) ClearTimeStop() {
+	a.mu.Lock()
+	a.timeStopTargetGameSec = -1
+	a.timeStopActionID = ""
+	a.timeStopDurationSec = 0
+	a.mu.Unlock()
+}
+
+// SetSelfStopInProgress marks an action ID we actively stopped and are
+// awaiting interrupted completion for (suppresses reactive trigger).
+func (a *AgentState) SetSelfStopInProgress(id string) {
+	a.mu.Lock()
+	a.selfStopInProgress = id
+	a.mu.Unlock()
+}
+
+// SelfStopInProgress returns the current self-stop-in-progress action ID.
+func (a *AgentState) SelfStopInProgress() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.selfStopInProgress
+}
+
+// SetCurrentActionSrc overrides the current action source without touching
+// other in-flight fields. Used by tests that need to simulate "previous
+// tactical action completed (currentActionID cleared) but source marker
+// retained" to exercise the prepend-on-busy-rejection defensive path.
+// Production code should use RecordActionStarted to set the source together
+// with the action ID.
+func (a *AgentState) SetCurrentActionSrc(src ActionSource) {
+	a.mu.Lock()
+	a.currentActionSrc = src
+	a.mu.Unlock()
+}
+
+// ClearForReplan resets queue, in-flight tracking, slot marker, and
+// redecompose counter — used by advanceSlotIfNeeded on slot expiry and
+// by tacticalRefillForReplan before re-decomposition. Returns the
+// in-flight action info (id, cmd) so the caller can issue a deferred
+// stop for long-composite actions.
+type InFlightInfo struct {
+	ActionID  string
+	ActionCmd string
+	Params    map[string]any
+	QueueLen  int
+}
+
+// ClearForSlotSwitch clears queue + in-flight + slot + redecompose counter.
+// Returns in-flight info so the caller can decide whether to set
+// pendingStopActionID for long-composite actions.
+func (a *AgentState) ClearForSlotSwitch() InFlightInfo {
+	a.mu.Lock()
+	info := InFlightInfo{
+		ActionID:  a.currentActionID,
+		ActionCmd: a.currentActionCmd,
+		Params:    cloneParams(a.currentActionParams),
+		QueueLen:  len(a.actionQueue),
+	}
+	// Stash the in-flight action so its delayed stop completion
+	// (action_completed with reason=interrupted, arriving after the
+	// stop_action issued by popAndSendQueueAction) can still be
+	// recorded as a full action_history row. Without this stash,
+	// RecordActionCompletion sees currentActionID="" and skips
+	// recording — losing the long-composite action entirely.
+	if a.currentActionID != "" {
+		a.clearedAction = &clearedActionInfo{
+			ActionID:   a.currentActionID,
+			Cmd:        a.currentActionCmd,
+			Params:     a.currentActionParams,
+			Start:      a.currentActionStart,
+			Src:        a.currentActionSrc,
+			ToolCallID: a.currentActionToolCallID,
+		}
+	}
+	a.actionQueue = nil
+	a.currentActionID = ""
+	a.currentActionCmd = ""
+	a.currentActionParams = nil
+	a.currentActionStart = time.Time{}
+	a.currentActionSrc = ""
+	a.currentActionToolCallID = ""
+	a.clearQueueStatusLocked()
+	a.currentSlot = ""
+	a.redecomposeCount = 0
+	snap := a.snapshotPersistentLocked()
+	a.mu.Unlock()
+	a.persistSchedule(snap)
+	return info
+}
+
+// ClearInFlightKeepQueue clears only the in-flight action (incl. the
+// clearedAction stash), preserving the action queue, currentSlot and
+// redecompose counter. Used by time_to_stop expiry to interrupt the current
+// segment and continue with the next queued segment (multi-segment plan like
+// work → rest → work), instead of dropping the queue and re-decomposing.
+func (a *AgentState) ClearInFlightKeepQueue() InFlightInfo {
+	a.mu.Lock()
+	info := InFlightInfo{
+		ActionID:  a.currentActionID,
+		ActionCmd: a.currentActionCmd,
+		Params:    cloneParams(a.currentActionParams),
+		QueueLen:  len(a.actionQueue),
+	}
+	// 与 ClearForSlotSwitch 相同的 stash：延迟 stop 引发的
+	// action_completed(interrupted) 到达时仍能记账为完整 action_history 行。
+	if a.currentActionID != "" {
+		a.clearedAction = &clearedActionInfo{
+			ActionID:   a.currentActionID,
+			Cmd:        a.currentActionCmd,
+			Params:     a.currentActionParams,
+			Start:      a.currentActionStart,
+			Src:        a.currentActionSrc,
+			ToolCallID: a.currentActionToolCallID,
+		}
+	}
+	a.currentActionID = ""
+	a.currentActionCmd = ""
+	a.currentActionParams = nil
+	a.currentActionStart = time.Time{}
+	a.currentActionSrc = ""
+	a.currentActionToolCallID = ""
+	a.clearQueueStatusLocked()
+	// 保留 a.actionQueue、a.currentSlot、a.redecomposeCount。
+	snap := a.snapshotPersistentLocked()
+	a.mu.Unlock()
+	a.persistSchedule(snap)
+	return info
+}
+
+// ClearForReplan resets queue + in-flight + slot but preserves redecompose
+// counter semantics (caller manages). Used by tacticalRefillForReplan.
+func (a *AgentState) ClearForReplan() InFlightInfo {
+	return a.ClearForSlotSwitch()
+}
+
+// Stop clears all transient state when an agent goes offline. Mirrors the
+// original agentContext.stop business-field cleanup. Does not touch
+// coordination fields (cancel, timers) — those are the caller's job.
+func (a *AgentState) Stop() {
+	a.mu.Lock()
+	a.online = false
+	a.latestPerception = nil
+	a.currentActionID = ""
+	a.currentActionSrc = ""
+	a.currentActionCmd = ""
+	a.currentActionParams = nil
+	a.currentActionStart = time.Time{}
+	a.currentActionToolCallID = ""
+	a.actionQueue = nil
+	a.clearQueueStatusLocked()
+	a.currentSlot = ""
+	a.redecomposeCount = 0
+	a.clearedAction = nil // drop stash — offline agent has no pending completion
+	snap := a.snapshotPersistentLocked()
+	a.mu.Unlock()
+	a.persistSchedule(snap)
+}
+
+// RefillQueue replaces the action queue with the given actions and records
+// the slot they were decomposed for.
+func (a *AgentState) RefillQueue(actions []PlannedAction, slot string) {
+	a.mu.Lock()
+	a.actionQueue = actions
+	a.currentSlot = slot
+	snap := a.snapshotPersistentLocked()
+	a.mu.Unlock()
+	a.persistSchedule(snap)
+}
+
+// PopAction removes and returns the first action in the queue (FIFO).
+// Returns ok=false if the queue is empty.
+func (a *AgentState) PopAction() (PlannedAction, bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if len(a.actionQueue) == 0 {
+		return PlannedAction{}, false
+	}
+	act := a.actionQueue[0]
+	a.actionQueue = a.actionQueue[1:]
+	return act, true
+}
+
+// PeekAction returns the first action without removing it.
+func (a *AgentState) PeekAction() (PlannedAction, bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if len(a.actionQueue) == 0 {
+		return PlannedAction{}, false
+	}
+	return a.actionQueue[0], true
+}
+
+// PopActionIfIdle atomically checks that no action is in-flight and, if
+// so, pops the first queued action. Returns ok=false if the queue is
+// empty or an action is in-flight (UE busy). Also returns and clears
+// the pendingStopActionID so the caller can issue a deferred stop.
+func (a *AgentState) PopActionIfIdle() (action PlannedAction, pendingStop string, ok bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if len(a.actionQueue) == 0 {
+		return PlannedAction{}, "", false
+	}
+	if a.currentActionID != "" {
+		return PlannedAction{}, "", false
+	}
+	action = a.actionQueue[0]
+	a.actionQueue = a.actionQueue[1:]
+	pendingStop = a.pendingStopActionID
+	a.pendingStopActionID = ""
+	return action, pendingStop, true
+}
+
+// PrependAction pushes an action to the front of the queue (used when
+// re-queueing an action that failed to dispatch due to UE busy).
+func (a *AgentState) PrependAction(action PlannedAction) {
+	a.mu.Lock()
+	a.actionQueue = append([]PlannedAction{action}, a.actionQueue...)
+	a.mu.Unlock()
+}
+
+// AppendQueueAction appends an action to the queue (used by tactical
+// streaming callback).
+func (a *AgentState) AppendQueueAction(action PlannedAction) {
+	a.mu.Lock()
+	a.actionQueue = append(a.actionQueue, action)
+	a.mu.Unlock()
+}
+
+// ShouldDispatchFirst reports whether the just-appended action is the
+// first in the queue and no action is in-flight (streaming fast-path).
+// Caller should call PopActionIfIdle to dispatch.
+func (a *AgentState) ShouldDispatchFirst() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.currentActionID == "" && len(a.actionQueue) == 1
+}
+
+// ReplaceQueue replaces the entire action queue (used by non-streaming
+// tactical refill).
+// ReplaceQueue replaces the action queue with the given actions. It also
+// records whether the queue contains nothing but speak calls, so that the
+// next premature-exhaustion refill (BeginTacticalRefill) can inject a
+// targeted hint for the "LLM returned only speak, queue drained in seconds"
+// failure mode (observed 2026-09-03: H-04/H-02 repeatedly refilled with a
+// single speak, NPC idled between 5-10s LLM calls).
+func (a *AgentState) ReplaceQueue(actions []PlannedAction) {
+	a.mu.Lock()
+	a.actionQueue = actions
+	onlySpeak := len(actions) > 0
+	for _, act := range actions {
+		if act.Action != "speak" {
+			onlySpeak = false
+			break
+		}
+	}
+	a.lastQueueOnlySpeak = onlySpeak
+	a.mu.Unlock()
+}
+
+// NeedFallbackDispatch reports whether there's a queued action ready to
+// dispatch with no in-flight action (used after tactical refill completes).
+func (a *AgentState) NeedFallbackDispatch() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.currentActionID == "" && len(a.actionQueue) > 0
+}
+
+// TacticalRefillPrep carries the snapshot data needed by the tactical
+// layer to call the LLM, plus guard flags. Produced atomically by
+// BeginTacticalRefill.
+type TacticalRefillPrep struct {
+	Goal            string
+	Slot            string
+	Index           int
+	Zone            string
+	Physical        *protocol.PhysicalState
+	Hint            string
+	IsRedecompose   bool
+	ShouldSkip      bool // guard failed (in-flight, no goal, redecompose limit)
+	AlreadyHasQueue bool // queue non-empty in same slot → skip redecompose
+}
+
+// BeginTacticalRefill atomically checks guards and prepares for a tactical
+// refill LLM call. It receives the goal/slot/idx pre-computed by the caller
+// (via selectCurrentGoal on the daily plan). If ShouldSkip is true the
+// caller must abort the refill. On success, the action queue is cleared
+// and the replanHint is consumed (returned in Hint for prompt injection).
+func (a *AgentState) BeginTacticalRefill(goal, slot string, idx int, hasTacticalHc bool) TacticalRefillPrep {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	prep := TacticalRefillPrep{
+		Goal:     goal,
+		Slot:     slot,
+		Index:    idx,
+		Zone:     a.latestZoneLocked(),
+		Physical: clonePhysical(a.latestPhysical),
+	}
+	if !hasTacticalHc {
+		prep.ShouldSkip = true
+		return prep
+	}
+	if a.currentActionID != "" {
+		prep.ShouldSkip = true
+		return prep
+	}
+	if goal == "" {
+		prep.ShouldSkip = true
+		return prep
+	}
+	// 同时段重复分解守卫
+	if slot == a.currentSlot {
+		if len(a.actionQueue) > 0 {
+			prep.AlreadyHasQueue = true
+			prep.ShouldSkip = true
+			return prep
+		}
+		if a.redecomposeCount >= 3 {
+			prep.ShouldSkip = true
+			return prep
+		}
+		// 注入"未安排长动作"hint；上次队列只含 speak 时给出更具体的诊断
+		// （该失败模式实测高频：LLM 只返回 1 个 speak，队列数秒即耗尽，
+		// NPC 在两次 LLM 调用之间呆站）。
+		if a.replanHint == "" {
+			if a.lastQueueOnlySpeak {
+				a.replanHint = "上次分解只返回了 1 个 speak，队列数秒即耗尽导致频繁重分解。本次必须在 speak 之后返回至少一个带 duration 的长动作（长复合动作或 InteractSmartObject 长动作），让 NPC 持续活动到时段结束"
+			} else {
+				a.replanHint = "上次队列提前耗尽，未安排长动作收尾——本次请确保最后一个 action 是长复合动作或 InteractSmartObject 长动作（见 function calling 的 tools 字段），让 NPC 持续工作到下一时段"
+			}
+		}
+	}
+	prep.IsRedecompose = slot == a.currentSlot
+	prep.Hint = a.replanHint
+	a.replanHint = ""
+	a.actionQueue = nil
+	return prep
+}
+
+// CommitTacticalRefill records the slot/index after a successful tactical
+// refill LLM call. For redecompose (same slot), bumps the counter; for a
+// new slot, resets the counter and updates slot/index.
+func (a *AgentState) CommitTacticalRefill(slot string, idx int, isRedecompose bool) {
+	a.mu.Lock()
+	if isRedecompose {
+		a.redecomposeCount++
+		a.mu.Unlock()
+		return
+	}
+	a.currentSlot = slot
+	a.currentPlanIndex = idx
+	a.redecomposeCount = 0
+	snap := a.snapshotPersistentLocked()
+	a.mu.Unlock()
+	a.persistSchedule(snap)
+}
+
+// QueueSnapshot returns a copy of the current action queue (for logging).
+func (a *AgentState) QueueSnapshot() []PlannedAction {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return cloneQueue(a.actionQueue)
+}
+
+// RedecomposeCountSnapshot returns the current redecompose count.
+func (a *AgentState) RedecomposeCountSnapshot() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.redecomposeCount
+}
+
+// ReplanPrep carries the snapshot data needed by the tactical layer to
+// re-decompose for a reactive replan. Unlike BeginTacticalRefill, this
+// does NOT check the in-flight guard (replan explicitly allows planning
+// while an action is in-flight — the caller will stop it after success).
+type ReplanPrep struct {
+	Goal     string
+	Slot     string
+	Index    int
+	Zone     string
+	Physical *protocol.PhysicalState
+}
+
+// BeginReplan reads the snapshot for a reactive replan. Does not clear
+// the queue or consume hint — the caller provides the hint. Returns
+// ShouldSkip=true if tacticalHc is nil or no goal.
+func (a *AgentState) BeginReplan(goal, slot string, idx int, hasTacticalHc bool) ReplanPrep {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return ReplanPrep{
+		Goal:     goal,
+		Slot:     slot,
+		Index:    idx,
+		Zone:     a.latestZoneLocked(),
+		Physical: clonePhysical(a.latestPhysical),
+	}
+}
+
+// CommitReplan replaces the queue, resets counters, and updates slot on
+// successful replan. Called after the LLM returns new actions.
+func (a *AgentState) CommitReplan(actions []PlannedAction, slot string, idx int) {
+	a.mu.Lock()
+	a.actionQueue = actions
+	a.redecomposeCount = 0
+	a.currentSlot = slot
+	a.currentPlanIndex = idx
+	a.replanHint = ""
+	snap := a.snapshotPersistentLocked()
+	a.mu.Unlock()
+	a.persistSchedule(snap)
+}
+
+// HasQueueNext reports whether the action queue has any pending actions.
+func (a *AgentState) HasQueueNext() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return len(a.actionQueue) > 0
+}
+
+// HasInFlightAction reports whether an action is currently in flight
+// (dispatched, awaiting completion).
+func (a *AgentState) HasInFlightAction() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.currentActionID != ""
+}
+
+// CurrentActionID returns the in-flight action ID (empty if none).
+func (a *AgentState) CurrentActionID() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.currentActionID
+}
+
+// CurrentActionSrc returns the source of the in-flight action.
+func (a *AgentState) CurrentActionSrc() ActionSource {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.currentActionSrc
+}
+
+// QueueLen returns the current action queue length.
+func (a *AgentState) QueueLen() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return len(a.actionQueue)
+}
+
+// SnapshotSchedule returns the daily plan text, current slot, and plan
+// index — used by /debug/plan and prompt builders.
+func (a *AgentState) SnapshotSchedule() (plan string, slot string, idx int) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.dailyPlan, a.currentSlot, a.currentPlanIndex
+}
+
+// SetDailyPlan replaces the daily plan and records which day_count it
+// was generated for.
+func (a *AgentState) SetDailyPlan(plan string, day int) {
+	a.mu.Lock()
+	a.dailyPlan = plan
+	a.currentDay = day
+	snap := a.snapshotPersistentLocked()
+	a.mu.Unlock()
+	a.persistSchedule(snap)
+}
+
+// SetCurrentPlanIndex records which daily-plan item is currently executing.
+func (a *AgentState) SetCurrentPlanIndex(idx int) {
+	a.mu.Lock()
+	a.currentPlanIndex = idx
+	snap := a.snapshotPersistentLocked()
+	a.mu.Unlock()
+	a.persistSchedule(snap)
+}
+
+// CurrentDay returns the day_count the current daily plan was generated for
+// (-1 = unplanned). Read-only query used by tests and the worker loop.
+func (a *AgentState) CurrentDay() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.currentDay
+}
+
+// IncrementRedecomposeCount bumps the per-slot re-decomposition counter.
+func (a *AgentState) IncrementRedecomposeCount() {
+	a.mu.Lock()
+	a.redecomposeCount++
+	a.mu.Unlock()
+}
+
+// ResetRedecomposeCount zeros the per-slot re-decomposition counter
+// (called on slot switch).
+func (a *AgentState) ResetRedecomposeCount() {
+	a.mu.Lock()
+	a.redecomposeCount = 0
+	a.mu.Unlock()
+}
+
+// RedecomposeCount returns the current per-slot re-decomposition count.
+func (a *AgentState) RedecomposeCount() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.redecomposeCount
+}
+
+// SetReplanHint stores the reason string injected into the next tactical
+// prompt (e.g. "zone changed to workshop" from a reactive replan).
+func (a *AgentState) SetReplanHint(reason string) {
+	a.mu.Lock()
+	a.replanHint = reason
+	a.mu.Unlock()
+}
+
+// SetReplanTimestamps records when a replan happened (wall-clock + game time),
+// used for dedupe and logging.
+func (a *AgentState) SetReplanTimestamps(at time.Time, gameTime string) {
+	a.mu.Lock()
+	a.lastReplanAt = at
+	a.lastReplanGameTime = gameTime
+	a.mu.Unlock()
+}
+
+// LastReactiveAt returns the last reactive trigger time for the given dedupe key.
+func (a *AgentState) LastReactiveAt(key string) (time.Time, bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	t, ok := a.lastReactiveAt[key]
+	return t, ok
+}
+
+// SetLastReactiveAt records the last reactive trigger time for a dedupe key.
+func (a *AgentState) SetLastReactiveAt(key string, t time.Time) {
+	a.mu.Lock()
+	a.lastReactiveAt[key] = t
+	a.mu.Unlock()
+}
+
+// DedupeReactive atomically checks the dedupe window for a reactive trigger
+// and records now if the trigger should proceed. Returns true when the key
+// has not been seen within window (caller should proceed; now is recorded).
+// Returns false when a recent trigger exists within window (caller should
+// skip; timestamp is left unchanged). The check-and-set is atomic under
+// AgentState.mu, preserving the original single-mutex dedupe semantics.
+func (a *AgentState) DedupeReactive(key string, now time.Time, window time.Duration) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	lastAt, exists := a.lastReactiveAt[key]
+	if exists && now.Sub(lastAt) < window {
+		return false
+	}
+	a.lastReactiveAt[key] = now
+	return true
+}
+
+// DetectDayRollover checks for day_count increment (cross-day) and updates
+// currentDay. Returns rollover=true when prev>=0 and day>prev (real cross-day,
+// caller should re-run generateDailyPlan). First sync (prev<0) updates
+// currentDay but returns rollover=false (worker already planned on startup).
+func (a *AgentState) DetectDayRollover() (rollover bool, prevDay, newDay int) {
+	a.mu.Lock()
+	day := a.latestDayCountLocked()
+	prev := a.currentDay
+	if day <= prev {
+		a.mu.Unlock()
+		return false, prev, day
+	}
+	a.currentDay = day
+	snap := a.snapshotPersistentLocked()
+	a.mu.Unlock()
+	a.persistSchedule(snap)
+	if prev < 0 {
+		return false, prev, day
+	}
+	return true, prev, day
+}
+
+// LatestTimeOfDay returns "HH:MM" extracted from the latest perception.
+func (a *AgentState) LatestTimeOfDay() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.latestTimeOfDayLocked()
+}
+
+// LatestGameTimeSec returns the authoritative GameTimeSec from the latest
+// perception, or 0 if no perception has arrived or parsing fails. Used by
+// time_to_stop polling.
+func (a *AgentState) LatestGameTimeSec() float64 {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if len(a.latestPerception) == 0 {
+		return 0
+	}
+	var p protocol.PerceptionPayload
+	if err := json.Unmarshal(a.latestPerception, &p); err != nil {
+		return 0
+	}
+	return p.Environment.GameTimeSec
+}
+
+// LatestDayCount returns the day_count from the latest perception, or -1
+// if no perception has arrived or parsing fails.
+func (a *AgentState) LatestDayCount() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.latestDayCountLocked()
+}
+
+// LatestZone returns the current zone id from the latest perception.
+func (a *AgentState) LatestZone() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.latestZoneLocked()
+}
+
+// LatestObjectStatus returns the per-category smart object availability
+// aggregate from the latest perception_update. Returns nil if no
+// perception has arrived, parsing fails, or UE5 didn't push the
+// object_status_summary field (e.g. mock UE). Used by tacticalRefill to
+// inject the 【物体实时占用】 segment into the tactical prompt.
+func (a *AgentState) LatestObjectStatus() map[string]protocol.ObjectCategoryStatus {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if len(a.latestPerception) == 0 {
+		return nil
+	}
+	var p protocol.PerceptionPayload
+	if err := json.Unmarshal(a.latestPerception, &p); err != nil {
+		return nil
+	}
+	if len(p.ObjectStatusSummary) == 0 {
+		return nil
+	}
+	return p.ObjectStatusSummary
+}
+
+// LatestNearbyObjects returns the per-instance nearby object list from the
+// latest perception_update (current zone only). Returns nil if no
+// perception has arrived or parsing fails. Paired with LatestObjectStatus:
+// the per-instance state disambiguates which semantic_group within a
+// multi-group category is occupied (e.g. WorkBench occupied → sorting_conveyor
+// is the idle one in the "work" category).
+func (a *AgentState) LatestNearbyObjects() []protocol.NearbyObject {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if len(a.latestPerception) == 0 {
+		return nil
+	}
+	var p protocol.PerceptionPayload
+	if err := json.Unmarshal(a.latestPerception, &p); err != nil {
+		return nil
+	}
+	if len(p.NearbyObjects) == 0 {
+		return nil
+	}
+	out := make([]protocol.NearbyObject, len(p.NearbyObjects))
+	copy(out, p.NearbyObjects)
+	return out
+}
+
+// LatestVisibleAgents returns the visible-NPC list from the latest
+// perception_update (Phase 2 Module C). Returns nil if no perception has
+// arrived or no agents are visible. The returned slice is a deep copy;
+// callers may mutate it freely. Used to inject 【附近NPC】 into the tactical
+// prompt so the LLM can pick a social_chat target.
+func (a *AgentState) LatestVisibleAgents() []protocol.VisibleAgent {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if len(a.latestVisibleAgents) == 0 {
+		return nil
+	}
+	out := make([]protocol.VisibleAgent, len(a.latestVisibleAgents))
+	copy(out, a.latestVisibleAgents)
+	return out
+}
+
+// Snapshot returns an exported read-only copy of all business fields.
+// Slice and pointer fields are deep-copied so the caller can mutate the
+// snapshot without affecting the source state.
+func (a *AgentState) Snapshot() Snapshot {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return Snapshot{
+		Online:              a.online,
+		LatestPhysical:      clonePhysical(a.latestPhysical),
+		LatestPerception:    cloneRawMessage(a.latestPerception),
+		LatestVisibleAgents: append([]protocol.VisibleAgent(nil), a.latestVisibleAgents...),
+		CurrentTask:         cloneTask(a.currentTask),
+		CurrentActionID:     a.currentActionID,
+		CurrentActionCmd:    a.currentActionCmd,
+		CurrentActionParams: cloneParams(a.currentActionParams),
+		CurrentActionStart:  a.currentActionStart,
+		CurrentActionSrc:    a.currentActionSrc,
+		QueuedActionID:      a.queuedActionID,
+		QueuedGroup:         a.queuedGroup,
+		QueuedPosition:      cloneIntPtr(a.queuedPosition),
+		QueuedEstimatedWait: cloneFloat64Ptr(a.queuedEstimatedWait),
+		QueuedAt:            a.queuedAt,
+		ActionQueue:         cloneQueue(a.actionQueue),
+		DailyPlan:           a.dailyPlan,
+		CurrentDay:          a.currentDay,
+		CurrentPlanIndex:    a.currentPlanIndex,
+		CurrentSlot:         a.currentSlot,
+		RedecomposeCount:    a.redecomposeCount,
+		PrevZone:            a.prevZone,
+		PrevObjectIDs:       cloneStrings(a.prevObjectIDs),
+		PerceptionCount:     a.perceptionCount,
+		ReplanHint:          a.replanHint,
+		LastReplanAt:        a.lastReplanAt,
+		LastReplanGameTime:  a.lastReplanGameTime,
+		PendingStopActionID: a.pendingStopActionID,
+		SelfStopInProgress:  a.selfStopInProgress,
+	}
+}
+
+// --- internal helpers (assume caller holds a.mu) ---
+
+func (a *AgentState) latestTimeOfDayLocked() string {
+	return extractTimeOfDay(a.latestPerception)
+}
+
+func (a *AgentState) latestDayCountLocked() int {
+	if len(a.latestPerception) == 0 {
+		return -1
+	}
+	var p protocol.PerceptionPayload
+	if err := json.Unmarshal(a.latestPerception, &p); err != nil {
+		return -1
+	}
+	return p.Environment.DayCount
+}
+
+func (a *AgentState) latestZoneLocked() string {
+	if len(a.latestPerception) == 0 {
+		return ""
+	}
+	var p protocol.PerceptionPayload
+	if err := json.Unmarshal(a.latestPerception, &p); err != nil {
+		return ""
+	}
+	if p.Location.CurrentZone != nil {
+		return *p.Location.CurrentZone
+	}
+	return ""
+}
+
+// --- package helpers ---
+
+func extractTimeOfDay(raw json.RawMessage) string {
+	var p protocol.PerceptionPayload
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return ""
+	}
+	return formatTodSec(p.Environment.TimeOfDaySec)
+}
+
+func formatTodSec(todSec float64) string {
+	if todSec < 0 || todSec >= 86400 {
+		return ""
+	}
+	totalSec := int(todSec)
+	hh := totalSec / 3600
+	mm := (totalSec % 3600) / 60
+	return fmt.Sprintf("%02d:%02d", hh, mm)
+}
+
+func extractObjectIDs(p protocol.PerceptionPayload) []string {
+	ids := make([]string, 0, len(p.NearbyObjects))
+	for _, obj := range p.NearbyObjects {
+		if obj.ID != "" {
+			ids = append(ids, obj.ID)
+		}
+	}
+	return ids
+}
+
+func cloneRawMessage(payload json.RawMessage) json.RawMessage {
+	return append(json.RawMessage(nil), payload...)
+}
+
+func clonePhysical(physical *protocol.PhysicalState) *protocol.PhysicalState {
+	if physical == nil {
+		return nil
+	}
+	cp := *physical
+	return &cp
+}
+
+func cloneTask(task *protocol.CurrentTaskProgress) *protocol.CurrentTaskProgress {
+	if task == nil {
+		return nil
+	}
+	cp := *task
+	return &cp
+}
+
+func cloneParams(params map[string]any) map[string]any {
+	if params == nil {
+		return nil
+	}
+	cp := make(map[string]any, len(params))
+	for k, v := range params {
+		cp[k] = v
+	}
+	return cp
+}
+
+func cloneQueue(q []PlannedAction) []PlannedAction {
+	if q == nil {
+		return nil
+	}
+	cp := make([]PlannedAction, len(q))
+	for i, act := range q {
+		cp[i] = PlannedAction{
+			Action: act.Action,
+			Params: cloneParams(act.Params),
+		}
+	}
+	return cp
+}
+
+func cloneStrings(s []string) []string {
+	if s == nil {
+		return nil
+	}
+	cp := make([]string, len(s))
+	copy(cp, s)
+	return cp
+}
+
+func cloneIntPtr(p *int) *int {
+	if p == nil {
+		return nil
+	}
+	cp := *p
+	return &cp
+}
+
+func cloneFloat64Ptr(p *float64) *float64 {
+	if p == nil {
+		return nil
+	}
+	cp := *p
+	return &cp
+}

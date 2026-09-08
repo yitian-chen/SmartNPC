@@ -3,33 +3,33 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 
-	"github.com/AgentTown/agenttown-mcp/pkg/hermes"
-	"github.com/AgentTown/agenttown-mcp/pkg/protocol"
-	"github.com/AgentTown/agenttown-mcp/pkg/wsserver"
+	"github.com/AgentTown/agenttown-mcp/pkg/agentstate"
+	"github.com/AgentTown/agenttown-mcp/contract/protocol"
+	"github.com/AgentTown/agenttown-mcp/pkg/venus"
+	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
+	"github.com/AgentTown/agenttown-mcp/wsserver"
 )
 
 // ─── 战术层队列辅助与 completion 路由 ──────────────────────────
 
-// setQueueForTest 在测试中直接设置队列（绕过 mu 的 tacticalRefill 流程）。
+// setQueueForTest 在测试中直接设置队列（绕过 tacticalRefill 流程）。
 func setQueueForTest(ac *agentContext, actions []plannedAction) {
-	ac.mu.Lock()
-	ac.actionQueue = actions
-	ac.mu.Unlock()
+	ac.as.ReplaceQueue(actions)
 }
 
 func TestRecordActionCompletion_SignalsWorkerAndClearsInFlight(t *testing.T) {
 	ac, _ := newAgentContext(context.Background())
 
-	ac.mu.Lock()
-	ac.currentActionID = "act_t1"
-	ac.currentActionSrc = sourceTactical
-	ac.mu.Unlock()
+	ac.as.RecordActionStarted("act_t1", "", nil, agentstate.SourceTactical, "")
 
 	// 排空 wake 通道
 	select {
@@ -51,15 +51,12 @@ func TestRecordActionCompletion_SignalsWorkerAndClearsInFlight(t *testing.T) {
 		t.Fatal("completion should signal worker via wake channel")
 	}
 	// currentActionSrc / currentActionID 应已清空
-	ac.mu.Lock()
-	src := ac.currentActionSrc
-	id := ac.currentActionID
-	ac.mu.Unlock()
-	if src != "" {
-		t.Fatalf("currentActionSrc should be cleared, got %q", src)
+	snap := ac.as.Snapshot()
+	if snap.CurrentActionSrc != "" {
+		t.Fatalf("currentActionSrc should be cleared, got %q", snap.CurrentActionSrc)
 	}
-	if id != "" {
-		t.Fatalf("currentActionID should be cleared, got %q", id)
+	if snap.CurrentActionID != "" {
+		t.Fatalf("currentActionID should be cleared, got %q", snap.CurrentActionID)
 	}
 }
 
@@ -102,16 +99,142 @@ func TestRecordActionCompletion_FailureTriggers(t *testing.T) {
 	}
 }
 
+// TestRecordActionCompletion_FailureDetailIncludesReason 验证异常完成的 detail
+// 包含 UE 回传的 reason 字段（如"寻路不可达"），让反应层 Ollama 能看到具体失败原因。
+func TestRecordActionCompletion_FailureDetailIncludesReason(t *testing.T) {
+	ac, _ := newAgentContext(context.Background())
+	_, trigger, detail := ac.recordActionCompletion(protocol.ActionCompletedPayload{
+		ActionID: "act_fail_2", Result: protocol.ResultFailed,
+		Reason: "寻路不可达", Progress: 0.3,
+	})
+	if trigger != TriggerActionDone {
+		t.Errorf("trigger: got %q, want %q", trigger, TriggerActionDone)
+	}
+	if !strings.Contains(detail, "reason=寻路不可达") {
+		t.Errorf("detail should contain UE reason: %q", detail)
+	}
+	if !strings.Contains(detail, "result=failed") {
+		t.Errorf("detail should contain result=failed: %q", detail)
+	}
+}
+
+// TestRecordActionCompletion_FailureSetsReplanHint 验证 Fix A：失败的 in-flight
+// action 把失败上下文（cmd/semantic_group/result/reason）写入 replanHint，让下一轮
+// 战术层 LLM 看到上次失败原因、避免盲重试同一动作（如工作台被占用后无限重试 work_shift）。
+// 仅 in-flight action 写入；/debug/action 手动调试路径（WasInFlight=false）不污染 hint。
+func TestRecordActionCompletion_FailureSetsReplanHint(t *testing.T) {
+	ac, _ := newAgentContext(context.Background())
+	// 模拟战术层下发的 work_shift（被 UE 拒绝，因为工作台被占用）
+	ac.as.RecordActionStarted("act_workbench_fail", "work_shift",
+		map[string]any{"semantic_group": "workbench", "interaction": "assemble"},
+		agentstate.SourceTactical, "")
+
+	ac.recordActionCompletion(protocol.ActionCompletedPayload{
+		ActionID: "act_workbench_fail",
+		Result:   protocol.ResultFailed,
+		Reason:   "claim_queue_not_supported",
+		Progress: 0,
+	})
+
+	snap := ac.as.Snapshot()
+	hint := snap.ReplanHint
+	if hint == "" {
+		t.Fatal("ReplanHint should be set on in-flight failure (Fix A)")
+	}
+	// 应包含 cmd
+	if !strings.Contains(hint, "cmd=work_shift") {
+		t.Errorf("hint should mention cmd=work_shift: %q", hint)
+	}
+	// 应包含 semantic_group
+	if !strings.Contains(hint, "semantic_group=workbench") {
+		t.Errorf("hint should mention semantic_group=workbench: %q", hint)
+	}
+	// 应包含 result 和 reason
+	if !strings.Contains(hint, "result=failed") {
+		t.Errorf("hint should mention result=failed: %q", hint)
+	}
+	if !strings.Contains(hint, "claim_queue_not_supported") {
+		t.Errorf("hint should mention failure reason: %q", hint)
+	}
+	// 应包含"避免直接重试"的引导文本
+	if !strings.Contains(hint, "避免直接重试") {
+		t.Errorf("hint should guide LLM to avoid blind retry: %q", hint)
+	}
+}
+
+// TestRecordActionCompletion_TooTiredHintGuidesRest 验证 too_tired 失败时
+// replanHint 引导 LLM 改派休息/充电，而非重试工作（历史 bug：too_tired 时
+// hint 仍建议"直接重试同一动作"，导致 work_shift 死循环到时段切换）。
+func TestRecordActionCompletion_TooTiredHintGuidesRest(t *testing.T) {
+	ac, _ := newAgentContext(context.Background())
+	ac.as.RecordActionStarted("act_too_tired", "work_shift",
+		map[string]any{"semantic_group": "workbench", "interaction": "assemble"},
+		agentstate.SourceTactical, "")
+
+	ac.recordActionCompletion(protocol.ActionCompletedPayload{
+		ActionID: "act_too_tired",
+		Result:   protocol.ResultFailed,
+		Reason:   "too_tired",
+		Progress: 0,
+	})
+
+	snap := ac.as.Snapshot()
+	hint := snap.ReplanHint
+	if !strings.Contains(hint, "too_tired") {
+		t.Errorf("hint should mention too_tired reason: %q", hint)
+	}
+	if !strings.Contains(hint, "rest_at_residence") || !strings.Contains(hint, "charge_at_station") {
+		t.Errorf("too_tired hint should guide to rest/charge: %q", hint)
+	}
+	if strings.Contains(hint, "直接重试同一动作") {
+		t.Errorf("too_tired hint must NOT guide blind retry: %q", hint)
+	}
+}
+
+// TestRecordActionCompletion_FailureNoHintForManualAction 验证 /debug/action
+// 手动调试路径（不经 recordActionStarted，WasInFlight=false）不写 ReplanHint，
+// 避免污染下一轮战术层规划。
+func TestRecordActionCompletion_FailureNoHintForManualAction(t *testing.T) {
+	ac, _ := newAgentContext(context.Background())
+	// 不调 RecordActionStarted —— 模拟 /debug/action 直接走 ws.Call 路径
+	ac.recordActionCompletion(protocol.ActionCompletedPayload{
+		ActionID: "act_manual_fail",
+		Result:   protocol.ResultFailed,
+		Reason:   "manual test failure",
+		Progress: 0,
+	})
+	snap := ac.as.Snapshot()
+	if snap.ReplanHint != "" {
+		t.Errorf("ReplanHint should remain empty for manual /debug/action failures, got %q", snap.ReplanHint)
+	}
+}
+
+// TestRecordActionCompletion_SuccessNoReplanHint 验证成功完成不写 ReplanHint
+// （成功是常态，不应让下一轮战术层误以为上次失败）。
+func TestRecordActionCompletion_SuccessNoReplanHint(t *testing.T) {
+	ac, _ := newAgentContext(context.Background())
+	ac.as.RecordActionStarted("act_work_ok", "work_shift",
+		map[string]any{"semantic_group": "workbench", "interaction": "assemble"},
+		agentstate.SourceTactical, "")
+	ac.recordActionCompletion(protocol.ActionCompletedPayload{
+		ActionID: "act_work_ok",
+		Result:   protocol.ResultSuccess,
+		Progress: 1,
+	})
+	snap := ac.as.Snapshot()
+	if snap.ReplanHint != "" {
+		t.Errorf("ReplanHint should remain empty on success, got %q", snap.ReplanHint)
+	}
+}
+
 func TestRecordEventNotification_ReturnsTrigger(t *testing.T) {
 	ac, _ := newAgentContext(context.Background())
-	setQueueForTest(ac, []plannedAction{
+	// RefillQueue 同时设置 queue + slot；IncrementRedecomposeCount 设置计数。
+	ac.as.RefillQueue([]plannedAction{
 		{Action: "move_to", Params: map[string]any{"target": "main_workshop"}},
 		{Action: "wait", Params: map[string]any{"duration_sec": 30}},
-	})
-	ac.mu.Lock()
-	ac.currentSlot = "08:00-12:00"
-	ac.redecomposeCount = 1
-	ac.mu.Unlock()
+	}, "08:00-12:00")
+	ac.as.IncrementRedecomposeCount()
 
 	// 反应层 P0：recordEventNotification 返回 (TriggerEventNotify, detail)
 	// 供 WS handler 异步触发 reactiveRunner。本测试验证签名 + 队列不被改动。
@@ -134,19 +257,15 @@ func TestRecordEventNotification_ReturnsTrigger(t *testing.T) {
 	}
 
 	// 队列应原样保留（recordEventNotification 不再触碰战术队列）
-	ac.mu.Lock()
-	queueLen := len(ac.actionQueue)
-	slot := ac.currentSlot
-	count := ac.redecomposeCount
-	ac.mu.Unlock()
-	if queueLen != 2 {
-		t.Fatalf("queue should be preserved, got %d items", queueLen)
+	if ac.as.QueueLen() != 2 {
+		t.Fatalf("queue should be preserved, got %d items", ac.as.QueueLen())
 	}
+	_, slot, _ := ac.as.SnapshotSchedule()
 	if slot != "08:00-12:00" {
 		t.Errorf("currentSlot should be preserved, got %q", slot)
 	}
-	if count != 1 {
-		t.Errorf("redecomposeCount should be preserved, got %d", count)
+	if ac.as.RedecomposeCount() != 1 {
+		t.Errorf("redecomposeCount should be preserved, got %d", ac.as.RedecomposeCount())
 	}
 }
 
@@ -166,21 +285,19 @@ func TestPopAndSendQueueAction_RefillOnBusyRejection(t *testing.T) {
 		{Action: "wait", Params: map[string]any{"duration_sec": 90}},
 	})
 
-	// 有在途战术 action（最后一个已 pop 但未完成）
-	ac.mu.Lock()
-	ac.currentActionSrc = sourceTactical
-	ac.mu.Unlock()
+	// 模拟"上一个战术 action 已完成（currentActionID 清空）但 currentActionSrc
+	// 仍标记为 tactical"——这正是触发回填路径的场景。生产代码中 RecordActionCompletion
+	// 会同时清 currentActionSrc，此处通过 SetCurrentActionSrc 直接设置以测试防御路径。
+	ac.as.SetCurrentActionSrc(agentstate.SourceTactical)
 
 	ac.popAndSendQueueAction(context.Background(), "H-01", ws, kb, logger)
 
 	// 回填后队列仍为 3，且队首仍是第一个 action
-	ac.mu.Lock()
-	queueLen := len(ac.actionQueue)
+	queueLen := ac.as.QueueLen()
 	firstAction := ""
 	if queueLen > 0 {
-		firstAction = ac.actionQueue[0].Action
+		firstAction = ac.as.QueueSnapshot()[0].Action
 	}
-	ac.mu.Unlock()
 	if queueLen != 3 {
 		t.Fatalf("queue should be refilled to 3 after busy rejection, got %d", queueLen)
 	}
@@ -192,28 +309,265 @@ func TestPopAndSendQueueAction_RefillOnBusyRejection(t *testing.T) {
 func TestRecordActionStarted_SetsSource(t *testing.T) {
 	ac, _ := newAgentContext(context.Background())
 
-	ac.recordActionStarted("act_1", "MoveTo", map[string]any{"target": "main_workshop"}, 1, sourceTactical)
-	ac.mu.Lock()
-	src := ac.currentActionSrc
-	id := ac.currentActionID
-	ac.mu.Unlock()
-	if src != sourceTactical {
-		t.Fatalf("currentActionSrc=%q, want tactical", src)
+	ac.recordActionStarted("act_1", "MoveTo", map[string]any{"target": "main_workshop"}, 1, sourceTactical, "")
+	snap := ac.as.Snapshot()
+	if snap.CurrentActionSrc != sourceTactical {
+		t.Fatalf("currentActionSrc=%q, want tactical", snap.CurrentActionSrc)
 	}
-	if id != "act_1" {
-		t.Fatalf("currentActionID=%q, want act_1", id)
+	if snap.CurrentActionID != "act_1" {
+		t.Fatalf("currentActionID=%q, want act_1", snap.CurrentActionID)
 	}
 
-	ac.recordActionStarted("act_2", "Wait", map[string]any{"duration_sec": 30}, 2, sourceHermes)
-	ac.mu.Lock()
-	src = ac.currentActionSrc
-	id = ac.currentActionID
-	ac.mu.Unlock()
-	if src != sourceHermes {
-		t.Fatalf("currentActionSrc=%q, want hermes", src)
+	ac.recordActionStarted("act_2", "Wait", map[string]any{"duration_sec": 30}, 2, sourceTool, "")
+	snap = ac.as.Snapshot()
+	if snap.CurrentActionSrc != sourceTool {
+		t.Fatalf("currentActionSrc=%q, want mcp_tool", snap.CurrentActionSrc)
 	}
-	if id != "act_2" {
-		t.Fatalf("currentActionID=%q, want act_2", id)
+	if snap.CurrentActionID != "act_2" {
+		t.Fatalf("currentActionID=%q, want act_2", snap.CurrentActionID)
+	}
+}
+
+// TestRecordActionStarted_CompletionAlreadyArrived verifies the ultra-short-
+// action race fix: when action_completed lands in the same WS read batch as
+// the ACK (e.g. Speak, 4ms), the read loop processes the completion BEFORE
+// recordActionStarted is called. The completion handler stashes the actionID
+// in completedBeforeArm and RecordActionCompletion sees currentActionID="" →
+// wasInFlight=false. Without the fix, recordActionStarted would set
+// currentActionID anyway, and it would NEVER be cleared (completion is gone)
+// — the worker's hasInFlightAction() gate blocks forever, NPC stuck.
+//
+// With the fix: recordActionStarted detects the completedBeforeArm entry,
+// skips RecordActionStarted, and signals the worker to proceed.
+func TestRecordActionStarted_CompletionAlreadyArrived(t *testing.T) {
+	ac, _ := newAgentContext(context.Background())
+
+	// Simulate: completion arrives before recordActionStarted.
+	// recordActionCompletion stashes in completedBeforeArm (currentActionID=""
+	// so wasInFlight=false, timer not armed so it goes to completedBeforeArm).
+	ac.recordActionCompletion(protocol.ActionCompletedPayload{
+		ActionID: "act_short", Result: protocol.ResultSuccess, Progress: 1,
+	})
+
+	// Drain wake from the completion's signal().
+	select {
+	case <-ac.wake:
+	default:
+	}
+
+	// Now recordActionStarted is called (ACK was delivered, caller proceeds).
+	// This must NOT set currentActionID — the action already completed.
+	ac.recordActionStarted("act_short", "Speak", map[string]any{"content": "hi"}, 1, sourceTactical, "")
+
+	snap := ac.as.Snapshot()
+	if snap.CurrentActionID != "" {
+		t.Fatalf("currentActionID=%q, want empty (completion already arrived, must not set in-flight)", snap.CurrentActionID)
+	}
+	if snap.CurrentActionSrc != "" {
+		t.Fatalf("currentActionSrc=%q, want empty", snap.CurrentActionSrc)
+	}
+
+	// Worker should be signaled to proceed to the next queued action.
+	select {
+	case <-ac.wake:
+		// good — worker can pop the next action
+	default:
+		t.Fatal("recordActionStarted should signal worker when completion already arrived")
+	}
+
+	// completedBeforeArm entry should remain for armActionTimeout to consume
+	// (it skips arming when it finds the entry). Verify it's still there.
+	ac.coordMu.Lock()
+	_, present := ac.completedBeforeArm["act_short"]
+	ac.coordMu.Unlock()
+	if !present {
+		t.Fatal("completedBeforeArm entry consumed prematurely — armActionTimeout needs it to skip arming")
+	}
+}
+
+// TestRecordActionStarted_TOCTOU_Recovery verifies the microsecond-window
+// TOCTOU: completion arrives BETWEEN the completedBeforeArm check and
+// RecordActionStarted setting currentActionID. The second check catches it
+// and clears the stale currentActionID via ClearInFlightAction.
+func TestRecordActionStarted_TOCTOU_Recovery(t *testing.T) {
+	ac, _ := newAgentContext(context.Background())
+
+	// Pre-check: completedBeforeArm is empty, so recordActionStarted proceeds
+	// to RecordActionStarted. We simulate the completion arriving DURING
+	// RecordActionStarted by pre-arming completedBeforeArm AFTER the first
+	// check would have passed. Since we can't easily inject into the middle
+	// of recordActionStarted, we test ClearInFlightAction directly — the
+	// TOCTOU recovery primitive that recordActionStarted calls.
+	ac.as.RecordActionStarted("act_race", "Speak", map[string]any{"content": "x"}, agentstate.SourceTactical, "")
+	if !ac.as.HasInFlightAction() {
+		t.Fatal("precondition: should have in-flight action")
+	}
+
+	// Simulate: completion arrives and stashes in completedBeforeArm
+	// (currentActionID matches but the completion ran in a parallel goroutine
+	// before RecordActionStarted set the field — wasInFlight was false).
+	ac.coordMu.Lock()
+	ac.completedBeforeArm["act_race"] = struct{}{}
+	ac.coordMu.Unlock()
+
+	// TOCTOU recovery: ClearInFlightAction clears the stale currentActionID.
+	ac.as.ClearInFlightAction("act_race")
+	if ac.as.HasInFlightAction() {
+		t.Fatal("HasInFlightAction=true after ClearInFlightAction, want false (stale currentActionID cleared)")
+	}
+	snap := ac.as.Snapshot()
+	if snap.CurrentActionID != "" {
+		t.Fatalf("currentActionID=%q, want empty after TOCTOU recovery", snap.CurrentActionID)
+	}
+}
+
+// ─── slot 切换延迟 stop ──────────────────────────────────────────
+
+// setGameTimeForTest 在测试中直接设置 latestPerception，让 LatestTimeOfDay
+// 返回指定 "HH:MM"。perception_update 的 environment.time_of_day_sec 字段是当天秒数。
+func setGameTimeForTest(t *testing.T, ac *agentContext, hhmm string) {
+	t.Helper()
+	var h, m int
+	if n, err := fmt.Sscanf(hhmm, "%d:%d", &h, &m); err != nil || n != 2 {
+		t.Fatalf("invalid hhmm %q: %v", hhmm, err)
+	}
+	totalSec := h*3600 + m*60
+	raw := []byte(fmt.Sprintf(`{"environment":{"time_of_day_sec":%d}}`, totalSec))
+	if _, err := ac.as.SetPerception(raw); err != nil {
+		t.Fatalf("SetPerception: %v", err)
+	}
+}
+
+// TestAdvanceSlotIfNeeded_DelayedStopForComposite 验证 slot 切换时对长复合动作
+// 不立即发 stop，而是记录 pendingStopActionID 让 popAndSendQueueAction 延迟补发。
+// 这样 NPC 在战术层 LLM 调用期间继续旧动作，避免愣住。
+func TestAdvanceSlotIfNeeded_DelayedStopForComposite(t *testing.T) {
+	ac, _ := newAgentContext(context.Background())
+	ws := wsserver.New(wsserver.Options{}) // 未连接；本测试不验证 stop 发送
+	logger := slog.Default()
+
+	ac.as.RefillQueue([]plannedAction{{Action: "wait", Params: map[string]any{"duration_sec": 30}}}, "08:00-10:00")
+	ac.as.RecordActionStarted("act_composite_1", "WorkShift", nil, agentstate.SourceTactical, "") // 内置硬编码复合 cmd
+	setGameTimeForTest(t, ac, "10:05")                                                            // 已过 slot 结束 10:00
+
+	ac.advanceSlotIfNeeded(ws, "H-01", logger)
+
+	snap := ac.as.Snapshot()
+	pendingStop := snap.PendingStopActionID
+	currentActionID := snap.CurrentActionID
+	queueLen := ac.as.QueueLen()
+	_, slot, _ := ac.as.SnapshotSchedule()
+
+	if pendingStop != "act_composite_1" {
+		t.Errorf("pendingStopActionID=%q, want act_composite_1 (composite 应延迟 stop)", pendingStop)
+	}
+	if currentActionID != "" {
+		t.Errorf("currentActionID=%q, want empty (cleared so tacticalRefill guard passes)", currentActionID)
+	}
+	if queueLen != 0 {
+		t.Errorf("queue=%d, want 0 (cleared on slot switch)", queueLen)
+	}
+	if slot != "" {
+		t.Errorf("currentSlot=%q, want empty (cleared on slot switch)", slot)
+	}
+}
+
+// TestAdvanceSlotIfNeeded_NoPendingStopForAtomicAction 验证 slot 切换时对短动作
+// 不设置 pendingStopActionID——短动作 100ms 内自然完成，发 stop 会触发 STOP_ID_MISMATCH
+// （UE 侧短动作不设 busy_action_id）。
+func TestAdvanceSlotIfNeeded_NoPendingStopForAtomicAction(t *testing.T) {
+	ac, _ := newAgentContext(context.Background())
+	ws := wsserver.New(wsserver.Options{})
+	logger := slog.Default()
+
+	ac.as.RefillQueue(nil, "08:00-10:00")
+	ac.as.RecordActionStarted("act_speak_1", "Speak", nil, agentstate.SourceTactical, "") // 原子动作
+	setGameTimeForTest(t, ac, "10:05")
+
+	ac.advanceSlotIfNeeded(ws, "H-01", logger)
+
+	if ac.as.PendingStopActionID() != "" {
+		t.Errorf("pendingStopActionID=%q, want empty (atomic action should not delay-stop)", ac.as.PendingStopActionID())
+	}
+}
+
+// TestAdvanceSlotIfNeeded_NoActionNoPendingStop 验证 slot 切换时若没有在途 action，
+// 不设置 pendingStopActionID。
+func TestAdvanceSlotIfNeeded_NoActionNoPendingStop(t *testing.T) {
+	ac, _ := newAgentContext(context.Background())
+	ws := wsserver.New(wsserver.Options{})
+	logger := slog.Default()
+
+	ac.as.RefillQueue(nil, "08:00-10:00")
+	// currentActionID 默认为空（无在途）
+	setGameTimeForTest(t, ac, "10:05")
+
+	ac.advanceSlotIfNeeded(ws, "H-01", logger)
+
+	if ac.as.PendingStopActionID() != "" {
+		t.Errorf("pendingStopActionID=%q, want empty (no in-flight action)", ac.as.PendingStopActionID())
+	}
+}
+
+// TestRecordActionCompletion_ClearsPendingStop 验证旧 action 在 LLM 调用期间
+// 自然完成时，recordActionCompletion 清除 pendingStopActionID——避免 popAndSendQueueAction
+// 对已完成的 action 补发 stop 触发 STOP_ID_MISMATCH。
+func TestRecordActionCompletion_ClearsPendingStop(t *testing.T) {
+	ac, _ := newAgentContext(context.Background())
+
+	ac.as.SetPendingStopActionID("act_old_composite")
+
+	ac.recordActionCompletion(protocol.ActionCompletedPayload{
+		ActionID: "act_old_composite", Result: protocol.ResultSuccess, Progress: 1.0,
+	})
+
+	if ac.as.PendingStopActionID() != "" {
+		t.Errorf("pendingStopActionID=%q, want empty (cleared when old action completes naturally)", ac.as.PendingStopActionID())
+	}
+}
+
+// TestRecordActionCompletion_SelfStopSuppressesReactive 验证 slot 切换主动 stop
+// 引发的 interrupted 完成不触发反应层——计划内打断不应 replan 干扰新 action。
+func TestRecordActionCompletion_SelfStopSuppressesReactive(t *testing.T) {
+	ac, _ := newAgentContext(context.Background())
+
+	ac.as.SetSelfStopInProgress("act_stopped_by_slot_switch")
+
+	queued, trigger, _ := ac.recordActionCompletion(protocol.ActionCompletedPayload{
+		ActionID: "act_stopped_by_slot_switch",
+		Result:   protocol.ResultInterrupted, // stop 引发的完成
+		Progress: 0.5,
+	})
+
+	if !queued {
+		t.Error("queued should be true (worker signaled)")
+	}
+	if trigger != "" {
+		t.Errorf("trigger=%q, want empty (self-stop should not trigger reactive)", trigger)
+	}
+
+	if ac.as.SelfStopInProgress() != "" {
+		t.Errorf("selfStopInProgress=%q, want empty (cleared after completion)", ac.as.SelfStopInProgress())
+	}
+}
+
+// TestRecordActionCompletion_OtherFailureStillTriggers 验证非 self-stop 的异常
+// 完成仍然触发反应层（延迟 stop 改动不应影响原有失败触发逻辑）。
+func TestRecordActionCompletion_OtherFailureStillTriggers(t *testing.T) {
+	ac, _ := newAgentContext(context.Background())
+
+	// 模拟一个普通的 failed completion（非 self-stop）
+	queued, trigger, _ := ac.recordActionCompletion(protocol.ActionCompletedPayload{
+		ActionID: "act_unexpected_fail",
+		Result:   protocol.ResultFailed,
+		Progress: 0.3,
+	})
+
+	if !queued {
+		t.Error("queued should be true")
+	}
+	if trigger != TriggerActionDone {
+		t.Errorf("trigger=%q, want %q (non-self-stop failure should still trigger reactive)", trigger, TriggerActionDone)
 	}
 }
 
@@ -221,23 +575,27 @@ func TestRecordActionStarted_SetsSource(t *testing.T) {
 
 func TestMapDebugCmd(t *testing.T) {
 	cases := []struct {
-		cmd      string
-		wantCmd  string
-		wantOK   bool
+		cmd     string
+		wantCmd string
+		wantOK  bool
 	}{
+		{"generic_act", protocol.CmdGenericAct, true},
 		{"move_to", protocol.CmdMoveTo, true},
+		{"turn_to", protocol.CmdTurnTo, true},
 		{"speak", protocol.CmdSpeak, true},
-		{"interact", protocol.CmdInteractSmartObject, true},
+		{"emote", protocol.CmdEmote, true},
+		{"InteractSmartObject", protocol.CmdInteractSmartObject, true},
 		{"wait", protocol.CmdWait, true},
-		{"charge_at", protocol.CmdExecuteComposite, true},
-		{"work_assemble", protocol.CmdExecuteComposite, true},
-		{"archive_research", protocol.CmdExecuteComposite, true},
-		{"rest_idle", protocol.CmdExecuteComposite, true},
+		{"work_shift", protocol.CmdWorkShift, true},
+		{"charge_at_station", protocol.CmdChargeAtStation, true},
+		{"self_maintenance", protocol.CmdSelfMaintenance, true},
+		{"rest_at_residence", protocol.CmdRestAtResidence, true},
+		{"surf_internet", protocol.CmdSurfInternet, true},
 		{"unknown_cmd", "", false},
 		{"", "", false},
 	}
 	for _, c := range cases {
-		got, ok := mapDebugCmd(c.cmd)
+		got, ok := mapDebugCmd(c.cmd, nil, "")
 		if ok != c.wantOK {
 			t.Errorf("mapDebugCmd(%q) ok=%v, want %v", c.cmd, ok, c.wantOK)
 			continue
@@ -248,254 +606,50 @@ func TestMapDebugCmd(t *testing.T) {
 	}
 }
 
-func TestResolveDebugMoveTo_Valid(t *testing.T) {
-	kb := loadTestKB(t)
-	params := map[string]any{"target": "workbench_01"}
-	out, err := resolveDebugMoveTo(params, kb)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	dest, ok := out["dest"].([]float64)
-	if !ok {
-		t.Fatalf("dest should be []float64, got %T", out["dest"])
-	}
-	if len(dest) != 3 {
-		t.Fatalf("dest should have 3 coords, got %d", len(dest))
-	}
-	if out["target"] != "workbench_01" {
-		t.Errorf("target=%v, want workbench_01", out["target"])
-	}
-	if out["kind"] == "" {
-		t.Error("kind should not be empty for valid target")
-	}
-	if out["speed"] != "walk" {
-		t.Errorf("speed=%v, want walk", out["speed"])
-	}
-}
-
-func TestResolveDebugMoveTo_Zone(t *testing.T) {
-	kb := loadTestKB(t)
-	// main_workshop 是 zone，应返回 kind="zone"
-	out, err := resolveDebugMoveTo(map[string]any{"target": "main_workshop"}, kb)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if out["kind"] != "zone" {
-		t.Errorf("kind=%v, want zone", out["kind"])
-	}
-}
-
-func TestResolveDebugMoveTo_UnknownTarget(t *testing.T) {
-	kb := loadTestKB(t)
-	_, err := resolveDebugMoveTo(map[string]any{"target": "nonexistent_place"}, kb)
-	if err == nil {
-		t.Fatal("expected error for unknown target")
-	}
-}
-
-func TestResolveDebugMoveTo_EmptyTarget(t *testing.T) {
-	kb := loadTestKB(t)
-	_, err := resolveDebugMoveTo(map[string]any{"target": ""}, kb)
-	if err == nil {
-		t.Fatal("expected error for empty target")
-	}
-}
-
-func TestResolveDebugMoveTo_NilKB(t *testing.T) {
-	_, err := resolveDebugMoveTo(map[string]any{"target": "workbench_01"}, nil)
-	if err == nil {
-		t.Fatal("expected error when kb is nil")
-	}
-}
-
-// ─── move_to 坐标直传（v2 新功能） ──────────────────────────
-
-func TestResolveDebugMoveTo_DestCoords(t *testing.T) {
-	kb := loadTestKB(t)
-	// 直接传 dest 坐标，不走 kb 解析
-	params := map[string]any{"dest": []any{10000.0, 20000.0, 0.0}}
-	out, err := resolveDebugMoveTo(params, kb)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	dest, ok := out["dest"].([]float64)
-	if !ok {
-		t.Fatalf("dest should be []float64, got %T", out["dest"])
-	}
-	if len(dest) != 3 || dest[0] != 10000 || dest[1] != 20000 || dest[2] != 0 {
-		t.Fatalf("dest=%v, want [10000 20000 0]", dest)
-	}
-	if out["kind"] != "coord" {
-		t.Errorf("kind=%v, want coord", out["kind"])
-	}
-	if out["target"] != "" {
-		t.Errorf("target should be empty for coord mode, got %v", out["target"])
-	}
-	if out["speed"] != "walk" {
-		t.Errorf("speed=%v, want walk", out["speed"])
-	}
-}
-
-func TestResolveDebugMoveTo_DestWithIntCoords(t *testing.T) {
-	// JSON 解码整数常会变 float64，但也支持 int / int64
-	kb := loadTestKB(t)
-	params := map[string]any{"dest": []any{10000, 20000, 0}}
-	out, err := resolveDebugMoveTo(params, kb)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	dest, _ := out["dest"].([]float64)
-	if len(dest) != 3 || dest[0] != 10000 || dest[1] != 20000 {
-		t.Fatalf("dest=%v, want [10000 20000 0]", dest)
-	}
-}
-
-func TestResolveDebugMoveTo_DestWithTargetLabel(t *testing.T) {
-	// dest + target 同时传：dest 优先，target 仅作日志标签
-	kb := loadTestKB(t)
-	params := map[string]any{
-		"dest":   []any{15000.0, 11000.0, 0.0},
-		"target": "custom_spot",
-	}
-	out, err := resolveDebugMoveTo(params, kb)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if out["kind"] != "coord" {
-		t.Errorf("kind=%v, want coord (dest 优先)", out["kind"])
-	}
-	if out["target"] != "custom_spot" {
-		t.Errorf("target=%v, want custom_spot (保留标签)", out["target"])
-	}
-}
-
-func TestResolveDebugMoveTo_DestWrongLength(t *testing.T) {
-	kb := loadTestKB(t)
-	cases := [][]any{
-		{1.0, 2.0},           // 太少
-		{1.0, 2.0, 3.0, 4.0}, // 太多
-	}
-	for i, arr := range cases {
-		_, err := resolveDebugMoveTo(map[string]any{"dest": arr}, kb)
-		if err == nil {
-			t.Errorf("[%d] expected error for wrong-length dest, got nil", i)
-		}
-	}
-}
-
-func TestResolveDebugMoveTo_DestNonNumeric(t *testing.T) {
-	kb := loadTestKB(t)
-	params := map[string]any{"dest": []any{"foo", 2.0, 3.0}}
-	_, err := resolveDebugMoveTo(params, kb)
-	if err == nil {
-		t.Fatal("expected error for non-numeric dest element")
-	}
-}
-
-func TestResolveDebugMoveTo_DestNotArray(t *testing.T) {
-	kb := loadTestKB(t)
-	params := map[string]any{"dest": "not an array"}
-	_, err := resolveDebugMoveTo(params, kb)
-	if err == nil {
-		t.Fatal("expected error when dest is not an array")
-	}
-}
-
-func TestResolveDebugMoveTo_NoDestNoTarget(t *testing.T) {
-	kb := loadTestKB(t)
-	// 既没 dest 也没 target，应报错提示两种模式
-	_, err := resolveDebugMoveTo(map[string]any{}, kb)
-	if err == nil {
-		t.Fatal("expected error when neither dest nor target is provided")
-	}
-	if !strings.Contains(err.Error(), "dest") || !strings.Contains(err.Error(), "target") {
-		t.Errorf("error should mention both dest and target options, got: %v", err)
-	}
-}
-
-func TestResolveDebugMoveTo_DestNilKB(t *testing.T) {
-	// dest 模式不应依赖 kb，nil kb 也能正常工作
-	out, err := resolveDebugMoveTo(map[string]any{"dest": []any{1.0, 2.0, 3.0}}, nil)
-	if err != nil {
-		t.Fatalf("dest mode should work without kb: %v", err)
-	}
-	if out["kind"] != "coord" {
-		t.Errorf("kind=%v, want coord", out["kind"])
-	}
-}
-
-func TestParseDestCoords_FloatSlice(t *testing.T) {
-	out, err := parseDestCoords([]float64{1.5, 2.5, 3.5})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(out) != 3 || out[0] != 1.5 || out[2] != 3.5 {
-		t.Fatalf("got %v", out)
-	}
-}
-
-func TestParseDestCoords_StringNumbers(t *testing.T) {
-	// 字符串数字也应支持（容错）
-	out, err := parseDestCoords([]any{"100", "200", "0"})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if out[0] != 100 || out[1] != 200 || out[2] != 0 {
-		t.Fatalf("got %v", out)
-	}
-}
-
-func TestToFloat64_Types(t *testing.T) {
+// TestMapDebugCmd_RegistryDerived verifies mapDebugCmd resolves UE-pushed new
+// cmds via registry lookup (Phase 3).
+func TestMapDebugCmd_RegistryDerived(t *testing.T) {
+	reg := NewCapabilityRegistry(nil)
+	reg.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
+		{Cmd: protocol.CmdMoveTo, Kind: "atomic"},
+		{Cmd: "WaveHand", Kind: "atomic"},
+	})
 	cases := []struct {
-		in   any
-		want float64
-		err  bool
+		cmd     string
+		wantCmd string
+		wantOK  bool
 	}{
-		{float64(1.5), 1.5, false},
-		{int(10), 10, false},
-		{int64(20), 20, false},
-		{float32(0.5), 0.5, false},
-		{json.Number("3.14"), 3.14, false},
-		{"42", 42, false},
-		{"not a number", 0, true},
-		{nil, 0, true},
-		{[]int{1}, 0, true},
+		{"move_to", protocol.CmdMoveTo, true}, // built-in
+		{"wave_hand", "WaveHand", true},       // new cmd via registry
+		{"fly_to", "", false},                 // not in registry
 	}
-	for i, c := range cases {
-		got, err := toFloat64(c.in)
-		if c.err {
-			if err == nil {
-				t.Errorf("[%d] expected error for %v", i, c.in)
-			}
+	for _, c := range cases {
+		got, ok := mapDebugCmd(c.cmd, reg, "H-01")
+		if ok != c.wantOK {
+			t.Errorf("mapDebugCmd(%q) ok=%v, want %v", c.cmd, ok, c.wantOK)
 			continue
 		}
-		if err != nil {
-			t.Errorf("[%d] unexpected error: %v", i, err)
-		}
-		if got != c.want {
-			t.Errorf("[%d] got %v, want %v", i, got, c.want)
+		if ok && got != c.wantCmd {
+			t.Errorf("mapDebugCmd(%q) = %q, want %q", c.cmd, got, c.wantCmd)
 		}
 	}
 }
 
-func TestBuildDebugParams_CompositeAddsName(t *testing.T) {
+func TestBuildDebugParams_CompositePassthrough(t *testing.T) {
 	kb := loadTestKB(t)
-	// charge_at 应在 params 里加 name=charge_at
-	out, err := buildDebugParams("charge_at", map[string]any{
-		"station_id":   "charging_station_01",
-		"duration_min": 30,
+	// charge_at_station 应直接透传 params
+	out, err := buildDebugParams("charge_at_station", map[string]any{
+		"semantic_group": "charging_station_01",
+		"interaction":    "charge",
 	}, kb)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if out["name"] != "charge_at" {
-		t.Errorf("name=%v, want charge_at", out["name"])
+	if out["semantic_group"] != "charging_station_01" {
+		t.Errorf("semantic_group=%v, want charging_station_01", out["semantic_group"])
 	}
-	if out["station_id"] != "charging_station_01" {
-		t.Errorf("station_id=%v, want charging_station_01", out["station_id"])
-	}
-	if out["duration_min"] != 30 {
-		t.Errorf("duration_min=%v, want 30", out["duration_min"])
+	if out["interaction"] != "charge" {
+		t.Errorf("interaction=%v, want charge", out["interaction"])
 	}
 }
 
@@ -549,41 +703,41 @@ func TestAgentContext_DebugOverrideLifecycle(t *testing.T) {
 	ac, _ := newAgentContext(context.Background())
 
 	// 初始 false
-	ac.mu.Lock()
+	ac.coordMu.Lock()
 	if ac.debugOverride {
 		t.Error("debugOverride should start false")
 	}
-	ac.mu.Unlock()
+	ac.coordMu.Unlock()
 
 	// set true
-	ac.mu.Lock()
+	ac.coordMu.Lock()
 	ac.debugOverride = true
-	ac.mu.Unlock()
+	ac.coordMu.Unlock()
 
-	ac.mu.Lock()
+	ac.coordMu.Lock()
 	if !ac.debugOverride {
 		t.Error("debugOverride should be true after set")
 	}
-	ac.mu.Unlock()
+	ac.coordMu.Unlock()
 
 	// defer 模式：set true → ... → clear + signal
 	func() {
-		ac.mu.Lock()
+		ac.coordMu.Lock()
 		ac.debugOverride = true
-		ac.mu.Unlock()
+		ac.coordMu.Unlock()
 		defer func() {
-			ac.mu.Lock()
+			ac.coordMu.Lock()
 			ac.debugOverride = false
-			ac.mu.Unlock()
+			ac.coordMu.Unlock()
 			ac.signal()
 		}()
 	}()
 
-	ac.mu.Lock()
+	ac.coordMu.Lock()
 	if ac.debugOverride {
 		t.Error("debugOverride should be false after defer clear")
 	}
-	ac.mu.Unlock()
+	ac.coordMu.Unlock()
 
 	// signal 应该投递到 wake
 	select {
@@ -600,7 +754,7 @@ func boolPtr(b bool) *bool { return &b }
 func TestTacticalRefillForReplan_NoTacticalHc(t *testing.T) {
 	ac, _ := newAgentContext(context.Background())
 	// tacticalHc 默认 nil
-	ok := ac.tacticalRefillForReplan(context.Background(), "H-01", nil, nil, slog.Default(), "test hint")
+	ok := ac.tacticalRefillForReplan(context.Background(), "H-01", nil, nil, nil, slog.Default(), "test hint")
 	if ok {
 		t.Error("should return false when tacticalHc is nil")
 	}
@@ -609,11 +763,9 @@ func TestTacticalRefillForReplan_NoTacticalHc(t *testing.T) {
 func TestTacticalRefillForReplan_NoGoal(t *testing.T) {
 	ac, _ := newAgentContext(context.Background())
 	// 设置 tacticalHc 但不设 dailyPlan → selectCurrentGoal 返回 ""
-	ac.mu.Lock()
-	ac.tacticalHc = newFailedHermesClient()
-	ac.dailyPlan = ""
-	ac.mu.Unlock()
-	ok := ac.tacticalRefillForReplan(context.Background(), "H-01", nil, nil, slog.Default(), "test hint")
+	ac.tacticalHc = newFailedVenusClient()
+	ac.as.SetDailyPlan("", 0)
+	ok := ac.tacticalRefillForReplan(context.Background(), "H-01", nil, nil, nil, slog.Default(), "test hint")
 	if ok {
 		t.Error("should return false when no current goal")
 	}
@@ -627,30 +779,74 @@ func TestTacticalRefillForReplan_LLMFail(t *testing.T) {
 	setQueueForTest(ac, oldQueue)
 	// 构造一个含 time_of_day 的 perception，使 selectCurrentGoal 能匹配到 slot
 	percJSON, _ := json.Marshal(protocol.PerceptionPayload{
-		Environment: protocol.Environment{TimeOfDay: "09:00"},
+		Environment: protocol.Environment{GameTimeSec: 32400, TimeOfDaySec: 32400, DayCount: 0, TimeScale: 60},
 	})
-	ac.mu.Lock()
-	ac.tacticalHc = newFailedHermesClient()
-	ac.dailyPlan = "06:00-12:00: 上午装配\n12:00-13:00: 午休"
-	ac.latestPerception = percJSON
-	ac.mu.Unlock()
-	ok := ac.tacticalRefillForReplan(context.Background(), "H-01", nil, nil, slog.Default(), "test hint")
+	ac.tacticalHc = newFailedVenusClient()
+	ac.as.SetDailyPlan("06:00-12:00: 上午装配\n12:00-13:00: 午休", 0)
+	if _, err := ac.as.SetPerception(percJSON); err != nil {
+		t.Fatalf("SetPerception: %v", err)
+	}
+	ok := ac.tacticalRefillForReplan(context.Background(), "H-01", nil, nil, nil, slog.Default(), "test hint")
 	if ok {
 		t.Error("should return false when LLM call fails")
 	}
 	// 验证旧队列保留
-	ac.mu.Lock()
-	queueLen := len(ac.actionQueue)
-	ac.mu.Unlock()
-	if queueLen != 1 {
-		t.Errorf("old queue should be preserved on failure, got len=%d", queueLen)
+	if ac.as.QueueLen() != 1 {
+		t.Errorf("old queue should be preserved on failure, got len=%d", ac.as.QueueLen())
 	}
 }
 
-// newFailedHermesClient 构造一个指向无效端口的 hermes.Client，
+// newFailedVenusClient 构造一个指向无效端口的 venus.Client，
 // 任何 LLM 调用都会因连接失败而返回 error。
-func newFailedHermesClient() *hermes.Client {
-	return hermes.New(hermes.Config{URL: "http://127.0.0.1:1"})
+func newFailedVenusClient() *venus.Client {
+	return venus.New(venus.Config{BaseURL: "http://127.0.0.1:1"})
+}
+
+// ─── tacticalRefill replanHint 测试 ──────────────────────────────
+
+// TestTacticalRefill_ConsumesReplanHint 验证 tacticalRefill 在调用前读取
+// ac.replanHint 并在调用后清空（即使 LLM 失败也清空）。
+// 这是 P1 修复的核心：反应层 interrupt 设置的 replanHint 必须传到战术层
+// prompt，让 LLM 知道中断原因（如"疲劳>60"）从而规划休息动作。
+func TestTacticalRefill_ConsumesReplanHint(t *testing.T) {
+	ac, _ := newAgentContext(context.Background())
+	// 构造能让 selectCurrentGoal 命中的 perception + dailyPlan
+	percJSON, _ := json.Marshal(protocol.PerceptionPayload{
+		Environment: protocol.Environment{GameTimeSec: 32400, TimeOfDaySec: 32400, DayCount: 0, TimeScale: 60},
+	})
+	ac.tacticalHc = newFailedVenusClient() // LLM 必失败，但 hint 读取/清空在调用前
+	ac.as.SetDailyPlan("06:00-12:00: 上午装配\n12:00-13:00: 午休", 0)
+	if _, err := ac.as.SetPerception(percJSON); err != nil {
+		t.Fatalf("SetPerception: %v", err)
+	}
+	ac.as.SetReplanHint("疲劳=65超过60，需要休息")
+
+	_ = ac.tacticalRefill(context.Background(), "H-01", nil, nil, nil, slog.Default())
+
+	if hint := ac.as.Snapshot().ReplanHint; hint != "" {
+		t.Errorf("replanHint 应被 tacticalRefill 消费清空，仍剩 %q", hint)
+	}
+}
+
+// TestTacticalRefill_NoHintDoesNotPanic 验证无 hint 时 tacticalRefill 正常运行。
+func TestTacticalRefill_NoHintDoesNotPanic(t *testing.T) {
+	ac, _ := newAgentContext(context.Background())
+	percJSON, _ := json.Marshal(protocol.PerceptionPayload{
+		Environment: protocol.Environment{GameTimeSec: 32400, TimeOfDaySec: 32400, DayCount: 0, TimeScale: 60},
+	})
+	ac.tacticalHc = newFailedVenusClient()
+	ac.as.SetDailyPlan("06:00-12:00: 上午装配\n12:00-13:00: 午休", 0)
+	if _, err := ac.as.SetPerception(percJSON); err != nil {
+		t.Fatalf("SetPerception: %v", err)
+	}
+	// 无 hint（默认空）
+
+	// 不应 panic
+	_ = ac.tacticalRefill(context.Background(), "H-01", nil, nil, nil, slog.Default())
+
+	if hint := ac.as.Snapshot().ReplanHint; hint != "" {
+		t.Errorf("replanHint 应保持空，得到 %q", hint)
+	}
 }
 
 // ─── /debug/schedule 端点测试 ──────────────────────────────────
@@ -675,7 +871,7 @@ func TestHandleDebugSchedule_MethodNotAllowed(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/debug/schedule", nil)
 	rec := httptest.NewRecorder()
 	ws := wsserver.New(wsserver.Options{})
-	handleDebugSchedule(context.Background(), slog.Default(), ws, nil, nil, rec, req)
+	handleDebugSchedule(context.Background(), slog.Default(), ws, nil, nil, nil, rec, req)
 
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("status: got %d, want 405", rec.Code)
@@ -692,7 +888,7 @@ func TestHandleDebugSchedule_MethodNotAllowed(t *testing.T) {
 func TestHandleDebugSchedule_InvalidJSON(t *testing.T) {
 	req, rec := newDebugScheduleRecorder(t, "{not json")
 	ws := wsserver.New(wsserver.Options{})
-	handleDebugSchedule(context.Background(), slog.Default(), ws, nil, nil, rec, req)
+	handleDebugSchedule(context.Background(), slog.Default(), ws, nil, nil, nil, rec, req)
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status: got %d, want 400", rec.Code)
@@ -709,7 +905,7 @@ func TestHandleDebugSchedule_InvalidJSON(t *testing.T) {
 func TestHandleDebugSchedule_MissingAgentID(t *testing.T) {
 	req, rec := newDebugScheduleRecorder(t, `{"schedule":"07:00-11:00: 装配"}`)
 	ws := wsserver.New(wsserver.Options{})
-	handleDebugSchedule(context.Background(), slog.Default(), ws, nil, nil, rec, req)
+	handleDebugSchedule(context.Background(), slog.Default(), ws, nil, nil, nil, rec, req)
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status: got %d, want 400", rec.Code)
@@ -724,7 +920,7 @@ func TestHandleDebugSchedule_MissingAgentID(t *testing.T) {
 func TestHandleDebugSchedule_MissingSchedule(t *testing.T) {
 	req, rec := newDebugScheduleRecorder(t, `{"agent_id":"H-01"}`)
 	ws := wsserver.New(wsserver.Options{})
-	handleDebugSchedule(context.Background(), slog.Default(), ws, nil, nil, rec, req)
+	handleDebugSchedule(context.Background(), slog.Default(), ws, nil, nil, nil, rec, req)
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status: got %d, want 400", rec.Code)
@@ -742,7 +938,7 @@ func TestHandleDebugSchedule_MultiLineRejected(t *testing.T) {
 	body := `{"agent_id":"H-01","schedule":"07:00-11:00: 装配\n13:00-17:00: 巡检"}`
 	req, rec := newDebugScheduleRecorder(t, body)
 	ws := wsserver.New(wsserver.Options{})
-	handleDebugSchedule(context.Background(), slog.Default(), ws, nil, nil, rec, req)
+	handleDebugSchedule(context.Background(), slog.Default(), ws, nil, nil, nil, rec, req)
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status: got %d, want 400", rec.Code)
@@ -761,7 +957,7 @@ func TestHandleDebugSchedule_PureGoalAccepted(t *testing.T) {
 	body := `{"agent_id":"H-01","schedule":"车间装配作业"}`
 	req, rec := newDebugScheduleRecorder(t, body)
 	ws := wsserver.New(wsserver.Options{})
-	handleDebugSchedule(context.Background(), slog.Default(), ws, nil, nil, rec, req)
+	handleDebugSchedule(context.Background(), slog.Default(), ws, nil, nil, nil, rec, req)
 
 	// 纯 goal 合法，应到达 ws 检查返回 503（而非 400）
 	if rec.Code != http.StatusServiceUnavailable {
@@ -777,7 +973,7 @@ func TestHandleDebugSchedule_BadSlotFallsBackToPureGoal(t *testing.T) {
 	body := `{"agent_id":"H-01","schedule":"07-11: 装配作业"}`
 	req, rec := newDebugScheduleRecorder(t, body)
 	ws := wsserver.New(wsserver.Options{})
-	handleDebugSchedule(context.Background(), slog.Default(), ws, nil, nil, rec, req)
+	handleDebugSchedule(context.Background(), slog.Default(), ws, nil, nil, nil, rec, req)
 
 	// 格式非法的 slot → 降级为纯 goal → 合法 → 503
 	if rec.Code != http.StatusServiceUnavailable {
@@ -791,15 +987,15 @@ func TestHandleDebugSchedule_UENotConnected(t *testing.T) {
 	body := `{"agent_id":"H-01","schedule":"07:00-11:00: 车间装配作业"}`
 	req, rec := newDebugScheduleRecorder(t, body)
 	ws := wsserver.New(wsserver.Options{}) // 未连接
-	handleDebugSchedule(context.Background(), slog.Default(), ws, nil, nil, rec, req)
+	handleDebugSchedule(context.Background(), slog.Default(), ws, nil, nil, nil, rec, req)
 
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status: got %d, want 503", rec.Code)
 	}
 	var resp debugScheduleResponse
 	json.Unmarshal(rec.Body.Bytes(), &resp)
-	if !strings.Contains(resp.Error, "no mock ue") {
-		t.Errorf("error=%q, want contain 'no mock ue'", resp.Error)
+	if !strings.Contains(resp.Error, "no ue") {
+		t.Errorf("error=%q, want contain 'no ue'", resp.Error)
 	}
 }
 
@@ -814,7 +1010,7 @@ func TestHandleDebugSchedule_OrderWSBeforeLookup(t *testing.T) {
 	ws := wsserver.New(wsserver.Options{}) // 未连接
 	// lookupAgent 返回 nil，但 ws 检查在前，应返回 503 而非 404
 	lookup := func(string) *agentContext { return nil }
-	handleDebugSchedule(context.Background(), slog.Default(), ws, nil, lookup, rec, req)
+	handleDebugSchedule(context.Background(), slog.Default(), ws, nil, lookup, nil, rec, req)
 
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status: got %d, want 503 (ws check before lookup)", rec.Code)
@@ -854,7 +1050,7 @@ func TestHandleDebugSchedule_SingleLineParseValid(t *testing.T) {
 	body := `{"agent_id":"H-01","schedule":"07:00-11:00: 车间装配作业"}`
 	req, rec := newDebugScheduleRecorder(t, body)
 	ws := wsserver.New(wsserver.Options{})
-	handleDebugSchedule(context.Background(), slog.Default(), ws, nil, nil, rec, req)
+	handleDebugSchedule(context.Background(), slog.Default(), ws, nil, nil, nil, rec, req)
 
 	// 应通过 schedule 校验，到达 ws 检查返回 503（而非 400）
 	if rec.Code != http.StatusServiceUnavailable {
@@ -911,5 +1107,460 @@ func TestParseScheduleText(t *testing.T) {
 				t.Errorf("goal: got %q, want %q", goal, c.wantGoal)
 			}
 		})
+	}
+}
+
+// ─── world_kb handler (worldKBSwap) ─────────────────────────────
+
+// buildWorldKBPayload 构造一个合法的 world_kb payload（最小 generated+authored）。
+func buildWorldKBPayload(t *testing.T) []byte {
+	t.Helper()
+	gen := map[string]any{
+		"$schema": "agenttown-world-generated/v1", "schema_version": "1.0",
+		"zones": []map[string]any{
+			{"id": "zone1", "bounds": map[string]any{"center": []int{0, 0, 0}, "extent": []int{1, 1, 1}},
+				"entry_point": []int{0, 0, 0}, "entry_facing": []int{1, 0, 0}},
+		},
+		"objects": []map[string]any{}, "agents": []map[string]any{},
+	}
+	auth := map[string]any{
+		"version": "1.0", "narrative": map[string]any{"setting": "测试", "theme": "t"},
+		"zones":   map[string]any{"zone1": map[string]any{"display_name": "Z1"}},
+		"objects": map[string]any{}, "agents": map[string]any{},
+	}
+	p := protocol.WorldKBPayload{
+		PushedAt:  "2026-07-31T03:00:00Z",
+		Generated: mustJSON(t, gen),
+		Authored:  mustJSON(t, auth),
+	}
+	out, err := json.Marshal(p)
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	return out
+}
+
+func mustJSON(t *testing.T, v any) json.RawMessage {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	return b
+}
+
+// TestWorldKBSwap_AcceptedBeforeAgentRegistered 验证启动窗口内接受 world_kb：
+// 返回非 nil KB + 无错误 + YAML 落盘可重载。
+func TestWorldKBSwap_AcceptedBeforeAgentRegistered(t *testing.T) {
+	dir := t.TempDir()
+	outPath := dir + "/world_kb.yaml"
+	manifestPath := dir + "/world_kb.manifest.json"
+	payload := buildWorldKBPayload(t)
+
+	newKB, _, err := worldKBSwap(false, payload, outPath, manifestPath)
+	if err != nil {
+		t.Fatalf("worldKBSwap: %v", err)
+	}
+	if newKB == nil {
+		t.Fatal("newKB should not be nil on success")
+	}
+	if len(newKB.Zones) != 1 || newKB.Zones[0].ID != "zone1" {
+		t.Errorf("zone mismatch: %+v", newKB.Zones)
+	}
+	if newKB.GetZone("zone1") == nil {
+		t.Error("index not built — GetZone returned nil")
+	}
+	// YAML 落盘可重载。
+	reloaded, err := worldkb.Load(outPath)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if reloaded.Narrative.Setting != "测试" {
+		t.Errorf("narrative.setting = %q, want 测试", reloaded.Narrative.Setting)
+	}
+	// Manifest 落盘。
+	if _, err := os.Stat(manifestPath); err != nil {
+		t.Errorf("manifest not written: %v", err)
+	}
+}
+
+// TestWorldKBSwap_RejectedAfterAgentRegistered 验证首个 agent_registered
+// 之后到达的 world_kb 被拒绝：返回 errAgentWindowClosed + 不写盘。
+func TestWorldKBSwap_RejectedAfterAgentRegistered(t *testing.T) {
+	dir := t.TempDir()
+	outPath := dir + "/world_kb.yaml"
+	payload := buildWorldKBPayload(t)
+
+	_, _, err := worldKBSwap(true, payload, outPath, "")
+	if !errors.Is(err, errAgentWindowClosed) {
+		t.Fatalf("expected errAgentWindowClosed, got: %v", err)
+	}
+	// 不应写盘。
+	if _, statErr := os.Stat(outPath); statErr == nil {
+		t.Error("out file should NOT exist after rejection")
+	}
+}
+
+// TestWorldKBSwap_BadPayloadPreservesOldKB 验证 payload 损坏时返回错误
+// 且不写盘（调用方据此保留旧 KB）。
+func TestWorldKBSwap_BadPayloadPreservesOldKB(t *testing.T) {
+	dir := t.TempDir()
+	outPath := dir + "/world_kb.yaml"
+
+	_, _, err := worldKBSwap(false, json.RawMessage("{not json"), outPath, "")
+	if err == nil {
+		t.Fatal("expected parse error for malformed payload")
+	}
+	if errors.Is(err, errAgentWindowClosed) {
+		t.Fatal("parse error should not be masked as window-closed")
+	}
+	if _, statErr := os.Stat(outPath); statErr == nil {
+		t.Error("out file should NOT exist after parse failure")
+	}
+}
+
+// TestWorldKBSwap_MergeErrorPreservesOldKB 验证 merge 失败（dangling
+// authored id — authored 引用 generated 不存在的实体）时返回错误且不写盘。
+// 历史上用 schema_version 9.9 vs 1.0 触发 fatal，但重构后版本不一致降级为
+// warning（不再 fatal），故改用 dangling authored 触发真正的 merge error。
+func TestWorldKBSwap_MergeErrorPreservesOldKB(t *testing.T) {
+	dir := t.TempDir()
+	outPath := dir + "/world_kb.yaml"
+
+	// generated 含 zone1；authored 引用不存在的 ghost_zone → dangling fatal。
+	gen := map[string]any{
+		"schema_version": "1.0",
+		"zones": []map[string]any{
+			{"id": "zone1", "bounds": map[string]any{"center": []int{0, 0, 0}, "extent": []int{1, 1, 1}},
+				"entry_point": []int{0, 0, 0}, "entry_facing": []int{1, 0, 0}},
+		},
+		"objects": []map[string]any{}, "agents": []map[string]any{},
+	}
+	auth := map[string]any{
+		"version": "1.0", "narrative": map[string]any{"setting": "x"},
+		"zones": map[string]any{
+			"ghost_zone": map[string]any{"display_name": "Ghost"},
+		},
+		"objects": map[string]any{}, "agents": map[string]any{},
+	}
+	p := protocol.WorldKBPayload{
+		Generated: mustJSON(t, gen),
+		Authored:  mustJSON(t, auth),
+	}
+	payload, _ := json.Marshal(p)
+
+	_, _, err := worldKBSwap(false, payload, outPath, "")
+	if err == nil {
+		t.Fatal("expected merge error for dangling authored id")
+	}
+	if errors.Is(err, errAgentWindowClosed) {
+		t.Fatal("merge error should not be masked as window-closed")
+	}
+	if _, statErr := os.Stat(outPath); statErr == nil {
+		t.Error("out file should NOT exist after merge failure")
+	}
+}
+
+// ─── idleWaitSeconds 测试已移除：函数本身已删除（长复合动作持续到时段切换
+//     由 advanceSlotIfNeeded 打断，短动作队列空时由 tacticalRefill 重新分解，
+//     不再发 idle wait）。
+
+// TestFormatTodSec 验证 time_of_day_sec → "HH:MM" 转换（约定 19）。
+func TestFormatTodSec(t *testing.T) {
+	cases := []struct {
+		todSec float64
+		want   string
+	}{
+		{0, "00:00"},
+		{21600, "06:00"},
+		{32400, "09:00"},
+		{50400, "14:00"},
+		{51780, "14:23"},
+		{86399, "23:59"},
+		{-1, ""},    // 越界
+		{86400, ""}, // 越界
+	}
+	for _, c := range cases {
+		if got := formatTodSec(c.todSec); got != c.want {
+			t.Errorf("formatTodSec(%v) = %q, want %q", c.todSec, got, c.want)
+		}
+	}
+}
+
+// TestExtractTimeOfDay_NewEnvShape 验证按约定 19 新 environment 字段
+// (time_of_day_sec 等派生字段) 提取 "HH:MM" 时间。
+func TestExtractTimeOfDay_NewEnvShape(t *testing.T) {
+	raw := json.RawMessage(`{"environment":{"game_time_sec":32400,"time_of_day_sec":32400,"day_count":0,"time_scale":60}}`)
+	if got := extractTimeOfDay(raw); got != "09:00" {
+		t.Errorf("extractTimeOfDay = %q, want 09:00", got)
+	}
+}
+
+// TestExtractTimeOfDay_LegacyEmptyEnv 验证 environment 缺失时返回 "00:00"
+// （零值为合法时间 00:00，不视为错误——约定 19 假定 UE 每次都携带 environment）。
+func TestExtractTimeOfDay_LegacyEmptyEnv(t *testing.T) {
+	raw := json.RawMessage(`{"location":{}}`)
+	if got := extractTimeOfDay(raw); got != "00:00" {
+		t.Errorf("extractTimeOfDay on empty env = %q, want 00:00 (zero value)", got)
+	}
+}
+
+// setPerceptionForDayTest 在 ac 注入同时含 time_of_day_sec 和 day_count 的
+// perception payload，用于跨日检测测试。
+func setPerceptionForDayTest(t *testing.T, ac *agentContext, hhmm string, dayCount int) {
+	t.Helper()
+	var h, m int
+	if n, err := fmt.Sscanf(hhmm, "%d:%d", &h, &m); err != nil || n != 2 {
+		t.Fatalf("invalid hhmm %q: %v", hhmm, err)
+	}
+	totalSec := h*3600 + m*60
+	raw := []byte(fmt.Sprintf(
+		`{"environment":{"game_time_sec":%d,"time_of_day_sec":%d,"day_count":%d,"time_scale":60}}`,
+		dayCount*86400+totalSec, totalSec, dayCount))
+	if _, err := ac.as.SetPerception(raw); err != nil {
+		t.Fatalf("SetPerception: %v", err)
+	}
+}
+
+// TestDetectDayRollover_FirstSyncNoRollover 验证首条 perception 到达时
+// （currentDay 从 -1 同步到实际 day_count）不触发重新规划——worker 启动时
+// 已调过 generateDailyPlan 规划当天。
+func TestDetectDayRollover_FirstSyncNoRollover(t *testing.T) {
+	ac, _ := newAgentContext(context.Background())
+	if ac.as.CurrentDay() != -1 {
+		t.Fatalf("initial currentDay = %d, want -1", ac.as.CurrentDay())
+	}
+	setPerceptionForDayTest(t, ac, "06:30", 0)
+	rollover, prev, newDay := ac.detectDayRollover()
+	if rollover {
+		t.Errorf("first sync should not trigger rollover; got rollover=true prev=%d newDay=%d", prev, newDay)
+	}
+	if prev != -1 {
+		t.Errorf("prevDay = %d, want -1", prev)
+	}
+	if newDay != 0 {
+		t.Errorf("newDay = %d, want 0", newDay)
+	}
+	if ac.as.CurrentDay() != 0 {
+		t.Errorf("after first sync currentDay = %d, want 0", ac.as.CurrentDay())
+	}
+}
+
+// TestDetectDayRollover_SameDayNoRollover 验证同一天内多次 perception 不触发。
+func TestDetectDayRollover_SameDayNoRollover(t *testing.T) {
+	ac, _ := newAgentContext(context.Background())
+	// currentDay=0 表示"首日已规划"；SetDailyPlan 同时设置 plan + day。
+	ac.as.SetDailyPlan("", 0)
+	setPerceptionForDayTest(t, ac, "10:00", 0)
+	rollover, _, _ := ac.detectDayRollover()
+	if rollover {
+		t.Errorf("same day should not trigger rollover")
+	}
+	if ac.as.CurrentDay() != 0 {
+		t.Errorf("currentDay = %d, want 0", ac.as.CurrentDay())
+	}
+}
+
+// TestDetectDayRollover_DayIncrementTriggersRollover 验证 day_count 递增
+// （跨日）触发 rollover=true 并更新 currentDay。
+func TestDetectDayRollover_DayIncrementTriggersRollover(t *testing.T) {
+	ac, _ := newAgentContext(context.Background())
+	ac.as.SetDailyPlan("", 0)                  // 首日已规划
+	setPerceptionForDayTest(t, ac, "06:00", 1) // 第二天 06:00
+	rollover, prev, newDay := ac.detectDayRollover()
+	if !rollover {
+		t.Errorf("day_count 0→1 should trigger rollover; got false prev=%d newDay=%d", prev, newDay)
+	}
+	if prev != 0 {
+		t.Errorf("prevDay = %d, want 0", prev)
+	}
+	if newDay != 1 {
+		t.Errorf("newDay = %d, want 1", newDay)
+	}
+	if ac.as.CurrentDay() != 1 {
+		t.Errorf("after rollover currentDay = %d, want 1", ac.as.CurrentDay())
+	}
+}
+
+// TestDetectDayRollover_NoPerceptionNoRollover 验证 latestPerception 为空时
+// 不触发（day_count 解析失败返回 -1，-1 <= prev 恒真）。
+func TestDetectDayRollover_NoPerceptionNoRollover(t *testing.T) {
+	ac, _ := newAgentContext(context.Background())
+	ac.as.SetDailyPlan("", 0)
+	rollover, _, _ := ac.detectDayRollover()
+	if rollover {
+		t.Errorf("empty perception should not trigger rollover")
+	}
+	if ac.as.CurrentDay() != 0 {
+		t.Errorf("currentDay = %d, want 0 (unchanged)", ac.as.CurrentDay())
+	}
+}
+
+// ─── auto_queue (约定21) ────────────────────────────────────────
+
+// TestShouldAutoQueue verifies that shouldAutoQueue always returns false
+// after the 2026-08-11 migration: envelope-level auto_queue is deprecated,
+// auto_queue is now exclusively a params-level field (per UE5's
+// capability_registry schema). The function is kept as a no-op to avoid
+// churning call sites; the envelope-level AutoQueue field relies on
+// omitempty + always-false to be omitted from JSON.
+func TestShouldAutoQueue(t *testing.T) {
+	cases := []struct {
+		cmd string
+	}{
+		{protocol.CmdWorkShift},
+		{protocol.CmdChargeAtStation},
+		{protocol.CmdSelfMaintenance},
+		{protocol.CmdRestAtResidence},
+		{protocol.CmdSurfInternet},
+		{protocol.CmdInteractSmartObject},
+		{protocol.CmdMoveTo},
+		{protocol.CmdTurnTo},
+		{protocol.CmdSpeak},
+		{protocol.CmdEmote},
+		{protocol.CmdWait},
+		{protocol.CmdGenericAct},
+		{"UnknownCmd"},
+	}
+	for _, tc := range cases {
+		if got := shouldAutoQueue(tc.cmd); got != false {
+			t.Errorf("shouldAutoQueue(%q) = %v, want false (envelope-level auto_queue deprecated)", tc.cmd, got)
+		}
+	}
+}
+
+// ─── duration 到点 hint ────────────────────────────────────
+
+func TestTimeStopReplanHint(t *testing.T) {
+	// 复合长动作：cmd 反查工具名 + params 拼语义组/交互 + 时长分钟数。
+	h := timeStopReplanHint("RestAtResidence", map[string]any{
+		"semantic_group": "sleep_pod",
+		"interaction":    "meditate",
+	}, 3000)
+	for _, want := range []string{
+		"rest_at_residence",
+		"semantic_group=sleep_pod",
+		"interaction=meditate",
+		"约 50 分钟",
+		"请避免连续相同长工作且中间无休息",
+	} {
+		if !strings.Contains(h, want) {
+			t.Errorf("hint missing %q: %s", want, h)
+		}
+	}
+	// 未知 cmd：CmdToToolName 回退到 snake_case（"SomeNewCmd"→"some_new_cmd"）。
+	h2 := timeStopReplanHint("SomeNewCmd", nil, 0)
+	if !strings.Contains(h2, "some_new_cmd") || strings.Contains(h2, "约") {
+		t.Errorf("unknown-cmd fallback hint wrong: %s", h2)
+	}
+}
+
+// TestCheckTimeToStop_KeepsQueue 验证 duration 到点后只打断当前段、
+// 保留队列与 currentSlot（多段计划 工作→小憩→工作 的核心路径）：到点后
+// in-flight 清空、pendingStop 已设、队列仍可顺序弹出下一段。
+func TestCheckTimeToStop_KeepsQueue(t *testing.T) {
+	ac, _ := newAgentContext(context.Background())
+	logger := slog.Default()
+
+	// 队列只含剩余段：当前工作段（act-work）已下发（in-flight），
+	// 队列里是 小憩段 + 返回工作段。
+	ac.as.RefillQueue([]plannedAction{
+		{Action: "InteractSmartObject", Params: map[string]any{"semantic_group": "bench", "interaction": "rest"}},
+		{Action: "work_shift", Params: map[string]any{"semantic_group": "workbench", "interaction": "assemble"}},
+	}, "09:00-12:00")
+	ac.as.RecordActionStarted("act-work", "WorkShift", map[string]any{"semantic_group": "workbench"}, agentstate.SourceTactical, "tool-1")
+	ac.as.ArmTimeStop("act-work", 40000, 3600) // target=40000
+
+	// 感知 game_time_sec=41000 > target → 到点。
+	raw := []byte(`{"environment":{"game_time_sec":41000}}`)
+	if _, err := ac.as.SetPerception(raw); err != nil {
+		t.Fatalf("SetPerception: %v", err)
+	}
+
+	ac.checkTimeToStop("H-01", logger)
+
+	if ac.as.HasInFlightAction() {
+		t.Error("HasInFlightAction = true after checkTimeToStop, want false")
+	}
+	if !ac.as.HasQueueNext() {
+		t.Error("HasQueueNext = false after checkTimeToStop, want true (queue preserved)")
+	}
+	next, pendingStop, ok := ac.as.PopActionIfIdle()
+	if !ok || next.Action != "InteractSmartObject" {
+		t.Errorf("PopActionIfIdle = (%q, ok=%v), want next segment InteractSmartObject", next.Action, ok)
+	}
+	if pendingStop != "act-work" {
+		t.Errorf("pendingStop = %q, want act-work (deferred stop for interrupted segment)", pendingStop)
+	}
+	if _, _, _, armed := ac.as.TimeStop(); armed {
+		t.Error("TimeStop still armed after checkTimeToStop, want cleared")
+	}
+	// currentSlot 保留（不触发时段切换）。
+	_, slot, _ := ac.as.SnapshotSchedule()
+	if slot != "09:00-12:00" {
+		t.Errorf("slot = %q, want 09:00-12:00 preserved", slot)
+	}
+}
+
+// ─── dialogueTargetAvailable ─────────────────────────────────
+
+func TestDialogueTargetAvailable(t *testing.T) {
+	// 保存并恢复全局，避免污染其他测试。
+	orig := lookupAgentRef
+	defer func() { lookupAgentRef = orig }()
+
+	// 构造一个"空闲"的目标 agentContext（dialogue 为 nil 或 phase=none）。
+	mkAgent := func(id string) *agentContext {
+		as := agentstate.New()
+		as.SetIdentity(id, nil)
+		return &agentContext{as: as}
+	}
+
+	// 1. lookupAgentRef 为 nil → 未启用检查，直接放行。
+	lookupAgentRef = nil
+	if !dialogueTargetAvailable("H-02") {
+		t.Error("nil lookupAgentRef should return true (check disabled)")
+	}
+
+	// 2. 目标不存在 → false。
+	lookupAgentRef = func(id string) *agentContext {
+		m := map[string]*agentContext{"H-02": mkAgent("H-02")}
+		return m[id]
+	}
+	if dialogueTargetAvailable("H-99") {
+		t.Error("unknown target should be unavailable")
+	}
+
+	// 3. 目标空闲（无 dialogue）→ true。
+	if !dialogueTargetAvailable("H-02") {
+		t.Error("idle target should be available")
+	}
+
+	// 4. 目标已在对话中（dialogue.active()=true）→ false。
+	busy := mkAgent("H-02")
+	busy.dialogue = &dialogueRunner{phase: phaseActive}
+	lookupAgentRef = func(id string) *agentContext {
+		if id == "H-02" {
+			return busy
+		}
+		return nil
+	}
+	if dialogueTargetAvailable("H-02") {
+		t.Error("target already in dialogue should be unavailable")
+	}
+
+	// 5. 目标已下线（stopped=true）→ false。
+	stopped := mkAgent("H-02")
+	stopped.coordMu.Lock()
+	stopped.stopped = true
+	stopped.coordMu.Unlock()
+	lookupAgentRef = func(id string) *agentContext {
+		if id == "H-02" {
+			return stopped
+		}
+		return nil
+	}
+	if dialogueTargetAvailable("H-02") {
+		t.Error("stopped target should be unavailable")
 	}
 }

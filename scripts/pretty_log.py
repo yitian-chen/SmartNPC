@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""pretty_log.py — 可读化查看 sim.log（JSON Lines）。
+"""pretty_log.py — 可读化查看 debug-mcp.log（JSON Lines）。
 
-sim.log 每行是一条 JSON，单行可能上千字（perception text 完整不截断）。
+debug-mcp.log 每行是一条 JSON，单行可能上千字（perception text 完整不截断）。
 本脚本提供两种查看方式：
 
 1. HTML 报告（推荐，--html）：生成独立 HTML 文件并自动打开浏览器。
@@ -14,19 +14,28 @@ sim.log 每行是一条 JSON，单行可能上千字（perception text 完整不
 
 2. 终端渲染（默认）：每条日志渲染成多行彩色文本。
 
+DEPRECATED 提示（2026-08）：
+    Hermes Gateway 已移除，MCP 直连 Venus。新日志使用 [MCP→LLM/...] 和
+    [LLM→MCP/...] 中性标签，不再产生 [MCP→Hermes/...] 或 Hermes/internal
+    条目。本脚本仍保留 --hermes 参数与旧标签解析能力，仅供查看历史日志
+    使用；后续版本可能删除。新日志的 LLM 标签可由 PERCEPTION / RESPONSE
+    / TOOL / STRATEGIC / TACTICAL 等通用过滤器匹配。
+
 用法：
     # HTML 报告（推荐）
     python scripts/pretty_log.py --html                   # 今天的日志
     python scripts/pretty_log.py --html 2026-07-20        # 指定日期
     python scripts/pretty_log.py --html -f PERCEPTION     # 只看 PERCEPTION
+    python scripts/pretty_log.py --html -a H-01           # 只看 H-01 相关日志
     python scripts/pretty_log.py --html -o report.html    # 指定输出路径
     python scripts/pretty_log.py --html --no-open         # 生成但不自动打开
-    python scripts/pretty_log.py --html --hermes          # 整合 Hermes 容器日志
-    python scripts/pretty_log.py --html --dev             # dev 实例（logs-dev/ + h01-dev）
+    python scripts/pretty_log.py --html --hermes          # 整合 Hermes 容器日志（DEPRECATED，仅历史日志）
+    python scripts/pretty_log.py --html --stable          # stable 实例（logs/ + h01）
 
     # 终端渲染
-    python scripts/pretty_log.py                          # 查看今天的 sim.log
+    python scripts/pretty_log.py                          # 查看今天的 debug-mcp.log（默认 logs-dev/）
     python scripts/pretty_log.py -f PERCEPTION -n 50      # 最近 50 条 PERCEPTION
+    python scripts/pretty_log.py -a H-02 -n 20            # 最近 20 条 H-02 日志
     python scripts/pretty_log.py --raw                    # 原始 JSON
 
 方向过滤器（-f）支持的简写（不区分大小写）：
@@ -38,7 +47,8 @@ sim.log 每行是一条 JSON，单行可能上千字（perception text 完整不
     HERMES      Hermes/internal（Hermes 容器内部日志：LLM 调用/工具错误/Turn 结束）
     HEARTBEAT   心跳（默认隐藏，可显式过滤查看）
 
-整合 Hermes 日志（--hermes）：
+整合 Hermes 日志（--hermes，DEPRECATED）：
+    Hermes Gateway 已移除，仅供解析历史日志使用。
     默认读取 hermes/profiles/h01/logs/agent.log（容器内 UTC，自动转 +08:00 合并排序）。
     默认只保留 agent.conversation_loop / agent.tool_executor / run_agent /
     POST /v1/responses 行，以及任何 ERROR/WARNING；其余噪声（插件注册、健康检查、
@@ -71,7 +81,7 @@ _DIRECTION_ALIASES = {
     "MCP→UE": "MCP→UE",
     "PERCEPTION": "MCP→Hermes/PERCEPTION",
     "RESPONSE": "Hermes→MCP/RESPONSE",
-    "TOOL": "Hermes→MCP/TOOL",
+    "TOOL": ["LLM→MCP/TOOL", "Hermes→MCP/TOOL"],
     "STRATEGIC-PROMPT": "MCP→Hermes/STRATEGIC-PROMPT",
     "STRATEGIC-RESPONSE": "Hermes→MCP/STRATEGIC-RESPONSE",
     "TACTICAL-PROMPT": "MCP→Hermes/TACTICAL-PROMPT",
@@ -92,6 +102,9 @@ _DIRECTION_CSS = {
     "MCP→Hermes/PERCEPTION": "dir-perception",
     "Hermes→MCP/RESPONSE": "dir-response",
     "Hermes→MCP/TOOL": "dir-tool",
+    "LLM→MCP/TOOL": "dir-tool",
+    "MCP→LLM/PERCEPTION": "dir-perception",
+    "LLM→MCP/RESPONSE": "dir-response",
     "MCP→Hermes/STRATEGIC-PROMPT": "dir-strategic",
     "Hermes→MCP/STRATEGIC-RESPONSE": "dir-strategic",
     "MCP→Hermes/TACTICAL-PROMPT": "dir-tactical",
@@ -211,7 +224,7 @@ def render_line(line: str, color: bool, show_source: bool = False) -> str:
 
     header = f"{time_s} {level} {msg_s}{source_s}"
 
-    skip = {"time", "level", "msg", "source", "_direction", "_game_time", "_raw"}
+    skip = {"time", "level", "msg", "source", "_direction", "_game_time", "_agent", "_raw"}
     parts = [header]
     for k in rec:
         if k in skip:
@@ -242,10 +255,13 @@ def render_line(line: str, color: bool, show_source: bool = False) -> str:
 # ── 过滤与路径解析 ────────────────────────────────────────────────────
 def _match_filter(rec: dict, f: str) -> bool:
     f_lower = f.lower()
+    msg = str(rec.get("msg", ""))
     for alias, full in _DIRECTION_ALIASES.items():
         if f_lower == alias.lower():
-            return full in str(rec.get("msg", ""))
-    return f in str(rec.get("msg", ""))
+            if isinstance(full, list):
+                return any(x in msg for x in full)
+            return full in msg
+    return f in msg
 
 
 def _hide_heartbeat(rec: dict, explicit_heartbeat: bool) -> bool:
@@ -255,10 +271,11 @@ def _hide_heartbeat(rec: dict, explicit_heartbeat: bool) -> bool:
     return "heartbeat" in msg
 
 
-def _resolve_log_path(arg: str | None, dev: bool = False) -> Path:
-    # dev 实例：logs-dev/YYYY-MM-DD/debug-mcp.log
-    # stable 实例：logs/YYYY-MM-DD/sim.log
-    log_dir, log_name = ("logs-dev", "debug-mcp.log") if dev else ("logs", "sim.log")
+def _resolve_log_path(arg: str | None, stable: bool = False) -> Path:
+    # 默认 dev 实例：logs-dev/YYYY-MM-DD/debug-mcp.log
+    # stable 实例（--stable）：logs/YYYY-MM-DD/debug-mcp.log
+    log_dir = "logs" if stable else "logs-dev"
+    log_name = "debug-mcp.log"
     if arg is None:
         today = _dt.date.today().isoformat()
         return Path(log_dir) / today / log_name
@@ -317,7 +334,35 @@ def _extract_game_time(rec: dict) -> str:
     return ""
 
 
-def _collect_records(log_path: Path, filt: str | None, tail: int | None) -> list[dict]:
+def _extract_agent_id(rec: dict) -> str:
+    """从日志记录提取 agent_id（H-01/H-02/H-03 或 system）。
+
+    优先级：
+    1. 顶层 agent_id 字段（perception_update/action_command/战略/战术/反应层等）
+    2. payload 内的 agent_id（部分消息嵌套在 payload 里）
+    3. text 字段中【NPC 名】模式（perception 叙事开头常有「我是老陈」等，不解析）
+    """
+    aid = rec.get("agent_id", "")
+    if isinstance(aid, str) and aid:
+        return aid
+    # payload 内查找（action_command 等消息 agent_id 在 payload）
+    payload = rec.get("payload", "")
+    if isinstance(payload, str) and payload.startswith("{"):
+        try:
+            obj = json.loads(payload)
+            aid = obj.get("agent_id", "")
+            if isinstance(aid, str) and aid:
+                return aid
+        except Exception:
+            pass
+    elif isinstance(payload, dict):
+        aid = payload.get("agent_id", "")
+        if isinstance(aid, str) and aid:
+            return aid
+    return ""
+
+
+def _collect_records(log_path: Path, filt: str | None, tail: int | None, agent: str | None = None) -> list[dict]:
     """读取日志文件，返回匹配的记录列表（已解析为 dict，含 game_time）。"""
     f_lower = (filt or "").lower()
     explicit_heartbeat = f_lower == "heartbeat"
@@ -336,6 +381,10 @@ def _collect_records(log_path: Path, filt: str | None, tail: int | None) -> list
             if filt and not _match_filter(rec, filt):
                 continue
             if _hide_heartbeat(rec, explicit_heartbeat):
+                continue
+            # 提取 agent_id 并填充到 _agent 字段（用于 HTML 筛选）
+            rec["_agent"] = _extract_agent_id(rec)
+            if agent and rec["_agent"] != agent:
                 continue
             # 提取游戏时间（仅记录本身有则填充，不做相邻填充）
             rec["_game_time"] = _extract_game_time(rec)
@@ -552,7 +601,7 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
-<title>sim.log 报告 — {title}</title>
+<title>debug-mcp.log 报告 — {title}</title>
 <style>
 :root {{
   --bg: #1e1e1e;
@@ -575,6 +624,10 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
   --strategic: #b267e6;
   --tactical: #f4a261;
   --reactive: #56c8d8;
+  --agent-h01: #4ec9b0;
+  --agent-h02: #dcdcaa;
+  --agent-h03: #c586c0;
+  --agent-system: #888;
 }}
 * {{ box-sizing: border-box; }}
 body {{
@@ -659,6 +712,15 @@ body {{
   font-size: 11px; flex-shrink: 0;
   border: 1px solid rgba(78, 201, 176, 0.3);
 }}
+.entry-agent {{
+  font-size: 11px; flex-shrink: 0;
+  padding: 1px 6px; border-radius: 3px;
+  font-weight: bold;
+}}
+.entry-agent.agent-H-01 {{ color: var(--agent-h01); background: rgba(78, 201, 176, 0.1); border: 1px solid rgba(78, 201, 176, 0.3); }}
+.entry-agent.agent-H-02 {{ color: var(--agent-h02); background: rgba(220, 220, 170, 0.1); border: 1px solid rgba(220, 220, 170, 0.3); }}
+.entry-agent.agent-H-03 {{ color: var(--agent-h03); background: rgba(197, 134, 192, 0.1); border: 1px solid rgba(197, 134, 192, 0.3); }}
+.entry-agent.agent-system {{ color: var(--agent-system); background: rgba(136, 136, 136, 0.1); border: 1px solid rgba(136, 136, 136, 0.3); }}
 .entry-level {{ width: 44px; flex-shrink: 0; font-weight: bold; }}
 .entry.level-INFO .entry-level {{ color: var(--info); }}
 .entry.level-WARN .entry-level {{ color: var(--warn); }}
@@ -700,7 +762,7 @@ body {{
 </head>
 <body>
 <div class="toolbar">
-  <h1>sim.log — {title}</h1>
+  <h1>debug-mcp.log — {title}</h1>
   <input type="text" id="search" placeholder="搜索（正则）..." />
   <button class="filter-btn active" data-filter="ALL">全部</button>
   <button class="filter-btn" data-filter="UE→MCP">UE→MCP</button>
@@ -715,6 +777,9 @@ body {{
   <select id="game-time-filter" title="按游戏时间过滤">
     <option value="ALL">游戏时间：全部</option>
   </select>
+  <select id="agent-filter" title="按 NPC 过滤">
+    <option value="ALL">NPC：全部</option>
+  </select>
   <span class="stats" id="stats"></span>
 </div>
 <div class="container" id="container">{entries}</div>
@@ -723,23 +788,40 @@ const entries = document.querySelectorAll('.entry');
 const stats = document.getElementById('stats');
 const search = document.getElementById('search');
 const gameTimeFilter = document.getElementById('game-time-filter');
+const agentFilter = document.getElementById('agent-filter');
 let currentFilter = 'ALL';
 let currentSearch = '';
 let currentGameTime = 'ALL';
+let currentAgent = 'ALL';
 
-// 收集所有出现过的游戏时间，填充下拉框
+// 收集所有出现过的游戏时间与 agent_id，填充下拉框
 (function() {{
   const times = new Set();
+  const agents = new Set();
   entries.forEach(e => {{
     const gt = e.dataset.gametime || '';
+    const ag = e.dataset.agent || '';
     if (gt) times.add(gt);
+    if (ag) agents.add(ag);
   }});
-  const sorted = Array.from(times).sort();
-  sorted.forEach(t => {{
+  const sortedTimes = Array.from(times).sort();
+  sortedTimes.forEach(t => {{
     const opt = document.createElement('option');
     opt.value = t;
     opt.textContent = t;
     gameTimeFilter.appendChild(opt);
+  }});
+  // agent 按字母序，但 H-01/H-02/H-03 优先于 system
+  const sortedAgents = Array.from(agents).sort((a, b) => {{
+    if (a === 'system') return 1;
+    if (b === 'system') return -1;
+    return a.localeCompare(b);
+  }});
+  sortedAgents.forEach(a => {{
+    const opt = document.createElement('option');
+    opt.value = a;
+    opt.textContent = a;
+    agentFilter.appendChild(opt);
   }});
 }})();
 
@@ -749,6 +831,7 @@ function applyFilters() {{
     const dir = e.dataset.direction || '';
     const text = e.dataset.searchtext || '';
     const gt = e.dataset.gametime || '';
+    const ag = e.dataset.agent || '';
     let show = true;
     if (currentFilter !== 'ALL') {{
       const filterMap = {{
@@ -756,7 +839,7 @@ function applyFilters() {{
         'MCP→UE': 'MCP→UE',
         'PERCEPTION': 'MCP→Hermes/PERCEPTION',
         'RESPONSE': 'Hermes→MCP/RESPONSE',
-        'TOOL': 'Hermes→MCP/TOOL',
+        'TOOL': ['LLM→MCP/TOOL', 'Hermes→MCP/TOOL'],
         'STRATEGIC': ['MCP→Hermes/STRATEGIC-PROMPT', 'Hermes→MCP/STRATEGIC-RESPONSE', '[战略层]'],
         'TACTICAL': ['MCP→Hermes/TACTICAL-PROMPT', 'Hermes→MCP/TACTICAL-RESPONSE', '[战术层]'],
         'REACTIVE': ['[反应层/PROMPT]', '[反应层/RESPONSE]', '[反应层/触发]', '[反应层/决策]', '[反应层/失败]', '[反应层]'],
@@ -767,6 +850,9 @@ function applyFilters() {{
     }}
     if (show && currentGameTime !== 'ALL') {{
       show = gt === currentGameTime;
+    }}
+    if (show && currentAgent !== 'ALL') {{
+      show = ag === currentAgent;
     }}
     if (show && currentSearch) {{
       try {{
@@ -791,6 +877,11 @@ document.querySelectorAll('.filter-btn').forEach(btn => {{
 
 gameTimeFilter.addEventListener('change', () => {{
   currentGameTime = gameTimeFilter.value;
+  applyFilters();
+}});
+
+agentFilter.addEventListener('change', () => {{
+  currentAgent = agentFilter.value;
   applyFilters();
 }});
 
@@ -883,9 +974,11 @@ def _entry_html(rec: dict) -> str:
 
     # 游戏时间（仅 perception_update / PERCEPTION 有）
     game_time = rec.get("_game_time", "")
+    # agent_id（perception_update/action_command/战略/战术/反应层等）
+    agent_id = rec.get("_agent", "")
 
     # body：所有字段
-    skip = {"time", "level", "msg", "source", "_game_time", "_direction", "_raw"}
+    skip = {"time", "level", "msg", "source", "_game_time", "_direction", "_raw", "_agent"}
     body_parts = []
     for k in rec:
         if k in skip:
@@ -927,11 +1020,13 @@ def _entry_html(rec: dict) -> str:
         f'<div class="entry {css_dir} level-{level}" '
         f'data-direction="{_html.escape(direction)}" '
         f'data-gametime="{_html.escape(game_time)}" '
+        f'data-agent="{_html.escape(agent_id)}" '
         f'data-searchtext="{_html.escape(search_text)}">'
         f'<div class="entry-header">'
         f'<span class="entry-time">{_html.escape(time_s)}</span>'
         f'<span class="entry-level">{_html.escape(level)}</span>'
-        f'<span class="entry-msg">{_html.escape(header_msg)}</span>'
+        + (f'<span class="entry-agent agent-{_html.escape(agent_id)}">{_html.escape(agent_id)}</span>' if agent_id else '')
+        + f'<span class="entry-msg">{_html.escape(header_msg)}</span>'
         + (f'<span class="entry-game-time">🎮 {_html.escape(game_time)}</span>' if game_time else '')
         + f'<span class="entry-meta">{_html.escape(meta_s)}</span>'
         f'</div>'
@@ -990,7 +1085,7 @@ def _open_in_browser(path: Path) -> bool:
 # ── 主入口 ────────────────────────────────────────────────────────────
 def main() -> int:
     ap = argparse.ArgumentParser(
-        description="可读化查看 sim.log（JSON Lines）",
+        description="可读化查看 debug-mcp.log（JSON Lines）",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
@@ -1001,6 +1096,7 @@ def main() -> int:
         help="日志文件路径或日期（如 2026-07-20）；默认今天",
     )
     ap.add_argument("-f", "--filter", help="按方向或 msg 子串过滤")
+    ap.add_argument("-a", "--agent", help="按 NPC agent_id 过滤（如 H-01/H-02/H-03）；system 为系统消息")
     ap.add_argument("-n", "--tail", type=int, help="只显示最后 N 条")
     ap.add_argument("--no-color", action="store_true", help="禁用颜色（终端模式）")
     ap.add_argument("--raw", action="store_true", help="原始 JSON，不渲染")
@@ -1013,7 +1109,7 @@ def main() -> int:
     ap.add_argument(
         "-o",
         "--output",
-        help="HTML 输出路径（仅 --html 模式）；默认 logs/YYYY-MM-DD/sim_report.html",
+        help="HTML 输出路径（仅 --html 模式）；默认 logs-dev/YYYY-MM-DD/sim_report.html",
     )
     ap.add_argument(
         "--no-open",
@@ -1023,30 +1119,31 @@ def main() -> int:
     ap.add_argument(
         "--hermes",
         action="store_true",
-        help="整合 Hermes 容器日志（hermes/profiles/h01/logs/agent.log）按时间合并",
+        help="(DEPRECATED) 整合 Hermes 容器日志（hermes/profiles/h01/logs/agent.log）"
+             "按时间合并。Hermes Gateway 已移除，仅供解析历史日志使用。",
     )
     ap.add_argument(
         "--hermes-log",
-        help="Hermes 日志路径（默认 hermes/profiles/h01/logs/agent.log）",
+        help="(DEPRECATED) Hermes 日志路径（默认 hermes/profiles/h01/logs/agent.log）",
     )
     ap.add_argument(
         "--hermes-all",
         action="store_true",
-        help="显示 Hermes 日志全部条目（默认只保留 LLM 决策相关 + WARNING/ERROR）",
+        help="(DEPRECATED) 显示 Hermes 日志全部条目（默认只保留 LLM 决策相关 + WARNING/ERROR）",
     )
     ap.add_argument(
-        "--dev",
+        "--stable",
         action="store_true",
-        help="查看 dev 实例日志（默认 logs-dev/YYYY-MM-DD/debug-mcp.log；--hermes 默认 h01-dev profile）",
+        help="查看 stable 实例日志（默认 logs-dev/YYYY-MM-DD/debug-mcp.log；--stable 切到 logs/；--hermes 默认 h01 profile）",
     )
     args = ap.parse_args()
 
-    log_path = _resolve_log_path(args.path, dev=args.dev)
+    log_path = _resolve_log_path(args.path, stable=args.stable)
     if not log_path.exists():
         print(f"日志文件不存在：{log_path}", file=sys.stderr)
         return 1
 
-    records = _collect_records(log_path, args.filter, args.tail)
+    records = _collect_records(log_path, args.filter, args.tail, agent=args.agent)
 
     # 整合 Hermes 日志
     if args.hermes or args.hermes_log or args.hermes_all:
@@ -1054,10 +1151,10 @@ def main() -> int:
             hermes_path = Path(args.hermes_log)
         else:
             # 默认位置：项目根 hermes/profiles/<profile>/logs/agent.log
-            # dev 实例用 h01-dev profile，stable 用 h01
+            # stable 实例用 h01 profile，默认（dev）用 h01-dev
             # 从 sim.log 路径回推项目根（logs/YYYY-MM-DD/sim.log → ../..）
             project_root = log_path.parent.parent.parent
-            profile = "h01-dev" if args.dev else "h01"
+            profile = "h01" if args.stable else "h01-dev"
             hermes_path = project_root / "hermes" / "profiles" / profile / "logs" / "agent.log"
         if not hermes_path.exists():
             print(f"警告：Hermes 日志不存在：{hermes_path}", file=sys.stderr)

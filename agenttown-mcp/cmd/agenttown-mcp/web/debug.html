@@ -71,7 +71,15 @@
     max-width: 1400px;
     margin: 0 auto;
   }
-  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+  .panel-request   { grid-row: 1 / span 2; grid-column: 1; }
+  .panel-schedule  { grid-row: 1; grid-column: 2; }
+  .panel-response  { grid-row: 2; grid-column: 2; }
+  .panel-tactical { grid-column: 1 / -1; }
+  .panel-logs      { grid-column: 1 / -1; }
+  @media (max-width: 900px) {
+    main { grid-template-columns: 1fr; }
+    .panel-request, .panel-schedule, .panel-response { grid-row: auto; grid-column: 1; }
+  }
   .panel {
     background: var(--panel);
     border: 1px solid var(--border);
@@ -87,6 +95,22 @@
     letter-spacing: 0.5px;
   }
   .field { margin-bottom: 14px; }
+  .plan-item {
+    display: flex;
+    gap: 12px;
+    padding: 8px 12px;
+    border-left: 3px solid transparent;
+    border-radius: 4px;
+    align-items: baseline;
+  }
+  .plan-item.current {
+    border-left-color: var(--accent);
+    background: rgba(255,255,255,0.05);
+  }
+  .plan-item.past { color: var(--text-muted); opacity: 0.6; }
+  .plan-time { font-family: monospace; color: var(--text-muted); min-width: 130px; font-size: 13px; }
+  .plan-item.current .plan-time { color: var(--accent); font-weight: 600; }
+  .plan-goal { flex: 1; word-break: break-word; }
   .field label {
     display: block;
     font-size: 13px;
@@ -200,6 +224,88 @@
     padding: 20px;
     text-align: center;
   }
+  .tac-entry {
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--accent);
+    border-radius: 4px;
+    padding: 10px 12px;
+    margin-bottom: 8px;
+    background: var(--panel-2);
+    font-size: 13px;
+  }
+  .tac-entry .tac-header {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    margin-bottom: 4px;
+    flex-wrap: wrap;
+  }
+  .tac-agent {
+    font-weight: bold;
+    color: var(--accent);
+  }
+  .tac-time, .tac-slot, .tac-inflight, .tac-qlen {
+    color: var(--text-muted);
+    font-size: 12px;
+    font-family: "Consolas", "Monaco", monospace;
+  }
+  .tac-inflight { color: #c9a227; }
+  .tac-inflight-line {
+    color: #c9a227;
+    font-family: "Consolas", "Monaco", monospace;
+    font-size: 12px;
+    margin: 4px 0;
+    word-break: break-all;
+  }
+  .tac-inflight-line.muted { color: var(--text-muted); }
+  .tac-inflight-line .tac-action { color: #e0a800; white-space: nowrap; }
+  .tac-qlen { color: var(--text-muted); }
+  .tac-goal { color: var(--text); margin: 4px 0; word-break: break-word; }
+  .tac-goal.muted, .tac-slot.muted, .tac-queue.muted { color: var(--text-muted); }
+  .tac-queue {
+    background: var(--code-bg);
+    border-radius: 3px;
+    padding: 6px 8px;
+    margin-top: 6px;
+    font-family: "Consolas", "Monaco", monospace;
+    font-size: 12px;
+    color: var(--text-muted);
+  }
+  .tac-task { display: flex; gap: 8px; align-items: baseline; }
+  .tac-action { color: var(--accent); white-space: nowrap; }
+  .tac-params { color: var(--text-muted); word-break: break-all; }
+  .count-badge {
+    display: inline-block;
+    background: var(--err);
+    color: #fff;
+    padding: 1px 8px;
+    border-radius: 10px;
+    font-size: 11px;
+    font-weight: 600;
+    margin-left: 6px;
+    vertical-align: middle;
+  }
+  .metrics-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+    font-family: "Consolas", "Monaco", monospace;
+    margin-bottom: 10px;
+  }
+  .metrics-table th, .metrics-table td {
+    padding: 5px 8px;
+    text-align: right;
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+  }
+  .metrics-table th {
+    color: var(--text-muted);
+    font-weight: 600;
+  }
+  .metrics-table th:first-child, .metrics-table td:first-child {
+    text-align: left;
+  }
+  .metrics-table tr:hover td { background: rgba(255,255,255,0.03); }
   .curl-preview {
     margin-top: 12px;
     padding-top: 12px;
@@ -227,6 +333,77 @@
   .history-item .ok { color: var(--ok); }
   .history-item .fail { color: var(--err); }
   #history-list { max-height: 300px; overflow-y: auto; }
+
+  /* ─── MCP 日志面板 ─── */
+  .log-filter-bar {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    margin-bottom: 10px;
+    flex-wrap: wrap;
+  }
+  .log-filter-btn {
+    background: var(--panel-2);
+    color: var(--text-muted);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 4px 12px;
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+    font-family: inherit;
+  }
+  .log-filter-btn:hover:not(.active) { color: var(--text); border-color: var(--accent); }
+  .log-filter-btn.active {
+    background: var(--accent);
+    color: #fff;
+    border-color: var(--accent);
+  }
+  .log-filter-hint { color: var(--text-muted); font-size: 12px; margin-left: 6px; }
+  #log-list {
+    max-height: 500px;
+    overflow-y: auto;
+    font-family: "Consolas", "Monaco", monospace;
+    font-size: 12px;
+  }
+  .log-entry {
+    display: flex;
+    gap: 8px;
+    padding: 4px 8px;
+    border-bottom: 1px solid var(--border);
+    align-items: baseline;
+    word-break: break-word;
+  }
+  .log-entry:hover { background: var(--panel-2); }
+  .log-entry:last-child { border-bottom: none; }
+  .log-level {
+    display: inline-block;
+    min-width: 48px;
+    text-align: center;
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-size: 11px;
+    font-weight: 600;
+    color: #fff;
+    flex-shrink: 0;
+  }
+  .log-level-debug { background: #6c757d; }
+  .log-level-info  { background: var(--accent); }
+  .log-level-warn  { background: var(--warn); }
+  .log-level-error { background: var(--err); }
+  .log-time {
+    color: var(--text-muted);
+    flex-shrink: 0;
+  }
+  .log-msg {
+    color: var(--text);
+    flex-shrink: 0;
+  }
+  .log-attrs {
+    color: var(--text-muted);
+    font-size: 11px;
+    min-width: 0;
+  }
 </style>
 </head>
 <body>
@@ -238,7 +415,7 @@
 
 <main>
   <!-- 左侧：表单 -->
-  <section class="panel">
+  <section class="panel panel-request">
     <h2>请求</h2>
 
     <div class="tabs">
@@ -249,22 +426,17 @@
     <div id="tab-action">
     <div class="field">
       <label for="agent_id">agent_id <span class="req">*</span></label>
-      <input type="text" id="agent_id" value="H-01" />
-      <div class="hint">UE 注册的 agent id（当前固定 H-01）</div>
+      <input type="text" id="agent_id" list="agent_id-list" autocomplete="off" placeholder="输入任意 agent id（已注册的在下方下拉）" />
+      <datalist id="agent_id-list"></datalist>
+      <div class="hint">允许填入未注册的 agent id 方便调试；已注册列表来自 /debug/agents（每 5s 刷新）</div>
     </div>
 
     <div class="field">
       <label for="cmd">cmd <span class="req">*</span></label>
       <select id="cmd" onchange="onCmdChange()">
-        <option value="move_to">move_to — 移动到目标位置</option>
-        <option value="speak">speak — 说话</option>
-        <option value="interact">interact — 与智能物体交互</option>
-        <option value="wait">wait — 原地等待</option>
-        <option value="charge_at">charge_at — 充电（复合）</option>
-        <option value="work_assemble">work_assemble — 工作台装配（复合）</option>
-        <option value="archive_research">archive_research — 档案研究（复合）</option>
-        <option value="rest_idle">rest_idle — 休息（复合）</option>
+        <!-- 由 rebuildCmdDropdown() 从 /debug/cap 动态填充 -->
       </select>
+      <div class="hint">工具列表来自 capability_registry（每 5s 轮询 /debug/cap 自动更新）</div>
     </div>
 
     <div id="params-form">
@@ -295,8 +467,8 @@
     <div id="tab-schedule" style="display:none">
       <div class="field">
         <label for="sched-agent">agent_id <span class="req">*</span></label>
-        <input type="text" id="sched-agent" value="H-01" />
-        <div class="hint">UE 注册的 agent id（当前固定 H-01）</div>
+        <select id="sched-agent"></select>
+        <div class="hint">已注册的 agent（来自 /debug/agents，每 5s 刷新）</div>
       </div>
 
       <div class="field">
@@ -327,8 +499,21 @@
     </div><!-- /tab-schedule -->
   </section>
 
-  <!-- 右侧：响应 + 历史 -->
-  <section class="panel">
+  <!-- 右侧上：当日 schedule -->
+  <section class="panel panel-schedule">
+    <h2>当日 schedule <span id="plan-game-time" class="count-badge" style="display:none;background:var(--accent);">--:--</span></h2>
+    <div class="field" style="margin-bottom:10px;">
+      <label for="plan-agent">agent</label>
+      <select id="plan-agent" onchange="onPlanAgentChange()" style="width:auto;min-width:120px;">
+      </select>
+    </div>
+    <div id="plan-list">
+      <div class="empty-state">等待战略层生成当日计划（06:00 触发）</div>
+    </div>
+  </section>
+
+  <!-- 右侧下：响应 + 历史 -->
+  <section class="panel panel-response">
     <h2>响应</h2>
     <div id="response-area">
       <div class="empty-state">尚未发送请求</div>
@@ -339,20 +524,71 @@
       <div class="empty-state">无历史记录</div>
     </div>
   </section>
+
+  <!-- 全宽：战术层分解情况 -->
+  <section class="panel panel-tactical" style="grid-column: 1 / -1;">
+    <h2>战术层分解情况 <span id="tactical-count" class="count-badge" style="display:none; background: var(--accent);">0</span></h2>
+    <div class="hint" style="margin-bottom:10px;">
+      每个 NPC 当前时段 goal 与战术层分解出的待执行任务队列（每 5s 刷新）
+    </div>
+    <div id="tactical-list">
+      <div class="empty-state">暂无战术层分解数据</div>
+    </div>
+  </section>
+
+  <!-- 全宽：LLM 服务指标 -->
+  <section class="panel panel-llm-metrics" style="grid-column: 1 / -1;">
+    <h2>LLM 服务指标 <span id="llm-metrics-count" class="count-badge" style="display:none; background: var(--accent);">0</span></h2>
+    <div class="hint" style="margin-bottom:10px;">
+      各层 E2E/TTFT/TPOT/ITL 分位数（ms）、错误类型分布、重试率、JSON 正确率（每 5s 刷新；TTFT/TPOT/ITL 仅 --tactical-stream 流式下可得）
+    </div>
+    <div id="llm-metrics-list">
+      <div class="empty-state">暂无 LLM 调用数据</div>
+    </div>
+  </section>
+
+  <!-- 全宽：MCP 日志 -->
+  <section class="panel panel-logs" style="grid-column: 1 / -1;">
+    <h2>MCP 日志 <span id="log-count" class="count-badge" style="display:none; background: var(--accent);">0</span></h2>
+    <div class="log-filter-bar">
+      <button class="log-filter-btn active" data-level="ALL" onclick="setLogFilter('ALL')">全部</button>
+      <button class="log-filter-btn" data-level="DEBUG" onclick="setLogFilter('DEBUG')">DEBUG</button>
+      <button class="log-filter-btn" data-level="INFO" onclick="setLogFilter('INFO')">INFO</button>
+      <button class="log-filter-btn" data-level="WARN" onclick="setLogFilter('WARN')">WARN</button>
+      <button class="log-filter-btn" data-level="ERROR" onclick="setLogFilter('ERROR')">ERROR</button>
+      <span class="log-filter-hint">环形缓冲最近 500 条，长字段值已截断；完整日志见 sim.log</span>
+    </div>
+    <div id="log-list">
+      <div class="empty-state">暂无日志</div>
+    </div>
+  </section>
 </main>
 
 <script>
 // ─── 全局状态 ────────────────────────────────────────────
-let kbData = { zones: [], locations: [], objects: [] };
+let kbData = { zones: [], objects: [] };
+let capData = { agents: {} }; // capability_registry 快照（来自 /debug/cap）
+let capVersion = ''; // capability 版本号（cmd 列表 hash），用于变化检测
 let history = []; // 最近 20 条
+let logEntries = []; // MCP 日志条目（来自 /debug/logs）
+let logFilter = 'ALL'; // 当前日志筛选级别
+let planData = { items: [], current_idx: -1, auto_plan: true, game_time: '' };
+let planAgentID = 'H-01';
+let registeredAgents = ['H-01']; // 已注册 agent 列表（来自 /debug/agents）
 
 // ─── 初始化 ──────────────────────────────────────────────
 async function init() {
-  await Promise.all([loadStatus(), loadKB()]);
+  await Promise.all([loadStatus(), loadKB(), loadCap(), loadTactical(), loadLogs(), loadPlan(), loadAgents(), loadLLMMetrics()]);
   onCmdChange();
   updateSchedCurlPreview();
-  // 定时刷新状态徽章（每 5s）
+  // 定时刷新状态徽章 + capability + 战术层分解 + MCP 日志 + schedule + agent 列表 + LLM 指标（每 5s）
   setInterval(loadStatus, 5000);
+  setInterval(loadCap, 5000);
+  setInterval(loadTactical, 5000);
+  setInterval(loadLogs, 5000);
+  setInterval(loadPlan, 5000);
+  setInterval(loadAgents, 5000);
+  setInterval(loadLLMMetrics, 5000);
 }
 
 async function loadStatus() {
@@ -383,206 +619,520 @@ async function loadKB() {
   }
 }
 
+// ─── capability 加载和 cmd 下拉动态构建 ─────────────────
+async function loadCap() {
+  try {
+    const r = await fetch('/debug/cap');
+    if (!r.ok) return;
+    const j = await r.json();
+    const newVersion = computeCapVersion(j);
+    if (newVersion !== capVersion) {
+      capVersion = newVersion;
+      capData = j || { agents: {} };
+      rebuildCmdDropdown();
+    }
+  } catch (e) {
+    console.warn('loadCap failed:', e);
+  }
+}
+
+// ─── 战术层分解情况加载和渲染 ────────────────────────────
+async function loadTactical() {
+  try {
+    const r = await fetch('/debug/tactical');
+    if (!r.ok) return;
+    const j = await r.json();
+    renderTactical(Array.isArray(j) ? j : []);
+  } catch (e) {
+    console.warn('loadTactical failed:', e);
+  }
+}
+
+// 把工具参数渲染成可读的 key=value 字符串，完整展示不截断
+// （speak 的 content 较长，靠 CSS word-break 换行）。
+function fmtTacticalParams(params) {
+  if (!params || !Object.keys(params).length) return '';
+  return Object.entries(params).map(([k, v]) => {
+    const s = typeof v === 'object' ? JSON.stringify(v) : String(v);
+    return `${escapeHtml(k)}=${escapeHtml(s)}`;
+  }).join(' ');
+}
+
+function renderTactical(entries) {
+  const list = document.getElementById('tactical-list');
+  const badge = document.getElementById('tactical-count');
+  if (!entries.length) {
+    list.innerHTML = '<div class="empty-state">暂无战术层分解数据</div>';
+    badge.style.display = 'none';
+    return;
+  }
+  badge.style.display = '';
+  badge.textContent = entries.length;
+  list.innerHTML = entries.map(e => {
+    const slot = e.current_slot ? `<span class="tac-slot">${escapeHtml(e.current_slot)}</span>` : '<span class="tac-slot muted">未命中时段</span>';
+    const goal = e.current_goal
+      ? `<div class="tac-goal">当前目标：${escapeHtml(e.current_goal)}</div>`
+      : '<div class="tac-goal muted">暂无当前目标（计划未生成或处于规划窗口）</div>';
+    const inflight = e.in_flight
+      ? `<div class="tac-inflight-line">执行中: <span class="tac-action">${escapeHtml(e.in_flight_cmd || e.in_flight.slice(0, 18))}</span>${fmtTacticalParams(e.in_flight_params) ? ` <span class="tac-params">${fmtTacticalParams(e.in_flight_params)}</span>` : ''}</div>`
+      : '<div class="tac-inflight-line muted">当前无在途 action</div>';
+    const queue = (e.queue || []).map(a => {
+      const params = fmtTacticalParams(a.params);
+      return `<div class="tac-task"><span class="tac-action">${escapeHtml(a.action)}</span>${params ? `<span class="tac-params">${params}</span>` : ''}</div>`;
+    }).join('');
+    const queueBody = e.queue_len > 0
+      ? `<div class="tac-queue">${queue}</div>`
+      : '<div class="tac-queue muted">队列为空（等待分解）</div>';
+    return `<div class="tac-entry">
+      <div class="tac-header">
+        <span class="tac-agent">${escapeHtml(e.agent_id)}</span>
+        <span class="tac-time">${escapeHtml(e.game_time || '--:--')}</span>
+        ${slot}
+        <span class="tac-qlen">队列 ${e.queue_len}</span>
+      </div>
+      ${inflight}
+      ${goal}
+      ${queueBody}
+    </div>`;
+  }).join('');
+}
+
+// ─── LLM 服务指标加载和渲染 ────────────────────────────
+async function loadLLMMetrics() {
+  try {
+    const r = await fetch('/debug/llm-metrics');
+    if (!r.ok) return;
+    const j = await r.json();
+    renderLLMMetrics(j);
+  } catch (e) {
+    console.warn('loadLLMMetrics failed:', e);
+  }
+}
+
+const LLM_LAYER_ORDER = ['strategic', 'tactical', 'dialogue'];
+const LLM_LAYER_NAMES = { strategic: '战略层', tactical: '战术层', dialogue: '对话层', unknown: '未知' };
+const LLM_ERR_KEYS = ['success', 'bad_json_4001', 'empty_completion', 'empty_result', 'rate_limited', 'timeout', 'http_error', 'network', 'other'];
+
+function fmtMs(v) {
+  if (v == null) return '-';
+  return Number(v).toFixed(1);
+}
+function fmtPct(v) {
+  if (v == null) return '-';
+  return (Number(v) * 100).toFixed(1) + '%';
+}
+
+function renderLLMMetrics(rep) {
+  const list = document.getElementById('llm-metrics-list');
+  const badge = document.getElementById('llm-metrics-count');
+  const layers = (rep && rep.layers) || {};
+  const ids = LLM_LAYER_ORDER.filter(l => layers[l]);
+  for (const k of Object.keys(layers)) if (!ids.includes(k)) ids.push(k);
+  if (!ids.length) {
+    list.innerHTML = '<div class="empty-state">暂无 LLM 调用数据</div>';
+    badge.style.display = 'none';
+    return;
+  }
+  let totalCalls = 0;
+  ids.forEach(l => { totalCalls += layers[l].calls || 0; });
+  badge.style.display = '';
+  badge.textContent = totalCalls;
+
+  let html = '<table class="metrics-table"><thead><tr>' +
+    '<th>层</th><th>调用</th>' +
+    '<th>E2E P50</th><th>E2E P99</th>' +
+    '<th>E2E流式 P50</th><th>E2E流式 P99</th>' +
+    '<th>TTFT P50</th><th>TTFT P99</th>' +
+    '<th>TPOT P50</th><th>TPOT P99</th>' +
+    '<th>ITL P50</th><th>ITL P99</th>' +
+    '<th>重试率</th><th>JSON正确率</th>' +
+    '</tr></thead><tbody>';
+  for (const l of ids) {
+    const lr = layers[l];
+    html += '<tr>' +
+      `<td>${escapeHtml(LLM_LAYER_NAMES[l] || l)}</td>` +
+      `<td>${lr.calls || 0}</td>` +
+      `<td>${fmtMs(lr.e2e && lr.e2e.p50_ms)}</td><td>${fmtMs(lr.e2e && lr.e2e.p99_ms)}</td>` +
+      `<td>${fmtMs(lr.e2e_stream && lr.e2e_stream.p50_ms)}</td><td>${fmtMs(lr.e2e_stream && lr.e2e_stream.p99_ms)}</td>` +
+      `<td>${fmtMs(lr.ttft && lr.ttft.p50_ms)}</td><td>${fmtMs(lr.ttft && lr.ttft.p99_ms)}</td>` +
+      `<td>${fmtMs(lr.tpot && lr.tpot.p50_ms)}</td><td>${fmtMs(lr.tpot && lr.tpot.p99_ms)}</td>` +
+      `<td>${fmtMs(lr.itl && lr.itl.p50_ms)}</td><td>${fmtMs(lr.itl && lr.itl.p99_ms)}</td>` +
+      `<td>${fmtPct(lr.retry_rate)}</td>` +
+      `<td>${fmtPct(lr.json_rate)}</td>` +
+      '</tr>';
+  }
+  html += '</tbody></table>';
+
+  html += '<div class="hint" style="margin-top:12px;">错误类型分布</div>';
+  html += '<table class="metrics-table"><thead><tr><th>层</th>' +
+    LLM_ERR_KEYS.map(k => `<th>${k}</th>`).join('') +
+    '</tr></thead><tbody>';
+  for (const l of ids) {
+    const ed = layers[l].error_dist || {};
+    html += `<tr><td>${escapeHtml(LLM_LAYER_NAMES[l] || l)}</td>` +
+      LLM_ERR_KEYS.map(k => `<td>${ed[k] || 0}</td>`).join('') +
+      '</tr>';
+  }
+  html += '</tbody></table>';
+
+  if (rep.updated_at) {
+    html += `<div class="hint">更新于 ${escapeHtml(new Date(rep.updated_at).toLocaleTimeString())}</div>`;
+  }
+  list.innerHTML = html;
+}
+
+// ─── 当日 schedule 加载和渲染 ───────────────────────────
+async function loadPlan() {
+  try {
+    const r = await fetch('/debug/plan?agent_id=' + encodeURIComponent(planAgentID));
+    if (!r.ok) return;
+    planData = await r.json();
+    renderPlan();
+  } catch (e) {
+    console.warn('loadPlan failed:', e);
+  }
+}
+
+// ─── 已注册 agent 列表加载和下拉填充 ─────────────────────
+// 数据源是 /debug/agents（agents map 的 key，即 agent_registered 写入的），
+// 不是 capability_registry（后者按 system 全局下发，不产生 per-agent 条目）。
+async function loadAgents() {
+  try {
+    const r = await fetch('/debug/agents');
+    if (!r.ok) return;
+    const j = await r.json();
+    const ids = (j && j.agents && j.agents.length) ? j.agents.slice() : ['H-01'];
+    // 仅在列表变化时重建，避免每 5s 刷新破坏用户当前选择
+    if (ids.join(',') !== registeredAgents.join(',')) {
+      registeredAgents = ids;
+      rebuildAgentDropdowns();
+    }
+  } catch (e) {
+    console.warn('loadAgents failed:', e);
+  }
+}
+
+// rebuildAgentDropdowns 用 registeredAgents 填充三个 agent 选择器：
+// plan-agent（日程面板）、agent_id（单 Action tab）、sched-agent（Schedule 注入 tab）。
+// 保留各选择器当前值（若新列表仍包含该值），否则选第一个。
+function rebuildAgentDropdowns() {
+  const ids = registeredAgents;
+  // plan-agent
+  const planSel = document.getElementById('plan-agent');
+  if (planSel) {
+    const cur = ids.includes(planAgentID) ? planAgentID : ids[0];
+    planSel.innerHTML = ids.map(a => `<option value="${a}" ${a === cur ? 'selected' : ''}>${a}</option>`).join('');
+    if (cur !== planAgentID) {
+      planAgentID = cur;
+      loadPlan();
+    }
+  }
+  // agent_id（单 Action tab）— 自由输入框 + datalist 建议，允许未注册 id
+  const actionInput = document.getElementById('agent_id');
+  const actionList = document.getElementById('agent_id-list');
+  if (actionInput && actionList) {
+    // 仅刷新建议列表，不清空用户当前输入
+    actionList.innerHTML = ids.map(a => `<option value="${escapeHtml(a)}">`).join('');
+    // 首次加载（输入为空）默认填第一个已注册 id
+    if (!actionInput.value && ids.length > 0) {
+      actionInput.value = ids[0];
+    }
+    updateCurlPreview();
+  }
+  // sched-agent（Schedule 注入 tab）
+  const schedSel = document.getElementById('sched-agent');
+  if (schedSel) {
+    const cur = ids.includes(schedSel.value) ? schedSel.value : ids[0];
+    schedSel.innerHTML = ids.map(a => `<option value="${a}" ${a === cur ? 'selected' : ''}>${a}</option>`).join('');
+    schedSel.value = cur;
+    updateSchedCurlPreview();
+  }
+}
+
+function onPlanAgentChange() {
+  const sel = document.getElementById('plan-agent');
+  if (!sel) return;
+  planAgentID = sel.value;
+  loadPlan();
+}
+
+function renderPlan() {
+  const list = document.getElementById('plan-list');
+  const timeBadge = document.getElementById('plan-game-time');
+  if (!list) return;
+
+  // 游戏时间徽章
+  if (timeBadge) {
+    if (planData.game_time) {
+      timeBadge.textContent = planData.game_time;
+      timeBadge.style.display = '';
+    } else {
+      timeBadge.style.display = 'none';
+    }
+  }
+
+  if (!planData.auto_plan) {
+    list.innerHTML = '<div class="empty-state">手动模式（--auto-plan=false），未生成每日计划</div>';
+    return;
+  }
+  if (!planData.items || !planData.items.length) {
+    list.innerHTML = '<div class="empty-state">等待战略层生成当日计划（06:00 触发）</div>';
+    return;
+  }
+  const curIdx = planData.current_idx;
+  list.innerHTML = planData.items.map((it, i) => {
+    const isCurrent = i === curIdx;
+    const isPast = curIdx >= 0 && i < curIdx;
+    const cls = isCurrent ? 'plan-item current' : (isPast ? 'plan-item past' : 'plan-item');
+    return `<div class="${cls}">
+      <span class="plan-time">${escapeHtml(it.time)}</span>
+      <span class="plan-goal">${escapeHtml(it.goal)}</span>
+    </div>`;
+  }).join('');
+}
+
+// ─── MCP 日志加载和渲染 ─────────────────────────────────
+async function loadLogs() {
+  try {
+    const r = await fetch('/debug/logs');
+    if (!r.ok) return;
+    const j = await r.json();
+    logEntries = Array.isArray(j) ? j : [];
+    renderLogs();
+  } catch (e) {
+    console.warn('loadLogs failed:', e);
+  }
+}
+
+function setLogFilter(level) {
+  logFilter = level;
+  document.querySelectorAll('.log-filter-btn').forEach(b => {
+    b.classList.toggle('active', b.dataset.level === level);
+  });
+  renderLogs();
+}
+
+function renderLogs() {
+  const list = document.getElementById('log-list');
+  const badge = document.getElementById('log-count');
+  const filtered = logFilter === 'ALL'
+    ? logEntries
+    : logEntries.filter(e => e.level === logFilter);
+  if (!filtered.length) {
+    list.innerHTML = '<div class="empty-state">暂无' + (logFilter !== 'ALL' ? ' ' + logFilter : '') + ' 日志</div>';
+    badge.style.display = 'none';
+    return;
+  }
+  badge.style.display = '';
+  badge.textContent = filtered.length;
+  // 后端按时间正序返回，前端倒序展示（最新在最上）
+  const sorted = filtered.slice().reverse();
+  list.innerHTML = sorted.map(e => renderLogEntry(e)).join('');
+}
+
+function renderLogEntry(e) {
+  const ts = e.time ? new Date(e.time).toLocaleTimeString('zh-CN', { hour12: false }) : '';
+  const lvl = (e.level || 'INFO').toUpperCase();
+  const levelCls = 'log-level-' + lvl.toLowerCase();
+  const attrs = e.attrs ? Object.entries(e.attrs)
+    .map(([k, v]) => `${escapeHtml(k)}=${escapeHtml(formatLogAttrVal(v))}`)
+    .join(' ') : '';
+  return `<div class="log-entry">
+    <span class="log-level ${levelCls}">${escapeHtml(lvl)}</span>
+    <span class="log-time">${escapeHtml(ts)}</span>
+    <span class="log-msg">${escapeHtml(e.msg || '')}</span>
+    ${attrs ? `<span class="log-attrs">${attrs}</span>` : ''}
+  </div>`;
+}
+
+function formatLogAttrVal(v) {
+  if (v == null) return String(v);
+  if (typeof v === 'string') return v.length > 100 ? v.slice(0, 100) + '…' : v;
+  if (typeof v === 'object') {
+    const s = JSON.stringify(v);
+    return s.length > 100 ? s.slice(0, 100) + '…' : s;
+  }
+  return String(v);
+}
+
+// computeCapVersion 用 system agent 的 cmd 列表排序拼接做版本号。
+// 足以检测"UE 重发 capability_registry 导致 cmd 集合变化"的场景；
+// 参数级变化（如 default_value 微调）不触发重建，避免抖动。
+function computeCapVersion(snap) {
+  const acts = (snap && snap.agents && snap.agents.system) || [];
+  return acts.map(a => a.cmd).slice().sort().join(',');
+}
+
+// effectiveCapabilities 返回当前生效的 cmd 列表。
+// 当前固定用 system 全局能力（BuiltinCmdCapabilities seed 或 UE 推送的 capability_registry）。
+// 若未来需要 per-agent 差异化，可在此读 capData.agents[agentID]。
+function effectiveCapabilities() {
+  return (capData.agents && capData.agents.system) || [];
+}
+
+// findCapability 从 capData 查找指定 tool_name（或 cmd）的 CapabilityAction。
+// 下拉的 value 是 tool_name，所以优先按 tool_name 匹配；兼容按 cmd 匹配。
+function findCapability(cmdOrToolName) {
+  return effectiveCapabilities().find(a => a.tool_name === cmdOrToolName || a.cmd === cmdOrToolName) || null;
+}
+
+// rebuildCmdDropdown 根据 capability 快照重建 cmd 下拉，按 Kind 分组。
+// option 的 value 用 tool_name（snake_case），与 mapDebugCmd 的 tool_name
+// 匹配路径以及前端 cmd 特殊处理保持一致。
+// 保留当前选择值（若新列表仍包含该 tool_name），否则选第一个。
+function rebuildCmdDropdown() {
+  const sel = document.getElementById('cmd');
+  const acts = effectiveCapabilities();
+  const atomic = acts.filter(a => a.kind === 'atomic');
+  const composite = acts.filter(a => a.kind === 'composite');
+  const prevValue = sel.value;
+  sel.innerHTML = '';
+  if (atomic.length) {
+    const g = document.createElement('optgroup');
+    g.label = `原子 cmd（${atomic.length}）`;
+    atomic.forEach(a => {
+      g.appendChild(new Option(`${a.cmd} — ${a.description || ''}`, a.tool_name || a.cmd));
+    });
+    sel.appendChild(g);
+  }
+  if (composite.length) {
+    const g = document.createElement('optgroup');
+    g.label = `复合 cmd（${composite.length}）`;
+    composite.forEach(a => {
+      g.appendChild(new Option(`${a.cmd} — ${a.description || ''}`, a.tool_name || a.cmd));
+    });
+    sel.appendChild(g);
+  }
+  // 恢复选择或选第一个
+  if (prevValue && [...sel.options].some(o => o.value === prevValue)) {
+    sel.value = prevValue;
+  } else if (sel.options.length > 0) {
+    sel.value = sel.options[0].value;
+  }
+  onCmdChange(); // 重建参数表单
+}
+
 // ─── 动态 params 表单 ─────────────────────────────────────
-const CMD_PARAM_SPECS = {
-  move_to: [
-    // 模式切换：target id（走 kb 解析） / 直接坐标（UE5 cm）
-    { name: '__move_mode', label: '输入模式', type: 'select-move-mode', required: false,
-      hint: 'target id 由 MCP 解析坐标；坐标模式直接传 [x,y,z] UE5 cm' },
-    // target id 模式（默认）
-    { name: 'target', label: 'target', type: 'select-kb-target', required: true,
-      hint: 'zone 或 location id，MCP 自动解析坐标',
-      modeVisibility: 'target_id' },
-    // 坐标模式
-    { name: 'dest_x', label: 'dest.x', type: 'number', required: true, default: 20000,
-      hint: 'UE5 厘米（X 轴）', modeVisibility: 'coord' },
-    { name: 'dest_y', label: 'dest.y', type: 'number', required: true, default: 10000,
-      hint: 'UE5 厘米（Y 轴）', modeVisibility: 'coord' },
-    { name: 'dest_z', label: 'dest.z', type: 'number', required: true, default: 0,
-      hint: 'UE5 厘米（Z 轴）', modeVisibility: 'coord' },
-  ],
-  speak: [
-    { name: 'content', label: 'content', type: 'text', required: true, hint: '说话内容' },
-    { name: 'target', label: 'target', type: 'text', required: false, default: '',
-      hint: '目标 agent_id，空串=自言自语' },
-  ],
-  interact: [
-    { name: 'object_id', label: 'object_id', type: 'select-kb-object', required: true,
-      hint: '智能物体 id' },
-    { name: 'action', label: 'action', type: 'select-object-action', required: true,
-      hint: '动作词（选项随 object_id 变化）' },
-  ],
-  wait: [
-    { name: 'duration_sec', label: 'duration_sec', type: 'number', required: true, default: 30,
-      hint: '等待秒数' },
-  ],
-  charge_at: [
-    { name: 'station_id', label: 'station_id', type: 'select-kb-object', required: true,
-      hint: '充电桩 id', filterActions: ['charge'] },
-    { name: 'duration_min', label: 'duration_min', type: 'number', required: true, default: 30,
-      hint: '充电分钟数' },
-  ],
-  work_assemble: [
-    { name: 'target', label: 'target', type: 'select-kb-object', required: true,
-      hint: '工作台 id', filterActions: ['assemble'] },
-    { name: 'duration_min', label: 'duration_min', type: 'number', required: true, default: 60,
-      hint: '装配分钟数' },
-  ],
-  archive_research: [
-    { name: 'duration_min', label: 'duration_min', type: 'number', required: true, default: 15,
-      hint: '档案研究分钟数' },
-  ],
-  rest_idle: [
-    { name: 'duration_min', label: 'duration_min', type: 'number', required: true, default: 10,
-      hint: '休息分钟数' },
-  ],
-};
+// 参数 type → 表单控件映射；KB 联动按参数名启发式判断。
+// 新 12 cmd 体系下 move_to 的 target_type/target_id/target_position 都在
+// capability_registry 描述里，走通用渲染路径，无需前端特判。
+
+// buildFieldSpec 把 CapabilityParam 转成前端字段规格。
+function buildFieldSpec(param, cmd) {
+  const spec = {
+    name: param.name,
+    label: param.name,
+    required: !!param.required,
+    hint: param.description || '',
+    default: param.default_value || '',
+  };
+  // capability_registry 声明的 type:string 字段统一用纯文本输入，
+  // 不再做 KB 联动下拉（KB 数据可能与 UE 实际不一致，下拉反而误导）。
+  if (param.type === 'enum') {
+    spec.type = 'select-enum';
+    spec.enumValues = param.enum_values || [];
+  } else if (param.type === 'bool') {
+    spec.type = 'select-bool';
+  } else if (param.type === 'number') {
+    spec.type = 'number';
+  } else if (param.type === 'vector') {
+    spec.type = 'text';
+    spec.hint = (spec.hint ? spec.hint + '；' : '') + '格式 [x,y,z]';
+  } else {
+    spec.type = 'text';
+  }
+  return spec;
+}
+
+// inferFilterInteractions 已移除：KB 联动下拉全部改为纯文本输入。
 
 function onCmdChange() {
   const cmd = document.getElementById('cmd').value;
-  const spec = CMD_PARAM_SPECS[cmd] || [];
+  const action = findCapability(cmd);
   const container = document.getElementById('params-form');
   container.innerHTML = '';
 
-  if (spec.length === 0) {
+  if (!action || !action.params || action.params.length === 0) {
     container.innerHTML = '<div class="empty-state">该 cmd 无参数</div>';
     updateCurlPreview();
     return;
   }
 
-  spec.forEach(field => {
-    const div = document.createElement('div');
-    div.className = 'field';
-    // 注意：不在 div 上设 data-field-name，否则 querySelector('[data-field-name="..."]')
-    // 会命中 div（父元素先于 input 出现）而非 input/select，导致 .value 为 undefined。
-    // data-field-name 只设在 input/select 上；div 用 data-mode-visibility 控制可见性。
-
-    // 模式可见性：move_to 的 target / dest_x/y/z 字段根据模式切换显示
-    if (field.modeVisibility) {
-      div.dataset.modeVisibility = field.modeVisibility;
-      // 默认 coord 模式 → target_id 字段初始隐藏
-      div.style.display = (field.modeVisibility === 'coord') ? '' : 'none';
-    }
-
-    const label = document.createElement('label');
-    label.htmlFor = `param-${field.name}`;
-    label.innerHTML = `params.${field.name}${field.required ? ' <span class="req">*</span>' : ''}`;
-    div.appendChild(label);
-
-    let input;
-    switch (field.type) {
-      case 'select-move-mode':
-        input = document.createElement('select');
-        input.id = `param-${field.name}`;
-        input.dataset.fieldName = field.name;
-        input.dataset.modeGroup = 'move_to';
-        [
-          { v: 'target_id', t: 'target id（kb 解析）' },
-          { v: 'coord', t: '直接坐标（UE5 cm）' },
-        ].forEach(o => {
-          const opt = document.createElement('option');
-          opt.value = o.v; opt.textContent = o.t;
-          input.appendChild(opt);
-        });
-        input.value = 'coord'; // 默认直接坐标模式
-        input.onchange = () => { toggleMoveModeVisibility(input.value); updateCurlPreview(); };
-        // 标记为模式控制器，collectRequest 时跳过
-        input.dataset.isModeController = '1';
-        break;
-
-      case 'select-kb-target':
-        input = document.createElement('select');
-        input.id = `param-${field.name}`;
-        input.dataset.fieldName = field.name;
-        // 标记该字段所属模式，便于切换显示/隐藏
-        if (field.modeVisibility) input.dataset.modeVisibility = field.modeVisibility;
-        // zones
-        const zg = document.createElement('optgroup');
-        zg.label = 'Zones（区域）';
-        (kbData.zones || []).forEach(z => {
-          const o = document.createElement('option');
-          o.value = z.id; o.textContent = `${z.id} — ${z.name}`;
-          zg.appendChild(o);
-        });
-        input.appendChild(zg);
-        // locations
-        const lg = document.createElement('optgroup');
-        lg.label = 'Locations（地点）';
-        (kbData.locations || []).forEach(l => {
-          const o = document.createElement('option');
-          o.value = l.id; o.textContent = `${l.id} — ${l.name} (in ${l.zone})`;
-          lg.appendChild(o);
-        });
-        input.appendChild(lg);
-        if (kbData.locations && kbData.locations.length > 0) {
-          input.value = kbData.locations[0].id;
-        }
-        break;
-
-      case 'select-kb-object':
-        input = document.createElement('select');
-        input.id = `param-${field.name}`;
-        input.dataset.fieldName = field.name;
-        input.onchange = () => { updateObjectActionOptions(); updateCurlPreview(); };
-        (kbData.objects || []).forEach(o => {
-          if (field.filterActions && !field.filterActions.some(a => (o.available_actions || []).includes(a))) return;
-          const opt = document.createElement('option');
-          opt.value = o.id; opt.textContent = `${o.id} — ${o.name}`;
-          input.appendChild(opt);
-        });
-        break;
-
-      case 'select-object-action':
-        input = document.createElement('select');
-        input.id = `param-${field.name}`;
-        input.dataset.fieldName = field.name;
-        // 选项由 updateObjectActionOptions 动态填
-        break;
-
-      case 'number':
-        input = document.createElement('input');
-        input.type = 'number';
-        input.id = `param-${field.name}`;
-        input.value = field.default != null ? field.default : 0;
-        input.dataset.fieldName = field.name;
-        input.oninput = updateCurlPreview;
-        break;
-
-      default: // text
-        input = document.createElement('input');
-        input.type = 'text';
-        input.id = `param-${field.name}`;
-        input.value = field.default != null ? field.default : '';
-        input.dataset.fieldName = field.name;
-        input.oninput = updateCurlPreview;
-    }
-    div.appendChild(input);
-
-    if (field.hint) {
-      const h = document.createElement('div');
-      h.className = 'hint'; h.textContent = field.hint;
-      div.appendChild(h);
-    }
-    container.appendChild(div);
+  // 通用：按 capability 声明的 params 逐个渲染
+  action.params.forEach(p => {
+    const spec = buildFieldSpec(p, cmd);
+    renderField(container, spec);
   });
-
-  updateObjectActionOptions();
   updateCurlPreview();
 }
 
-function updateObjectActionOptions() {
-  // 找到 object_id select，根据其值更新 action select 的选项
-  const objSel = document.querySelector('[data-field-name="object_id"]');
-  const actSel = document.querySelector('[data-field-name="action"]');
-  if (!objSel || !actSel) return;
-  const obj = (kbData.objects || []).find(o => o.id === objSel.value);
-  actSel.innerHTML = '';
-  (obj && obj.available_actions || []).forEach(a => {
-    const o = document.createElement('option');
-    o.value = a; o.textContent = a;
-    actSel.appendChild(o);
-  });
-  updateCurlPreview();
+// renderField 渲染单个字段到 container。控件生成逻辑提取自原 onCmdChange 的 switch。
+function renderField(container, field) {
+  const div = document.createElement('div');
+  div.className = 'field';
+
+  const label = document.createElement('label');
+  label.htmlFor = `param-${field.name}`;
+  label.innerHTML = `params.${field.name}${field.required ? ' <span class="req">*</span>' : ''}`;
+  div.appendChild(label);
+
+  let input;
+  switch (field.type) {
+    case 'select-bool':
+      input = document.createElement('select');
+      input.id = `param-${field.name}`;
+      input.dataset.fieldName = field.name;
+      input.dataset.boolField = '1';
+      [
+        { v: 'true', t: 'true' },
+        { v: 'false', t: 'false' },
+      ].forEach(o => {
+        const opt = document.createElement('option');
+        opt.value = o.v; opt.textContent = o.t;
+        input.appendChild(opt);
+      });
+      input.value = String(field.default === 'true' || field.default === true);
+      input.onchange = updateCurlPreview;
+      break;
+
+    case 'select-enum':
+      input = document.createElement('select');
+      input.id = `param-${field.name}`;
+      input.dataset.fieldName = field.name;
+      (field.enumValues || []).forEach(v => {
+        const opt = document.createElement('option');
+        opt.value = v; opt.textContent = v;
+        input.appendChild(opt);
+      });
+      input.value = field.default || (field.enumValues && field.enumValues[0]) || '';
+      input.onchange = updateCurlPreview;
+      break;
+
+    case 'number':
+      input = document.createElement('input');
+      input.type = 'number';
+      input.id = `param-${field.name}`;
+      input.value = field.default != null && field.default !== '' ? field.default : 0;
+      input.dataset.fieldName = field.name;
+      input.oninput = updateCurlPreview;
+      break;
+
+    default: // text
+      input = document.createElement('input');
+      input.type = 'text';
+      input.id = `param-${field.name}`;
+      input.value = field.default != null ? field.default : '';
+      input.dataset.fieldName = field.name;
+      input.oninput = updateCurlPreview;
+  }
+  div.appendChild(input);
+
+  if (field.hint) {
+    const h = document.createElement('div');
+    h.className = 'hint'; h.textContent = field.hint;
+    div.appendChild(h);
+  }
+  container.appendChild(div);
 }
 
 // ─── 收集表单 → 请求体 ───────────────────────────────────
@@ -592,44 +1142,23 @@ function collectRequest() {
   const force = document.getElementById('force').checked;
   const params = {};
 
-  // move_to 特殊处理：根据当前模式收集不同字段
-  // - target_id 模式 → {target: "..."}
-  // - coord 模式    → {dest: [x, y, z]}
-  if (cmd === 'move_to') {
-    const modeEl = document.querySelector('#params-form [data-field-name="__move_mode"]');
-    const mode = modeEl ? modeEl.value : 'coord';
-    if (mode === 'coord') {
-      const x = Number(document.querySelector('#params-form [data-field-name="dest_x"]').value || 0);
-      const y = Number(document.querySelector('#params-form [data-field-name="dest_y"]').value || 0);
-      const z = Number(document.querySelector('#params-form [data-field-name="dest_z"]').value || 0);
-      params.dest = [x, y, z];
-    } else {
-      const targetEl = document.querySelector('#params-form [data-field-name="target"]');
-      if (targetEl) params.target = targetEl.value;
-    }
-    return { agent_id, cmd, params, force };
-  }
-
-  // 其他 cmd：通用收集（跳过 mode 控制器字段）
+  // 通用收集（所有 cmd 走同一路径，params 直接透传 UE）
   document.querySelectorAll('#params-form [data-field-name]').forEach(el => {
-    if (el.dataset.isModeController === '1') return; // 模式控制器不进 params
     const k = el.dataset.fieldName;
     let v = el.value;
     // number 字段转 number
     if (el.type === 'number') {
       v = v === '' ? 0 : Number(v);
     }
+    // bool select 转 boolean
+    if (el.dataset.boolField === '1') {
+      v = (v === 'true');
+    }
+    // 空串字段不进 params（可选字段留空时跳过，避免发送空字符串干扰后端）
+    if (v === '') return;
     params[k] = v;
   });
   return { agent_id, cmd, params, force };
-}
-
-// toggleMoveModeVisibility 切换 move_to 的 target / 坐标输入可见性。
-// mode = "target_id" 显示 target 下拉；"coord" 显示 dest_x/y/z 三个数字框。
-function toggleMoveModeVisibility(mode) {
-  document.querySelectorAll('#params-form [data-mode-visibility]').forEach(div => {
-    div.style.display = (div.dataset.modeVisibility === mode) ? '' : 'none';
-  });
 }
 
 // ─── curl 预览 ───────────────────────────────────────────
@@ -724,7 +1253,8 @@ async function submitSchedule() {
 }
 
 function resetScheduleForm() {
-  document.getElementById('sched-agent').value = 'H-01';
+  const schedSel = document.getElementById('sched-agent');
+  if (schedSel && schedSel.options.length > 0) schedSel.selectedIndex = 0;
   document.getElementById('sched-text').value = '';
   document.getElementById('sched-force').checked = true;
   updateSchedCurlPreview();
@@ -822,45 +1352,22 @@ function replayHistory(i) {
   if (forceEl) forceEl.checked = h.req.force !== false;
   onCmdChange();
 
-  // move_to 特殊处理：根据历史 params 内容切换模式
-  // - 有 dest 字段 → coord 模式，回填 x/y/z
-  // - 有 target 字段 → target_id 模式，回填 target 下拉
-  if (h.req.cmd === 'move_to' && h.req.params) {
-    const modeEl = document.querySelector('#params-form [data-field-name="__move_mode"]');
-    if (h.req.params.dest) {
-      if (modeEl) { modeEl.value = 'coord'; toggleMoveModeVisibility('coord'); }
-      const [x, y, z] = h.req.params.dest;
-      const xEl = document.querySelector('#params-form [data-field-name="dest_x"]');
-      const yEl = document.querySelector('#params-form [data-field-name="dest_y"]');
-      const zEl = document.querySelector('#params-form [data-field-name="dest_z"]');
-      if (xEl) xEl.value = x;
-      if (yEl) yEl.value = y;
-      if (zEl) zEl.value = z;
-    } else if (h.req.params.target) {
-      if (modeEl) { modeEl.value = 'target_id'; toggleMoveModeVisibility('target_id'); }
-      const tEl = document.querySelector('#params-form [data-field-name="target"]');
-      if (tEl) tEl.value = h.req.params.target;
+  // 通用回填：按 params 字段名匹配表单控件
+  Object.entries(h.req.params || {}).forEach(([k, v]) => {
+    const el = document.querySelector(`#params-form [data-field-name="${k}"]`);
+    if (el) {
+      // bool select 需要 string 值
+      if (el.dataset.boolField === '1') el.value = String(v);
+      else el.value = v;
     }
-    updateCurlPreview();
-    return;
-  }
-
-  // 其他 cmd：通用回填
-  Object.entries(h.req.params || {}).forEach(([k, v]) => {
-    const el = document.querySelector(`#params-form [data-field-name="${k}"]`);
-    if (el) el.value = v;
-  });
-  updateObjectActionOptions();
-  Object.entries(h.req.params || {}).forEach(([k, v]) => {
-    const el = document.querySelector(`#params-form [data-field-name="${k}"]`);
-    if (el) el.value = v;
   });
   updateCurlPreview();
 }
 
 function resetForm() {
-  document.getElementById('agent_id').value = 'H-01';
-  document.getElementById('cmd').value = 'move_to';
+  // 默认选第一个 cmd（rebuildCmdDropdown 已在初始化时选好第一个）
+  const cmdSel = document.getElementById('cmd');
+  if (cmdSel.options.length > 0) cmdSel.selectedIndex = 0;
   const forceEl = document.getElementById('force');
   if (forceEl) forceEl.checked = true;
   onCmdChange();

@@ -7,199 +7,213 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"github.com/AgentTown/agenttown-mcp/pkg/protocol"
+	"github.com/AgentTown/agenttown-mcp/contract/protocol"
 )
 
-// Composite tools (§6.4) translate to ExecuteComposite action_command.
-// Each carries agent_id as the first parameter. Durations are expressed to
-// the LLM in minutes (duration_min) and converted to seconds internally.
+// Composite tools (§2.3) translate to their own Composite cmd. Each
+// carries agent_id as the first parameter. Per 约定14, Agent prefers
+// composite behaviors for routine goals; atomic behaviors are for
+// reactions or cases the composite library doesn't cover.
+//
+// 6 composite cmds (2026-08-11 + Phase 2 Module C): WorkShift /
+// ChargeAtStation / SelfMaintenance / RestAtResidence / SurfInternet /
+// SocialChat. The first 5 share the params schema semantic_group +
+// interaction; SocialChat uses target_agent_id + content (dialogue is
+// not a queueable Smart Object action).
+//
+// Parameter naming (2026-08-11 fix): MCP previously sent smart_object
+// as the param key, but real UE5's capability_registry declares the
+// required param as semantic_group. Without this key, UE5 cannot find
+// the target facility and the composite action fast-returns without
+// executing the work phase. The value passed is the semantic group name
+// (e.g. "workbench", "charger") which the world_kb already uses as
+// object IDs — UE5 resolves an idle instance from that group.
+//
+// auto_queue (约定21) lives inside params per UE5's schema, not at the
+// envelope level. UE5 expects a string "true"/"false" for
+// ChargeAtStation and a bool for InteractSmartObject. The envelope-level
+// AutoQueue field is deprecated (always omitted); params-level value is
+// the authoritative source for real UE5. SocialChat does NOT carry
+// auto_queue — it targets another NPC, not a queueable Smart Object.
 
-const secondsPerMinute = 60
-
-// WorkAssembleInput — composite: assemble at a workbench.
-type WorkAssembleInput struct {
-	AgentID       string  `json:"agent_id" jsonschema:"the NPC's id, e.g. \"H-01\""`
-	DecisionEpoch int64   `json:"decision_epoch" jsonschema:"required epoch from the current decision_context"`
-	Target        string  `json:"target"       jsonschema:"workbench id, e.g. workbench_01"`
-	DurationMin   float64 `json:"duration_min" jsonschema:"work duration in minutes"`
-}
-
-// PatrolRouteInput — composite: patrol a named route.
-type PatrolRouteInput struct {
+// WorkShiftInput — composite: work at a specified facility.
+type WorkShiftInput struct {
 	AgentID       string `json:"agent_id" jsonschema:"the NPC's id"`
 	DecisionEpoch int64  `json:"decision_epoch" jsonschema:"required epoch from the current decision_context"`
-	RouteID       string `json:"route_id" jsonschema:"route id to patrol"`
+	SemanticGroup string `json:"semantic_group" jsonschema:"work facility semantic group name, e.g. workbench, sorting_conveyor"`
+	Interaction   string `json:"interaction" jsonschema:"interaction work type"`
 }
 
-// ChargeAtInput — composite: charge at a station.
-type ChargeAtInput struct {
-	AgentID       string  `json:"agent_id" jsonschema:"the NPC's id"`
-	DecisionEpoch int64   `json:"decision_epoch" jsonschema:"required epoch from the current decision_context"`
-	StationID     string  `json:"station_id"   jsonschema:"charging station id, e.g. charging_station_01"`
-	DurationMin   float64 `json:"duration_min" jsonschema:"charge duration in minutes"`
-}
-
-// RepairTargetInput — composite: repair another agent.
-type RepairTargetInput struct {
+// ChargeAtStationInput — composite: charge at a charging station.
+type ChargeAtStationInput struct {
 	AgentID       string `json:"agent_id" jsonschema:"the NPC's id"`
 	DecisionEpoch int64  `json:"decision_epoch" jsonschema:"required epoch from the current decision_context"`
-	TargetAgentID string `json:"target_agent_id" jsonschema:"the agent to repair"`
+	SemanticGroup string `json:"semantic_group" jsonschema:"charging facility semantic group name, e.g. charger"`
+	Interaction   string `json:"interaction" jsonschema:"interaction type, fixed to charge"`
 }
 
-// SocialChatWithInput — composite: chat with another agent.
-type SocialChatWithInput struct {
+// SelfMaintenanceInput — composite: self-maintenance at a repair table.
+type SelfMaintenanceInput struct {
 	AgentID       string `json:"agent_id" jsonschema:"the NPC's id"`
 	DecisionEpoch int64  `json:"decision_epoch" jsonschema:"required epoch from the current decision_context"`
-	TargetAgentID string `json:"target_agent_id" jsonschema:"the agent to chat with"`
+	SemanticGroup string `json:"semantic_group" jsonschema:"repair facility semantic group name, e.g. repair_table"`
+	Interaction   string `json:"interaction" jsonschema:"interaction type, fixed to repair_self"`
 }
 
-// RestIdleInput — composite: rest/idle for a while.
-type RestIdleInput struct {
-	AgentID       string  `json:"agent_id" jsonschema:"the NPC's id"`
-	DecisionEpoch int64   `json:"decision_epoch" jsonschema:"required epoch from the current decision_context"`
-	DurationMin   float64 `json:"duration_min" jsonschema:"rest duration in minutes"`
+// RestAtResidenceInput — composite: rest at a sleep pod.
+type RestAtResidenceInput struct {
+	AgentID       string `json:"agent_id" jsonschema:"the NPC's id"`
+	DecisionEpoch int64  `json:"decision_epoch" jsonschema:"required epoch from the current decision_context"`
+	SemanticGroup string `json:"semantic_group" jsonschema:"rest facility semantic group name, e.g. sleep_pod"`
+	Interaction   string `json:"interaction" jsonschema:"interaction type, fixed to sleep"`
 }
 
-// ArchiveResearchInput — composite: do archive research.
-type ArchiveResearchInput struct {
-	AgentID       string  `json:"agent_id" jsonschema:"the NPC's id"`
-	DecisionEpoch int64   `json:"decision_epoch" jsonschema:"required epoch from the current decision_context"`
-	DurationMin   float64 `json:"duration_min" jsonschema:"research duration in minutes"`
+// SurfInternetInput — composite: surf the internet at a computer.
+type SurfInternetInput struct {
+	AgentID       string `json:"agent_id" jsonschema:"the NPC's id"`
+	DecisionEpoch int64  `json:"decision_epoch" jsonschema:"required epoch from the current decision_context"`
+	SemanticGroup string `json:"semantic_group" jsonschema:"computer semantic group name, e.g. computer"`
+	Interaction   string `json:"interaction" jsonschema:"interaction type, fixed to surf_internet"`
+}
+
+// SocialChatInput — composite: proactively initiate dialogue with another NPC.
+// Per docs/AgentTown_Dialogue_Design.md §3.1, this is A's action_command that
+// opens a session. params are target_agent_id + content (NOT semantic_group/
+// interaction). No auto_queue — dialogue targets an NPC, not a queueable
+// Smart Object. UE opens a DialogueSession(Inviting), preempts B, and sends
+// chat_invite to B; MCP then handles chat_invite_rsp / chat_turn exchange.
+type SocialChatInput struct {
+	AgentID       string `json:"agent_id" jsonschema:"the NPC's id"`
+	DecisionEpoch int64  `json:"decision_epoch" jsonschema:"required epoch from the current decision_context"`
+	TargetAgentID string `json:"target_agent_id" jsonschema:"the target NPC's id to talk to"`
+	Content       string `json:"content" jsonschema:"opening line / 开场白"`
 }
 
 // registerComposite installs the composite-behavior tools.
 func registerComposite(s *mcp.Server, ex Executor, logger *slog.Logger) {
-	// work_assemble
+	// work_shift
 	mcp.AddTool(s, &mcp.Tool{
-		Name:        "work_assemble",
-		Description: "Assemble parts at a workbench for a duration. Composite behavior — runs a full assembly routine.",
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, in WorkAssembleInput) (*mcp.CallToolResult, ackResult, error) {
-		if in.AgentID == "" || in.Target == "" {
-			return nil, ackResult{}, fmt.Errorf("agent_id and target are required")
+		Name:        "work_shift",
+		Description: "Go to a specified facility and work. Composite behavior — runs a full work routine.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in WorkShiftInput) (*mcp.CallToolResult, ackResult, error) {
+		if in.AgentID == "" || in.SemanticGroup == "" || in.Interaction == "" {
+			return nil, ackResult{}, fmt.Errorf("agent_id, semantic_group and interaction are required")
 		}
-		logToolCall("work_assemble", in.AgentID, in.DecisionEpoch, in)
-		ack, err := ex.SendAction(ctx, in.AgentID, in.DecisionEpoch, protocol.CmdExecuteComposite, map[string]any{
-			"name":         "work_assemble",
-			"target":       in.Target,
-			"duration_sec": in.DurationMin * secondsPerMinute,
+		logToolCall("work_shift", in.AgentID, in.DecisionEpoch, in)
+		ack, err := ex.SendAction(ctx, in.AgentID, in.DecisionEpoch, protocol.CmdWorkShift, map[string]any{
+			"semantic_group": in.SemanticGroup,
+			"interaction":    in.Interaction,
+			"auto_queue":     "true",
 		})
 		if err != nil {
-			return nil, ackResult{}, fmt.Errorf("work_assemble: %w", err)
+			return nil, ackResult{}, fmt.Errorf("work_shift: %w", err)
 		}
 		return nil, buildAckResult(ack, in.DecisionEpoch), nil
 	})
 
-	// patrol_route
+	// charge_at_station
 	mcp.AddTool(s, &mcp.Tool{
-		Name:        "patrol_route",
-		Description: "Patrol a predefined route. Composite behavior.",
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, in PatrolRouteInput) (*mcp.CallToolResult, ackResult, error) {
-		if in.AgentID == "" || in.RouteID == "" {
-			return nil, ackResult{}, fmt.Errorf("agent_id and route_id are required")
+		Name:        "charge_at_station",
+		Description: "Charge at a charging station. Composite behavior — restores battery.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in ChargeAtStationInput) (*mcp.CallToolResult, ackResult, error) {
+		if in.AgentID == "" || in.SemanticGroup == "" || in.Interaction == "" {
+			return nil, ackResult{}, fmt.Errorf("agent_id, semantic_group and interaction are required")
 		}
-		logToolCall("patrol_route", in.AgentID, in.DecisionEpoch, in)
-		ack, err := ex.SendAction(ctx, in.AgentID, in.DecisionEpoch, protocol.CmdExecuteComposite, map[string]any{
-			"name":     "patrol_route",
-			"route_id": in.RouteID,
+		logToolCall("charge_at_station", in.AgentID, in.DecisionEpoch, in)
+		ack, err := ex.SendAction(ctx, in.AgentID, in.DecisionEpoch, protocol.CmdChargeAtStation, map[string]any{
+			"semantic_group": in.SemanticGroup,
+			"interaction":    in.Interaction,
+			"auto_queue":     "true",
 		})
 		if err != nil {
-			return nil, ackResult{}, fmt.Errorf("patrol_route: %w", err)
+			return nil, ackResult{}, fmt.Errorf("charge_at_station: %w", err)
 		}
 		return nil, buildAckResult(ack, in.DecisionEpoch), nil
 	})
 
-	// charge_at
+	// self_maintenance
 	mcp.AddTool(s, &mcp.Tool{
-		Name:        "charge_at",
-		Description: "Charge at a charging station for a duration. Composite behavior — restores battery.",
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, in ChargeAtInput) (*mcp.CallToolResult, ackResult, error) {
-		if in.AgentID == "" || in.StationID == "" {
-			return nil, ackResult{}, fmt.Errorf("agent_id and station_id are required")
+		Name:        "self_maintenance",
+		Description: "Go to a repair table and perform self-inspection/maintenance. Composite behavior.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in SelfMaintenanceInput) (*mcp.CallToolResult, ackResult, error) {
+		if in.AgentID == "" || in.SemanticGroup == "" || in.Interaction == "" {
+			return nil, ackResult{}, fmt.Errorf("agent_id, semantic_group and interaction are required")
 		}
-		logToolCall("charge_at", in.AgentID, in.DecisionEpoch, in)
-		ack, err := ex.SendAction(ctx, in.AgentID, in.DecisionEpoch, protocol.CmdExecuteComposite, map[string]any{
-			"name":         "charge_at",
-			"station_id":   in.StationID,
-			"duration_sec": in.DurationMin * secondsPerMinute,
+		logToolCall("self_maintenance", in.AgentID, in.DecisionEpoch, in)
+		ack, err := ex.SendAction(ctx, in.AgentID, in.DecisionEpoch, protocol.CmdSelfMaintenance, map[string]any{
+			"semantic_group": in.SemanticGroup,
+			"interaction":    in.Interaction,
+			"auto_queue":     "true",
 		})
 		if err != nil {
-			return nil, ackResult{}, fmt.Errorf("charge_at: %w", err)
+			return nil, ackResult{}, fmt.Errorf("self_maintenance: %w", err)
 		}
 		return nil, buildAckResult(ack, in.DecisionEpoch), nil
 	})
 
-	// repair_target
+	// rest_at_residence
 	mcp.AddTool(s, &mcp.Tool{
-		Name:        "repair_target",
-		Description: "Repair another agent. Composite behavior.",
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, in RepairTargetInput) (*mcp.CallToolResult, ackResult, error) {
-		if in.AgentID == "" || in.TargetAgentID == "" {
-			return nil, ackResult{}, fmt.Errorf("agent_id and target_agent_id are required")
+		Name:        "rest_at_residence",
+		Description: "Go to a sleep pod and rest. Composite behavior — restores energy overnight.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in RestAtResidenceInput) (*mcp.CallToolResult, ackResult, error) {
+		if in.AgentID == "" || in.SemanticGroup == "" || in.Interaction == "" {
+			return nil, ackResult{}, fmt.Errorf("agent_id, semantic_group and interaction are required")
 		}
-		logToolCall("repair_target", in.AgentID, in.DecisionEpoch, in)
-		ack, err := ex.SendAction(ctx, in.AgentID, in.DecisionEpoch, protocol.CmdExecuteComposite, map[string]any{
-			"name":            "repair_target",
+		logToolCall("rest_at_residence", in.AgentID, in.DecisionEpoch, in)
+		ack, err := ex.SendAction(ctx, in.AgentID, in.DecisionEpoch, protocol.CmdRestAtResidence, map[string]any{
+			"semantic_group": in.SemanticGroup,
+			"interaction":    in.Interaction,
+			"auto_queue":     "true",
+		})
+		if err != nil {
+			return nil, ackResult{}, fmt.Errorf("rest_at_residence: %w", err)
+		}
+		return nil, buildAckResult(ack, in.DecisionEpoch), nil
+	})
+
+	// surf_internet
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "surf_internet",
+		Description: "Go to a computer and surf the internet. Composite behavior — for leisure or research.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in SurfInternetInput) (*mcp.CallToolResult, ackResult, error) {
+		if in.AgentID == "" || in.SemanticGroup == "" || in.Interaction == "" {
+			return nil, ackResult{}, fmt.Errorf("agent_id, semantic_group and interaction are required")
+		}
+		logToolCall("surf_internet", in.AgentID, in.DecisionEpoch, in)
+		ack, err := ex.SendAction(ctx, in.AgentID, in.DecisionEpoch, protocol.CmdSurfInternet, map[string]any{
+			"semantic_group": in.SemanticGroup,
+			"interaction":    in.Interaction,
+			"auto_queue":     "true",
+		})
+		if err != nil {
+			return nil, ackResult{}, fmt.Errorf("surf_internet: %w", err)
+		}
+		return nil, buildAckResult(ack, in.DecisionEpoch), nil
+	})
+
+	// social_chat — Phase 2 Module C: proactive NPC-to-NPC dialogue.
+	// Sends CmdSocialChat with target_agent_id + content. No auto_queue
+	// (dialogue is not a queueable Smart Object action). UE opens a
+	// DialogueSession, preempts B, and sends chat_invite to B; the
+	// subsequent chat_invite_rsp / chat_turn exchange is handled by the
+	// dialogue runner in cmd/agenttown-mcp/dialogue.go, not by this tool.
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "social_chat",
+		Description: "Proactively walk to another NPC and start a dialogue. Composite behavior — runs MoveTo+TurnTo+WaitDialogue until the conversation ends.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in SocialChatInput) (*mcp.CallToolResult, ackResult, error) {
+		if in.AgentID == "" || in.TargetAgentID == "" || in.Content == "" {
+			return nil, ackResult{}, fmt.Errorf("agent_id, target_agent_id and content are required")
+		}
+		if in.AgentID == in.TargetAgentID {
+			return nil, ackResult{}, fmt.Errorf("social_chat: target_agent_id must differ from agent_id")
+		}
+		logToolCall("social_chat", in.AgentID, in.DecisionEpoch, in)
+		ack, err := ex.SendAction(ctx, in.AgentID, in.DecisionEpoch, protocol.CmdSocialChat, map[string]any{
 			"target_agent_id": in.TargetAgentID,
+			"content":         in.Content,
 		})
 		if err != nil {
-			return nil, ackResult{}, fmt.Errorf("repair_target: %w", err)
-		}
-		return nil, buildAckResult(ack, in.DecisionEpoch), nil
-	})
-
-	// social_chat_with
-	mcp.AddTool(s, &mcp.Tool{
-		Name:        "social_chat_with",
-		Description: "Have a social chat with another agent. Composite behavior.",
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, in SocialChatWithInput) (*mcp.CallToolResult, ackResult, error) {
-		if in.AgentID == "" || in.TargetAgentID == "" {
-			return nil, ackResult{}, fmt.Errorf("agent_id and target_agent_id are required")
-		}
-		logToolCall("social_chat_with", in.AgentID, in.DecisionEpoch, in)
-		ack, err := ex.SendAction(ctx, in.AgentID, in.DecisionEpoch, protocol.CmdExecuteComposite, map[string]any{
-			"name":            "social_chat_with",
-			"target_agent_id": in.TargetAgentID,
-		})
-		if err != nil {
-			return nil, ackResult{}, fmt.Errorf("social_chat_with: %w", err)
-		}
-		return nil, buildAckResult(ack, in.DecisionEpoch), nil
-	})
-
-	// rest_idle
-	mcp.AddTool(s, &mcp.Tool{
-		Name:        "rest_idle",
-		Description: "Rest and idle for a duration. Composite behavior.",
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, in RestIdleInput) (*mcp.CallToolResult, ackResult, error) {
-		if in.AgentID == "" {
-			return nil, ackResult{}, fmt.Errorf("agent_id is required")
-		}
-		logToolCall("rest_idle", in.AgentID, in.DecisionEpoch, in)
-		ack, err := ex.SendAction(ctx, in.AgentID, in.DecisionEpoch, protocol.CmdExecuteComposite, map[string]any{
-			"name":         "rest_idle",
-			"duration_sec": in.DurationMin * secondsPerMinute,
-		})
-		if err != nil {
-			return nil, ackResult{}, fmt.Errorf("rest_idle: %w", err)
-		}
-		return nil, buildAckResult(ack, in.DecisionEpoch), nil
-	})
-
-	// archive_research
-	mcp.AddTool(s, &mcp.Tool{
-		Name:        "archive_research",
-		Description: "Do research in the archive for a duration. Composite behavior.",
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, in ArchiveResearchInput) (*mcp.CallToolResult, ackResult, error) {
-		if in.AgentID == "" {
-			return nil, ackResult{}, fmt.Errorf("agent_id is required")
-		}
-		logToolCall("archive_research", in.AgentID, in.DecisionEpoch, in)
-		ack, err := ex.SendAction(ctx, in.AgentID, in.DecisionEpoch, protocol.CmdExecuteComposite, map[string]any{
-			"name":         "archive_research",
-			"duration_sec": in.DurationMin * secondsPerMinute,
-		})
-		if err != nil {
-			return nil, ackResult{}, fmt.Errorf("archive_research: %w", err)
+			return nil, ackResult{}, fmt.Errorf("social_chat: %w", err)
 		}
 		return nil, buildAckResult(ack, in.DecisionEpoch), nil
 	})

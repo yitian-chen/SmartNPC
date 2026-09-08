@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/AgentTown/agenttown-mcp/pkg/hermes"
+	"github.com/AgentTown/agenttown-mcp/pkg/llmtypes"
 )
 
 func newTestClient(t *testing.T, url string) *Client {
@@ -28,7 +28,7 @@ func newTestClient(t *testing.T, url string) *Client {
 }
 
 // TestSendWithSummary_NonStreaming verifies a non-streaming OpenAI Chat
-// Completions call is parsed and converted to *hermes.Response correctly.
+// Completions call is parsed and converted to *llmtypes.Response correctly.
 func TestSendWithSummary_NonStreaming(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/chat/completions" {
@@ -74,7 +74,7 @@ func TestSendWithSummary_NonStreaming(t *testing.T) {
 	defer server.Close()
 
 	c := newTestClient(t, server.URL)
-	resp, err := c.SendWithSummary(context.Background(), "hi", "")
+	resp, err := c.SendWithSummary(context.Background(), "", "hi")
 	if err != nil {
 		t.Fatalf("SendWithSummary: %v", err)
 	}
@@ -99,9 +99,9 @@ func TestSendWithSummary_NonStreaming(t *testing.T) {
 	}
 }
 
-// TestSendWithSummary_SummaryUnused verifies the summary parameter is accepted
-// but does not affect the request (signature compatibility with hermes.Client).
-func TestSendWithSummary_SummaryUnused(t *testing.T) {
+// TestSendWithSummary_SystemMessage verifies a non-empty system prompt is
+// sent as a leading role:"system" message before the user message.
+func TestSendWithSummary_SystemMessage(t *testing.T) {
 	var capturedRequest request
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewDecoder(r.Body).Decode(&capturedRequest)
@@ -111,12 +111,15 @@ func TestSendWithSummary_SummaryUnused(t *testing.T) {
 	defer server.Close()
 
 	c := newTestClient(t, server.URL)
-	_, _ = c.SendWithSummary(context.Background(), "input", "some summary")
-	if len(capturedRequest.Messages) != 1 {
-		t.Errorf("expected 1 message, got %d", len(capturedRequest.Messages))
+	_, _ = c.SendWithSummary(context.Background(), "you are an NPC", "input")
+	if len(capturedRequest.Messages) != 2 {
+		t.Fatalf("expected 2 messages, got %d", len(capturedRequest.Messages))
 	}
-	if capturedRequest.Messages[0].Content != "input" {
-		t.Errorf("content = %q, want input (summary should not modify)", capturedRequest.Messages[0].Content)
+	if capturedRequest.Messages[0].Role != "system" || capturedRequest.Messages[0].Content != "you are an NPC" {
+		t.Errorf("messages[0] = %+v, want system message", capturedRequest.Messages[0])
+	}
+	if capturedRequest.Messages[1].Role != "user" || capturedRequest.Messages[1].Content != "input" {
+		t.Errorf("messages[1] = %+v, want user message", capturedRequest.Messages[1])
 	}
 }
 
@@ -129,7 +132,7 @@ func TestSendWithSummary_HTTPError(t *testing.T) {
 	defer server.Close()
 
 	c := newTestClient(t, server.URL)
-	_, err := c.SendWithSummary(context.Background(), "hi", "")
+	_, err := c.SendWithSummary(context.Background(), "", "hi")
 	if err == nil {
 		t.Fatal("expected error for 401")
 	}
@@ -150,7 +153,7 @@ func TestSendWithSummary_ContextCanceled(t *testing.T) {
 	c := newTestClient(t, server.URL)
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
-	_, err := c.SendWithSummary(ctx, "hi", "")
+	_, err := c.SendWithSummary(ctx, "", "hi")
 	if err == nil {
 		t.Fatal("expected context deadline error")
 	}
@@ -197,7 +200,7 @@ func TestSendStreaming_SSE(t *testing.T) {
 
 	c := newTestClient(t, server.URL)
 	var deltas []string
-	resp, err := c.SendStreaming(context.Background(), "hi", func(d string) { deltas = append(deltas, d) })
+	resp, err := c.SendStreaming(context.Background(), "", "hi", func(d string) { deltas = append(deltas, d) })
 	if err != nil {
 		t.Fatalf("SendStreaming: %v", err)
 	}
@@ -232,7 +235,7 @@ func TestSendStreaming_WithUsage(t *testing.T) {
 	defer server.Close()
 
 	c := newTestClient(t, server.URL)
-	resp, err := c.SendStreaming(context.Background(), "hi", nil)
+	resp, err := c.SendStreaming(context.Background(), "", "hi", nil)
 	if err != nil {
 		t.Fatalf("SendStreaming: %v", err)
 	}
@@ -259,7 +262,7 @@ func TestSendStreaming_KeepaliveComment(t *testing.T) {
 	defer server.Close()
 
 	c := newTestClient(t, server.URL)
-	resp, err := c.SendStreaming(context.Background(), "hi", nil)
+	resp, err := c.SendStreaming(context.Background(), "", "hi", nil)
 	if err != nil {
 		t.Fatalf("SendStreaming: %v", err)
 	}
@@ -282,7 +285,7 @@ func TestSendStreaming_MissingDoneMarker(t *testing.T) {
 	defer server.Close()
 
 	c := newTestClient(t, server.URL)
-	resp, err := c.SendStreaming(context.Background(), "hi", nil)
+	resp, err := c.SendStreaming(context.Background(), "", "hi", nil)
 	if err != nil {
 		t.Fatalf("expected graceful partial response, got error: %v", err)
 	}
@@ -300,12 +303,469 @@ func TestSendStreaming_EmptyStream(t *testing.T) {
 	defer server.Close()
 
 	c := newTestClient(t, server.URL)
-	_, err := c.SendStreaming(context.Background(), "hi", nil)
+	_, err := c.SendStreaming(context.Background(), "", "hi", nil)
 	if err == nil {
 		t.Fatal("expected error for empty stream")
 	}
 	if !errors.Is(err, io.ErrUnexpectedEOF) {
 		t.Errorf("expected io.ErrUnexpectedEOF, got: %v", err)
+	}
+}
+
+// TestSendStreaming_EmptyCompletionWithDone verifies a stream that terminates
+// cleanly ([DONE]) — or with only an id/role chunk — without producing any
+// content or tool calls is treated as an empty completion (ErrEmptyCompletion),
+// not a silent empty success. This is the overloaded-backend case: HTTP 200
+// with an immediate [DONE].
+func TestSendStreaming_EmptyCompletionWithDone(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, _ := w.(http.Flusher)
+		// role-only first chunk carrying an id, then [DONE] — no content,
+		// no tool_calls, no usage.
+		_, _ = w.Write([]byte("data: {\"id\":\"chatcmpl-abc\",\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\n"))
+		flusher.Flush()
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+		flusher.Flush()
+	}))
+	defer server.Close()
+
+	c := newTestClient(t, server.URL)
+	_, err := c.SendStreaming(context.Background(), "", "hi", nil)
+	if err == nil {
+		t.Fatal("expected error for empty completion with [DONE]")
+	}
+	if !errors.Is(err, ErrEmptyCompletion) {
+		t.Errorf("expected ErrEmptyCompletion, got: %v", err)
+	}
+}
+
+// TestSendWithSchema_RequestIncludesResponseFormat verifies SendWithSchema
+// adds response_format (json_schema, strict) to the request body and the
+// schema document round-trips.
+func TestSendWithSchema_RequestIncludesResponseFormat(t *testing.T) {
+	var capturedRequest request
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&capturedRequest)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"x","choices":[{"message":{"role":"assistant","content":"[]"}}],"usage":{}}`))
+	}))
+	defer server.Close()
+
+	c := newTestClient(t, server.URL)
+	schema := []byte(`{"type":"array","items":{"type":"object","properties":{"goal":{"type":"string"}}}}`)
+	if _, err := c.SendWithSchema(context.Background(), "sys", "user", "daily_plan", schema); err != nil {
+		t.Fatalf("SendWithSchema: %v", err)
+	}
+	if capturedRequest.ResponseFormat == nil {
+		t.Fatal("response_format should be present for SendWithSchema")
+	}
+	if capturedRequest.ResponseFormat.Type != "json_schema" {
+		t.Errorf("response_format.type = %q, want json_schema", capturedRequest.ResponseFormat.Type)
+	}
+	js := capturedRequest.ResponseFormat.JSONSchema
+	if js == nil {
+		t.Fatal("json_schema should be present")
+	}
+	if js.Name != "daily_plan" || !js.Strict {
+		t.Errorf("json_schema name/strict = %q/%v", js.Name, js.Strict)
+	}
+	if string(js.Schema) != string(schema) {
+		t.Errorf("schema = %s, want %s", js.Schema, schema)
+	}
+	// 无 tools 时 tool_choice 应省略，tools 也应省略。
+	if capturedRequest.Tools != nil {
+		t.Errorf("tools should be absent when none passed, got %+v", capturedRequest.Tools)
+	}
+	if capturedRequest.ToolChoice != nil {
+		t.Errorf("tool_choice should be absent when no tools, got %v", capturedRequest.ToolChoice)
+	}
+}
+
+// TestSendWithSchema_ToolChoiceNone verifies that passing tools to SendWithSchema
+// serializes the `tools` array but sets tool_choice="none" — the model sees the
+// action catalog yet must emit the schema-constrained JSON (no tool_calls).
+func TestSendWithSchema_ToolChoiceNone(t *testing.T) {
+	var capturedRequest request
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&capturedRequest)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"x","choices":[{"message":{"role":"assistant","content":"[]"}}],"usage":{}}`))
+	}))
+	defer server.Close()
+
+	c := newTestClient(t, server.URL)
+	schema := []byte(`{"type":"array","items":{"type":"object","properties":{"goal":{"type":"string"}}}}`)
+	tools := []Tool{{
+		Type: "function",
+		Function: ToolFunction{
+			Name:        "social_chat",
+			Description: "主动去找另一个 NPC 开始对话",
+			Parameters:  json.RawMessage(`{"type":"object","properties":{"target_agent_id":{"type":"string"}},"required":["target_agent_id"]}`),
+		},
+	}}
+	if _, err := c.SendWithSchema(context.Background(), "sys", "user", "daily_plan", schema, tools); err != nil {
+		t.Fatalf("SendWithSchema: %v", err)
+	}
+	if len(capturedRequest.Tools) != 1 {
+		t.Fatalf("tools len = %d, want 1", len(capturedRequest.Tools))
+	}
+	if capturedRequest.Tools[0].Function.Name != "social_chat" {
+		t.Errorf("tools[0].name = %q, want social_chat", capturedRequest.Tools[0].Function.Name)
+	}
+	// tool_choice 必须为 "none"：披露目录但不允许 tool_call（战略层产出 JSON 计划文本）。
+	choice, _ := capturedRequest.ToolChoice.(string)
+	if choice != "none" {
+		t.Errorf("tool_choice = %v, want \"none\"", capturedRequest.ToolChoice)
+	}
+	// response_format 仍应存在（schema 与 tools 可共存）。
+	if capturedRequest.ResponseFormat == nil {
+		t.Fatal("response_format should still be present alongside tools")
+	}
+}
+
+// TestSendWithSummary_ToolChoiceNone verifies that passing tools to
+// SendWithSummary (variadic) serializes `tools` and sets tool_choice="none" —
+// the dialogue layer advertises the catalog without forcing a tool call.
+// A separate test server confirms the no-tools call omits both fields.
+func TestSendWithSummary_ToolChoiceNone(t *testing.T) {
+	var capturedRequest request
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedRequest = request{} // 重置：避免前一次调用残留
+		_ = json.NewDecoder(r.Body).Decode(&capturedRequest)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"x","choices":[{"message":{"role":"assistant","content":"{\"accept\":true}"}}],"usage":{}}`))
+	}))
+	defer server.Close()
+
+	c := newTestClient(t, server.URL)
+	tools := []Tool{{Type: "function", Function: ToolFunction{Name: "social_chat"}}}
+	if _, err := c.SendWithSummary(context.Background(), "sys", "user", tools); err != nil {
+		t.Fatalf("SendWithSummary: %v", err)
+	}
+	if len(capturedRequest.Tools) != 1 {
+		t.Fatalf("tools len = %d, want 1", len(capturedRequest.Tools))
+	}
+	choice, _ := capturedRequest.ToolChoice.(string)
+	if choice != "none" {
+		t.Errorf("tool_choice = %v, want \"none\" (catalog disclosed, no forced call)", capturedRequest.ToolChoice)
+	}
+}
+
+// TestSendWithSummary_NoToolsOmitsToolFields verifies a no-tools SendWithSummary
+// call omits both `tools` and `tool_choice`.
+func TestSendWithSummary_NoToolsOmitsToolFields(t *testing.T) {
+	var capturedRequest request
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedRequest = request{}
+		_ = json.NewDecoder(r.Body).Decode(&capturedRequest)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"x","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{}}`))
+	}))
+	defer server.Close()
+
+	c := newTestClient(t, server.URL)
+	if _, err := c.SendWithSummary(context.Background(), "", "hi"); err != nil {
+		t.Fatalf("SendWithSummary: %v", err)
+	}
+	if capturedRequest.Tools != nil {
+		t.Errorf("tools should be absent when none passed, got %+v", capturedRequest.Tools)
+	}
+	if capturedRequest.ToolChoice != nil {
+		t.Errorf("tool_choice should be absent when no tools, got %v", capturedRequest.ToolChoice)
+	}
+}
+
+// TestSendWithSummary_NoResponseFormat verifies plain SendWithSummary does
+// not attach response_format (schema mode is opt-in per call).
+func TestSendWithSummary_NoResponseFormat(t *testing.T) {
+	var capturedRequest request
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&capturedRequest)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"x","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{}}`))
+	}))
+	defer server.Close()
+
+	c := newTestClient(t, server.URL)
+	if _, err := c.SendWithSummary(context.Background(), "", "hi"); err != nil {
+		t.Fatalf("SendWithSummary: %v", err)
+	}
+	if capturedRequest.ResponseFormat != nil {
+		t.Errorf("response_format should be absent, got %+v", capturedRequest.ResponseFormat)
+	}
+	if capturedRequest.Tools != nil {
+		t.Errorf("tools should be absent for plain SendWithSummary, got %+v", capturedRequest.Tools)
+	}
+}
+
+// TestSendWithSummaryTools_RequestIncludesTools verifies SendWithSummaryTools
+// serializes the `tools` array (function calling) into the request body.
+func TestSendWithSummaryTools_RequestIncludesTools(t *testing.T) {
+	var capturedRequest request
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&capturedRequest)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"x","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{}}`))
+	}))
+	defer server.Close()
+
+	c := newTestClient(t, server.URL)
+	tools := []Tool{{
+		Type: "function",
+		Function: ToolFunction{
+			Name:        "work_shift",
+			Description: "去指定设施执行工作",
+			Parameters:  json.RawMessage(`{"type":"object","properties":{"semantic_group":{"type":"string"}},"required":["semantic_group"]}`),
+		},
+	}}
+	if _, err := c.SendWithSummaryTools(context.Background(), "sys", "user", tools); err != nil {
+		t.Fatalf("SendWithSummaryTools: %v", err)
+	}
+	if len(capturedRequest.Tools) != 1 {
+		t.Fatalf("tools len = %d, want 1", len(capturedRequest.Tools))
+	}
+	got := capturedRequest.Tools[0]
+	if got.Type != "function" {
+		t.Errorf("tools[0].type = %q, want function", got.Type)
+	}
+	if got.Function.Name != "work_shift" {
+		t.Errorf("tools[0].function.name = %q, want work_shift", got.Function.Name)
+	}
+	if string(got.Function.Parameters) != `{"type":"object","properties":{"semantic_group":{"type":"string"}},"required":["semantic_group"]}` {
+		t.Errorf("tools[0].function.parameters = %s", got.Function.Parameters)
+	}
+	// tools 非空时自动设置 tool_choice="required"（function calling 强制调用）。
+	if capturedRequest.ToolChoice != "required" {
+		t.Errorf("tool_choice = %v, want required", capturedRequest.ToolChoice)
+	}
+}
+
+// TestSendWithSummaryTools_ParsesToolCalls verifies a non-streaming response
+// with tool_calls is converted into llmtypes.Response.ToolCalls.
+func TestSendWithSummaryTools_ParsesToolCalls(t *testing.T) {
+	body := `{"id":"x","choices":[{"message":{"role":"assistant","content":"","tool_calls":[` +
+		`{"id":"call_1","type":"function","function":{"name":"speak","arguments":"{\"content\":\"hi\"}"}},` +
+		`{"id":"call_2","type":"function","function":{"name":"move_to","arguments":"{\"target_id\":\"main_workshop\"}"}}` +
+		`]}}],"usage":{}}`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(body))
+	}))
+	defer server.Close()
+
+	c := newTestClient(t, server.URL)
+	resp, err := c.SendWithSummaryTools(context.Background(), "sys", "user", []Tool{{Type: "function", Function: ToolFunction{Name: "speak"}}})
+	if err != nil {
+		t.Fatalf("SendWithSummaryTools: %v", err)
+	}
+	if len(resp.ToolCalls) != 2 {
+		t.Fatalf("ToolCalls len = %d, want 2", len(resp.ToolCalls))
+	}
+	if resp.ToolCalls[0].Function.Name != "speak" || resp.ToolCalls[0].Function.Arguments != `{"content":"hi"}` {
+		t.Errorf("ToolCalls[0] = %+v", resp.ToolCalls[0])
+	}
+	if resp.ToolCalls[1].Function.Name != "move_to" || resp.ToolCalls[1].Function.Arguments != `{"target_id":"main_workshop"}` {
+		t.Errorf("ToolCalls[1] = %+v", resp.ToolCalls[1])
+	}
+}
+
+// TestSendMessagesTools_SerializesMultiTurn verifies SendMessagesTools sends
+// the full messages array (including assistant tool_calls and tool role with
+// tool_call_id) in order.
+func TestSendMessagesTools_SerializesMultiTurn(t *testing.T) {
+	var capturedRequest request
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&capturedRequest)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"x","choices":[{"message":{"role":"assistant","content":"","tool_calls":[{"id":"call_9","type":"function","function":{"name":"speak","arguments":"{}"}}]}}],"usage":{}}`))
+	}))
+	defer server.Close()
+
+	c := newTestClient(t, server.URL)
+	messages := []llmtypes.Message{
+		{Role: "system", Content: "sys"},
+		{Role: "user", Content: "round1"},
+		{Role: "assistant", Content: "", ToolCalls: []llmtypes.ToolCall{
+			{ID: "call_1", Type: "function", Function: llmtypes.ToolFunction{Name: "move_to", Arguments: `{"target_id":"z"}`}},
+		}},
+		{Role: "tool", Content: "result=success", ToolCallID: "call_1"},
+		{Role: "user", Content: "round2"},
+	}
+	resp, err := c.SendMessagesTools(context.Background(), messages, []Tool{{Type: "function", Function: ToolFunction{Name: "speak"}}})
+	if err != nil {
+		t.Fatalf("SendMessagesTools: %v", err)
+	}
+	if len(capturedRequest.Messages) != 5 {
+		t.Fatalf("messages len = %d, want 5", len(capturedRequest.Messages))
+	}
+	if capturedRequest.Messages[0].Role != "system" || capturedRequest.Messages[0].Content != "sys" {
+		t.Errorf("messages[0] = %+v", capturedRequest.Messages[0])
+	}
+	asst := capturedRequest.Messages[2]
+	if asst.Role != "assistant" || len(asst.ToolCalls) != 1 || asst.ToolCalls[0].ID != "call_1" {
+		t.Errorf("messages[2] assistant tool_calls = %+v", asst)
+	}
+	toolMsg := capturedRequest.Messages[3]
+	if toolMsg.Role != "tool" || toolMsg.ToolCallID != "call_1" || toolMsg.Content != "result=success" {
+		t.Errorf("messages[3] tool = %+v", toolMsg)
+	}
+	if len(resp.ToolCalls) != 1 || resp.ToolCalls[0].ID != "call_9" {
+		t.Errorf("resp.ToolCalls = %+v", resp.ToolCalls)
+	}
+}
+
+// TestSendStreamingTools_AccumulatesToolCalls verifies streamed delta.tool_calls
+// are accumulated by index and delivered via onToolCall once complete.
+func TestSendStreamingTools_AccumulatesToolCalls(t *testing.T) {
+	// 用 json.Marshal 构造 SSE chunk，避免手写多层转义。
+	mkChunk := func(delta map[string]any, finish string) string {
+		chunk := map[string]any{
+			"id":      "s1",
+			"choices": []any{map[string]any{"delta": delta, "finish_reason": finish}},
+		}
+		b, _ := json.Marshal(chunk)
+		return "data: " + string(b) + "\n\n"
+	}
+	sse := "" +
+		mkChunk(map[string]any{"tool_calls": []any{map[string]any{
+			"index": 0, "id": "call_1", "type": "function",
+			"function": map[string]any{"name": "speak", "arguments": `{"content":"`},
+		}}}, "") +
+		mkChunk(map[string]any{"tool_calls": []any{map[string]any{
+			"index":    0,
+			"function": map[string]any{"arguments": `hi"}`},
+		}}}, "") +
+		mkChunk(map[string]any{"tool_calls": []any{map[string]any{
+			"index": 1, "id": "call_2", "type": "function",
+			"function": map[string]any{"name": "move_to", "arguments": `{"target_id":"main_workshop"}`},
+		}}}, "") +
+		mkChunk(map[string]any{}, "tool_calls") +
+		"data: [DONE]\n\n"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(sse))
+	}))
+	defer server.Close()
+
+	c := newTestClient(t, server.URL)
+	var completed []llmtypes.ToolCall
+	resp, err := c.SendStreamingTools(context.Background(), "sys", "user", []Tool{{Type: "function", Function: ToolFunction{Name: "speak"}}}, nil, func(tc llmtypes.ToolCall) {
+		completed = append(completed, tc)
+	})
+	if err != nil {
+		t.Fatalf("SendStreamingTools: %v", err)
+	}
+	if len(completed) != 2 {
+		t.Fatalf("onToolCall count = %d, want 2", len(completed))
+	}
+	if completed[0].Function.Name != "speak" || completed[0].Function.Arguments != `{"content":"hi"}` {
+		t.Errorf("completed[0] = %+v, want speak with content hi", completed[0])
+	}
+	if completed[1].Function.Name != "move_to" || completed[1].Function.Arguments != `{"target_id":"main_workshop"}` {
+		t.Errorf("completed[1] = %+v, want move_to", completed[1])
+	}
+	// 最终 Response 也应携带累积后的 ToolCalls。
+	if len(resp.ToolCalls) != 2 {
+		t.Errorf("resp.ToolCalls len = %d, want 2", len(resp.ToolCalls))
+	}
+}
+
+// TestSendLoopStreaming_AccumulatesToolCallsWithUsage verifies the streaming
+// loop variant carries tool_calls and usage back into the Response, and that
+// the request body sets stream + stream_options.include_usage.
+func TestSendLoopStreaming_AccumulatesToolCallsWithUsage(t *testing.T) {
+	var capturedReq struct {
+		Stream        bool `json:"stream"`
+		StreamOptions struct {
+			IncludeUsage bool `json:"include_usage"`
+		} `json:"stream_options"`
+	}
+	mkChunk := func(delta map[string]any, finish string) string {
+		chunk := map[string]any{
+			"id":      "s1",
+			"choices": []any{map[string]any{"delta": delta, "finish_reason": finish}},
+		}
+		b, _ := json.Marshal(chunk)
+		return "data: " + string(b) + "\n\n"
+	}
+	sse := "" +
+		mkChunk(map[string]any{"tool_calls": []any{map[string]any{
+			"index": 0, "id": "call_1", "type": "function",
+			"function": map[string]any{"name": "speak", "arguments": `{"content":"hi"}`},
+		}}}, "") +
+		mkChunk(map[string]any{}, "tool_calls") +
+		"data: {\"id\":\"s1\",\"choices\":[],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":4,\"total_tokens\":14}}\n\n" +
+		"data: [DONE]\n\n"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&capturedReq)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(sse))
+	}))
+	defer server.Close()
+
+	c := newTestClient(t, server.URL)
+	resp, err := c.SendLoopStreaming(context.Background(),
+		[]llmtypes.Message{{Role: "system", Content: "s"}, {Role: "user", Content: "u"}},
+		[]Tool{{Type: "function", Function: ToolFunction{Name: "speak"}}},
+		"required", "", nil, nil, nil)
+	if err != nil {
+		t.Fatalf("SendLoopStreaming: %v", err)
+	}
+	if !capturedReq.Stream || !capturedReq.StreamOptions.IncludeUsage {
+		t.Errorf("request stream=%v include_usage=%v, want true/true", capturedReq.Stream, capturedReq.StreamOptions.IncludeUsage)
+	}
+	if len(resp.ToolCalls) != 1 || resp.ToolCalls[0].Function.Name != "speak" {
+		t.Errorf("resp.ToolCalls = %+v, want one speak call", resp.ToolCalls)
+	}
+	if resp.Usage.OutputTokens != 4 {
+		t.Errorf("Usage.OutputTokens = %d, want 4 (from include_usage chunk)", resp.Usage.OutputTokens)
+	}
+}
+
+// TestSendStreamingTools_ArgumentFragmentsTriggerOnDelta 钉死修复：纯
+// tool-calling（tool_choice=required，无 delta.content）流式下，onDelta 仍
+// 要收到 tool_calls 的 arguments 分片——否则 TTFT/ITL 等流式指标采集为空。
+func TestSendStreamingTools_ArgumentFragmentsTriggerOnDelta(t *testing.T) {
+	mkChunk := func(delta map[string]any) string {
+		chunk := map[string]any{
+			"id":      "s1",
+			"choices": []any{map[string]any{"delta": delta}},
+		}
+		b, _ := json.Marshal(chunk)
+		return "data: " + string(b) + "\n\n"
+	}
+	sse := "" +
+		mkChunk(map[string]any{"tool_calls": []any{map[string]any{
+			"index": 0, "id": "call_1", "type": "function",
+			"function": map[string]any{"name": "speak", "arguments": `{"content":"`},
+		}}}) +
+		mkChunk(map[string]any{"tool_calls": []any{map[string]any{
+			"index":    0,
+			"function": map[string]any{"arguments": `hi"}`},
+		}}}) +
+		"data: [DONE]\n\n"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(sse))
+	}))
+	defer server.Close()
+
+	c := newTestClient(t, server.URL)
+	var deltas []string
+	if _, err := c.SendStreamingTools(context.Background(), "sys", "user",
+		[]Tool{{Type: "function", Function: ToolFunction{Name: "speak"}}},
+		func(d string) { deltas = append(deltas, d) }, nil); err != nil {
+		t.Fatalf("SendStreamingTools: %v", err)
+	}
+	if len(deltas) != 2 {
+		t.Fatalf("onDelta calls = %d, want 2 (two argument fragments)", len(deltas))
+	}
+	if deltas[0] != `{"content":"` || deltas[1] != `hi"}` {
+		t.Errorf("deltas = %q, want argument fragments", deltas)
 	}
 }
 
@@ -346,7 +806,7 @@ func TestOpenaiResponse_ToHermes(t *testing.T) {
 		},
 		Usage: openaiUsage{PromptTokens: 3, CompletionTokens: 4, TotalTokens: 7},
 	}
-	hr := or.toHermes("fallback-model")
+	hr := or.toLlmTypes("fallback-model")
 	if hr.ID != "chat_x" {
 		t.Errorf("ID = %q", hr.ID)
 	}
@@ -364,12 +824,132 @@ func TestOpenaiResponse_ToHermes(t *testing.T) {
 	}
 }
 
-// TestVenusClient_MatchesHermesSignatures is a compile-time check that
+// TestVenusClient_MatchesLLMClientSignatures is a compile-time check that
 // *venus.Client satisfies the llmClient interface expected by main.go.
-func TestVenusClient_MatchesHermesSignatures(t *testing.T) {
+func TestVenusClient_MatchesLLMClientSignatures(t *testing.T) {
 	var _ interface {
-		SendWithSummary(ctx context.Context, input, summary string) (*hermes.Response, error)
-		SendStreaming(ctx context.Context, input string, onDelta func(string)) (*hermes.Response, error)
+		SendWithSummary(ctx context.Context, system, user string, tools ...[]Tool) (*llmtypes.Response, error)
+		SendStreaming(ctx context.Context, system, user string, onDelta func(string)) (*llmtypes.Response, error)
+		SendWithSchema(ctx context.Context, system, user, schemaName string, schema []byte, tools ...[]Tool) (*llmtypes.Response, error)
+		SendWithSummaryTools(ctx context.Context, system, user string, tools []Tool) (*llmtypes.Response, error)
+		SendStreamingTools(ctx context.Context, system, user string, tools []Tool, onDelta func(string), onToolCall func(llmtypes.ToolCall)) (*llmtypes.Response, error)
+		SendMessagesTools(ctx context.Context, messages []llmtypes.Message, tools []Tool) (*llmtypes.Response, error)
+		SendLoop(ctx context.Context, messages []llmtypes.Message, tools []Tool, toolChoice, schemaName string, schema []byte) (*llmtypes.Response, error)
+		SendLoopStreaming(ctx context.Context, messages []llmtypes.Message, tools []Tool, toolChoice, schemaName string, schema []byte, onDelta func(string), onToolCall func(llmtypes.ToolCall)) (*llmtypes.Response, error)
 		ResetSession()
 	} = (*Client)(nil)
+}
+
+// TestLastRequestBody verifies the client records the full request body of
+// the most recent send, for docs/actual_prompts.md (latest actual request).
+func TestLastRequestBody(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"x","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+	}))
+	defer server.Close()
+
+	c := newTestClient(t, server.URL)
+	if body := c.LastRequestBody(); len(body) != 0 {
+		t.Fatalf("LastRequestBody before any send = %q, want empty", body)
+	}
+	if _, err := c.SendWithSummary(context.Background(), "sys", "user"); err != nil {
+		t.Fatalf("SendWithSummary: %v", err)
+	}
+	body := c.LastRequestBody()
+	var got map[string]any
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("LastRequestBody not valid JSON: %v", err)
+	}
+	if got["model"] != "qwen3.6-35b-a3b" {
+		t.Errorf("body model = %v, want qwen3.6-35b-a3b", got["model"])
+	}
+	msgs, ok := got["messages"].([]any)
+	if !ok || len(msgs) != 2 {
+		t.Fatalf("body messages = %v, want 2 entries", got["messages"])
+	}
+}
+
+// TestSendLoop_ToolChoiceAndSchema verifies SendLoop serializes the multi-turn
+// messages array with tools and the explicit tool_choice, plus response_format
+// when schemaName is non-empty — the unified per-NPC agentic loop entry.
+func TestSendLoop_ToolChoiceAndSchema(t *testing.T) {
+	var capturedRequest request
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedRequest = request{}
+		_ = json.NewDecoder(r.Body).Decode(&capturedRequest)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"x","choices":[{"message":{"role":"assistant","content":"[]"}}],"usage":{}}`))
+	}))
+	defer server.Close()
+
+	c := newTestClient(t, server.URL)
+	tools := []Tool{{Type: "function", Function: ToolFunction{Name: "social_chat"}}}
+	messages := []llmtypes.Message{
+		{Role: "system", Content: "sys"},
+		{Role: "user", Content: "u1"},
+		{Role: "assistant", Content: "a1", ToolCalls: []llmtypes.ToolCall{{ID: "t1", Type: "function", Function: llmtypes.ToolFunction{Name: "speak", Arguments: "{}"}}}},
+		{Role: "tool", Content: "result=success", ToolCallID: "t1"},
+		{Role: "user", Content: "u2"},
+	}
+	schema := []byte(`{"type":"array"}`)
+
+	// 战略轮形态：tool_choice=none + response_format。
+	if _, err := c.SendLoop(context.Background(), messages, tools, "none", "daily_plan", schema); err != nil {
+		t.Fatalf("SendLoop strategic: %v", err)
+	}
+	if len(capturedRequest.Tools) != 1 {
+		t.Fatalf("tools len = %d, want 1", len(capturedRequest.Tools))
+	}
+	choice, _ := capturedRequest.ToolChoice.(string)
+	if choice != "none" {
+		t.Errorf("tool_choice = %v, want none", capturedRequest.ToolChoice)
+	}
+	if capturedRequest.ResponseFormat == nil || capturedRequest.ResponseFormat.JSONSchema == nil {
+		t.Fatal("response_format should be present when schemaName non-empty")
+	}
+	if capturedRequest.ResponseFormat.JSONSchema.Name != "daily_plan" {
+		t.Errorf("json_schema name = %q, want daily_plan", capturedRequest.ResponseFormat.JSONSchema.Name)
+	}
+	if len(capturedRequest.Messages) != len(messages) {
+		t.Fatalf("messages len = %d, want %d", len(capturedRequest.Messages), len(messages))
+	}
+	// 多轮序列化：tool_calls 与 tool_call_id 随消息透传。
+	if len(capturedRequest.Messages[2].ToolCalls) != 1 || capturedRequest.Messages[2].ToolCalls[0].ID != "t1" {
+		t.Errorf("assistant tool_calls not serialized: %+v", capturedRequest.Messages[2])
+	}
+	if capturedRequest.Messages[3].ToolCallID != "t1" {
+		t.Errorf("tool message tool_call_id = %q, want t1", capturedRequest.Messages[3].ToolCallID)
+	}
+
+	// 战术轮形态：tool_choice=required、无 response_format。
+	if _, err := c.SendLoop(context.Background(), messages, tools, "required", "", nil); err != nil {
+		t.Fatalf("SendLoop tactical: %v", err)
+	}
+	choice, _ = capturedRequest.ToolChoice.(string)
+	if choice != "required" {
+		t.Errorf("tool_choice = %v, want required", capturedRequest.ToolChoice)
+	}
+	if capturedRequest.ResponseFormat != nil {
+		t.Errorf("response_format should be absent when schemaName empty, got %+v", capturedRequest.ResponseFormat)
+	}
+}
+
+// TestSendWithSummary_EmptyCompletion 验证非流式空完成（200 但 content 空、无
+// tool_calls）返回 ErrEmptyCompletion，对齐流式 parseStream 的空完成检查。
+func TestSendWithSummary_EmptyCompletion(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl-123","model":"default","choices":[{"message":{"role":"assistant","content":""},"finish_reason":"stop"}]}`))
+	}))
+	defer server.Close()
+
+	c := newTestClient(t, server.URL)
+	_, err := c.SendWithSummary(context.Background(), "", "hi")
+	if err == nil {
+		t.Fatal("expected ErrEmptyCompletion for empty non-streaming response")
+	}
+	if !errors.Is(err, ErrEmptyCompletion) {
+		t.Errorf("expected ErrEmptyCompletion, got: %v", err)
+	}
 }

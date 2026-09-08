@@ -1,125 +1,1716 @@
-# World Knowledge Base — AgentTown 园区世界字典
-#
-# 这是 UE5 场景的导出物（目前由手写维护，未来由 UE 端 WorldKBExporter 自动生成）。
-# MCP 层启动时加载此文件，把语义 ID 解析为坐标，供 move_to 等工具下发。
-# Mock UE (src/agenttown/mock_ue.py) 也读同一份文件作为唯一真相源。
-#
-# 坐标单位：UE5 centimeter（如 [16000, 10000, 0] 表示 X=160m, Y=100m, Z=0）。
-# 与 src/agenttown/mock_ue.py 中原有硬编码 dict 数据对齐。
-#
-# 字段参考 docs/AgentTown_Design.md §子系统1 的 YAML schema。
-
-version: "1.0"
-
-site:
-  id: industrial_park
-  name: "工业机器人园区"
-
-# ─── Zones（区域，由 UE5 BoxTrigger 导出） ─────────────────────────
-zones:
-  - id: main_workshop
-    name: "主生产车间"
-    description: "机器人们的主要工作场所"
-    ue5_bounds:
-      center: [20000, 10000, 0]        # BoxTrigger 位置
-      half_size: [5000, 5000, 5000]    # BoxComponent 半尺寸
-    entry_point: [16000, 10000, 0]     # 自动计算的入口
-    connected_to: [central_plaza]
-    locations: [workbench_01, charging_station_01]
-
-  - id: central_plaza
-    name: "中央广场"
-    description: "园区中央的开放广场，机器人休息社交的场所"
-    ue5_bounds:
-      center: [11500, 11500, 0]
-      half_size: [3500, 3500, 5000]
-    entry_point: [10000, 10000, 0]
-    connected_to: [main_workshop, charging_station]
-    locations: []
-
-  - id: charging_station
-    name: "充电站"
-    description: "园区充电设施所在区域"
-    ue5_bounds:
-      center: [22500, 7500, 0]
-      half_size: [2500, 2500, 5000]
-    entry_point: [21500, 8500, 0]
-    connected_to: [central_plaza]
-    locations: [charging_station_01]
-
-  - id: rest_area
-    name: "休息厅"
-    description: "废弃货运升降井旁的公共休息区，充电、聊天、留言、聚会的场所"
-    ue5_bounds:
-      center: [15000, 11500, 0]          # 主车间与中央广场之间
-      half_size: [3000, 2500, 5000]
-    entry_point: [14000, 11000, 0]
-    connected_to: [main_workshop, central_plaza]
-    locations: [rest_bench_01]
-
-# ─── Locations（地点，由 Smart Object Actor 导出） ────────────────
-locations:
-  - id: workbench_01
-    name: "工作台一号"
-    zone: main_workshop
-    type: workstation
-    position: [20000, 10000, 0]          # Actor->GetActorLocation()
-    interaction_point: [19500, 10500, 0] # InteractionSocket 世界坐标
-    interaction_radius: 1500             # cm，用于 mock_ue 坐标反推 current_location
-    facing: [1, 0, 0]
-    available_actions: [assemble, inspect]
-    ue5_ref: "BP_Workbench_01"
-
-  - id: charging_station_01
-    name: "充电桩一号"
-    zone: main_workshop
-    type: charging
-    position: [21500, 8500, 0]
-    interaction_point: [21500, 8500, 0]
-    interaction_radius: 1500
-    facing: [1, 0, 0]
-    available_actions: [charge, inspect]
-    ue5_ref: "BP_ChargingStation_01"
-
-  - id: rest_bench_01
-    name: "休息长椅"
-    zone: rest_area
-    type: furniture
-    position: [15000, 11500, 0]
-    interaction_point: [14800, 11300, 0]
-    interaction_radius: 1500
-    facing: [0, 1, 0]
-    available_actions: [rest, inspect]
-    ue5_ref: "BP_RestBench_01"
-
-# ─── Objects（智能对象，与 Location 一一对应） ─────────────────────
-objects:
-  - id: workbench_01
-    available_actions: [assemble, inspect]
-    required_role: [worker]
-    capacity: 1
-    ue5_ref: "BP_Workbench_01"
-
-  - id: charging_station_01
-    available_actions: [charge, inspect]
-    required_role: []
-    capacity: 1
-    ue5_ref: "BP_ChargingStation_01"
-
-  - id: rest_bench_01
-    available_actions: [rest, inspect]
-    required_role: []
-    capacity: 2
-    ue5_ref: "BP_RestBench_01"
-
-# ─── Agents（园区内的 NPC 定义） ───────────────────────────────────
 agents:
-  - id: H-01
-    name: "老陈"
-    type: humanoid
-    role: [supervisor, worker]
-    capabilities: [move_to, speak, emote, work_assemble]
-    default_zone: main_workshop
-    default_position: [20000, 10000, 0]
-    ue5_class: "BP_HumanoidRobot"
-    ue5_variant: "H01_LaoChen"
+    - action_table: ""
+      actor_class: /Game/AI/AgentTown/AgentBP/Human/BP_AT_Agent_LaoChen.BP_AT_Agent_LaoChen_C
+      core_memories: []
+      description: ""
+      display_name: 老陈
+      editor_label: BP_AT_Agent_LaoChen
+      id: H-01
+      initial_position:
+        - -8950
+        - -12630
+        - -22712
+      initial_zone: residential_quarters
+      main_behavior_tree: /Game/AI/AgentTown/AgentBT/BT_AT_LaoChen.BT_AT_LaoChen
+      personality:
+        traits:
+            - 沉稳
+            - 念旧
+            - 重视工艺
+            - 务实
+      profession: supervisor、worker、maintainer
+      type: Human
+      work_preference: main_workshop
+    - action_table: ""
+      actor_class: /Game/AI/AgentTown/AgentBP/Human/BP_AT_Agent_LaoWang.BP_AT_Agent_LaoWang_C
+      description: ""
+      display_name: 老王
+      editor_label: BP_AT_Agent_LaoWang
+      id: H-02
+      initial_position:
+        - -7280
+        - -13200
+        - -22712
+      initial_zone: residential_quarters
+      main_behavior_tree: /Game/AI/AgentTown/AgentBT/BT_AT_LaoChen.BT_AT_LaoChen
+      profession: ""
+      type: Human
+    - action_table: ""
+      actor_class: /Game/AI/AgentTown/AgentBP/Human/BP_AT_Agent_LaoLi.BP_AT_Agent_LaoLi_C
+      description: ""
+      display_name: 老李
+      editor_label: BP_AT_Agent_LaoLi
+      id: H-03
+      initial_position:
+        - -8330
+        - -13240
+        - -22312
+      initial_zone: residential_quarters
+      main_behavior_tree: /Game/AI/AgentTown/AgentBT/BT_AT_LaoChen.BT_AT_LaoChen
+      profession: ""
+      type: Human
+    - action_table: ""
+      actor_class: /Game/AI/AgentTown/AgentBP/Human/BP_AT_Agent_LaoLiu.BP_AT_Agent_LaoLiu_C
+      description: ""
+      display_name: 老刘
+      editor_label: BP_AT_Agent_LaoLiu
+      id: H-04
+      initial_position:
+        - -8230
+        - -12820
+        - -22312
+      initial_zone: residential_quarters
+      main_behavior_tree: /Game/AI/AgentTown/AgentBT/BT_AT_LaoChen.BT_AT_LaoChen
+      profession: ""
+      type: Human
+    - action_table: ""
+      actor_class: /Game/AI/AgentTown/AgentBP/Human/BP_AT_Agent_LaoZhang.BP_AT_Agent_LaoZhang_C
+      description: ""
+      display_name: 老张
+      editor_label: BP_AT_Agent_LaoZhang
+      id: H-05
+      initial_position:
+        - -8110
+        - -13400
+        - -22712
+      initial_zone: residential_quarters
+      main_behavior_tree: /Game/AI/AgentTown/AgentBT/BT_AT_LaoChen.BT_AT_LaoChen
+      profession: ""
+      type: Human
+narrative:
+    setting: 工业机器人小镇
+    theme: 一座由机器人居民维持生产和日常生活的封闭工业园区。居民在车间、物流站、维修厂等工作，在广场社交、在居住区休息，构成了自给自足的工业生活共同体。偶尔会有外来的人类玩家进入小镇，他们可能对机器人居民发起攻击。
+objects:
+    - actor_class: /AgentTownBridge/WorldKB/SmartObject/bench/BP_AT_Bench.BP_AT_Bench_C
+      actor_position:
+        - -5530
+        - 13190
+        - -21720
+      available_interactions:
+        - rest
+      category: rest
+      default_state: idle
+      description: 坐一坐，恢复少量疲劳
+      display_name: 长椅
+      editor_label: BP_AT_Bench
+      id: bench-1
+      interaction_facing:
+        - 0
+        - -1
+        - 0
+      interaction_point:
+        - -5530
+        - 13190
+        - -21720
+      interaction_radius: 1500
+      semantic_group: bench
+      zone_id: central_plaza
+    - actor_class: /AgentTownBridge/WorldKB/SmartObject/bench/BP_AT_Bench.BP_AT_Bench_C
+      actor_position:
+        - 1540
+        - 6710
+        - -20720
+      available_interactions:
+        - rest
+      category: rest
+      default_state: idle
+      description: 坐一坐，恢复少量疲劳
+      display_name: 长椅
+      editor_label: BP_AT_Bench10
+      id: bench-10
+      interaction_facing:
+        - 0
+        - 1
+        - 0
+      interaction_point:
+        - 1540
+        - 6710
+        - -20720
+      interaction_radius: 1500
+      semantic_group: bench
+      zone_id: main_workshop
+    - actor_class: /AgentTownBridge/WorldKB/SmartObject/bench/BP_AT_Bench.BP_AT_Bench_C
+      actor_position:
+        - -8970
+        - -6380
+        - -22700
+      available_interactions:
+        - rest
+      category: rest
+      default_state: idle
+      description: 坐一坐，恢复少量疲劳
+      display_name: 长椅
+      editor_label: BP_AT_Bench11
+      id: bench-11
+      interaction_facing:
+        - 1
+        - 0
+        - 0
+      interaction_point:
+        - -8970
+        - -6380
+        - -22700
+      interaction_radius: 1500
+      semantic_group: bench
+      zone_id: logistics_hub
+    - actor_class: /AgentTownBridge/WorldKB/SmartObject/bench/BP_AT_Bench.BP_AT_Bench_C
+      actor_position:
+        - -9420
+        - -6540
+        - -22700
+      available_interactions:
+        - rest
+      category: rest
+      default_state: idle
+      description: 坐一坐，恢复少量疲劳
+      display_name: 长椅
+      editor_label: BP_AT_Bench12
+      id: bench-12
+      interaction_facing:
+        - 0.77
+        - 0.64
+        - 0
+      interaction_point:
+        - -9420
+        - -6540
+        - -22700
+      interaction_radius: 1500
+      semantic_group: bench
+      zone_id: logistics_hub
+    - actor_class: /AgentTownBridge/WorldKB/SmartObject/bench/BP_AT_Bench.BP_AT_Bench_C
+      actor_position:
+        - -5530
+        - 13940
+        - -21720
+      available_interactions:
+        - rest
+      category: rest
+      default_state: idle
+      description: 坐一坐，恢复少量疲劳
+      display_name: 长椅
+      editor_label: BP_AT_Bench2
+      id: bench-2
+      interaction_facing:
+        - 0
+        - -1
+        - 0
+      interaction_point:
+        - -5530
+        - 13940
+        - -21720
+      interaction_radius: 1500
+      semantic_group: bench
+      zone_id: central_plaza
+    - actor_class: /AgentTownBridge/WorldKB/SmartObject/bench/BP_AT_Bench.BP_AT_Bench_C
+      actor_position:
+        - -5530
+        - 14810
+        - -21720
+      available_interactions:
+        - rest
+      category: rest
+      default_state: idle
+      description: 坐一坐，恢复少量疲劳
+      display_name: 长椅
+      editor_label: BP_AT_Bench3
+      id: bench-3
+      interaction_facing:
+        - 0
+        - -1
+        - 0
+      interaction_point:
+        - -5530
+        - 14810
+        - -21720
+      interaction_radius: 1500
+      semantic_group: bench
+      zone_id: central_plaza
+    - actor_class: /AgentTownBridge/WorldKB/SmartObject/bench/BP_AT_Bench.BP_AT_Bench_C
+      actor_position:
+        - -5530
+        - 15610
+        - -21720
+      available_interactions:
+        - rest
+      category: rest
+      default_state: idle
+      description: 坐一坐，恢复少量疲劳
+      display_name: 长椅
+      editor_label: BP_AT_Bench4
+      id: bench-4
+      interaction_facing:
+        - 0
+        - -1
+        - 0
+      interaction_point:
+        - -5530
+        - 15610
+        - -21720
+      interaction_radius: 1500
+      semantic_group: bench
+      zone_id: central_plaza
+    - actor_class: /AgentTownBridge/WorldKB/SmartObject/bench/BP_AT_Bench.BP_AT_Bench_C
+      actor_position:
+        - -5530
+        - 16510
+        - -21720
+      available_interactions:
+        - rest
+      category: rest
+      default_state: idle
+      description: 坐一坐，恢复少量疲劳
+      display_name: 长椅
+      editor_label: BP_AT_Bench5
+      id: bench-5
+      interaction_facing:
+        - 0
+        - -1
+        - 0
+      interaction_point:
+        - -5530
+        - 16510
+        - -21720
+      interaction_radius: 1500
+      semantic_group: bench
+      zone_id: central_plaza
+    - actor_class: /AgentTownBridge/WorldKB/SmartObject/bench/BP_AT_Bench.BP_AT_Bench_C
+      actor_position:
+        - -5530
+        - 17540
+        - -21720
+      available_interactions:
+        - rest
+      category: rest
+      default_state: idle
+      description: 坐一坐，恢复少量疲劳
+      display_name: 长椅
+      editor_label: BP_AT_Bench6
+      id: bench-6
+      interaction_facing:
+        - 0
+        - -1
+        - 0
+      interaction_point:
+        - -5530
+        - 17540
+        - -21720
+      interaction_radius: 1500
+      semantic_group: bench
+      zone_id: central_plaza
+    - actor_class: /AgentTownBridge/WorldKB/SmartObject/bench/BP_AT_Bench.BP_AT_Bench_C
+      actor_position:
+        - 4970
+        - 6480
+        - -21130
+      available_interactions:
+        - rest
+      category: rest
+      default_state: idle
+      description: 坐一坐，恢复少量疲劳
+      display_name: 长椅
+      editor_label: BP_AT_Bench7
+      id: bench-7
+      interaction_facing:
+        - 1
+        - 0
+        - 0
+      interaction_point:
+        - 4970
+        - 6480
+        - -21130
+      interaction_radius: 1500
+      semantic_group: bench
+      zone_id: main_workshop
+    - actor_class: /AgentTownBridge/WorldKB/SmartObject/bench/BP_AT_Bench.BP_AT_Bench_C
+      actor_position:
+        - 4480
+        - 6480
+        - -21130
+      available_interactions:
+        - rest
+      category: rest
+      default_state: idle
+      description: 坐一坐，恢复少量疲劳
+      display_name: 长椅
+      editor_label: BP_AT_Bench8
+      id: bench-8
+      interaction_facing:
+        - 1
+        - 0
+        - 0
+      interaction_point:
+        - 4480
+        - 6480
+        - -21130
+      interaction_radius: 1500
+      semantic_group: bench
+      zone_id: main_workshop
+    - actor_class: /AgentTownBridge/WorldKB/SmartObject/bench/BP_AT_Bench.BP_AT_Bench_C
+      actor_position:
+        - 1540
+        - 7200
+        - -20720
+      available_interactions:
+        - rest
+      category: rest
+      default_state: idle
+      description: 坐一坐，恢复少量疲劳
+      display_name: 长椅
+      editor_label: BP_AT_Bench9
+      id: bench-9
+      interaction_facing:
+        - 0
+        - 1
+        - 0
+      interaction_point:
+        - 1540
+        - 7200
+        - -20720
+      interaction_radius: 1500
+      semantic_group: bench
+      zone_id: main_workshop
+    - actor_class: /AgentTownBridge/WorldKB/SmartObject/BookShelf/BP_AT_BookShelf.BP_AT_BookShelf_C
+      actor_position:
+        - -2930
+        - -4350
+        - -22650
+      available_interactions:
+        - read
+      category: reading
+      default_state: idle
+      description: 放置在档案馆的书架，陈列着图书、报刊和园区档案资料。机器人居民可以在这里取书阅读、翻阅报刊、查阅档案，是档案馆主要的阅览设施。
+      display_name: 阅览书架
+      editor_label: BP_AT_BookShelf2
+      id: bookshelf-1
+      interaction_facing:
+        - 0.77
+        - -0.64
+        - 0
+      interaction_point:
+        - -2930
+        - -4350
+        - -22650
+      interaction_radius: 1500
+      semantic_group: bookshelf
+      supports_queue: true
+      zone_id: archive_station
+    - actor_class: /AgentTownBridge/WorldKB/SmartObject/BookShelf/BP_AT_BookShelf.BP_AT_BookShelf_C
+      actor_position:
+        - -3210
+        - -4080
+        - -22650
+      available_interactions:
+        - read
+      category: reading
+      default_state: idle
+      description: 放置在档案馆的书架，陈列着图书、报刊和园区档案资料。机器人居民可以在这里取书阅读、翻阅报刊、查阅档案，是档案馆主要的阅览设施。
+      display_name: 阅览书架
+      editor_label: BP_AT_BookShelf
+      id: bookshelf-2
+      interaction_facing:
+        - 0.77
+        - -0.64
+        - 0
+      interaction_point:
+        - -3210
+        - -4080
+        - -22650
+      interaction_radius: 1500
+      semantic_group: bookshelf
+      supports_queue: true
+      zone_id: archive_station
+    - actor_class: /AgentTownBridge/WorldKB/SmartObject/BookShelf/BP_AT_BookShelf.BP_AT_BookShelf_C
+      actor_position:
+        - -3070
+        - -3550
+        - -22650
+      available_interactions:
+        - read
+      category: reading
+      default_state: idle
+      description: 放置在档案馆的书架，陈列着图书、报刊和园区档案资料。机器人居民可以在这里取书阅读、翻阅报刊、查阅档案，是档案馆主要的阅览设施。
+      display_name: 阅览书架
+      editor_label: BP_AT_BookShelf3
+      id: bookshelf-3
+      interaction_facing:
+        - 0.64
+        - -0.77
+        - 0
+      interaction_point:
+        - -3070
+        - -3550
+        - -22650
+      interaction_radius: 1500
+      semantic_group: bookshelf
+      supports_queue: true
+      zone_id: archive_station
+    - actor_class: /AgentTownBridge/WorldKB/SmartObject/BookShelf/BP_AT_BookShelf.BP_AT_BookShelf_C
+      actor_position:
+        - -3400
+        - -3200
+        - -22660
+      available_interactions:
+        - read
+      category: reading
+      default_state: idle
+      description: 放置在档案馆的书架，陈列着图书、报刊和园区档案资料。机器人居民可以在这里取书阅读、翻阅报刊、查阅档案，是档案馆主要的阅览设施。
+      display_name: 阅览书架
+      editor_label: BP_AT_BookShelf4
+      id: bookshelf-4
+      interaction_facing:
+        - 0.64
+        - -0.77
+        - 0
+      interaction_point:
+        - -3400
+        - -3200
+        - -22660
+      interaction_radius: 1500
+      semantic_group: bookshelf
+      supports_queue: true
+      zone_id: archive_station
+    - actor_class: /AgentTownBridge/WorldKB/SmartObject/BookShelf/BP_AT_BookShelf.BP_AT_BookShelf_C
+      actor_position:
+        - -4160
+        - -3030
+        - -22650
+      available_interactions:
+        - read
+      category: reading
+      default_state: idle
+      description: 放置在档案馆的书架，陈列着图书、报刊和园区档案资料。机器人居民可以在这里取书阅读、翻阅报刊、查阅档案，是档案馆主要的阅览设施。
+      display_name: 阅览书架
+      editor_label: BP_AT_BookShelf5
+      id: bookshelf-5
+      interaction_facing:
+        - 0.77
+        - 0.64
+        - 0
+      interaction_point:
+        - -4160
+        - -3030
+        - -22650
+      interaction_radius: 1500
+      semantic_group: bookshelf
+      supports_queue: true
+      zone_id: archive_station
+    - actor_class: /AgentTownBridge/WorldKB/SmartObject/Charge/BP_Charging_Station.BP_Charging_Station_C
+      actor_position:
+        - -12830
+        - 12730
+        - -21750
+      available_interactions:
+        - charge
+      capacity: 1
+      category: charging
+      default_state: idle
+      description: 用于给机器人充能的装置
+      display_name: 充电桩
+      editor_label: BP_Charging_Station
+      id: charge-1
+      interaction_facing:
+        - 1
+        - 0
+        - 0
+      interaction_point:
+        - -12830
+        - 12730
+        - -21750
+      interaction_radius: 1500
+      required_roles: []
+      semantic_group: charger
+      supports_queue: true
+      zone_id: central_plaza
+    - actor_class: /AgentTownBridge/WorldKB/SmartObject/Charge/BP_Charging_Station.BP_Charging_Station_C
+      actor_position:
+        - -12830
+        - 13710
+        - -21750
+      available_interactions:
+        - charge
+      capacity: 1
+      category: charging
+      default_state: idle
+      description: 用于给机器人充能的装置
+      display_name: 充电桩
+      editor_label: BP_Charging_Station2
+      id: charge-2
+      interaction_facing:
+        - 1
+        - 0
+        - 0
+      interaction_point:
+        - -12830
+        - 13710
+        - -21750
+      interaction_radius: 1500
+      required_roles: []
+      semantic_group: charger
+      supports_queue: true
+      zone_id: central_plaza
+    - actor_class: /AgentTownBridge/WorldKB/SmartObject/Charge/BP_Charging_Station.BP_Charging_Station_C
+      actor_position:
+        - -12830
+        - 14620
+        - -21750
+      available_interactions:
+        - charge
+      capacity: 1
+      category: charging
+      default_state: idle
+      description: 用于给机器人充能的装置
+      display_name: 充电桩
+      editor_label: BP_Charging_Station3
+      id: charge-3
+      interaction_facing:
+        - 1
+        - 0
+        - 0
+      interaction_point:
+        - -12830
+        - 14620
+        - -21750
+      interaction_radius: 1500
+      required_roles: []
+      semantic_group: charger
+      supports_queue: true
+      zone_id: central_plaza
+    - actor_class: /AgentTownBridge/WorldKB/SmartObject/Charge/BP_Charging_Station.BP_Charging_Station_C
+      actor_position:
+        - -12830
+        - 15510
+        - -21750
+      available_interactions:
+        - charge
+      capacity: 1
+      category: charging
+      default_state: idle
+      description: 用于给机器人充能的装置
+      display_name: 充电桩
+      editor_label: BP_Charging_Station4
+      id: charge-4
+      interaction_facing:
+        - 1
+        - 0
+        - 0
+      interaction_point:
+        - -12830
+        - 15510
+        - -21750
+      interaction_radius: 1500
+      required_roles: []
+      semantic_group: charger
+      supports_queue: true
+      zone_id: central_plaza
+    - actor_class: /AgentTownBridge/WorldKB/SmartObject/Charge/BP_Charging_Station.BP_Charging_Station_C
+      actor_position:
+        - -12830
+        - 16510
+        - -21750
+      available_interactions:
+        - charge
+      capacity: 1
+      category: charging
+      default_state: idle
+      description: 用于给机器人充能的装置
+      display_name: 充电桩
+      editor_label: BP_Charging_Station5
+      id: charge-5
+      interaction_facing:
+        - 1
+        - 0
+        - 0
+      interaction_point:
+        - -12830
+        - 16510
+        - -21750
+      interaction_radius: 1500
+      required_roles: []
+      semantic_group: charger
+      supports_queue: true
+      zone_id: central_plaza
+    - actor_class: /AgentTownBridge/WorldKB/SmartObject/Charge/BP_Charging_Station.BP_Charging_Station_C
+      actor_position:
+        - -12810
+        - 17670
+        - -21750
+      available_interactions:
+        - charge
+      capacity: 1
+      category: charging
+      default_state: idle
+      description: 用于给机器人充能的装置
+      display_name: 充电桩
+      editor_label: BP_Charging_Station6
+      id: charge-6
+      interaction_facing:
+        - 1
+        - 0
+        - 0
+      interaction_point:
+        - -12810
+        - 17670
+        - -21750
+      interaction_radius: 1500
+      required_roles: []
+      semantic_group: charger
+      supports_queue: true
+      zone_id: central_plaza
+    - actor_class: /AgentTownBridge/WorldKB/SmartObject/Computer/BP_AT_Computer.BP_AT_Computer_C
+      actor_position:
+        - -4700
+        - -2640
+        - -21860
+      available_interactions:
+        - surf_internet
+      category: Net
+      default_state: idle
+      description: 放置在档案馆的公共上网终端，机器人居民可以在这里联网查询资料、浏览信息、收发信息，也能用来学习和娱乐。
+      display_name: 电脑
+      editor_label: BP_AT_Computer
+      id: computer-1
+      interaction_facing:
+        - -0.77
+        - 0.64
+        - 0
+      interaction_point:
+        - -4700
+        - -2640
+        - -21860
+      interaction_radius: 1500
+      semantic_group: computer
+      zone_id: archive_station
+    - actor_class: /AgentTownBridge/WorldKB/SmartObject/Computer/BP_AT_Computer.BP_AT_Computer_C
+      actor_position:
+        - -4130
+        - -3370
+        - -21860
+      available_interactions:
+        - surf_internet
+      category: Net
+      default_state: idle
+      description: 放置在档案馆的公共上网终端，机器人居民可以在这里联网查询资料、浏览信息、收发信息，也能用来学习和娱乐。
+      display_name: 电脑
+      editor_label: BP_AT_Computer2
+      id: computer-2
+      interaction_facing:
+        - 0.64
+        - -0.77
+        - 0
+      interaction_point:
+        - -4130
+        - -3370
+        - -21860
+      interaction_radius: 1500
+      semantic_group: computer
+      zone_id: archive_station
+    - actor_class: /AgentTownBridge/WorldKB/SmartObject/Computer/BP_AT_Computer.BP_AT_Computer_C
+      actor_position:
+        - -4470
+        - -1930
+        - -21860
+      available_interactions:
+        - surf_internet
+      category: Net
+      default_state: idle
+      description: 放置在档案馆的公共上网终端，机器人居民可以在这里联网查询资料、浏览信息、收发信息，也能用来学习和娱乐。
+      display_name: 电脑
+      editor_label: BP_AT_Computer3
+      id: computer-3
+      interaction_facing:
+        - -0.77
+        - -0.64
+        - 0
+      interaction_point:
+        - -4470
+        - -1930
+        - -21860
+      interaction_radius: 1500
+      semantic_group: computer
+      zone_id: archive_station
+    - actor_class: /AgentTownBridge/WorldKB/SmartObject/Computer/BP_AT_Computer.BP_AT_Computer_C
+      actor_position:
+        - -4220
+        - -2180
+        - -21860
+      available_interactions:
+        - surf_internet
+      category: Net
+      default_state: idle
+      description: 放置在档案馆的公共上网终端，机器人居民可以在这里联网查询资料、浏览信息、收发信息，也能用来学习和娱乐。
+      display_name: 电脑
+      editor_label: BP_AT_Computer4
+      id: computer-4
+      interaction_facing:
+        - -0.77
+        - -0.64
+        - 0
+      interaction_point:
+        - -4220
+        - -2180
+        - -21860
+      interaction_radius: 1500
+      semantic_group: computer
+      zone_id: archive_station
+    - actor_class: /AgentTownBridge/WorldKB/SmartObject/Computer/BP_AT_Computer.BP_AT_Computer_C
+      actor_position:
+        - -4000
+        - -2420
+        - -21860
+      available_interactions:
+        - surf_internet
+      category: Net
+      default_state: idle
+      description: 放置在档案馆的公共上网终端，机器人居民可以在这里联网查询资料、浏览信息、收发信息，也能用来学习和娱乐。
+      display_name: 电脑
+      editor_label: BP_AT_Computer5
+      id: computer-5
+      interaction_facing:
+        - -0.77
+        - -0.64
+        - 0
+      interaction_point:
+        - -4000
+        - -2420
+        - -21860
+      interaction_radius: 1500
+      semantic_group: computer
+      zone_id: archive_station
+    - actor_class: /AgentTownBridge/WorldKB/SmartObject/Computer/BP_AT_Computer.BP_AT_Computer_C
+      actor_position:
+        - -3790
+        - -2650
+        - -21860
+      available_interactions:
+        - surf_internet
+      category: Net
+      default_state: idle
+      description: 放置在档案馆的公共上网终端，机器人居民可以在这里联网查询资料、浏览信息、收发信息，也能用来学习和娱乐。
+      display_name: 电脑
+      editor_label: BP_AT_Computer6
+      id: computer-6
+      interaction_facing:
+        - -0.77
+        - -0.64
+        - 0
+      interaction_point:
+        - -3790
+        - -2650
+        - -21860
+      interaction_radius: 1500
+      semantic_group: computer
+      zone_id: archive_station
+    - actor_class: /AgentTownBridge/WorldKB/SmartObject/DebugStation/BP_AT_DebugStation.BP_AT_DebugStation_C
+      actor_position:
+        - 1670
+        - 4250
+        - -20750
+      available_interactions:
+        - debug
+      category: work
+      default_state: idle
+      description: 车间的设备调试工位，用于对装配完成的设备进行参数校准与功能测试，是技术要求较高的岗位。
+      display_name: 调试台
+      editor_label: BP_AT_QualityInspect3
+      id: debugstation-1
+      interaction_facing:
+        - -0.98
+        - -0.17
+        - 0
+      interaction_point:
+        - 1670
+        - 4250
+        - -20750
+      interaction_radius: 1500
+      semantic_group: debug_station
+      zone_id: main_workshop
+    - actor_class: /AgentTownBridge/WorldKB/SmartObject/DebugStation/BP_AT_DebugStation.BP_AT_DebugStation_C
+      actor_position:
+        - 2900
+        - 4510
+        - -20750
+      available_interactions:
+        - debug
+      category: work
+      default_state: idle
+      description: 车间的设备调试工位，用于对装配完成的设备进行参数校准与功能测试，是技术要求较高的岗位。
+      display_name: 调试台
+      editor_label: BP_AT_QualityInspect4
+      id: debugstation-2
+      interaction_facing:
+        - -0.98
+        - -0.17
+        - 0
+      interaction_point:
+        - 2900
+        - 4510
+        - -20750
+      interaction_radius: 1500
+      semantic_group: debug_station
+      zone_id: main_workshop
+    - actor_class: /AgentTownBridge/WorldKB/SmartObject/DismantleTable/BP_AT_DismantleTable.BP_AT_DismantleTable_C
+      actor_position:
+        - 7940
+        - -8370
+        - -22860
+      available_interactions:
+        - dismantle
+      category: work
+      default_state: idle
+      description: 回收场的废料拆解工位，将报废设备拆解分类，回收可用零件。工作强度高，对关节磨损较大。
+      display_name: 拆解台
+      editor_label: BP_AT_DismantleTable
+      id: dismantletable-1
+      interaction_facing:
+        - 1
+        - 0
+        - 0
+      interaction_point:
+        - 7940
+        - -8370
+        - -22860
+      interaction_radius: 1500
+      semantic_group: dismantle_table
+      zone_id: recycling_yard
+    - actor_class: /AgentTownBridge/WorldKB/SmartObject/DismantleTable/BP_AT_DismantleTable.BP_AT_DismantleTable_C
+      actor_position:
+        - 7410
+        - -8450
+        - -22860
+      available_interactions:
+        - dismantle
+      category: work
+      default_state: idle
+      description: 回收场的废料拆解工位，将报废设备拆解分类，回收可用零件。工作强度高，对关节磨损较大。
+      display_name: 拆解台
+      editor_label: BP_AT_DismantleTable2
+      id: dismantletable-2
+      interaction_facing:
+        - 1
+        - 0
+        - 0
+      interaction_point:
+        - 7410
+        - -8450
+        - -22860
+      interaction_radius: 1500
+      semantic_group: dismantle_table
+      zone_id: recycling_yard
+    - actor_class: /AgentTownBridge/WorldKB/SmartObject/QualityInspect/BP_AT_QualityInspect.BP_AT_QualityInspect_C
+      actor_position:
+        - 3480
+        - 7180
+        - -20750
+      available_interactions:
+        - inspect
+      category: work
+      default_state: idle
+      description: 用于检测装配零件精度的质检工位，机器人可在此进行质检工作，工作强度较低
+      display_name: 质检台
+      editor_label: BP_AT_QualityInspect
+      id: inspectiontable-1
+      interaction_facing:
+        - -1
+        - 0
+        - 0
+      interaction_point:
+        - 3480
+        - 7180
+        - -20750
+      interaction_radius: 1500
+      semantic_group: inspection_table
+      zone_id: main_workshop
+    - actor_class: /AgentTownBridge/WorldKB/SmartObject/QualityInspect/BP_AT_QualityInspect.BP_AT_QualityInspect_C
+      actor_position:
+        - 3010
+        - 7170
+        - -20750
+      available_interactions:
+        - inspect
+      category: work
+      default_state: idle
+      description: 用于检测装配零件精度的质检工位，机器人可在此进行质检工作，工作强度较低
+      display_name: 质检台
+      editor_label: BP_AT_QualityInspect2
+      id: inspectiontable-2
+      interaction_facing:
+        - -1
+        - 0
+        - 0
+      interaction_point:
+        - 3010
+        - 7170
+        - -20750
+      interaction_radius: 1500
+      semantic_group: inspection_table
+      zone_id: main_workshop
+    - actor_class: /AgentTownBridge/WorldKB/SmartObject/ProcessMachine/BP_AT_ProcessMachine.BP_AT_ProcessMachine_C
+      actor_position:
+        - -12270
+        - -4810
+        - -22740
+      available_interactions:
+        - process
+      category: work
+      default_state: idle
+      description: 物流站的原料加工设备，将原始物料加工成标准半成品，是生产流水线的起点。
+      display_name: 加工机
+      editor_label: BP_AT_ProcessMachine
+      id: processmachine-1
+      interaction_facing:
+        - 0.77
+        - -0.64
+        - 0
+      interaction_point:
+        - -12270
+        - -4810
+        - -22740
+      interaction_radius: 1500
+      semantic_group: process_machine
+      zone_id: logistics_hub
+    - actor_class: /AgentTownBridge/WorldKB/SmartObject/ProcessMachine/BP_AT_ProcessMachine.BP_AT_ProcessMachine_C
+      actor_position:
+        - -11380
+        - -5710
+        - -22740
+      available_interactions:
+        - process
+      category: work
+      default_state: idle
+      description: 物流站的原料加工设备，将原始物料加工成标准半成品，是生产流水线的起点。
+      display_name: 加工机
+      editor_label: BP_AT_ProcessMachine2
+      id: processmachine-2
+      interaction_facing:
+        - 0.77
+        - -0.64
+        - 0
+      interaction_point:
+        - -11380
+        - -5710
+        - -22740
+      interaction_radius: 1500
+      semantic_group: process_machine
+      zone_id: logistics_hub
+    - actor_class: /AgentTownBridge/WorldKB/SmartObject/ProcessMachine/BP_AT_ProcessMachine.BP_AT_ProcessMachine_C
+      actor_position:
+        - -10950
+        - -6110
+        - -22740
+      available_interactions:
+        - process
+      category: work
+      default_state: idle
+      description: 物流站的原料加工设备，将原始物料加工成标准半成品，是生产流水线的起点。
+      display_name: 加工机
+      editor_label: BP_AT_ProcessMachine3
+      id: processmachine-3
+      interaction_facing:
+        - 0.77
+        - -0.64
+        - 0
+      interaction_point:
+        - -10950
+        - -6110
+        - -22740
+      interaction_radius: 1500
+      semantic_group: process_machine
+      zone_id: logistics_hub
+    - actor_class: /AgentTownBridge/WorldKB/SmartObject/RepairTable/BP_AT_RepairTable.BP_AT_RepairTable_C
+      actor_position:
+        - -11570
+        - 3020
+        - -22670
+      available_interactions:
+        - repair
+      capacity: 1
+      category: maintainance
+      default_state: idle
+      description: 用于机器人居民的日常维修和保养
+      display_name: 修理台
+      editor_label: BP_AT_RepairTable
+      id: repairtable-1
+      interaction_facing:
+        - 1
+        - 0
+        - 0
+      interaction_point:
+        - -11570
+        - 3020
+        - -22670
+      interaction_radius: 1500
+      required_roles:
+        - maintainer
+      semantic_group: repair_table
+      zone_id: repair_bay
+    - actor_class: /AgentTownBridge/WorldKB/SmartObject/RepairTable/BP_AT_RepairTable.BP_AT_RepairTable_C
+      actor_position:
+        - -11570
+        - 2480
+        - -22670
+      available_interactions:
+        - repair
+      capacity: 1
+      category: maintainance
+      default_state: idle
+      description: 用于机器人居民的日常维修和保养
+      display_name: 修理台
+      editor_label: BP_AT_RepairTable2
+      id: repairtable-2
+      interaction_facing:
+        - 1
+        - 0
+        - 0
+      interaction_point:
+        - -11570
+        - 2480
+        - -22670
+      interaction_radius: 1500
+      required_roles:
+        - maintainer
+      semantic_group: repair_table
+      zone_id: repair_bay
+    - actor_class: /AgentTownBridge/WorldKB/SmartObject/SleepPod/BP_AT_SleepPod.BP_AT_SleepPod_C
+      actor_position:
+        - -8420
+        - -12660
+        - -22690
+      available_interactions:
+        - meditate
+        - sleep
+        - tidy_up
+      capacity: 1
+      category: rest
+      default_state: idle
+      description: 用于休息和睡觉
+      display_name: 睡眠舱
+      editor_label: BP_AT_SleepPod
+      id: sleeppod-1
+      interaction_facing:
+        - -0.77
+        - -0.64
+        - 0
+      interaction_point:
+        - -8420
+        - -12660
+        - -22690
+      interaction_radius: 1500
+      required_roles: []
+      semantic_group: sleep_pod
+      zone_id: residential_quarters
+    - actor_class: /AgentTownBridge/WorldKB/SmartObject/SleepPod/BP_AT_SleepPod.BP_AT_SleepPod_C
+      actor_position:
+        - -6760
+        - -13050
+        - -22720
+      available_interactions:
+        - meditate
+        - sleep
+        - tidy_up
+      capacity: 1
+      category: rest
+      default_state: idle
+      description: 用于休息和睡觉
+      display_name: 睡眠舱
+      editor_label: BP_AT_SleepPod2
+      id: sleeppod-2
+      interaction_facing:
+        - 0.77
+        - 0.64
+        - 0
+      interaction_point:
+        - -6760
+        - -13050
+        - -22720
+      interaction_radius: 1500
+      required_roles: []
+      semantic_group: sleep_pod
+      zone_id: residential_quarters
+    - actor_class: /AgentTownBridge/WorldKB/SmartObject/SleepPod/BP_AT_SleepPod.BP_AT_SleepPod_C
+      actor_position:
+        - -7600
+        - -13780
+        - -22320
+      available_interactions:
+        - meditate
+        - sleep
+        - tidy_up
+      capacity: 1
+      category: rest
+      default_state: idle
+      description: 用于休息和睡觉
+      display_name: 睡眠舱
+      editor_label: BP_AT_SleepPod3
+      id: sleeppod-3
+      interaction_facing:
+        - 0.64
+        - 0.77
+        - 0
+      interaction_point:
+        - -7600
+        - -13780
+        - -22320
+      interaction_radius: 1500
+      required_roles: []
+      semantic_group: sleep_pod
+      zone_id: residential_quarters
+    - actor_class: /AgentTownBridge/WorldKB/SmartObject/SleepPod/BP_AT_SleepPod.BP_AT_SleepPod_C
+      actor_position:
+        - -7570
+        - -12880
+        - -22320
+      available_interactions:
+        - meditate
+        - sleep
+        - tidy_up
+      capacity: 1
+      category: rest
+      default_state: idle
+      description: 用于休息和睡觉
+      display_name: 睡眠舱
+      editor_label: BP_AT_SleepPod4
+      id: sleeppod-4
+      interaction_facing:
+        - 0.64
+        - -0.77
+        - 0
+      interaction_point:
+        - -7570
+        - -12880
+        - -22320
+      interaction_radius: 1500
+      required_roles: []
+      semantic_group: sleep_pod
+      zone_id: residential_quarters
+    - actor_class: /AgentTownBridge/WorldKB/SmartObject/SleepPod/BP_AT_SleepPod.BP_AT_SleepPod_C
+      actor_position:
+        - -7430
+        - -13680
+        - -22740
+      available_interactions:
+        - meditate
+        - sleep
+        - tidy_up
+      capacity: 1
+      category: rest
+      default_state: idle
+      description: 用于休息和睡觉
+      display_name: 睡眠舱
+      editor_label: BP_AT_SleepPod5
+      id: sleeppod-5
+      interaction_facing:
+        - 0.77
+        - 0.64
+        - 0
+      interaction_point:
+        - -7430
+        - -13680
+        - -22740
+      interaction_radius: 1500
+      required_roles: []
+      semantic_group: sleep_pod
+      zone_id: residential_quarters
+    - actor_class: /AgentTownBridge/WorldKB/SmartObject/SortingConveyor/BP_AT_SortingConveyor.BP_AT_SortingConveyor_C
+      actor_position:
+        - -6130
+        - -10910
+        - -22780
+      available_interactions:
+        - sort_cargo
+      category: work
+      default_state: idle
+      description: 物流中转站的分拣传送带，负责对原料、半成品和成品进行分拣与流转输送。机器人居民在这里搬运、分类和配送物资，是物资进出的关键设施。
+      display_name: 分拣传送带
+      editor_label: BP_AT_SortingConveyor
+      id: sortingconveyor-1
+      interaction_facing:
+        - 1
+        - 0
+        - 0
+      interaction_point:
+        - -6130
+        - -10910
+        - -22780
+      interaction_radius: 1500
+      semantic_group: sorting_conveyor
+      zone_id: logistics_hub
+    - actor_class: /AgentTownBridge/WorldKB/SmartObject/SortingConveyor/BP_AT_SortingConveyor.BP_AT_SortingConveyor_C
+      actor_position:
+        - -6710
+        - -10260
+        - -22780
+      available_interactions:
+        - sort_cargo
+      category: work
+      default_state: idle
+      description: 物流中转站的分拣传送带，负责对原料、半成品和成品进行分拣与流转输送。机器人居民在这里搬运、分类和配送物资，是物资进出的关键设施。
+      display_name: 分拣传送带
+      editor_label: BP_AT_SortingConveyor2
+      id: sortingconveyor-2
+      interaction_facing:
+        - 1
+        - 0
+        - 0
+      interaction_point:
+        - -6710
+        - -10260
+        - -22780
+      interaction_radius: 1500
+      semantic_group: sorting_conveyor
+      zone_id: logistics_hub
+    - actor_class: /AgentTownBridge/WorldKB/SmartObject/StretchEquiment/BP_AT_StretchEquiment.BP_AT_StretchEquiment_C
+      actor_position:
+        - -8870
+        - 19080
+        - -21750
+      available_interactions:
+        - stretch
+      category: exercise
+      default_state: idle
+      description: 放置在中央广场的户外运动器材，机器人居民可以在这里锻炼身体、活动筋骨。空闲或想运动时来这里健身，是广场上主要的锻炼设施，可以恢复磨损度Joint Wear
+      display_name: 广场运动器材
+      editor_label: BP_Charging_Station7
+      id: stretchequipment-1
+      interaction_facing:
+        - 1
+        - 0
+        - 0
+      interaction_point:
+        - -8870
+        - 19080
+        - -21750
+      interaction_radius: 1500
+      semantic_group: stretch_equipment
+      supports_queue: true
+      zone_id: central_plaza
+    - actor_class: /AgentTownBridge/WorldKB/SmartObject/StretchEquiment/BP_AT_StretchEquiment.BP_AT_StretchEquiment_C
+      actor_position:
+        - -10200
+        - 19080
+        - -21750
+      available_interactions:
+        - stretch
+      category: exercise
+      default_state: idle
+      description: 放置在中央广场的户外运动器材，机器人居民可以在这里锻炼身体、活动筋骨。空闲或想运动时来这里健身，是广场上主要的锻炼设施，可以恢复磨损度Joint Wear
+      display_name: 广场运动器材
+      editor_label: BP_Charging_Station8
+      id: stretchequipment-2
+      interaction_facing:
+        - 1
+        - 0
+        - 0
+      interaction_point:
+        - -10200
+        - 19080
+        - -21750
+      interaction_radius: 1500
+      semantic_group: stretch_equipment
+      supports_queue: true
+      zone_id: central_plaza
+    - actor_class: /AgentTownBridge/WorldKB/SmartObject/StretchEquiment/BP_AT_StretchEquiment.BP_AT_StretchEquiment_C
+      actor_position:
+        - -11560
+        - 19080
+        - -21750
+      available_interactions:
+        - stretch
+      category: exercise
+      default_state: idle
+      description: 放置在中央广场的户外运动器材，机器人居民可以在这里锻炼身体、活动筋骨。空闲或想运动时来这里健身，是广场上主要的锻炼设施，可以恢复磨损度Joint Wear
+      display_name: 广场运动器材
+      editor_label: BP_Charging_Station9
+      id: stretchequipment-3
+      interaction_facing:
+        - 1
+        - 0
+        - 0
+      interaction_point:
+        - -11560
+        - 19080
+        - -21750
+      interaction_radius: 1500
+      semantic_group: stretch_equipment
+      supports_queue: true
+      zone_id: central_plaza
+    - actor_class: /AgentTownBridge/WorldKB/SmartObject/TreadMill/BP_AT_TreadMill.BP_AT_TreadMill_C
+      actor_position:
+        - -13050
+        - -8730
+        - -22770
+      available_interactions:
+        - run
+      category: exercise
+      default_state: idle
+      description: 放置在居住区的跑步机，机器人居民可以在这里跑步锻炼、增强体能。想要进行有氧运动、又不想在户外跑时使用，是室内（或半室内）锻炼的主要设施。可以恢复磨损度Joint Wear
+      display_name: 跑步机
+      editor_label: BP_AT_TreadMill
+      id: treadmill-1
+      interaction_facing:
+        - -0.64
+        - 0.77
+        - 0
+      interaction_point:
+        - -13050
+        - -8730
+        - -22770
+      interaction_radius: 1500
+      semantic_group: treadmill
+      supports_queue: true
+      zone_id: residential_quarters
+    - actor_class: /AgentTownBridge/WorldKB/SmartObject/TreadMill/BP_AT_TreadMill.BP_AT_TreadMill_C
+      actor_position:
+        - -13250
+        - -8510
+        - -22770
+      available_interactions:
+        - run
+      category: exercise
+      default_state: idle
+      description: 放置在居住区的跑步机，机器人居民可以在这里跑步锻炼、增强体能。想要进行有氧运动、又不想在户外跑时使用，是室内（或半室内）锻炼的主要设施。可以恢复磨损度Joint Wear
+      display_name: 跑步机
+      editor_label: BP_AT_TreadMill2
+      id: treadmill-2
+      interaction_facing:
+        - -0.64
+        - 0.77
+        - 0
+      interaction_point:
+        - -13250
+        - -8510
+        - -22770
+      interaction_radius: 1500
+      semantic_group: treadmill
+      supports_queue: true
+      zone_id: residential_quarters
+    - actor_class: /AgentTownBridge/WorldKB/SmartObject/TreadMill/BP_AT_TreadMill.BP_AT_TreadMill_C
+      actor_position:
+        - -13860
+        - -9330
+        - -22760
+      available_interactions:
+        - run
+      category: exercise
+      default_state: idle
+      description: 放置在居住区的跑步机，机器人居民可以在这里跑步锻炼、增强体能。想要进行有氧运动、又不想在户外跑时使用，是室内（或半室内）锻炼的主要设施。可以恢复磨损度Joint Wear
+      display_name: 跑步机
+      editor_label: BP_AT_TreadMill3
+      id: treadmill-3
+      interaction_facing:
+        - 0.77
+        - -0.64
+        - 0
+      interaction_point:
+        - -13860
+        - -9330
+        - -22760
+      interaction_radius: 1500
+      semantic_group: treadmill
+      supports_queue: true
+      zone_id: residential_quarters
+    - actor_class: /AgentTownBridge/WorldKB/SmartObject/WorkBench/BP_AT_WorkBench.BP_AT_WorkBench_C
+      actor_position:
+        - 6290
+        - 6800
+        - -21140
+      available_interactions:
+        - assemble
+      capacity: 1
+      category: work
+      default_state: idle
+      description: 装配工作台
+      display_name: 工作台
+      editor_label: BP_AT_WorkBench2
+      id: workbench-1
+      interaction_facing:
+        - 1
+        - 0
+        - 0
+      interaction_point:
+        - 6290
+        - 6800
+        - -21140
+      interaction_radius: 1500
+      required_roles:
+        - worker
+      semantic_group: workbench
+      zone_id: main_workshop
+    - actor_class: /AgentTownBridge/WorldKB/SmartObject/WorkBench/BP_AT_WorkBench.BP_AT_WorkBench_C
+      actor_position:
+        - 5850
+        - 6820
+        - -21140
+      available_interactions:
+        - assemble
+      capacity: 1
+      category: work
+      default_state: idle
+      description: 装配工作台
+      display_name: 工作台
+      editor_label: BP_AT_WorkBench
+      id: workbench-2
+      interaction_facing:
+        - 1
+        - 0
+        - 0
+      interaction_point:
+        - 5850
+        - 6820
+        - -21140
+      interaction_radius: 1500
+      required_roles:
+        - worker
+      semantic_group: workbench
+      zone_id: main_workshop
+    - actor_class: /AgentTownBridge/WorldKB/SmartObject/WorkBench/BP_AT_WorkBench.BP_AT_WorkBench_C
+      actor_position:
+        - 5140
+        - 6800
+        - -21140
+      available_interactions:
+        - assemble
+      capacity: 1
+      category: work
+      default_state: idle
+      description: 装配工作台
+      display_name: 工作台
+      editor_label: BP_AT_WorkBench3
+      id: workbench-3
+      interaction_facing:
+        - 1
+        - 0
+        - 0
+      interaction_point:
+        - 5140
+        - 6800
+        - -21140
+      interaction_radius: 1500
+      required_roles:
+        - worker
+      semantic_group: workbench
+      zone_id: main_workshop
+    - actor_class: /AgentTownBridge/WorldKB/SmartObject/WorkBench/BP_AT_WorkBench.BP_AT_WorkBench_C
+      actor_position:
+        - 4480
+        - 6800
+        - -21140
+      available_interactions:
+        - assemble
+      capacity: 1
+      category: work
+      default_state: idle
+      description: 装配工作台
+      display_name: 工作台
+      editor_label: BP_AT_WorkBench4
+      id: workbench-4
+      interaction_facing:
+        - 1
+        - 0
+        - 0
+      interaction_point:
+        - 4480
+        - 6800
+        - -21140
+      interaction_radius: 1500
+      required_roles:
+        - worker
+      semantic_group: workbench
+      zone_id: main_workshop
+version: "1.0"
+zones:
+    - actor_path: /AgentTownBridge/Map/AgentTown.AgentTown:PersistentLevel.BP_AT_ArchiveStation_C_UAID_ACF46673A2EA24F302_1534280443
+      bounds:
+        center:
+            - -3970
+            - -2900
+            - -21890
+        extent:
+            - 2000
+            - 2000
+            - 1000
+        rotation:
+            - 0
+            - 50
+            - 0
+      connections:
+        - to: central_plaza
+        - to: residential_quarters
+      description: 保存园区历史、技术资料和个人记忆的文化中心，也负责公共广播。同时设有图书馆和网络机房，机器人居民可以来这里查阅资料、录入档案、读书上网，是文化与娱乐交汇的区域。
+      display_name: 档案馆·图书馆与网络中心
+      editor_label: BP_AT_ArchiveStation
+      entry_facing:
+        - 0.64
+        - 0.77
+        - 0
+      entry_point:
+        - -3970
+        - -2900
+        - -21890
+      id: archive_station
+    - actor_path: /AgentTownBridge/Map/AgentTown.AgentTown:PersistentLevel.BP_AT_CentralPlaza_C_UAID_ACF46673A2EA25F302_1660144623
+      bounds:
+        center:
+            - -9310
+            - 16060
+            - -21780
+        extent:
+            - 5000
+            - 5000
+            - 1000
+        rotation: []
+      connections:
+        - to: main_workshop
+        - to: residential_quarters
+        - to: archive_station
+      description: 小镇的公共交通、社交和充能中心，也是机器人居民闲暇时聚集、交流的公共空间。充电站位于此处，是补充能量的主要场所。
+      display_name: 中央广场
+      editor_label: BP_AT_CentralPlaza
+      entry_facing:
+        - 1
+        - 0
+        - 0
+      entry_point:
+        - -9310
+        - 16060
+        - -21780
+      id: central_plaza
+    - actor_path: /AgentTownBridge/Map/AgentTown.AgentTown:PersistentLevel.BP_AT_LogisticsHub_C_UAID_ACF46673A2EA25F302_1323014622
+      bounds:
+        center:
+            - -8703.9
+            - -8030.21
+            - -22802.58
+        extent:
+            - 1400
+            - 7000
+            - 2000
+        rotation:
+            - 0
+            - 41
+            - 0
+      connections:
+        - to: main_workshop
+        - to: recycling_yard
+      description: 负责原料、半成品和成品的仓储与分拣中心，承担小镇的生产物资流转任务。需要搬运或分拣物资的工作大多在这里进行。
+      display_name: 物流转运站
+      editor_label: BP_AT_LogisticsHub
+      entry_facing:
+        - 0.75
+        - 0.66
+        - 0
+      entry_point:
+        - -8703.9
+        - -8030.21
+        - -22802.58
+      id: logistics_hub
+    - actor_path: /AgentTownBridge/Map/AgentTown.AgentTown:PersistentLevel.BP_AT_MainWorkShop_C_UAID_ACF46673A2EA22F302_1440335089
+      bounds:
+        center:
+            - 6210
+            - 5780
+            - -21200
+        extent:
+            - 7500
+            - 7500
+            - 1000
+        rotation: []
+      connections:
+        - to: central_plaza
+        - to: logistics_hub
+        - to: repair_bay
+      description: 小镇的生产核心，机器人居民在这里完成装配、质检和设备调试。NPC的日常生产任务大多出自这个车间。
+      display_name: 主生产车间
+      editor_label: BP_AT_MainWorkShop
+      entry_facing:
+        - 1
+        - 0
+        - 0
+      entry_point:
+        - 6210
+        - 5780
+        - -21200
+      id: main_workshop
+    - actor_path: /AgentTownBridge/Map/AgentTown.AgentTown:PersistentLevel.BP_AT_RecyclingYard_C_UAID_ACF46673A2EA24F302_1940350444
+      bounds:
+        center:
+            - 7760
+            - -9010
+            - -22900
+        extent:
+            - 1250
+            - 1250
+            - 400
+        rotation:
+            - 0
+            - 20
+            - 0
+      connections:
+        - to: logistics_hub
+        - to: repair_bay
+      description: 负责废料分类、零件拆解和再制造处理，也处理永久报废。承载小镇的资源循环与叙事记忆，是工作与故事交汇的区域。
+      display_name: 废料回收与再制造场
+      editor_label: BP_AT_RecyclingYard
+      entry_facing:
+        - 0.94
+        - 0.34
+        - 0
+      entry_point:
+        - 7760
+        - -9010
+        - -22900
+      id: recycling_yard
+    - actor_path: /AgentTownBridge/Map/AgentTown.AgentTown:PersistentLevel.BP_AT_RepairBay_C_UAID_ACF46673A2EA25F302_1150220621
+      bounds:
+        center:
+            - -10980
+            - 2040
+            - -22320
+        extent:
+            - 3000
+            - 3000
+            - 600
+        rotation: []
+      connections:
+        - to: main_workshop
+        - to: recycling_yard
+      description: 机器人居民进行自检、换件和维修的场所，也是紧急救援中心。磨损或故障的机器人会来这里检修，是工作与生活交汇的区域。
+      display_name: 机械维修厂
+      editor_label: BP_AT_RepairBay
+      entry_facing:
+        - 1
+        - 0
+        - 0
+      entry_point:
+        - -10980
+        - 2040
+        - -22320
+      id: repair_bay
+    - actor_path: /AgentTownBridge/Map/AgentTown.AgentTown:PersistentLevel.BP_AT_ResidentialQuarters_C_UAID_ACF46673A2EA25F302_1756472624
+      bounds:
+        center:
+            - -10880
+            - -11220
+            - -22800
+        extent:
+            - 2000
+            - 6000
+            - 600
+        rotation:
+            - 0
+            - 45
+            - 0
+      connections:
+        - to: central_plaza
+        - to: archive_station
+      description: 机器人居民休眠、独处和存放私人物品的生活区。居民的休眠舱就在这里，是休息和私人空间的主要场所。
+      display_name: 休眠舱居住区
+      editor_label: BP_AT_ResidentialQuarters
+      entry_facing:
+        - 0.71
+        - 0.71
+        - 0
+      entry_point:
+        - -10880
+        - -11220
+        - -22800
+      id: residential_quarters

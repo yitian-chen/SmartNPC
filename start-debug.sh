@@ -7,21 +7,18 @@
 #   - 启动后打印局域网地址给 UE 同事
 #
 # 启动组件：
-#   1. agenttown-mcp.exe (Windows, WS :9090 + HTTP :8760)  ← UE 连这个
-#   2. CodeBuddy Adapter (Windows, :8761, localhost only)
-#   3. Hermes Gateway (Docker/WSL, :8642, localhost only)
+#   1. agenttown-mcp.exe (Windows, WS :9092 + HTTP :8760)  ← UE 连这个
+#
+# LLM 后端：MCP 直连 Venus（OpenAI Chat Completions 协议），
+# 凭据 VENUS_API_KEY 从 .env 读取，启动时透传给 MCP 进程。
 #
 # 用法：
-#   bash start-debug.sh                # 默认全启
-#   bash start-debug.sh --no-rebuild   # 跳过 Hermes 镜像重建（快速重启）
-#   bash start-debug.sh --no-hermes    # 跳过 Hermes（已手动启动时用）
-#   bash start-debug.sh --no-adapter   # 跳过 Adapter（已手动启动时用）
+#   bash start-debug.sh                # 启动
+#   bash start-debug.sh --stop         # 仅停止所有服务
 #
 # 前置：
 #   - Go 编译器可访问（PATH 中有 go，或设置 GO_BIN）
-#   - Docker Desktop 运行中（Hermes 跑在 Docker）
-#   - CodeBuddy CLI 已登录（适配层复用其 OAuth）
-#   - d:/SmartNPC_v3/.env 存在且配置了 HERMES_AGENT_API_KEY
+#   - d:/SmartNPC_v3/.env 存在且配置了 VENUS_API_KEY
 
 set -uo pipefail
 
@@ -47,69 +44,91 @@ MCP_DIR="$PROJECT_DIR/agenttown-mcp"
 # 避免两实例共用同一 exe 导致 stable 运行时 dev 无法重新编译覆盖
 MCP_EXE_NAME="${MCP_EXE_NAME:-agenttown-mcp.exe}"
 MCP_EXE="$MCP_DIR/$MCP_EXE_NAME"
-DOCKER_COMPOSE="${DOCKER_COMPOSE:-$PROJECT_DIR/docker/docker-compose.yml}"
 ENV_FILE="$PROJECT_DIR/.env"
-ADAPTER_SCRIPT="$PROJECT_DIR/src/agenttown/codebuddy_adapter.py"
-ADAPTER_PORT="${ADAPTER_PORT:-8761}"
-WS_PORT="${WS_PORT:-9090}"
+WS_PORT="${WS_PORT:-9092}"
 HTTP_PORT="${HTTP_PORT:-8760}"
-HERMES_PORT="${HERMES_PORT:-8642}"
-CLI_PORT="${CLI_PORT:-52001}"
-HERMES_CONTAINER="${HERMES_CONTAINER:-agenttown-h01}"
+
+# ─── MySQL 配置（仅 Linux 云环境默认启用）──────────────────
+# 数据目录 /data/mysql-data 挂在宿主机持久化盘，跨 MCP 重启/容器重建不丢。
+# 环境变量 SKIP_MYSQL=1 可跳过自动启动（MCP 降级为内存模式 NoopStore）。
+# 环境变量 MYSQL_DSN 可覆盖默认 DSN。
+# 环境变量 MYSQL_DB 选择数据库实例名：dev wrapper 设 agenttown_dev，
+# stable 直接跑本脚本默认 agenttown_stable，防止两实例共享同一数据库串台。
+MYSQL_SOCKET="/data/mysql-run/mysql.sock"
+MYSQL_DATA_DIR="/data/mysql-data"
+MYSQL_RUN_DIR="/data/mysql-run"
+MYSQL_DB="${MYSQL_DB:-agenttown_stable}"
+MYSQL_DSN_DEFAULT="root@tcp(127.0.0.1:3306)/${MYSQL_DB}?parseTime=true&charset=utf8mb4"
+
+# ─── Ollama 配置 ─────────────────────────────────────────────
+# 反应层 LLM 后端：MCP 通过 --ollama-url 调用本地 Ollama（qwen2.5:7b）。
+# 默认禁用反应层（误判率高、延迟成本大，待优化后再默认启用）。
+# 启用方式：在 .env 设 OLLAMA_URL=http://localhost:11434 连接云环境本地 Ollama；
+# 远端 Windows 场景：先在 Windows 端运行 start-tunnel.sh 拉起 SSH 反向隧道
+# （云端 localhost:11435），再将 OLLAMA_URL 设为 http://localhost:11435。
+#
+# 环境变量（可在 .env 配置覆盖）：
+#   OLLAMA_URL               MCP 连接 Ollama 的 URL（默认空串=禁用反应层；
+#                            设为 http://localhost:11434 连云环境本地 Ollama 启用）
+#   OLLAMA_MODEL             Ollama 模型名（默认 qwen2.5:7b-instruct-q4_K_M）
+#   OLLAMA_NUM_THREAD        CPU 推理线程数（默认 16）
+#   OLLAMA_TUNNEL_PORT       云端反隧道端口（默认 11435，与 start-tunnel.sh 对齐）
+#   SKIP_OLLAMA_TUNNEL_CHECK 跳过隧道检测（=1 时不检查不警告，用于无反应层场景）
+OLLAMA_URL="${OLLAMA_URL:-}"
+OLLAMA_MODEL="${OLLAMA_MODEL:-qwen2.5:7b-instruct-q4_K_M}"
+OLLAMA_NUM_THREAD="${OLLAMA_NUM_THREAD:-16}"
+OLLAMA_TUNNEL_PORT="${OLLAMA_TUNNEL_PORT:-11435}"
 
 LOG_DATE=$(date +%Y-%m-%d)
 LOG_SUBDIR_BASE="$PROJECT_DIR/logs/$LOG_DATE"
 LOG_SUBDIR="${LOG_SUBDIR:-$LOG_SUBDIR_BASE}"
 MCP_LOG="$LOG_SUBDIR/debug-mcp.log"
-ADAPTER_LOG="$LOG_SUBDIR/debug-adapter.log"
 
 # ─── 加载 .env 到 shell 环境 ──────────────────────────────────
 # MCP 是 Windows exe，通过 .bat 启动；bash export 不会自动传给 cmd.exe，
 # 因此需要在生成 .bat 时显式 set 环境变量。这里先把 .env 的变量 source
 # 到当前 shell，后续 generate .bat 时再注入。
-# 默认架构是 MCP → Hermes → Venus：MCP 走 hermes backend，Venus 凭据由
-# Hermes 容器通过 docker-compose env_file 直接读取，不经过 MCP。
-# 这里仍加载 VENUS_ 前缀变量，便于临时切回 --llm-backend venus 直连调试。
+# 架构是 MCP 直连 Venus：MCP 进程需要 VENUS_API_KEY 才能调用 LLM。
 if [ -f "$ENV_FILE" ]; then
     while IFS='=' read -r key value || [ -n "$key" ]; do
         # 跳过空行和注释
         case "$key" in
             ''|\#*) continue ;;
         esac
-        # 只 export VENUS_ 前缀变量
+        # 只 export VENUS_ / AGENTTOWN_MCP_ / OLLAMA_ 前缀变量
         case "$key" in
             VENUS_*) export "$key=$value" ;;
+            AGENTTOWN_MCP_*) export "$key=$value" ;;
+            OLLAMA_*) export "$key=$value" ;;
+            LLM_*) export "$key=$value" ;;
         esac
     done < "$ENV_FILE"
 fi
 
 # Venus URL/model 默认值（与 Go flag 默认值一致）。
-# 仅在临时切回 --llm-backend venus 直连调试时使用；默认走 Hermes 时不读取。
 VENUS_URL="${VENUS_URL:-http://v2.open.venus.oa.com/llmproxy}"
-VENUS_MODEL="${VENUS_MODEL:-qwen3.6-35b-a3b}"
+VENUS_MODEL="${VENUS_MODEL:-deepseek-v4-flash}"
 
 # ─── 参数 ──────────────────────────────────────────────────────
-REBUILD_HERMES=true
-START_HERMES=true
-START_ADAPTER=true
 STOP_ONLY=false
+# --drop-tables：重置 ${MYSQL_DB} 全部表（DROP DATABASE + CREATE），
+# 让 MCP 启动时 migrations 从零重建。默认 false（保留累积状态）。
+DROP_TABLES=false
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --no-rebuild) REBUILD_HERMES=false; shift ;;
-        --no-hermes)  START_HERMES=false; shift ;;
-        --no-adapter) START_ADAPTER=false; shift ;;
-        --stop)       STOP_ONLY=true; shift ;;
+        --stop)        STOP_ONLY=true; shift ;;
+        --drop-tables) DROP_TABLES=true; shift ;;
+        # 向后兼容：旧版有 Adapter/Hermes 相关 flag，现均已废弃，识别后忽略
+        --no-adapter|--with-adapter|--no-hermes|--no-rebuild) warn "$1 已废弃（Hermes/Adapter 已移除），忽略"; shift ;;
         -h|--help)
             echo "Usage: bash start-debug.sh [OPTIONS]"
             echo ""
             echo "UE 联调启动脚本：MCP 跑在 Windows 原生（监听 0.0.0.0），局域网可达。"
             echo ""
             echo "Options:"
-            echo "  --stop         仅停止所有服务，不重启"
-            echo "  --no-rebuild   跳过 Hermes 镜像重建（快速重启）"
-            echo "  --no-hermes    跳过 Hermes 启动（已手动启动时用）"
-            echo "  --no-adapter   跳过 Adapter 启动（已手动启动时用）"
+            echo "  --stop          仅停止所有服务，不重启"
+            echo "  --drop-tables   重置 MySQL 表（DROP DATABASE + CREATE，MCP 启动时 migrations 重建）"
             echo ""
             echo "UE 端连接地址：ws://<本机局域网IP>:$WS_PORT/ws"
             exit 0 ;;
@@ -118,17 +137,20 @@ while [[ $# -gt 0 ]]; do
 done
 
 # ─── 环境检测 ──────────────────────────────────────────────────
-# 脚本可能在 Git Bash (Windows) 或 WSL bash 里运行：
-#   - Git Bash: localhost = Windows localhost，可直接访问 Windows 服务
-#   - WSL bash: localhost = WSL VM localhost，访问 Windows 服务需用宿主 IP
-#              （WSL2 默认网关 = vEthernet 网卡 IP）
-# 检测方法：WSL 里 /proc/version 含 "microsoft"，Git Bash 里不存在。
+# 脚本可能在三种环境运行：
+#   - Git Bash (Windows): localhost = Windows localhost，用 wsl 调 WSL 命令、cygpath 转路径
+#   - WSL bash: localhost = WSL VM localhost，访问 Windows 服务需用宿主 IP（wslpath 转路径）
+#   - 纯 Linux (AnyDev/远程): 无 Windows 工具，无需路径转换
+# 检测方法：WSL 里 /proc/version 含 "microsoft"；纯 Linux 无 cmd.exe；其余视为 Git Bash。
 IN_WSL=false
+IN_LINUX=false
 if grep -qi microsoft /proc/version 2>/dev/null; then
     IN_WSL=true
+elif ! command -v cmd.exe >/dev/null 2>&1; then
+    IN_LINUX=true
 fi
 
-# Windows 宿主 IP（WSL 访问 Windows 服务用）；Git Bash 里不用
+# Windows 宿主 IP（WSL 访问 Windows 服务用）；Git Bash 和纯 Linux 里不用
 WIN_HOST="localhost"
 if $IN_WSL; then
     WIN_HOST=$(ip route show default 2>/dev/null | awk '{print $3}' | head -1)
@@ -136,13 +158,18 @@ if $IN_WSL; then
     [ -z "$WIN_HOST" ] && WIN_HOST="172.18.16.1"  # 兜底：常见 vEthernet IP
 fi
 
-# WSL 调用前缀：Git Bash 里用 "wsl" 调用 WSL 命令，WSL 里为空（直接执行）。
-# 路径转换：Git Bash 用 cygpath，WSL 用 wslpath。
+# WSL 调用前缀与路径转换工具：
+#   - WSL: WSL_CMD=""（直接执行），PATH_CONV=wslpath
+#   - 纯 Linux: WSL_CMD=""，PATH_CONV=""（无需转换）
+#   - Git Bash: WSL_CMD=wsl，PATH_CONV=cygpath
 WSL_CMD=""
 PATH_CONV=""
 if $IN_WSL; then
     WSL_CMD=""
     PATH_CONV="wslpath"
+elif $IN_LINUX; then
+    WSL_CMD=""
+    PATH_CONV=""
 else
     WSL_CMD="wsl"
     PATH_CONV="cygpath"
@@ -150,12 +177,8 @@ fi
 
 # ─── 健康检查 ──────────────────────────────────────────────────
 # MCP 跑在 Windows（本脚本的核心设计），WSL 里访问要用 WIN_HOST。
-# Hermes 跑在 Docker（WSL2），localhost 即可达（WSL2 localhost forwarding）。
-# Adapter 跑在 Windows，WSL 里访问要用 WIN_HOST。
 check_mcp_http() { curl -sf http://$WIN_HOST:$HTTP_PORT/healthz >/dev/null 2>&1; }
 check_mcp_ws()   { curl -sf http://$WIN_HOST:$WS_PORT/healthz >/dev/null 2>&1; }
-check_hermes()   { curl -sf http://localhost:$HERMES_PORT/health >/dev/null 2>&1; }
-check_adapter()  { curl -sf http://$WIN_HOST:$ADAPTER_PORT/health >/dev/null 2>&1; }
 
 wait_for() {
     local name="$1" check_fn="$2" max_wait="${3:-30}" elapsed=0
@@ -172,6 +195,18 @@ wait_for() {
 # 排除 WSL vEthernet (172.18.x.x) 和 VPN 虚拟网卡 (192.168.255.x)，
 # 优先返回公司内网 IP。
 detect_lan_ip() {
+    if $IN_LINUX; then
+        # 纯 Linux：hostname -I 输出空格分隔的 IP 列表，取第一个
+        local ip
+        ip=$(hostname -I 2>/dev/null | awk '{print $1}')
+        if [ -z "$ip" ]; then
+            # 兜底：从 ip addr 提取第一个非 loopback 的 IPv4
+            ip=$(ip -4 addr show 2>/dev/null | grep -oE "inet [0-9.]+" | grep -v "127.0.0.1" | head -1 | awk '{print $2}')
+        fi
+        echo "$ip"
+        return
+    fi
+    # Windows/WSL：用 ipconfig.exe
     local ip
     # ipconfig 输出可能因语言不同而字段名不同，用 grep 抓所有 IPv4 行
     ip=$(ipconfig.exe 2>/dev/null | grep -E "IPv4|IPv4 Address" \
@@ -196,6 +231,23 @@ detect_lan_ip() {
 # 导致新启动的 MCP 被 wslrelay 抢占端口（curl 命中 wslrelay 返回 404）。
 kill_port_listeners() {
     local port="$1" label="$2"
+    if $IN_LINUX; then
+        # 纯 Linux：用 ss 找监听 PID + kill。awk 提取 "pid=1234" 中的数字。
+        local pids
+        pids=$(ss -ltnp 2>/dev/null | awk -v p=":$port" '$4 ~ p"$" {match($0, /pid=([0-9]+)/, m); print m[1]}' | sort -u)
+        if [ -z "$pids" ]; then
+            warn "  No listener on :$port"
+            return 0
+        fi
+        local pid
+        for pid in $pids; do
+            kill -9 "$pid" >/dev/null 2>&1 \
+                && ok "  $label on :$port stopped (PID $pid)" \
+                || warn "  Failed to kill $label PID $pid on :$port"
+        done
+        return
+    fi
+    # Windows/WSL：netstat.exe + taskkill.exe
     local pids
     # netstat 本地地址列 ($2) 形如 0.0.0.0:8760 / [::1]:8760 / [::]:8760 / 127.0.0.1:8760
     # 用 awk 匹配 ":<port>$" 结尾，避免误伤 87600 等端口
@@ -218,8 +270,8 @@ stop_all() {
     info "=== Step 0: Stop existing processes ==="
 
     # Mock UE（联调不应跑，但兜底杀）
-    info "Stopping Mock UE..."
-    pkill -f "run_day.py" 2>/dev/null && ok "  Mock UE stopped" || warn "  Mock UE not running"
+    info "Stopping UE..."
+    pkill -f "run_day.py" 2>/dev/null && ok "  UE stopped" || warn "  UE not running"
 
     # MCP（Windows exe）— 杀掉端口上所有监听者（含 WSL wslrelay 幽灵）
     info "Stopping existing MCP..."
@@ -228,31 +280,170 @@ stop_all() {
         kill_port_listeners "$port" "MCP"
     done
 
-    # Adapter
-    if $START_ADAPTER; then
-        info "Stopping existing Adapter..."
-        kill_port_listeners "$ADAPTER_PORT" "Adapter"
-    fi
-
-    # CodeBuddy CLI 子进程
-    kill_port_listeners "$CLI_PORT" "CLI subprocess"
-
-    # Hermes（可选停止）
-    if $START_HERMES; then
-        info "Stopping Hermes..."
-        local compose_path
-        if $IN_WSL; then
-            compose_path="$DOCKER_COMPOSE"
-        else
-            compose_path=$(MSYS_NO_PATHCONV=1 $WSL_CMD wslpath -u "$DOCKER_COMPOSE" 2>/dev/null || echo "/mnt/d/SmartNPC_v3/docker/docker-compose.yml")
-        fi
-        $WSL_CMD docker compose -f "$compose_path" stop 2>/dev/null \
-            && ok "  Hermes stopped" \
-            || warn "  Hermes not running"
-    fi
-
     sleep 2
     echo ""
+}
+
+# ─── Step 0.5: 启动 MySQL（仅 Linux 云环境默认启用）──────────
+# stop_all 不停 MySQL——MySQL 是基础设施，启动慢，跨 MCP 重启复用。
+# 幂等：已运行则跳过；数据目录未初始化则自动 --initialize-insecure。
+ensure_mysql() {
+    if ! $IN_LINUX; then
+        return 0  # 仅 Linux 云环境启用
+    fi
+    if [ "${SKIP_MYSQL:-0}" = "1" ]; then
+        warn "SKIP_MYSQL=1, 跳过 MySQL 启动（MCP 将使用内存模式 NoopStore）"
+        return 0
+    fi
+    # 已运行则跳过 mysqld 启动，但仍需确保 ${MYSQL_DB} 库存在（防 dev/stable 串台）
+    if mysql --socket="$MYSQL_SOCKET" -uroot -e "SELECT 1" >/dev/null 2>&1; then
+        ok "MySQL already running (socket=$MYSQL_SOCKET)"
+        ensure_mysql_db
+        return 0
+    fi
+    info "=== Step 0.5: Start MySQL (Linux cloud env) ==="
+
+    if ! command -v mysqld >/dev/null 2>&1; then
+        fail "mysqld not installed. Install with: dnf install -y mysql-server"
+    fi
+
+    # 数据目录未初始化则初始化（empty 判断避免覆盖已有数据）
+    if [ ! -d "$MYSQL_DATA_DIR" ] || [ -z "$(ls -A "$MYSQL_DATA_DIR" 2>/dev/null)" ]; then
+        info "Initializing MySQL data dir at $MYSQL_DATA_DIR..."
+        mkdir -p "$MYSQL_DATA_DIR"
+        chown -R mysql:mysql "$MYSQL_DATA_DIR" 2>/dev/null
+        if ! mysqld --initialize-insecure --datadir="$MYSQL_DATA_DIR" --user=mysql >/dev/null 2>&1; then
+            fail "mysqld --initialize-insecure failed (see /tmp/mysqld-init.log)"
+        fi
+    fi
+
+    mkdir -p "$MYSQL_RUN_DIR"
+    chown mysql:mysql "$MYSQL_RUN_DIR" 2>/dev/null
+
+    # nohup + disown 让 mysqld 脱离 shell（容器内无 systemd 可用）
+    nohup mysqld \
+        --datadir="$MYSQL_DATA_DIR" \
+        --socket="$MYSQL_SOCKET" \
+        --pid-file="$MYSQL_RUN_DIR/mysqld.pid" \
+        --user=mysql \
+        --bind-address=127.0.0.1 \
+        --port=3306 \
+        --character-set-server=utf8mb4 \
+        --collation-server=utf8mb4_unicode_ci \
+        > "$MYSQL_RUN_DIR/mysqld.log" 2>&1 &
+    disown
+
+    # 等 ping 通（最多 20s）
+    local elapsed=0
+    info "Waiting for MySQL to be ready..."
+    while [ $elapsed -lt 20 ]; do
+        if mysql --socket="$MYSQL_SOCKET" -uroot -e "SELECT 1" >/dev/null 2>&1; then
+            ensure_mysql_db
+            ok "MySQL is up (socket=$MYSQL_SOCKET, datadir=$MYSQL_DATA_DIR, db=$MYSQL_DB)"
+            return 0
+        fi
+        sleep 1; elapsed=$((elapsed + 1)); printf "."
+    done
+    echo ""
+    fail "MySQL did not come up within 20s (see $MYSQL_RUN_DIR/mysqld.log)"
+}
+
+# ensure_mysql_db 确保 ${MYSQL_DB} 库存在——无论 mysqld 是刚启动还是已运行都要跑，
+# 这样 dev/stable 实例共享同一 mysqld 但各自独立数据库，不会串台。
+ensure_mysql_db() {
+    mysql --socket="$MYSQL_SOCKET" -uroot -e \
+        "CREATE DATABASE IF NOT EXISTS \`$MYSQL_DB\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci" \
+        >/dev/null 2>&1 || fail "CREATE DATABASE $MYSQL_DB failed"
+}
+
+# ─── Step 0.55: 检测 SSH 反向隧道（仅云端 Linux + 反应层启用时）──
+# 反应层 LLM 跑在用户 Windows 本地 Ollama，通过 SSH 反向隧道暴露到云端
+# localhost:${OLLAMA_TUNNEL_PORT}（用户在 Windows 端运行 start-tunnel.sh）。
+# 本函数检测隧道是否已建立（云端该端口有监听），未建立时显眼提醒用户。
+#
+# 触发条件（全部满足才检测）：
+#   1. IN_LINUX（云端场景；Windows 原生 MCP 直接访问 localhost:11434 无需隧道）
+#   2. OLLAMA_URL 非空（反应层启用）
+#   3. OLLAMA_URL 指向 localhost:${OLLAMA_TUNNEL_PORT}（走隧道的标志）
+#   4. SKIP_OLLAMA_TUNNEL_CHECK != 1
+#
+# 检测方法：ss -ltn 查 :${OLLAMA_TUNNEL_PORT} 是否有监听。
+# SSH -R 反向隧道建立后，云端 SSH 服务端会在该端口开 listener。
+check_ollama_tunnel() {
+    if ! $IN_LINUX; then
+        return 0  # Windows/WSL 场景 MCP 直接连本地 Ollama，无需隧道
+    fi
+    if [ -z "$OLLAMA_URL" ]; then
+        return 0  # 反应层禁用，无需检测
+    fi
+    # 仅当 OLLAMA_URL 指向 localhost 的隧道端口时才检测
+    # （其他 URL 如 http://10.0.0.5:11434 是直连，不走隧道）
+    case "$OLLAMA_URL" in
+        http://localhost:${OLLAMA_TUNNEL_PORT}*|http://127.0.0.1:${OLLAMA_TUNNEL_PORT}*)
+            : # 走隧道的 URL，继续检测
+            ;;
+        *)
+            return 0  # 非隧道 URL，跳过检测
+            ;;
+    esac
+    if [ "${SKIP_OLLAMA_TUNNEL_CHECK:-0}" = "1" ]; then
+        return 0
+    fi
+
+    info "=== Step 0.55: Check SSH reverse tunnel (Ollama) ==="
+    # ss -ltn 列出所有 TCP 监听，匹配 :${OLLAMA_TUNNEL_PORT}$ 避免误匹配 114350 等
+    if ss -ltn 2>/dev/null | awk -v p=":${OLLAMA_TUNNEL_PORT}" '$4 ~ p"$" {found=1} END {exit !found}'; then
+        ok "SSH 反向隧道已建立（localhost:${OLLAMA_TUNNEL_PORT} 有监听）"
+        return 0
+    fi
+
+    # 未建立——显眼提醒
+    echo ""
+    echo -e "${RED}${BOLD}═══════════════════════════════════════════════════════════════${NC}"
+    echo -e "${RED}${BOLD}  ⚠️  SSH 反向隧道未建立 — 反应层 Ollama 将无法连接 ${NC}"
+    echo -e "${RED}${BOLD}═══════════════════════════════════════════════════════════════${NC}"
+    echo ""
+    echo -e "  ${YELLOW}当前配置${NC}"
+    echo -e "    OLLAMA_URL=${OLLAMA_URL}"
+    echo -e "    → MCP 会尝试连接云端 localhost:${OLLAMA_TUNNEL_PORT}，但该端口无监听"
+    echo -e "    → 反应层调用会失败，MCP 会静默降级（不打断战术层），但反应层形同虚设"
+    echo ""
+    echo -e "  ${BOLD}${GREEN}解决方法${NC}"
+    echo -e "    ${CYAN}在 Windows 端打开 Git Bash，运行：${NC}"
+    echo -e "      cd <项目根目录> && bash start-tunnel.sh"
+    echo ""
+    echo -e "    脚本会后台拉起 SSH 反向隧道并保活，云端 localhost:${OLLAMA_TUNNEL_PORT}"
+    echo -e "    即可访问你 Windows 本地的 Ollama。"
+    echo ""
+    echo -e "  ${YELLOW}其他选项${NC}"
+    echo -e "    - 若暂不需要反应层：在 .env 注释掉 OLLAMA_URL，重启 MCP"
+    echo -e "    - 若已确认隧道可忽略：SKIP_OLLAMA_TUNNEL_CHECK=1 bash start-dev.sh"
+    echo -e "${RED}${BOLD}═══════════════════════════════════════════════════════════════${NC}"
+    echo ""
+    warn "继续启动 MCP（反应层将在调用时失败并降级）"
+    return 1
+}
+
+# ─── Step 0.6: 重置 MySQL 表（可选，--drop-tables 触发）──────────
+# 删除 ${MYSQL_DB} 全部表，让 MCP 启动时 migrations 从零重建（包括 schema_migrations，
+# 否则 MCP 认为 schema 已是最新不会重跑）。实现用 DROP DATABASE + CREATE DATABASE
+# 而非逐表 DROP —— 自动覆盖未来新增的表，且无需与 migration 保持表名同步。
+# 仅在 Linux 且未 SKIP_MYSQL 且 DROP_TABLES=true 时生效；默认 false，保留累积状态。
+drop_mysql_tables() {
+    if ! $IN_LINUX; then
+        return 0
+    fi
+    if [ "${SKIP_MYSQL:-0}" = "1" ]; then
+        return 0
+    fi
+    if [ "${DROP_TABLES:-false}" != "true" ]; then
+        return 0
+    fi
+    info "=== Step 0.6: Drop MySQL tables (db=$MYSQL_DB) ==="
+    mysql --socket="$MYSQL_SOCKET" -uroot -e \
+        "DROP DATABASE IF EXISTS \`$MYSQL_DB\`; CREATE DATABASE \`$MYSQL_DB\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci" \
+        >/dev/null 2>&1 || fail "DROP/CREATE DATABASE $MYSQL_DB failed"
+    ok "MySQL tables dropped (db=$MYSQL_DB, will be recreated by MCP migrations)"
 }
 
 # ─── Step 1: 编译 MCP Windows exe ──────────────────────────────
@@ -290,186 +481,66 @@ build_mcp() {
   GO_BIN=/d/Go/bin/go bash start-debug.sh"
     fi
 
-    info "Building MCP (windows/amd64)..."
-    "$GO_BIN" version
     # 删除旧二进制，强制 go build 重新链接产物。
     # Go 的包缓存是内容哈希的（源码改了必定重编包），但若输出文件存在且 mtime 较新，
     # go build 可能直接跳过链接步骤。删掉旧 exe 保证最终二进制永远反映当前源码。
     rm -f "$MCP_EXE"
-    (cd "$MCP_DIR" && GOOS=windows GOARCH=amd64 CGO_ENABLED=0 "$GO_BIN" build -o "$MCP_EXE_NAME" ./cmd/agenttown-mcp) \
-        || fail "Go build failed"
-
-    info "Running MCP unit tests..."
-    (cd "$MCP_DIR" && "$GO_BIN" test ./cmd/agenttown-mcp/ -count=1) \
-        || fail "MCP unit tests failed; refusing to deploy broken binary"
-
-    ok "MCP exe built: $MCP_EXE"
-    echo ""
-}
-
-# ─── Step 2: 启动 Adapter ─────────────────────────────────────
-start_adapter() {
-    info "=== Step 2: Start CodeBuddy Adapter (localhost:$ADAPTER_PORT) ==="
-
-    if [ ! -f "$ADAPTER_SCRIPT" ]; then
-        fail "Adapter script not found: $ADAPTER_SCRIPT"
-    fi
-
-    # 定位 Python（adapter 需要 httpx, pyyaml, fastapi, uvicorn）
-    # 优先用 Hermes venv（依赖齐全），其次 PATH 里的 python/python3/py
-    # Windows venv 里的可执行文件是 python.exe（无后缀的 python 不存在），
-    # 所以显式加 .exe 后缀检测。
-    local py_cmd=""
-    local hermes_venv_py="/c/Users/yitianchen/AppData/Local/hermes/hermes-agent/venv/Scripts/python.exe"
-    if [ -x "$hermes_venv_py" ]; then
-        if "$hermes_venv_py" -c "import httpx, yaml, fastapi, uvicorn" 2>/dev/null; then
-            py_cmd="$hermes_venv_py"
-            ok "  Using Hermes venv Python: $py_cmd"
-        fi
-    fi
-    if [ -z "$py_cmd" ]; then
-        for cmd in python python.exe python3 py; do
-            # command -v 返回路径后，再验证不是 Windows Store 的 stub
-            # （Store stub 执行会重定向到商店，import 必失败）
-            local resolved
-            resolved=$(command -v "$cmd" 2>/dev/null) || continue
-            case "$resolved" in
-                *WindowsApps*) continue ;;  # 跳过 Store stub
-            esac
-            if "$resolved" -c "import httpx, yaml, fastapi, uvicorn" 2>/dev/null; then
-                py_cmd="$resolved"
-                ok "  Using Python: $py_cmd"
-                break
-            fi
-        done
-    fi
-    if [ -z "$py_cmd" ]; then
-        fail "Python with deps (httpx, pyyaml, fastapi, uvicorn) not found.
-  Options:
-    1. Ensure Hermes venv exists: $hermes_venv_py
-    2. pip install httpx pyyaml fastapi uvicorn into your Python
-    3. Set PATH to include a Python that has these deps"
-    fi
-
-    mkdir -p "$LOG_SUBDIR"
-    : > "$ADAPTER_LOG"
-
-    # 路径转换：脚本可能在 Git Bash（用 cygpath）或 WSL（用 wslpath）运行。
-    # Windows Python 不认 /d/... 或 /mnt/d/... 风格路径，必须转成 D:\... 风格。
-    # cygpath 不理解 /mnt/d/ 挂载约定，会错误转成 D:\mnt\d\...；wslpath 才对。
-    local script_arg="$ADAPTER_SCRIPT"
-    if command -v wslpath &>/dev/null; then
-        # WSL 环境
-        script_arg=$(wslpath -w "$ADAPTER_SCRIPT" 2>/dev/null) || script_arg="$ADAPTER_SCRIPT"
-    elif command -v cygpath &>/dev/null; then
-        # Git Bash (MSYS) 环境
-        script_arg="$(cygpath -w "$ADAPTER_SCRIPT")"
-    fi
-
-    info "Starting adapter (log: logs/$LOG_DATE/debug-adapter.log)..."
-    info "  Python: $py_cmd"
-    info "  Script: $script_arg"
-    nohup "$py_cmd" "$script_arg" --port "$ADAPTER_PORT" --cli-port "$CLI_PORT" > "$ADAPTER_LOG" 2>&1 &
-    disown
-
-    info "Waiting for Adapter (max 20s)..."
-    local elapsed=0
-    while [ $elapsed -lt 20 ]; do
-        if check_adapter; then
-            ok "Adapter is up (localhost:$ADAPTER_PORT)"
-            local health
-            health=$(curl -sS http://localhost:$ADAPTER_PORT/health 2>/dev/null)
-            if echo "$health" | grep -q '"status":"ok"'; then
-                ok "  Adapter connected to CLI"
-            else
-                warn "  Adapter up but CLI not reachable: $health"
-                warn "  Start CodeBuddy CLI in a separate terminal: codebuddy"
-            fi
-            return 0
-        fi
-        sleep 2; elapsed=$((elapsed + 2)); printf "."
-    done
-    echo ""
-    warn "  Adapter failed. Last 15 lines:"
-    tail -15 "$ADAPTER_LOG" 2>/dev/null | sed 's/^/    /'
-    fail "  Adapter failed to start."
-}
-
-# ─── Step 3: 启动 Hermes ──────────────────────────────────────
-start_hermes() {
-    info "=== Step 3: Start Hermes Gateway (Docker, localhost:$HERMES_PORT) ==="
-
-    if [ ! -f "$ENV_FILE" ]; then
-        fail ".env file not found at $ENV_FILE"
-    fi
-
-    if $REBUILD_HERMES; then
-        info "Rebuilding Hermes Docker image..."
-        HERMES_BUILD_SCRIPT="$PROJECT_DIR/docker/build-hermes.sh"
-        if [ ! -f "$HERMES_BUILD_SCRIPT" ]; then
-            fail "Hermes build script not found: $HERMES_BUILD_SCRIPT"
-        fi
-        # 转成 WSL 路径（/mnt/d/... 风格），build-hermes.sh 在 WSL/Docker 里跑
-        local script_wsl
-        if $IN_WSL; then
-            script_wsl="$HERMES_BUILD_SCRIPT"
-        else
-            case "$HERMES_BUILD_SCRIPT" in
-                /mnt/*) script_wsl="$HERMES_BUILD_SCRIPT" ;;
-                /?/*)   script_wsl="/mnt${HERMES_BUILD_SCRIPT}" ;;
-                *)      script_wsl=$(MSYS_NO_PATHCONV=1 $WSL_CMD wslpath -u "$HERMES_BUILD_SCRIPT" 2>/dev/null \
-                            || echo "/mnt/d/SmartNPC_v3/docker/build-hermes.sh") ;;
-            esac
-        fi
-        MSYS_NO_PATHCONV=1 $WSL_CMD bash -c "bash '$script_wsl'" \
-            || fail "Hermes Docker image build failed"
+    if $IN_LINUX; then
+        info "Building MCP (linux/amd64)..."
+        (cd "$MCP_DIR" && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 "$GO_BIN" build -o "$MCP_EXE_NAME" ./cmd/agenttown-mcp) \
+            || fail "Go build failed"
     else
-        info "Skipping Hermes image rebuild (--no-rebuild)"
+        info "Building MCP (windows/amd64)..."
+        (cd "$MCP_DIR" && GOOS=windows GOARCH=amd64 CGO_ENABLED=0 "$GO_BIN" build -o "$MCP_EXE_NAME" ./cmd/agenttown-mcp) \
+            || fail "Go build failed"
     fi
+    "$GO_BIN" version
 
-    info "Starting Hermes via docker compose..."
-    local compose_wsl env_wsl
-    if $IN_WSL; then
-        compose_wsl="$DOCKER_COMPOSE"
-        env_wsl="$ENV_FILE"
-    else
-        compose_wsl=$(MSYS_NO_PATHCONV=1 $WSL_CMD wslpath -u "$DOCKER_COMPOSE" 2>/dev/null || echo "/mnt/d/SmartNPC_v3/docker/docker-compose.yml")
-        env_wsl=$(MSYS_NO_PATHCONV=1 $WSL_CMD wslpath -u "$ENV_FILE" 2>/dev/null || echo "/mnt/d/SmartNPC_v3/.env")
-    fi
-    MSYS_NO_PATHCONV=1 $WSL_CMD docker compose -f "$compose_wsl" --env-file "$env_wsl" up -d --force-recreate \
-        || fail "docker compose up failed"
-
-    wait_for "Hermes Gateway (:$HERMES_PORT)" check_hermes 40
-
-    # 等 Hermes 连接 MCP（MCP 还没起，这里只等 Hermes 自身健康）
-    ok "Hermes is up"
+    ok "MCP binary built: $MCP_EXE"
     echo ""
 }
 
-# ─── Step 4: 启动 MCP（Windows 原生，监听 0.0.0.0）────────────
+# ─── Step 2: 启动 MCP（监听 0.0.0.0，局域网可达）────────────
 start_mcp() {
-    info "=== Step 4: Start agenttown-mcp.exe (0.0.0.0:$WS_PORT + :$HTTP_PORT) ==="
+    info "=== Step 2: Start agenttown-mcp (0.0.0.0:$WS_PORT + :$HTTP_PORT) ==="
 
     if [ ! -f "$MCP_EXE" ]; then
-        fail "MCP exe not found: $MCP_EXE. Run build step first."
+        fail "MCP binary not found: $MCP_EXE. Run build step first."
+    fi
+
+    # 从 .env 读取 VENUS_API_KEY（MCP 直连 Venus 必需；用 LLM_CONFIG 切自建后端时可不设）
+    local venus_key=""
+    if [ -f "$ENV_FILE" ]; then
+        if grep -q "^VENUS_API_KEY=" "$ENV_FILE" 2>/dev/null; then
+            venus_key=$(grep "^VENUS_API_KEY=" "$ENV_FILE" | cut -d= -f2-)
+        fi
+    fi
+    # LLM 后端参数：LLM_CONFIG 非空时走配置文件（自建 SGLang / Venus 切换），
+    # 否则直连 Venus 用 VENUS_API_KEY。
+    local llm_args=()
+    if [ -n "${LLM_CONFIG:-}" ]; then
+        llm_args=(--llm-config "$LLM_CONFIG")
+    else
+        if [ -z "$venus_key" ]; then
+            fail "VENUS_API_KEY not found in $ENV_FILE. MCP 直连 Venus 必需此凭据（或设 LLM_CONFIG 指向自建后端配置文件）。"
+        fi
+        llm_args=(--venus-api-key "$venus_key")
     fi
 
     mkdir -p "$LOG_SUBDIR"
     : > "$MCP_LOG"
 
-    # 在启动前确认 Hermes 可达，否则 MCP 连不上会一直重试
-    if ! check_hermes; then
-        warn "Hermes not reachable on :$HERMES_PORT — MCP may fail to discover tools"
-    fi
-
     # MCP 是 Windows exe，传给它的路径必须是 Windows 风格（D:\...）。
     # WSL 里用 wslpath -w 转换；Git Bash 里用 cygpath -w。
+    # 纯 Linux 无需转换，直接用原路径。
     # cwd 也要是 Windows 路径，否则 Windows 进程看不到 assets/ 等 相对路径。
     local mcp_exe_win="$MCP_EXE"
     local world_kb_win="$PROJECT_DIR/assets/world_kb.yaml"
     local mcp_log_win="$MCP_LOG"
     local cwd_win="$PROJECT_DIR"
-    if $IN_WSL; then
+    if $IN_LINUX; then
+        : # 纯 Linux 直接用原路径，无需转换
+    elif $IN_WSL; then
         mcp_exe_win=$(wslpath -w "$MCP_EXE" 2>/dev/null) || mcp_exe_win="$MCP_EXE"
         world_kb_win=$(wslpath -w "$PROJECT_DIR/assets/world_kb.yaml" 2>/dev/null) || world_kb_win="$PROJECT_DIR/assets/world_kb.yaml"
         mcp_log_win=$(wslpath -w "$MCP_LOG" 2>/dev/null) || mcp_log_win="$MCP_LOG"
@@ -482,31 +553,63 @@ start_mcp() {
     fi
 
     info "Starting MCP (log: logs/$LOG_DATE/debug-mcp.log)..."
-    # --ws :9090 在 Windows 上监听 0.0.0.0:9090，局域网可达
+    # --ws :9092 在 Windows 上监听 0.0.0.0:9092，局域网可达
     # --http :8760 同理
-    # --llm-backend hermes 走 MCP → Hermes → Venus 架构：MCP 把战略/战术层
-    #   LLM 调用发给 Hermes Gateway，由 Hermes 配置 (hermes/profiles/h01-dev/
-    #   config.yaml) 决定后端模型（当前为 Venus qwen3.6-35b-a3b）。
-    #   Venus client 仍保留在代码中，需要时切回 --llm-backend venus 直连即可。
-    # --world-kb 用 Windows 绝对路径，避免 cwd 不对找不到 assets/world_kb.yaml
-    # WSL 里执行 Windows exe：写一个 .bat 临时文件用 cmd.exe 启动，
-    # 避免在 bash 里嵌套 cmd.exe /C 时的多层引号转义问题（反斜杠+引号
-    # 在 bash 双引号里会被部分解释，导致路径破损）。
-    #
-    # 注意：MCP 走 Hermes 时不需要 VENUS_API_KEY，Venus 凭据由 Hermes 容器
-    # 通过 docker-compose 的 env_file: ../.env 读取，不透传到 MCP 进程。
-    local bat_file="$LOG_SUBDIR/start_mcp.bat"
-    cat > "$bat_file" << EOF
+    # MCP 直连 Venus（OpenAI Chat Completions 协议），--venus-api-key 透传凭据。
+    # --world-kb 用绝对路径，避免 cwd 不对找不到 assets/world_kb.yaml
+    # --ollama-url 反应层 LLM 后端：默认空=禁用反应层；显式传 URL 启用（如 http://localhost:11434 连云环境本地 Ollama）
+    local ollama_args=()
+    if [ -n "$OLLAMA_URL" ]; then
+        ollama_args=(--ollama-url "$OLLAMA_URL" --ollama-model "$OLLAMA_MODEL" --ollama-num-thread "$OLLAMA_NUM_THREAD")
+    fi
+    if $IN_LINUX; then
+        # 纯 Linux：直接 nohup 启动 Linux 二进制，无需 .bat/cmd.exe
+        # --auto-plan 从 .env 的 AGENTTOWN_MCP_AUTO_PLAN 读取（默认 true）
+        # --mysql-dsn 从 ensure_mysql 准备的实例拿（SKIP_MYSQL=1 时降级内存模式）
+        local mysql_args=()
+        if [ "${SKIP_MYSQL:-0}" != "1" ]; then
+            mysql_args=(--mysql-dsn "${MYSQL_DSN:-$MYSQL_DSN_DEFAULT}")
+        fi
+        # Go flag 包对 bool flag 特殊：--auto-plan true 里的 true 被当 positional arg，
+        # 导致 flag 解析停止，后续 --mysql-dsn 等不被解析。必须用 --auto-plan=value 形式。
+        nohup "$MCP_EXE" --http ":$HTTP_PORT" --ws ":$WS_PORT" \
+            "${llm_args[@]}" \
+            --world-kb "$PROJECT_DIR/assets/world_kb.yaml" \
+            --auto-plan="${AGENTTOWN_MCP_AUTO_PLAN:-true}" \
+            --tactical-stream \
+            "${mysql_args[@]}" \
+            "${ollama_args[@]}" \
+            --log-level info >> "$MCP_LOG" 2>&1 &
+        disown
+    else
+        # Windows/WSL：写一个 .bat 临时文件用 cmd.exe 启动，
+        # 避免在 bash 里嵌套 cmd.exe /C 时的多层引号转义问题（反斜杠+引号
+        # 在 bash 双引号里会被部分解释，导致路径破损）。
+        local bat_file="$LOG_SUBDIR/start_mcp.bat"
+        # .bat 里 ollama args 拼成单行字符串（cmd.exe 不支持 bash 数组）
+        local ollama_args_str=""
+        if [ -n "$OLLAMA_URL" ]; then
+            ollama_args_str="--ollama-url \"$OLLAMA_URL\" --ollama-model \"$OLLAMA_MODEL\" --ollama-num-thread $OLLAMA_NUM_THREAD"
+        fi
+        # LLM 后端参数：LLM_CONFIG 非空走配置文件，否则直连 Venus。
+        local llm_args_str=""
+        if [ -n "${LLM_CONFIG:-}" ]; then
+            llm_args_str="--llm-config \"$LLM_CONFIG\""
+        else
+            llm_args_str="--venus-api-key \"$venus_key\""
+        fi
+        cat > "$bat_file" << EOF
 @echo off
 pushd "$cwd_win"
-"$mcp_exe_win" --http ":$HTTP_PORT" --ws ":$WS_PORT" --llm-backend hermes --hermes-url "http://localhost:$HERMES_PORT" --world-kb "$world_kb_win" --log-level debug >> "$mcp_log_win" 2>&1
+"$mcp_exe_win" --http ":$HTTP_PORT" --ws ":$WS_PORT" $llm_args_str --world-kb "$world_kb_win" --auto-plan="${AGENTTOWN_MCP_AUTO_PLAN:-true}" --tactical-stream $ollama_args_str --log-level info >> "$mcp_log_win" 2>&1
 EOF
-    if $IN_WSL; then
-        local bat_win
-        bat_win=$(wslpath -w "$bat_file" 2>/dev/null) || bat_win="$bat_file"
-        MSYS_NO_PATHCONV=1 cmd.exe /C "$bat_win" >/dev/null 2>&1 &
-    else
-        MSYS_NO_PATHCONV=1 cmd.exe /C "$(cygpath -w "$bat_file" 2>/dev/null || echo "$bat_file")" >/dev/null 2>&1 &
+        if $IN_WSL; then
+            local bat_win
+            bat_win=$(wslpath -w "$bat_file" 2>/dev/null) || bat_win="$bat_file"
+            MSYS_NO_PATHCONV=1 cmd.exe /C "$bat_win" >/dev/null 2>&1 &
+        else
+            MSYS_NO_PATHCONV=1 cmd.exe /C "$(cygpath -w "$bat_file" 2>/dev/null || echo "$bat_file")" >/dev/null 2>&1 &
+        fi
     fi
 
     wait_for "MCP HTTP (:$HTTP_PORT)" check_mcp_http 20
@@ -516,9 +619,9 @@ EOF
     echo ""
 }
 
-# ─── Step 5: 打印联调信息 ─────────────────────────────────────
+# ─── Step 3: 打印联调信息 ─────────────────────────────────────
 print_summary() {
-    info "=== Step 5: Summary ==="
+    info "=== Step 3: Summary ==="
 
     local lan_ip
     lan_ip=$(detect_lan_ip)
@@ -534,31 +637,62 @@ print_summary() {
     echo ""
     echo -e "  ${BOLD}本机服务${NC}"
     echo -e "    MCP:        0.0.0.0:$WS_PORT (WS) + :$HTTP_PORT (HTTP)"
-    echo -e "    Hermes:     localhost:$HERMES_PORT"
-    echo -e "    Adapter:    localhost:$ADAPTER_PORT"
+    if [ -n "${LLM_CONFIG:-}" ]; then
+        echo -e "    LLM 后端:   配置文件（$LLM_CONFIG）"
+    else
+        echo -e "    LLM 后端:   Venus 直连（$VENUS_URL, model=$VENUS_MODEL）"
+    fi
+    if $IN_LINUX && [ "${SKIP_MYSQL:-0}" != "1" ]; then
+        echo -e "    MySQL:      127.0.0.1:3306 (socket=$MYSQL_SOCKET, db=$MYSQL_DB)"
+        echo -e "                DSN: ${MYSQL_DSN:-$MYSQL_DSN_DEFAULT}"
+    fi
+    if [ -n "$OLLAMA_URL" ]; then
+        echo -e "    反应层 LLM:  Ollama（$OLLAMA_URL, model=$OLLAMA_MODEL, threads=$OLLAMA_NUM_THREAD）"
+        # 云端走隧道时显示隧道状态
+        if $IN_LINUX; then
+            case "$OLLAMA_URL" in
+                http://localhost:${OLLAMA_TUNNEL_PORT}*|http://127.0.0.1:${OLLAMA_TUNNEL_PORT}*)
+                    if ss -ltn 2>/dev/null | awk -v p=":${OLLAMA_TUNNEL_PORT}" '$4 ~ p"$" {found=1} END {exit !found}'; then
+                        echo -e "                ${GREEN}SSH 反向隧道已建立（localhost:${OLLAMA_TUNNEL_PORT} 监听中）${NC}"
+                    else
+                        echo -e "                ${RED}⚠ SSH 反向隧道未建立 — 反应层将无法调用 Ollama${NC}"
+                        echo -e "                ${YELLOW}  在 Windows 端运行：bash start-tunnel.sh${NC}"
+                    fi
+                    ;;
+                *)
+                    echo -e "                （直连 Ollama，不走隧道）"
+                    ;;
+            esac
+        fi
+    else
+        echo -e "    反应层 LLM:  ${YELLOW}未启用${NC}（OLLAMA_URL 为空，仅战略/战术层决策）"
+    fi
     echo ""
     echo -e "  ${BOLD}日志${NC}"
     local log_rel="${LOG_SUBDIR#$PROJECT_DIR/}"
     echo -e "    MCP:     $log_rel/debug-mcp.log"
-    echo -e "    Adapter: $log_rel/debug-adapter.log"
-    echo -e "    Hermes:  wsl docker logs -f $HERMES_CONTAINER"
     echo ""
     echo -e "  ${BOLD}协议文档${NC}"
     echo -e "    docs/AgentTown_CommProtocol_Values.md"
     echo -e "    docs/AgentTown_Core_DeepDive.md"
     echo ""
     echo -e "  ${YELLOW}注意${NC}"
-    echo -e "    1. 确保 Windows 防火墙放行 :$WS_PORT 端口（管理员 PowerShell）："
-    echo -e "       New-NetFirewallRule -DisplayName \"AgentTown WS\" -Direction Inbound -LocalPort $WS_PORT -Protocol TCP -Action Allow"
-    echo -e "    2. 本脚本未启动 Mock UE，UE 同事自己连 WS 发感知即可"
-    echo -e "    3. 停止服务：bash start-debug.sh --stop 或手动 taskkill"
+    if $IN_LINUX; then
+        echo -e "    1. 确保防火墙放行 :$WS_PORT 端口："
+        echo -e "       sudo ufw allow $WS_PORT/tcp  (或 firewalld: sudo firewall-cmd --add-port=$WS_PORT/tcp --permanent)"
+        echo -e "    2. 本脚本未启动 UE，UE 同事自己连 WS 发感知即可"
+        echo -e "    3. 停止服务：bash start-dev.sh --stop 或 kill 占用端口的进程"
+    else
+        echo -e "    1. 确保 Windows 防火墙放行 :$WS_PORT 端口（管理员 PowerShell）："
+        echo -e "       New-NetFirewallRule -DisplayName \"AgentTown WS\" -Direction Inbound -LocalPort $WS_PORT -Protocol TCP -Action Allow"
+        echo -e "    2. 本脚本未启动 UE，UE 同事自己连 WS 发感知即可"
+        echo -e "    3. 停止服务：bash start-debug.sh --stop 或手动 taskkill"
+    fi
     echo -e ""
     echo -e "${BOLD}${GREEN}═══════════════════════════════════════════════════════════════${NC}"
 }
 
 # ─── --stop 选项 ──────────────────────────────────────────────
-# stop_all 内部用 START_HERMES / START_ADAPTER 控制 是否停该组件，
-# 因此 --stop 默认停全部；--stop --no-hermes 则只跳过 Hermes，以此类推。
 if $STOP_ONLY; then
     stop_all
     ok "All services stopped."
@@ -579,8 +713,9 @@ echo ""
 mkdir -p "$LOG_SUBDIR"
 
 stop_all
+ensure_mysql
+drop_mysql_tables
+check_ollama_tunnel
 build_mcp
-$START_ADAPTER && start_adapter
-$START_HERMES  && start_hermes
 start_mcp
 print_summary

@@ -5,7 +5,7 @@
 //
 // 路由（注册在 main.go runHTTP 的 mux 上）：
 //   - GET  /debug/    → 返回嵌入的 debug.html
-//   - GET  /debug/kb  → 返回 world_kb 的 zones/locations/objects 摘要（JSON）
+//   - GET  /debug/kb  → 返回 world_kb 的 zones/objects 摘要（JSON）
 //   - POST /debug/action → 已有端点，本文件不修改
 //
 // HTML 是单文件、无外部依赖、纯静态（fetch /debug/kb 拿下拉数据），
@@ -19,7 +19,12 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"strings"
 
+	"github.com/AgentTown/agenttown-mcp/adapters/agenttown/tools"
+	"github.com/AgentTown/agenttown-mcp/contract/protocol"
+	"github.com/AgentTown/agenttown-mcp/internal/log"
+	"github.com/AgentTown/agenttown-mcp/pkg/llmmetrics"
 	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
 )
 
@@ -39,28 +44,23 @@ func init() {
 }
 
 // debugKBResponse 是 /debug/kb 的响应体。结构故意保持紧凑——只暴露
-// 前端下拉需要的字段（id/name/zone/available_actions），不泄露坐标等内部数据。
+// 前端下拉需要的字段（id/display_name/zone_id/available_interactions），
+// 不泄露坐标等内部数据。
 type debugKBResponse struct {
-	Zones     []debugKBZone     `json:"zones"`
-	Locations []debugKBLocation `json:"locations"`
-	Objects   []debugKBObject   `json:"objects"`
+	Zones   []debugKBZone   `json:"zones"`
+	Objects []debugKBObject `json:"objects"`
 }
 
 type debugKBZone struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
-}
-
-type debugKBLocation struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
-	Zone string `json:"zone"`
+	ID          string `json:"id"`
+	DisplayName string `json:"display_name"`
 }
 
 type debugKBObject struct {
-	ID               string   `json:"id"`
-	Name             string   `json:"name"`
-	AvailableActions []string `json:"available_actions"`
+	ID                    string   `json:"id"`
+	DisplayName           string   `json:"display_name"`
+	ZoneID                string   `json:"zone_id"`
+	AvailableInteractions []string `json:"available_interactions"`
 }
 
 // handleDebugUI 返回 debug 控制台 HTML 页面。
@@ -89,24 +89,310 @@ func handleDebugKB(w http.ResponseWriter, r *http.Request, kb *worldkb.KB, logge
 	}
 
 	resp := debugKBResponse{
-		Zones:     make([]debugKBZone, 0, len(kb.Zones)),
-		Locations: make([]debugKBLocation, 0, len(kb.Locations)),
-		Objects:   make([]debugKBObject, 0, len(kb.Objects)),
+		Zones:   make([]debugKBZone, 0, len(kb.Zones)),
+		Objects: make([]debugKBObject, 0, len(kb.Objects)),
 	}
 	for _, z := range kb.ListZones() {
-		resp.Zones = append(resp.Zones, debugKBZone{ID: z.ID, Name: z.Name})
-	}
-	for _, l := range kb.ListLocations() {
-		resp.Locations = append(resp.Locations, debugKBLocation{ID: l.ID, Name: l.Name, Zone: l.Zone})
+		resp.Zones = append(resp.Zones, debugKBZone{ID: z.ID, DisplayName: z.DisplayName})
 	}
 	for _, o := range kb.ListObjects() {
 		resp.Objects = append(resp.Objects, debugKBObject{
-			ID:               o.ID,
-			Name:             o.Name,
-			AvailableActions: o.AvailableActions,
+			ID:                    o.ID,
+			DisplayName:           o.DisplayName,
+			ZoneID:                o.ZoneID,
+			AvailableInteractions: o.AvailableInteractions,
 		})
 	}
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
 		logger.Warn("[debug/kb] encode failed", "err", err)
+	}
+}
+
+// handleDebugCap 返回 capability_registry 当前状态，供 e2e 测试黑盒验证。
+// 结构：{"agents": {"system": [{cmd, tool_name, kind, ...}], "H-01": [...]}}
+// global default 始终以 "system" key 暴露，per-agent override 以各自 agentID 暴露。
+//
+// tool_name 字段由 tools.CmdToToolName(act.Cmd) 派生，前端下拉用 tool_name
+// 作 value，使其与 mapDebugCmd 的 tool_name 匹配路径以及前端 cmd 特殊处理
+// （如 cmd === 'move_to'）保持一致。
+//
+// 合成 Stop 能力项始终追加到每个 agent 列表末尾（不写进 registry 的
+// EffectiveActions/Snapshot，避免影响战术层 prompt 与 ReconcileTools）。
+// Stop 不对应 action_command，而是发 stop_action 控制消息；在 debug 下拉里
+// 始终可见，不受 capability_registry 注册内容变化影响。
+func handleDebugCap(w http.ResponseWriter, r *http.Request, cap *CapabilityRegistry, logger *slog.Logger) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+	if cap == nil {
+		logger.Warn("[debug/cap] capability registry is nil, returning empty")
+		_ = json.NewEncoder(w).Encode(debugCapResponse{})
+		return
+	}
+	snap := cap.Snapshot()
+	resp := debugCapResponse{Agents: make(map[string][]debugCapAction, len(snap.Agents))}
+	for agentID, acts := range snap.Agents {
+		// +1 给合成 Stop 项预留容量
+		enriched := make([]debugCapAction, 0, len(acts)+1)
+		for _, a := range acts {
+			enriched = append(enriched, debugCapAction{
+				CapabilityAction: a,
+				ToolName:         tools.CmdToToolName(a.Cmd),
+			})
+		}
+		enriched = append(enriched, stopCapabilityAction)
+		resp.Agents[agentID] = enriched
+	}
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		logger.Warn("[debug/cap] encode failed", "err", err)
+	}
+}
+
+// stopCapabilityAction 是始终保留在 /debug/cap 响应中的合成 Stop 能力项。
+// Stop 不对应 action_command（它发 stop_action 控制消息），但联调同事需要
+// 在 debug 下拉里始终可见、不受 capability_registry 注册影响。仅用于 debug
+// 展示，不写进 CapabilityRegistry 的 EffectiveActions/Snapshot，避免影响战术层
+// prompt 工具列表与 ReconcileTools 的工具增删。
+var stopCapabilityAction = debugCapAction{
+	CapabilityAction: protocol.CapabilityAction{
+		Cmd:         "Stop",
+		Kind:        "atomic",
+		Description: "停止当前在途动作（发送 stop_action 控制消息）",
+	},
+	ToolName: "stop",
+}
+
+// debugCapAction 是 /debug/cap 返回的 action 项，在 protocol.CapabilityAction
+// 之上追加 tool_name 字段（仅 debug 用，不进协议层）。
+type debugCapAction struct {
+	protocol.CapabilityAction
+	ToolName string `json:"tool_name"`
+}
+
+// debugCapResponse 是 /debug/cap 的响应结构，与 CapabilitySnapshot 同构但
+// action 项替换为 debugCapAction。
+type debugCapResponse struct {
+	Agents map[string][]debugCapAction `json:"agents"`
+}
+
+// handleDebugAgents 返回当前已注册的 agent ID 列表，供 debug 控制台
+// 填充 agent 下拉菜单。数据源是 main.go 的 listAgentIDs()（即 agents map
+// 的 key，按字典序排序）。未注册任何 agent 时返回 ["H-01"] 兜底，兼容
+// 旧版冷启动行为。
+//
+// 与 /debug/cap 不同：capability_registry 按 agent_id="system" 全局下发，
+// 不会为每个 NPC 产生 per-agent 条目，因此 /debug/cap 的 agents map 不能
+// 作为已注册 agent 列表的来源。本端点直接读 agents 注册表，反映真实的
+// agent_registered 状态。
+func handleDebugAgents(w http.ResponseWriter, r *http.Request, listAgentIDs func() []string, logger *slog.Logger) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+	ids := listAgentIDs()
+	if len(ids) == 0 {
+		ids = []string{"H-01"}
+	}
+	resp := debugAgentsResponse{Agents: ids}
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		logger.Warn("[debug/agents] encode failed", "err", err)
+	}
+}
+
+// debugAgentsResponse 是 /debug/agents 的响应体。
+type debugAgentsResponse struct {
+	Agents []string `json:"agents"`
+}
+
+// handleDebugUEErrors 返回最近 UE 上报的 error 消息列表（环形缓冲，最多
+// maxUEErrorEntries 条），供 debug 控制台展示 UE 侧报错（区别于 MCP 自身日志）。
+// 响应始终是 JSON 数组（无错误时为 []），前端按 received_at 倒序渲染。
+func handleDebugUEErrors(w http.ResponseWriter, r *http.Request, logger *slog.Logger) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+	entries := snapshotUEErrors()
+	if entries == nil {
+		entries = []ueErrorEntry{}
+	}
+	if err := json.NewEncoder(w).Encode(entries); err != nil {
+		logger.Warn("[debug/ue-errors] encode failed", "err", err)
+	}
+}
+
+// handleDebugLLMMetrics 返回 LLM 调用表现聚合指标（各层 E2E/TTFT/TPOT/ITL
+// 分位数、错误分布、重试率、JSON 正确率），供更换推理服务端前后对比。
+// 数据源是进程级 llmMetricsCollector（agenticTurn / generateTacticalPlan 写入）。
+func handleDebugLLMMetrics(w http.ResponseWriter, r *http.Request, logger *slog.Logger) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+	rep := llmMetricsCollector.Snapshot()
+	if rep.Layers == nil {
+		rep.Layers = map[string]*llmmetrics.LayerReport{}
+	}
+	if err := json.NewEncoder(w).Encode(rep); err != nil {
+		logger.Warn("[debug/llm-metrics] encode failed", "err", err)
+	}
+}
+
+// debugTacticalEntry 是 /debug/tactical 返回的单个 agent 战术层分解快照：
+// 当前在途 action + 当前时段 goal + 战术层队列中待执行的任务列表。
+type debugTacticalEntry struct {
+	AgentID        string                `json:"agent_id"`
+	GameTime       string                `json:"game_time"`                  // "HH:MM"（来自最新 perception）
+	CurrentSlot    string                `json:"current_slot"`               // "HH:MM-HH:MM" 或 ""
+	CurrentGoal    string                `json:"current_goal,omitempty"`     // 当前时段 goal（来自战略层计划）
+	QueueLen       int                   `json:"queue_len"`                  // 队列中剩余任务数
+	Queue          []debugTacticalAction `json:"queue"`                      // 战术层分解出的任务列表
+	InFlight       string                `json:"in_flight,omitempty"`        // 当前在途 action_id
+	InFlightCmd    string                `json:"in_flight_cmd,omitempty"`    // 当前在途 action 的工具名
+	InFlightParams map[string]any        `json:"in_flight_params,omitempty"` // 当前在途 action 的全部参数
+}
+
+// debugTacticalAction 是队列中的一个战术层分解任务（对应一次工具调用）。
+type debugTacticalAction struct {
+	Action string         `json:"action"`           // 工具名（如 speak / work_shift / move_to）
+	Params map[string]any `json:"params,omitempty"` // 工具参数（LLM 原始输出）
+}
+
+// handleDebugTactical 返回所有已注册 agent 当前战术层分解情况（当前时段
+// goal + 待执行任务队列），供 debug 控制台全宽面板展示。未注册任何 agent
+// 时回落 ["H-01"]，与 /debug/agents 一致。响应始终是 JSON 数组。
+func handleDebugTactical(w http.ResponseWriter, r *http.Request, lookupAgent func(string) *agentContext, listAgentIDs func() []string, logger *slog.Logger) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+
+	ids := listAgentIDs()
+	if len(ids) == 0 {
+		ids = []string{"H-01"}
+	}
+	resp := make([]debugTacticalEntry, 0, len(ids))
+	for _, id := range ids {
+		ac := lookupAgent(id)
+		if ac == nil {
+			continue
+		}
+		plan, slot, idx := ac.snapshotSchedule()
+		items := parseFormattedPlan(plan)
+		goal := ""
+		if idx >= 0 && idx < len(items) {
+			goal = items[idx].Goal
+		} else if slot != "" {
+			for _, it := range items {
+				if it.Time == slot {
+					goal = it.Goal
+					break
+				}
+			}
+		}
+		queue := ac.as.QueueSnapshot()
+		q := make([]debugTacticalAction, 0, len(queue))
+		for _, pa := range queue {
+			q = append(q, debugTacticalAction{Action: pa.Action, Params: pa.Params})
+		}
+		snap := ac.as.Snapshot()
+		resp = append(resp, debugTacticalEntry{
+			AgentID:        id,
+			GameTime:       ac.latestTimeOfDay(),
+			CurrentSlot:    slot,
+			CurrentGoal:    goal,
+			QueueLen:       len(q),
+			Queue:          q,
+			InFlight:       snap.CurrentActionID,
+			InFlightCmd:    snap.CurrentActionCmd,
+			InFlightParams: snap.CurrentActionParams,
+		})
+	}
+	if resp == nil {
+		resp = []debugTacticalEntry{}
+	}
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		logger.Warn("[debug/tactical] encode failed", "err", err)
+	}
+}
+
+// handleDebugLogs 返回最近 MCP 日志条目（环形缓冲，最多 500 条），供 debug
+// 控制台展示 MCP 侧全量日志。前端按 level 筛选（ALL/DEBUG/INFO/WARN/ERROR）。
+// 响应始终是 JSON 数组（无日志时为 []），按时间正序返回，前端倒序渲染（最新在最上）。
+// 大型 payload 字段值已被截断到 500 字符，避免几条大日志占满缓冲——完整内容去 sim.log。
+func handleDebugLogs(w http.ResponseWriter, r *http.Request, logger *slog.Logger) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+	entries := log.Snapshot()
+	if entries == nil {
+		entries = []log.Entry{}
+	}
+	if err := json.NewEncoder(w).Encode(entries); err != nil {
+		logger.Warn("[debug/logs] encode failed", "err", err)
+	}
+}
+
+// debugPlanResponse 是 /debug/plan 的响应体，返回当日 dailyPlan 的结构化快照
+// 供 debug 控制台右侧 schedule 面板展示。
+type debugPlanResponse struct {
+	OK          bool            `json:"ok"`
+	AgentID     string          `json:"agent_id"`
+	Items       []dailyPlanItem `json:"items"`        // 7 时段 goal（解析自 dailyPlan 字符串）
+	CurrentSlot string          `json:"current_slot"` // "HH:MM-HH:MM" 或 "__debug__..." 或 ""
+	CurrentIdx  int             `json:"current_idx"`  // 当前时段在 items 中的下标，-1=未命中或注入模式
+	GameTime    string          `json:"game_time"`    // "HH:MM"（来自最新 perception）
+	AutoPlan    bool            `json:"auto_plan"`    // 是否处于自动规划模式
+}
+
+// handleDebugPlan 返回指定 agent 当日 dailyPlan 快照，供 debug 控制台 schedule 面板展示。
+// 请求参数：?agent_id=<id>。未指定时回落到 listAgentIDs() 的首个注册 agent；若没有任何
+// agent 注册，回落到 "H-01"（兼容旧版冷启动行为）。
+//
+// 响应的 CurrentIdx 在以下情况返回 -1：dailyPlan 为空、当前时段未命中任何 item、
+// 或 currentSlot 为 "__debug__" 前缀（/debug/schedule 注入的临时 slot，不在 dailyPlan 内）。
+func handleDebugPlan(w http.ResponseWriter, r *http.Request, lookupAgent func(string) *agentContext, listAgentIDs func() []string, logger *slog.Logger) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+
+	agentID := r.URL.Query().Get("agent_id")
+	if agentID == "" {
+		if ids := listAgentIDs(); len(ids) > 0 {
+			agentID = ids[0]
+		} else {
+			agentID = "H-01"
+		}
+	}
+
+	ac := lookupAgent(agentID)
+	if ac == nil {
+		w.WriteHeader(http.StatusNotFound)
+		_ = json.NewEncoder(w).Encode(debugPlanResponse{
+			OK:         false,
+			AgentID:    agentID,
+			Items:      []dailyPlanItem{},
+			CurrentIdx: -1,
+			AutoPlan:   autoPlanEnabled,
+		})
+		return
+	}
+
+	plan, slot, idx := ac.snapshotSchedule()
+	items := parseFormattedPlan(plan)
+	gameTime := ac.latestTimeOfDay()
+
+	// /debug/schedule 注入的 slot 带 "__debug__" 前缀，不属于 dailyPlan，
+	// 此时 currentPlanIndex 指向的是注入前的旧值，不能用来高亮 items。
+	if strings.HasPrefix(slot, "__debug__") {
+		idx = -1
+	}
+	if idx < 0 {
+		idx = -1
+	}
+
+	resp := debugPlanResponse{
+		OK:          true,
+		AgentID:     agentID,
+		Items:       items,
+		CurrentSlot: slot,
+		CurrentIdx:  idx,
+		GameTime:    gameTime,
+		AutoPlan:    autoPlanEnabled,
+	}
+	if resp.Items == nil {
+		resp.Items = []dailyPlanItem{}
+	}
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		logger.Warn("[debug/plan] encode failed", "err", err)
 	}
 }
