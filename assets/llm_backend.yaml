@@ -17,7 +17,7 @@
 strategic:
   host: "127.0.0.1"
   port: 8000
-  model: "Qwen3-8B-AWQ"
+  model: "Qwen3-8B-FP8"
   api_key: ""                    # 自建 vLLM 通常无需认证
   timeout_sec: 120
 
@@ -25,6 +25,6 @@ strategic:
 tactical:
   host: "127.0.0.1"
   port: 8000
-  model: "Qwen3-8B-AWQ"
+  model: "Qwen3-8B-FP8"
   api_key: ""                    # 自建 vLLM 通常无需认证
   timeout_sec: 120
