@@ -95,12 +95,13 @@ if [ -f "$ENV_FILE" ]; then
         case "$key" in
             ''|\#*) continue ;;
         esac
-        # 只 export VENUS_ / AGENTTOWN_MCP_ / OLLAMA_ 前缀变量
+        # 只 export VENUS_ / AGENTTOWN_MCP_ / OLLAMA_ / LLM_ / MYSQL_ 前缀变量
         case "$key" in
             VENUS_*) export "$key=$value" ;;
             AGENTTOWN_MCP_*) export "$key=$value" ;;
             OLLAMA_*) export "$key=$value" ;;
             LLM_*) export "$key=$value" ;;
+            MYSQL_*) export "$key=$value" ;;
         esac
     done < "$ENV_FILE"
 fi
@@ -527,6 +528,18 @@ start_mcp() {
         llm_args=(--venus-api-key "$venus_key")
     fi
 
+    # MySQL DSN：优先读 .env 的 MYSQL_DSN（本地 Windows 也走持久化）；
+    # 空则回退 MYSQL_DB 拼默认 DSN；再空则 MCP 降级内存模式。
+    # SKIP_MYSQL=1 强制禁用（MCP 用内存模式 NoopStore）。
+    local mysql_dsn=""
+    if [ "${SKIP_MYSQL:-0}" != "1" ]; then
+        mysql_dsn="${MYSQL_DSN:-}"
+        if [ -z "$mysql_dsn" ]; then
+            # .env 里没 MYSQL_DSN 时用 MYSQL_DB 拼（沿用云环境默认 DSN 约定）
+            mysql_dsn="${MYSQL_DSN_DEFAULT:-root@tcp(127.0.0.1:3306)/${MYSQL_DB:-agenttown_stable}?parseTime=true&charset=utf8mb4}"
+        fi
+    fi
+
     mkdir -p "$LOG_SUBDIR"
     : > "$MCP_LOG"
 
@@ -565,10 +578,10 @@ start_mcp() {
     if $IN_LINUX; then
         # 纯 Linux：直接 nohup 启动 Linux 二进制，无需 .bat/cmd.exe
         # --auto-plan 从 .env 的 AGENTTOWN_MCP_AUTO_PLAN 读取（默认 true）
-        # --mysql-dsn 从 ensure_mysql 准备的实例拿（SKIP_MYSQL=1 时降级内存模式）
+        # --mysql-dsn 用上面解析出的 mysql_dsn（SKIP_MYSQL=1 时为空→内存模式）
         local mysql_args=()
-        if [ "${SKIP_MYSQL:-0}" != "1" ]; then
-            mysql_args=(--mysql-dsn "${MYSQL_DSN:-$MYSQL_DSN_DEFAULT}")
+        if [ -n "$mysql_dsn" ]; then
+            mysql_args=(--mysql-dsn "$mysql_dsn")
         fi
         # Go flag 包对 bool flag 特殊：--auto-plan true 里的 true 被当 positional arg，
         # 导致 flag 解析停止，后续 --mysql-dsn 等不被解析。必须用 --auto-plan=value 形式。
@@ -598,10 +611,16 @@ start_mcp() {
         else
             llm_args_str="--venus-api-key \"$venus_key\""
         fi
+        # MySQL DSN：本地 Windows 也走持久化（.env 配了 MYSQL_DSN 则注入）。
+        # 空则 MCP 降级内存模式（与 Linux 分支行为一致）。
+        local mysql_args_str=""
+        if [ -n "$mysql_dsn" ]; then
+            mysql_args_str="--mysql-dsn \"$mysql_dsn\""
+        fi
         cat > "$bat_file" << EOF
 @echo off
 pushd "$cwd_win"
-"$mcp_exe_win" --http ":$HTTP_PORT" --ws ":$WS_PORT" $llm_args_str --world-kb "$world_kb_win" --auto-plan="${AGENTTOWN_MCP_AUTO_PLAN:-true}" --tactical-stream $ollama_args_str --log-level info >> "$mcp_log_win" 2>&1
+"$mcp_exe_win" --http ":$HTTP_PORT" --ws ":$WS_PORT" $llm_args_str --world-kb "$world_kb_win" --auto-plan="${AGENTTOWN_MCP_AUTO_PLAN:-true}" --tactical-stream $mysql_args_str $ollama_args_str --log-level info >> "$mcp_log_win" 2>&1
 EOF
         if $IN_WSL; then
             local bat_win

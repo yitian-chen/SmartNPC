@@ -1,8 +1,8 @@
 # LLM 推理服务分层配置（OpenAI Chat Completions 兼容）
 #
-# 战略层与战术/对话层可分别指向不同的推理服务。默认：
-#   - 战略层 → Venus DeepSeek-v4-pro（生成每日计划）
-#   - 战术层 + 对话层 → 自部署推理服务（高频调用）
+# 三层决策（战略 / 战术 / 对话）统一指向自部署 vLLM 推理服务。
+#   - 战略层 → vLLM（生成每日计划，一天一次）
+#   - 战术层 + 对话层 → vLLM（高频调用；对话层复用战术层客户端）
 #
 # 带 --llm-config=assets/llm_backend.yaml 重启 MCP 生效
 # （不传该 flag 时走 --venus-url 等原有 flag，战略/战术共用同一 Venus）。
@@ -15,15 +15,16 @@
 
 # ─── 战略层（每日计划生成）───
 strategic:
-  base_url: "http://v2.open.venus.oa.com/llmproxy"
-  api_key: ""                    # 留空则读 VENUS_API_KEY 环境变量
-  model: "deepseek-v4-pro"
+  host: "127.0.0.1"
+  port: 8000
+  model: "Qwen3-8B-FP8"
+  api_key: ""                    # 自建 vLLM 通常无需认证
   timeout_sec: 120
 
 # ─── 战术层 + 对话层（高频调用）───
 tactical:
-  host: "21.6.67.160"
+  host: "127.0.0.1"
   port: 8000
-  model: "Qwen2.5-7B-Instruct-GPTQ-Int4"
-  api_key: ""                    # 自建服务通常无需认证
+  model: "Qwen3-8B-FP8"
+  api_key: ""                    # 自建 vLLM 通常无需认证
   timeout_sec: 120
