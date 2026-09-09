@@ -183,7 +183,7 @@ func TestRecordActionCompletion_TooTiredHintGuidesRest(t *testing.T) {
 	if !strings.Contains(hint, "too_tired") {
 		t.Errorf("hint should mention too_tired reason: %q", hint)
 	}
-	if !strings.Contains(hint, "rest_at_residence") || !strings.Contains(hint, "charge_at_station") {
+	if !strings.Contains(hint, "sleep_pod/sleep") || !strings.Contains(hint, "charger/charge") {
 		t.Errorf("too_tired hint should guide to rest/charge: %q", hint)
 	}
 	if strings.Contains(hint, "直接重试同一动作") {

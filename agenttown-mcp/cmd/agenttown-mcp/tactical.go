@@ -56,15 +56,32 @@ const (
 	sourceTactical actionSource = agentstate.SourceTactical
 )
 
+// maskedTacticalTools 是战术层 function calling 目录中**屏蔽**的工具（不在
+// tools 数组里下发、校验时也拒绝）。分两类：
+//   - 复合/快捷工具（work_shift / charge_at_station / rest_at_residence /
+//     self_maintenance / surf_internet / use_exercise_equipment / read）与
+//     InteractSmartObject 功能重叠——system prompt 的设施详情已列出所有
+//     (semantic_group, interaction) 组合，模型统一用 InteractSmartObject 即可，
+//     屏蔽这些快捷工具可把 tools 数组从 15 个瘦到 6 个（省 ~62%）。
+//   - turn_to / emote 为非必要瞬时动作，一并屏蔽。
+//   - scan_area / stop / wait 本就不属于战术层排队工具。
+// 目录派生（tacticalToolsFromRegistry）与校验（tacticalActionAvailable）
+// 共用这一份清单，保证「不展示 = 拒绝」一致。
+var maskedTacticalTools = map[string]bool{
+	"scan_area": true, "stop": true, "wait": true,
+	"work_shift": true, "use_exercise_equipment": true,
+	"charge_at_station": true, "read": true,
+	"rest_at_residence": true, "self_maintenance": true,
+	"surf_internet": true, "turn_to": true, "emote": true,
+}
+
 // tacticalActionAvailable 判断 action 是否为战术层可用工具，且其依赖的
 // cmd 在 registry 中对 agentID 有效。registry == nil 时降级为仅检查是否
 // 内置战术工具（向后兼容测试与未启用 capability 的场景）。
 //
-// scan_area / stop 不属于战术层排队工具，无论 registry 是否 nil 都返回 false。
-// wait 同样返回 false：长复合动作应持续到时段切换由 advanceSlotIfNeeded
-// 打断，队列空时由 tacticalRefill 重新分解，不应输出 wait。
+// 被 maskedTacticalTools 屏蔽的工具无论 registry 是否 nil 都返回 false。
 func tacticalActionAvailable(action, agentID string, registry *CapabilityRegistry) bool {
-	if action == "wait" {
+	if maskedTacticalTools[action] {
 		return false
 	}
 	// 旧工具名 interact 已改名 InteractSmartObject（与 UE 注册 cmd 同名）；
@@ -286,8 +303,9 @@ var workInteractions = map[string]bool{
 	"process":    true, // 加工
 }
 
-// isWorkAction 判断是否为"工作类"动作：work_shift 复合工作，或
-// InteractSmartObject + 工种交互动词（assemble/sort_cargo 等）。
+// isWorkAction 判断是否为"工作类"动作：InteractSmartObject + 工种交互动词
+// （assemble/sort_cargo 等）。work_shift 分支保留兼容（已被目录屏蔽，但
+// /debug/action 或历史队列仍可能含该动作）。
 func isWorkAction(a *plannedAction) bool {
 	if a.Action == "work_shift" {
 		return true
@@ -324,7 +342,7 @@ func fillDefaultDurationForWork(actions []plannedAction) []plannedAction {
 	return actions
 }
 
-// restSegmentBetweenWork 返回一个"相邻重复 work_shift 之间"插入的休息/活动段，
+// restSegmentBetweenWork 返回一个"相邻重复工作类动作之间"插入的休息/活动段，
 // 随机三选一：原地拉伸（exercise/stretch）、长椅休息（InteractSmartObject bench
 // rest）、散步（exercise/walk）。duration 用 defaultRestDurationSec（30 分钟）。
 func restSegmentBetweenWork() plannedAction {
@@ -345,10 +363,10 @@ func sameParam(a, b map[string]any, key string) bool {
 	return aok && bok && av == bv
 }
 
-// insertRestBetweenDuplicateWork 在相邻的"相同 work_shift（同 semantic_group +
-// interaction）"之间随机插入一个休息段，打破"连续两次 work_shift 同地点"。
-// 规则 4 已禁止但 LLM 常无视，此处做执行层兜底。只处理非队尾的相邻对（队尾
-// 保持自然持续到时段切换，不插）。
+// insertRestBetweenDuplicateWork 在相邻的"相同工作类动作（同 semantic_group +
+// interaction，如连续两次 InteractSmartObject 去同一工作台装配）"之间随机插入
+// 一个休息段，打破"连续两次工作同地点"。规则 4 已禁止但 LLM 常无视，此处做
+// 执行层兜底。只处理非队尾的相邻对（队尾保持自然持续到时段切换，不插）。
 func insertRestBetweenDuplicateWork(actions []plannedAction) []plannedAction {
 	if len(actions) < 2 {
 		return actions
@@ -360,7 +378,7 @@ func insertRestBetweenDuplicateWork(actions []plannedAction) []plannedAction {
 			break
 		}
 		cur, nxt := a, actions[i+1]
-		if cur.Action == "work_shift" && nxt.Action == "work_shift" &&
+		if isWorkAction(&cur) && isWorkAction(&nxt) &&
 			sameParam(cur.Params, nxt.Params, "semantic_group") &&
 			sameParam(cur.Params, nxt.Params, "interaction") {
 			out = append(out, restSegmentBetweenWork())
@@ -407,9 +425,10 @@ func filterValidActions(actions []plannedAction, registry *CapabilityRegistry, a
 
 // tacticalToolsFromRegistry 从 capability registry 派生 OpenAI function
 // calling 的 tools 数组，注入战术层请求体。工具名由 CmdToToolName 生成，
-// 描述与参数 schema 来自 CapabilityAction。跳过 scan_area/stop/wait
-// （非战术层排队工具）。registry == nil → nil（UE 未连接时请求体不带
-// tools）。工具清单仅经此下发，不再注入 prompt 文本。
+// 描述与参数 schema 来自 CapabilityAction。跳过 maskedTacticalTools 屏蔽的
+// 工具（复合/快捷工具与 InteractSmartObject 重叠，以及 scan_area/stop/wait）。
+// registry == nil → nil（UE 未连接时请求体不带 tools）。工具清单仅经此
+// 下发，不再注入 prompt 文本。
 func tacticalToolsFromRegistry(registry *CapabilityRegistry, agentID string) []venus.Tool {
 	if registry == nil {
 		return nil
@@ -418,7 +437,7 @@ func tacticalToolsFromRegistry(registry *CapabilityRegistry, agentID string) []v
 	out := make([]venus.Tool, 0, len(actions))
 	for _, act := range actions {
 		name := tools.CmdToToolName(act.Cmd)
-		if name == "scan_area" || name == "stop" || name == "wait" {
+		if maskedTacticalTools[name] {
 			continue
 		}
 		desc := act.Description
@@ -484,8 +503,8 @@ func capabilityParamsSchema(params []protocol.CapabilityParam, name string) json
 			desc = "设施语义组名（UE 从该组自动选一个空闲实例，勿传具体编号）"
 		case "interaction":
 			// 有 enum 的固定值工具，"固定为 X"与 enum 重复，可精简；无 enum
-			// 的（work_shift/use_exercise_equipment/InteractSmartObject）描述
-			// 含 semantic_group↔interaction 配对，删掉会丢关键信息，保留。
+			// 的（如 InteractSmartObject）描述含 semantic_group↔interaction
+			// 配对，删掉会丢关键信息，保留。
 			if len(p.EnumValues) > 0 {
 				desc = "交互动作类型（合法值见 enum）"
 			}
