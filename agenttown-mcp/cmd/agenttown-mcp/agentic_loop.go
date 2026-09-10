@@ -69,7 +69,7 @@ func (a *agentContext) agenticTurn(ctx context.Context, hc llmClient, kb *worldk
 
 	// 上下文压缩：估算输入 token，超阈值时把旧历史摘要成稳定 digest、
 	// 只保留最近几轮原始尾（保护 [system + tools + 摘要块] 前缀的 KV cache）。
-	a.maybeCompactConversation(ctx, system, tools, userContent, agentID, kb, profiles, logger)
+	a.maybeCompactConversation(system, tools, userContent, agentID, kb, profiles, logger)
 
 	// 重新读历史（压缩可能已改写）+ 摘要块。
 	history := a.as.Conversation()
