@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/AgentTown/agenttown-mcp/pkg/llmtokens"
 	"github.com/AgentTown/agenttown-mcp/pkg/llmtypes"
@@ -18,13 +19,18 @@ import (
 // 最近 compactTailRounds 轮原始尾，保护 [system + tools + 摘要块] 前缀的
 // KV cache（摘要块两次压缩之间字节不变）。
 const (
-	// compactTriggerTokens：估算输入 token 超过此值触发压缩（16k 封顶下取 14k）。
-	compactTriggerTokens = 14000
+	// compactTriggerTokens：估算输入 token 超过此值触发压缩（8k 封顶）。
+	compactTriggerTokens = 8000
 	// compactTailRounds：压缩时保留的最近完整轮数（每轮=一个 assistant 及其
 	// 紧跟的 tool 占位与后续注入的 [系统注入] 结果）。
 	compactTailRounds = 4
 	// compactSummaryMaxChars：摘要块长度上限（字符）。
 	compactSummaryMaxChars = 800
+	// compactSummaryTimeout：摘要 LLM 调用的独立超时。摘要与战术层主调用
+	// 解耦——不复用 tacticalCallTimeout（60s），因为战略层模型慢 + 摘要输入
+	// 大，60s 内经常完不成导致「摘要失败→跳过」，压缩永远落不了地；失败时
+	// 只是跳过本次、下轮重试，故给较长的独立预算。
+	compactSummaryTimeout = 120 * time.Second
 )
 
 // compactSystemPrompt 是上下文压缩的 system 消息：机制文本，静态可缓存。
@@ -52,9 +58,9 @@ const compactUserTemplate = `[压缩层/上下文压缩] 请压缩以下多轮�
 // 成稳定 digest、只保留最近 compactTailRounds 轮。摘要失败时跳过本轮压缩
 // （带全量历史继续、下轮再试），绝不无摘要地丢弃历史（那正是滚动窗口的
 // 目标漂移问题）。
-func (a *agentContext) maybeCompactConversation(ctx context.Context, system string, tools []venus.Tool, userContent, agentID string, kb *worldkb.KB, profiles map[string]*profile.Profile, logger *slog.Logger) {
-	if a.strategicHc == nil {
-		return // 无战略层客户端可做摘要，跳过
+func (a *agentContext) maybeCompactConversation(system string, tools []venus.Tool, userContent, agentID string, kb *worldkb.KB, profiles map[string]*profile.Profile, logger *slog.Logger) {
+	if a.tacticalHc == nil {
+		return // 无战术层客户端可做摘要，跳过
 	}
 	history := a.as.Conversation()
 	summary := a.as.ConversationSummary()
@@ -65,7 +71,7 @@ func (a *agentContext) maybeCompactConversation(ctx context.Context, system stri
 	if len(evict) == 0 {
 		return // 已是小尾巴，无从逐出
 	}
-	newSummary, err := a.summarizeConversation(ctx, evict, agentID, kb, profiles, logger)
+	newSummary, err := a.summarizeConversation(evict, agentID, kb, profiles, logger)
 	if err != nil {
 		logger.Warn("[压缩层] 摘要生成失败，跳过本次压缩（下轮重试）",
 			"agent_id", agentID, "evict_msgs", len(evict), "err", err)
@@ -79,9 +85,9 @@ func (a *agentContext) maybeCompactConversation(ctx context.Context, system stri
 		"est_tokens", estimateInputTokens(system, tools, newSummary, tail, userContent))
 }
 
-// summarizeConversation 用战略层模型把 evict 历史压缩成一份摘要串（best-effort，
+// summarizeConversation 用战术层模型把 evict 历史压缩成一份摘要串（best-effort，
 // 不 JSON 解析，直接取文本）。
-func (a *agentContext) summarizeConversation(ctx context.Context, evict []llmtypes.Message, agentID string, kb *worldkb.KB, profiles map[string]*profile.Profile, logger *slog.Logger) (string, error) {
+func (a *agentContext) summarizeConversation(evict []llmtypes.Message, agentID string, kb *worldkb.KB, profiles map[string]*profile.Profile, logger *slog.Logger) (string, error) {
 	roleCtx := ""
 	if role := prompt.AgentRole(kb, profiles, agentID); role != "" {
 		roleCtx = "【你的角色】\n" + role
@@ -91,11 +97,15 @@ func (a *agentContext) summarizeConversation(ctx context.Context, evict []llmtyp
 	logger.Info("[MCP→LLM/COMPACT-PROMPT]", "agent_id", agentID,
 		"evict_msgs", len(evict), "text", promptText)
 
-	resp, err := a.strategicHc.SendWithSummary(ctx, compactSystemPrompt, promptText)
+	// 摘要调用独立超时：不复用调用方（战术层）的 60s ctx，避免 Venus 排队时
+	// 摘要被过早取消。best-effort，失败只是跳过本次压缩。
+	summaryCtx, cancel := context.WithTimeout(context.Background(), compactSummaryTimeout)
+	defer cancel()
+	resp, err := a.tacticalHc.SendWithSummary(summaryCtx, compactSystemPrompt, promptText)
 	if err != nil {
 		return "", fmt.Errorf("compact llm: %w", err)
 	}
-	a.strategicHc.ResetSession()
+	a.tacticalHc.ResetSession()
 
 	summary := strings.TrimSpace(resp.ExtractText())
 	if summary == "" {

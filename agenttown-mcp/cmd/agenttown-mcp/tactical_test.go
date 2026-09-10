@@ -37,7 +37,7 @@ func TestParseToolCalls_Basic(t *testing.T) {
 	tcs := []llmtypes.ToolCall{
 		{Function: llmtypes.ToolFunction{Name: "speak", Arguments: `{"content":"先去车间再装配"}`}},
 		{Function: llmtypes.ToolFunction{Name: "move_to", Arguments: `{"target_type":"zone","target_id":"main_workshop"}`}},
-		{Function: llmtypes.ToolFunction{Name: "work_shift", Arguments: `{"semantic_group":"workbench_01","interaction":"assemble"}`}},
+		{Function: llmtypes.ToolFunction{Name: "InteractSmartObject", Arguments: `{"semantic_group":"workbench","interaction":"assemble"}`}},
 	}
 	actions := parseToolCalls(tcs, nil, "")
 	if len(actions) != 3 {
@@ -46,8 +46,8 @@ func TestParseToolCalls_Basic(t *testing.T) {
 	if actions[0].Action != "speak" || actions[0].Params["content"] != "先去车间再装配" {
 		t.Errorf("actions[0]=%+v, want speak with content", actions[0])
 	}
-	if actions[1].Action != "move_to" || actions[2].Action != "work_shift" {
-		t.Errorf("actions=%+v, want [speak move_to work_shift]", actions)
+	if actions[1].Action != "move_to" || actions[2].Action != "InteractSmartObject" {
+		t.Errorf("actions=%+v, want [speak move_to InteractSmartObject]", actions)
 	}
 }
 
@@ -324,7 +324,7 @@ func TestGenerateTacticalPlan_ValidResponse(t *testing.T) {
 	tc := &fakeStrategicCaller{resp: makeToolCallResponse([]llmtypes.ToolCall{
 		{Function: llmtypes.ToolFunction{Name: "speak", Arguments: `{"content":"先移动再装配"}`}},
 		{Function: llmtypes.ToolFunction{Name: "move_to", Arguments: `{"target_type":"zone","target_id":"main_workshop"}`}},
-		{Function: llmtypes.ToolFunction{Name: "work_shift", Arguments: `{"semantic_group":"workbench_01","interaction":"assemble"}`}},
+		{Function: llmtypes.ToolFunction{Name: "InteractSmartObject", Arguments: `{"semantic_group":"workbench","interaction":"assemble"}`}},
 	})}
 	actions, err := generateTacticalPlan(context.Background(), tacticalCtxForTest(tc), "H-01", "装配", "main_workshop", "09:00", "09:00-12:00", "07:00-09:00: 上午准备\n09:00-12:00: 车间装配", &protocol.PhysicalState{Energy: 80, Fatigue: 20, JointWear: 10}, nil, nil, slog.Default(), "", "", "", nil, nil, nil, nil)
 	if err != nil {
@@ -442,7 +442,7 @@ func TestGenerateTacticalPlan_RetryOn4001(t *testing.T) {
 		t.Fatalf("got %d calls, want 3 (1 initial + 2 retries)", tc.calls)
 	}
 	if len(actions) != 2 {
-		t.Fatalf("got %d actions, want 2 (speak + work_shift)", len(actions))
+		t.Fatalf("got %d actions, want 2 (speak + InteractSmartObject)", len(actions))
 	}
 	if tc.resetCount != 1 {
 		t.Errorf("resetCount=%d, want 1", tc.resetCount)
@@ -487,13 +487,13 @@ func lastUserPromptOf(t *testing.T, msgs []llmtypes.Message) string {
 	return last.Content
 }
 
-// speakToolCallResp 构造一个有效的战术成功响应：speak（首动作）+ work_shift
+// speakToolCallResp 构造一个有效的战术成功响应：speak（首动作）+ InteractSmartObject
 // 长动作。speak-only 已被视为空结果（isEmptyTacticalResult），故此处必须带
 // 一个长动作，否则 agenticTurn 会判空重试。
 func speakToolCallResp() *llmtypes.Response {
 	return makeToolCallResponse([]llmtypes.ToolCall{
 		{Function: llmtypes.ToolFunction{Name: "speak", Arguments: `{"content":"开始"}`}},
-		{Function: llmtypes.ToolFunction{Name: "work_shift", Arguments: `{"semantic_group":"workbench","interaction":"assemble","duration":3600}`}},
+		{Function: llmtypes.ToolFunction{Name: "InteractSmartObject", Arguments: `{"semantic_group":"workbench","interaction":"assemble","duration":3600}`}},
 	})
 }
 
@@ -612,11 +612,11 @@ func TestGenerateTacticalPlan_PlanChangeReinjectsFull(t *testing.T) {
 // 走精简。
 func TestGenerateTacticalPlan_ParseFailureStillSetsHeader(t *testing.T) {
 	plan := "07:00-09:00: 上午准备\n09:00-12:00: 车间装配"
-	// work_shift 是合法工具（isEmptyTacticalResult 判非空），但 arguments 非法
-	// JSON → parseToolCalls 跳过 → 0 个 action（parse 失败），agenticTurn 层
+	// InteractSmartObject 是合法工具（isEmptyTacticalResult 判非空），但 arguments
+	// 非法 JSON → parseToolCalls 跳过 → 0 个 action（parse 失败），agenticTurn 层
 	// 已返回成功并追加历史。
 	fake := &fakeLoopLLM{resp: makeToolCallResponse([]llmtypes.ToolCall{
-		{Function: llmtypes.ToolFunction{Name: "work_shift", Arguments: `not-json`}},
+		{Function: llmtypes.ToolFunction{Name: "InteractSmartObject", Arguments: `not-json`}},
 	})}
 	ac := tacticalCtxForTest(fake)
 
@@ -771,7 +771,7 @@ func TestBuildTacticalPrompt_ObjectStatusTemporarilyRemoved(t *testing.T) {
 		!strings.Contains(prompt.TacticalRules, "请下发更合理的动作") {
 		t.Errorf("system prompt should guide LLM to avoid doomed occupancy actions")
 	}
-	if !strings.Contains(prompt.TacticalRules, "所有工种设备都可用 InteractSmartObject") {
+	if !strings.Contains(prompt.TacticalRules, "所有工种设备与生活设施都可用 InteractSmartObject") {
 		t.Error("system prompt should say InteractSmartObject works for any work device")
 	}
 }
@@ -1154,8 +1154,8 @@ func TestTacticalToolsFromRegistry_BuildsTools(t *testing.T) {
 	reg := NewCapabilityRegistry(nil)
 	reg.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
 		{
-			Cmd:         protocol.CmdWorkShift,
-			Kind:        "composite",
+			Cmd:         protocol.CmdInteractSmartObject,
+			Kind:        "atomic",
 			Description: "去指定设施执行工作",
 			Params: []protocol.CapabilityParam{
 				{Name: "semantic_group", Type: "string", Description: "设施语义组", Required: true},
@@ -1171,37 +1171,37 @@ func TestTacticalToolsFromRegistry_BuildsTools(t *testing.T) {
 		},
 	})
 	// Register(system) 会自动注入 social_chat（MCP 侧对话工具），所以总数
-	// = MoveTo + WorkShift + SocialChat。
+	// = MoveTo + InteractSmartObject + SocialChat。
 	got := tacticalToolsFromRegistry(reg, "H-01")
 	byName := map[string]venus.Tool{}
 	for _, tool := range got {
 		byName[tool.Function.Name] = tool
 	}
 	if len(got) != 3 {
-		t.Fatalf("tools len = %d, want 3 (MoveTo + WorkShift + SocialChat)", len(got))
+		t.Fatalf("tools len = %d, want 3 (MoveTo + InteractSmartObject + SocialChat)", len(got))
 	}
 	if _, ok := byName["move_to"]; !ok {
 		t.Fatalf("move_to tool missing: %v", got)
 	}
-	if _, ok := byName["work_shift"]; !ok {
-		t.Fatalf("work_shift tool missing: %v", got)
+	if _, ok := byName["InteractSmartObject"]; !ok {
+		t.Fatalf("InteractSmartObject tool missing: %v", got)
 	}
 	if _, ok := byName["social_chat"]; !ok {
 		t.Fatalf("social_chat tool missing: %v", got)
 	}
-	if byName["work_shift"].Type != "function" {
+	if byName["InteractSmartObject"].Type != "function" {
 		t.Errorf("tool type should be function")
 	}
-	if byName["work_shift"].Function.Description != "去指定设施执行工作" {
-		t.Errorf("work_shift description = %q", byName["work_shift"].Function.Description)
+	if byName["InteractSmartObject"].Function.Description != "去指定设施执行工作" {
+		t.Errorf("InteractSmartObject description = %q", byName["InteractSmartObject"].Function.Description)
 	}
-	// 校验 work_shift 的 parameters schema 含 semantic_group/interaction 且 required。
+	// 校验 InteractSmartObject 的 parameters schema 含 semantic_group/interaction 且 required。
 	var schema struct {
 		Type       string         `json:"type"`
 		Properties map[string]any `json:"properties"`
 		Required   []string       `json:"required"`
 	}
-	if err := json.Unmarshal(byName["work_shift"].Function.Parameters, &schema); err != nil {
+	if err := json.Unmarshal(byName["InteractSmartObject"].Function.Parameters, &schema); err != nil {
 		t.Fatalf("parameters is not valid JSON: %v", err)
 	}
 	if schema.Type != "object" {
@@ -1256,6 +1256,44 @@ func TestTacticalToolsFromRegistry_BuildsTools(t *testing.T) {
 func TestTacticalToolsFromRegistry_NilRegistryEmpty(t *testing.T) {
 	if got := tacticalToolsFromRegistry(nil, "H-01"); got != nil {
 		t.Fatalf("nil registry should return nil tools, got %v", got)
+	}
+}
+
+// TestTacticalToolsFromRegistry_MasksCompositeTools 验证复合/快捷工具与
+// turn_to/emote 被屏蔽（不出现在 function calling 目录），只保留
+// InteractSmartObject 作为设施交互入口。
+func TestTacticalToolsFromRegistry_MasksCompositeTools(t *testing.T) {
+	r := NewCapabilityRegistry(slog.Default())
+	r.Register(protocol.SystemAgentID, BuiltinCmdCapabilities)
+
+	names := map[string]bool{}
+	for _, tl := range tacticalToolsFromRegistry(r, "H-01") {
+		names[tl.Function.Name] = true
+	}
+	for _, keep := range []string{"InteractSmartObject", "generic_act", "move_to", "social_chat", "speak"} {
+		if !names[keep] {
+			t.Errorf("tool %s should be present, got %v", keep, names)
+		}
+	}
+	for _, mask := range []string{"work_shift", "charge_at_station", "rest_at_residence", "self_maintenance", "surf_internet", "use_exercise_equipment", "read", "turn_to", "emote", "wait", "scan_area", "stop"} {
+		if names[mask] {
+			t.Errorf("tool %s should be masked, got %v", mask, names)
+		}
+	}
+}
+
+// TestTacticalActionAvailable_RejectsMasked 验证校验侧与目录派生侧共用屏蔽清单：
+// 被屏蔽工具即使 registry 声明了也判不可用，InteractSmartObject 正常可用。
+func TestTacticalActionAvailable_RejectsMasked(t *testing.T) {
+	r := NewCapabilityRegistry(slog.Default())
+	r.Register(protocol.SystemAgentID, BuiltinCmdCapabilities)
+	for _, name := range []string{"work_shift", "charge_at_station", "turn_to", "emote", "wait", "scan_area", "stop"} {
+		if tacticalActionAvailable(name, "H-01", r) {
+			t.Errorf("tacticalActionAvailable(%q) should be false (masked)", name)
+		}
+	}
+	if !tacticalActionAvailable("InteractSmartObject", "H-01", r) {
+		t.Errorf("InteractSmartObject should be available")
 	}
 }
 
@@ -1419,11 +1457,11 @@ func TestBuildTacticalPrompt_PhysicalAlertConstraint(t *testing.T) {
 	if !strings.Contains(promptText, "【物理告警强制约束】") {
 		t.Errorf("prompt should contain physical alert constraint section, got: %s", promptText)
 	}
-	if !strings.Contains(promptText, "work_shift（消耗体力）") {
-		t.Errorf("prompt should forbid work_shift, got: %s", promptText)
+	if !strings.Contains(promptText, "工作类 InteractSmartObject（如 workbench/assemble，消耗体力）") {
+		t.Errorf("prompt should forbid work InteractSmartObject, got: %s", promptText)
 	}
-	if !strings.Contains(promptText, "优先 charge_at_station") {
-		t.Errorf("prompt should prioritize charge_at_station, got: %s", promptText)
+	if !strings.Contains(promptText, "优先 InteractSmartObject 充电（charger/charge）") {
+		t.Errorf("prompt should prioritize charging via InteractSmartObject, got: %s", promptText)
 	}
 }
 
@@ -1437,16 +1475,16 @@ func TestBuildTacticalPrompt_PhysicalAlertJointWearConstraint(t *testing.T) {
 	if !strings.Contains(promptText, "【物理告警强制约束】") {
 		t.Errorf("prompt should contain constraint section, got: %s", promptText)
 	}
-	if !strings.Contains(promptText, "self_maintenance") {
-		t.Errorf("prompt should require self_maintenance for joint_wear alert, got: %s", promptText)
+	if !strings.Contains(promptText, "维护保养（repair_table/repair）") {
+		t.Errorf("prompt should require maintenance for joint_wear alert, got: %s", promptText)
 	}
-	// 关节磨损告警不禁 self_maintenance（那是恢复动作）
-	if strings.Contains(promptText, "self_maintenance（无助于恢复）") {
-		t.Errorf("prompt should NOT forbid self_maintenance for joint_wear-only alert, got: %s", promptText)
+	// 上网被禁（无助于恢复）
+	if !strings.Contains(promptText, "computer/surf_internet") {
+		t.Errorf("prompt should forbid surfing for joint_wear alert, got: %s", promptText)
 	}
-	// 关节磨损告警不禁 work_shift（仅疲劳告警才禁）
-	if strings.Contains(promptText, "work_shift（消耗体力）") {
-		t.Errorf("prompt should NOT forbid work_shift for joint_wear-only alert, got: %s", promptText)
+	// 关节磨损告警不禁工作类动作（仅疲劳告警才禁）
+	if strings.Contains(promptText, "工作类 InteractSmartObject（如 workbench/assemble，消耗体力）") {
+		t.Errorf("prompt should NOT forbid work for joint_wear-only alert, got: %s", promptText)
 	}
 }
 
@@ -1659,11 +1697,11 @@ func TestTacticalToolsFromRegistry_AppendsUsageHint(t *testing.T) {
 	}
 
 	// 带 usage_hint 的工具：hint 以"。"追加到描述末尾。
-	if got := desc("charge_at_station"); !strings.HasSuffix(got, "电量低时使用") {
-		t.Errorf("charge_at_station = %q, want suffix 电量低时使用", got)
+	if got := desc("move_to"); !strings.HasSuffix(got, "需要走到某个位置或者某个actor时使用") {
+		t.Errorf("move_to = %q, want suffix 需要走到某个位置或者某个actor时使用", got)
 	}
-	if got := desc("self_maintenance"); !strings.HasSuffix(got, "磨损高或需要维护时使用") {
-		t.Errorf("self_maintenance = %q, want suffix 磨损高或需要维护时使用", got)
+	if got := desc("InteractSmartObject"); !strings.HasSuffix(got, "需要与某个设施/物件交互、但没有更具体的复合动作可用时使用") {
+		t.Errorf("InteractSmartObject = %q, want suffix 需要与某个设施/物件交互、但没有更具体的复合动作可用时使用", got)
 	}
 	// 无 usage_hint 的工具（speak）描述保持不变。
 	if got := desc("speak"); got != "讲话" {
@@ -1693,38 +1731,31 @@ func TestTacticalToolsFromRegistry_SlimParams(t *testing.T) {
 	r := NewCapabilityRegistry(slog.Default())
 	r.Register(protocol.SystemAgentID, BuiltinCmdCapabilities)
 
-	var workShift, charge, inter *venus.Tool
+	var inter *venus.Tool
 	tools := tacticalToolsFromRegistry(r, "H-01")
 	for i := range tools {
 		tl := &tools[i]
-		switch tl.Function.Name {
-		case "work_shift":
-			workShift = tl
-		case "charge_at_station":
-			charge = tl
-		case "InteractSmartObject":
+		if tl.Function.Name == "InteractSmartObject" {
 			inter = tl
 		}
 	}
-	if workShift == nil || charge == nil || inter == nil {
-		t.Fatal("work_shift/charge_at_station/InteractSmartObject not found")
+	if inter == nil {
+		t.Fatal("InteractSmartObject not found")
 	}
 
 	// ① duration 去重：不再含时长档位（3600-7200），只留执行语义。
-	if d := paramDescOf(t, *workShift, "duration"); strings.Contains(d, "3600-7200") {
+	if d := paramDescOf(t, *inter, "duration"); strings.Contains(d, "3600-7200") {
 		t.Errorf("duration description should be slimmed, got %q", d)
 	} else if !strings.Contains(d, "末段设为时段剩余时长") {
 		t.Errorf("duration description should keep execution semantics, got %q", d)
 	}
 
 	// ② semantic_group 精简为通用短句（不再"固定为charger"）。
-	if d := paramDescOf(t, *charge, "semantic_group"); strings.Contains(d, "固定为charger") {
-		t.Errorf("semantic_group description should drop '固定为charger', got %q", d)
-	} else if !strings.Contains(d, "勿传具体编号") {
+	if d := paramDescOf(t, *inter, "semantic_group"); !strings.Contains(d, "勿传具体编号") {
 		t.Errorf("semantic_group description should keep '勿传具体编号', got %q", d)
 	}
 
-	// ② 无 enum 的 interaction（InteractSmartObject）保留原配对描述，不被精简。
+	// ③ 无 enum 的 interaction（InteractSmartObject）保留原配对描述，不被精简。
 	if d := paramDescOf(t, *inter, "interaction"); d == "交互动作类型（合法值见 enum）" {
 		t.Errorf("InteractSmartObject interaction (no enum) should keep pairing description, got generic %q", d)
 	}

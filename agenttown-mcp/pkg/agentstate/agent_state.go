@@ -927,9 +927,9 @@ func (a *AgentState) BeginTacticalRefill(goal, slot string, idx int, hasTactical
 		// NPC 在两次 LLM 调用之间呆站）。
 		if a.replanHint == "" {
 			if a.lastQueueOnlySpeak {
-				a.replanHint = "上次分解只返回了 1 个 speak，队列数秒即耗尽导致频繁重分解。本次必须在 speak 之后返回至少一个带 duration 的长动作（长复合动作或 InteractSmartObject 长动作），让 NPC 持续活动到时段结束"
+				a.replanHint = "上次分解只返回了 1 个 speak，队列数秒即耗尽导致频繁重分解。本次必须在 speak 之后返回至少一个带 duration 的长动作（InteractSmartObject 设施互动或 exercise 原地锻炼），让 NPC 持续活动到时段结束"
 			} else {
-				a.replanHint = "上次队列提前耗尽，未安排长动作收尾——本次请确保最后一个 action 是长复合动作或 InteractSmartObject 长动作（见 function calling 的 tools 字段），让 NPC 持续工作到下一时段"
+				a.replanHint = "上次队列提前耗尽，未安排长动作收尾——本次请确保最后一个 action 是 InteractSmartObject 长动作（见 function calling 的 tools 字段），让 NPC 持续工作到下一时段"
 			}
 		}
 	}

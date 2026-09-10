@@ -1,5 +1,7 @@
 .idea
 .env
+# 本地 LLM 推理服务配置（host/model 随环境而异，不入库）
+assets/llm_backend.yaml
 
 # ─── Mock UE 运行时输出 ─────────────────────────────────────
 logs/

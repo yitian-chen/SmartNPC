@@ -13,15 +13,14 @@ import (
 // 【附近NPC】/【物体实时占用】 point at the user message's dynamic segments.
 // The available tools are NOT listed here — they arrive via the
 // function-calling `tools` request field.
-const TacticalRules = `1. 第一个工具调用必须是 speak（用一段话表达此刻内心想法或独白），随后必须返回至少一个带 duration 的长动作（长复合动作或 InteractSmartObject 长动作），最多 6 个动作段，按执行顺序排列。禁止只返回 speak——只返回 speak 会被系统判定为失败并重试。可以在动作之间穿插speak表达现在的情况。
+const TacticalRules = `1. 第一个工具调用必须是 speak（用一段话表达此刻内心想法或独白），随后必须返回至少一个带 duration 的长动作（InteractSmartObject 设施互动或 exercise 原地锻炼），最多 6 个动作段，按执行顺序排列。禁止只返回 speak——只返回 speak 会被系统判定为失败并重试。可以在动作之间穿插speak表达现在的情况。
 2. 你可以根据当前NPC的实际属性、实际游戏时间等信息灵活安排，如果当前此条日程并不合理，例如半夜不睡觉而是跑步/工作、电量不为低时就去充电等情况，请下发更合理的动作，不必遵守原有日程规定。
-3. 复合动作已包含自动移动到对应位置的逻辑，禁止在复合动作前调用 move_to——直接调用单个长复合动作即可。
-4. 仅当目标确实没有匹配的长复合动作时，才用原子动作组合实现目标。禁止把同一动作连续重复多次填充时段（工作段之间应穿插休息段）。
-5. InteractSmartObject 和复合动作的 semantic_group 必须严格使用设施详情中给出的 semantic_group 值，禁止编造、禁止用实例 id（如 Charge-1）。
-6. 复合动作与 semantic_group 必须严格对应，禁止跨类别组合。
-   - 补充：所有工种设备都可用 InteractSmartObject 原子动作直接工作——semantic_group 填工作设备、interaction 填对应动词即可（如 加工机 process、调试台 debug、拆解台 dismantle，以及 workbench/assemble、sorting_conveyor/sort_cargo、inspection_table/inspect）；work_shift 只是其中三类工种设备的快捷复合动作，没有复合动作的工种一律用 InteractSmartObject。
-7. 所有非瞬时动作（长复合动作、InteractSmartObject 互动等需要持续一段时间的）都必须填写 duration 参数（秒，schema 必填）；move_to 的移动时长由 UE 自动决定、无需填 duration；瞬时动作（speak、emote 等立即完成的）也不填 duration。duration 要合理：冥想、整理床铺等单段设 1800 秒左右，不宜超过 1 小时；工作段可设 3600-7200 秒。到点后系统会打断该段并继续执行后续动作段；只有全部动作执行完，系统才会再次询问。推荐模式：工作段（如 1.5 小时）→ 长椅小憩/原地拉伸段（不超过 30 分钟）→ 返回工作段（duration 设为时段剩余时长）。
-8. 每次生成的最后一个动作必须是长动作（长复合动作或 InteractSmartObject 长动作），其 duration 设为当前时段的剩余时长（见上文"剩余约 X 分钟"提示）——到点后系统自动切入下一时段，NPC 不会呆站。所有动作的 duration 总和应接近当前时段的剩余时长，避免过短导致队列提前耗尽触发重分解、或过长拖到下一时段。
+3. InteractSmartObject 通过 zone + semantic_group 定位目标设施实例并完成互动，直接调用并填好 semantic_group / interaction / zone / duration 即可，无需在其前面额外调用 move_to。
+4. 禁止把同一动作连续重复多次填充时段（工作段之间应穿插休息段）。
+5. InteractSmartObject 的 semantic_group 必须严格使用设施详情中给出的 semantic_group 值，禁止编造、禁止用实例 id（如 Charge-1）。
+6. InteractSmartObject 的 semantic_group 与 interaction 必须严格对应，禁止跨类别组合——所有工种设备与生活设施都可用 InteractSmartObject 直接交互，semantic_group 填设施、interaction 填对应动词即可（如 workbench/assemble、process_machine/process、charger/charge、sleep_pod/sleep、bench/rest 等，完整映射见设施详情）。
+7. 所有非瞬时动作（InteractSmartObject 设施互动、exercise 原地锻炼等需要持续一段时间的）都必须填写 duration 参数（秒，schema 必填）；move_to 的移动时长由 UE 自动决定、无需填 duration；瞬时动作（speak 等立即完成的）也不填 duration。duration 要合理：冥想、整理床铺等单段设 1800 秒左右，不宜超过 1 小时；工作段可设 3600-7200 秒。到点后系统会打断该段并继续执行后续动作段；只有全部动作执行完，系统才会再次询问。推荐模式：工作段（如 1.5 小时）→ 长椅小憩/原地拉伸段（不超过 30 分钟）→ 返回工作段（duration 设为时段剩余时长）。
+8. 每次生成的最后一个动作必须是长动作（InteractSmartObject 长动作），其 duration 设为当前时段的剩余时长（见上文"剩余约 X 分钟"提示）——到点后系统自动切入下一时段，NPC 不会呆站。所有动作的 duration 总和应接近当前时段的剩余时长，避免过短导致队列提前耗尽触发重分解、或过长拖到下一时段。
 9. 如果是调用 InteractSmartObject 工具，若当前日程目标明确指定了区域（如"去中央广场长椅休息"），**必须**在该工具的 zone 参数中填写对应区域 id（如 central_plaza、logistics_hub）。`
 
 // tacticalCoreRules 是精简模式（Compact=true）下替代完整 TacticalRules 的
@@ -157,23 +156,23 @@ func tacticalHintLine(in TacticalInput, th BandThresholds) string {
 	}
 	var reqs, forbids []string
 	if in.Physical.Energy < th.EnergyAlert() {
-		reqs = append(reqs, "- 电量过低：必须优先 charge_at_station（充电）补能")
+		reqs = append(reqs, "- 电量过低：必须优先 InteractSmartObject 充电（charger/charge）补能")
 	}
 	if in.Physical.Fatigue > th.FatigueAlert() {
-		reqs = append(reqs, "- 疲劳过高：优先 charge_at_station（充电）或 rest_at_residence（休息），充电后若仍疲劳追加 rest_at_residence")
+		reqs = append(reqs, "- 疲劳过高：优先 InteractSmartObject 充电（charger/charge）或到睡眠舱休息（sleep_pod/sleep），充电后若仍疲劳追加休息")
 	}
 	if in.Physical.JointWear > th.JointWearAlert() {
-		reqs = append(reqs, "- 关节磨损过高：必须优先 self_maintenance（维护保养），否则持续工作会加剧损耗")
+		reqs = append(reqs, "- 关节磨损过高：必须优先 InteractSmartObject 维护保养（repair_table/repair），否则持续工作会加剧损耗")
 	}
 	// 禁止项：仅禁止与所有活跃告警冲突的消耗性动作
-	// 关节磨损告警时不禁 self_maintenance（那是需要的恢复动作）
+	// 关节磨损告警时不禁维护保养（那是需要的恢复动作）
 	fatigueAlert := in.Physical.Fatigue > th.FatigueAlert()
 	jointWearAlert := in.Physical.JointWear > th.JointWearAlert()
 	if fatigueAlert {
-		forbids = append(forbids, "work_shift（消耗体力）")
+		forbids = append(forbids, "工作类 InteractSmartObject（如 workbench/assemble，消耗体力）")
 	}
 	if jointWearAlert {
-		forbids = append(forbids, "surf_internet（无助于恢复）")
+		forbids = append(forbids, "InteractSmartObject 上网（computer/surf_internet，无助于恢复）")
 	}
 	if fatigueAlert {
 		forbids = append(forbids, "move_to 到非恢复设施区域")

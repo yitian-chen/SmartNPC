@@ -119,13 +119,13 @@ func TestBuildSharedSystemPrompt_Module3Details(t *testing.T) {
 	if !strings.Contains(got, "主生产车间（main_workshop）：小镇的生产核心") {
 		t.Errorf("module 3 missing zone description:\n%s", got)
 	}
-	// 各区域可交互设施映射表：按实例真实分布列出 semantic_group，
+	// 各区域可交互设施已并入区域详情行：按实例真实分布列出 semantic_group，
 	// 跨 zone 的 bench 同时出现在中央广场和主生产车间。
-	if !strings.Contains(got, "- 中央广场（central_plaza）：长椅（bench）") {
-		t.Errorf("module 3 missing per-zone facility map for central_plaza bench:\n%s", got)
+	if !strings.Contains(got, "；可交互设施：长椅（bench）") {
+		t.Errorf("module 3 missing per-zone facility for central_plaza bench:\n%s", got)
 	}
-	if !strings.Contains(got, "- 主生产车间（main_workshop）：长椅（bench）、旧装置（legacy）、工作台（workbench）") {
-		t.Errorf("module 3 missing cross-zone bench in main_workshop facility map:\n%s", got)
+	if !strings.Contains(got, "；可交互设施：长椅（bench）、旧装置（legacy）、工作台（workbench）") {
+		t.Errorf("module 3 missing cross-zone bench in main_workshop facilities:\n%s", got)
 	}
 	// 设施组 + 内联交互效果（不再带"位于"）。
 	if !strings.Contains(got, "- 工作台（workbench）：\n  - assemble：") {
