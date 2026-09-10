@@ -18,8 +18,8 @@ import (
 // 最近 compactTailRounds 轮原始尾，保护 [system + tools + 摘要块] 前缀的
 // KV cache（摘要块两次压缩之间字节不变）。
 const (
-	// compactTriggerTokens：估算输入 token 超过此值触发压缩（16k 封顶下取 14k）。
-	compactTriggerTokens = 14000
+	// compactTriggerTokens：估算输入 token 超过此值触发压缩（8k 封顶）。
+	compactTriggerTokens = 8000
 	// compactTailRounds：压缩时保留的最近完整轮数（每轮=一个 assistant 及其
 	// 紧跟的 tool 占位与后续注入的 [系统注入] 结果）。
 	compactTailRounds = 4
