@@ -112,8 +112,8 @@ func WorldOverview(kb *worldkb.KB) string {
 }
 
 // worldDetailCore renders the KB-derived world detail shared by the strategic
-// and tactical system prompts: per-zone descriptions + a per-zone
-// semantic_group map + smart objects grouped by semantic_group with
+// and tactical system prompts: per-zone descriptions (each inlined with its
+// interactive facilities) + smart objects grouped by semantic_group with
 // per-interaction description, per-hour attribute effects and usage gates
 // (from the KB's declared rates).
 func worldDetailCore(kb *worldkb.KB) string {
@@ -121,6 +121,27 @@ func worldDetailCore(kb *worldkb.KB) string {
 	wroteZone := false
 	if kb != nil {
 		if zs := kb.ListZones(); len(zs) > 0 {
+			// 先聚合 zone → semantic_group 真实分布 + semantic_group → 显示名，
+			// 供区域详情行内联附上"可交互设施"，避免单独再列一段、重复 zone 标签。
+			os := kb.ListObjects()
+			zoneGroups := make(map[string]map[string]bool, len(zs))
+			for _, o := range os {
+				if o.ZoneID == "" || o.SemanticGroup == "" {
+					continue
+				}
+				if zoneGroups[o.ZoneID] == nil {
+					zoneGroups[o.ZoneID] = make(map[string]bool)
+				}
+				zoneGroups[o.ZoneID][o.SemanticGroup] = true
+			}
+			display := make(map[string]string, len(os))
+			for _, g := range groupObjectsBySemantic(os) {
+				label := g.SemanticGroup
+				if g.DisplayName != "" && g.DisplayName != g.SemanticGroup {
+					label = fmt.Sprintf("%s（%s）", g.DisplayName, g.SemanticGroup)
+				}
+				display[g.SemanticGroup] = label
+			}
 			sb.WriteString("各区域详情：\n")
 			wroteZone = true
 			for _, z := range zs {
@@ -128,49 +149,12 @@ func worldDetailCore(kb *worldkb.KB) string {
 				if z.DisplayName != "" && z.DisplayName != z.ID {
 					label = fmt.Sprintf("%s（%s）", z.DisplayName, z.ID)
 				}
+				line := "- " + label
 				if d := strings.TrimSpace(z.Description); d != "" {
-					sb.WriteString("- " + label + "：" + d + "\n")
-				} else {
-					sb.WriteString("- " + label + "\n")
+					line += "：" + d
 				}
-			}
-		}
-	}
-	// 各区域可交互设施：按实例真实分布列出，跨 zone 的 semantic_group
-	//（如 bench 分布在中央广场/主生产车间/物流转运站）会在每个实际分布
-	// zone 下列出，避免"长椅只在中央广场"这类误导，供规划时直接按地点选设施。
-	if kb != nil {
-		if zs := kb.ListZones(); len(zs) > 0 {
-			if os := kb.ListObjects(); len(os) > 0 {
-				if wroteZone {
-					sb.WriteString("\n")
-				}
-				// zone → semantic_group 集合：按每个实例的 zone_id 聚合真实分布。
-				zoneGroups := make(map[string]map[string]bool, len(zs))
-				for _, o := range os {
-					if o.ZoneID == "" || o.SemanticGroup == "" {
-						continue
-					}
-					if zoneGroups[o.ZoneID] == nil {
-						zoneGroups[o.ZoneID] = make(map[string]bool)
-					}
-					zoneGroups[o.ZoneID][o.SemanticGroup] = true
-				}
-				// semantic_group → 显示名（取 group 的 DisplayName）。
-				display := make(map[string]string, len(os))
-				for _, g := range groupObjectsBySemantic(os) {
-					label := g.SemanticGroup
-					if g.DisplayName != "" && g.DisplayName != g.SemanticGroup {
-						label = fmt.Sprintf("%s（%s）", g.DisplayName, g.SemanticGroup)
-					}
-					display[g.SemanticGroup] = label
-				}
-				sb.WriteString("各区域可交互设施：\n")
-				for _, z := range zs {
-					gs := zoneGroups[z.ID]
-					if len(gs) == 0 {
-						continue
-					}
+				// 该区域的可交互设施（按实例真实分布聚合）附在详情行后。
+				if gs := zoneGroups[z.ID]; len(gs) > 0 {
 					keys := make([]string, 0, len(gs))
 					for k := range gs {
 						keys = append(keys, k)
@@ -184,12 +168,9 @@ func worldDetailCore(kb *worldkb.KB) string {
 							names = append(names, k)
 						}
 					}
-					zlabel := z.ID
-					if z.DisplayName != "" && z.DisplayName != z.ID {
-						zlabel = fmt.Sprintf("%s（%s）", z.DisplayName, z.ID)
-					}
-					sb.WriteString("- " + zlabel + "：" + strings.Join(names, "、") + "\n")
+					line += "；可交互设施：" + strings.Join(names, "、")
 				}
+				sb.WriteString(line + "\n")
 			}
 		}
 	}
