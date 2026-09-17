@@ -84,20 +84,17 @@ func TestBuildSharedSystemPrompt_ThreeModules(t *testing.T) {
 	if strings.Contains(got, "【其他NPC】") {
 		t.Errorf("system prompt should not contain the strategic 【其他NPC】 roster (moved to user prompt):\n%s", got)
 	}
-	// 模块 1 世界背景：narrative + 设施/居民名册（区域行已移除——模块 3
-	// 有逐区域明细，纯 id 列表是噪音）。
+	// 模块 1 世界背景：narrative + 三份名册。
 	for _, want := range []string{
 		"设定：工业机器人小镇",
 		"主题：",
+		"区域（2 个）：主生产车间（main_workshop）、中央广场（central_plaza）",
 		"可交互设施类别",
 		"居民（2 位）：老陈（H-01）、老王（H-02）",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("module 1 missing %q:\n%s", want, got)
 		}
-	}
-	if strings.Contains(got, "区域（") {
-		t.Errorf("module 1 should not carry the zone roster line:\n%s", got)
 	}
 	// 模块 2 人物背景：fallback persona。
 	if !strings.Contains(got, "名字：老陈") {

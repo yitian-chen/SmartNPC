@@ -56,10 +56,8 @@ func BuildSharedSystemPrompt(kb *worldkb.KB, profiles map[string]*profile.Profil
 }
 
 // WorldOverview renders the shared module 1: the world's basic situation —
-// narrative setting/theme, smart-object group roster, and NPC roster
-// (compact inventories only; details live in module 3). Zone roster is NOT
-// listed here (moved out 2026-09: module 3 already carries per-zone detail,
-// and the plain id list added noise without new information).
+// narrative setting/theme, zone roster, smart-object group roster, and NPC
+// roster (compact inventories only; details live in module 3).
 func WorldOverview(kb *worldkb.KB) string {
 	if kb == nil {
 		return ""
@@ -70,6 +68,17 @@ func WorldOverview(kb *worldkb.KB) string {
 	}
 	if kb.Narrative.Theme != "" {
 		lines = append(lines, "主题："+kb.Narrative.Theme)
+	}
+	if zs := kb.ListZones(); len(zs) > 0 {
+		parts := make([]string, 0, len(zs))
+		for _, z := range zs {
+			if z.DisplayName != "" && z.DisplayName != z.ID {
+				parts = append(parts, fmt.Sprintf("%s（%s）", z.DisplayName, z.ID))
+			} else {
+				parts = append(parts, z.ID)
+			}
+		}
+		lines = append(lines, fmt.Sprintf("区域（%d 个）：%s。", len(zs), strings.Join(parts, "、")))
 	}
 	if os := kb.ListObjects(); len(os) > 0 {
 		parts := make([]string, 0)
