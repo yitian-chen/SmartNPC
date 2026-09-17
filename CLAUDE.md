@@ -17,7 +17,7 @@ AgentTown_v3 — AI NPC 模拟系统。5 个 NPC（H-01~H-05，各自独立 prof
 - **根 module**（`agenttown-mcp/`）：agent 决策 + 装配壳 + `pkg/` 领域库，经根 `go.mod` 的 `replace => ./contract` / `=> ./wsserver` 引用本地 module
 - 依赖倒置：agent 决策侧（`guardedExecutor`/`dialogueRunner`/`reactiveRunner`/worker 循环）只依赖 `contract.Transport` 接口，不依赖 wsserver 实现；入站消息经 `Runtime.HandleMessage`（`cmd/agenttown-mcp/runtime.go`）单入口分发，运输层只注册 `HandleMessage`/`OnDisconnect` 两个回调
 
-**LLM 后端**：MCP 直连 Venus（OpenAI Chat Completions 协议），战略层用 `deepseek-v4-pro`、战术层用 `deepseek-v4-flash`（`--venus-strategic-model`/`--venus-model`）。反应层直连本地 Ollama（`qwen2.5:7b`），不走 Venus。
+**LLM 后端**：MCP 直连 Venus（OpenAI Chat Completions 协议），战略层用 `deepseek-v4-pro`、战术层用 `deepseek-v4.1-flash`（`--venus-strategic-model`/`--venus-model`）。反应层直连本地 Ollama（`qwen2.5:7b`），不走 Venus。
 
 ## 架构总览
 
@@ -30,7 +30,7 @@ graph LR
         MCP["agenttown-mcp (Go)<br/>MCP Server + WS Server<br/>:8760 HTTP / :9092 WS (stable)<br/>三层决策：战略+战术+反应"]
     end
     subgraph LLM["LLM 后端"]
-        VENUS["Venus<br/>战略 deepseek-v4-pro<br/>战术 deepseek-v4-flash<br/>(OpenAI 兼容)"]
+        VENUS["Venus<br/>战略 deepseek-v4-pro<br/>战术 deepseek-v4.1-flash<br/>(OpenAI 兼容)"]
         OLLAMA["Ollama 本地<br/>qwen2.5:7b<br/>(反应层专用，默认禁用)"]
     end
     UE5 <-->|"WebSocket :9092<br/>7-field Envelope"| MCP
@@ -103,7 +103,7 @@ MCP 直连 Venus（OpenAI Chat Completions 协议），战略/战术层调用 Ve
 ./agenttown-mcp --http :8760 --ws :9092 \
   --venus-url http://v2.open.venus.oa.com/llmproxy \
   --venus-api-key $VENUS_API_KEY \
-  --venus-model deepseek-v4-flash \
+  --venus-model deepseek-v4.1-flash \
   --venus-strategic-model deepseek-v4-pro
 ```
 
@@ -628,7 +628,7 @@ cp .env.example .env
 | `--ws` | `:9090` | WebSocket 监听（UE5 连接；start-debug.sh 默认传 `:9092` stable / `:9091` dev） |
 | `--venus-url` | `http://v2.open.venus.oa.com/llmproxy` | Venus 后端 URL |
 | `--venus-api-key` | `""` | Venus API key（**必填**，否则 401）。env 回退 `VENUS_API_KEY` |
-| `--venus-model` | `deepseek-v4-flash` | Venus 模型 ID（战术层） |
+| `--venus-model` | `deepseek-v4.1-flash` | Venus 模型 ID（战术层） |
 | `--venus-strategic-model` | `deepseek-v4-pro` | 战略层模型 ID（空值回退到 `--venus-model`） |
 | `--venus-timeout` | `60s` | Venus 调用超时 |
 | `--tactical-timeout` | `60s` | 战术层 LLM 调用超时（time_scale=90 下 ≈90 游戏分钟，slot 切换拖尾主因之一） |

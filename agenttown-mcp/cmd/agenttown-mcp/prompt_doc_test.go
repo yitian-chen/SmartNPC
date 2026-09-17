@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -93,6 +94,7 @@ func resetPromptDocForTest(path string) {
 
 // testLogger 复用 reactive_runner_test.go 中的实现（丢弃输出的 slog logger）。
 
+// TestExtractSystemUser 验证无状态栏时取最后一条 user（原行为不变）。
 func TestExtractSystemUser(t *testing.T) {
 	body := []byte(`{"model":"m","messages":[
 		{"role":"system","content":"sys内容\n第二行"},
@@ -107,6 +109,38 @@ func TestExtractSystemUser(t *testing.T) {
 	// 取最后一条 user
 	if usr != "本次user\n含换行" {
 		t.Errorf("user = %q, want 本次user\\n含换行", usr)
+	}
+}
+
+// TestExtractSystemUser_TrailingStateBar 验证末条 user 是 <agent_state>
+// 状态栏时捡拾倒数两条：本轮 user prompt + 状态栏拼接，避免预览只剩
+// 状态栏。
+func TestExtractSystemUser_TrailingStateBar(t *testing.T) {
+	bar := agentStateBarOpen + "\n当前游戏时间：D12 10:47:03\n" + agentStateBarClose
+	body, err := json.Marshal(map[string]any{
+		"model": "m",
+		"messages": []map[string]string{
+			{"role": "system", "content": "sys"},
+			{"role": "user", "content": "历史user1"},
+			{"role": "assistant", "content": "a1"},
+			{"role": "user", "content": "本次战术分解指令"},
+			{"role": "user", "content": bar},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	sys, usr := extractSystemUser(body)
+	if sys != "sys" {
+		t.Errorf("system = %q, want sys", sys)
+	}
+	want := "本次战术分解指令" + "\n\n" + bar
+	if usr != want {
+		t.Errorf("user = %q, want 本次战术分解指令+\\n\\n+状态栏", usr)
+	}
+	// 历史 user 不进预览。
+	if strings.Contains(usr, "历史user1") {
+		t.Errorf("preview should not carry historical user messages:\n%s", usr)
 	}
 }
 

@@ -20,6 +20,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -72,7 +73,8 @@ func dumpPromptDoc(agentID, layer string, body []byte, logger *slog.Logger) {
 	fmt.Fprintf(f, "# 实际 LLM 请求体留存\n\n记录 H-01 最新一次发给 LLM 的战略层/战术层/对话层请求体完整 JSON（model/messages/tools 等所有字段），由 MCP 运行时覆盖落盘。\n\n")
 
 	// 可读 Prompt 预览：每个 layer 的 system + user 内容，还原换行后放在
-	// 文档开头，便于快速查看核心 prompt 而不必在 JSON 里翻找。
+	// 文档开头，便于快速查看核心 prompt 而不必在 JSON 里翻找。user 预览
+	// 捡拾末尾两条 user 消息（本轮 user prompt + <agent_state> 状态栏）。
 	fmt.Fprintf(f, "## 可读 Prompt 预览\n\n")
 	for _, l := range promptDocLayers {
 		b, ok := promptDocBodies[l]
@@ -117,7 +119,12 @@ func layerNameOf(layer string) string {
 	}
 }
 
-// extractSystemUser 从请求体 JSON 提取 system 与最后一条 user 的 content。
+// extractSystemUser 从请求体 JSON 提取 system 与末尾 user 的 content。
+//
+// 末尾 user 捡拾倒数两条：agenticTurn 在本轮 user prompt 之后追加瞬态
+// <agent_state> 状态栏（同为 user role），只取最后一条会只剩状态栏——
+// 预览应为"最后一条 user prompt + 状态栏"两条拼接。请求未带状态栏
+// （无感知数据等）时保持原行为，只取最后一条 user。
 func extractSystemUser(body []byte) (system, user string) {
 	var req struct {
 		Messages []struct {
@@ -128,6 +135,7 @@ func extractSystemUser(body []byte) (system, user string) {
 	if err := json.Unmarshal(body, &req); err != nil {
 		return "", ""
 	}
+	var users []string
 	for _, m := range req.Messages {
 		switch m.Role {
 		case "system":
@@ -135,10 +143,17 @@ func extractSystemUser(body []byte) (system, user string) {
 				system = m.Content
 			}
 		case "user":
-			user = m.Content // 覆盖取最后一条
+			users = append(users, m.Content)
 		}
 	}
-	return system, user
+	if len(users) == 0 {
+		return system, ""
+	}
+	// 末条是状态栏 → 拼上其前一条（本轮 user prompt），两条都进预览。
+	if last := users[len(users)-1]; strings.HasPrefix(last, agentStateBarOpen) && len(users) >= 2 {
+		return system, users[len(users)-2] + "\n\n" + last
+	}
+	return system, users[len(users)-1]
 }
 
 // dumpLastRequestBody 读取 LLM 客户端最近一次发送的完整请求体并落盘。
