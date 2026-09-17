@@ -122,3 +122,23 @@ func (a *AgentState) WorldEventQueueLen() int {
 	defer a.mu.Unlock()
 	return len(a.worldEventQueue)
 }
+
+// RemoveQueuedWorldEvent removes one pending event by id (the router's
+// interrupt branch pulls an event out of the queue because it is being
+// handled NOW, not at the next safe point). Reports whether the event was
+// found and removed. The dedup seen-set is untouched: a replay of this
+// event must still be dropped (it was received and is being handled).
+func (a *AgentState) RemoveQueuedWorldEvent(eventID string) bool {
+	if eventID == "" {
+		return false
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for i, ev := range a.worldEventQueue {
+		if ev.EventID == eventID {
+			a.worldEventQueue = append(a.worldEventQueue[:i], a.worldEventQueue[i+1:]...)
+			return true
+		}
+	}
+	return false
+}

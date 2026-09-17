@@ -46,6 +46,11 @@ type Runtime struct {
 	worldKBManifest string
 	ctx             context.Context
 
+	// eventRouter judges non-force world events (P2-5): interrupt or
+	// enqueue. nil (router disabled / no LLM backend) means every non-force
+	// event just enqueues.
+	eventRouter *eventRouter
+
 	// Pointers into main's mutable locals, shared so both sides stay in sync.
 	kbPtr                **worldkb.KB
 	firstAgentRegistered *bool

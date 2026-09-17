@@ -1935,6 +1935,17 @@ func main() {
 		kbPtr:                &kb,
 		firstAgentRegistered: &firstAgentRegistered,
 	}
+	// P2-5 轻量事件路由器：非 force world_event 的紧急度裁决（interrupt
+	// or 入队）。借用 per-agent 战术层 flash 客户端做无状态单发调用；LLM
+	// 客户端按 agent 注册后才有（registerAgent 内构造），经 lookupHC 解引用。
+	rt.eventRouter = newEventRouter(
+		func(id string) llmClient {
+			if ac := lookupAgent(id); ac != nil {
+				return ac.tacticalHc
+			}
+			return nil
+		},
+		&kb, profiles, lookupAgent, rt.routerInterrupt, logger)
 	ws.SetDisconnectHandler(rt.OnDisconnect)
 	ws.SetMessageHandler(rt.HandleMessage)
 	// ─── Start serving ─────────────────────────────────────────
