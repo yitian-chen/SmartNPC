@@ -91,6 +91,8 @@ graph TB
 - **`currentSlot` 加 `__debug__` 前缀**：防止注入的 slot 和 dailyPlan 同名 slot 碰撞触发 `redecomposeCount >= 1` 限制
 - **反应层去抖**：`lastReactiveAt` map 按 trigger 类型去抖（periodic 60s / zone_change 45s）
 - **反应层 replan**：决策为 `replan` 时调 `ac.tacticalRefillForReplan`，会重置 `actionQueue` 重新调战术层 LLM
+- **world_event 事件系统（事件驱动设计 §四，P1 系列）**：runtime 分发 `world_event`（`world_event_dispatch.go`）。force=true 走硬保证通道——**零 LLM、零去抖、不可否决**，stop 在 WS 接收路径同步发出（goroutine 之前）+ 清在途追踪（stash 保 action_history）+ 注入【强制打断】hint + 异步 `forceInterruptReplan` 重规划（prompt 层渲染为【紧急事件】最高优先级指令，授权暂停时段目标、豁免时长填满）；失败兜底 `abandonCurrentPlan` 清旧队列走 worker 自然 refill。force=false 入 per-agent 事件队列（`pkg/agentstate/world_event_queue.go`，上限 64 丢最旧、event_id 去重防 seq 重放、drain 全取不 pop、仅 Stop 清——slot 切换/replan 不清，安全点在 completion 之后）。手动模式同反应层口径丢弃。联调注入端点 `POST /debug/event`（控制台"事件下发" tab，14 预设 + 自定义）
+- **在途战术层 LLM 请求可取消（§3.3 唯一盲区，P1-4）**：`generateTacticalPlan` 咽喉点注册 cancel 句柄（coordMu + 世代号防旧调用误清新注册）；force 事件在接收路径同步掐掉在途调用（venus ctx 贯穿 HTTP，sendMu 随之中止释放）。半截思考零残留（`agenticTurn` 成功才落历史）。被取消方经 `cancelledByForce`（错误为 Canceled 且 parent ctx 存活——区别于超时 DeadlineExceeded 与父 ctx 关停）判定后**跳过一切失败兜底**：worker `tacticalRefill` 不补 fallback 动作（"网络波动"speak 会与 force 反应打架）、`tacticalRefillForReplan` 返回 `(false, cancelled=true)` 让调用方让位（不清队列不覆盖 hint）、`/debug/schedule` 返回 409。`forceReplanWaitLimit` 由 ~70s 收窄到 5s（取消后 holder 毫秒级释放 slot）
 
 ### LLM 后端
 

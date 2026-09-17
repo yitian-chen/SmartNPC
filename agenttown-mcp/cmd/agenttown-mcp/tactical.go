@@ -156,6 +156,13 @@ func generateTacticalPlan(
 	nearbyObjects []protocol.NearbyObject,
 	visibleAgents []protocol.VisibleAgent,
 ) ([]plannedAction, error) {
+	// P1-4（§3.3 唯一盲区）：注册本次 LLM 调用的取消句柄——force 事件到达时
+	// 由 handleForceEvent 同步掐掉（半截思考丢弃：agenticTurn 成功才落历史），
+	// 被取消方经 cancelledByForce 判定后跳过失败兜底。三个调用方（worker
+	// tacticalRefill / tacticalRefillForReplan / /debug/schedule）共用本咽喉点。
+	ctx, deregLLM := ac.registerTacticalLLMCall(ctx)
+	defer deregLLM()
+
 	// 精简引用判定：当天同一 dailyPlan 的全量头（【全天日程】+完整
 	// 【分解规则】）已在本日会话历史中（由上一次成功全量轮写入
 	// tacticalHeaderPlan 标记）→ 本轮省略日内不变块，改为核心约束速览 +

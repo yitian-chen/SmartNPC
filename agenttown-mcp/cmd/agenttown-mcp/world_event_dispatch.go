@@ -5,16 +5,18 @@ package main
 //
 // handleWorldEvent is wired from Runtime.HandleMessage. The force branch is
 // the design doc's hard-guarantee channel: zero LLM, zero debounce, cannot
-// be vetoed — the stop fires synchronously in the WS receive path before
-// any goroutine or model call, so nothing stands between the message and
-// the interruption. The replan that follows is tactical work, not part of
-// the guarantee, and runs async. Non-force events enqueue for the next safe
+// be vetoed — the stop AND the in-flight tactical LLM cancellation (§3.3
+// 唯一盲区) fire synchronously in the WS receive path before any goroutine
+// or model call, so nothing stands between the message and the
+// interruption. The replan that follows is tactical work, not part of the
+// guarantee, and runs async. Non-force events enqueue for the next safe
 // point (§4.4); the lightweight router (P2) will sit between receipt and
 // enqueue once it lands.
 
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -30,16 +32,64 @@ import (
 	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
 )
 
-// Waiting parameters for the force replan when another replan
-// (/debug/schedule injection or the reactive layer) holds the slot.
-// P1-4 will cancel in-flight LLM requests and shrink this window to
-// milliseconds; until then a bounded poll keeps the guarantee that the
-// force replan eventually runs with the event context.
-const forceReplanPollInterval = 100 * time.Millisecond
+// forceReplanPollInterval is how often acquireReplanSlot re-checks the
+// replan slot while another replan holds it. The holder's in-flight LLM call
+// is already cancelled by handleForceEvent, so it should release within one
+// HTTP abort (~ms); a fine poll keeps the takeover snappy.
+const forceReplanPollInterval = 20 * time.Millisecond
 
-// forceReplanWaitLimit bounds the wait for an in-flight replan (tactical
-// LLM call plus margin).
-var forceReplanWaitLimit = tacticalCallTimeout + 10*time.Second
+// forceReplanWaitLimit bounds the wait for an in-flight replan to release
+// the slot after its LLM call was cancelled. Cancellation makes the holder
+// fail fast (venus sendMu frees on HTTP abort), so a few seconds is a
+// generous backstop for a holder stuck outside the LLM call itself.
+var forceReplanWaitLimit = 5 * time.Second
+
+// registerTacticalLLMCall wraps parent in a cancellable context and
+// registers the cancel so a force event can abort this call (§3.3 唯一盲区).
+// The returned deregister must be deferred by the caller; it is a no-op if
+// a newer call has since registered (generation-guarded), so a stale call
+// can never clear a live registration.
+func (a *agentContext) registerTacticalLLMCall(parent context.Context) (context.Context, func()) {
+	ctx, cancel := context.WithCancel(parent)
+	a.coordMu.Lock()
+	a.tacticalLLMGen++
+	gen := a.tacticalLLMGen
+	a.tacticalLLMCancel = cancel
+	a.coordMu.Unlock()
+	dereg := func() {
+		cancel() // release ctx resources regardless
+		a.coordMu.Lock()
+		if a.tacticalLLMGen == gen {
+			a.tacticalLLMCancel = nil
+		}
+		a.coordMu.Unlock()
+	}
+	return ctx, dereg
+}
+
+// cancelInFlightTacticalLLM aborts the in-flight tactical-layer LLM call,
+// if any. Returns whether a call was actually cancelled. Called from the
+// force path's synchronous segment — a memory operation, microsecond-level,
+// part of the §4.2 guarantee extension (no uninterruptible window).
+func (a *agentContext) cancelInFlightTacticalLLM() bool {
+	a.coordMu.Lock()
+	defer a.coordMu.Unlock()
+	if a.tacticalLLMCancel == nil {
+		return false
+	}
+	a.tacticalLLMCancel()
+	return true
+}
+
+// cancelledByForce reports whether an LLM error is the result of a force
+// interrupt cancelling the call (as opposed to a parent shutdown or a
+// timeout): the error is context.Canceled while the parent context is still
+// alive. Callers use this to skip their failure fallbacks — the force replan
+// owns the world now, and a fallback (idle-speak / hint overwrite / queue
+// drop) would fight it.
+func cancelledByForce(err error, parent context.Context) bool {
+	return err != nil && errors.Is(err, context.Canceled) && parent.Err() == nil
+}
 
 // handleWorldEvent dispatches one inbound world_event message. It reports
 // whether the event was accepted into the event system (force path entered
@@ -93,6 +143,8 @@ func (rt *Runtime) handleWorldEvent(agentID string, ev protocol.WorldEventPayloa
 // handleForceEvent executes the §4.2 hard-guarantee channel. It must be
 // called synchronously from the WS receive path: the stop below is the
 // microsecond-level guarantee, so nothing asynchronous may precede it.
+// Cancelling the in-flight tactical LLM call (§3.3) is part of the same
+// synchronous segment — the "blind window" is closed at receive time.
 func (rt *Runtime) handleForceEvent(ac *agentContext, agentID string, ev protocol.WorldEventPayload) {
 	// Dedup is replay protection, not vetoing: an event_id already seen is
 	// a seq-replay redelivery of an interruption that already fired.
@@ -100,6 +152,14 @@ func (rt *Runtime) handleForceEvent(ac *agentContext, agentID string, ev protoco
 		rt.logger.Info("[world_event/force] 重复事件已丢弃（seq 重放）",
 			"agent_id", agentID, "event_id", ev.EventID)
 		return
+	}
+
+	// 掐掉正在飞的战术层 LLM 请求（§3.3 唯一盲区）：半截思考直接丢弃
+	// （agenticTurn 成功才落历史，取消天然零残留），被取消方经
+	// cancelledByForce 判定后不做失败兜底，本次 force replan 随后接管。
+	if ac.cancelInFlightTacticalLLM() {
+		rt.logger.Info("[world_event/force] 已取消在途战术层 LLM 请求（半截思考丢弃，重规划即将接管）",
+			"agent_id", agentID, "event_id", ev.EventID)
 	}
 
 	// 立即打断在途动作（执行中或 SmartObject 排队中均覆盖——stop 会把
@@ -158,7 +218,15 @@ func (a *agentContext) forceInterruptReplan(ctx context.Context, agentID string,
 		a.coordMu.Unlock()
 	}()
 
-	ok := a.tacticalRefillForReplan(ctx, agentID, ws, kb, profiles, logger, hint)
+	ok, cancelled := a.tacticalRefillForReplan(ctx, agentID, ws, kb, profiles, logger, hint)
+	if cancelled {
+		// 本 force replan 被更新的 force 事件掐掉（§3.3）：那个事件的 replan
+		// 已接管（其 hint 已同步注入），此处跳过 abandon（清队列/覆盖 hint
+		// 都会破坏更新的 force 反应）。
+		logger.Info("[world_event/force] 重规划被更新的 force 事件取消，让位",
+			"agent_id", agentID)
+		return
+	}
 	if !ok {
 		// 失败兜底：紧急事件后不应恢复旧计划——清掉过期队列，worker 以
 		// 当前状态自然 refill（hint 已在 AgentState，会注入战术层 prompt）。

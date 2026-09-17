@@ -363,7 +363,14 @@ func (r *reactiveRunner) execute(agentID string, ac *agentContext, dec ReactiveD
 		//    worker 被 replanInProgress 守卫挡住不 pop 不 refill。
 		r.logger.Info("[反应层] replan 开始，规划期间保持原 action",
 			"agent_id", agentID, "replan_reason", dec.Reason)
-		ok := ac.tacticalRefillForReplan(context.Background(), agentID, r.ws, r.kb, r.profiles, r.logger, dec.Reason)
+		ok, cancelled := ac.tacticalRefillForReplan(context.Background(), agentID, r.ws, r.kb, r.profiles, r.logger, dec.Reason)
+		if cancelled {
+			// LLM 调用被 force 事件掐掉（§3.3）：force replan 已接管（打断/事件
+			// hint 都由 force 路径完成），此处跳过一切失败兜底让位。
+			r.logger.Info("[反应层] replan 被 force 事件取消，让位给 force 重规划",
+				"agent_id", agentID, "replan_reason", dec.Reason)
+			return
+		}
 		if !ok {
 			// 规划失败：仍需打断坏 action，否则 agent 继续执行触发 replan 的
 			// 不合理 action（如疲劳仍工作），且旧队列也可能已过期。清空队列 +

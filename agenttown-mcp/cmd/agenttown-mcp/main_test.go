@@ -754,9 +754,12 @@ func boolPtr(b bool) *bool { return &b }
 func TestTacticalRefillForReplan_NoTacticalHc(t *testing.T) {
 	ac, _ := newAgentContext(context.Background())
 	// tacticalHc 默认 nil
-	ok := ac.tacticalRefillForReplan(context.Background(), "H-01", nil, nil, nil, slog.Default(), "test hint")
+	ok, cancelled := ac.tacticalRefillForReplan(context.Background(), "H-01", nil, nil, nil, slog.Default(), "test hint")
 	if ok {
 		t.Error("should return false when tacticalHc is nil")
+	}
+	if cancelled {
+		t.Error("cancelled should be false when tacticalHc is nil (no LLM call was made)")
 	}
 }
 
@@ -765,7 +768,7 @@ func TestTacticalRefillForReplan_NoGoal(t *testing.T) {
 	// 设置 tacticalHc 但不设 dailyPlan → selectCurrentGoal 返回 ""
 	ac.tacticalHc = newFailedVenusClient()
 	ac.as.SetDailyPlan("", 0)
-	ok := ac.tacticalRefillForReplan(context.Background(), "H-01", nil, nil, nil, slog.Default(), "test hint")
+	ok, _ := ac.tacticalRefillForReplan(context.Background(), "H-01", nil, nil, nil, slog.Default(), "test hint")
 	if ok {
 		t.Error("should return false when no current goal")
 	}
@@ -786,9 +789,12 @@ func TestTacticalRefillForReplan_LLMFail(t *testing.T) {
 	if _, err := ac.as.SetPerception(percJSON); err != nil {
 		t.Fatalf("SetPerception: %v", err)
 	}
-	ok := ac.tacticalRefillForReplan(context.Background(), "H-01", nil, nil, nil, slog.Default(), "test hint")
+	ok, cancelled := ac.tacticalRefillForReplan(context.Background(), "H-01", nil, nil, nil, slog.Default(), "test hint")
 	if ok {
 		t.Error("should return false when LLM call fails")
+	}
+	if cancelled {
+		t.Error("cancelled should be false on a plain LLM failure (connection refused is not a force cancel)")
 	}
 	// 验证旧队列保留
 	if ac.as.QueueLen() != 1 {

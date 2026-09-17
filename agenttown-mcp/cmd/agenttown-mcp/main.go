@@ -83,6 +83,14 @@ type agentContext struct {
 	completedBeforeArm    map[string]struct{}    // action_id completed before timer armed
 	agentEpoch            int64
 	online                bool // coordination aspect (business online flag is in AgentState)
+	// tacticalLLMCancel cancels the in-flight tactical-layer LLM call (nil =
+	// none). Registered by generateTacticalPlan around agenticTurn so the
+	// force path (world_event_dispatch.go) can kill the "blind window"
+	// (设计文档 §3.3) synchronously in the WS receive path. tacticalLLMGen
+	// is the registration generation: a stale call's deregister must not
+	// clear a newer call's registration.
+	tacticalLLMCancel context.CancelFunc
+	tacticalLLMGen    uint64
 
 	// LLM clients (immutable after construction, no lock needed)
 	strategicHc llmClient
@@ -1363,6 +1371,14 @@ func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
 
 	// 3. LLM 调用结束后的记账（流式/非流式共用）
 	if err != nil {
+		// 被 force 事件掐掉（§3.3）：半截思考已丢弃，force replan 正在带事件
+		// 上下文接管——此处不得补兜底动作（"网络波动"speak 会与 force 反应
+		// 打架），也不做其他清理，直接让位。
+		if cancelledByForce(err, ctx) {
+			logger.Info("[战术层] 分解被 force 事件取消，让位给 force 重规划",
+				"agent_id", agentID)
+			return false
+		}
 		queued := a.as.QueueLen()
 		logger.Warn("[战术层] 分解失败，保留已入队 action",
 			"agent_id", agentID, "queued", queued, "err", err)
@@ -1412,7 +1428,9 @@ func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
 // tacticalRefillForReplan 供反应层 replan 决策调用：绕过 currentActionID 守卫，
 // 强制重新分解当前时段 goal。规划成功后清空旧队列、写入新队列并 signal worker。
 // 不在此处发 stop_action（由调用方 execute() 在规划成功后发）。
-// 规划失败返回 false，调用方应保持原 action 不打断。
+// 规划失败返回 ok=false，调用方应保持原 action 不打断；cancelled=true 表示
+// LLM 调用被 force 事件掐掉（§3.3）——force replan 已接管，调用方必须跳过
+// 一切失败兜底（hint 覆盖/清队列/stop 都会与 force 反应打架）。
 //
 // 与 tacticalRefill 的区别：
 //  1. 不检查 currentActionID（允许在途 action 期间规划，这是本函数存在的全部意义）
@@ -1422,10 +1440,10 @@ func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
 func (a *agentContext) tacticalRefillForReplan(
 	ctx context.Context, agentID string, ws contract.Transport,
 	kb *worldkb.KB, profiles map[string]*profile.Profile, logger *slog.Logger, replanHint string,
-) bool {
+) (ok bool, cancelled bool) {
 	// 1. 取当前时段 goal —— 不检查 currentActionID（replan 允许在途规划）
 	if a.tacticalHc == nil {
-		return false
+		return false, false
 	}
 	plan, _, _ := a.as.SnapshotSchedule()
 	tod := a.as.LatestTimeOfDay()
@@ -1433,7 +1451,7 @@ func (a *agentContext) tacticalRefillForReplan(
 	if goal == "" {
 		logger.Warn("[战术层/replan] 无当前时段 goal，无法 replan",
 			"agent_id", agentID)
-		return false
+		return false, false
 	}
 	prep := a.as.BeginReplan(goal, slot, idx, a.tacticalHc != nil)
 	goal, slot, idx = prep.Goal, prep.Slot, prep.Index
@@ -1471,10 +1489,17 @@ func (a *agentContext) tacticalRefillForReplan(
 
 	// 3. 失败处理：保留旧队列（不清空），调用方保持原 action
 	if err != nil {
+		// 被 force 事件掐掉（§3.3）：force replan 已接管，本调用方不得做任何
+		// 失败兜底（清队列/覆盖 hint/stop 都会破坏 force 反应）。
+		if cancelledByForce(err, ctx) {
+			logger.Info("[战术层/replan] 规划被 force 事件取消，让位给 force 重规划",
+				"agent_id", agentID)
+			return false, true
+		}
 		queued := a.as.QueueLen()
 		logger.Warn("[战术层/replan] 规划失败，保留原队列和原 action",
 			"agent_id", agentID, "queued", queued, "err", err)
-		return false
+		return false, false
 	}
 
 	// 4. 成功：原子完成——覆盖旧队列、重置计数、清 hint、signal worker
@@ -1490,7 +1515,7 @@ func (a *agentContext) tacticalRefillForReplan(
 
 	// 唤醒 worker（execute() 也会再 signal 一次，幂等）
 	a.signal()
-	return true
+	return true, false
 }
 
 func main() {
@@ -2445,6 +2470,16 @@ func handleDebugSchedule(ctx context.Context, logger *slog.Logger, ws contract.T
 		goal, zone, timeOfDay, slot, "", physical, kb, nil, logger, "", "", "", capabilityRegistryRef, nil, nil, nil,
 	)
 	if err != nil {
+		if cancelledByForce(err, ctx) {
+			// 被 force 事件掐掉（§3.3）：force replan 已接管，注入的 schedule 作废。
+			logger.Info("[debug/schedule] decompose 被 force 事件取消，让位给 force 重规划",
+				"agent_id", req.AgentID, "slot", slot, "goal", goal)
+			w.WriteHeader(http.StatusConflict)
+			_ = json.NewEncoder(w).Encode(debugScheduleResponse{
+				Error: "decompose cancelled by a force world_event; the force replan has taken over",
+			})
+			return
+		}
 		logger.Warn("[debug/schedule] decompose failed",
 			"agent_id", req.AgentID, "slot", slot, "goal", goal, "err", err)
 		w.WriteHeader(http.StatusBadGateway)
