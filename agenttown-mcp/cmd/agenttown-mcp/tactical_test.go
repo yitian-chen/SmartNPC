@@ -667,8 +667,8 @@ func TestBuildTacticalPrompt_NilPhysical(t *testing.T) {
 	if !strings.Contains(promptText, "物理状态") {
 		t.Errorf("prompt should contain '物理状态' with default values for nil physical, got: %s", promptText)
 	}
-	if !strings.Contains(promptText, "电量 高") {
-		t.Errorf("prompt should contain default band 电量 高 for nil physical, got: %s", promptText)
+	if !strings.Contains(promptText, "电量：高") {
+		t.Errorf("prompt should contain default band 电量：高 for nil physical, got: %s", promptText)
 	}
 	// slot 为空时不应有时长提示行
 	if strings.Contains(promptText, "请让步骤总时长接近此时长") {
@@ -683,19 +683,19 @@ func TestBuildTacticalPrompt_ZeroPhysical(t *testing.T) {
 	if !strings.Contains(promptText, "物理状态") {
 		t.Errorf("prompt should contain '物理状态' with default values for all-zero physical, got: %s", promptText)
 	}
-	if !strings.Contains(promptText, "电量 高") {
-		t.Errorf("prompt should contain default band 电量 高 for all-zero physical, got: %s", promptText)
+	if !strings.Contains(promptText, "电量：高") {
+		t.Errorf("prompt should contain default band 电量：高 for all-zero physical, got: %s", promptText)
 	}
 }
 
 func TestBuildTacticalPrompt_WithPhysical(t *testing.T) {
 	promptText := prompt.BuildTactical(prompt.TacticalInput{Goal: "装配", Zone: "main_workshop", TimeOfDay: "09:00", Slot: "09:00-12:00", Physical: &protocol.PhysicalState{Energy: 75, Fatigue: 30, JointWear: 5}, KB: nil, Hint: "", AgentID: ""})
 	// 数值以分段标签呈现：75→中等、30→精神饱满、5→良好
-	if !strings.Contains(promptText, "电量 中等") {
-		t.Errorf("prompt should contain '电量 中等' (75), got: %s", promptText)
+	if !strings.Contains(promptText, "电量：中等") {
+		t.Errorf("prompt should contain '电量：中等' (75), got: %s", promptText)
 	}
-	if !strings.Contains(promptText, "疲劳 精神饱满") {
-		t.Errorf("prompt should contain '疲劳 精神饱满' (30), got: %s", promptText)
+	if !strings.Contains(promptText, "疲劳度：精神饱满") {
+		t.Errorf("prompt should contain '疲劳度：精神饱满' (30), got: %s", promptText)
 	}
 	// slot 有效时应包含时长提示
 	if !strings.Contains(promptText, "当前时段 09:00-12:00，约 180 分钟") {

@@ -291,7 +291,7 @@ func TestBuildTactical_PhysicalNoDuplicatePrefix(t *testing.T) {
 		Slot: "07:00-12:00", Physical: &protocol.PhysicalState{Energy: 75, Fatigue: 30, JointWear: 5},
 		AgentID: "H-01",
 	})
-	if !strings.Contains(out, "【物理状态】\n电量 中等、疲劳 精神饱满") {
+	if !strings.Contains(out, "【物理状态】\n电量：中等、疲劳度：精神饱满") {
 		t.Errorf("physical segment should be header + band line without in-line prefix:\n%s", out)
 	}
 	if strings.Contains(out, "\n物理状态：") {

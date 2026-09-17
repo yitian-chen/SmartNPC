@@ -35,7 +35,7 @@ func TestBuildReactivePrompt_Defaults(t *testing.T) {
 	for _, want := range []string{
 		"14:30", "main_workshop",
 		// 物理状态以分段标签呈现（45→较低、30→精神饱满、15→未有磨损），余额保留数值
-		"电量 较低", "疲劳 精神饱满", "关节磨损 未有磨损", "余额 0",
+		"电量：较低", "疲劳度：精神饱满", "关节磨损度：未有磨损", "余额：0",
 		"WorkShift(smart_object=workbench_01, interaction=assemble)",
 		"tactical", "14:00-18:00", "14:00-18:00 工作组装",
 		"zone rest_area→main_workshop",

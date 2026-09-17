@@ -96,7 +96,7 @@ func TestBuildAgentStateBar_FullState(t *testing.T) {
 	}
 	for _, want := range []string{
 		"当前游戏时间：D12 10:47:03",
-		"物理状态：电量 中等、疲劳 精神饱满、关节磨损 严重磨损、余额 340",
+		"物理状态：电量：中等、疲劳度：精神饱满、关节磨损度：严重磨损、余额：340",
 		"当前日程：[2/6] 09:00-12:00 车间装配作业（剩余约 1 小时 13 分钟）",
 		"当前动作：InteractSmartObject(workbench/assemble)（剩余约 1 小时，预计 11:47 结束）",
 	} {
