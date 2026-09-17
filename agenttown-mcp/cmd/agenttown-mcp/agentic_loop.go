@@ -1,8 +1,9 @@
 // Package main — 统一 agentic loop 编排。
 //
 // 每个 NPC 每天的战略/战术/对话三层共用一份会话历史（AgentState.
-// conversation）：每次 LLM 调用（无论哪层）以 [system, ...历史, 本次 user]
-// 发送，成功后把 user + assistant 两条消息追加进历史；跨日
+// conversation）：每次 LLM 调用（无论哪层）以 [system, ...历史, 本次 user,
+// <agent_state> 状态栏] 发送，成功后把 user + assistant 两条消息追加进历史
+// （状态栏是瞬态注入，不落历史，下一轮重新现拼）；跨日
 // （detectDayRollover）清空历史重新开始，跨日记忆走既有 generateDailyMemories
 // → 昨日总结注入次日战略轮 user 内容。
 //
@@ -38,8 +39,8 @@ import (
 )
 
 // agenticTurn 跑统一 loop 的一轮。请求 messages = [system(共享), ...历史,
-// user(本次)]；成功后 append user + assistant 两条消息进
-// AgentState.conversation（a.as），失败则历史不动。
+// user(本次), <agent_state> 状态栏]；成功后 append user + assistant 两条消息
+// 进 AgentState.conversation（a.as，状态栏不落历史），失败则历史不动。
 //
 // hc 决定本轮模型（战略轮传 strategicHc=pro，战术/对话轮传 tacticalHc=
 // flash——Venus 客户端无状态，同一份历史在不同轮次间切模型可行）。
@@ -81,15 +82,21 @@ func (a *agentContext) agenticTurn(ctx context.Context, hc llmClient, kb *worldk
 	history := a.as.Conversation()
 	summary := a.as.ConversationSummary()
 
-	// 请求 messages：[system, (摘要块), ...历史, user(本次)]。不先 append
-	// user——成功才落历史，失败不留半截。
-	messages := make([]llmtypes.Message, 0, len(history)+3)
+	// 请求 messages：[system, (摘要块), ...历史, user(本次), 状态栏]。不先
+	// append user——成功才落历史，失败不留半截。
+	messages := make([]llmtypes.Message, 0, len(history)+4)
 	messages = append(messages, llmtypes.Message{Role: "system", Content: system})
 	if summary != "" {
 		messages = append(messages, llmtypes.Message{Role: "user", Content: "【上下文摘要】\n" + summary})
 	}
 	messages = append(messages, history...)
 	messages = append(messages, llmtypes.Message{Role: "user", Content: userContent})
+	// <agent_state> 状态栏：messages 末尾的瞬态实时状态注入（事件驱动设计
+	// §6.1——前缀稳定、只失效尾巴）。每轮现拼，不写入会话历史（旧状态栏
+	// 留在历史里只会误导）；无感知数据时 buildAgentStateBar 返回空串跳过。
+	if bar := a.buildAgentStateBar(agentID, profiles); bar != "" {
+		messages = append(messages, llmtypes.Message{Role: "user", Content: bar})
+	}
 
 	// 流式采集（仅战术层 + --tactical-stream）：非流式只能测 E2E，流式才能
 	// 测 TTFT/TPOT/ITL。onDelta 在 venus.parseStream 内同步回调，时间戳即
@@ -208,7 +215,9 @@ func (a *agentContext) agenticTurn(ctx context.Context, hc llmClient, kb *worldk
 	// 字节稳定不变以吃 prefix cache。真实结果由 recordActionCompletion 以
 	// user role 注入到末尾（见 systemInjectedToolResult）。
 	assistant := llmtypes.Message{Role: "assistant", Content: resp.ExtractText(), ToolCalls: resp.ToolCalls}
-	a.as.AppendConversationMessage(messages[len(messages)-1])
+	// 落历史的是 userContent 本身，不是 messages 末条——末条是瞬态状态栏，
+	// 不得进历史（下一轮重新现拼）。
+	a.as.AppendConversationMessage(llmtypes.Message{Role: "user", Content: userContent})
 	a.as.AppendConversationMessage(assistant)
 	for _, tc := range resp.ToolCalls {
 		if tc.ID != "" {

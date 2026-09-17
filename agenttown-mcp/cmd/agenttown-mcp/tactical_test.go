@@ -474,17 +474,15 @@ func TestGenerateTacticalPlan_NoRetryOnNon4001(t *testing.T) {
 
 // ─── 精简引用（compact）模式 ─────────────────────────────────
 
-// lastUserPromptOf 取 SendLoop 捕获请求的末条 user 内容（[system,...历史,user]）。
+// lastUserPromptOf 取 SendLoop 捕获请求中最后一条非状态栏的 user 内容
+// （[system,...历史,user,状态栏]——末尾 <agent_state> 是瞬态注入，跳过）。
 func lastUserPromptOf(t *testing.T, msgs []llmtypes.Message) string {
 	t.Helper()
-	if len(msgs) == 0 {
-		t.Fatal("captured messages empty")
+	last := lastUserPromptContent(msgs)
+	if last == "" {
+		t.Fatal("captured messages carry no user prompt")
 	}
-	last := msgs[len(msgs)-1]
-	if last.Role != "user" {
-		t.Fatalf("last message role = %q, want user", last.Role)
-	}
-	return last.Content
+	return last
 }
 
 // speakToolCallResp 构造一个有效的战术成功响应：speak（首动作）+ InteractSmartObject
