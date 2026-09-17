@@ -13,7 +13,8 @@
 //   - schemaName/schema：战略层传 daily_plan（response_format json_schema
 //     strict），其余层空（不带 response_format）
 //
-// tools 字段每次请求都传（tacticalToolsFromRegistry 派生，含 social_chat）。
+// tools 字段每次请求都传（tacticalToolsFromRegistry 派生）；战略层额外屏蔽
+// social_chat（规划阶段不引导主动社交），战术/对话层仍披露。
 //
 // 失败语义：LLM 调用失败（含 4001 重试耗尽）时历史保持不变——失败的
 // user 消息不留悬空在历史里，下次调用重试完整请求。
@@ -61,10 +62,15 @@ func (a *agentContext) agenticTurn(ctx context.Context, hc llmClient, kb *worldk
 	// 对同一 agent 字节级一致，可缓存）。
 	system := prompt.BuildSharedSystemPrompt(kb, profiles, agentID)
 
-	// tools 每次都传：与战术层一致的完整行动目录（含 social_chat）。
+	// tools 每次都传：与战术层一致的完整行动目录。战略层额外屏蔽
+	// social_chat（规划阶段不引导 NPC 主动社交；对话由对话层/战术层在
+	// 运行时触发），请求体 tools 目录不再披露该工具。
 	var tools []venus.Tool
 	if capabilityRegistryRef != nil {
 		tools = tacticalToolsFromRegistry(capabilityRegistryRef, agentID)
+		if layer == "strategic" {
+			tools = dropTool(tools, "social_chat")
+		}
 	}
 
 	// 上下文压缩：估算输入 token，超阈值时把旧历史摘要成稳定 digest、
@@ -221,6 +227,19 @@ func (a *agentContext) agenticTurn(ctx context.Context, hc llmClient, kb *worldk
 // conversation 前缀稳定、Venus prefix cache 可复用。真实结果不覆盖它，
 // 而是以 user role 追加到末尾。
 const pendingToolResult = "result=pending"
+
+// dropTool 从 tools 目录中移除 Function.Name == name 的工具。目录派生
+// （tacticalToolsFromRegistry）对三层一致，战略层在 tool_choice=none 下
+// 仍会收到完整目录，这里按层剔除不应披露的工具（当前仅 social_chat）。
+func dropTool(tools []venus.Tool, name string) []venus.Tool {
+	out := make([]venus.Tool, 0, len(tools))
+	for _, t := range tools {
+		if t.Function.Name != name {
+			out = append(out, t)
+		}
+	}
+	return out
+}
 
 // rateLimitBackoffBase 是 429 限流重试的退避基础时长（实际退避 = base +
 // [0, 3/4·base) 随机抖动）。包级变量便于测试临时调小加速。

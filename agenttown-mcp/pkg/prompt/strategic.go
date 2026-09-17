@@ -102,15 +102,15 @@ func zoneDisplayName(kb *worldkb.KB, zoneID string) string {
 // point at the system message's modules; references to 【物理状态】 point at
 // the user message's dynamic segments.
 const StrategicRules = `1. 【硬性要求】每个时段的结束时间减去开始时间必须 ≥30 分钟（不足 30 分钟的活动要么并入相邻时段，要么不安排）；每段安排 1 - 2 项任务，连续两个时段不得任务完全相同
-2. 规划每个时段时，先想清楚这个时段的活动用什么实现：goal 应能映射到【世界详细信息】设施详情中列出的某个 (semantic_group, interaction) 组合——不限于工种设备，睡眠舱的 sleep/meditate/tidy_up、长椅的 rest 都是合法活动，战术层会据此分解为对应的移动与长时段互动；映射不上的抽象活动（如"准备工具""巡查"）→ 换一个。锻炼类活动（晨练拉伸等原地动作）不需要设施，属例外；聊天/社交/对话类活动用 social_chat 实现（目标是【其他NPC】名单里的某位 NPC，不是设施），也属例外
-3. goal 中提到的地点、人物、设备必须是系统信息中【人物背景】和【世界详细信息】、或用户信息中【其他NPC】里存在的，不得编造未提及的人物或设施
+2. 规划每个时段时，先想清楚这个时段的活动用什么实现：goal 应能映射到【世界详细信息】设施详情中列出的某个 (semantic_group, interaction) 组合——不限于工种设备，睡眠舱的 sleep/meditate/tidy_up、长椅的 rest 都是合法活动，战术层会据此分解为对应的移动与长时段互动；映射不上的抽象活动（如"准备工具""巡查"）→ 换一个。锻炼类活动（晨练拉伸等原地动作）不需要设施，属例外
+3. goal 中提到的地点、人物、设备必须是系统信息中【人物背景】和【世界详细信息】里存在的，不得编造未提及的人物或设施
 4. 第一个时段必须从当前仿真时间开始，且任何时段的开始时间不得早于当前时间（清晨规划时禁止输出 0:00-7:00 这类凌晨睡觉时段——凌晨睡眠已由前一晚的跨午夜末段覆盖，不要重复安排）。
 5. 首段禁止安排工作——早间可以安排晨练拉伸、上网、长椅放松、冥想醒神、整理舱位等非工作活动。午间可以选择锻炼、就近长椅小憩、休眠舱午睡等非产出性活动。夜间睡眠必须是一个连续的跨午夜时段：约 22:00 前后开始、次日 06:00-07:00 结束；不得拆成多个睡眠时段（禁止 20:30-22:58 睡觉 + 22:58-07:16 睡觉这样的连续两段），也不得在凌晨提前结束（禁止 23:00-01:00 这样的短睡眠段）。末段跨午夜时结束时间表示次日时刻
 6. 充电仅在规划时电量为"低"或"较低"时安排，规划时电量为"高"或"中"时严禁规划充电；维护仅在关节磨损达到"明显磨损"及以上时安排；睡眠只能在午间和晚上
 7. 综合用户信息中【物理状态】的四项状态调整安排侧重点：电量偏低→多充电少工作；疲劳偏高→提前休眠；磨损偏高→安排维护；余额低→多工作少花钱
 8. 整理内务、冥想等动作安排的时间不得超过一小时
 
-格式示例：[{"time":"07:00-09:00","goal":"晨练拉伸"},{"time":"09:00-12:00","goal":"上午车间装配作业"},{"time":"12:00-12:40","goal":"找老王聊聊天（social_chat）"},{"time":"12:40-18:00","goal":"下午继续装配作业"},{"time":"18:00-22:00","goal":"去中央广场长椅休息"},{"time":"22:00-07:00","goal":"夜间在睡眠舱休眠"}]`
+格式示例：[{"time":"07:00-09:00","goal":"晨练拉伸"},{"time":"09:00-12:00","goal":"上午车间装配作业"},{"time":"12:00-18:00","goal":"下午继续装配作业"},{"time":"18:00-22:00","goal":"去中央广场长椅休息"},{"time":"22:00-07:00","goal":"夜间在睡眠舱休眠"}]`
 
 // StrategicPromptInput aggregates the strategic layer user-prompt inputs.
 type StrategicPromptInput struct {
@@ -147,11 +147,11 @@ func BuildStrategicUserPrompt(in StrategicPromptInput) string {
 
 // BuildStrategicUserContext constructs the strategic layer user message's
 // dynamic context segment: 【今日日程】 (weekly schedule context, skipped
-// when empty) + 【物理状态】 (nil physical → default fresh state) +
-// 【其他NPC】 (KB peer roster — the social_chat target list, skipped when no
-// peers). The strategic preamble (module role) also lives here: the system
-// prompt is shared verbatim across layers, so every strategic-specific text
-// belongs in the user message.
+// when empty) + 【物理状态】 (nil physical → default fresh state). The
+// 【其他NPC】 roster segment was removed (social_chat is masked from the
+// strategic layer). The strategic preamble (module role) also lives here:
+// the system prompt is shared verbatim across layers, so every
+// strategic-specific text belongs in the user message.
 func BuildStrategicUserContext(agentID string, kb *worldkb.KB, profiles map[string]*profile.Profile, physical *protocol.PhysicalState, dayContext string) string {
 	var sb strings.Builder
 	// 【今日日程】段：每周日程上下文（星期几 + 工作日/休息日 + 当日提示）。
@@ -174,16 +174,15 @@ func BuildStrategicUserContext(agentID string, kb *worldkb.KB, profiles map[stri
 		sb.WriteString(strings.TrimPrefix(line, "物理状态："))
 		sb.WriteString("\n")
 	}
-	// 【其他NPC】段：列出 KB 中除自己外的所有 NPC（id + 职业），让战略层 LLM
-	// 在 07:00 规划时看到可聊天的同伴——social_chat 的 target_agent_id 需要
-	// 具体 id，没有这份花名册 LLM 会因"不得编造未提及的人物"规则而不安排
-	// 社交时段。与战术层的【附近NPC】不同：战术层用 UE 运行时感知，战略层用
-	// KB 静态花名册（任何 NPC id 都合法目标）。段头点明"聊天是合法活动"，
-	// 提供正向引导（规则 9 删除后这是战略层唯一的社交触发点）。
-	if peers := OtherAgentsLine(kb, agentID); peers != "" {
-		sb.WriteString("【其他NPC】（你可以主动找其中某位聊天 social_chat，维系人际关系）\n")
-		sb.WriteString(peers)
-		sb.WriteString("\n")
-	}
+	// 【其他NPC】段已屏蔽（向 LLM 屏蔽 social_chat）：原实现列出 KB 中除自己
+	// 外的所有 NPC（id + 职业），让战略层 LLM 在 07:00 规划时看到可聊天的同伴
+	// ——social_chat 的 target_agent_id 需要具体 id。现在战略层不再引导主动
+	// 社交（规则 2 的 social_chat 映射、格式示例的社交时段已一并移除），该段
+	// 整体注释掉。战术层仍通过 OtherAgentsLine 作运行时回退（见 tactical.go）。
+	// if peers := OtherAgentsLine(kb, agentID); peers != "" {
+	// 	sb.WriteString("【其他NPC】（你可以主动找其中某位聊天 social_chat，维系人际关系）\n")
+	// 	sb.WriteString(peers)
+	// 	sb.WriteString("\n")
+	// }
 	return sb.String()
 }
