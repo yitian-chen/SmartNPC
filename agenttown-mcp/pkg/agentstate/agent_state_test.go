@@ -1204,7 +1204,6 @@ func TestClearConversation_ClearsSummary(t *testing.T) {
 	}
 }
 
-
 func TestTacticalHeaderPlan_NotPersistedNoStoreWrite(t *testing.T) {
 	fs := newFakeStore()
 	a := New()

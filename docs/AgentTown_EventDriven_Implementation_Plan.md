@@ -127,11 +127,11 @@ graph TD
 
 `pkg/agentstate` 新增有界事件队列（容量 ~64）：
 
-- `Enqueue / DrainAll（一次取全部，不是 pop 一个）/ Clear`
-- **event_id 去重**：wsserver 断线重连会 seq 重放离散消息，重放的事件不得重复入队
-- 清理点对齐 `ClearForSlotSwitch / ClearForReplan / Stop`
-- 超上限丢弃策略：丢最旧 + warn（事件是决策输入，不是账本）
-- 单测覆盖去重 / 边界 / 清理
+- `Enqueue / DrainAll（一次取全部，不是 pop 一个）`
+- **event_id 去重**：wsserver 断线重连会 seq 重放离散消息，重放的事件（含已 drain 消费过的）不得重复入队；去重窗口有界（防长仿真无界增长）
+- 清理点**仅 Stop**（agent 下线）——slot 切换 / replan **不清**：§4.4 的安全点是被打断动作的 interrupted completion，两个 clear 钩子都跑在它之前，清了就永久丢事件（seen-set 会拦掉重放）
+- 超上限丢弃策略：丢最旧（事件是决策输入，不是账本）；结果码返回给调用方打日志
+- 单测覆盖去重 / 边界 / 清理 / 并发同 id
 
 ### P1-3 runtime 分发 + force 硬保证通道
 

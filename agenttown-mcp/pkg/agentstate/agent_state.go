@@ -65,6 +65,14 @@ type AgentState struct {
 	queuedPosition      *int
 	queuedEstimatedWait *float64
 	queuedAt            time.Time
+	// worldEventQueue is the per-agent bounded FIFO of non-force world
+	// events awaiting the next safe point (§4.4) — see world_event_queue.go
+	// for the API and the deliberate non-clearing on slot switch / replan.
+	// worldEventSeen dedups by event_id (reconnect seq-replay cannot
+	// re-enqueue a delivered event); worldEventSeenFIFO is its eviction order.
+	worldEventQueue     []protocol.WorldEventPayload
+	worldEventSeen      map[string]struct{}
+	worldEventSeenFIFO  []string
 	actionQueue         []PlannedAction
 	redecomposeCount    int
 	pendingStopActionID string
@@ -135,6 +143,7 @@ func New() *AgentState {
 		currentDay:            -1,
 		timeStopTargetGameSec: -1,
 		lastReactiveAt:        make(map[string]time.Time),
+		worldEventSeen:        make(map[string]struct{}),
 	}
 }
 
@@ -752,6 +761,12 @@ func (a *AgentState) Stop() {
 	a.currentActionToolCallID = ""
 	a.actionQueue = nil
 	a.clearQueueStatusLocked()
+	// World-event queue + dedup seen-set reset together: after a reconnect
+	// UE only replays messages the agent never received, so nothing
+	// received-and-consumed can come back (world_event_queue.go).
+	a.worldEventQueue = nil
+	a.worldEventSeen = nil
+	a.worldEventSeenFIFO = nil
 	a.currentSlot = ""
 	a.redecomposeCount = 0
 	a.clearedAction = nil // drop stash — offline agent has no pending completion
