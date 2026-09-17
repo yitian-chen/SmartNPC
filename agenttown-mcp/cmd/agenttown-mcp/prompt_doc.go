@@ -29,7 +29,8 @@ import (
 const promptDocAgent = "H-01"
 
 // promptDocLayers 是文档中按此顺序展示的 layer（可读预览 + 完整 JSON）。
-var promptDocLayers = []string{"strategic", "tactical", "dialogue"}
+// router = 事件路由器（P2-5，无状态单发，event_router.go）。
+var promptDocLayers = []string{"strategic", "tactical", "router", "dialogue"}
 
 var (
 	promptDocMu     sync.Mutex
@@ -112,6 +113,8 @@ func layerNameOf(layer string) string {
 		return "战略层"
 	case "tactical":
 		return "战术层"
+	case "router":
+		return "事件路由"
 	case "dialogue":
 		return "对话层"
 	default:

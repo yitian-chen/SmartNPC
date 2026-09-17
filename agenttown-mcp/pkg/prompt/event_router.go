@@ -42,6 +42,11 @@ type RouterInput struct {
 	// CurrentAction describes the in-flight action (e.g. "InteractSmartObject
 	// (workbench/assemble)，已执行约 47 分钟"); empty = idle.
 	CurrentAction string
+	// WorldOverview is the shared world setting/theme (prompt.WorldOverview,
+	// the same module 1 the strategic/tactical/dialogue layers inject), so
+	// the router judges with the same world model as the rest of the mind.
+	// Empty → 省略段.
+	WorldOverview string
 	Event         protocol.WorldEventPayload
 }
 
@@ -67,7 +72,9 @@ const RouterSystemPrompt = `你是小镇居民 NPC 的事件路由模块。世�
 其中 severity 是你评估的"对该 NPC 的主观紧急度"（0-10），reason 说明关键依据（如关系、距离、性格）。`
 
 // BuildRouterSystem constructs the router's system message: the static
-// mechanism text plus the per-agent judgment identity (【你的角色】 +
+// mechanism text, the shared world setting/theme (【世界背景】+【生产工作流】，
+// the same modules the other three layers inject — 路由器与整套心智共用
+// 同一份世界模型), and the per-agent judgment identity (【你的角色】 +
 // 【人际关系】). Identity lives in the system message (not the user
 // message) so the user message carries only what changes per event —
 // state, action, event — keeping the per-call prefix minimal.
@@ -82,9 +89,14 @@ func BuildRouterSystem(in RouterInput) string {
 	}
 	var sb strings.Builder
 	sb.WriteString(RouterSystemPrompt)
-	sb.WriteString("\n\n")
-	fmt.Fprintf(&sb, "你是 NPC %s 的事件路由模块。判断时的角色与关系背景如下：\n\n", agentName)
-	sb.WriteString("【你的角色】\n")
+	if in.WorldOverview != "" {
+		sb.WriteString("\n\n【世界背景】\n")
+		sb.WriteString(in.WorldOverview)
+	}
+	sb.WriteString("\n\n【生产工作流】\n")
+	sb.WriteString(ProductionWorkflowText)
+	fmt.Fprintf(&sb, "\n\n你是 NPC %s 的事件路由模块。判断时的角色与关系背景如下：\n", agentName)
+	sb.WriteString("\n【你的角色】\n")
 	sb.WriteString(agentRole)
 	sb.WriteString("\n")
 	if in.Relationships != "" {

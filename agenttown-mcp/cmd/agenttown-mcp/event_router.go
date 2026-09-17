@@ -87,6 +87,9 @@ func (r *eventRouter) route(ctx context.Context, agentID string, ev protocol.Wor
 	system := prompt.BuildRouterSystem(in)
 	user := prompt.BuildRouterPrompt(in)
 	resp, err := hc.SendWithSummary(routerCtx, system, user)
+	// 路由请求体落盘 docs/actual_prompts.md（layer="router"，仿战略/战术/
+	// 对话层；无论成败都记最新一次）。
+	dumpLastRequestBody(agentID, "router", hc, r.logger)
 	if err != nil {
 		// 路由失败 → 保持入队（保守）。事件已在接收路径入队，无需补偿。
 		r.logger.Info("[事件路由] 裁决调用失败，按入队处理（保守）",
@@ -156,6 +159,7 @@ func (r *eventRouter) buildInput(agentID string, ac *agentContext, ev protocol.W
 		PhysicalLine:  physicalLine,
 		Relationships: relationships,
 		CurrentAction: action,
+		WorldOverview: prompt.WorldOverview(kb),
 		Event:         ev,
 	}
 }

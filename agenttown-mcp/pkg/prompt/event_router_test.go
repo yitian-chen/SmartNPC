@@ -35,11 +35,14 @@ func TestBuildRouterPrompt_Segments(t *testing.T) {
 		PhysicalLine:  "物理状态：电量：中等、疲劳度：精神饱满。",
 		Relationships: "- 与 K-03：熟悉度 12、好感 8（互动 3 次）",
 		CurrentAction: "InteractSmartObject(workbench/assemble)，已执行约 47 分钟（来源：tactical）",
+		WorldOverview: "小镇以机器人劳作为核心：物流转运、车间生产、废料回收构成生产循环……",
 		Event:         routerTestEvent(7),
 	}
 	sys := BuildRouterSystem(in)
 	for _, want := range []string{
 		"你是 NPC 阿静 的事件路由模块",
+		"【世界背景】\n小镇以机器人劳作为核心",
+		"【生产工作流】",
 		"档案管理员，性格细腻",
 		"- 与 K-03：熟悉度 12",
 	} {
@@ -65,14 +68,18 @@ func TestBuildRouterPrompt_Segments(t *testing.T) {
 		}
 	}
 
-	// 空可选段 + 空闲：降级占位、不残留段头。
+	// 空可选段 + 空闲：降级占位、不残留段头（无 KB 时世界背景省略，
+	// 生产工作流是常量恒在）。
 	minimalIn := RouterInput{AgentID: "H-01", TimeOfDay: "09:00", Zone: "z", Event: routerTestEvent(3)}
 	minimalSys := BuildRouterSystem(minimalIn)
 	if !strings.Contains(minimalSys, "你是 NPC H-01 的事件路由模块") || !strings.Contains(minimalSys, "（无角色信息）") {
 		t.Errorf("minimal system prompt missing identity placeholders:\n%s", minimalSys)
 	}
-	if strings.Contains(minimalSys, "【人际关系】") {
-		t.Errorf("minimal system prompt should omit empty relationships:\n%s", minimalSys)
+	if !strings.Contains(minimalSys, "【生产工作流】") {
+		t.Errorf("minimal system prompt should always carry the workflow module:\n%s", minimalSys)
+	}
+	if strings.Contains(minimalSys, "【世界背景】") || strings.Contains(minimalSys, "【人际关系】") {
+		t.Errorf("minimal system prompt should omit empty world/relationships:\n%s", minimalSys)
 	}
 	minimalUser := BuildRouterPrompt(minimalIn)
 	for _, want := range []string{"NPC H-01 收到一条世界事件", "无（空闲）"} {
