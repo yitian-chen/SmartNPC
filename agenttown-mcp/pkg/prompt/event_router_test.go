@@ -21,9 +21,10 @@ func routerTestEvent(severity int) protocol.WorldEventPayload {
 	}
 }
 
-// TestBuildRouterPrompt_Segments verifies the prompt carries the judgment
-// inputs the design doc demands (§4.3): persona, relationships, current
-// action, event facts — and that optional segments collapse cleanly.
+// TestBuildRouterPrompt_Segments verifies the message split: the system
+// message carries the mechanism + per-agent judgment identity (persona,
+// relationships — §4.3 输入), while the user message carries only per-call
+// data (state, action, event). Optional segments collapse cleanly.
 func TestBuildRouterPrompt_Segments(t *testing.T) {
 	in := RouterInput{
 		AgentID:       "H-03",
@@ -36,30 +37,51 @@ func TestBuildRouterPrompt_Segments(t *testing.T) {
 		CurrentAction: "InteractSmartObject(workbench/assemble)，已执行约 47 分钟（来源：tactical）",
 		Event:         routerTestEvent(7),
 	}
-	out := BuildRouterPrompt(in)
+	sys := BuildRouterSystem(in)
 	for _, want := range []string{
-		"NPC 阿静 收到一条世界事件",
+		"你是 NPC 阿静 的事件路由模块",
 		"档案管理员，性格细腻",
 		"- 与 K-03：熟悉度 12",
+	} {
+		if !strings.Contains(sys, want) {
+			t.Errorf("system prompt missing %q:\n%s", want, sys)
+		}
+	}
+
+	user := BuildRouterPrompt(in)
+	for _, want := range []string{
+		"NPC 阿静 收到一条世界事件",
 		"已执行约 47 分钟",
 		"世界事件：发生故障：K-03 关节锁死，需要救援（主体 K-03，客观严重度 7",
 	} {
-		if !strings.Contains(out, want) {
-			t.Errorf("prompt missing %q:\n%s", want, out)
+		if !strings.Contains(user, want) {
+			t.Errorf("user prompt missing %q:\n%s", want, user)
+		}
+	}
+	// 身份段不进 user 消息（已迁 system）。
+	for _, banned := range []string{"【你的角色】", "【人际关系】"} {
+		if strings.Contains(user, banned) {
+			t.Errorf("user prompt must not carry %q (moved to system):\n%s", banned, user)
 		}
 	}
 
 	// 空可选段 + 空闲：降级占位、不残留段头。
-	minimal := BuildRouterPrompt(RouterInput{AgentID: "H-01", TimeOfDay: "09:00", Zone: "z", Event: routerTestEvent(3)})
-	for _, want := range []string{"NPC H-01 收到一条世界事件", "（无角色信息）", "无（空闲）"} {
-		if !strings.Contains(minimal, want) {
-			t.Errorf("minimal prompt missing %q:\n%s", want, minimal)
+	minimalIn := RouterInput{AgentID: "H-01", TimeOfDay: "09:00", Zone: "z", Event: routerTestEvent(3)}
+	minimalSys := BuildRouterSystem(minimalIn)
+	if !strings.Contains(minimalSys, "你是 NPC H-01 的事件路由模块") || !strings.Contains(minimalSys, "（无角色信息）") {
+		t.Errorf("minimal system prompt missing identity placeholders:\n%s", minimalSys)
+	}
+	if strings.Contains(minimalSys, "【人际关系】") {
+		t.Errorf("minimal system prompt should omit empty relationships:\n%s", minimalSys)
+	}
+	minimalUser := BuildRouterPrompt(minimalIn)
+	for _, want := range []string{"NPC H-01 收到一条世界事件", "无（空闲）"} {
+		if !strings.Contains(minimalUser, want) {
+			t.Errorf("minimal user prompt missing %q:\n%s", want, minimalUser)
 		}
 	}
-	for _, banned := range []string{"【人际关系】", "【物理状态】"} {
-		if strings.Contains(minimal, banned) {
-			t.Errorf("minimal prompt should omit empty segment %q:\n%s", banned, minimal)
-		}
+	if strings.Contains(minimalUser, "【物理状态】") {
+		t.Errorf("minimal user prompt should omit empty physical segment:\n%s", minimalUser)
 	}
 }
 
@@ -85,9 +107,9 @@ func TestRouterSystemPrompt_Contract(t *testing.T) {
 func TestParseRouterDecision_FaultTolerance(t *testing.T) {
 	fallbacks := []string{
 		"not json at all",
-		`{"severity": 5}`,                          // missing interrupt → zero value false... but explicit check below
-		``,                                          // empty
-		`{"interrupt": "yes", "severity": 5}`,       // wrong type → parse error → fallback
+		`{"severity": 5}`,                     // missing interrupt → zero value false... but explicit check below
+		``,                                    // empty
+		`{"interrupt": "yes", "severity": 5}`, // wrong type → parse error → fallback
 		`前置说明 {"interrupt": false} 后置散文`, // prose around JSON is fine
 	}
 	for _, raw := range fallbacks {

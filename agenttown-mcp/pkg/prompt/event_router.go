@@ -46,8 +46,9 @@ type RouterInput struct {
 }
 
 // RouterSystemPrompt is the router's system message: mechanism only (the
-// single question, the cost asymmetry, JSON shape). Static across agents
-// and calls → cacheable. Per-call data lives in the user message.
+// single question, the cost asymmetry, JSON shape). Static across calls →
+// cacheable. BuildRouterSystem appends the per-agent judgment identity
+// (persona + relationships), which changes rarely within a day.
 const RouterSystemPrompt = `你是小镇居民 NPC 的事件路由模块。世界发生了一件事，正在推送给该 NPC。你只回答一个问题：要不要打断 NPC 手上正在做的事？
 
 【只有两种结论】
@@ -65,16 +66,43 @@ const RouterSystemPrompt = `你是小镇居民 NPC 的事件路由模块。世�
 
 其中 severity 是你评估的"对该 NPC 的主观紧急度"（0-10），reason 说明关键依据（如关系、距离、性格）。`
 
-// RouterUserTemplate is the router's user message template.
-const RouterUserTemplate = `NPC %s 收到一条世界事件，请裁决是否打断当前行动。
+// BuildRouterSystem constructs the router's system message: the static
+// mechanism text plus the per-agent judgment identity (【你的角色】 +
+// 【人际关系】). Identity lives in the system message (not the user
+// message) so the user message carries only what changes per event —
+// state, action, event — keeping the per-call prefix minimal.
+func BuildRouterSystem(in RouterInput) string {
+	agentName := in.AgentName
+	if agentName == "" {
+		agentName = in.AgentID
+	}
+	agentRole := in.AgentRole
+	if agentRole == "（无角色信息）" || agentRole == "" {
+		agentRole = "（无角色信息）"
+	}
+	var sb strings.Builder
+	sb.WriteString(RouterSystemPrompt)
+	sb.WriteString("\n\n")
+	fmt.Fprintf(&sb, "你是 NPC %s 的事件路由模块。判断时的角色与关系背景如下：\n\n", agentName)
+	sb.WriteString("【你的角色】\n")
+	sb.WriteString(agentRole)
+	sb.WriteString("\n")
+	if in.Relationships != "" {
+		sb.WriteString("\n【人际关系】\n")
+		sb.WriteString(in.Relationships)
+		sb.WriteString("\n")
+	}
+	return sb.String()
+}
 
-【你的角色】
-%s
+// RouterUserTemplate is the router's user message template. Per-call data
+// only: realtime state, in-flight action, the event.
+const RouterUserTemplate = `NPC %s 收到一条世界事件，请裁决是否打断当前行动。
 
 【当前状态】
 游戏时间：%s
 位置：%s
-%s%s
+%s
 【当前动作】
 %s
 
@@ -84,14 +112,13 @@ const RouterUserTemplate = `NPC %s 收到一条世界事件，请裁决是否打
 请给出你的裁决。`
 
 // BuildRouterPrompt constructs the router's user message. Pure function.
+// Per-call data only (state / action / event); the per-agent identity
+// (persona + relationships) goes into the system message — see
+// BuildRouterSystem.
 func BuildRouterPrompt(in RouterInput) string {
 	agentName := in.AgentName
 	if agentName == "" {
 		agentName = in.AgentID
-	}
-	agentRole := in.AgentRole
-	if agentRole == "" {
-		agentRole = "（无角色信息）"
 	}
 	action := in.CurrentAction
 	if action == "" {
@@ -101,17 +128,11 @@ func BuildRouterPrompt(in RouterInput) string {
 	if in.PhysicalLine != "" {
 		physicalSeg = in.PhysicalLine + "\n"
 	}
-	relSeg := ""
-	if in.Relationships != "" {
-		relSeg = "【人际关系】\n" + in.Relationships + "\n"
-	}
 	return fmt.Sprintf(RouterUserTemplate,
 		agentName,
-		agentRole,
 		in.TimeOfDay,
 		in.Zone,
 		physicalSeg,
-		relSeg,
 		action,
 		FormatWorldEvent(in.Event),
 	)

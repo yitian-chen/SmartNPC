@@ -84,8 +84,9 @@ func (r *eventRouter) route(ctx context.Context, agentID string, ev protocol.Wor
 	defer cancel()
 
 	in := r.buildInput(agentID, ac, ev)
+	system := prompt.BuildRouterSystem(in)
 	user := prompt.BuildRouterPrompt(in)
-	resp, err := hc.SendWithSummary(routerCtx, prompt.RouterSystemPrompt, user)
+	resp, err := hc.SendWithSummary(routerCtx, system, user)
 	if err != nil {
 		// 路由失败 → 保持入队（保守）。事件已在接收路径入队，无需补偿。
 		r.logger.Info("[事件路由] 裁决调用失败，按入队处理（保守）",
