@@ -83,7 +83,7 @@ Agent 侧正在从「轮询感知」演进为「**事件驱动**」：UE 主动�
 
 ## 三、事件类别与 data 结构
 
-六大类别。`event_type` 为推荐枚举，UE 可按实现补充，但 **category 必须落在这六类之一**（Agent 侧按 category 走对应处理分支）。
+七大类别。`event_type` 为推荐枚举，UE 可按实现补充，但 **category 必须落在这七类之一**（Agent 侧按 category 走对应处理分支）。
 
 ### 3.1 physical_threshold（物理跨阈值）
 
@@ -163,9 +163,36 @@ Director 注入的故障、环境事件、剧情事件。来源：Director / 调
 | `environment_change` | 环境变化（天气、停水停电） | `{"description": "..."}` |
 | `director_directive` | 剧情指令（一般带 force） | `{"description": "..."}` |
 
-### 3.6 force 类（强制，跨类别）
+### 3.6 player_interaction（玩家互动事件）
 
-带 `force: true` 的事件属于硬保证通道，**category 不限**（可以是 physical_threshold，也可以是 world）。典型来源：
+真实玩家对该 NPC 的主动行为，或战斗状态的变化。玩家行为与 NPC 事件有本质区别——**玩家的意图不可预测、不可由系统裁决**，因此被攻击/被瞄准这类直接威胁**建议带 force**，其余（脱离战斗、被注视、被互动）交路由判。
+
+| event_type | 说明 | 建议标记 | data |
+|------------|------|----------|------|
+| `player_attacked` | 被玩家攻击 | force=true | `{"attacker": "player_1", "damage": 20, "damage_type": "physical"}` |
+| `player_targeted` | 被玩家瞄准/锁定 | force=true | `{"attacker": "player_1"}` |
+| `combat_exit` | 脱离战斗（威胁消失） | force=false | `{"attacker": "player_1", "outcome": "escaped"}` |
+| `player_interact` | 玩家对 NPC 发起交互（对话/给物品等） | force=false | `{"player": "player_1", "action": "greet", "detail": "..."}` |
+| `player_watching` | 玩家注视该 NPC 超过一定时长 | force=false | `{"player": "player_1", "duration_ms": 5000}` |
+
+```json
+"data": { "attacker": "player_1", "damage": 20, "damage_type": "physical" }
+```
+
+| data 字段 | 类型 | 说明 |
+|-----------|------|------|
+| attacker / player | string | 玩家标识（单机统一 `"player_1"`，预留多人扩展） |
+| damage | number | 受到的伤害值（attacked 类） |
+| damage_type | string | 伤害类型（physical / energy / ...） |
+| outcome | string | combat_exit 的结局（`escaped` 逃逸 / `defeated` 击败对方 / `disengaged` 对方脱离） |
+| action | string | player_interact 的交互类型（greet / give_item / push / ...） |
+| detail | string | 交互附加信息 |
+
+> 与 3.7 节 force 类的 `attacked` 语义衔接——被玩家攻击是 `attacked` 的一个具体来源。UE 实现时可二选一：统一推 `player_attacked`（推荐，category 明确），或按通用 `attacked` 推、在 data 里注明 attacker 为玩家。
+
+### 3.7 force 类（强制，跨类别）
+
+带 `force: true` 的事件属于硬保证通道，**category 不限**（可以是 physical_threshold，也可以是 world 或 player_interaction）。典型来源：
 
 | event_type | 说明 | data |
 |------------|------|------|
@@ -181,7 +208,7 @@ Director 注入的故障、环境事件、剧情事件。来源：Director / 调
 1. **零 LLM、零路由**：从消息到达到动作中断，中间无任何模型调用与权衡，延迟微秒级。
 2. **不可否决**：Agent 侧不能有任何逻辑能拒绝它——没有阈值、没有预算、没有"最近打断太频繁"的抑制。UE 侧打标即生效。
 3. **打断后的动作**：复用现有 `PreemptForDialogue` 优雅中断路径（放下工具、起身），而非硬切动画。
-4. **典型语义**：被攻击、死亡、剧情强制、Director 高优先级注入、调试命令。
+4. **典型语义**：被攻击（含被玩家攻击）、死亡、剧情强制、Director 高优先级注入、调试命令。
 
 **打标责任在 UE 侧硬编码**，不依赖配置或模型判断。
 
@@ -276,7 +303,9 @@ UE 按本协议推送后，Agent 侧保证：
 }
 ```
 
-### 8.3 剧情强制指令（force）
+### 8.3 玩家互动事件：被玩家攻击（force）与脱离战斗
+
+被玩家攻击——force 硬保证通道，Agent 收到即打断当前动作：
 
 ```json
 {
@@ -288,8 +317,8 @@ UE 按本协议推送后，Agent 侧保证：
   "agent_id": "H-03",
   "payload": {
     "event_id": "evt_20260917_000044",
-    "category": "world",
-    "event_type": "plot_command",
+    "category": "player_interaction",
+    "event_type": "player_attacked",
     "force": true,
     "severity": 10,
     "subject": "H-03",
@@ -297,7 +326,37 @@ UE 按本协议推送后，Agent 侧保证：
     "location": "central_plaza",
     "occurred_at": 1719456410000,
     "data": {
-      "description": "立即前往档案馆参加紧急会议"
+      "attacker": "player_1",
+      "damage": 20,
+      "damage_type": "physical"
+    }
+  }
+}
+```
+
+战斗结束、威胁消失——非 force，交路由判（结合性格：胆小的 NPC 可能判紧急立刻撤离，沉着的可能入队继续手上的事）：
+
+```json
+{
+  "version": "1.0",
+  "msg_id": "uuid-d",
+  "seq": 4004,
+  "timestamp": 1719456460000,
+  "type": "world_event",
+  "agent_id": "H-03",
+  "payload": {
+    "event_id": "evt_20260917_000045",
+    "category": "player_interaction",
+    "event_type": "combat_exit",
+    "force": false,
+    "severity": 6,
+    "subject": "H-03",
+    "game_time": "D12 12:01:30",
+    "location": "central_plaza",
+    "occurred_at": 1719456460000,
+    "data": {
+      "attacker": "player_1",
+      "outcome": "disengaged"
     }
   }
 }
