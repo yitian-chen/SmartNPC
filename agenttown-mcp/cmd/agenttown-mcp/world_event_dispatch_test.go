@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -279,5 +281,158 @@ func TestForceInterruptReplan_WaitsForInFlightReplanTimesOut(t *testing.T) {
 	}
 	if hint := ac.as.ReplanHint(); !strings.Contains(hint, "【强制打断】") {
 		t.Fatalf("hint must survive the timeout path: %q", hint)
+	}
+}
+
+// ─── /debug/event 注入端点测试（P4-13）────────────────────────
+
+// postDebugEvent POSTs a JSON body through handleDebugEvent and decodes the
+// response. inject is the runtime's real dispatch entry, so a passing test
+// exercises the same path a UE message would take.
+func postDebugEvent(t *testing.T, rt *Runtime, body string) (int, debugEventResponse) {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/debug/event", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	handleDebugEvent(testLogger(), rt.lookupAgent, rt.handleWorldEvent, rec, req)
+	var resp debugEventResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v (body=%s)", err, rec.Body.String())
+	}
+	return rec.Code, resp
+}
+
+// seedPerception installs a perception at D12 10:47:03 so game-time
+// autofill has an authoritative source.
+func seedPerception(t *testing.T, ac *agentContext) {
+	t.Helper()
+	if _, err := ac.as.SetPerception(mustMarshalBarPerception(t, 11, 38823, 11*86400+38823)); err != nil {
+		t.Fatalf("seed perception: %v", err)
+	}
+}
+
+// TestHandleDebugEvent_NonForceAutofillsAndEnqueues verifies the endpoint
+// feeds a complete event through the real dispatch: server-side autofill of
+// event_id (evt_debug_*，与 UE id 空间隔离) / game_time (当前游戏时间) /
+// occurred_at / data，then enqueues for the safe-point drain.
+func TestHandleDebugEvent_NonForceAutofillsAndEnqueues(t *testing.T) {
+	rt, ft, ac := newWorldEventTestRuntime(t)
+	seedPerception(t, ac)
+
+	code, resp := postDebugEvent(t, rt, `{
+		"agent_id": "H-01",
+		"event": {"category": "world", "event_type": "malfunction", "severity": 7}
+	}`)
+	if code != http.StatusOK || !resp.OK {
+		t.Fatalf("code=%d resp=%+v, want 200/ok", code, resp)
+	}
+	if !strings.HasPrefix(resp.EventID, "evt_debug_") {
+		t.Fatalf("event_id should be auto-generated with evt_debug_ prefix, got %q", resp.EventID)
+	}
+	if resp.GameTime != "D12 10:47:03" {
+		t.Fatalf("game_time should autofill from the agent's perception, got %q", resp.GameTime)
+	}
+	if resp.QueueLen != 1 {
+		t.Fatalf("queue_len = %d, want 1", resp.QueueLen)
+	}
+	// 入队事件的字段经 autofill 后完整（drain 检查 occurred_at/data）。
+	events := ac.as.DrainWorldEvents()
+	if len(events) != 1 {
+		t.Fatalf("drained %d events, want 1", len(events))
+	}
+	if events[0].OccurredAt == 0 {
+		t.Fatalf("occurred_at should autofill to now")
+	}
+	if string(events[0].Data) != "{}" {
+		t.Fatalf("data should default to empty object, got %s", events[0].Data)
+	}
+	if events[0].EventID != resp.EventID {
+		t.Fatalf("enqueued id %q != response id %q", events[0].EventID, resp.EventID)
+	}
+	if stops := stoppedActions(ft); len(stops) != 0 {
+		t.Fatalf("non-force injection must not stop anything, got %v", stops)
+	}
+}
+
+// TestHandleDebugEvent_ForceStopsInFlight verifies a force injection runs
+// the full hard-guarantee path: synchronous stop + async replan failure
+// fallback (queue dropped, hint injected).
+func TestHandleDebugEvent_ForceStopsInFlight(t *testing.T) {
+	rt, ft, ac := newWorldEventTestRuntime(t)
+	seedPerception(t, ac)
+	ac.as.RecordActionStarted("act-1", protocol.CmdWorkShift, nil, agentstate.SourceTactical, "")
+	ac.as.RefillQueue([]agentstate.PlannedAction{
+		{Action: "InteractSmartObject", Params: map[string]any{"semantic_group": "workbench"}},
+	}, "09:00-12:00")
+
+	code, resp := postDebugEvent(t, rt, `{
+		"agent_id": "H-01",
+		"event": {"category": "player_interaction", "event_type": "player_attacked",
+			"force": true, "severity": 10,
+			"data": {"attacker": "player_1", "damage": 20, "damage_type": "physical"}}
+	}`)
+	if code != http.StatusOK || !resp.OK || !resp.Force {
+		t.Fatalf("code=%d resp=%+v, want 200/ok/force", code, resp)
+	}
+	if stops := stoppedActions(ft); len(stops) != 1 || stops[0] != "act-1" {
+		t.Fatalf("force injection must stop the in-flight action synchronously, got %v", stops)
+	}
+	waitFor(t, 2*time.Second, func() bool { return ac.as.QueueLen() == 0 && replanIdle(ac) })
+	if hint := ac.as.ReplanHint(); !strings.Contains(hint, "【强制打断】") {
+		t.Fatalf("force hint not injected: %q", hint)
+	}
+}
+
+// TestHandleDebugEvent_RequestValidation covers the error paths: method,
+// JSON, agent_id, unknown agent, category, event_type.
+func TestHandleDebugEvent_RequestValidation(t *testing.T) {
+	rt, _, _ := newWorldEventTestRuntime(t)
+
+	cases := []struct {
+		name string
+		req  *http.Request
+		want int
+	}{
+		{"method", httptest.NewRequest(http.MethodGet, "/debug/event", nil), http.StatusMethodNotAllowed},
+		{"bad json", httptest.NewRequest(http.MethodPost, "/debug/event", strings.NewReader(`{nope`)), http.StatusBadRequest},
+		{"missing agent_id", httptest.NewRequest(http.MethodPost, "/debug/event", strings.NewReader(`{"event":{"category":"world","event_type":"malfunction"}}`)), http.StatusBadRequest},
+		{"unknown agent", httptest.NewRequest(http.MethodPost, "/debug/event", strings.NewReader(`{"agent_id":"H-99","event":{"category":"world","event_type":"malfunction"}}`)), http.StatusBadRequest},
+		{"missing category", httptest.NewRequest(http.MethodPost, "/debug/event", strings.NewReader(`{"agent_id":"H-01","event":{"event_type":"malfunction"}}`)), http.StatusBadRequest},
+		{"missing event_type", httptest.NewRequest(http.MethodPost, "/debug/event", strings.NewReader(`{"agent_id":"H-01","event":{"category":"world"}}`)), http.StatusBadRequest},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			handleDebugEvent(testLogger(), rt.lookupAgent, rt.handleWorldEvent, rec, tc.req)
+			if rec.Code != tc.want {
+				t.Fatalf("code = %d, want %d (body=%s)", rec.Code, tc.want, rec.Body.String())
+			}
+		})
+	}
+}
+
+// TestHandleDebugEvent_ManualModeReportsDropped verifies manual mode is
+// reported honestly: injection succeeds, dispatch drops it by policy.
+func TestHandleDebugEvent_ManualModeReportsDropped(t *testing.T) {
+	rt, ft, ac := newWorldEventTestRuntime(t)
+	rt.autoPlanEnabled = false
+
+	code, resp := postDebugEvent(t, rt, `{
+		"agent_id": "H-01",
+		"event": {"category": "world", "event_type": "malfunction"}
+	}`)
+	if code != http.StatusOK {
+		t.Fatalf("code = %d, want 200 (policy drop is not a client error)", code)
+	}
+	if resp.OK {
+		t.Fatalf("manual mode should report ok=false, got %+v", resp)
+	}
+	if !strings.Contains(resp.Note, "丢弃") {
+		t.Fatalf("note should explain the drop, got %q", resp.Note)
+	}
+	if got := ac.as.WorldEventQueueLen(); got != 0 {
+		t.Fatalf("manual mode must not enqueue, got %d", got)
+	}
+	if stops := stoppedActions(ft); len(stops) != 0 {
+		t.Fatalf("manual mode must not stop anything, got %v", stops)
 	}
 }

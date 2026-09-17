@@ -524,3 +524,83 @@ actions 入队后由 worker 异步逐个下发。每个 action 走 `action_comma
 5. **agent 无感知时仍可分解**：若 agent 尚未上报感知（`latestPerception` 为空），zone/timeOfDay/physical 为空，prompt 仍能构造（buildTacticalPrompt 对 nil 用 0.0），响应 `warning` 字段提示分解质量可能下降。
 
 6. **同步等待分解**：handler 同步等战术层 LLM 分解完成（最长 60s）再返回 actions 列表。LLM 超时返回 502。下发是异步的（`dispatched: false`）。
+
+---
+
+## 七、`/debug/event` 事件注入端点（2026-09 新增）
+
+> 对应代码：`agenttown-mcp/cmd/agenttown-mcp/world_event_dispatch.go` 的 `handleDebugEvent`。
+> 用途：合成 `world_event` 注入事件系统，走**与 UE 上报完全相同的分发入口**（`Runtime.handleWorldEvent`），验证事件驱动链路（force 硬保证打断 / 非 force 入队等安全点 drain）。UE 侧事件推送尚未实现时的主要联调手段；UE 就绪后继续可用（注入只增加入站消息，不干扰 UE 自身推送）。
+
+### 7.1 端点信息
+
+| 项 | 值 |
+|---|---|
+| 路径 | `POST /debug/event` |
+| Content-Type | `application/json` |
+| 认证 | 无（仅联调用） |
+
+### 7.2 请求格式
+
+```json
+{
+  "agent_id": "H-01",
+  "event": {
+    "event_id": "",
+    "category": "player_interaction",
+    "event_type": "player_attacked",
+    "force": true,
+    "severity": 10,
+    "subject": "H-01",
+    "location": "central_plaza",
+    "game_time": "",
+    "data": {"attacker": "player_1", "damage": 20, "damage_type": "physical"}
+  }
+}
+```
+
+- `event` 是完整的 `WorldEventPayload`（六类别枚举见 `docs/AgentTown_WorldEvent_Protocol.md` §三）
+- 服务端自动补齐缺省字段：`event_id`（`evt_debug_<日期>_<序号>` 前缀，与 UE 生成的 id 空间隔离、去重互不干扰）、`occurred_at`（当前时间）、`game_time`（该 NPC 当前权威游戏时间）、`data`（空对象）
+- `force=true`：硬保证通道——同步打断在途动作（微秒级，日志 `[world_event/force]`）+ 异步带事件重规划
+- `force=false`：入队（`[world_event] 已入队` 日志），等安全点 drain 交给战术层
+
+### 7.3 curl 示例
+
+```bash
+# 被玩家攻击（force，立即打断 + 重规划）
+curl -X POST http://localhost:8760/debug/event \
+  -H "Content-Type: application/json" \
+  -d '{"agent_id":"H-01","event":{"category":"player_interaction","event_type":"player_attacked","force":true,"severity":10,"data":{"attacker":"player_1","damage":20,"damage_type":"physical"}}}'
+
+# K-03 故障广播（非 force，入队）
+curl -X POST http://localhost:8760/debug/event \
+  -H "Content-Type: application/json" \
+  -d '{"agent_id":"H-01","event":{"category":"world","event_type":"malfunction","severity":7,"subject":"K-03","data":{"target":"K-03","description":"K-03 关节锁死，需要救援"}}}'
+
+# 能量跌破 20（非 force）
+curl -X POST http://localhost:8760/debug/event \
+  -H "Content-Type: application/json" \
+  -d '{"agent_id":"H-01","event":{"category":"physical_threshold","event_type":"energy_below","severity":4,"data":{"attribute":"energy","value":19.8,"threshold":20,"direction":"below"}}}'
+```
+
+响应：
+
+```json
+{
+  "ok": true,
+  "event_id": "evt_debug_20260917_000001",
+  "category": "player_interaction",
+  "event_type": "player_attacked",
+  "force": true,
+  "severity": 10,
+  "game_time": "D12 12:00:03",
+  "queue_len": 0,
+  "note": "force 硬保证：在途动作已同步打断，重规划异步进行（见 [world_event/force] 日志）"
+}
+```
+
+### 7.4 注意事项
+
+1. **只注入，不直发**：本端点只合成入站消息走分发入口，不直接向 UE 发任何东西（force 事件触发的 stop_action 是事件系统本身的正常后果）。
+2. **手动模式**：`--auto-plan=false` 时事件被策略丢弃，响应 `ok:false` + note 说明。
+3. **浏览器控制台**：`/debug/` 的"事件下发" tab 提供 14 个快速预设（被玩家攻击/被瞄准/脱离战斗/玩家交互/K-03 故障广播/剧情指令/环境变化/能量跌破/疲劳升破/进入新区域/NPC 靠近/对话邀请/设施被占用/动作失败）+ 自定义空白表单；预设填充后可任意改写再下发。

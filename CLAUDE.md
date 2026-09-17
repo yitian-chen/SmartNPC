@@ -229,6 +229,7 @@ MCP 启动后暴露 HTTP debug 端点（dev 端口 `:8770`，stable `:8760`，�
 | `GET /debug/` | GET | 浏览器控制台 UI（单页 HTML，`//go:embed` 嵌入） |
 | `POST /debug/action` | POST | 直接下发单个 action_command 到 UE（单步调试） |
 | `POST /debug/schedule` | POST | 注入一条 schedule 到战术层，立即分解为 action 序列入队 |
+| `POST /debug/event` | POST | 合成 world_event 注入事件系统（走与 UE 上报相同的分发入口；force 打断/入队全链路联调） |
 | `GET /debug/kb` | GET | 返回 world_kb JSON（zones/objects） |
 | `GET /debug/cap` | GET | 返回 capability_registry 当前状态（global + per-agent cmd） |
 | `GET /debug/agents` | GET | 返回已注册 agent ID 列表（供前端 agent 下拉） |
@@ -257,11 +258,32 @@ MCP 启动后暴露 HTTP debug 端点（dev 端口 `:8770`，stable `:8760`，�
 
 详见 `docs/DebugAction_Tool.md`。
 
+### `/debug/event`（2026-09 新增，事件驱动 P4-13）
+
+合成 `world_event` 注入事件系统，**走与 UE 上报完全相同的分发入口**（`Runtime.handleWorldEvent`）——force=true 走硬保证通道（同步 stop 在途动作 + 异步重规划），force=false 入队等安全点 drain。只注入入站消息，不直接向 UE 发任何东西，与 UE 自身推事件不冲突（注入事件的 event_id 用 `evt_debug_` 前缀与 UE 的 id 空间隔离）。
+
+请求体（`event` 为完整 `WorldEventPayload`，缺省字段服务端自动补齐：`event_id`（evt_debug_*）、`occurred_at`（now）、`game_time`（该 NPC 当前权威游戏时间）、`data`（空对象））：
+```json
+{
+  "agent_id": "H-01",
+  "event": {
+    "category": "player_interaction",
+    "event_type": "player_attacked",
+    "force": true,
+    "severity": 10,
+    "data": {"attacker": "player_1", "damage": 20, "damage_type": "physical"}
+  }
+}
+```
+
+`category`/`event_type` 六类别枚举见 `docs/AgentTown_WorldEvent_Protocol.md`。浏览器控制台"事件下发" tab 提供 14 个快速预设（被玩家攻击/脱离战斗/K-03 故障广播/能量跌破等）+ 自定义表单。
+
 ### 浏览器 UI
 
 `/debug/` 单页控制台，多面板：
 - **单 Action**：填 cmd + params，直接下发 UE
 - **Schedule 注入**：填 schedule 文本，触发战术层分解
+- **事件下发**：快速预设（被玩家攻击/脱离战斗等 14 项）+ 自定义 world_event，走事件系统分发入口
 - **当日 schedule**：右侧面板展示 dailyPlan（时段 + goal + 当前高亮）
 - **战术层分解情况**：全宽面板展示每个 NPC 当前时段 goal + 在途 action（含全部参数）+ 待执行队列（每 5s 刷新）
 - **MCP 日志**：全宽面板，按 level 筛选的环形日志
@@ -315,6 +337,7 @@ type Envelope struct {
 | `error` | 双向 | 错误上报 | 异常情况 |
 | `capability_registry` | UE→Agent | NPC 能力声明（哪些 cmd 可执行） | UE 连接后 / 能力变更时 |
 | `world_kb` | UE→Agent | 世界知识库下发（generated + authored） | UE 连接后（首个 `agent_registered` 之前） |
+| `world_event` | UE→Agent | 世界事件上传（事件驱动反应层的判定输入；force=硬保证打断，非 force=入队/路由） | 事件发生那一刻（边沿触发），见 `docs/AgentTown_WorldEvent_Protocol.md` |
 
 ### 动作生命周期
 

@@ -421,6 +421,7 @@
     <div class="tabs">
       <button class="tab active" id="tab-btn-action" onclick="switchTab('action')">单 Action</button>
       <button class="tab" id="tab-btn-schedule" onclick="switchTab('schedule')">Schedule 注入</button>
+      <button class="tab" id="tab-btn-event" onclick="switchTab('event')">事件下发</button>
     </div>
 
     <div id="tab-action">
@@ -497,6 +498,74 @@
         </details>
       </div>
     </div><!-- /tab-schedule -->
+
+    <div id="tab-event" style="display:none">
+      <div class="field">
+        <label for="event-agent">agent_id <span class="req">*</span></label>
+        <select id="event-agent"></select>
+        <div class="hint">接收事件的 NPC（UE 广播 = 对每个 NPC 各发一条；此处单发）</div>
+      </div>
+
+      <div class="field">
+        <label for="event-preset">快速预设</label>
+        <select id="event-preset" onchange="applyEventPreset()"></select>
+        <div class="hint">预设只填充表单，下发前可任意改写（即自定义事件）</div>
+      </div>
+
+      <div class="field">
+        <label for="event-category">category <span class="req">*</span></label>
+        <input type="text" id="event-category" placeholder="physical_threshold / spatial / social / action_anomaly / world / player_interaction" />
+      </div>
+
+      <div class="field">
+        <label for="event-type">event_type <span class="req">*</span></label>
+        <input type="text" id="event-type" placeholder="player_attacked" />
+      </div>
+
+      <div class="field">
+        <label for="event-severity">severity（0~10，客观严重度）</label>
+        <input type="number" id="event-severity" min="0" max="10" value="5" />
+      </div>
+
+      <div class="field">
+        <label for="event-subject">subject（事件主体，可选）</label>
+        <input type="text" id="event-subject" placeholder="谁的能量 / 谁在搭话 / 谁故障" />
+      </div>
+
+      <div class="field">
+        <label for="event-location">location（可选）</label>
+        <input type="text" id="event-location" placeholder="zone id 或物体 id" />
+      </div>
+
+      <div class="field">
+        <label for="event-game-time">game_time（可选）</label>
+        <input type="text" id="event-game-time" placeholder="留空自动取该 NPC 当前游戏时间" />
+      </div>
+
+      <div class="field">
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:normal;">
+          <input type="checkbox" id="event-force" style="width:auto;margin:0;" />
+          <span>force — 硬保证通道：立即打断在途动作，不走路由、不可否决</span>
+        </label>
+        <div class="hint">勾选后走 [world_event/force] 日志链路；不勾选则入队等安全点 drain</div>
+      </div>
+
+      <div class="field">
+        <label for="event-data">data（JSON，类别专属载荷）</label>
+        <textarea id="event-data" rows="3" placeholder='{"attacker":"player_1","damage":20}'></textarea>
+      </div>
+
+      <div class="button-row">
+        <button id="event-submit-btn" onclick="submitEvent()">下发事件</button>
+      </div>
+
+      <div class="curl-preview">
+        <details>
+          <summary>查看等价 curl 命令</summary>
+          <pre id="event-curl-preview" style="margin-top:8px;"></pre>
+        </details>
+      </div>
+    </div><!-- /tab-event -->
   </section>
 
   <!-- 右侧上：当日 schedule -->
@@ -581,6 +650,8 @@ async function init() {
   await Promise.all([loadStatus(), loadKB(), loadCap(), loadTactical(), loadLogs(), loadPlan(), loadAgents(), loadLLMMetrics()]);
   onCmdChange();
   updateSchedCurlPreview();
+  initEventPresetDropdown();
+  applyEventPreset();
   // 定时刷新状态徽章 + capability + 战术层分解 + MCP 日志 + schedule + agent 列表 + LLM 指标（每 5s）
   setInterval(loadStatus, 5000);
   setInterval(loadCap, 5000);
@@ -846,6 +917,14 @@ function rebuildAgentDropdowns() {
     schedSel.innerHTML = ids.map(a => `<option value="${a}" ${a === cur ? 'selected' : ''}>${a}</option>`).join('');
     schedSel.value = cur;
     updateSchedCurlPreview();
+  }
+  // event-agent（事件下发 tab）
+  const evSel = document.getElementById('event-agent');
+  if (evSel) {
+    const cur = ids.includes(evSel.value) ? evSel.value : ids[0];
+    evSel.innerHTML = ids.map(a => `<option value="${a}" ${a === cur ? 'selected' : ''}>${a}</option>`).join('');
+    evSel.value = cur;
+    updateEventCurlPreview();
   }
 }
 
@@ -1201,8 +1280,10 @@ async function submitAction() {
 function switchTab(which) {
   document.getElementById('tab-action').style.display = (which === 'action') ? '' : 'none';
   document.getElementById('tab-schedule').style.display = (which === 'schedule') ? '' : 'none';
+  document.getElementById('tab-event').style.display = (which === 'event') ? '' : 'none';
   document.getElementById('tab-btn-action').classList.toggle('active', which === 'action');
   document.getElementById('tab-btn-schedule').classList.toggle('active', which === 'schedule');
+  document.getElementById('tab-btn-event').classList.toggle('active', which === 'event');
 }
 
 // ─── schedule 提交 ───────────────────────────────────────
@@ -1270,6 +1351,132 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 });
 
+// ─── 事件下发（world_event 注入，/debug/event）──────────────
+// 预设只填充表单；下发前可任意改写 = 自定义事件。
+// subject: '@agent' 表示填充为当前选择的接收 agent。
+const EVENT_PRESETS = [
+  {name:'被玩家攻击（force）', category:'player_interaction', event_type:'player_attacked', force:true, severity:10, subject:'@agent', data:{attacker:'player_1', damage:20, damage_type:'physical'}},
+  {name:'被玩家瞄准（force）', category:'player_interaction', event_type:'player_targeted', force:true, severity:8, subject:'@agent', data:{attacker:'player_1'}},
+  {name:'脱离战斗', category:'player_interaction', event_type:'combat_exit', severity:3, subject:'@agent', data:{attacker:'player_1', outcome:'escaped'}},
+  {name:'玩家交互（greet）', category:'player_interaction', event_type:'player_interact', severity:3, subject:'@agent', data:{player:'player_1', action:'greet', detail:'挥手打招呼'}},
+  {name:'NPC 故障广播（K-03）', category:'world', event_type:'malfunction', severity:7, subject:'K-03', data:{target:'K-03', description:'K-03 关节锁死，需要救援'}},
+  {name:'剧情指令（force）', category:'world', event_type:'director_directive', force:true, severity:9, data:{description:'全员立即前往中央广场集合'}},
+  {name:'环境变化（停电）', category:'world', event_type:'environment_change', severity:4, data:{description:'车间突然停电，照明中断'}},
+  {name:'能量跌破 20', category:'physical_threshold', event_type:'energy_below', severity:4, subject:'@agent', data:{attribute:'energy', value:19.8, threshold:20, direction:'below'}},
+  {name:'疲劳升破 70', category:'physical_threshold', event_type:'fatigue_above', severity:4, subject:'@agent', data:{attribute:'fatigue', value:70.5, threshold:70, direction:'above'}},
+  {name:'进入新区域', category:'spatial', event_type:'zone_enter', severity:1, data:{zone:'central_plaza', from:'main_workshop'}},
+  {name:'有 NPC 靠近', category:'spatial', event_type:'agent_nearby', severity:2, data:{other_agent:'H-02', distance_cm:350}},
+  {name:'对话邀请', category:'social', event_type:'chat_invite_incoming', severity:5, data:{conv_id:'conv_debug_001', from:'H-02', content:'老陈，借个工具？'}},
+  {name:'设施被占用', category:'action_anomaly', event_type:'smartobject_occupied', severity:3, data:{action_id:'act_debug_001', semantic_group:'workbench', occupied_by:'H-02'}},
+  {name:'动作失败', category:'action_anomaly', event_type:'action_failed', severity:3, data:{action_id:'act_debug_001', cmd:'MoveTo', reason:'unreachable'}},
+  {name:'自定义（空白表单）', custom:true},
+];
+
+function initEventPresetDropdown() {
+  const sel = document.getElementById('event-preset');
+  if (!sel) return;
+  sel.innerHTML = EVENT_PRESETS.map((p, i) => `<option value="${i}">${escapeHtml(p.name)}</option>`).join('');
+}
+
+function applyEventPreset() {
+  const sel = document.getElementById('event-preset');
+  if (!sel) return;
+  const p = EVENT_PRESETS[sel.selectedIndex];
+  if (!p) return;
+  if (p.custom) {
+    ['event-category', 'event-type', 'event-subject', 'event-location', 'event-game-time'].forEach(id => { document.getElementById(id).value = ''; });
+    document.getElementById('event-severity').value = 5;
+    document.getElementById('event-force').checked = false;
+    document.getElementById('event-data').value = '';
+  } else {
+    const agent = document.getElementById('event-agent') ? document.getElementById('event-agent').value : '';
+    document.getElementById('event-category').value = p.category;
+    document.getElementById('event-type').value = p.event_type;
+    document.getElementById('event-severity').value = p.severity;
+    document.getElementById('event-force').checked = !!p.force;
+    document.getElementById('event-subject').value = p.subject === '@agent' ? agent : (p.subject || '');
+    document.getElementById('event-location').value = p.location || '';
+    document.getElementById('event-game-time').value = ''; // 留空让后端取当前游戏时间
+    document.getElementById('event-data').value = JSON.stringify(p.data || {}, null, 2);
+  }
+  updateEventCurlPreview();
+}
+
+// collectEventRequest 组装 /debug/event 请求体。data 为非法 JSON 时返回
+// dataErr，由调用方决定提示/标注。
+function collectEventRequest() {
+  let data = {};
+  let dataErr = '';
+  const dataText = document.getElementById('event-data').value.trim();
+  if (dataText) {
+    try { data = JSON.parse(dataText); } catch (e) { dataErr = 'data 不是合法 JSON：' + e.message; }
+  }
+  return {
+    req: {
+      agent_id: document.getElementById('event-agent').value,
+      event: {
+        category: document.getElementById('event-category').value.trim(),
+        event_type: document.getElementById('event-type').value.trim(),
+        force: document.getElementById('event-force').checked,
+        severity: parseInt(document.getElementById('event-severity').value || '0', 10) || 0,
+        subject: document.getElementById('event-subject').value.trim(),
+        location: document.getElementById('event-location').value.trim(),
+        game_time: document.getElementById('event-game-time').value.trim(),
+        data,
+      },
+    },
+    dataErr,
+  };
+}
+
+function updateEventCurlPreview() {
+  const el = document.getElementById('event-curl-preview');
+  if (!el) return;
+  const { req, dataErr } = collectEventRequest();
+  const json = JSON.stringify(req);
+  const base = `${location.protocol}//${location.host}`;
+  const prefix = dataErr ? `# ${dataErr}\n` : '';
+  el.textContent = `${prefix}curl -X POST ${base}/debug/event \\\n  -H "Content-Type: application/json" \\\n  -d '${json}'`;
+}
+
+async function submitEvent() {
+  const btn = document.getElementById('event-submit-btn');
+  const { req, dataErr } = collectEventRequest();
+  if (!req.agent_id) { alert('agent_id 不能为空'); return; }
+  if (!req.event.category || !req.event.event_type) { alert('category 和 event_type 不能为空'); return; }
+  if (dataErr) { alert(dataErr); return; }
+  btn.disabled = true; btn.textContent = '下发中…';
+
+  const t0 = performance.now();
+  let resp, json, err;
+  try {
+    resp = await fetch('/debug/event', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(req),
+    });
+    json = await resp.json();
+  } catch (e) {
+    err = e.toString();
+  }
+  const elapsed = Math.round(performance.now() - t0);
+
+  renderResponse(resp, json, err, elapsed);
+  addHistory('event', req, resp, json, err, elapsed);
+
+  btn.disabled = false; btn.textContent = '下发事件';
+}
+
+// event 表单输入实时更新 curl 预览
+document.addEventListener('DOMContentLoaded', () => {
+  ['event-agent', 'event-category', 'event-type', 'event-severity', 'event-subject', 'event-location', 'event-game-time', 'event-data'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener('input', updateEventCurlPreview);
+  });
+  const evForce = document.getElementById('event-force');
+  if (evForce) evForce.addEventListener('change', updateEventCurlPreview);
+});
+
 function renderResponse(resp, json, err, elapsed) {
   const area = document.getElementById('response-area');
   if (err) {
@@ -1289,6 +1496,8 @@ function renderResponse(resp, json, err, elapsed) {
       ${json && json.accepted ? `<span>accepted: ${json.accepted}</span>` : ''}
       ${json && json.estimated_duration_sec ? `<span>est: ${json.estimated_duration_sec}s</span>` : ''}
       ${json && json.slot ? `<span>slot: ${escapeHtml(json.slot)}</span>` : ''}
+      ${json && json.event_id ? `<span>event_id: ${escapeHtml(json.event_id)}</span>` : ''}
+      ${json && json.force ? `<span style="color:var(--warn);">force</span>` : ''}
       ${json && json.queue_len != null ? `<span>queue: ${json.queue_len}</span>` : ''}
       ${json && json.dispatched === false ? `<span>异步下发</span>` : ''}
       ${json && json.warning ? `<span style="color:var(--warn);">⚠ ${escapeHtml(json.warning)}</span>` : ''}
@@ -1317,9 +1526,11 @@ function renderHistory() {
     const ok = h.resp_status && h.resp_status < 300;
     const statusCls = ok ? 'ok' : 'fail';
     const statusText = h.err ? 'NET ERR' : `HTTP ${h.resp_status}`;
-    // schedule 类型显示 schedule 文本；action 类型显示 cmd + params
+    // schedule 类型显示 schedule 文本；event 类型显示 event_type + category；action 类型显示 cmd + params
     const label = h.type === 'schedule'
       ? `<span class="cmd">schedule</span> ${escapeHtml(h.req.schedule || '')}`
+      : h.type === 'event'
+      ? `<span class="cmd">${escapeHtml((h.req.event && h.req.event.event_type) || 'event')}</span> ${escapeHtml((h.req.event && h.req.event.category) || '')}${(h.req.event && h.req.event.force) ? ' <span style="color:var(--warn);">force</span>' : ''}`
       : `<span class="cmd">${escapeHtml(h.req.cmd)}</span> ${escapeHtml(JSON.stringify(h.req.params))}`;
     return `
       <div class="history-item" onclick="replayHistory(${i})">
@@ -1341,6 +1552,28 @@ function replayHistory(i) {
     const sForce = document.getElementById('sched-force');
     if (sForce) sForce.checked = h.req.force !== false;
     updateSchedCurlPreview();
+    return;
+  }
+  // event 类型：切到事件 tab，回填表单（agent select 可能需要重建）
+  if (h.type === 'event') {
+    switchTab('event');
+    const evSel = document.getElementById('event-agent');
+    if (evSel && h.req.agent_id && !registeredAgents.includes(h.req.agent_id)) {
+      // 历史 agent 不在当前列表（如已下线）：追加为选项，避免回填丢失
+      registeredAgents.push(h.req.agent_id);
+      rebuildAgentDropdowns();
+    }
+    if (evSel) evSel.value = h.req.agent_id || 'H-01';
+    const e = h.req.event || {};
+    document.getElementById('event-category').value = e.category || '';
+    document.getElementById('event-type').value = e.event_type || '';
+    document.getElementById('event-severity').value = (e.severity != null) ? e.severity : 5;
+    document.getElementById('event-force').checked = !!e.force;
+    document.getElementById('event-subject').value = e.subject || '';
+    document.getElementById('event-location').value = e.location || '';
+    document.getElementById('event-game-time').value = e.game_time || '';
+    document.getElementById('event-data').value = (e.data && Object.keys(e.data).length) ? JSON.stringify(e.data, null, 2) : '';
+    updateEventCurlPreview();
     return;
   }
   // action 类型：切到 action tab，回填原有表单

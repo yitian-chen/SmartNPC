@@ -14,8 +14,12 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
+	"math"
+	"net/http"
+	"sync/atomic"
 	"time"
 
 	"github.com/AgentTown/agenttown-mcp/contract"
@@ -37,19 +41,22 @@ const forceReplanPollInterval = 100 * time.Millisecond
 // LLM call plus margin).
 var forceReplanWaitLimit = tacticalCallTimeout + 10*time.Second
 
-// handleWorldEvent dispatches one inbound world_event message.
-func (rt *Runtime) handleWorldEvent(agentID string, ev protocol.WorldEventPayload) {
+// handleWorldEvent dispatches one inbound world_event message. It reports
+// whether the event was accepted into the event system (force path entered
+// or enqueued); false means dropped by policy (unregistered agent / manual
+// mode / agent offline) — the reason is in the log.
+func (rt *Runtime) handleWorldEvent(agentID string, ev protocol.WorldEventPayload) bool {
 	ac := rt.lookupAgent(agentID)
 	if ac == nil {
 		rt.logger.Warn("world_event dropped for unregistered agent",
 			"agent_id", agentID, "event_id", ev.EventID, "category", ev.Category)
-		return
+		return false
 	}
 	if !rt.autoPlanEnabled {
 		// 手动模式与反应层触发同口径：MCP 不做任何自动决策。
 		rt.logger.Debug("world_event dropped (manual mode)",
 			"agent_id", agentID, "event_id", ev.EventID)
-		return
+		return false
 	}
 	ac.coordMu.Lock()
 	stopped := ac.stopped
@@ -57,12 +64,12 @@ func (rt *Runtime) handleWorldEvent(agentID string, ev protocol.WorldEventPayloa
 	if stopped {
 		rt.logger.Debug("world_event dropped (agent offline)",
 			"agent_id", agentID, "event_id", ev.EventID)
-		return
+		return false
 	}
 
 	if ev.Force {
 		rt.handleForceEvent(ac, agentID, ev)
-		return
+		return true
 	}
 
 	switch res := ac.as.EnqueueWorldEvent(ev); res {
@@ -80,6 +87,7 @@ func (rt *Runtime) handleWorldEvent(agentID string, ev protocol.WorldEventPayloa
 			"category", ev.Category, "severity", ev.Severity,
 			"queue_len", ac.as.WorldEventQueueLen())
 	}
+	return true
 }
 
 // handleForceEvent executes the §4.2 hard-guarantee channel. It must be
@@ -244,4 +252,144 @@ func (a *agentContext) abandonCurrentPlan(agentID string, ws contract.Transport,
 			"agent_id", agentID, "queue_len", queueLen, "replan_reason", reason)
 	}
 	a.signal()
+}
+
+// ─── /debug/event 注入端点（P4-13）─────────────────────────────
+//
+// 合成 world_event 并喂进与 UE 上报完全相同的分发入口（Runtime.
+// handleWorldEvent），用于无 UE 或带 UE 联调时验证事件系统全链路
+// （force 打断 / 入队 / 后续 drain）。与 UE 不冲突：本端点只注入入站
+// 消息，不直接向 UE 发任何东西（force 事件触发的 stop_action 是事件
+// 系统本身的正常后果，与 UE 自己推事件的行为一致）。快速预设在前端
+// debug 控制台（web/debug.html 的"事件下发" tab），curl 直接 POST 完整
+// 事件。仅联调用，无认证。
+
+// debugEventSeq numbers injected event ids within the process.
+var debugEventSeq atomic.Int64
+
+// nextDebugEventID generates an id for debug-injected events, mirroring
+// the protocol's evt_<YYYYMMDD>_<seq> format with a "debug" marker so it
+// can never collide with UE-generated ids.
+func nextDebugEventID() string {
+	return fmt.Sprintf("evt_debug_%s_%06d", time.Now().Format("20060102"), debugEventSeq.Add(1))
+}
+
+// debugGameTimeNow renders the agent's current authoritative game time in
+// the protocol's "D12 10:47:03" format; empty when no perception yet.
+func debugGameTimeNow(ac *agentContext) string {
+	gt := ac.as.LatestGameTimeSec()
+	if gt <= 0 {
+		return ""
+	}
+	day := int(gt / 86400)
+	tod := math.Mod(gt, 86400)
+	return fmt.Sprintf("D%d %02d:%02d:%02d", day+1,
+		int(tod/3600), int(math.Mod(tod, 3600)/60), int(math.Mod(tod, 60)))
+}
+
+// debugEventRequest is the POST /debug/event body: agent_id + the full
+// world_event payload. Server-side autofill when omitted: event_id
+// (evt_debug_*，与 UE 生成的 id 空间隔离), occurred_at (now), game_time
+// (agent 当前权威游戏时间), data (空对象).
+type debugEventRequest struct {
+	AgentID string                     `json:"agent_id"`
+	Event   protocol.WorldEventPayload `json:"event"`
+}
+
+// debugEventResponse echoes the effective (post-autofill) event fields plus
+// what the event system did with it.
+type debugEventResponse struct {
+	OK        bool   `json:"ok"`
+	Error     string `json:"error,omitempty"`
+	EventID   string `json:"event_id,omitempty"`
+	Category  string `json:"category,omitempty"`
+	EventType string `json:"event_type,omitempty"`
+	Force     bool   `json:"force"`
+	Severity  int    `json:"severity"`
+	GameTime  string `json:"game_time,omitempty"`
+	QueueLen  int    `json:"queue_len"`
+	Note      string `json:"note,omitempty"`
+}
+
+// handleDebugEvent is the /debug/event handler. inject is the Runtime's
+// dispatch entry (handleWorldEvent), returning whether the event was
+// accepted into the event system.
+func handleDebugEvent(logger *slog.Logger, lookupAgent func(string) *agentContext,
+	inject func(agentID string, ev protocol.WorldEventPayload) bool,
+	w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		_ = json.NewEncoder(w).Encode(debugEventResponse{Error: "method not allowed, use POST"})
+		return
+	}
+	var req debugEventRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(debugEventResponse{Error: "invalid JSON body: " + err.Error()})
+		return
+	}
+	if req.AgentID == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(debugEventResponse{Error: "agent_id is required"})
+		return
+	}
+	ac := lookupAgent(req.AgentID)
+	if ac == nil {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(debugEventResponse{Error: "agent not registered: " + req.AgentID})
+		return
+	}
+	ev := req.Event
+	if ev.Category == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(debugEventResponse{Error: "event.category is required"})
+		return
+	}
+	if ev.EventType == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(debugEventResponse{Error: "event.event_type is required"})
+		return
+	}
+	// Autofill：id 用 evt_debug_ 前缀隔离 UE 的 id 空间（去重互不干扰）；
+	// game_time 缺省取 agent 当前权威游戏时间（手填 "D12 10:47:03" 易错）。
+	if ev.EventID == "" {
+		ev.EventID = nextDebugEventID()
+	}
+	if ev.OccurredAt == 0 {
+		ev.OccurredAt = time.Now().UnixMilli()
+	}
+	if ev.GameTime == "" {
+		ev.GameTime = debugGameTimeNow(ac)
+	}
+	if len(ev.Data) == 0 {
+		ev.Data = json.RawMessage(`{}`)
+	}
+
+	handled := inject(req.AgentID, ev)
+
+	note := "已入队，等待安全点 drain（action_completed 时交战术层统筹）"
+	if !handled {
+		note = "事件被策略丢弃（手动模式或 agent 离线，见 MCP 日志）"
+	} else if ev.Force {
+		note = "force 硬保证：在途动作已同步打断，重规划异步进行（见 [world_event/force] 日志）"
+	}
+	logger.Info("[debug/event] 事件已注入",
+		"agent_id", req.AgentID, "event_id", ev.EventID,
+		"category", ev.Category, "event_type", ev.EventType, "force", ev.Force,
+		"severity", ev.Severity, "handled", handled)
+
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(debugEventResponse{
+		OK:        handled,
+		EventID:   ev.EventID,
+		Category:  ev.Category,
+		EventType: ev.EventType,
+		Force:     ev.Force,
+		Severity:  ev.Severity,
+		GameTime:  ev.GameTime,
+		QueueLen:  ac.as.WorldEventQueueLen(),
+		Note:      note,
+	})
 }

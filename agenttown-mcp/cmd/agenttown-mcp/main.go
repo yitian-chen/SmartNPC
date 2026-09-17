@@ -1921,14 +1921,14 @@ func main() {
 	}()
 
 	if *httpAddr != "" {
-		runHTTP(ctx, logger, server, *httpAddr, *httpAllowAnyOrigin, *mcpAPIKey, ws, kb, lookupAgent, listAgentIDs, registerAgent)
+		runHTTP(ctx, logger, server, *httpAddr, *httpAllowAnyOrigin, *mcpAPIKey, ws, kb, lookupAgent, listAgentIDs, registerAgent, rt.handleWorldEvent)
 	} else {
 		runStdio(ctx, logger, server)
 	}
 }
 
 // runHTTP serves the MCP server over Streamable HTTP + a /status endpoint.
-func runHTTP(ctx context.Context, logger *slog.Logger, server *mcp.Server, addr string, allowAnyOrigin bool, apiKey string, ws contract.Transport, kb *worldkb.KB, lookupAgent func(string) *agentContext, listAgentIDs func() []string, registerAgent func(string) (*agentContext, bool)) {
+func runHTTP(ctx context.Context, logger *slog.Logger, server *mcp.Server, addr string, allowAnyOrigin bool, apiKey string, ws contract.Transport, kb *worldkb.KB, lookupAgent func(string) *agentContext, listAgentIDs func() []string, registerAgent func(string) (*agentContext, bool), injectWorldEvent func(agentID string, ev protocol.WorldEventPayload) bool) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/status", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -1947,6 +1947,13 @@ func runHTTP(ctx context.Context, logger *slog.Logger, server *mcp.Server, addr 
 	// 仅联调用，无认证。
 	mux.HandleFunc("/debug/schedule", func(w http.ResponseWriter, r *http.Request) {
 		handleDebugSchedule(ctx, logger, ws, kb, lookupAgent, registerAgent, w, r)
+	})
+	// /debug/event — 联调 debug 端点：合成 world_event 注入事件系统，走与
+	// UE 上报完全相同的分发入口（force 打断/入队/drain 全链路验证）。只注入
+	// 入站消息，不直接向 UE 发任何东西，与 UE 自身推事件不冲突。快速预设见
+	// debug 控制台"事件下发" tab；curl 直接 POST 完整事件。仅联调用，无认证。
+	mux.HandleFunc("/debug/event", func(w http.ResponseWriter, r *http.Request) {
+		handleDebugEvent(logger, lookupAgent, injectWorldEvent, w, r)
 	})
 	// /debug/ — 浏览器 debug 控制台 HTML 页面（无外部依赖，嵌入二进制）。
 	mux.HandleFunc("/debug/", func(w http.ResponseWriter, r *http.Request) {
