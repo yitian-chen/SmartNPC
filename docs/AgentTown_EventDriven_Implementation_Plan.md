@@ -36,7 +36,7 @@
 | §6.3 反思/压缩/关系底座 | ✅ Stage 4 日终记忆 + Stage 5 关系数值 | `memory.go` / `relationship.go` |
 | 唯一指令出口（咽喉点） | ✅ 所有 action 下发收口 `guardedExecutor.SendAction` | `guarded_executor.go` |
 | 绝对截止（半成） | ⚠️ LLM 填秒数 → `ArmTimeStop` 换算绝对 game_time 目标 | 缺"从时段结束推导 + 总时长裁决" |
-| world_event 协议契约 | 📝 文档定稿 v1.0（七类别 + force 通道 + 边沿触发纪律） | `docs/AgentTown_WorldEvent_Protocol.md` |
+| world_event 协议契约 | 📝 文档定稿 v1.0（六类别 + force 通道 + 边沿触发纪律） | `docs/AgentTown_WorldEvent_Protocol.md` |
 
 ### 1.2 缺口清单
 
@@ -114,7 +114,7 @@ graph TD
 
 - `envelope.go` 新增 `TypeWorldEvent = "world_event"` 常量（UE → Agent）
 - `messages.go` 新增 `WorldEventPayload`：`event_id / category / event_type / force / severity / subject / game_time / location / occurred_at / data(json.RawMessage)`
-- 七类别（`physical_threshold / spatial / social / action_anomaly / world / player_interaction` + `command`）与 event_type 枚举常量
+- 六类别（`physical_threshold / spatial / social / action_anomaly / world / player_interaction`）与 event_type 枚举常量
 - 序列化单测（与协议文档 §8 示例逐字段对齐）
 
 纯契约层，无行为变更；UE 侧同按此实现，是两侧的共同基准。
@@ -311,7 +311,7 @@ flag 控制，UE 就绪后一处关闭。同时收编旧 reactive 层的触发�
 
 | 新增项 | 位置 | 说明 |
 |--------|------|------|
-| world_event 推送 | RobotAgentComponent | 按协议 v1.0 七类别推事件，边沿触发纪律 |
+| world_event 推送 | RobotAgentComponent | 按协议 v1.0 六类别推事件，边沿触发纪律 |
 | force 打标 | 通信协议 | 强制打断的旁路标识，UE 侧硬编码打标 |
 | 动作进度上报 | UActionExecutor | 支撑"装配了 3/8 个零件"（未完成任务槽的进度字段） |
 | 动作失败事件 | UActionExecutor | action_failed / smartobject_occupied（不再走 error 通道） |
