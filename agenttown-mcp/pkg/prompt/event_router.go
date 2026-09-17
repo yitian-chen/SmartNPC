@@ -78,6 +78,13 @@ const RouterSystemPrompt = `你是小镇居民 NPC 的事件路由模块。世�
 // 【人际关系】). Identity lives in the system message (not the user
 // message) so the user message carries only what changes per event —
 // state, action, event — keeping the per-call prefix minimal.
+//
+// The world overview is passed through worldOverviewWithoutZones: the zone
+// roster line is dropped for the router only (zones are planning context —
+// the tactical layer needs them; for an urgency verdict they are noise,
+// and the event itself already carries its location). The shared
+// WorldOverview used by the strategic/tactical/dialogue layers keeps the
+// zone roster.
 func BuildRouterSystem(in RouterInput) string {
 	agentName := in.AgentName
 	if agentName == "" {
@@ -91,7 +98,7 @@ func BuildRouterSystem(in RouterInput) string {
 	sb.WriteString(RouterSystemPrompt)
 	if in.WorldOverview != "" {
 		sb.WriteString("\n\n【世界背景】\n")
-		sb.WriteString(in.WorldOverview)
+		sb.WriteString(worldOverviewWithoutZones(in.WorldOverview))
 	}
 	sb.WriteString("\n\n【生产工作流】\n")
 	sb.WriteString(ProductionWorkflowText)
@@ -105,6 +112,22 @@ func BuildRouterSystem(in RouterInput) string {
 		sb.WriteString("\n")
 	}
 	return sb.String()
+}
+
+// worldOverviewWithoutZones strips the zone-roster line ("区域（N 个）：…")
+// from a rendered WorldOverview. Line-based: the zone roster is exactly one
+// line, so dropping every line with that prefix keeps 设定/主题/设施/居民
+// intact regardless of KB shape.
+func worldOverviewWithoutZones(overview string) string {
+	lines := strings.Split(overview, "\n")
+	kept := make([]string, 0, len(lines))
+	for _, l := range lines {
+		if strings.HasPrefix(l, "区域（") {
+			continue
+		}
+		kept = append(kept, l)
+	}
+	return strings.Join(kept, "\n")
 }
 
 // RouterUserTemplate is the router's user message template. Per-call data

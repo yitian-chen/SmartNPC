@@ -35,13 +35,16 @@ func TestBuildRouterPrompt_Segments(t *testing.T) {
 		PhysicalLine:  "物理状态：电量：中等、疲劳度：精神饱满。",
 		Relationships: "- 与 K-03：熟悉度 12、好感 8（互动 3 次）",
 		CurrentAction: "InteractSmartObject(workbench/assemble)，已执行约 47 分钟（来源：tactical）",
-		WorldOverview: "小镇以机器人劳作为核心：物流转运、车间生产、废料回收构成生产循环……",
+		WorldOverview: "设定：工业机器人小镇\n主题：一座封闭工业园区。\n区域（2 个）：主生产车间（main_workshop）、中央广场（central_plaza）。\n可交互设施类别（2 类）：工作台（workbench）。\n居民（2 位）：老陈（H-01）。\n",
 		Event:         routerTestEvent(7),
 	}
 	sys := BuildRouterSystem(in)
 	for _, want := range []string{
 		"你是 NPC 阿静 的事件路由模块",
-		"【世界背景】\n小镇以机器人劳作为核心",
+		"【世界背景】\n设定：工业机器人小镇",
+		"主题：",
+		"可交互设施类别",
+		"居民（2 位）",
 		"【生产工作流】",
 		"档案管理员，性格细腻",
 		"- 与 K-03：熟悉度 12",
@@ -49,6 +52,11 @@ func TestBuildRouterPrompt_Segments(t *testing.T) {
 		if !strings.Contains(sys, want) {
 			t.Errorf("system prompt missing %q:\n%s", want, sys)
 		}
+	}
+	// 区域名册行只从路由器剔除（对紧急度裁决是噪音；事件本身带位置），
+	// 共享 WorldOverview（战略/战术/对话层）保持原样。
+	if strings.Contains(sys, "区域（") {
+		t.Errorf("router system prompt must drop the zone roster line:\n%s", sys)
 	}
 
 	user := BuildRouterPrompt(in)
@@ -146,5 +154,27 @@ func TestParseRouterDecision_FaultTolerance(t *testing.T) {
 	// Missing reason gets a placeholder (never empty, for log readability).
 	if dec := ParseRouterDecision(`{"interrupt": true}`); dec.Reason == "" {
 		t.Errorf("missing reason should get a placeholder, got empty")
+	}
+}
+
+// TestWorldOverviewWithoutZones_OnlyRouterDropsZoneLine pins the scope:
+// the zone-roster line is dropped from the ROUTER's system prompt only.
+// The shared WorldOverview (strategic/tactical/dialogue system prompts)
+// keeps it — verified against the same KB-backed rendering.
+func TestWorldOverviewWithoutZones_OnlyRouterDropsZoneLine(t *testing.T) {
+	overview := "设定：工业机器人小镇\n主题：园区。\n区域（2 个）：主生产车间（main_workshop）、中央广场（central_plaza）。\n可交互设施类别（1 类）：工作台。\n居民（1 位）：老陈（H-01）。\n"
+
+	routerView := worldOverviewWithoutZones(overview)
+	if strings.Contains(routerView, "区域（") {
+		t.Fatalf("router view must drop the zone roster line:\n%s", routerView)
+	}
+	for _, want := range []string{"设定：", "主题：", "可交互设施类别", "居民"} {
+		if !strings.Contains(routerView, want) {
+			t.Fatalf("router view must keep %q:\n%s", want, routerView)
+		}
+	}
+	// 共享 WorldOverview 原文不动（其他三层的 system prompt 继续带区域行）。
+	if !strings.Contains(overview, "区域（2 个）") {
+		t.Fatalf("shared overview must be untouched:\n%s", overview)
 	}
 }
