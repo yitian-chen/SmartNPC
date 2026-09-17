@@ -60,7 +60,7 @@ Agent 侧正在从「轮询感知」演进为「**事件驱动**」：UE 主动�
 
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| event_id | string | ✅ | 事件唯一 ID（建议 `evt_` + 递增/时间戳）。同一广播事件推给多个 NPC 时**保持相同 event_id**，Agent 侧据此去重与关联 |
+| event_id | string | ✅ | 事件唯一 ID，格式固定为 `evt_<YYYYMMDD>_<6 位递增序号>`（如 `evt_20260917_000042`，进程内单调递增）。同一广播事件推给多个 NPC 时**保持相同 event_id**，Agent 侧据此去重与关联 |
 | category | string | ✅ | 事件类别（见 §三，枚举） |
 | event_type | string | ✅ | 类别内具体事件类型（见 §三，枚举） |
 | force | bool | ✅ | 强制打断标记，默认 false。true = 硬保证通道（见 §四） |
@@ -83,7 +83,7 @@ Agent 侧正在从「轮询感知」演进为「**事件驱动**」：UE 主动�
 
 ## 三、事件类别与 data 结构
 
-七大类别。`event_type` 为推荐枚举，UE 可按实现补充，但 **category 必须落在这七类之一**（Agent 侧按 category 走对应处理分支）。
+七大类别。下表 `event_type` 为**本期 UE 必须实现的枚举全集**（不做增删）；后续要新增类型时先修订本协议再实现，`category` 七选一不变（Agent 侧按 category 走对应处理分支）。
 
 ### 3.1 physical_threshold（物理跨阈值）
 
@@ -93,11 +93,11 @@ Agent 侧正在从「轮询感知」演进为「**事件驱动**」：UE 主动�
 
 | event_type | 说明 | data |
 |------------|------|------|
-| `energy_below` | 能量跨过下阈值（默认 20） | `{"attribute": "energy", "value": 19.8, "threshold": 20, "direction": "below"}` |
-| `energy_above` | 能量恢复跨过上阈值（默认 80） | 同上，`direction: "above"` |
-| `fatigue_above` | 疲劳跨过上阈值（默认 70） | `{"attribute": "fatigue", ...}` |
-| `joint_wear_above` | 关节磨损跨过上阈值（默认 60） | `{"attribute": "joint_wear", ...}` |
-| `money_below` | 余额跨过下阈值（默认 50） | `{"attribute": "money", ...}` |
+| `energy_below` | 能量向下跨过 20（协议固定阈值） | `{"attribute": "energy", "value": 19.8, "threshold": 20, "direction": "below"}` |
+| `energy_above` | 能量向上跨过 80（协议固定阈值） | 同上，`direction: "above"` |
+| `fatigue_above` | 疲劳向上跨过 70（协议固定阈值） | `{"attribute": "fatigue", ...}` |
+| `joint_wear_above` | 关节磨损向上跨过 60（协议固定阈值） | `{"attribute": "joint_wear", ...}` |
+| `money_below` | 余额向下跨过 50（协议固定阈值） | `{"attribute": "money", ...}` |
 
 ```json
 "data": {
@@ -124,7 +124,7 @@ Agent 侧正在从「轮询感知」演进为「**事件驱动**」：UE 主动�
 | `agent_nearby` | 另一 NPC 进入对话距离 | `{"other_agent": "H-02", "distance_cm": 350}` |
 | `agent_leave_nearby` | 另一 NPC 离开对话距离 | 同上 |
 
-> `zone_enter`/`zone_exit` 复用现有 `OnEnterZone`/`OnExitZone` 委托；阈值默认对话距离 500cm（可调）。注意：**zone 变化本身也会触发 perception_update**（基础协议既有行为），事件通道只负责"发生那一刻"的语义，两者并存不冲突。
+> `zone_enter`/`zone_exit` 复用现有 `OnEnterZone`/`OnExitZone` 委托；`agent_nearby`/`agent_leave_nearby` 的距离阈值固定为 500cm。注意：**zone 变化本身也会触发 perception_update**（基础协议既有行为），事件通道只负责"发生那一刻"的语义，两者并存不冲突。
 
 ```json
 "data": { "zone": "archive_station", "from": "central_plaza" }
@@ -134,11 +134,11 @@ Agent 侧正在从「轮询感知」演进为「**事件驱动**」：UE 主动�
 
 | event_type | 说明 | data |
 |------------|------|------|
-| `chat_invite_incoming` | 有人向该 NPC 发起对话（转发自 SocialChat 动作） | `{"from": "H-02", "content": "老陈，借个工具？"}` |
+| `chat_invite_incoming` | 有人向该 NPC 发起对话（转发自 SocialChat 动作） | `{"conv_id": "conv_...", "from": "H-02", "content": "老陈，借个工具？"}` |
 | `broadcast_heard` | 听到广播/附近 NPC 的大声说话 | `{"source": "H-04", "content": "..."}` |
 | `mentioned` | 被点名/被提及 | `{"source": "H-02", "context": "..."}` |
 
-> `chat_invite_incoming` 与现有 `chat_invite` 消息（对话邀请）语义重叠：实现上 UE 可直接把 chat_invite 的 payload 适配为本事件（补充 category/event_type/game_time 等字段），或在 Agent 侧做一层映射。推荐前者——统一事件入口，降低 Agent 侧分支数。
+> **规定：UE 将对话邀请统一按 `world_event` 推送**（`event_type=chat_invite_incoming`，原 `chat_invite` payload 的 `conv_id`/`from`/`content` 三个字段原样并入 `data`，另补 `category`/`game_time` 等通用字段），**不再发送独立的 `chat_invite` 消息**——统一事件入口，Agent 侧对话链路改从事件队列消费。`chat_invite_rsp` / `chat_turn` 维持原消息类型不变。
 
 ### 3.4 action_anomaly（动作异常）
 
@@ -147,7 +147,7 @@ Agent 侧正在从「轮询感知」演进为「**事件驱动**」：UE 主动�
 | `action_failed` | 动作执行失败（目标不可达等） | `{"action_id": "act_...", "cmd": "MoveTo", "reason": "unreachable"}` |
 | `smartobject_occupied` | 目标 SmartObject 被占用 | `{"action_id": "act_...", "semantic_group": "workbench", "occupied_by": "H-02"}` |
 
-> 作用：替代/补充现有 `error` 消息（error_code=ACTION_FAILED）的语义——error 通道保留给协议级错误，**业务级动作异常统一走 world_event**，Agent 反应层才能在同一队列里统筹它们。
+> **规定：业务级动作异常一律走本通道**（`action_failed` / `smartobject_occupied`），**不再通过 `error` 消息上报 ACTION_FAILED**。`error` 通道仅保留协议级错误（`INVALID_MESSAGE` / `UNKNOWN_AGENT` / `INTERNAL_ERROR` / `STOP_ID_MISMATCH`）——Agent 反应层才能在同一队列里统筹动作异常。
 
 ```json
 "data": { "action_id": "act_123", "cmd": "MoveTo", "reason": "unreachable" }
@@ -161,19 +161,19 @@ Director 注入的故障、环境事件、剧情事件。来源：Director / 调
 |------------|------|------|
 | `malfunction` | 某设备/NPC 故障 | `{"target": "K-03", "description": "K-03 关节锁死"}` |
 | `environment_change` | 环境变化（天气、停水停电） | `{"description": "..."}` |
-| `director_directive` | 剧情指令（一般带 force） | `{"description": "..."}` |
+| `director_directive` | 剧情指令（固定 force=true） | `{"description": "..."}` |
 
 ### 3.6 player_interaction（玩家互动事件）
 
-真实玩家对该 NPC 的主动行为，或战斗状态的变化。玩家行为与 NPC 事件有本质区别——**玩家的意图不可预测、不可由系统裁决**，因此被攻击/被瞄准这类直接威胁**建议带 force**，其余（脱离战斗、被注视、被互动）交路由判。
+真实玩家对该 NPC 的主动行为，或战斗状态的变化。玩家行为与 NPC 事件有本质区别——**玩家的意图不可预测、不可由系统裁决**，因此被攻击/被瞄准这类直接威胁**固定带 force**，其余（脱离战斗、被注视、被互动）固定不带 force、交路由判。
 
-| event_type | 说明 | 建议标记 | data |
-|------------|------|----------|------|
-| `player_attacked` | 被玩家攻击 | force=true | `{"attacker": "player_1", "damage": 20, "damage_type": "physical"}` |
-| `player_targeted` | 被玩家瞄准/锁定 | force=true | `{"attacker": "player_1"}` |
-| `combat_exit` | 脱离战斗（威胁消失） | force=false | `{"attacker": "player_1", "outcome": "escaped"}` |
-| `player_interact` | 玩家对 NPC 发起交互（对话/给物品等） | force=false | `{"player": "player_1", "action": "greet", "detail": "..."}` |
-| `player_watching` | 玩家注视该 NPC 超过一定时长 | force=false | `{"player": "player_1", "duration_ms": 5000}` |
+| event_type | 说明 | force | data |
+|------------|------|-------|------|
+| `player_attacked` | 被玩家攻击 | true | `{"attacker": "player_1", "damage": 20, "damage_type": "physical"}` |
+| `player_targeted` | 被玩家瞄准/锁定 | true | `{"attacker": "player_1"}` |
+| `combat_exit` | 脱离战斗（威胁消失） | false | `{"attacker": "player_1", "outcome": "escaped"}` |
+| `player_interact` | 玩家对 NPC 发起交互（对话/给物品等） | false | `{"player": "player_1", "action": "greet", "detail": "..."}` |
+| `player_watching` | 玩家注视该 NPC 持续 ≥5 游戏秒 | false | `{"player": "player_1", "duration_ms": 5000}` |
 
 ```json
 "data": { "attacker": "player_1", "damage": 20, "damage_type": "physical" }
@@ -188,7 +188,7 @@ Director 注入的故障、环境事件、剧情事件。来源：Director / 调
 | action | string | player_interact 的交互类型（greet / give_item / push / ...） |
 | detail | string | 交互附加信息 |
 
-> 与 3.7 节 force 类的 `attacked` 语义衔接——被玩家攻击是 `attacked` 的一个具体来源。UE 实现时可二选一：统一推 `player_attacked`（推荐，category 明确），或按通用 `attacked` 推、在 data 里注明 attacker 为玩家。
+> **规定：玩家来源的攻击一律推 `player_attacked`**（category 明确、固定 force）；§3.7 的通用 `attacked` 仅用于 NPC 之间的攻击。UE 侧不需要也不允许用通用 `attacked` 表达玩家来源。
 
 ### 3.7 force 类（强制，跨类别）
 
@@ -196,7 +196,7 @@ Director 注入的故障、环境事件、剧情事件。来源：Director / 调
 
 | event_type | 说明 | data |
 |------------|------|------|
-| `attacked` | NPC 被攻击 | `{"attacker": "...", "damage": 20}` |
+| `attacked` | 被 NPC 攻击（玩家来源一律用 `player_attacked`） | `{"attacker": "H-02", "damage": 20}` |
 | `death` | NPC 死亡（本人视角） | `{"cause": "..."}` |
 | `plot_command` | 剧情强制指令 | `{"description": "..."}` |
 | `debug_command` | 调试命令 | `{"description": "..."}` |
@@ -219,7 +219,7 @@ Director 注入的故障、环境事件、剧情事件。来源：Director / 调
 | 跨越才推 | 能量从 20.3 掉到 19.8（跨过 20）→ 推一次；继续掉到 19.5 → **不推**（没有新跨越） |
 | 恢复才再推 | 能量充回到 21（向上穿 20）→ 推 `energy_above`；再次掉到 19.8 → 推 `energy_below`（双向都各自边沿触发） |
 | zone 只推变化 | 进入新 zone 推一次，停留期间不推 |
-| 去抖 | 高频抖动场景（如恰好在阈值线上震荡）建议 UE 侧加 5~10 秒去抖窗口，避免事件风暴 |
+| 去抖 | **必须启用**：同一 (attribute, direction) 组合在 5 游戏秒内只推第一条（如恰好在阈值线上震荡），避免事件风暴 |
 
 ## 六、Agent 侧处理承诺
 
@@ -237,8 +237,8 @@ UE 按本协议推送后，Agent 侧保证：
 | 消息类型 | 新增 `world_event`（UE → Agent） |
 | 信封 | **不变**（7 字段，无新增顶层字段；force 在 payload 内） |
 | `event_notification` | 保持现状（Agent 内部路由用，Director 事件的 Agent→Agent 转发可后续并入本通道） |
-| `error` 消息 | 保留（协议级错误）；业务级动作异常改走 `world_event.action_anomaly` |
-| `chat_invite` | 语义重叠，推荐 UE 侧适配为 `world_event.social.chat_invite_incoming`（过渡期两者并存） |
+| `error` 消息 | 保留**仅协议级错误**（INVALID_MESSAGE / UNKNOWN_AGENT / INTERNAL_ERROR / STOP_ID_MISMATCH）；业务级动作异常一律走 `world_event.action_anomaly`，不再上报 ACTION_FAILED |
+| `chat_invite` | **停用**：UE 一律按 `world_event`（social.chat_invite_incoming）推对话邀请，原 payload 三字段并入 data（见 §3.3）；`chat_invite_rsp` / `chat_turn` 不变 |
 | 感知通道 | `perception_update` / `state_report` **不变**——心跳类连续量不迁入事件通道 |
 
 ## 八、完整示例
