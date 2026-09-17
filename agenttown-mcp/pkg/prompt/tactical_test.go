@@ -435,3 +435,32 @@ func TestBuildTactical_CompactIgnoresDailyPlanField(t *testing.T) {
 		t.Errorf("Compact should veto the schedule segment regardless of DailyPlan:\n%s", out)
 	}
 }
+
+// TestBuildTactical_ForceEventElevated 验证 force 事件（【强制打断】前缀 hint）
+// 渲染为【紧急事件】最高优先级指令：显式授权暂停时段目标 + 豁免时长填满，
+// 而不是降格为【上次中断原因】的说明性注释（否则 LLM 的理性选择是一句
+// speak 后继续原时段动作——2026-09-17 仿真实测）。
+func TestBuildTactical_ForceEventElevated(t *testing.T) {
+	in := TacticalInput{
+		Goal:      "去废料回收场拆解台拆解报废设备",
+		Zone:      "recycling_yard",
+		TimeOfDay: "13:07:17",
+		Slot:      "12:07-14:06",
+		Hint:      "【强制打断】玩家互动：被玩家 player_1 瞄准/锁定（主体 H-04，客观严重度 8，游戏时间 D1 13:07:17）",
+		AgentID:   "H-04",
+	}
+	out := BuildTactical(in)
+	for _, want := range []string{
+		"【紧急事件】玩家互动：被玩家 player_1 瞄准/锁定",
+		"最高优先级",
+		"有权暂停原计划",
+		"无需用长动作填满时段剩余时长",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("prompt missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "【上次中断原因】") {
+		t.Errorf("force hint must not render as 上次中断原因:\n%s", out)
+	}
+}

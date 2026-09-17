@@ -138,17 +138,33 @@ func BuildTactical(in TacticalInput) string {
 	return sb.String()
 }
 
-// tacticalHintLine renders the replan hint plus, when the hint carries the
-// "物理状态告警" marker (set by upgradeIfPhysicalAlert), type-specific
-// recovery constraints based on which physical values are actually in alert.
-// Pairs with physicalAlertOverrideGoal (code-layer goal override) as double
-// insurance. Different alert types drive different recovery actions:
+// tacticalHintLine renders the replan hint. Two hint flavors:
+//   - "【强制打断】" 前缀（force 事件，P1-3）：升级为【紧急事件】最高优先级
+//     指令——显式授权战术层暂停时段目标（设计文档 §4.2/§5.5 的否决权），
+//     并豁免"时长填满/末段长动作"规则。不这样写的话，事件只是规则段前
+//     的一行说明性注释，主指令（分解时段目标 + 填满剩余时长）全部指向
+//     恢复原工作——LLM 的理性选择就是一句 speak 后继续原时段动作
+//     （2026-09-17 仿真实测：被玩家瞄准 → 说"先躲躲" → 继续拆解原设备）。
+//   - "物理状态告警" marker (set by upgradeIfPhysicalAlert): type-specific
+//     recovery constraints based on which physical values are actually in
+//     alert. Pairs with physicalAlertOverrideGoal (code-layer goal override)
+//     as double insurance. Different alert types drive different recovery
+//     actions:
 //   - 低电量 → charge_at_station 充电
 //   - 高疲劳 → charge_at_station 充电 / rest_at_residence 休息
 //   - 高关节磨损 → self_maintenance 维修保养
 func tacticalHintLine(in TacticalInput, th BandThresholds) string {
 	if in.Hint == "" {
 		return ""
+	}
+	if strings.HasPrefix(in.Hint, "【强制打断】") {
+		event := strings.TrimPrefix(in.Hint, "【强制打断】")
+		return "【紧急事件】" + event + "\n" +
+			"本轮规划的最高优先级是应对上述紧急事件，它优先于【当前时段目标】和下方分解规则：" +
+			"你有权暂停原计划，先妥善处置事件（如撤离威胁范围、移动到安全位置、寻找同伴支援、保持警戒观察等，" +
+			"具体做法由你结合角色性格与事件性质决定），处理完且时间允许时再回到时段目标。" +
+			"本轮动作时长按应对事件的实际需要安排即可，无需用长动作填满时段剩余时长——" +
+			"事件应对只需短时间时，队列耗尽后系统会自然重新规划回到日程。"
 	}
 	hintLine := "【上次中断原因】" + in.Hint + "（请据此调整本轮规划）"
 	if !strings.Contains(in.Hint, "物理状态告警") || in.Physical == nil || in.Physical.IsZero() {

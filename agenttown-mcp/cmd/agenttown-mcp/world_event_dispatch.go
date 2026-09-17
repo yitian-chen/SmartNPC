@@ -133,10 +133,12 @@ func (rt *Runtime) handleForceEvent(ac *agentContext, agentID string, ev protoco
 	go ac.forceInterruptReplan(rt.ctx, agentID, rt.ws, *rt.kbPtr, rt.profiles, hint, rt.logger)
 }
 
-// forceEventHint formats the replan hint injected after a force interrupt.
+// forceEventHint formats the replan hint for a force event. The 【强制打断】
+// marker is the contract with prompt.tacticalHintLine: it renders the event
+// as a top-priority 【紧急事件】 directive (explicitly overriding the slot
+// goal and the duration-filling rules) instead of a mere interruption note.
 func forceEventHint(ev protocol.WorldEventPayload) string {
-	return fmt.Sprintf("【强制打断】%s。当前动作已被强制打断，请立即围绕该事件重新规划当前时段的行为。",
-		prompt.FormatWorldEvent(ev))
+	return "【强制打断】" + prompt.FormatWorldEvent(ev)
 }
 
 // forceInterruptReplan runs the post-interrupt replan for a force event.
