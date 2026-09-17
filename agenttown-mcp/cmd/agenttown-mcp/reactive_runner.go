@@ -403,43 +403,9 @@ func (r *reactiveRunner) execute(agentID string, ac *agentContext, dec ReactiveD
 // 发 stop_action + signal worker。worker 醒来后通过自然 tacticalRefill 路径
 // 基于当前状态重新规划（replanHint 已注入战术层 prompt）。
 //
-// 关键点：提前清除 replanInProgress + currentActionID，让 worker 的
-// hasInFlightAction()/replanInProgress 守卫都不阻止 refill，避免
-// "stop_action 后等 action_completed 才能 refill" 的 75 游戏分钟延迟。
-// 旧 action 的超时 timer 必须取消，防止 fire 后误清新 currentActionID。
-// 旧 action 的 action_completed 迟到时 currentActionID 已不匹配，自然忽略。
+// 清理主体已抽为 agentContext.abandonCurrentPlan（force 打断失败路径共用，
+// 见 world_event_dispatch.go）；此处补反应层特有的游戏时间去抖时间戳。
 func (r *reactiveRunner) fallbackStopAndRefill(agentID string, ac *agentContext, reason string) {
-	// 业务字段（queue + 在途追踪 + slot）通过 AgentState 原子清理；
-	// 协调字段（replanInProgress + pending timer）通过 coordMu 清理。
-	// 两次加锁不嵌套。
-	info := ac.as.ClearForReplan()
-	actionID := info.ActionID
-	queueLen := info.QueueLen
-	ac.as.SetReplanHint(reason)
+	ac.abandonCurrentPlan(agentID, r.ws, reason, r.logger, "[反应层]")
 	ac.as.SetReplanTimestamps(time.Now(), ac.as.LatestTimeOfDay()) // 游戏时间去抖，防止 1 游戏小时内反复 replan 失败
-
-	ac.coordMu.Lock()
-	ac.replanInProgress = false
-	if actionID != "" {
-		if timer, ok := ac.pendingActionTimeouts[actionID]; ok {
-			timer.Stop()
-			delete(ac.pendingActionTimeouts, actionID)
-		}
-	}
-	ac.coordMu.Unlock()
-
-	if actionID != "" {
-		if err := r.ws.SendStopAction(agentID, actionID); err != nil {
-			r.logger.Warn("[反应层] replan 失败后 stop_action 发送失败",
-				"agent_id", agentID, "action_id", actionID, "err", err)
-		} else {
-			r.logger.Info("[反应层] replan 失败，已 stop 原 action，worker 将自然 refill",
-				"agent_id", agentID, "action_id", actionID,
-				"queue_len", queueLen, "replan_reason", reason)
-		}
-	} else {
-		r.logger.Info("[反应层] replan 失败，无在途 action，worker 将自然 refill",
-			"agent_id", agentID, "queue_len", queueLen, "replan_reason", reason)
-	}
-	ac.signal()
 }

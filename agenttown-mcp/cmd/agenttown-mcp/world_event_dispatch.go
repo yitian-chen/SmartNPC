@@ -1,0 +1,247 @@
+package main
+
+// world_event inbound dispatch + the force hard-guarantee channel
+// (事件驱动设计 §4，docs/AgentTown_WorldEvent_Protocol.md §四).
+//
+// handleWorldEvent is wired from Runtime.HandleMessage. The force branch is
+// the design doc's hard-guarantee channel: zero LLM, zero debounce, cannot
+// be vetoed — the stop fires synchronously in the WS receive path before
+// any goroutine or model call, so nothing stands between the message and
+// the interruption. The replan that follows is tactical work, not part of
+// the guarantee, and runs async. Non-force events enqueue for the next safe
+// point (§4.4); the lightweight router (P2) will sit between receipt and
+// enqueue once it lands.
+
+import (
+	"context"
+	"fmt"
+	"log/slog"
+	"time"
+
+	"github.com/AgentTown/agenttown-mcp/contract"
+	"github.com/AgentTown/agenttown-mcp/contract/protocol"
+	"github.com/AgentTown/agenttown-mcp/pkg/agentstate"
+	"github.com/AgentTown/agenttown-mcp/pkg/profile"
+	"github.com/AgentTown/agenttown-mcp/pkg/prompt"
+	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
+)
+
+// Waiting parameters for the force replan when another replan
+// (/debug/schedule injection or the reactive layer) holds the slot.
+// P1-4 will cancel in-flight LLM requests and shrink this window to
+// milliseconds; until then a bounded poll keeps the guarantee that the
+// force replan eventually runs with the event context.
+const forceReplanPollInterval = 100 * time.Millisecond
+
+// forceReplanWaitLimit bounds the wait for an in-flight replan (tactical
+// LLM call plus margin).
+var forceReplanWaitLimit = tacticalCallTimeout + 10*time.Second
+
+// handleWorldEvent dispatches one inbound world_event message.
+func (rt *Runtime) handleWorldEvent(agentID string, ev protocol.WorldEventPayload) {
+	ac := rt.lookupAgent(agentID)
+	if ac == nil {
+		rt.logger.Warn("world_event dropped for unregistered agent",
+			"agent_id", agentID, "event_id", ev.EventID, "category", ev.Category)
+		return
+	}
+	if !rt.autoPlanEnabled {
+		// 手动模式与反应层触发同口径：MCP 不做任何自动决策。
+		rt.logger.Debug("world_event dropped (manual mode)",
+			"agent_id", agentID, "event_id", ev.EventID)
+		return
+	}
+	ac.coordMu.Lock()
+	stopped := ac.stopped
+	ac.coordMu.Unlock()
+	if stopped {
+		rt.logger.Debug("world_event dropped (agent offline)",
+			"agent_id", agentID, "event_id", ev.EventID)
+		return
+	}
+
+	if ev.Force {
+		rt.handleForceEvent(ac, agentID, ev)
+		return
+	}
+
+	switch res := ac.as.EnqueueWorldEvent(ev); res {
+	case agentstate.EnqueueOK:
+		rt.logger.Info("[world_event] 已入队，等待安全点 drain",
+			"agent_id", agentID, "event_id", ev.EventID,
+			"category", ev.Category, "event_type", ev.EventType,
+			"severity", ev.Severity, "queue_len", ac.as.WorldEventQueueLen())
+	case agentstate.EnqueueDuplicate:
+		rt.logger.Debug("[world_event] 重复事件已丢弃（seq 重放）",
+			"agent_id", agentID, "event_id", ev.EventID)
+	case agentstate.EnqueueEvictedOldest:
+		rt.logger.Warn("[world_event] 队列已满，丢弃最旧事件后入队",
+			"agent_id", agentID, "event_id", ev.EventID,
+			"category", ev.Category, "severity", ev.Severity,
+			"queue_len", ac.as.WorldEventQueueLen())
+	}
+}
+
+// handleForceEvent executes the §4.2 hard-guarantee channel. It must be
+// called synchronously from the WS receive path: the stop below is the
+// microsecond-level guarantee, so nothing asynchronous may precede it.
+func (rt *Runtime) handleForceEvent(ac *agentContext, agentID string, ev protocol.WorldEventPayload) {
+	// Dedup is replay protection, not vetoing: an event_id already seen is
+	// a seq-replay redelivery of an interruption that already fired.
+	if !ac.as.MarkWorldEventSeen(ev.EventID) {
+		rt.logger.Info("[world_event/force] 重复事件已丢弃（seq 重放）",
+			"agent_id", agentID, "event_id", ev.EventID)
+		return
+	}
+
+	// 立即打断在途动作（执行中或 SmartObject 排队中均覆盖——stop 会把
+	// 排队方一并移出队列，UE 回 action_completed{interrupted}）。
+	actionID := ac.as.CurrentActionID()
+	if actionID != "" {
+		if err := rt.ws.SendStopAction(agentID, actionID); err != nil {
+			// 发送失败保留在途追踪：后续 replan 完成后还会重试 stop。
+			rt.logger.Warn("[world_event/force] stop_action 发送失败（打断延后到 replan 完成后重试）",
+				"agent_id", agentID, "action_id", actionID, "err", err)
+		} else {
+			// 清在途追踪，交给延迟到达的 action_completed{interrupted}：
+			// stash 保住 action_history 记账（与 checkTimeToStop 同模式）。
+			ac.as.ClearInFlightKeepQueue()
+			rt.logger.Warn("[world_event/force] 已强制打断在途动作",
+				"agent_id", agentID, "action_id", actionID,
+				"event_id", ev.EventID, "category", ev.Category,
+				"event_type", ev.EventType, "severity", ev.Severity,
+				"subject", ev.Subject)
+		}
+	} else {
+		rt.logger.Warn("[world_event/force] 强制事件到达（无在途动作，直接重规划）",
+			"agent_id", agentID, "event_id", ev.EventID, "category", ev.Category,
+			"event_type", ev.EventType, "severity", ev.Severity, "subject", ev.Subject)
+	}
+
+	hint := forceEventHint(ev)
+	// hint 落 AgentState：等待超时 / replan 失败两条兜底路径都靠 worker
+	// 自然 refill 时经 BeginTacticalRefill 读到事件上下文。
+	ac.as.SetReplanHint(hint)
+	go ac.forceInterruptReplan(rt.ctx, agentID, rt.ws, *rt.kbPtr, rt.profiles, hint, rt.logger)
+}
+
+// forceEventHint formats the replan hint injected after a force interrupt.
+func forceEventHint(ev protocol.WorldEventPayload) string {
+	return fmt.Sprintf("【强制打断】%s。当前动作已被强制打断，请立即围绕该事件重新规划当前时段的行为。",
+		prompt.FormatWorldEvent(ev))
+}
+
+// forceInterruptReplan runs the post-interrupt replan for a force event.
+// The interruption itself already fired synchronously in handleForceEvent
+// (the §4.2 guarantee); this goroutine only does the tactical work of
+// re-decomposing the current slot with the event injected as the hint.
+func (a *agentContext) forceInterruptReplan(ctx context.Context, agentID string,
+	ws contract.Transport, kb *worldkb.KB, profiles map[string]*profile.Profile,
+	hint string, logger *slog.Logger) {
+
+	if !a.acquireReplanSlot(agentID, hint, logger) {
+		return
+	}
+	defer func() {
+		a.coordMu.Lock()
+		a.replanInProgress = false
+		a.coordMu.Unlock()
+	}()
+
+	ok := a.tacticalRefillForReplan(ctx, agentID, ws, kb, profiles, logger, hint)
+	if !ok {
+		// 失败兜底：紧急事件后不应恢复旧计划——清掉过期队列，worker 以
+		// 当前状态自然 refill（hint 已在 AgentState，会注入战术层 prompt）。
+		logger.Warn("[world_event/force] 重规划失败，清空旧队列让 worker 自然 refill",
+			"agent_id", agentID)
+		a.abandonCurrentPlan(agentID, ws, hint, logger, "[world_event/force]")
+		return
+	}
+
+	// 打断 replan 期间仍在途的动作：预 stop 发送失败的情况重试 stop；
+	// 或等待 slot 期间 worker 从旧队列 pop 出的动作（replanInProgress 置位
+	// 前的窗口）。新队列已就绪，worker 待 signal pop。
+	if actionID := a.as.CurrentActionID(); actionID != "" {
+		if err := ws.SendStopAction(agentID, actionID); err != nil {
+			logger.Warn("[world_event/force] replan 后 stop_action 发送失败（新队列已就绪，等 completion 自然推进）",
+				"agent_id", agentID, "action_id", actionID, "err", err)
+		} else {
+			logger.Info("[world_event/force] 重规划完成，已打断残留动作",
+				"agent_id", agentID, "action_id", actionID)
+		}
+	}
+	a.signal()
+}
+
+// acquireReplanSlot waits for any in-flight replan (/debug/schedule or the
+// reactive layer) to finish, then takes the replanInProgress slot. Bails on
+// agent stop or wait-limit expiry — in both, the interruption has already
+// fired and the hint is set, so the worker's natural refill still carries
+// the event context.
+func (a *agentContext) acquireReplanSlot(agentID, hint string, logger *slog.Logger) bool {
+	deadline := time.Now().Add(forceReplanWaitLimit)
+	for {
+		a.coordMu.Lock()
+		switch {
+		case a.stopped:
+			a.coordMu.Unlock()
+			return false
+		case !a.replanInProgress:
+			a.replanInProgress = true
+			a.coordMu.Unlock()
+			return true
+		}
+		a.coordMu.Unlock()
+		if time.Now().After(deadline) {
+			logger.Warn("[world_event/force] 等待在途 replan 超时，放弃本次重规划（打断已生效，hint 已注入，worker 将自然 refill）",
+				"agent_id", agentID, "hint", hint)
+			a.signal()
+			return false
+		}
+		time.Sleep(forceReplanPollInterval)
+	}
+}
+
+// abandonCurrentPlan drops the stale plan after a failed replan: clears the
+// old action queue + in-flight tracking, sends stop for the in-flight
+// action, and signals the worker so it naturally refills from current
+// state (the replan hint stays set in AgentState and flows into the next
+// tactical prompt via BeginTacticalRefill).
+//
+// Shared by the reactive layer's replan failure path and the force
+// interrupt's failure path. tag prefixes the log lines.
+func (a *agentContext) abandonCurrentPlan(agentID string, ws contract.Transport,
+	reason string, logger *slog.Logger, tag string) {
+	// 业务字段（queue + 在途追踪 + slot）通过 AgentState 原子清理；
+	// 协调字段（replanInProgress + pending timer）通过 coordMu 清理。
+	// 两次加锁不嵌套。
+	info := a.as.ClearForReplan()
+	actionID := info.ActionID
+	queueLen := info.QueueLen
+	a.as.SetReplanHint(reason)
+
+	a.coordMu.Lock()
+	a.replanInProgress = false
+	if actionID != "" {
+		if timer, ok := a.pendingActionTimeouts[actionID]; ok {
+			timer.Stop()
+			delete(a.pendingActionTimeouts, actionID)
+		}
+	}
+	a.coordMu.Unlock()
+
+	if actionID != "" {
+		if err := ws.SendStopAction(agentID, actionID); err != nil {
+			logger.Warn(tag+" replan 失败后 stop_action 发送失败",
+				"agent_id", agentID, "action_id", actionID, "err", err)
+		} else {
+			logger.Info(tag+" replan 失败，已 stop 原 action，worker 将自然 refill",
+				"agent_id", agentID, "action_id", actionID,
+				"queue_len", queueLen, "replan_reason", reason)
+		}
+	} else {
+		logger.Info(tag+" replan 失败，无在途 action，worker 将自然 refill",
+			"agent_id", agentID, "queue_len", queueLen, "replan_reason", reason)
+	}
+	a.signal()
+}

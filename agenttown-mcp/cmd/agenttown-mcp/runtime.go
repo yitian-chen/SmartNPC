@@ -180,6 +180,14 @@ func (rt *Runtime) HandleMessage(_ context.Context, msgType, agentID string, pay
 			"action_id", aq.ActionID, "status", aq.Status,
 			"group", aq.Group, "position", aq.Position)
 
+	case protocol.TypeWorldEvent:
+		var ev protocol.WorldEventPayload
+		if err := json.Unmarshal(payload, &ev); err != nil {
+			rt.logger.Warn("world_event parse failed", "err", err, "agent_id", agentID)
+			return
+		}
+		rt.handleWorldEvent(agentID, ev)
+
 	case protocol.TypeEventNotification:
 		var event protocol.EventNotificationPayload
 		if err := json.Unmarshal(payload, &event); err != nil {

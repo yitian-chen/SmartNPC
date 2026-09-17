@@ -1130,6 +1130,14 @@ func (a *AgentState) SetReplanHint(reason string) {
 	a.mu.Unlock()
 }
 
+// ReplanHint returns the currently stored replan hint ("" = none pending).
+// The hint is consumed (cleared) by the next BeginTacticalRefill.
+func (a *AgentState) ReplanHint() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.replanHint
+}
+
 // SetReplanTimestamps records when a replan happened (wall-clock + game time),
 // used for dedupe and logging.
 func (a *AgentState) SetReplanTimestamps(at time.Time, gameTime string) {
