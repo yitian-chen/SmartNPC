@@ -92,6 +92,16 @@ type agentContext struct {
 	tacticalLLMCancel context.CancelFunc
 	tacticalLLMGen    uint64
 
+	// Reaction-task guard state (P2-6, 设计文档 §4.5 护栏): while a reaction
+	// (interrupt-generated planning window) is active, a new ROUTER interrupt
+	// needs strictly higher severity to cut it (reactionSeverity), and the
+	// whole window is bounded by reactionDeadlineGameSec (authoritative game
+	// seconds). Cleared on deadline expiry / schedule refill / slot switch /
+	// agent stop. Force events ignore the ladder (§4.2 不可否决).
+	reactionActive          bool
+	reactionSeverity        int
+	reactionDeadlineGameSec float64
+
 	// LLM clients (immutable after construction, no lock needed)
 	strategicHc llmClient
 	tacticalHc  llmClient
@@ -487,6 +497,8 @@ func (a *agentContext) advanceSlotIfNeeded(ws contract.Transport, agentID string
 	actionID := info.ActionID
 	actionCmd := info.ActionCmd
 	queueLen := info.QueueLen
+	// slot 切换 = 反应窗口结束（P2-6 护栏）：时段边界重置 ladder/截止。
+	a.clearReaction()
 
 	// 只对长复合动作记录 pendingStop：短动作 ~100ms 自然完成，会在 LLM 期间
 	// 被 recordActionCompletion 清除；若 LLM 极快返回仍发 stop 会触发
@@ -619,6 +631,11 @@ func (a *agentContext) stop() {
 		return
 	}
 	a.stopped = true
+	// P2-6 护栏：下线即解除反应窗口。直接重置字段——此处已持 coordMu，
+	// 不得再调 clearReaction（会自死锁）。
+	a.reactionActive = false
+	a.reactionSeverity = 0
+	a.reactionDeadlineGameSec = 0
 	a.online = false
 	// 停止所有 pending action 超时 timer
 	for _, timer := range a.pendingActionTimeouts {
@@ -778,6 +795,11 @@ func runPerceptionWorker(
 		if replanBusy {
 			continue
 		}
+
+		// P2-6 护栏①：反应任务截止——仍在 armed 状态的反应（自反应开始
+		// 未发生过日程 refill）超过 deadline 即切回日程。放 replanBusy 之后：
+		// 不与在途 replan 抢状态。
+		ac.checkReactionDeadline(agentID, ws, logger)
 
 		// 在途 action（composite 执行中）时跳过 pop/refill：UE 正忙，pop 出的
 		// action 会被 busy 拒，refill 出的队列也会被拒。等 action_completed 自然
@@ -1343,6 +1365,9 @@ func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
 	if prep.ShouldSkip {
 		return false
 	}
+	// 日程 refill = 反应窗口结束（P2-6 护栏）：NPC 回到日程驱动的规划，
+	// 反应 ladder/截止随之解除。
+	a.clearReaction()
 	goal, slot, idx = prep.Goal, prep.Slot, prep.Index
 	zone := prep.Zone
 	physical := prep.Physical

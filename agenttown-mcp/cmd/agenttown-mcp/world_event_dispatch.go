@@ -128,6 +128,12 @@ func (rt *Runtime) handleWorldEvent(agentID string, ev protocol.WorldEventPayloa
 			"agent_id", agentID, "event_id", ev.EventID,
 			"category", ev.Category, "event_type", ev.EventType,
 			"severity", ev.Severity, "queue_len", ac.as.WorldEventQueueLen())
+		// 路由器裁决（§4.3）：非 force 事件入队后异步判一次紧急度——
+		// interrupt 则撤队转打断（routerInterrupt），不紧急/判不动则
+		// 留在队列等安全点。入队先行保证任何失败路径下事件都不丢。
+		if rt.eventRouter != nil {
+			go rt.eventRouter.route(rt.ctx, agentID, ev)
+		}
 	case agentstate.EnqueueDuplicate:
 		rt.logger.Debug("[world_event] 重复事件已丢弃（seq 重放）",
 			"agent_id", agentID, "event_id", ev.EventID)
@@ -190,6 +196,9 @@ func (rt *Runtime) handleForceEvent(ac *agentContext, agentID string, ev protoco
 	// hint 落 AgentState：等待超时 / replan 失败两条兜底路径都靠 worker
 	// 自然 refill 时经 BeginTacticalRefill 读到事件上下文。
 	ac.as.SetReplanHint(hint)
+	// 护栏（§4.5）：force 反应同样是一个反应任务——带截止时间，后续路由
+	// 裁决需严格更高 severity 才能再打断（force 自身不受限，§4.2）。
+	ac.beginReaction(ev.Severity, ac.as.LatestGameTimeSec())
 	go ac.forceInterruptReplan(rt.ctx, agentID, rt.ws, *rt.kbPtr, rt.profiles, hint, rt.logger)
 }
 
@@ -462,4 +471,114 @@ func handleDebugEvent(logger *slog.Logger, lookupAgent func(string) *agentContex
 		QueueLen:  ac.as.WorldEventQueueLen(),
 		Note:      note,
 	})
+}
+
+// ─── 反应护栏（P2-6，设计文档 §4.5 两条护栏）──────────────────
+//
+// ① 反应任务带绝对截止时间，不能无界——超过 deadline 的反应被打断，
+//   worker 重新按日程 refill（反应吞掉整个时段是最坏情形）。
+// ② 反应打断反应，要求 severity 严格更高——进行中的反应窗口内，路由
+//   裁决的 severity 不高于当前反应的事件保持入队（保守：等安全点统筹）。
+//
+// 状态在 worker 的日程 refill（tacticalRefill）/ slot 切换 / 到期 / agent
+// 下线时清除——所以"仍 armed"即"自反应开始没有发生过日程 refill"，截止
+// 硬切有明确的归属。force 事件不走 ②（§4.2 不可否决），但会重置反应窗口。
+
+// reactionDeadlineGameSec bounds one reaction task in authoritative game
+// seconds (30 game minutes — a reaction is "处理完事件再回到日程"，不该
+// 吞掉整个时段；反应动作本身另有 time_to_stop / slot 边界兜底)。
+// var 便于测试注入。
+var reactionDeadlineGameSec = 1800.0
+
+// beginReaction arms the guard for a newly started reaction task with its
+// severity ladder bar and absolute deadline. nowGameSec is the current
+// authoritative game time (<= 0 = no perception yet; the deadline check
+// stays inert until perception arrives).
+func (a *agentContext) beginReaction(severity int, nowGameSec float64) {
+	if severity < 0 {
+		severity = 0
+	}
+	if severity > 10 {
+		severity = 10
+	}
+	a.coordMu.Lock()
+	defer a.coordMu.Unlock()
+	a.reactionActive = true
+	a.reactionSeverity = severity
+	if nowGameSec > 0 {
+		a.reactionDeadlineGameSec = nowGameSec + reactionDeadlineGameSec
+	} else {
+		a.reactionDeadlineGameSec = 0 // 无感知：等首条 perception 后再算
+	}
+}
+
+// reactionSnapshot returns the guard state.
+func (a *agentContext) reactionSnapshot() (active bool, severity int, deadlineGameSec float64) {
+	a.coordMu.Lock()
+	defer a.coordMu.Unlock()
+	return a.reactionActive, a.reactionSeverity, a.reactionDeadlineGameSec
+}
+
+// clearReaction lifts the guard. Callers: schedule refill (tacticalRefill —
+// the NPC has returned to schedule-driven planning), slot switch, agent
+// stop, and deadline expiry.
+func (a *agentContext) clearReaction() {
+	a.coordMu.Lock()
+	a.reactionActive = false
+	a.reactionSeverity = 0
+	a.reactionDeadlineGameSec = 0
+	a.coordMu.Unlock()
+}
+
+// mayInterruptReaction implements guardrail ②: an interrupt with the given
+// severity may cut an active reaction only if strictly higher. No active
+// reaction → always true.
+func (a *agentContext) mayInterruptReaction(severity int) bool {
+	a.coordMu.Lock()
+	defer a.coordMu.Unlock()
+	return !a.reactionActive || severity > a.reactionSeverity
+}
+
+// checkReactionDeadline implements guardrail ① (called from the worker
+// loop, after the replanBusy guard): at deadline expiry the still-armed
+// reaction is cut — in-flight action stopped, queue dropped, hint tells the
+// next refill to return to the schedule. Still-armed means no schedule
+// refill happened since the reaction started, so the current activity is
+// attributable to the reaction.
+func (a *agentContext) checkReactionDeadline(agentID string, ws contract.Transport, logger *slog.Logger) {
+	active, sev, deadline := a.reactionSnapshot()
+	if !active {
+		return
+	}
+	now := a.as.LatestGameTimeSec()
+	if now <= 0 || deadline <= 0 || now < deadline {
+		return
+	}
+	a.clearReaction()
+
+	// 与 abandonCurrentPlan 同模式：清队列 + stop 在途 + cancel timer +
+	// signal worker。hint 是"回到日程"（不带【强制打断】前缀 → 不升级为
+	// 紧急事件，走普通 hint 注入）。
+	info := a.as.ClearForReplan()
+	actionID := info.ActionID
+	a.as.SetReplanHint("【反应截止】对紧急事件的反应时间已用完，请立即回到当前时段目标的原有日程继续安排。")
+
+	a.coordMu.Lock()
+	if actionID != "" {
+		if timer, ok := a.pendingActionTimeouts[actionID]; ok {
+			timer.Stop()
+			delete(a.pendingActionTimeouts, actionID)
+		}
+	}
+	a.coordMu.Unlock()
+	if actionID != "" {
+		if err := ws.SendStopAction(agentID, actionID); err != nil {
+			logger.Warn("[反应护栏] 截止 stop_action 发送失败（worker 将自然 refill）",
+				"agent_id", agentID, "action_id", actionID, "err", err)
+		}
+	}
+	logger.Info("[反应护栏] 反应任务到截止时间，切回日程",
+		"agent_id", agentID, "severity", sev, "game_time", now, "deadline", deadline,
+		"action_id", actionID, "queue_len", info.QueueLen)
+	a.signal()
 }

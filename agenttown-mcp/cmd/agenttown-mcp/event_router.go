@@ -182,6 +182,17 @@ func (rt *Runtime) routerInterrupt(agentID string, ev protocol.WorldEventPayload
 		return
 	}
 
+	// 护栏②（§4.5）：反应打断反应需 severity 严格更高。被拦截的事件保持
+	// 入队（已在队列里，等安全点与后续事件一并统筹——保守方向与 §4.3 一致）。
+	// force 事件不走此护栏（§4.2 不可否决）。
+	if active, curSev, _ := ac.reactionSnapshot(); active && dec.Severity <= curSev {
+		rt.logger.Info("[事件路由] 反应护栏拦截：severity 不高于进行中的反应，保持入队",
+			"agent_id", agentID, "event_id", ev.EventID,
+			"event_type", ev.EventType, "event_severity", dec.Severity,
+			"reaction_severity", curSev, "reason", dec.Reason)
+		return
+	}
+
 	// 撤下队列中的这条事件（改走打断路径，不再等安全点）。找不到 = 已被
 	// drain 或 Stop 清过——继续打断处理（保守：宁可多一次反应，不丢一次
 	// 紧急响应）。
@@ -211,5 +222,8 @@ func (rt *Runtime) routerInterrupt(agentID string, ev protocol.WorldEventPayload
 	hint := fmt.Sprintf("【强制打断】%s（路由裁决：紧急，%s）",
 		prompt.FormatWorldEvent(ev), dec.Reason)
 	ac.as.SetReplanHint(hint)
+	// 护栏（§4.5）：路由打断开启的反应任务——带截止时间，后续反应打断
+	// 需严格更高 severity。
+	ac.beginReaction(dec.Severity, ac.as.LatestGameTimeSec())
 	go ac.forceInterruptReplan(rt.ctx, agentID, rt.ws, *rt.kbPtr, rt.profiles, hint, rt.logger)
 }
