@@ -30,7 +30,7 @@ import (
 
 const (
 	// strategicReplanDailyCap bounds replans per game day per agent.
-	strategicReplanDailyCap = 2
+	strategicReplanDailyCap = 5
 	// strategicReplanMinGapGameSec is the minimum game-time gap between two
 	// replans (2 game hours — an event storm must not become a plan storm).
 	strategicReplanMinGapGameSec = 2 * 3600.0
