@@ -42,6 +42,9 @@ type RouterInput struct {
 	// CurrentAction describes the in-flight action (e.g. "InteractSmartObject
 	// (workbench/assemble)，已执行约 47 分钟"); empty = idle.
 	CurrentAction string
+	// Situations is the pre-rendered active-situation list（P3-9 修复 A）：
+	// an ongoing threat colors how urgent a NEW event is.
+	Situations string
 	// WorldOverview is the shared world setting/theme (prompt.WorldOverview,
 	// the same module 1 the strategic/tactical/dialogue layers inject), so
 	// the router judges with the same world model as the rest of the mind.
@@ -140,7 +143,7 @@ const RouterUserTemplate = `NPC %s 收到一条世界事件，请裁决是否打
 %s
 【当前动作】
 %s
-
+%s
 【收到的事件】
 %s
 
@@ -163,12 +166,17 @@ func BuildRouterPrompt(in RouterInput) string {
 	if in.PhysicalLine != "" {
 		physicalSeg = in.PhysicalLine + "\n"
 	}
+	situationsSeg := ""
+	if in.Situations != "" {
+		situationsSeg = "【当前处境】仍在持续、尚未解除：\n" + in.Situations + "\n"
+	}
 	return fmt.Sprintf(RouterUserTemplate,
 		agentName,
 		in.TimeOfDay,
 		in.Zone,
 		physicalSeg,
 		action,
+		situationsSeg,
 		FormatWorldEvent(in.Event),
 	)
 }

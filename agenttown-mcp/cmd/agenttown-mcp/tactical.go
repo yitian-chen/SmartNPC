@@ -177,6 +177,9 @@ func generateTacticalPlan(
 	// 失败调用丢弃）。drain 在本咽喉点覆盖三个调用方：worker tacticalRefill
 	// / tacticalRefillForReplan（force 与路由打断的重规划）/ /debug/schedule。
 	worldEvents := ac.as.WorldEventQueueSnapshot()
+	// P3-9 修复 A：持续情境注入【当前处境】段（combat_exit/TTL 解除前
+	// 每轮可见——防"威胁解除了"幻觉）。
+	situations := formatActiveSituations(ac.as.Snapshot().ActiveSituations, ac.as.LatestGameTimeSec())
 	headerPlan := ac.as.TacticalHeaderPlan()
 	compact := dailyPlan != "" && headerPlan == dailyPlan
 	promptText := prompt.BuildTactical(prompt.TacticalInput{
@@ -193,6 +196,7 @@ func generateTacticalPlan(
 		Memories:      memories,
 		Relationships: relationships,
 		Events:        prompt.FormatWorldEventList(worldEvents),
+		Situations:    situations,
 		AgentID:       agentID,
 		ObjectStatus:  objectStatus,
 		NearbyObjects: nearbyObjects,

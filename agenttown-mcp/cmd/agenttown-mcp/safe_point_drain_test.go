@@ -101,11 +101,12 @@ func TestForceReplan_PromptCarriesQueuedEvents(t *testing.T) {
 	dispatchTestEvent(t, rt, "H-01", forceTestEvent("evt_drain_f"))
 
 	// force replan 成功（fake 返回 tool_calls）→ prompt 同时含紧急 hint
-	// 与队列事件，且队列被消费。轮询 mutex 保护的队列长度（ClearWorldEvents
-	// 在 prompt 写入之后才执行——经 AgentState.mu 形成 happens-before，
-	// 此后读 capturedMsgs 是安全的；不直接轮询无锁的 capturedMsgs）。
+	// 与队列事件；成功后事件回声入队（修复 B：反应耗尽后的第一次日程
+	// refill 在【发生的事件】里再见到 force 事件一次），队列余 1。轮询
+	// mutex 保护的队列长度（ClearWorldEvents 在 prompt 写入之后才执行——
+	// 经 AgentState.mu 形成 happens-before，此后读 capturedMsgs 是安全的）。
 	waitFor(t, 2*time.Second, func() bool {
-		return ac.as.WorldEventQueueLen() == 0 && replanIdle(ac)
+		return ac.as.WorldEventQueueLen() == 1 && replanIdle(ac)
 	})
 	user := lastUserPromptOf(t, fake.capturedMsgs)
 	for _, want := range []string{
@@ -118,8 +119,13 @@ func TestForceReplan_PromptCarriesQueuedEvents(t *testing.T) {
 			t.Fatalf("force replan prompt missing %q:\n%s", want, user)
 		}
 	}
-	if got := ac.as.WorldEventQueueLen(); got != 0 {
-		t.Fatalf("force replan must consume the queued events, got len=%d", got)
+	// 修复 B：force replan 成功后事件回声入队——队列余 1（force 事件
+	// 本身），被反应后的第一次日程 refill 消费。
+	if got := ac.as.WorldEventQueueLen(); got != 1 {
+		t.Fatalf("force replan must leave exactly the event echo, got len=%d", got)
+	}
+	if echoed := ac.as.WorldEventQueueSnapshot(); len(echoed) != 1 || echoed[0].EventID != "evt_drain_f" {
+		t.Fatalf("echo should be the force event itself, got %+v", echoed)
 	}
 	// stop 已同步发出（force 硬保证不因 drain 改变）。
 	if stops := stoppedActions(ft); len(stops) != 1 || stops[0] != "act-1" {

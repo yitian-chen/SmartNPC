@@ -86,6 +86,14 @@ func BuildTactical(in TacticalInput) string {
 		sb.WriteString(in.Events)
 		sb.WriteString("\n")
 	}
+	// P3-9 修复 A：持续情境（未被解除的威胁）。事件是边沿触发的，但威胁
+	// 在解除信号到达前持续存在——每轮 refill 都要可见，否则 LLM 会脑补
+	// "威胁解除了"。
+	if in.Situations != "" {
+		sb.WriteString("【当前处境】以下情境仍在持续、尚未收到解除信号，安排行动时必须考虑：\n")
+		sb.WriteString(in.Situations)
+		sb.WriteString("\n")
+	}
 	if in.Memories != "" {
 		sb.WriteString("【过往经验】\n" + in.Memories)
 		if !strings.HasSuffix(in.Memories, "\n") {
@@ -171,7 +179,9 @@ func tacticalHintLine(in TacticalInput, th BandThresholds) string {
 			"你有权暂停原计划，先妥善处置事件（如撤离威胁范围、移动到安全位置、寻找同伴支援、保持警戒观察等，" +
 			"具体做法由你结合角色性格与事件性质决定），处理完且时间允许时再回到时段目标。" +
 			"本轮动作时长按应对事件的实际需要安排即可，无需用长动作填满时段剩余时长——" +
-			"事件应对只需短时间时，队列耗尽后系统会自然重新规划回到日程。"
+			"事件应对只需短时间时，队列耗尽后系统会自然重新规划回到日程。" +
+			"若该事件描述的是威胁类情境（如被攻击/被瞄准），在收到明确的解除信号（脱离战斗）之前应视为持续存在，" +
+			"不得自行认定威胁已解除。"
 	}
 	hintLine := "【上次中断原因】" + in.Hint + "（请据此调整本轮规划）"
 	if !strings.Contains(in.Hint, "物理状态告警") || in.Physical == nil || in.Physical.IsZero() {

@@ -117,6 +117,20 @@ func (rt *Runtime) handleWorldEvent(agentID string, ev protocol.WorldEventPayloa
 		return false
 	}
 
+	// 修复 A：combat 类事件是持续状态的边沿——attacked/targeted 登记威胁
+	// 情境（直到 combat_exit 或 TTL），combat_exit 解除。放在 force 分流
+	// 之前：登记/解除对 force 与非 force 路径一视同仁。
+	if isCombatStartEvent(ev) {
+		ac.as.BeginSituation(situationKindCombat, prompt.FormatWorldEvent(ev), ac.as.LatestGameTimeSec())
+		rt.logger.Info("[world_event] 登记持续威胁情境（combat_exit 或 TTL 解除）",
+			"agent_id", agentID, "event_id", ev.EventID, "event_type", ev.EventType)
+	} else if isCombatExitEvent(ev) {
+		if ac.as.EndSituation(situationKindCombat) {
+			rt.logger.Info("[world_event] 威胁情境已解除（combat_exit）",
+				"agent_id", agentID, "event_id", ev.EventID)
+		}
+	}
+
 	if ev.Force {
 		rt.handleForceEvent(ac, agentID, ev)
 		return true
@@ -201,7 +215,7 @@ func (rt *Runtime) handleForceEvent(ac *agentContext, agentID string, ev protoco
 	// 护栏（§4.5）：force 反应同样是一个反应任务——带截止时间，后续路由
 	// 裁决需严格更高 severity 才能再打断（force 自身不受限，§4.2）。
 	ac.beginReaction(ev.Severity, ac.as.LatestGameTimeSec())
-	go ac.forceInterruptReplan(rt.ctx, agentID, rt.ws, *rt.kbPtr, rt.profiles, hint, rt.logger)
+	go ac.forceInterruptReplan(rt.ctx, agentID, rt.ws, *rt.kbPtr, rt.profiles, ev, hint, rt.logger)
 }
 
 // forceEventHint formats the replan hint for a force event. The 【强制打断】
@@ -216,9 +230,13 @@ func forceEventHint(ev protocol.WorldEventPayload) string {
 // The interruption itself already fired synchronously in handleForceEvent
 // (the §4.2 guarantee); this goroutine only does the tactical work of
 // re-decomposing the current slot with the event injected as the hint.
+// On success the event is echoed into the world-event queue（修复 B）: the
+// FIRST schedule refill after the reaction sees it once more in
+// 【发生的事件】— the consumed hint must not be the last trace of the event
+// in the context.
 func (a *agentContext) forceInterruptReplan(ctx context.Context, agentID string,
 	ws contract.Transport, kb *worldkb.KB, profiles map[string]*profile.Profile,
-	hint string, logger *slog.Logger) {
+	ev protocol.WorldEventPayload, hint string, logger *slog.Logger) {
 
 	if !a.acquireReplanSlot(agentID, hint, logger) {
 		return
@@ -258,6 +276,11 @@ func (a *agentContext) forceInterruptReplan(ctx context.Context, agentID string,
 			logger.Info("[world_event/force] 重规划完成，已打断残留动作",
 				"agent_id", agentID, "action_id", actionID)
 		}
+	}
+	// 修复 B：事件回声入队——反应耗尽后的第一次日程 refill 在【发生的事件】
+	// 里再见到它一次（消费一次即清）。
+	if ev.EventID != "" || ev.EventType != "" {
+		a.as.EchoWorldEvent(ev)
 	}
 	a.signal()
 }
@@ -588,4 +611,25 @@ func (a *agentContext) checkReactionDeadline(agentID string, ws contract.Transpo
 		"action_id", actionID, "queue_len", info.QueueLen)
 	a.signal()
 	return true
+}
+
+// situationKindCombat is the ongoing-threat situation kind (P3-9 修复 A).
+const situationKindCombat = "combat"
+
+// situationTTLGameSec bounds a situation without a resolution event
+// (combat_exit never arrives): 30 game minutes, then it auto-degrades.
+const situationTTLGameSec = 30 * 60.0
+
+// isCombatStartEvent reports whether the event starts a combat threat
+// (player_attacked / player_targeted — both are force by protocol, but the
+// check is label-based so a mislabeled non-force one still registers).
+func isCombatStartEvent(ev protocol.WorldEventPayload) bool {
+	return ev.Category == protocol.CategoryPlayerInteraction &&
+		(ev.EventType == protocol.EventTypePlayerAttacked || ev.EventType == protocol.EventTypePlayerTargeted)
+}
+
+// isCombatExitEvent reports whether the event resolves the combat threat.
+func isCombatExitEvent(ev protocol.WorldEventPayload) bool {
+	return ev.Category == protocol.CategoryPlayerInteraction &&
+		ev.EventType == protocol.EventTypeCombatExit
 }

@@ -1384,7 +1384,14 @@ func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
 	plan, _, _ := a.as.SnapshotSchedule()
 	tod := a.as.LatestTimeOfDay()
 	goal, slot, idx := selectCurrentGoal(plan, tod)
-	prep := a.as.BeginTacticalRefill(goal, slot, idx, a.tacticalHc != nil)
+	// 修复 C：反应窗口仍 armed（打断以来没有过日程 refill）时，本次 refill
+	// 是"紧急反应刚结束"的衔接点——不发"长动作收尾"自动 hint（反向信号，
+	// 会把 LLM 推回填满时段），情境由 activeSituations 承载。
+	suppressAutoHint := false
+	if reactionArmed, _, _ := a.reactionSnapshot(); reactionArmed {
+		suppressAutoHint = true
+	}
+	prep := a.as.BeginTacticalRefill(goal, slot, idx, a.tacticalHc != nil, suppressAutoHint)
 	if prep.ShouldSkip {
 		return false
 	}

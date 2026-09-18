@@ -46,8 +46,14 @@ type TacticalInput struct {
 	// (P3-7, §4.4/§5.1 第三输入), pre-rendered via FormatWorldEventList;
 	// empty = skip the 【发生的事件】 segment. Unlike 【全天日程】 it is
 	// per-call data — injected in BOTH full and compact forms.
-	Events  string
-	AgentID string
+	Events string
+	// Situations is the pre-rendered active-situation list（P3-9 修复 A：
+	// combat 类事件登记的持续威胁，combat_exit/TTL 解除）。Injected as
+	// 【当前处境】 so every refill sees the ongoing threat until it is
+	// actually resolved — the LLM must not declare it over on its own.
+	// Empty = skip.
+	Situations string
+	AgentID    string
 	// ObjectStatus is UE5's per-category smart object availability aggregate
 	// (cross-zone). Injected into the tactical prompt as 【物体实时占用】 so
 	// the LLM can avoid planning actions targeting occupied objects. nil =

@@ -109,11 +109,14 @@ type AgentState struct {
 	strategicReplanDay    int
 	lastStrategicReplanGT float64
 	planRevisions         []string
-	prevZone              string
-	prevObjectIDs         []string
-	lastReactiveAt        map[string]time.Time
-	perceptionCount       int
-	replanHint            string
+	// activeSituations 是事件登记的持续情境（combat 类）：登记/解除见
+	// active_situations.go。TTL 过滤在读取时做。
+	activeSituations []ActiveSituation
+	prevZone         string
+	prevObjectIDs    []string
+	lastReactiveAt   map[string]time.Time
+	perceptionCount  int
+	replanHint       string
 	// lastQueueOnlySpeak 记录最近一次战术层分解（ReplaceQueue 路径）的队列
 	// 是否只含 speak——用于 BeginTacticalRefill 在"队列提前耗尽"时生成
 	// 针对性 hint（LLM 只返回 1 个 speak、队列数秒即耗尽的场景）。
@@ -1019,7 +1022,13 @@ type TacticalRefillPrep struct {
 // (via selectCurrentGoal on the daily plan). If ShouldSkip is true the
 // caller must abort the refill. On success, the action queue is cleared
 // and the replanHint is consumed (returned in Hint for prompt injection).
-func (a *AgentState) BeginTacticalRefill(goal, slot string, idx int, hasTacticalHc bool) TacticalRefillPrep {
+//
+// suppressAutoHint skips the queue-exhaustion auto-hint（"上次队列提前耗尽…
+// 安排长动作收尾"）：该 hint 在紧急反应刚结束的 refill 里是反向信号——
+// 它把 LLM 推回"填满时段的长动作"，而此刻正确语境是刚被打断的紧急
+// 情境（由 activeSituations 承载）。调用方（tacticalRefill）在反应窗口
+// 仍 armed 时传 true。
+func (a *AgentState) BeginTacticalRefill(goal, slot string, idx int, hasTacticalHc, suppressAutoHint bool) TacticalRefillPrep {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	prep := TacticalRefillPrep{
@@ -1054,8 +1063,9 @@ func (a *AgentState) BeginTacticalRefill(goal, slot string, idx int, hasTactical
 		}
 		// 注入"未安排长动作"hint；上次队列只含 speak 时给出更具体的诊断
 		// （该失败模式实测高频：LLM 只返回 1 个 speak，队列数秒即耗尽，
-		// NPC 在两次 LLM 调用之间呆站）。
-		if a.replanHint == "" {
+		// NPC 在两次 LLM 调用之间呆站）。反应窗口内的 refill 跳过（见
+		// suppressAutoHint 注释）。
+		if a.replanHint == "" && !suppressAutoHint {
 			if a.lastQueueOnlySpeak {
 				a.replanHint = "上次分解只返回了 1 个 speak，队列数秒即耗尽导致频繁重分解。本次必须在 speak 之后返回至少一个带 duration 的长动作（InteractSmartObject 设施互动或 exercise 原地锻炼），让 NPC 持续活动到时段结束"
 			} else {
@@ -1436,6 +1446,7 @@ func (a *AgentState) Snapshot() Snapshot {
 		LastEndResult:          a.lastEndResult,
 		LastEndWhy:             a.lastEndWhy,
 		UnfinishedTask:         a.unfinishedTask,
+		ActiveSituations:       append([]ActiveSituation(nil), a.activeSituations...),
 		QueuedActionID:         a.queuedActionID,
 		QueuedGroup:            a.queuedGroup,
 		QueuedPosition:         cloneIntPtr(a.queuedPosition),

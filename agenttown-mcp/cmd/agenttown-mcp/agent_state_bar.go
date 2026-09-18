@@ -72,6 +72,10 @@ func (a *agentContext) buildAgentStateBar(agentID string, profiles map[string]*p
 	if line := barLastEndLine(&snap); line != "" {
 		b.WriteString(line + "\n")
 	}
+	// P3-9 修复 A：持续情境（未被解除的威胁）——每轮 LLM 调用都可见。
+	if line := formatActiveSituations(snap.ActiveSituations, env.GameTimeSec); line != "" {
+		b.WriteString("当前处境：" + line + "\n")
+	}
 	b.WriteString(agentStateBarClose)
 	return b.String()
 }
@@ -259,4 +263,26 @@ func truncateRunes(s string, n int) string {
 		return s
 	}
 	return string(r[:n]) + "…"
+}
+
+// formatActiveSituations renders the live situations（P3-9 修复 A）with
+// TTL filtering and elapsed duration; "" when none live. Shared by the
+// status bar, the tactical prompt, and the router input.
+func formatActiveSituations(situations []agentstate.ActiveSituation, nowGameSec float64) string {
+	live := agentstate.FilterSituations(situations, nowGameSec, situationTTLGameSec)
+	if len(live) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(live))
+	for _, s := range live {
+		line := s.Desc
+		if s.StartGameSec > 0 && nowGameSec > s.StartGameSec {
+			line += fmt.Sprintf("（已持续%s", barDurMinute(int((nowGameSec-s.StartGameSec)/60)))
+		} else {
+			line += "（"
+		}
+		line += "，尚未收到解除信号）"
+		parts = append(parts, line)
+	}
+	return strings.Join(parts, "；")
 }

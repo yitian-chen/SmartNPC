@@ -159,6 +159,7 @@ func (r *eventRouter) buildInput(agentID string, ac *agentContext, ev protocol.W
 		PhysicalLine:  physicalLine,
 		Relationships: relationships,
 		CurrentAction: action,
+		Situations:    formatActiveSituations(snap.ActiveSituations, ac.as.LatestGameTimeSec()),
 		WorldOverview: prompt.WorldOverview(kb),
 		Event:         ev,
 	}
@@ -226,5 +227,5 @@ func (rt *Runtime) routerInterrupt(agentID string, ev protocol.WorldEventPayload
 	// 护栏（§4.5）：路由打断开启的反应任务——带截止时间，后续反应打断
 	// 需严格更高 severity。
 	ac.beginReaction(dec.Severity, ac.as.LatestGameTimeSec())
-	go ac.forceInterruptReplan(rt.ctx, agentID, rt.ws, *rt.kbPtr, rt.profiles, hint, rt.logger)
+	go ac.forceInterruptReplan(rt.ctx, agentID, rt.ws, *rt.kbPtr, rt.profiles, ev, hint, rt.logger)
 }
