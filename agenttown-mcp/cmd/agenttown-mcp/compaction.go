@@ -134,6 +134,12 @@ func (a *agentContext) summarizeConversation(evict []llmtypes.Message, prevSumma
 	summaryCtx, cancel := context.WithTimeout(context.Background(), compactSummaryTimeout)
 	defer cancel()
 	resp, err := a.tacticalHc.SendWithSummary(summaryCtx, compactSystemPrompt, promptText)
+	// 清掉压缩调用留下的 lastRequestBody——防 dumpLastRequestBody 把
+	// 压缩请求体误记为战术层请求（压缩 user prompt 含完整历史原文，
+	// 在 actual_prompts.md 里会显示为大量重复段）。
+	if c, ok := any(a.tacticalHc).(interface{ ClearLastRequestBody() }); ok {
+		c.ClearLastRequestBody()
+	}
 	if err != nil {
 		return "", fmt.Errorf("compact llm: %w", err)
 	}

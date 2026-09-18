@@ -169,7 +169,39 @@ func dumpLastRequestBody(agentID, layer string, lc any, logger *slog.Logger) {
 	if !ok {
 		return
 	}
-	if body := rb.LastRequestBody(); len(body) > 0 {
-		dumpPromptDoc(agentID, layer, body, logger)
+	body := rb.LastRequestBody()
+	if len(body) == 0 {
+		return
 	}
+	// 跳过压缩层请求体：maybeCompactConversation 在 agenticTurn 内部用同一
+	// tacticalHc 调 SendWithSummary 做压缩，lastRequestBody 可能被设为压缩
+	// 请求体（system 含"对话压缩模块"）。某些路径（流式/限流重试）下
+	// send() 未覆盖它，dumpLastRequestBody 就会把压缩请求体记为战术层
+	// 请求体——压缩层 user prompt 含完整历史原文（每轮战术 prompt 重复
+	// 【全天日程】/【分解规则】等），在 actual_prompts.md 里显示为大量重复。
+	if isCompactRequestBody(body) {
+		return
+	}
+	dumpPromptDoc(agentID, layer, body, logger)
+}
+
+// isCompactRequestBody reports whether a request body is the compaction
+// layer's (system message = 对话压缩模块), so dumpLastRequestBody can skip
+// it — it must not be recorded as a tactical/strategic/dialogue request.
+func isCompactRequestBody(body []byte) bool {
+	var req struct {
+		Messages []struct {
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		return false
+	}
+	for _, m := range req.Messages {
+		if m.Role == "system" && strings.Contains(m.Content, "对话压缩模块") {
+			return true
+		}
+	}
+	return false
 }
