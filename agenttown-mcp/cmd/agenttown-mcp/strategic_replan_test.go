@@ -190,3 +190,67 @@ func protocolPerceptionAt(t *testing.T, day int, todSec float64) json.RawMessage
 // silence unused import in minimal test configurations.
 var _ = venus.Tool{}
 var _ sync.Mutex
+
+// TestParseDailyPlan_BracketlessTolerance pins the 2026-09-18 field failure:
+// the replan LLM occasionally drops the outer array brackets (comma-separated
+// {...},{...} with a stray trailing ]), which made both event-driven
+// revisions fail parsing and silently keep the old plan.
+func TestParseDailyPlan_BracketlessTolerance(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+		want int
+	}{
+		{"no brackets, no trailing", `{"time":"12:39-13:15","goal":"避一避"},{"time":"13:15-15:30","goal":"拆解"}`, 2},
+		{"no opening bracket, stray trailing ]", "\n\n{\"time\":\"12:39-13:15\",\"goal\":\"避一避\"},{\"time\":\"13:15-15:30\",\"goal\":\"拆解\"}]", 2},
+		{"single object no brackets", `{"time":"12:39-13:15","goal":"避一避"}`, 1},
+		{"normal array untouched", `["a"]`[:0] + `[{"time":"07:00-08:00","goal":"晨练"}]`, 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			items, err := parseDailyPlan(tc.raw)
+			if err != nil {
+				t.Fatalf("parseDailyPlan(%q): %v", tc.raw, err)
+			}
+			if len(items) != tc.want {
+				t.Fatalf("items = %d, want %d (%+v)", len(items), tc.want, items)
+			}
+		})
+	}
+	// 仍无法挽救的形态照常报错。
+	if _, err := parseDailyPlan("not json at all"); err == nil {
+		t.Fatalf("garbage input must still error")
+	}
+}
+
+// TestStrategicReplan_BracketlessResponseEndToEnd is the regression for the
+// user's report: a replan whose LLM response lacks the array brackets must
+// still revise the plan.
+func TestStrategicReplan_BracketlessResponseEndToEnd(t *testing.T) {
+	ac, ctx := newAgentContext(context.Background())
+	ac.autoPlanEnabled = true
+	// 仿真实测的失败形态：无 [ 开头、尾部残留 ]。
+	fake := &fakeLoopLLM{resp: makeStrategicResponse(
+		`{"time":"12:31-15:00","goal":"处理故障后续"},{"time":"15:00-18:00","goal":"下午拆解"}]`)}
+	ac.strategicHc = fake
+	ft := &fakeTransport{connected: true}
+
+	ac.as.SetDailyPlan("07:00-09:00: 晨练\n09:00-12:00: 上午装配\n14:00-18:00: 下午拆解", 11)
+	perc := protocolPerceptionAt(t, 11, 45060) // D12 12:31
+	if _, err := ac.as.SetPerception(perc); err != nil {
+		t.Fatalf("SetPerception: %v", err)
+	}
+
+	ac.maybeStrategicReplan(ctx, "H-01", ft, nil, nil, nil, testLogger(), "紧急反应跨越时段边界被切断")
+	waitFor(t, 3*time.Second, func() bool {
+		return len(ac.as.PlanRevisions()) == 1 && replanIdle(ac)
+	})
+	plan, _, idx := ac.as.SnapshotSchedule()
+	items := parseFormattedPlan(plan)
+	if len(items) != 4 {
+		t.Fatalf("revised plan should have 4 slots (2 past + 2 new), got %d:\n%s", len(items), plan)
+	}
+	if items[2].Goal != "处理故障后续" || idx != 2 {
+		t.Fatalf("bracket-less response must still revise the plan, got %q idx=%d", items[2].Goal, idx)
+	}
+}

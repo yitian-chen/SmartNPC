@@ -287,14 +287,15 @@ func formatActiveSituations(situations []agentstate.ActiveSituation, nowGameSec 
 	}
 	parts := make([]string, 0, len(live))
 	for _, s := range live {
-		line := s.Desc
+		// desc 自带元数据括号（…（主体…，游戏时间…）），追加注记独立成括号，
+		// 避免堆叠出"）（，"——已持续 0 分钟时干脆省略时长。
 		if s.StartGameSec > 0 && nowGameSec > s.StartGameSec {
-			line += fmt.Sprintf("（已持续%s", barDurMinute(int((nowGameSec-s.StartGameSec)/60)))
+			line := fmt.Sprintf("%s（已持续%s，尚未收到解除信号）",
+				s.Desc, barDurMinute(int((nowGameSec-s.StartGameSec)/60)))
+			parts = append(parts, line)
 		} else {
-			line += "（"
+			parts = append(parts, s.Desc+"（尚未收到解除信号）")
 		}
-		line += "，尚未收到解除信号）"
-		parts = append(parts, line)
 	}
 	return strings.Join(parts, "；")
 }

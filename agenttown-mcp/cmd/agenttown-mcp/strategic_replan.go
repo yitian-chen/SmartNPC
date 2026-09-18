@@ -102,7 +102,7 @@ func (a *agentContext) strategicReplan(ctx context.Context, agentID string,
 		}
 		hint += fmt.Sprintf("上一个动作的结束方式：%s。\n", end)
 	}
-	hint += "请基于当前时间与实际执行状况，重新规划从当前时间起到今天结束的剩余日程：吸收上述偏差（例如压缩或顺延后续时段、补上未完成的事），已过去的时段不需要输出，保持与原计划相同的格式与节奏。"
+	hint += "请基于当前时间与实际执行状况，重新规划从当前时间起到今天结束的剩余日程：吸收上述偏差（例如压缩或顺延后续时段、补上未完成的事），已过去的时段不需要输出。输出必须是一个 JSON 数组，每个元素形为 {\"time\":\"HH:MM-HH:MM\",\"goal\":\"目标描述\"}，时段目标风格与原计划一致。"
 
 	dayCtx := weeklyschedule.WeeklyLine(a.as.LatestDayCount(), weeklySched)
 	newPlan, err := a.generateDailyPlanCore(ctx, agentID, kb, profiles, logger,

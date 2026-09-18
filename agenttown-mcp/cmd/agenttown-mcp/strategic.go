@@ -185,7 +185,18 @@ func parseDailyPlan(raw string) ([]dailyPlanItem, error) {
 	// 此时尝试补 ] 再 unmarshal；仍失败则报错。
 	start := strings.Index(s, "[")
 	if start < 0 {
-		return nil, fmt.Errorf("no JSON array found")
+		// 容错：模型偶发丢掉外层数组括号（输出逗号分隔的 {...},{...}，
+		// 尾部可能残留孤立的 ]）——剥掉尾括号后整体包一层 [...] 再试。
+		// 2026-09-18 实测：两次事件驱动的当日修订均因此形态解析失败，
+		// 修订被静默放弃。
+		trimmed := strings.TrimRight(s, " \t\r\n]")
+		trimmed = strings.TrimLeft(trimmed, " \t\r\n")
+		if strings.HasPrefix(trimmed, "{") {
+			s = "[" + trimmed + "]"
+			start = 0
+		} else {
+			return nil, fmt.Errorf("no JSON array found")
+		}
 	}
 	end := strings.LastIndex(s, "]")
 	var arrayStr string
