@@ -236,7 +236,7 @@ func (a *agentContext) updateState(report protocol.StateReportPayload) (Reactive
 // "要不要打断"意义不大（模型看不到战术层整体规划，只能基于贫乏信息答 continue）。
 // 异常完成才是真正需要反应层介入的时机。
 func (a *agentContext) recordActionCompletion(completion protocol.ActionCompletedPayload) (bool, ReactiveTrigger, string) {
-	res := a.as.RecordActionCompletion(completion.ActionID)
+	res := a.as.RecordActionCompletion(completion.ActionID, completion.Result, completion.Reason)
 	// Stage 4: best-effort action_history recording — only for tracked in-flight
 	// actions (debug /debug/action path doesn't call recordActionStarted, so its
 	// completions have WasInFlight=false and aren't recorded).
@@ -493,6 +493,8 @@ func (a *agentContext) advanceSlotIfNeeded(ws contract.Transport, agentID string
 	if !prompt.SlotExpired(slot, tod) {
 		return
 	}
+	// P4-10：切时段前捕捉未完成任务槽（在途动作被计划内打断的事实）。
+	a.recordInterrupted("时段切换（计划内打断）")
 	info := a.as.ClearForSlotSwitch()
 	actionID := info.ActionID
 	actionCmd := info.ActionCmd
@@ -991,7 +993,7 @@ func (a *agentContext) armActionTimeout(
 		ac := lookup(agentID)
 		if ac != nil {
 			// 业务状态清理走 AgentState
-			ac.as.RecordActionCompletion(actionID)
+			ac.as.RecordActionCompletion(actionID, "", "")
 			// 协调字段清理走 coordMu
 			ac.coordMu.Lock()
 			delete(ac.pendingActionTimeouts, actionID)

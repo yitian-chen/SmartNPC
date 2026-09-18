@@ -177,6 +177,8 @@ func (rt *Runtime) handleForceEvent(ac *agentContext, agentID string, ev protoco
 			rt.logger.Warn("[world_event/force] stop_action 发送失败（打断延后到 replan 完成后重试）",
 				"agent_id", agentID, "action_id", actionID, "err", err)
 		} else {
+			// P4-10：先捕捉未完成任务槽（含已执行时长），再清在途追踪。
+			ac.recordInterrupted("被紧急事件强制打断：" + truncateRunes(prompt.FormatWorldEvent(ev), 60))
 			// 清在途追踪，交给延迟到达的 action_completed{interrupted}：
 			// stash 保住 action_history 记账（与 checkTimeToStop 同模式）。
 			ac.as.ClearInFlightKeepQueue()
@@ -302,6 +304,7 @@ func (a *agentContext) abandonCurrentPlan(agentID string, ws contract.Transport,
 	// 业务字段（queue + 在途追踪 + slot）通过 AgentState 原子清理；
 	// 协调字段（replanInProgress + pending timer）通过 coordMu 清理。
 	// 两次加锁不嵌套。
+	a.recordInterrupted("旧计划清退（" + truncateRunes(reason, 40) + "）")
 	info := a.as.ClearForReplan()
 	actionID := info.ActionID
 	queueLen := info.QueueLen
@@ -559,6 +562,7 @@ func (a *agentContext) checkReactionDeadline(agentID string, ws contract.Transpo
 	// 与 abandonCurrentPlan 同模式：清队列 + stop 在途 + cancel timer +
 	// signal worker。hint 是"回到日程"（不带【强制打断】前缀 → 不升级为
 	// 紧急事件，走普通 hint 注入）。
+	a.recordInterrupted("反应截止时间到，切回日程")
 	info := a.as.ClearForReplan()
 	actionID := info.ActionID
 	a.as.SetReplanHint("【反应截止】对紧急事件的反应时间已用完，请立即回到当前时段目标的原有日程继续安排。")

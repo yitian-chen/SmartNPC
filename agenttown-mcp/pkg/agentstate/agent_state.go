@@ -85,7 +85,23 @@ type AgentState struct {
 	// so callers (recordActionHistory) still record the full action row
 	// for long-composite actions interrupted by slot switch or replan
 	// fallback. One-shot: matched → cleared. Overwritten by next clear.
-	clearedAction   *clearedActionInfo
+	clearedAction *clearedActionInfo
+	// P4-10（§6.1 状态栏补全）字段：未完成任务槽 + 上次动作结束原因 +
+	// 在途动作的游戏时间起点（已执行时长推算用）。
+	// currentActionStartGame 记录在途动作开始时的权威游戏秒（<=0 = 当时
+	// 无感知，已执行时长省略）。
+	currentActionStartGame float64
+	// lastEndResult/lastEndWhy 记录最近一次在途动作的结束方式与原因：
+	// result 为协议值（success/failed/interrupted/error），why 为 UE reason
+	// 或打断来源（如"被玩家攻击强制打断"）。lastEndInterrupted 标记 stop 点
+	// 已预告 interrupted——迟到的 action_completed{interrupted} 只确认结果，
+	// 不覆盖 stop 时记下的更具体 why。
+	lastEndResult      string
+	lastEndWhy         string
+	lastEndInterrupted bool
+	// unfinishedTask 承载被打断任务的事实（任务描述+进度+离开原因，预渲染），
+	// 供状态栏与下一次重规划参考；下个动作开始即清（事实已被消费）。
+	unfinishedTask  string
 	prevZone        string
 	prevObjectIDs   []string
 	lastReactiveAt  map[string]time.Time
@@ -350,6 +366,8 @@ func (a *AgentState) SetOnline(v bool) {
 }
 
 // RecordActionStarted records a newly-dispatched in-flight action.
+// The unfinished-task slot is cleared here: the interruption fact has been
+// consumed by the decision that produced this action.
 func (a *AgentState) RecordActionStarted(actionID, cmd string, params map[string]any, src ActionSource, toolCallID string) {
 	a.mu.Lock()
 	a.currentActionID = actionID
@@ -358,7 +376,41 @@ func (a *AgentState) RecordActionStarted(actionID, cmd string, params map[string
 	a.currentActionParams = params
 	a.currentActionStart = time.Now()
 	a.currentActionToolCallID = toolCallID
+	a.currentActionStartGame = latestGameTimeSecLocked(a.latestPerception)
+	a.unfinishedTask = ""
 	a.mu.Unlock()
+}
+
+// RecordActionInterrupted captures the current in-flight action as the
+// unfinished-task slot with the interrupt reason (P4-10，§3.4：三种结束
+// 方式必须区分——把打断当成功继续走是最典型的幻觉来源)。 Call at every
+// stop point BEFORE the in-flight tracking is cleared
+// (ClearInFlightKeepQueue / ClearForSlotSwitch). No-op when nothing is
+// in flight — usually an earlier stop point already captured a more
+// specific reason, and a later capture must not overwrite it.
+func (a *AgentState) RecordActionInterrupted(taskDesc, reason string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.currentActionID == "" {
+		return
+	}
+	a.lastEndResult = "interrupted"
+	a.lastEndWhy = reason
+	a.lastEndInterrupted = true
+	a.unfinishedTask = taskDesc
+}
+
+// latestGameTimeSecLocked parses the authoritative game seconds out of the
+// latest perception JSON. Caller holds a.mu.
+func latestGameTimeSecLocked(perception json.RawMessage) float64 {
+	if len(perception) == 0 {
+		return 0
+	}
+	var p protocol.PerceptionPayload
+	if err := json.Unmarshal(perception, &p); err != nil {
+		return 0
+	}
+	return p.Environment.GameTimeSec
 }
 
 // CompletionResult carries the flags computed by RecordActionCompletion
@@ -383,10 +435,20 @@ type CompletionResult struct {
 // and resolves pendingStop/selfStop markers. Returns flags describing
 // what was cleared so the caller can handle coordination timers
 // (pendingActionTimeouts, completedBeforeArm) and reactive triggers.
-func (a *AgentState) RecordActionCompletion(actionID string) CompletionResult {
+func (a *AgentState) RecordActionCompletion(actionID, result, reason string) CompletionResult {
 	a.mu.Lock()
 	if a.currentTask != nil && a.currentTask.ActionID == actionID {
 		a.currentTask = nil
+	}
+	// P4-10：上次结束方式记账。stop 点已预告 interrupted（why 更具体——
+	// 事件/裁决来源）时，迟到的 interrupted completion 只确认结果、不覆盖
+	// why；其余情况（success/failed/error，或未经 stop 点的 interrupted）
+	// 按实际结果覆盖。
+	if result == "interrupted" && a.lastEndInterrupted {
+		a.lastEndInterrupted = false
+	} else if result != "" {
+		a.lastEndResult = result
+		a.lastEndWhy = reason
 	}
 	wasInFlight := a.currentActionID == actionID
 	// Stage 4: capture in-flight fields BEFORE clearing, for action_history.
@@ -767,6 +829,11 @@ func (a *AgentState) Stop() {
 	a.worldEventQueue = nil
 	a.worldEventSeen = nil
 	a.worldEventSeenFIFO = nil
+	a.currentActionStartGame = 0
+	a.lastEndResult = ""
+	a.lastEndWhy = ""
+	a.lastEndInterrupted = false
+	a.unfinishedTask = ""
 	a.currentSlot = ""
 	a.redecomposeCount = 0
 	a.clearedAction = nil // drop stash — offline agent has no pending completion
@@ -1307,35 +1374,39 @@ func (a *AgentState) Snapshot() Snapshot {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return Snapshot{
-		Online:              a.online,
-		LatestPhysical:      clonePhysical(a.latestPhysical),
-		LatestPerception:    cloneRawMessage(a.latestPerception),
-		LatestVisibleAgents: append([]protocol.VisibleAgent(nil), a.latestVisibleAgents...),
-		CurrentTask:         cloneTask(a.currentTask),
-		CurrentActionID:     a.currentActionID,
-		CurrentActionCmd:    a.currentActionCmd,
-		CurrentActionParams: cloneParams(a.currentActionParams),
-		CurrentActionStart:  a.currentActionStart,
-		CurrentActionSrc:    a.currentActionSrc,
-		QueuedActionID:      a.queuedActionID,
-		QueuedGroup:         a.queuedGroup,
-		QueuedPosition:      cloneIntPtr(a.queuedPosition),
-		QueuedEstimatedWait: cloneFloat64Ptr(a.queuedEstimatedWait),
-		QueuedAt:            a.queuedAt,
-		ActionQueue:         cloneQueue(a.actionQueue),
-		DailyPlan:           a.dailyPlan,
-		CurrentDay:          a.currentDay,
-		CurrentPlanIndex:    a.currentPlanIndex,
-		CurrentSlot:         a.currentSlot,
-		RedecomposeCount:    a.redecomposeCount,
-		PrevZone:            a.prevZone,
-		PrevObjectIDs:       cloneStrings(a.prevObjectIDs),
-		PerceptionCount:     a.perceptionCount,
-		ReplanHint:          a.replanHint,
-		LastReplanAt:        a.lastReplanAt,
-		LastReplanGameTime:  a.lastReplanGameTime,
-		PendingStopActionID: a.pendingStopActionID,
-		SelfStopInProgress:  a.selfStopInProgress,
+		Online:                 a.online,
+		LatestPhysical:         clonePhysical(a.latestPhysical),
+		LatestPerception:       cloneRawMessage(a.latestPerception),
+		LatestVisibleAgents:    append([]protocol.VisibleAgent(nil), a.latestVisibleAgents...),
+		CurrentTask:            cloneTask(a.currentTask),
+		CurrentActionID:        a.currentActionID,
+		CurrentActionCmd:       a.currentActionCmd,
+		CurrentActionParams:    cloneParams(a.currentActionParams),
+		CurrentActionStart:     a.currentActionStart,
+		CurrentActionStartGame: a.currentActionStartGame,
+		CurrentActionSrc:       a.currentActionSrc,
+		LastEndResult:          a.lastEndResult,
+		LastEndWhy:             a.lastEndWhy,
+		UnfinishedTask:         a.unfinishedTask,
+		QueuedActionID:         a.queuedActionID,
+		QueuedGroup:            a.queuedGroup,
+		QueuedPosition:         cloneIntPtr(a.queuedPosition),
+		QueuedEstimatedWait:    cloneFloat64Ptr(a.queuedEstimatedWait),
+		QueuedAt:               a.queuedAt,
+		ActionQueue:            cloneQueue(a.actionQueue),
+		DailyPlan:              a.dailyPlan,
+		CurrentDay:             a.currentDay,
+		CurrentPlanIndex:       a.currentPlanIndex,
+		CurrentSlot:            a.currentSlot,
+		RedecomposeCount:       a.redecomposeCount,
+		PrevZone:               a.prevZone,
+		PrevObjectIDs:          cloneStrings(a.prevObjectIDs),
+		PerceptionCount:        a.perceptionCount,
+		ReplanHint:             a.replanHint,
+		LastReplanAt:           a.lastReplanAt,
+		LastReplanGameTime:     a.lastReplanGameTime,
+		PendingStopActionID:    a.pendingStopActionID,
+		SelfStopInProgress:     a.selfStopInProgress,
 	}
 }
 

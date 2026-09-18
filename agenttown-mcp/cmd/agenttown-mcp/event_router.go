@@ -212,6 +212,7 @@ func (rt *Runtime) routerInterrupt(agentID string, ev protocol.WorldEventPayload
 			rt.logger.Warn("[事件路由] stop_action 发送失败（打断延后到 replan 完成后重试）",
 				"agent_id", agentID, "action_id", actionID, "err", err)
 		} else {
+			ac.recordInterrupted("被紧急事件打断（路由裁决：" + truncateRunes(dec.Reason, 40) + "）")
 			ac.as.ClearInFlightKeepQueue()
 			rt.logger.Warn("[事件路由] 已打断在途动作（路由裁决紧急）",
 				"agent_id", agentID, "action_id", actionID, "event_id", ev.EventID,

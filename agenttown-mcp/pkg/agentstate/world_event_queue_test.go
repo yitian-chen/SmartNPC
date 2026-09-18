@@ -195,3 +195,109 @@ func TestEnqueueWorldEvent_ConcurrentDuplicate(t *testing.T) {
 		t.Fatalf("concurrent same-id enqueues must yield exactly 1 queued event, got %d", got)
 	}
 }
+
+// ─── P4-10（§6.1 状态栏补全）测试 ──────────────────────────────
+
+// TestRecordActionInterrupted_CapturesUnfinishedSlot verifies the capture:
+// unfinished task + last end (interrupted + specific why). No-op when idle.
+func TestRecordActionInterrupted_CapturesUnfinishedSlot(t *testing.T) {
+	s := New()
+	s.RecordActionStarted("act-1", "InteractSmartObject", map[string]any{"semantic_group": "workbench"}, SourceTactical, "")
+	s.RecordActionInterrupted("InteractSmartObject(workbench)，已执行约 47 分钟", "被玩家攻击强制打断")
+	snap := s.Snapshot()
+	if snap.UnfinishedTask != "InteractSmartObject(workbench)，已执行约 47 分钟" {
+		t.Fatalf("unfinished = %q", snap.UnfinishedTask)
+	}
+	if snap.LastEndResult != "interrupted" || snap.LastEndWhy != "被玩家攻击强制打断" {
+		t.Fatalf("lastEnd = %q/%q", snap.LastEndResult, snap.LastEndWhy)
+	}
+
+	// 无在途时 no-op（真实时序：stop 点捕捉后立即 ClearInFlightKeepQueue，
+	// 更晚的打断点看到的是空在途，不得覆盖更具体的记录）。
+	s.ClearInFlightKeepQueue()
+	s.RecordActionInterrupted("后来的笼统描述", "另一个笼统原因")
+	snap = s.Snapshot()
+	if snap.LastEndWhy != "被玩家攻击强制打断" {
+		t.Fatalf("idle capture must not overwrite the more specific one, got %q", snap.LastEndWhy)
+	}
+}
+
+// TestRecordActionCompletion_LastEndBookkeeping verifies the ledger rules:
+// a stop-time-prefaced interrupted completion keeps the specific why; other
+// results overwrite; a fresh interrupted (no stop capture) records its own.
+func TestRecordActionCompletion_LastEndBookkeeping(t *testing.T) {
+	s := New()
+	s.RecordActionStarted("act-1", "WorkShift", nil, SourceTactical, "")
+	s.RecordActionInterrupted("WorkShift", "被紧急事件强制打断")
+	// 迟到的 interrupted completion：只确认，不覆盖 why。
+	s.RecordActionCompletion("act-1", "interrupted", "")
+	snap := s.Snapshot()
+	if snap.LastEndResult != "interrupted" || snap.LastEndWhy != "被紧急事件强制打断" {
+		t.Fatalf("prefaced completion must keep the specific why, got %q/%q", snap.LastEndResult, snap.LastEndWhy)
+	}
+
+	// 正常完成：覆盖。
+	s.RecordActionStarted("act-2", "WorkShift", nil, SourceTactical, "")
+	s.RecordActionCompletion("act-2", "success", "")
+	snap = s.Snapshot()
+	if snap.LastEndResult != "success" || snap.LastEndWhy != "" {
+		t.Fatalf("success must overwrite, got %q/%q", snap.LastEndResult, snap.LastEndWhy)
+	}
+
+	// 未经 stop 点的 interrupted（UE 自身原因）：按实际记录。
+	s.RecordActionStarted("act-3", "MoveTo", nil, SourceTactical, "")
+	s.RecordActionCompletion("act-3", "failed", "unreachable")
+	snap = s.Snapshot()
+	if snap.LastEndResult != "failed" || snap.LastEndWhy != "unreachable" {
+		t.Fatalf("failed must record its reason, got %q/%q", snap.LastEndResult, snap.LastEndWhy)
+	}
+}
+
+// TestUnfinishedTask_ClearedOnNextAction verifies the consumption semantics:
+// a new action start clears the slot (the decision that produced this
+// action already consumed the fact), and Stop clears everything.
+func TestUnfinishedTask_ClearedOnNextAction(t *testing.T) {
+	s := New()
+	s.RecordActionStarted("act-1", "WorkShift", nil, SourceTactical, "")
+	s.RecordActionInterrupted("WorkShift", "时段切换（计划内打断）")
+	if s.Snapshot().UnfinishedTask == "" {
+		t.Fatalf("unfinished should be captured")
+	}
+	s.RecordActionStarted("act-2", "Speak", nil, SourceTactical, "")
+	if got := s.Snapshot().UnfinishedTask; got != "" {
+		t.Fatalf("next action start must clear the slot, got %q", got)
+	}
+	// lastEnd 保留（跨动作可见：上次为什么结束）。
+	if s.Snapshot().LastEndResult != "interrupted" {
+		t.Fatalf("lastEnd must survive action start, got %q", s.Snapshot().LastEndResult)
+	}
+
+	s.RecordActionInterrupted("x", "y")
+	s.Stop()
+	snap := s.Snapshot()
+	if snap.UnfinishedTask != "" || snap.LastEndResult != "" {
+		t.Fatalf("Stop must clear P4-10 fields, got %q/%q", snap.UnfinishedTask, snap.LastEndResult)
+	}
+}
+
+// TestCurrentActionStartGame records the game-time anchor for elapsed
+// computation when perception exists, and stays 0 without perception.
+func TestCurrentActionStartGame(t *testing.T) {
+	s := New()
+	// 无感知：起点为 0（已执行时长省略）。
+	s.RecordActionStarted("act-1", "WorkShift", nil, SourceTactical, "")
+	if got := s.Snapshot().CurrentActionStartGame; got != 0 {
+		t.Fatalf("no perception → start game 0, got %v", got)
+	}
+	// 有感知：起点 = 权威游戏秒。
+	perc, _ := json.Marshal(protocol.PerceptionPayload{
+		Environment: protocol.Environment{GameTimeSec: 989223, TimeOfDaySec: 38823, DayCount: 11, TimeScale: 90},
+	})
+	if _, err := s.SetPerception(perc); err != nil {
+		t.Fatalf("SetPerception: %v", err)
+	}
+	s.RecordActionStarted("act-2", "WorkShift", nil, SourceTactical, "")
+	if got := s.Snapshot().CurrentActionStartGame; got != 989223 {
+		t.Fatalf("start game = %v, want 989223", got)
+	}
+}

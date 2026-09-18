@@ -64,8 +64,64 @@ func (a *agentContext) buildAgentStateBar(agentID string, profiles map[string]*p
 	b.WriteString(prompt.PhysicalLine(snap.LatestPhysical, prompt.BandThresholdsFor(profiles, agentID)) + "\n")
 	b.WriteString(barScheduleLine(&snap, todSec) + "\n")
 	b.WriteString(a.barActionLine(&snap, env.GameTimeSec, todSec) + "\n")
+	// P4-10（§6.1）补全字段：未完成任务槽 + 上次动作结束原因。缺失的
+	// 行整行省略——状态栏保持紧凑，有事实才占行。
+	if snap.UnfinishedTask != "" {
+		b.WriteString("未完成：" + snap.UnfinishedTask + "\n")
+	}
+	if line := barLastEndLine(&snap); line != "" {
+		b.WriteString(line + "\n")
+	}
 	b.WriteString(agentStateBarClose)
 	return b.String()
+}
+
+// interruptedTaskDesc builds the unfinished-task description captured at a
+// stop point: tool name + key params + elapsed game time. Call BEFORE the
+// in-flight tracking is cleared.
+func (a *agentContext) interruptedTaskDesc(snap *agentstate.Snapshot, gameSec float64) string {
+	desc := tools.CmdToToolName(snap.CurrentActionCmd)
+	if extra := barActionParams(snap.CurrentActionParams); extra != "" {
+		desc += "(" + extra + ")"
+	}
+	if snap.CurrentActionStartGame > 0 && gameSec > snap.CurrentActionStartGame {
+		desc += fmt.Sprintf("，已执行约 %d 分钟", int((gameSec-snap.CurrentActionStartGame)/60))
+	}
+	return desc
+}
+
+// recordInterrupted captures the in-flight action as the unfinished-task
+// slot with the interrupt reason (P4-10). No-op when nothing is in flight.
+// Call BEFORE the in-flight tracking is cleared at any stop point.
+func (a *agentContext) recordInterrupted(reason string) {
+	snap := a.as.Snapshot()
+	if snap.CurrentActionCmd == "" {
+		return
+	}
+	a.as.RecordActionInterrupted(a.interruptedTaskDesc(&snap, a.as.LatestGameTimeSec()), reason)
+}
+
+// barLastEndLine renders the 上次动作结束原因 line; "" when no action has
+// ended yet. §3.4：三种结束方式必须区分——把失败/打断当成功继续走是
+// 最典型的幻觉来源。
+func barLastEndLine(snap *agentstate.Snapshot) string {
+	if snap.LastEndResult == "" {
+		return ""
+	}
+	label := map[string]string{
+		"success":     "正常完成",
+		"failed":      "失败",
+		"interrupted": "被中断",
+		"error":       "异常结束",
+	}[snap.LastEndResult]
+	if label == "" {
+		label = snap.LastEndResult
+	}
+	line := "上次动作结束：" + label
+	if snap.LastEndWhy != "" {
+		line += "（" + snap.LastEndWhy + "）"
+	}
+	return line
 }
 
 // barGameTimeLine 渲染当前游戏时间行。DayCount 从 0 起（约定 19），展示为
@@ -135,6 +191,11 @@ func (a *agentContext) barActionLine(snap *agentstate.Snapshot, gameSec, todSec 
 	desc := tools.CmdToToolName(snap.CurrentActionCmd)
 	if extra := barActionParams(snap.CurrentActionParams); extra != "" {
 		desc += "(" + extra + ")"
+	}
+	// P4-10：已执行时长（§6.1 防反复重启同一动作）。游戏时间口径，无
+	// 感知起点时省略。
+	if snap.CurrentActionStartGame > 0 && gameSec > snap.CurrentActionStartGame {
+		desc += fmt.Sprintf("，已执行约 %d 分钟", int((gameSec-snap.CurrentActionStartGame)/60))
 	}
 	if target, _, tsActionID, armed := a.as.TimeStop(); armed && tsActionID == snap.CurrentActionID && gameSec > 0 {
 		if remain := target - gameSec; remain > 0 {
