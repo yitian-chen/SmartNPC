@@ -92,10 +92,11 @@ type AgentState struct {
 	// 无感知，已执行时长省略）。
 	currentActionStartGame float64
 	// lastEndResult/lastEndWhy 记录最近一次在途动作的结束方式与原因：
-	// result 为协议值（success/failed/interrupted/error），why 为 UE reason
-	// 或打断来源（如"被玩家攻击强制打断"）。lastEndInterrupted 标记 stop 点
-	// 已预告 interrupted——迟到的 action_completed{interrupted} 只确认结果，
-	// 不覆盖 stop 时记下的更具体 why。
+	// result 为协议值（success/failed/interrupted/error）或 "scheduled"
+	// （时段切换的计划内结束，渲染"正常结束"），why 为 UE reason 或打断
+	// 来源（如"被玩家攻击强制打断"）。lastEndInterrupted 是 preface 标记：
+	// stop/切换点已预先记下结束方式——迟到的 action_completed{interrupted}
+	// 只确认结果，不覆盖预记的更具体 why。
 	lastEndResult      string
 	lastEndWhy         string
 	lastEndInterrupted bool
@@ -407,6 +408,25 @@ func (a *AgentState) RecordActionInterrupted(taskDesc, reason string) {
 	a.lastEndResult = "interrupted"
 	a.lastEndWhy = reason
 	a.lastEndInterrupted = true
+	a.unfinishedTask = taskDesc
+}
+
+// RecordActionEndedBySchedule records a PLANNED end of the in-flight
+// action — the slot boundary. 时段切换是本系统的正常终止方式（长动作
+// 设计上持续到时段边界），不是"被中断"：把它渲染成 被中断（时段切换）
+// 会让 LLM 误以为受到了干扰。The task still lands in the unfinished-task
+// slot (its facts feed the next slot's planning); only the end REASON is
+// "scheduled"（状态栏渲染"正常结束"）. Like RecordActionInterrupted, the
+// delayed action_completed{interrupted} must not overwrite this record.
+func (a *AgentState) RecordActionEndedBySchedule(taskDesc string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.currentActionID == "" {
+		return
+	}
+	a.lastEndResult = "scheduled"
+	a.lastEndWhy = ""
+	a.lastEndInterrupted = true // preface flag：迟到的 interrupted completion 只确认，不覆盖
 	a.unfinishedTask = taskDesc
 }
 

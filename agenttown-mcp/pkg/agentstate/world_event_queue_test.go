@@ -301,3 +301,32 @@ func TestCurrentActionStartGame(t *testing.T) {
 		t.Fatalf("start game = %v, want 989223", got)
 	}
 }
+
+// TestRecordActionEndedBySchedule verifies the slot-switch end semantics:
+// result "scheduled"（状态栏渲染"正常结束"）+ unfinished facts captured +
+// the delayed action_completed{interrupted} must NOT overwrite it back to
+// 被中断——时段切换是长动作的正常终止方式，不是干扰。
+func TestRecordActionEndedBySchedule(t *testing.T) {
+	s := New()
+	s.RecordActionStarted("act-1", "InteractSmartObject", map[string]any{"semantic_group": "workbench"}, SourceTactical, "")
+	s.RecordActionEndedBySchedule("InteractSmartObject(workbench)，已执行约 47 分钟")
+	snap := s.Snapshot()
+	if snap.LastEndResult != "scheduled" || snap.LastEndWhy != "" {
+		t.Fatalf("scheduled end = %q/%q, want scheduled/\"\"", snap.LastEndResult, snap.LastEndWhy)
+	}
+	if snap.UnfinishedTask == "" {
+		t.Fatalf("task facts must still land in the unfinished slot")
+	}
+	// 迟到的 interrupted completion：只确认，不覆盖为"被中断"。
+	s.RecordActionCompletion("act-1", "interrupted", "")
+	snap = s.Snapshot()
+	if snap.LastEndResult != "scheduled" {
+		t.Fatalf("delayed interrupted completion must not overwrite the scheduled end, got %q", snap.LastEndResult)
+	}
+	// 后续正常完成照常覆盖。
+	s.RecordActionStarted("act-2", "WorkShift", nil, SourceTactical, "")
+	s.RecordActionCompletion("act-2", "success", "")
+	if s.Snapshot().LastEndResult != "success" {
+		t.Fatalf("a later real completion must overwrite, got %q", s.Snapshot().LastEndResult)
+	}
+}

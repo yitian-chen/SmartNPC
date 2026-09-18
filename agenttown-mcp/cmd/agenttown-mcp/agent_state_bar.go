@@ -105,6 +105,17 @@ func (a *agentContext) recordInterrupted(reason string) {
 	a.as.RecordActionInterrupted(a.interruptedTaskDesc(&snap, a.as.LatestGameTimeSec()), reason)
 }
 
+// recordScheduledEnd captures the in-flight action at a slot boundary: the
+// task facts still land in the unfinished-task slot, but the end reason is
+// "scheduled"（正常结束）——时段切换不是干扰。
+func (a *agentContext) recordScheduledEnd() {
+	snap := a.as.Snapshot()
+	if snap.CurrentActionCmd == "" {
+		return
+	}
+	a.as.RecordActionEndedBySchedule(a.interruptedTaskDesc(&snap, a.as.LatestGameTimeSec()))
+}
+
 // barLastEndLine renders the 上次动作结束原因 line; "" when no action has
 // ended yet. §3.4：三种结束方式必须区分——把失败/打断当成功继续走是
 // 最典型的幻觉来源。
@@ -114,6 +125,7 @@ func barLastEndLine(snap *agentstate.Snapshot) string {
 	}
 	label := map[string]string{
 		"success":     "正常完成",
+		"scheduled":   "正常结束",
 		"failed":      "失败",
 		"interrupted": "被中断",
 		"error":       "异常结束",

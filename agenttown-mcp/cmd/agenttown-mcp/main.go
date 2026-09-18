@@ -500,8 +500,10 @@ func (a *agentContext) advanceSlotIfNeeded(ws contract.Transport, agentID string
 	if !prompt.SlotExpired(slot, tod) {
 		return false
 	}
-	// P4-10：切时段前捕捉未完成任务槽（在途动作被计划内打断的事实）。
-	a.recordInterrupted("时段切换（计划内打断）")
+	// P4-10：切时段前捕捉未完成任务槽（任务事实留给下一时段规划）。
+	// 结束方式记"计划内结束"（状态栏渲染"正常结束"）——时段切换是长动作
+	// 的正常终止方式，不是"被中断"，避免 LLM 误以为受到干扰。
+	a.recordScheduledEnd()
 	// P3-9 触发信号：反应进行中撞上时段边界——时间轴被事件挤乱。必须在
 	// clearReaction 之前捕获（P2-6 的时段边界清理会把窗口解除）。
 	reactionCut := false
