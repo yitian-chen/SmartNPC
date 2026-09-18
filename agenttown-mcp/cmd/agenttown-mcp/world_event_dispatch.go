@@ -485,10 +485,10 @@ func handleDebugEvent(logger *slog.Logger, lookupAgent func(string) *agentContex
 // 硬切有明确的归属。force 事件不走 ②（§4.2 不可否决），但会重置反应窗口。
 
 // reactionDeadlineGameSec bounds one reaction task in authoritative game
-// seconds (30 game minutes — a reaction is "处理完事件再回到日程"，不该
+// seconds (60 game minutes — a reaction is "处理完事件再回到日程"，不该
 // 吞掉整个时段；反应动作本身另有 time_to_stop / slot 边界兜底)。
 // var 便于测试注入。
-var reactionDeadlineGameSec = 1800.0
+var reactionDeadlineGameSec = 3600.0
 
 // beginReaction arms the guard for a newly started reaction task with its
 // severity ladder bar and absolute deadline. nowGameSec is the current
