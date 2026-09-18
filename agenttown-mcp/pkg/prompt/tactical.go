@@ -79,6 +79,13 @@ func BuildTactical(in TacticalInput) string {
 		sb.WriteString("【物理状态】\n")
 		sb.WriteString(strings.TrimPrefix(line, "物理状态：") + "\n")
 	}
+	// P3-7 安全点 drain（§4.4/§5.1 三输入之一）：攒下的非 force 事件
+	// 一次性全取注入。逐次变化的数据，compact 模式同样注入（非日内不变块）。
+	if in.Events != "" {
+		sb.WriteString("【发生的事件】（自上次规划以来世界上发生的事，请纳入本轮安排考虑）\n")
+		sb.WriteString(in.Events)
+		sb.WriteString("\n")
+	}
 	if in.Memories != "" {
 		sb.WriteString("【过往经验】\n" + in.Memories)
 		if !strings.HasSuffix(in.Memories, "\n") {

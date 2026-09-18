@@ -2,6 +2,7 @@ package prompt
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/AgentTown/agenttown-mcp/contract/protocol"
@@ -177,5 +178,54 @@ func TestFormatWorldEvent_MinimalFields(t *testing.T) {
 	}
 	if got := FormatWorldEvent(ev); got != "世界事件：发生故障：停电了" {
 		t.Fatalf("minimal event should have no metadata parens: %q", got)
+	}
+}
+
+// TestFormatWorldEventList renders the drain bullet list in FIFO order and
+// returns "" for empty input.
+func TestFormatWorldEventList(t *testing.T) {
+	if got := FormatWorldEventList(nil); got != "" {
+		t.Fatalf("empty list should render empty, got %q", got)
+	}
+	events := []protocol.WorldEventPayload{
+		{Category: protocol.CategoryWorld, EventType: protocol.EventTypeMalfunction, Subject: "K-03",
+			GameTime: "D12 10:47:03", Data: json.RawMessage(`{"description":"K-03 关节锁死"}`)},
+		{Category: protocol.CategoryPhysicalThreshold, EventType: protocol.EventTypeEnergyBelow, Subject: "H-01",
+			GameTime: "D12 11:02:44", Data: json.RawMessage(`{"attribute":"energy","value":19.8,"threshold":20,"direction":"below"}`)},
+	}
+	got := FormatWorldEventList(events)
+	want := "- 世界事件：发生故障：K-03 关节锁死（主体 K-03，游戏时间 D12 10:47:03）\n" +
+		"- 物理状态跨阈值：能量向下跌破阈值 20，当前 19.8（主体 H-01，游戏时间 D12 11:02:44）"
+	if got != want {
+		t.Fatalf("FormatWorldEventList =\n%q\nwant\n%q", got, want)
+	}
+}
+
+// TestBuildTactical_EventsSegment verifies the 【发生的事件】 segment: injected
+// in BOTH full and compact forms (per-call data, not a day-invariant block),
+// omitted when empty.
+func TestBuildTactical_EventsSegment(t *testing.T) {
+	base := TacticalInput{
+		Goal:      "车间装配作业",
+		Zone:      "main_workshop",
+		TimeOfDay: "11:00",
+		Slot:      "09:00-12:00",
+		DailyPlan: "09:00-12:00: 车间装配作业",
+		AgentID:   "H-01",
+		Events:    "- 世界事件：发生故障：K-03 关节锁死（主体 K-03，游戏时间 D12 10:47:03）",
+	}
+	full := BuildTactical(base)
+	if !strings.Contains(full, "【发生的事件】（自上次规划以来世界上发生的事，请纳入本轮安排考虑）\n- 世界事件：发生故障：K-03 关节锁死") {
+		t.Fatalf("full form missing events segment:\n%s", full)
+	}
+	compact := BuildTactical(base) // Compact=true
+	compactIn := base
+	compactIn.Compact = true
+	compact = BuildTactical(compactIn)
+	if !strings.Contains(compact, "【发生的事件】") || !strings.Contains(compact, "K-03 关节锁死") {
+		t.Fatalf("compact form must also inject per-call events:\n%s", compact)
+	}
+	if empty := BuildTactical(TacticalInput{Goal: "g", AgentID: "H-01"}); strings.Contains(empty, "【发生的事件】") {
+		t.Fatalf("empty events must omit the segment:\n%s", empty)
 	}
 }

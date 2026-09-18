@@ -65,6 +65,7 @@ const (
 //     屏蔽这些快捷工具可把 tools 数组从 15 个瘦到 6 个（省 ~62%）。
 //   - turn_to / emote 为非必要瞬时动作，一并屏蔽。
 //   - scan_area / stop / wait 本就不属于战术层排队工具。
+//
 // 目录派生（tacticalToolsFromRegistry）与校验（tacticalActionAvailable）
 // 共用这一份清单，保证「不展示 = 拒绝」一致。
 var maskedTacticalTools = map[string]bool{
@@ -170,6 +171,12 @@ func generateTacticalPlan(
 	// 调试要确定性，且 auto-plan=false 时历史可能从无全量头，纯引用会
 	// 指向不存在的规则。计划变化（日内重规划）→ 比对不等 → 重新全量
 	// 注入。单次读取存局部变量，判定与置位复用同一值。
+	// P3-7 安全点 drain（§4.4/§5.1 第三输入）：攒下的非 force 事件一次性
+	// 全取注入本轮战术 prompt。快照注入 + 成功后清空——LLM 失败/被 force
+	// 取消时事件保留在队列，下一次分解重新看到（事件是决策输入，不因一次
+	// 失败调用丢弃）。drain 在本咽喉点覆盖三个调用方：worker tacticalRefill
+	// / tacticalRefillForReplan（force 与路由打断的重规划）/ /debug/schedule。
+	worldEvents := ac.as.WorldEventQueueSnapshot()
 	headerPlan := ac.as.TacticalHeaderPlan()
 	compact := dailyPlan != "" && headerPlan == dailyPlan
 	promptText := prompt.BuildTactical(prompt.TacticalInput{
@@ -185,6 +192,7 @@ func generateTacticalPlan(
 		Hint:          hint,
 		Memories:      memories,
 		Relationships: relationships,
+		Events:        prompt.FormatWorldEventList(worldEvents),
 		AgentID:       agentID,
 		ObjectStatus:  objectStatus,
 		NearbyObjects: nearbyObjects,
@@ -223,6 +231,8 @@ func generateTacticalPlan(
 		llmMetricsCollector.RecordJSON("tactical", false)
 		return nil, fmt.Errorf("tactical plan has no actions (raw=%s)", truncateText(raw, 200))
 	}
+	// 分解成功：安全点 drain 完成，消费事件队列（一次性交出）。
+	ac.as.ClearWorldEvents()
 	// JSON 正确率埋点：agenticTurn 成功后（LLM 已返回 tool_calls）按
 	// parseToolCalls 结果记 ok。venus 层的坏 JSON（4001）已在 agenticTurn
 	// 记作 bad_json_4001 错误类别，此处只记 MCP 层解析结果。

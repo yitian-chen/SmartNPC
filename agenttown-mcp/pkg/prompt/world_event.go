@@ -40,6 +40,21 @@ func FormatWorldEvent(ev protocol.WorldEventPayload) string {
 	return out
 }
 
+// FormatWorldEventList renders queued world events as a bullet list for the
+// tactical prompt's 【发生的事件】 segment (P3-7 safe-point drain). FIFO
+// order (oldest first — chronological narrative); empty → "" (caller omits
+// the segment).
+func FormatWorldEventList(events []protocol.WorldEventPayload) string {
+	if len(events) == 0 {
+		return ""
+	}
+	var sb strings.Builder
+	for _, ev := range events {
+		sb.WriteString("- " + FormatWorldEvent(ev) + "\n")
+	}
+	return strings.TrimSuffix(sb.String(), "\n")
+}
+
 // worldEventCategoryLabel maps a category constant to its Chinese label.
 func worldEventCategoryLabel(category string) string {
 	switch category {

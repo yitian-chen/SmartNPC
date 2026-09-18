@@ -123,6 +123,26 @@ func (a *AgentState) WorldEventQueueLen() int {
 	return len(a.worldEventQueue)
 }
 
+// WorldEventQueueSnapshot returns a copy of the pending events in arrival
+// order without draining (generateTacticalPlan injects this into the prompt;
+// the queue is only cleared on a successful decomposition — a failed LLM
+// call retries with the same events next time).
+func (a *AgentState) WorldEventQueueSnapshot() []protocol.WorldEventPayload {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	out := make([]protocol.WorldEventPayload, len(a.worldEventQueue))
+	copy(out, a.worldEventQueue)
+	return out
+}
+
+// ClearWorldEvents empties the pending-event queue (the tactical layer has
+// successfully consumed them into a decomposition).
+func (a *AgentState) ClearWorldEvents() {
+	a.mu.Lock()
+	a.worldEventQueue = nil
+	a.mu.Unlock()
+}
+
 // RemoveQueuedWorldEvent removes one pending event by id (the router's
 // interrupt branch pulls an event out of the queue because it is being
 // handled NOW, not at the next safe point). Reports whether the event was

@@ -42,7 +42,12 @@ type TacticalInput struct {
 	Hint          string
 	Memories      string // Stage 4: formatted bullet list of recent memories; empty = skip segment
 	Relationships string // Stage 5: formatted relationship list for 【人际关系】段; empty = skip segment (single-NPC scenario)
-	AgentID       string
+	// Events is the safe-point drain of queued non-force world events
+	// (P3-7, §4.4/§5.1 第三输入), pre-rendered via FormatWorldEventList;
+	// empty = skip the 【发生的事件】 segment. Unlike 【全天日程】 it is
+	// per-call data — injected in BOTH full and compact forms.
+	Events  string
+	AgentID string
 	// ObjectStatus is UE5's per-category smart object availability aggregate
 	// (cross-zone). Injected into the tactical prompt as 【物体实时占用】 so
 	// the LLM can avoid planning actions targeting occupied objects. nil =
