@@ -30,6 +30,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -95,6 +96,11 @@ type agentContext struct {
 	// autoPlanEnabled mirrors the --auto-plan flag: strategic replan (P3-9)
 	// must not run in manual mode. Set once at registerAgent; immutable after.
 	autoPlanEnabled bool
+
+	// compacting guards maybeCompactConversation against concurrent
+	// agenticTurns both crossing the threshold (double summarize + stale
+	// overwrite losing messages appended in between).
+	compacting atomic.Bool
 
 	// Reaction-task guard state (P2-6, 设计文档 §4.5 护栏): while a reaction
 	// (interrupt-generated planning window) is active, a new ROUTER interrupt
