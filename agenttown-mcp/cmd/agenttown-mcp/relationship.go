@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"time"
 
@@ -62,19 +63,48 @@ func parseRelationshipJudgeResponse(raw string) bool {
 // passed in (from LoadRelationships); each line shows the other side and the
 // current familiarity/affection/interaction_count. Returns "" when the slice
 // is empty (caller skips the prompt segment).
+// formatRelationshipsForPrompt renders the relationship lines for the
+// prompt, deduplicated by the OTHER agent id: LoadRelationships queries
+// both A→B and B→A rows (WHERE agent_a=? OR agent_b=?), so an agent who
+// has interacted with H-03 gets two rows that both read "与 H-03" — that
+// duplication confused the LLM and wasted tokens (2026-09-18 仿真实测).
+// When both directions exist, the higher familiarity/interaction wins
+// (the direction with the latest update_at is already first per the query
+// ORDER BY, but dedup by max value is safer).
 func formatRelationshipsForPrompt(rels []storage.Relationship, agentID string) string {
 	if len(rels) == 0 {
 		return ""
 	}
-	var sb strings.Builder
+	type relLine struct {
+		familiarity  int
+		affection    int
+		interactions int
+	}
+	best := make(map[string]*relLine)
 	for _, r := range rels {
 		other := r.AgentB
 		if r.AgentA != agentID {
-			// agentID is agent_b side, so the other side is agent_a.
 			other = r.AgentA
 		}
+		cur := best[other]
+		if cur == nil || r.Familiarity > cur.familiarity || r.InteractionCount > cur.interactions {
+			best[other] = &relLine{
+				familiarity:  r.Familiarity,
+				affection:    r.Affection,
+				interactions: r.InteractionCount,
+			}
+		}
+	}
+	keys := make([]string, 0, len(best))
+	for k := range best {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var sb strings.Builder
+	for _, other := range keys {
+		r := best[other]
 		fmt.Fprintf(&sb, "- 与 %s：熟悉度 %d、好感 %d（互动 %d 次）\n",
-			other, r.Familiarity, r.Affection, r.InteractionCount)
+			other, r.familiarity, r.affection, r.interactions)
 	}
 	return strings.TrimSuffix(sb.String(), "\n")
 }

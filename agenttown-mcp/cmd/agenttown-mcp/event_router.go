@@ -16,6 +16,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"time"
@@ -114,6 +115,15 @@ func (r *eventRouter) route(ctx context.Context, agentID string, ev protocol.Wor
 // buildInput snapshots the agent state and composes the router's view.
 func (r *eventRouter) buildInput(agentID string, ac *agentContext, ev protocol.WorldEventPayload) prompt.RouterInput {
 	snap := ac.as.Snapshot()
+	// 从同一 snapshot 推导权威游戏时间——避免 Snapshot 与 LatestGameTimeSec
+	// 两次读取之间 perception 到达导致时间不一致（情境 TTL 过滤口径）。
+	nowGameSec := 0.0
+	if len(snap.LatestPerception) > 0 {
+		var p protocol.PerceptionPayload
+		if err := json.Unmarshal(snap.LatestPerception, &p); err == nil {
+			nowGameSec = p.Environment.GameTimeSec
+		}
+	}
 
 	agentName := ""
 	agentRole := ""
@@ -159,7 +169,7 @@ func (r *eventRouter) buildInput(agentID string, ac *agentContext, ev protocol.W
 		PhysicalLine:  physicalLine,
 		Relationships: relationships,
 		CurrentAction: action,
-		Situations:    formatActiveSituations(snap.ActiveSituations, ac.as.LatestGameTimeSec()),
+		Situations:    formatActiveSituations(snap.ActiveSituations, nowGameSec),
 		WorldOverview: prompt.WorldOverview(kb),
 		Event:         ev,
 	}

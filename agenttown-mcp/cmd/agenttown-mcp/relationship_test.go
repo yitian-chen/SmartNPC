@@ -3,12 +3,13 @@ package main
 import (
 	"context"
 	"errors"
+	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/AgentTown/agenttown-mcp/pkg/storage"
 	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
-	"log/slog"
 )
 
 // ─── parseRelationshipJudgeResponse ──────────────────────────────
@@ -316,3 +317,37 @@ func TestSeedRelationshipsFromKB_ThreeNPCColdStart(t *testing.T) {
 // ensure time package is referenced (seedRelationshipsFromKB tests use time
 // only indirectly via storage.Relationship, but keep the import active).
 var _ = time.Time{}
+
+// TestFormatRelationshipsForPrompt_DedupByOtherAgent pins fix #1: when
+// LoadRelationships returns both A→B and B→A rows for the same pair
+// (it queries WHERE agent_a=? OR agent_b=?), the prompt must show only
+// ONE line per other agent — not two identical "与 H-03" lines
+// (2026-09-18 仿真实测 duplication).
+func TestFormatRelationshipsForPrompt_DedupByOtherAgent(t *testing.T) {
+	rels := []storage.Relationship{
+		{AgentA: "H-01", AgentB: "H-03", Familiarity: 1, Affection: 0, InteractionCount: 1},
+		{AgentA: "H-03", AgentB: "H-01", Familiarity: 1, Affection: 0, InteractionCount: 1},
+	}
+	got := formatRelationshipsForPrompt(rels, "H-01")
+	if strings.Count(got, "与 H-03") != 1 {
+		t.Fatalf("should show exactly one line per other agent, got:\n%s", got)
+	}
+	// 双向时取更高值。
+	rels = []storage.Relationship{
+		{AgentA: "H-01", AgentB: "H-03", Familiarity: 1, Affection: 0, InteractionCount: 1},
+		{AgentA: "H-03", AgentB: "H-01", Familiarity: 3, Affection: 2, InteractionCount: 5},
+	}
+	got = formatRelationshipsForPrompt(rels, "H-01")
+	if !strings.Contains(got, "熟悉度 3、好感 2（互动 5 次）") {
+		t.Fatalf("should show the higher values, got:\n%s", got)
+	}
+	// 多个不同 agent 不误并。
+	rels = []storage.Relationship{
+		{AgentA: "H-01", AgentB: "H-02", Familiarity: 2, Affection: 1, InteractionCount: 3},
+		{AgentA: "H-01", AgentB: "H-03", Familiarity: 1, Affection: 0, InteractionCount: 1},
+	}
+	got = formatRelationshipsForPrompt(rels, "H-01")
+	if strings.Count(got, "\n") != 1 {
+		t.Fatalf("two distinct agents → two lines, got:\n%s", got)
+	}
+}
