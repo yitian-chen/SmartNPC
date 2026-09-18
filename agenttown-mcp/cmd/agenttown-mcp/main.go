@@ -92,6 +92,10 @@ type agentContext struct {
 	tacticalLLMCancel context.CancelFunc
 	tacticalLLMGen    uint64
 
+	// autoPlanEnabled mirrors the --auto-plan flag: strategic replan (P3-9)
+	// must not run in manual mode. Set once at registerAgent; immutable after.
+	autoPlanEnabled bool
+
 	// Reaction-task guard state (P2-6, 设计文档 §4.5 护栏): while a reaction
 	// (interrupt-generated planning window) is active, a new ROUTER interrupt
 	// needs strictly higher severity to cut it (reactionSeverity), and the
@@ -486,15 +490,24 @@ func (a *agentContext) loadRelationships(ctx context.Context, agentID string, kb
 // 反应层 replan 进行中（replanInProgress=true）时本方法仍可执行：schedule
 // 切换优先级高于反应层 replan，清掉的 in-flight 状态不会干扰 replan
 // （replan 自己会重新规划，且 replanInProgress 由 replan 路径自己清除）。
-func (a *agentContext) advanceSlotIfNeeded(ws contract.Transport, agentID string, logger *slog.Logger) {
+// advanceSlotIfNeeded 检查 game_time 是否超出 currentSlot。返回 true 当且
+// 仅当切换发生在反应任务进行中（P3-9 触发信号：时间轴被事件挤乱，日程的
+// 剩余部分值得战略层重算）。
+func (a *agentContext) advanceSlotIfNeeded(ws contract.Transport, agentID string, logger *slog.Logger) bool {
 	// 检查 slot 是否过期（AgentState 内部持锁判断）
 	_, slot, _ := a.as.SnapshotSchedule()
 	tod := a.as.LatestTimeOfDay()
 	if !prompt.SlotExpired(slot, tod) {
-		return
+		return false
 	}
 	// P4-10：切时段前捕捉未完成任务槽（在途动作被计划内打断的事实）。
 	a.recordInterrupted("时段切换（计划内打断）")
+	// P3-9 触发信号：反应进行中撞上时段边界——时间轴被事件挤乱。必须在
+	// clearReaction 之前捕获（P2-6 的时段边界清理会把窗口解除）。
+	reactionCut := false
+	if active, _, _ := a.reactionSnapshot(); active {
+		reactionCut = true
+	}
 	info := a.as.ClearForSlotSwitch()
 	actionID := info.ActionID
 	actionCmd := info.ActionCmd
@@ -527,6 +540,7 @@ func (a *agentContext) advanceSlotIfNeeded(ws contract.Transport, agentID string
 	// 由 popAndSendQueueAction 在下发新 action 前补发 stop。
 	// signal worker 下一轮走 tacticalRefill 选新 slot
 	a.signal()
+	return reactionCut
 }
 
 // checkTimeToStop 轮询长动作的 time_to_stop：动作设了 time_to_stop 且权威
@@ -755,8 +769,12 @@ func runPerceptionWorker(
 
 		// 时段切换检测：game_time 已超出 currentSlot 结束时间 → 打断长复合动作
 		// + 清队列 + 清 slot，让本轮后续走 tacticalRefill 选新 slot 重新分解。
-		// 这是长复合动作的唯一打断路径（它们不设超时）。
-		ac.advanceSlotIfNeeded(ws, agentID, logger)
+		// 这是长复合动作的唯一打断路径（它们不设超时）。切换发生在反应进行中
+		// 时返回 true → 时间轴被事件挤乱，评估战略层 replan（P3-9）。
+		if ac.advanceSlotIfNeeded(ws, agentID, logger) {
+			go ac.maybeStrategicReplan(ctx, agentID, ws, kb, profiles, weeklySched, logger,
+				"紧急反应跨越时段边界被切断")
+		}
 
 		// time_to_stop 检测：长动作设了执行时长且 game_time 到点 → 打断进入下一轮。
 		ac.checkTimeToStop(agentID, logger)
@@ -800,8 +818,11 @@ func runPerceptionWorker(
 
 		// P2-6 护栏①：反应任务截止——仍在 armed 状态的反应（自反应开始
 		// 未发生过日程 refill）超过 deadline 即切回日程。放 replanBusy 之后：
-		// 不与在途 replan 抢状态。
-		ac.checkReactionDeadline(agentID, ws, logger)
+		// 不与在途 replan 抢状态。切回即偏差 → 评估战略层 replan（P3-9）。
+		if ac.checkReactionDeadline(agentID, ws, logger) {
+			go ac.maybeStrategicReplan(ctx, agentID, ws, kb, profiles, weeklySched, logger,
+				"紧急反应超过截止时间被切回日程")
+		}
 
 		// 在途 action（composite 执行中）时跳过 pop/refill：UE 正忙，pop 出的
 		// action 会被 busy 拒，refill 出的队列也会被拒。等 action_completed 自然
@@ -1896,6 +1917,7 @@ func main() {
 			}
 		}
 
+		ac.autoPlanEnabled = autoPlanEnabled
 		ac.strategicHc = venus.New(venus.Config{
 			BaseURL: strategicBaseURL,
 			APIKey:  strategicKey,

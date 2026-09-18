@@ -83,6 +83,21 @@ const yesterdaySummaryForFirstDay = "昨天按计划完成了车间装配。"
 // 事件/debug）传 ""（用当前游戏时间，不覆盖已流逝时段）。冷启动首条感知
 // 未到时可传 ""（tod 为空回落 "07:00"）。
 func (a *agentContext) triggerStrategicPlanning(ctx context.Context, agentID string, kb *worldkb.KB, profiles map[string]*profile.Profile, logger *slog.Logger, yesterdaySummary, dayContext, hint, planningStart string) string {
+	plan, err := a.generateDailyPlanCore(ctx, agentID, kb, profiles, logger, yesterdaySummary, dayContext, hint, planningStart)
+	if err != nil {
+		fallback := jitterPlanString(prompt.DefaultDailyPlan(kb, agentID))
+		logger.Warn("[战略层] 计划生成失败，使用默认计划兜底",
+			"agent_id", agentID, "err", err, "fallback", fallback)
+		return fallback
+	}
+	return plan
+}
+
+// generateDailyPlanCore is triggerStrategicPlanning minus the fallback-on-
+// failure wrapper: it returns the plan OR the error, so the mid-day
+// strategic replan (P3-9) can keep the old plan on failure instead of
+// silently overwriting the day with the default plan.
+func (a *agentContext) generateDailyPlanCore(ctx context.Context, agentID string, kb *worldkb.KB, profiles map[string]*profile.Profile, logger *slog.Logger, yesterdaySummary, dayContext, hint, planningStart string) (string, error) {
 	if yesterdaySummary == "" {
 		yesterdaySummary = yesterdaySummaryForFirstDay
 	}
@@ -122,10 +137,7 @@ func (a *agentContext) triggerStrategicPlanning(ctx context.Context, agentID str
 	resp, err := a.agenticTurn(ctx, a.strategicHc, kb, profiles, logger, agentID,
 		"strategic", promptText, "none", "daily_plan", []byte(dailyPlanSchema))
 	if err != nil {
-		fallback := jitterPlanString(prompt.DefaultDailyPlan(kb, agentID))
-		logger.Warn("[战略层] 计划生成失败，使用默认计划兜底",
-			"agent_id", agentID, "err", err, "fallback", fallback)
-		return fallback
+		return "", fmt.Errorf("strategic llm: %w", err)
 	}
 
 	raw := resp.ExtractText()
@@ -134,10 +146,7 @@ func (a *agentContext) triggerStrategicPlanning(ctx context.Context, agentID str
 
 	items, err := parseDailyPlan(raw)
 	if err != nil {
-		fallback := jitterPlanString(prompt.DefaultDailyPlan(kb, agentID))
-		logger.Warn("[战略层] 计划解析失败，使用默认计划兜底",
-			"agent_id", agentID, "raw", truncateText(raw, 200), "err", err, "fallback", fallback)
-		return fallback
+		return "", fmt.Errorf("parse daily plan: %w (raw=%s)", err, truncateText(raw, 200))
 	}
 	// 首段前伸到触发时刻：早晨触发（07:00）与旧行为一致；中午触发则从
 	// 当前时间起，不覆盖已流逝的时段。
@@ -147,8 +156,7 @@ func (a *agentContext) triggerStrategicPlanning(ctx context.Context, agentID str
 	}
 	items = normalizeDailyPlan(items, startMinute)
 	if len(items) == 0 {
-		logger.Warn("[战略层] 计划校验后为空，使用默认计划兜底", "agent_id", agentID)
-		return jitterPlanString(prompt.DefaultDailyPlan(kb, agentID))
+		return "", fmt.Errorf("plan empty after normalize")
 	}
 	// 时间节点 ±planJitterMinutes 随机扰动：错开各 NPC 的活动开始时间，
 	// 时段切换（战术层分解触发点）随之落在扰动后的时间点上。
@@ -156,7 +164,7 @@ func (a *agentContext) triggerStrategicPlanning(ctx context.Context, agentID str
 	items = clampNightEnd(jitterPlanNodes(items, planJitterMinutes, startMinute))
 	plan := formatDailyPlan(items)
 	logger.Info("[战略层] 每日计划生成成功", "agent_id", agentID, "items", len(items), "plan", plan)
-	return plan
+	return plan, nil
 }
 
 // parseDailyPlan 从 LLM 原始输出中解析 JSON 数组。

@@ -101,12 +101,19 @@ type AgentState struct {
 	lastEndInterrupted bool
 	// unfinishedTask 承载被打断任务的事实（任务描述+进度+离开原因，预渲染），
 	// 供状态栏与下一次重规划参考；下个动作开始即清（事实已被消费）。
-	unfinishedTask  string
-	prevZone        string
-	prevObjectIDs   []string
-	lastReactiveAt  map[string]time.Time
-	perceptionCount int
-	replanHint      string
+	unfinishedTask string
+	// P3-9 升格（事件驱动战略层 replan）状态：节流（每游戏日上限 + 游戏时间
+	// 去抖，strategicReplanCount/Day/lastGT）与修订留痕（planRevisions，
+	// 供当晚反思消费——P5-15；进程内不持久化）。
+	strategicReplanCount  int
+	strategicReplanDay    int
+	lastStrategicReplanGT float64
+	planRevisions         []string
+	prevZone              string
+	prevObjectIDs         []string
+	lastReactiveAt        map[string]time.Time
+	perceptionCount       int
+	replanHint            string
 	// lastQueueOnlySpeak 记录最近一次战术层分解（ReplaceQueue 路径）的队列
 	// 是否只含 speak——用于 BeginTacticalRefill 在"队列提前耗尽"时生成
 	// 针对性 hint（LLM 只返回 1 个 speak、队列数秒即耗尽的场景）。
@@ -840,6 +847,47 @@ func (a *AgentState) Stop() {
 	snap := a.snapshotPersistentLocked()
 	a.mu.Unlock()
 	a.persistSchedule(snap)
+}
+
+// TryBeginStrategicReplan atomically checks the strategic-replan throttle
+// (per-game-day cap + game-time debounce) and commits the attempt when
+// allowed. The attempt counts even if the replan later fails — an event
+// storm must not turn into a replan storm.
+func (a *AgentState) TryBeginStrategicReplan(nowGameSec float64, day, maxPerDay int, minGapGameSec float64) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if day != a.strategicReplanDay {
+		a.strategicReplanDay = day
+		a.strategicReplanCount = 0
+	}
+	if a.strategicReplanCount >= maxPerDay {
+		return false
+	}
+	if a.lastStrategicReplanGT > 0 && nowGameSec > 0 && nowGameSec-a.lastStrategicReplanGT < minGapGameSec {
+		return false
+	}
+	a.strategicReplanCount++
+	a.lastStrategicReplanGT = nowGameSec
+	return true
+}
+
+// RecordPlanRevision appends a revision note (当日计划修订留痕，P3-9/P5-15）。
+// Bounded: keeps the most recent notes only.
+func (a *AgentState) RecordPlanRevision(note string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.planRevisions = append(a.planRevisions, note)
+	if len(a.planRevisions) > 32 {
+		a.planRevisions = a.planRevisions[len(a.planRevisions)-32:]
+	}
+}
+
+// PlanRevisions returns a copy of the revision notes for tonight's
+// reflection (P5-15).
+func (a *AgentState) PlanRevisions() []string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return append([]string(nil), a.planRevisions...)
 }
 
 // RefillQueue replaces the action queue with the given actions and records

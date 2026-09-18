@@ -548,14 +548,16 @@ func (a *agentContext) mayInterruptReaction(severity int) bool {
 // next refill to return to the schedule. Still-armed means no schedule
 // refill happened since the reaction started, so the current activity is
 // attributable to the reaction.
-func (a *agentContext) checkReactionDeadline(agentID string, ws contract.Transport, logger *slog.Logger) {
+// checkReactionDeadline returns true when a cut actually happened (P3-9
+// trigger signal: the reaction overran its budget — the day is off-script).
+func (a *agentContext) checkReactionDeadline(agentID string, ws contract.Transport, logger *slog.Logger) bool {
 	active, sev, deadline := a.reactionSnapshot()
 	if !active {
-		return
+		return false
 	}
 	now := a.as.LatestGameTimeSec()
 	if now <= 0 || deadline <= 0 || now < deadline {
-		return
+		return false
 	}
 	a.clearReaction()
 
@@ -585,4 +587,5 @@ func (a *agentContext) checkReactionDeadline(agentID string, ws contract.Transpo
 		"agent_id", agentID, "severity", sev, "game_time", now, "deadline", deadline,
 		"action_id", actionID, "queue_len", info.QueueLen)
 	a.signal()
+	return true
 }
