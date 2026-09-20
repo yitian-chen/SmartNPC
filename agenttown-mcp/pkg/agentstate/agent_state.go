@@ -113,11 +113,16 @@ type AgentState struct {
 	// activeSituations 是事件登记的持续情境（combat 类）：登记/解除见
 	// active_situations.go。TTL 过滤在读取时做。
 	activeSituations []ActiveSituation
-	prevZone         string
-	prevObjectIDs    []string
-	lastReactiveAt   map[string]time.Time
-	perceptionCount  int
-	replanHint       string
+	// slotSwitchPending: advanceSlotIfNeeded 检测到 slot 过期但不再强切
+	// （P3-8 入队化）：只清 currentSlot 标记 pending，等安全点（无在途
+	// 动作）时由 worker 做真正的清理 + 选新 slot。反应进行中也不打断——
+	// pending 挂着，reaction 结束后自然处理。
+	slotSwitchPending bool
+	prevZone          string
+	prevObjectIDs     []string
+	lastReactiveAt    map[string]time.Time
+	perceptionCount   int
+	replanHint        string
 	// lastQueueOnlySpeak 记录最近一次战术层分解（ReplaceQueue 路径）的队列
 	// 是否只含 speak——用于 BeginTacticalRefill 在"队列提前耗尽"时生成
 	// 针对性 hint（LLM 只返回 1 个 speak、队列数秒即耗尽的场景）。
@@ -864,6 +869,7 @@ func (a *AgentState) Stop() {
 	a.lastEndWhy = ""
 	a.lastEndInterrupted = false
 	a.unfinishedTask = ""
+	a.slotSwitchPending = false
 	a.currentSlot = ""
 	a.redecomposeCount = 0
 	a.clearedAction = nil // drop stash — offline agent has no pending completion
@@ -911,6 +917,35 @@ func (a *AgentState) PlanRevisions() []string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return append([]string(nil), a.planRevisions...)
+}
+
+// SetSlotSwitchPending marks that a slot boundary was crossed but the
+// switch was deferred to a safe point (P3-8). The worker clears currentSlot
+// here (so selectCurrentGoal picks the new slot on the next refill), but
+// does NOT clear the action queue or in-flight tracking — those wait until
+// the action completes naturally (or is stopped by time_to_stop).
+func (a *AgentState) SetSlotSwitchPending() {
+	a.mu.Lock()
+	a.currentSlot = ""
+	a.slotSwitchPending = true
+	snap := a.snapshotPersistentLocked()
+	a.mu.Unlock()
+	a.persistSchedule(snap)
+}
+
+// SlotSwitchPending reports whether a deferred slot switch is pending.
+func (a *AgentState) SlotSwitchPending() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.slotSwitchPending
+}
+
+// ClearSlotSwitchPending consumes the pending flag (the worker has done
+// the cleanup: ClearForSlotSwitch / pendingStop / new-slot refill).
+func (a *AgentState) ClearSlotSwitchPending() {
+	a.mu.Lock()
+	a.slotSwitchPending = false
+	a.mu.Unlock()
 }
 
 // RefillQueue replaces the action queue with the given actions and records

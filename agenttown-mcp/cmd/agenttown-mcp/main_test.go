@@ -12,8 +12,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/AgentTown/agenttown-mcp/pkg/agentstate"
 	"github.com/AgentTown/agenttown-mcp/contract/protocol"
+	"github.com/AgentTown/agenttown-mcp/pkg/agentstate"
 	"github.com/AgentTown/agenttown-mcp/pkg/venus"
 	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
 	"github.com/AgentTown/agenttown-mcp/wsserver"
@@ -438,37 +438,52 @@ func setGameTimeForTest(t *testing.T, ac *agentContext, hhmm string) {
 	}
 }
 
-// TestAdvanceSlotIfNeeded_DelayedStopForComposite 验证 slot 切换时对长复合动作
-// 不立即发 stop，而是记录 pendingStopActionID 让 popAndSendQueueAction 延迟补发。
-// 这样 NPC 在战术层 LLM 调用期间继续旧动作，避免愣住。
+// TestAdvanceSlotIfNeeded_DelayedStopForComposite 验证 P3-8 入队化后
+// slot 切换的行为：advanceSlotIfNeeded 不再强切——只标记 pending +
+// 清 currentSlot，保留队列与在途追踪。清理在 processSlotSwitch（安全点）
+// 才完成。
 func TestAdvanceSlotIfNeeded_DelayedStopForComposite(t *testing.T) {
 	ac, _ := newAgentContext(context.Background())
-	ws := wsserver.New(wsserver.Options{}) // 未连接；本测试不验证 stop 发送
+	ws := wsserver.New(wsserver.Options{})
 	logger := slog.Default()
 
 	ac.as.RefillQueue([]plannedAction{{Action: "wait", Params: map[string]any{"duration_sec": 30}}}, "08:00-10:00")
-	ac.as.RecordActionStarted("act_composite_1", "WorkShift", nil, agentstate.SourceTactical, "") // 内置硬编码复合 cmd
-	setGameTimeForTest(t, ac, "10:05")                                                            // 已过 slot 结束 10:00
+	ac.as.RecordActionStarted("act_composite_1", "WorkShift", nil, agentstate.SourceTactical, "")
+	setGameTimeForTest(t, ac, "10:05")
 
+	// P3-8：advanceSlotIfNeeded 只标记 pending，不强切。
 	ac.advanceSlotIfNeeded(ws, "H-01", logger)
 
-	snap := ac.as.Snapshot()
-	pendingStop := snap.PendingStopActionID
-	currentActionID := snap.CurrentActionID
-	queueLen := ac.as.QueueLen()
+	// 队列与在途追踪保留（等安全点清理）。
+	if ac.as.QueueLen() != 1 {
+		t.Errorf("queue=%d, want 1 (not cleared until safe point)", ac.as.QueueLen())
+	}
+	if ac.as.CurrentActionID() != "act_composite_1" {
+		t.Errorf("currentActionID=%q, want act_composite_1 (not cleared until safe point)", ac.as.CurrentActionID())
+	}
+	// currentSlot 已清（selectCurrentGoal 选新 slot）。
 	_, slot, _ := ac.as.SnapshotSchedule()
-
-	if pendingStop != "act_composite_1" {
-		t.Errorf("pendingStopActionID=%q, want act_composite_1 (composite 应延迟 stop)", pendingStop)
-	}
-	if currentActionID != "" {
-		t.Errorf("currentActionID=%q, want empty (cleared so tacticalRefill guard passes)", currentActionID)
-	}
-	if queueLen != 0 {
-		t.Errorf("queue=%d, want 0 (cleared on slot switch)", queueLen)
-	}
 	if slot != "" {
-		t.Errorf("currentSlot=%q, want empty (cleared on slot switch)", slot)
+		t.Errorf("currentSlot=%q, want empty (cleared so selectCurrentGoal picks new slot)", slot)
+	}
+	if !ac.as.SlotSwitchPending() {
+		t.Errorf("SlotSwitchPending should be true after advanceSlotIfNeeded")
+	}
+
+	// 安全点：processSlotSwitch 做真正清理。
+	ac.processSlotSwitch(ws, "H-01", logger)
+	snap := ac.as.Snapshot()
+	if snap.PendingStopActionID != "act_composite_1" {
+		t.Errorf("after processSlotSwitch: pendingStop=%q, want act_composite_1", snap.PendingStopActionID)
+	}
+	if snap.CurrentActionID != "" {
+		t.Errorf("after processSlotSwitch: currentActionID=%q, want empty", snap.CurrentActionID)
+	}
+	if ac.as.QueueLen() != 0 {
+		t.Errorf("after processSlotSwitch: queue=%d, want 0", ac.as.QueueLen())
+	}
+	if ac.as.SlotSwitchPending() {
+		t.Errorf("SlotSwitchPending should be cleared after processSlotSwitch")
 	}
 }
 

@@ -499,37 +499,58 @@ func (a *agentContext) loadRelationships(ctx context.Context, agentID string, kb
 // advanceSlotIfNeeded 检查 game_time 是否超出 currentSlot。返回 true 当且
 // 仅当切换发生在反应任务进行中（P3-9 触发信号：时间轴被事件挤乱，日程的
 // 剩余部分值得战略层重算）。
+// advanceSlotIfNeeded 检查 game_time 是否超出 currentSlot。返回 true 当且
+// 仅当切换发生在反应任务进行中（P3-9 触发信号）。
+//
+// P3-8 入队化：不再在检测到 slot 过期时强切（清队列+清在途+pendingStop）——
+// 只标记 slotSwitchPending + 清 currentSlot（让 selectCurrentGoal 选新 slot），
+// 不打断当前动作、不清队列。真正的清理等安全点（无在途动作时）由
+// processSlotSwitch 完成。反应进行中也不打断——pending 挂着，reaction
+// 结束后自然处理。
 func (a *agentContext) advanceSlotIfNeeded(ws contract.Transport, agentID string, logger *slog.Logger) bool {
-	// 检查 slot 是否过期（AgentState 内部持锁判断）
+	// 已有 pending 不重复检测。
+	if a.as.SlotSwitchPending() {
+		return false
+	}
 	_, slot, _ := a.as.SnapshotSchedule()
 	tod := a.as.LatestTimeOfDay()
 	if !prompt.SlotExpired(slot, tod) {
 		return false
 	}
-	// P4-10：切时段前捕捉未完成任务槽（任务事实留给下一时段规划）。
-	// 结束方式记"计划内结束"（状态栏渲染"正常结束"）——时段切换是长动作
-	// 的正常终止方式，不是"被中断"，避免 LLM 误以为受到干扰。
-	a.recordScheduledEnd()
-	// P3-9 触发信号：反应进行中撞上时段边界——时间轴被事件挤乱。必须在
-	// clearReaction 之前捕获（P2-6 的时段边界清理会把窗口解除）。
+	// P3-9 触发信号：反应进行中撞上时段边界。
 	reactionCut := false
 	if active, _, _ := a.reactionSnapshot(); active {
 		reactionCut = true
 	}
+	// P3-8：只标记 pending + 清 currentSlot，不强切。
+	a.as.SetSlotSwitchPending()
+	logger.Info("[战术层] schedule 时段切换（延迟到安全点处理）",
+		"agent_id", agentID, "expired_slot", slot, "game_time", tod,
+		"reaction_cut", reactionCut)
+	a.signal()
+	return reactionCut
+}
+
+// processSlotSwitch 在安全点（无在途动作）执行 slot 切换的真正清理：
+// P4-10 记划内结束捕捉 + ClearForSlotSwitch（清队列+清在途+pendingStop）+
+// 清反应窗口（P2-6）。由 worker 在 hasInFlightAction 守卫之后调用。
+func (a *agentContext) processSlotSwitch(ws contract.Transport, agentID string, logger *slog.Logger) {
+	if !a.as.SlotSwitchPending() {
+		return
+	}
+	// P4-10：切时段前捕捉未完成任务槽（结束方式"计划内结束"）。
+	a.recordScheduledEnd()
 	info := a.as.ClearForSlotSwitch()
 	actionID := info.ActionID
 	actionCmd := info.ActionCmd
 	queueLen := info.QueueLen
-	// slot 切换 = 反应窗口结束（P2-6 护栏）：时段边界重置 ladder/截止。
+	// slot 切换 = 反应窗口结束（P2-6 护栏）。
 	a.clearReaction()
+	a.as.ClearSlotSwitchPending()
 
-	// 只对长复合动作记录 pendingStop：短动作 ~100ms 自然完成，会在 LLM 期间
-	// 被 recordActionCompletion 清除；若 LLM 极快返回仍发 stop 会触发
-	// STOP_ID_MISMATCH（UE 侧短动作不设 busy_action_id）。
 	if actionID != "" && isCompositeCmdDynamic(actionCmd, capabilityRegistryRef) {
 		a.as.SetPendingStopActionID(actionID)
 	}
-	// 取消旧 action 的超时 timer（若有）
 	if actionID != "" {
 		a.coordMu.Lock()
 		if timer, ok := a.pendingActionTimeouts[actionID]; ok {
@@ -538,17 +559,10 @@ func (a *agentContext) advanceSlotIfNeeded(ws contract.Transport, agentID string
 		}
 		a.coordMu.Unlock()
 	}
-
-	logger.Info("[战术层] schedule 时段切换，清队列（stop 延迟到分解完成后）",
-		"agent_id", agentID, "expired_slot", slot, "game_time", tod,
-		"action_id", actionID, "pending_stop", actionID != "" && isCompositeCmdDynamic(actionCmd, capabilityRegistryRef),
+	logger.Info("[战术层] schedule 时段切换清理完成（安全点）",
+		"agent_id", agentID, "action_id", actionID,
+		"pending_stop", actionID != "" && isCompositeCmdDynamic(actionCmd, capabilityRegistryRef),
 		"queue_len", queueLen)
-
-	// 不在此处发 stop_action —— 等 tacticalRefill 分解完成后，
-	// 由 popAndSendQueueAction 在下发新 action 前补发 stop。
-	// signal worker 下一轮走 tacticalRefill 选新 slot
-	a.signal()
-	return reactionCut
 }
 
 // checkTimeToStop 轮询长动作的 time_to_stop：动作设了 time_to_stop 且权威
@@ -838,6 +852,11 @@ func runPerceptionWorker(
 		if ac.hasInFlightAction() {
 			continue
 		}
+
+		// P3-8：安全点处理延迟的 slot 切换（hasInFlightAction 之后 = 无在途
+		// 动作）。在此完成清理：清队列+pendingStop+清反应窗口，让后续
+		// tacticalRefill 选新 slot。
+		ac.processSlotSwitch(ws, agentID, logger)
 
 		// 对话进行中（social_chat 挂起）时跳过 pop/refill：避免战术层生成新
 		// 动作打断对话。对话结束后 dialogue runner 会调用 signal 唤醒 worker。
