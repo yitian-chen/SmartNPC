@@ -47,7 +47,7 @@ func TestReactionGuard_HigherSeverityRequired(t *testing.T) {
 	rt, ft, ac, _, _ := newRouterTestRuntime(t, `{}`)
 	ac.as.RecordActionStarted("act-1", protocol.CmdWorkShift, nil, agentstate.SourceTactical, "")
 	// 直接武装 severity 8 的反应窗口（等价于一次 severity 8 打断后的护栏状态）。
-	ac.beginReaction(8, ac.as.LatestGameTimeSec())
+	ac.beginReaction(8, ac.as.LatestGameTimeSec(), "")
 
 	// severity 8（不严格更高）被护栏拦截——事件留在队列，不 stop，不 replan。
 	ac.as.EnqueueWorldEvent(reactionTestEvent("evt_g2"))
@@ -80,7 +80,7 @@ func TestReactionGuard_HigherSeverityRequired(t *testing.T) {
 func TestReactionGuard_ForceBypassesLadder(t *testing.T) {
 	rt, ft, ac, _, _ := newRouterTestRuntime(t, `{}`)
 	ac.as.RecordActionStarted("act-1", protocol.CmdWorkShift, nil, agentstate.SourceTactical, "")
-	ac.beginReaction(9, ac.as.LatestGameTimeSec())
+	ac.beginReaction(9, ac.as.LatestGameTimeSec(), "")
 
 	// severity 2 的 force 事件（如调试命令）照样打断。
 	dispatchTestEvent(t, rt, "H-01", forceTestEvent("evt_g4"))
@@ -104,7 +104,7 @@ func TestReactionGuard_DeadlineCutsBackToSchedule(t *testing.T) {
 
 	// 直接武装一个"马上到期"的反应窗口（绕过 beginReaction 的 30 分钟
 	// 常量，验证 checkReactionDeadline 的行为本身）。
-	ac.beginReaction(8, ac.as.LatestGameTimeSec()-reactionDeadlineGameSec-1) // deadline 已过
+	ac.beginReaction(8, ac.as.LatestGameTimeSec()-reactionDeadlineGameSec-1, "") // deadline 已过
 
 	ac.checkReactionDeadline("H-01", ft, testLogger())
 
@@ -136,7 +136,7 @@ func TestReactionGuard_DeadlineNotYetReached(t *testing.T) {
 	ac.as.RecordActionStarted("act-1", protocol.CmdWorkShift, nil, agentstate.SourceTactical, "")
 
 	// 未到期：什么都不动。
-	ac.beginReaction(8, ac.as.LatestGameTimeSec())
+	ac.beginReaction(8, ac.as.LatestGameTimeSec(), "")
 	ac.checkReactionDeadline("H-01", ft, testLogger())
 	if stops := stoppedActions(ft); len(stops) != 0 {
 		t.Fatalf("pre-deadline check must be inert, got %v", stops)
@@ -163,7 +163,7 @@ func TestReactionGuard_ScheduleRefillClears(t *testing.T) {
 	_, ft, ac, _, _ := newRouterTestRuntime(t, `{}`)
 	seedPerception(t, ac)
 	ac.as.SetDailyPlan("09:00-12:00: 车间装配作业", 11)
-	ac.beginReaction(8, ac.as.LatestGameTimeSec())
+	ac.beginReaction(8, ac.as.LatestGameTimeSec(), "")
 
 	// tacticalHc 失败 → refill 返回 false，但 clearReaction 在 LLM 调用前
 	// 已执行（ShouldSkip 守卫之后）。
@@ -178,7 +178,7 @@ func TestReactionGuard_ScheduleRefillClears(t *testing.T) {
 // TestReactionGuard_StopClears verifies agent shutdown lifts the guard.
 func TestReactionGuard_StopClears(t *testing.T) {
 	_, _, ac, _, _ := newRouterTestRuntime(t, `{}`)
-	ac.beginReaction(8, 1000)
+	ac.beginReaction(8, 1000, "")
 	ac.stop()
 	if active, _, _ := ac.reactionSnapshot(); active {
 		t.Fatalf("agent stop must clear the reaction window")
@@ -189,11 +189,11 @@ func TestReactionGuard_StopClears(t *testing.T) {
 // to 0..10 regardless of source (force events trust UE's field).
 func TestReactionGuard_BeginClampsSeverity(t *testing.T) {
 	_, _, ac, _, _ := newRouterTestRuntime(t, `{}`)
-	ac.beginReaction(99, 1000)
+	ac.beginReaction(99, 1000, "")
 	if _, sev, _ := ac.reactionSnapshot(); sev != 10 {
 		t.Fatalf("severity 99 must clamp to 10, got %d", sev)
 	}
-	ac.beginReaction(-5, 1000)
+	ac.beginReaction(-5, 1000, "")
 	if _, sev, _ := ac.reactionSnapshot(); sev != 0 {
 		t.Fatalf("severity -5 must clamp to 0, got %d", sev)
 	}
@@ -204,7 +204,7 @@ func TestReactionGuard_BeginClampsSeverity(t *testing.T) {
 // first perception arrives.
 func TestReactionGuard_NoPerceptionDeadlineInert(t *testing.T) {
 	_, ft, ac, _, _ := newRouterTestRuntime(t, `{}`)
-	ac.beginReaction(8, 0) // 无感知
+	ac.beginReaction(8, 0, "") // 无感知
 	ac.checkReactionDeadline("H-01", ft, testLogger())
 	if active, _, _ := ac.reactionSnapshot(); !active {
 		t.Fatalf("no-perception window stays armed (inert), got cleared")

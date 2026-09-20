@@ -104,7 +104,7 @@ func TestStrategicReplan_EndToEnd(t *testing.T) {
 	}
 	ac.as.CommitTacticalRefill("09:00-12:00", 1, false)
 	ac.as.RecordActionStarted("act-1", "WorkShift", map[string]any{"semantic_group": "workbench"}, agentstate.SourceTactical, "")
-	ac.beginReaction(8, ac.as.LatestGameTimeSec())
+	ac.beginReaction(8, ac.as.LatestGameTimeSec(), "")
 
 	// 时段切换：反应被切断。
 	if !ac.advanceSlotIfNeeded(ft, "H-01", testLogger()) {

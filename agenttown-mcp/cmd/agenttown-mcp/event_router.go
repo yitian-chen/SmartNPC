@@ -152,6 +152,17 @@ func (r *eventRouter) buildInput(agentID string, ac *agentContext, ev protocol.W
 			action += "（来源：" + string(snap.CurrentActionSrc) + "）"
 		}
 	}
+	// 反应窗口上下文：当前动作是对某紧急事件的反应时，路由 LLM 需要
+	// 知道这一点——只看 MoveTo(residential_quarters) 的字面目标无法判断
+	// 这是"逃跑"还是"正常日程"（2026-09-20 仿真：combat_exit 到达时路由
+	// 判"未处于逃跑状态"，漏掉了 situation_resolved 打断）。
+	if reactionDesc := ac.reactionDescSnapshot(); reactionDesc != "" {
+		if action == "" {
+			action = "（空闲，但正应对紧急事件：" + reactionDesc + "）"
+		} else {
+			action += "。注意：这是对紧急事件的反应动作（" + reactionDesc + "）"
+		}
+	}
 
 	relationships := ""
 	if store := ac.as.Store(); store != nil && kb != nil && len(kb.Agents) > 1 {
@@ -258,9 +269,9 @@ func (rt *Runtime) routerInterrupt(agentID string, ev protocol.WorldEventPayload
 	case prompt.RouterMotiveSituationResolved:
 		ac.clearReaction()
 	case prompt.RouterMotiveSocial:
-		ac.beginReaction(2, ac.as.LatestGameTimeSec())
+		ac.beginReaction(2, ac.as.LatestGameTimeSec(), prompt.FormatWorldEvent(ev))
 	default:
-		ac.beginReaction(dec.Severity, ac.as.LatestGameTimeSec())
+		ac.beginReaction(dec.Severity, ac.as.LatestGameTimeSec(), prompt.FormatWorldEvent(ev))
 	}
 	go ac.forceInterruptReplan(rt.ctx, agentID, rt.ws, *rt.kbPtr, rt.profiles, ev, hint, rt.logger)
 }

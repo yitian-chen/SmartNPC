@@ -111,6 +111,12 @@ type agentContext struct {
 	reactionActive          bool
 	reactionSeverity        int
 	reactionDeadlineGameSec float64
+	// reactionDesc 记录引发当前反应窗口的事件描述（路由/打断 hint 摘要），
+	// 供 buildInput 注入路由 prompt——让路由 LLM 看到"当前动作是对某事件
+	// 的反应"而不仅看到 MoveTo 的字面目标（2026-09-20 仿真：combat_exit
+	// 到达时路由判"未处于逃跑状态"，因为 MoveTo(residential_quarters)
+	// 看不出是逃跑）。
+	reactionDesc string
 
 	// LLM clients (immutable after construction, no lock needed)
 	strategicHc llmClient
@@ -1407,6 +1413,17 @@ func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
 	suppressAutoHint := false
 	if reactionArmed, _, _ := a.reactionSnapshot(); reactionArmed {
 		suppressAutoHint = true
+		// 修复2：反应窗口的 hint（BeginTacticalRefill 只在 hint 为空时才
+		// 消费——此处提前注入反应上下文，让 refill 的战术 LLM 知道"你在
+		// 应对紧急事件，动作刚执行完，威胁可能未解除"。2026-09-20 仿真：
+		// 逃跑动作完成后 refill 的 prompt 里紧急上下文全丢，LLM 只看到
+		// "工作台装配"，没有"刚在逃跑"的衔接信息。
+		if a.as.ReplanHint() == "" {
+			if reactionDesc := a.reactionDescSnapshot(); reactionDesc != "" {
+				a.as.SetReplanHint("正在应对紧急事件（" + reactionDesc +
+					"）。上一个反应动作已执行完，若威胁仍未解除请继续应对；若已收到解除信号（如脱离战斗），请回到当前时段目标的原有日程。")
+			}
+		}
 	}
 	prep := a.as.BeginTacticalRefill(goal, slot, idx, a.tacticalHc != nil, suppressAutoHint)
 	if prep.ShouldSkip {

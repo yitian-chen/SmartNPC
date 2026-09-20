@@ -235,7 +235,7 @@ func (rt *Runtime) handleForceEvent(ac *agentContext, agentID string, ev protoco
 	ac.as.SetReplanHint(hint)
 	// 护栏（§4.5）：force 反应同样是一个反应任务——带截止时间，后续路由
 	// 裁决需严格更高 severity 才能再打断（force 自身不受限，§4.2）。
-	ac.beginReaction(ev.Severity, ac.as.LatestGameTimeSec())
+	ac.beginReaction(ev.Severity, ac.as.LatestGameTimeSec(), prompt.FormatWorldEvent(ev))
 	go ac.forceInterruptReplan(rt.ctx, agentID, rt.ws, *rt.kbPtr, rt.profiles, ev, hint, rt.logger)
 }
 
@@ -541,7 +541,7 @@ var reactionDeadlineGameSec = 3600.0
 // severity ladder bar and absolute deadline. nowGameSec is the current
 // authoritative game time (<= 0 = no perception yet; the deadline check
 // stays inert until perception arrives).
-func (a *agentContext) beginReaction(severity int, nowGameSec float64) {
+func (a *agentContext) beginReaction(severity int, nowGameSec float64, desc string) {
 	if severity < 0 {
 		severity = 0
 	}
@@ -552,6 +552,7 @@ func (a *agentContext) beginReaction(severity int, nowGameSec float64) {
 	defer a.coordMu.Unlock()
 	a.reactionActive = true
 	a.reactionSeverity = severity
+	a.reactionDesc = desc
 	if nowGameSec > 0 {
 		a.reactionDeadlineGameSec = nowGameSec + reactionDeadlineGameSec
 	} else {
@@ -574,7 +575,19 @@ func (a *agentContext) clearReaction() {
 	a.reactionActive = false
 	a.reactionSeverity = 0
 	a.reactionDeadlineGameSec = 0
+	a.reactionDesc = ""
 	a.coordMu.Unlock()
+}
+
+// reactionDescSnapshot returns the description of the event that armed the
+// current reaction window ("" when not active).
+func (a *agentContext) reactionDescSnapshot() string {
+	a.coordMu.Lock()
+	defer a.coordMu.Unlock()
+	if !a.reactionActive {
+		return ""
+	}
+	return a.reactionDesc
 }
 
 // mayInterruptReaction implements guardrail ②: an interrupt with the given

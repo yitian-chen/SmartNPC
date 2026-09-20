@@ -129,7 +129,7 @@ func TestReactionRefill_SuppressesAutoHint(t *testing.T) {
 	ac.tacticalHc = newFailedVenusClient()
 
 	// 反应窗口 armed（模拟"紧急反应刚结束"），同 slot 队列耗尽 refill。
-	ac.beginReaction(8, ac.as.LatestGameTimeSec())
+	ac.beginReaction(8, ac.as.LatestGameTimeSec(), "")
 	// 第一次成功分解置位 tacticalHeaderPlan，让 refill 走"同 slot 重分解"
 	// 路径（auto-hint 只在该路径生成）。
 	ac.tacticalHc = &fakeLoopLLM{resp: speakToolCallResp()}

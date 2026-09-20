@@ -272,7 +272,7 @@ func TestRouterMotive_SituationResolvedBypassesGuardrail(t *testing.T) {
 	rt, ft, ac, _, _ := newRouterTestRuntime(t, `{}`)
 	ac.as.RecordActionStarted("act-1", "MoveTo", map[string]any{"target_id": "repair_bay"}, agentstate.SourceTactical, "")
 	// 武装一个 severity 9 的反应窗口（模拟被攻击后的逃跑反应）。
-	ac.beginReaction(9, ac.as.LatestGameTimeSec())
+	ac.beginReaction(9, ac.as.LatestGameTimeSec(), "")
 	ac.as.EnqueueWorldEvent(reactionTestEvent("evt_g1"))
 
 	// combat_exit：severity 3 << 9，motive=situation_resolved → 应放行。
@@ -318,4 +318,54 @@ func TestRouterMotive_SocialLowSeverityWindow(t *testing.T) {
 		t.Fatalf("hint should carry the social prefix, got %q", hint)
 	}
 	waitFor(t, 2*time.Second, func() bool { return replanIdle(ac) })
+}
+
+// TestRouter_ReactionDescInjectedIntoPrompt pins the 2026-09-20 fix: when a
+// reaction window is armed, the router prompt's 【当前动作】 carries the
+// reaction context — the router LLM can see "this MoveTo is a flee response"
+// and correctly judge a combat_exit as situation_resolved.
+func TestRouter_ReactionDescInjectedIntoPrompt(t *testing.T) {
+	rt, _, ac, llm, _ := newRouterTestRuntime(t, `{"interrupt": false, "severity": 1, "reason": "x"}`)
+	seedPerception(t, ac)
+	ac.as.RecordActionStarted("act-1", "MoveTo",
+		map[string]any{"target_type": "zone", "target_id": "residential_quarters"}, agentstate.SourceTactical, "")
+	// 武装一个带描述的反应窗口（模拟被攻击后的逃跑反应）。
+	ac.beginReaction(9, ac.as.LatestGameTimeSec(), "玩家互动：被玩家 player_1 攻击（伤害 20，类型 physical）")
+
+	dispatchTestEvent(t, rt, "H-01", nonForceTestEvent("evt_desc_1"))
+	waitFor(t, 2*time.Second, func() bool { return strings.Contains(llm.lastPrompt(), "世界事件") })
+
+	p := llm.lastPrompt()
+	if !strings.Contains(p, "这是对紧急事件的反应动作") {
+		t.Fatalf("router prompt must carry the reaction context when the window is armed:\n%s", p)
+	}
+	if !strings.Contains(p, "被玩家 player_1 攻击") {
+		t.Fatalf("router prompt must carry the reaction's origin event:\n%s", p)
+	}
+}
+
+// TestTacticalRefill_ReactionContextHint verifies the 2026-09-20 fix: when a
+// reaction window is still armed and the action completes (refill fires),
+// the tactical prompt carries the reaction context — the LLM knows it was
+// mid-reaction, not just seeing "工作台装配" with no transition context.
+func TestTacticalRefill_ReactionContextHint(t *testing.T) {
+	_, ft, ac, _, _ := newRouterTestRuntime(t, `{}`)
+	seedPerception(t, ac)
+	ac.as.SetDailyPlan("09:00-12:00: 车间装配作业", 11)
+	ac.beginReaction(9, ac.as.LatestGameTimeSec(), "被玩家攻击")
+
+	// fakeLoopLLM 捕获 prompt + speakToolCallResp 让分解成功（hint 被
+	// BeginTacticalRefill 消费后进 prompt，ReplanHint() 读回为空——需从
+	// 捕获的 prompt 断言）。
+	fake := &fakeLoopLLM{resp: speakToolCallResp()}
+	ac.tacticalHc = fake
+	_ = ac.tacticalRefill(context.Background(), "H-01", ft, nil, nil, testLogger())
+
+	user := lastUserPromptOf(t, fake.capturedMsgs)
+	if !strings.Contains(user, "正在应对紧急事件") {
+		t.Fatalf("refill prompt during a reaction window must carry the transition hint:\n%s", user)
+	}
+	if !strings.Contains(user, "被玩家攻击") {
+		t.Fatalf("refill prompt must carry the reaction's origin event:\n%s", user)
+	}
 }
