@@ -11,8 +11,8 @@ import (
 
 	"github.com/AgentTown/agenttown-mcp/adapters/agenttown/tools"
 	"github.com/AgentTown/agenttown-mcp/contract"
-	"github.com/AgentTown/agenttown-mcp/pkg/profile"
 	"github.com/AgentTown/agenttown-mcp/contract/protocol"
+	"github.com/AgentTown/agenttown-mcp/pkg/profile"
 	"github.com/AgentTown/agenttown-mcp/pkg/weeklyschedule"
 	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
 )
@@ -94,9 +94,6 @@ func (rt *Runtime) HandleMessage(_ context.Context, msgType, agentID string, pay
 		*rt.kbPtr = newKB
 		kbRef = newKB // sync /debug/kb handler
 		tools.RegisterAll(rt.server, rt.executor, newKB, rt.logger)
-		if reactiveRunnerRef != nil {
-			reactiveRunnerRef.kb = newKB
-		}
 		rt.agentsMu.Unlock()
 		rt.logger.Info("world_kb merged and persisted",
 			"path", rt.worldKBPath,
@@ -141,12 +138,14 @@ func (rt *Runtime) HandleMessage(_ context.Context, msgType, agentID string, pay
 			rt.logger.Warn("state_report dropped for unregistered agent", "agent_id", agentID)
 			return
 		}
-		trigger, detail := ac.updateState(sr)
+		detail := ac.updateState(sr)
 		rt.logger.Info("state_report", "agent_id", agentID,
 			"energy", sr.PhysicalState.Energy, "fatigue", sr.PhysicalState.Fatigue,
 			"joint_wear", sr.PhysicalState.JointWear)
-		if trigger != "" && rt.autoPlanEnabled {
-			go reactiveRunnerRef.trigger(agentID, ac, trigger, detail)
+		// P4-12：物理警戒带突破 → 合成 physical_threshold world_event 入队
+		// （路由器裁决 interrupt/入队）。
+		if detail != "" && rt.autoPlanEnabled {
+			rt.dispatchSynthesizedEvent(ac, agentID, detail)
 		}
 
 	case protocol.TypeActionCompleted:
@@ -160,13 +159,15 @@ func (rt *Runtime) HandleMessage(_ context.Context, msgType, agentID string, pay
 			rt.logger.Warn("action_completed dropped for unregistered agent", "agent_id", agentID)
 			return
 		}
-		queued, trigger, detail := ac.recordActionCompletion(completed)
+		queued, detail := ac.recordActionCompletion(completed)
 		rt.logger.Info("action_completed", "agent_id", agentID,
 			"action_id", completed.ActionID, "result", completed.Result,
 			"reason", completed.Reason, "progress", completed.Progress,
 			"decision_queued", queued)
-		if trigger != "" && rt.autoPlanEnabled {
-			go reactiveRunnerRef.trigger(agentID, ac, trigger, detail)
+		// P4-12：异常完成（failed/interrupted/error）→ 合成 action_anomaly
+		// world_event 入队。成功完成不合成——是常态。
+		if detail != "" && completed.Result != protocol.ResultSuccess && rt.autoPlanEnabled {
+			rt.dispatchSynthesizedEvent(ac, agentID, detail)
 		}
 
 	case protocol.TypeActionQueued:
@@ -204,12 +205,13 @@ func (rt *Runtime) HandleMessage(_ context.Context, msgType, agentID string, pay
 			rt.logger.Warn("event_notification dropped for unregistered agent", "agent_id", agentID)
 			return
 		}
-		trigger, detail := ac.recordEventNotification(event)
+		detail := ac.recordEventNotification(event)
 		rt.logger.Info("event_notification", "agent_id", agentID,
-			"event_id", event.EventID, "perception_level", event.PerceptionLevel,
-			"trigger", trigger)
-		if trigger != "" && rt.autoPlanEnabled {
-			go reactiveRunnerRef.trigger(agentID, ac, trigger, detail)
+			"event_id", event.EventID, "perception_level", event.PerceptionLevel)
+		// P4-12：event_notification（Director 注入）→ 合成 world world_event
+		// 入队，走事件系统。旧反应层不复存在。
+		if rt.autoPlanEnabled {
+			rt.dispatchSynthesizedEvent(ac, agentID, "event_notification "+detail)
 		}
 
 	case protocol.TypeError:
@@ -243,13 +245,14 @@ func (rt *Runtime) HandleMessage(_ context.Context, msgType, agentID string, pay
 		} else {
 			ac.coordMu.Unlock()
 		}
-		trigger, detail, err := ac.observePerception(payload)
+		detail, err := ac.observePerception(payload)
 		if err != nil {
 			rt.logger.Warn("perception_update parse failed", "agent_id", agentID, "err", err)
 			return
 		}
-		if trigger != "" && rt.autoPlanEnabled {
-			go reactiveRunnerRef.trigger(agentID, ac, trigger, detail)
+		// P4-12：物理警戒带突破 → 合成 physical_threshold world_event 入队。
+		if detail != "" && rt.autoPlanEnabled {
+			rt.dispatchSynthesizedEvent(ac, agentID, detail)
 		}
 
 	case protocol.TypeChatInvite:

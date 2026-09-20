@@ -187,37 +187,32 @@ func redactDSN(dsn string) string {
 }
 
 // observePerception 存储最新感知payload，供战术层 refill 时读取当前世界状态。
-// 反应层：检测 zone 变化 / 新物体出现 / 周期性触发，若显著变化则返回 trigger 信息供
-// message handler 异步触发 reactiveRunner.trigger。
-func (a *agentContext) observePerception(payload json.RawMessage) (ReactiveTrigger, string, error) {
+// observePerception 存最新感知 + 检测物理警戒带突破（P4-12 退役后仅剩
+// 此项）。突破时返回 detail（供 runtime 合成 physical_threshold world_event
+// 入队，走路由器裁决）。zone 变化/新物体/周期触发不再产生决策——事件系统
+// （UE world_event / 物理告警合成）接管全部打断判定。
+func (a *agentContext) observePerception(payload json.RawMessage) (string, error) {
 	// coord check under coordMu (release before calling AgentState)
 	a.coordMu.Lock()
 	if a.stopped {
 		a.coordMu.Unlock()
-		return "", "", nil
+		return "", nil
 	}
 	a.coordMu.Unlock()
 
 	upd, err := a.as.SetPerception(payload)
 	if err != nil {
-		return "", "", err
+		return "", err
 	}
-	pCount := upd.PerceptionCount
 
-	// 检测显著变化（zone/新物体）+ 物理警戒带突破。物理状态由 perception_update
-	// 携带全量 3 项（energy/fatigue/joint_wear）上传，SetPerception 写入
-	// latestPhysical 并返回 PrevPhysical/CurPhysical 供此处警戒带检测。
-	// state_report 路径（updateState）作为兜底，在 perception 未带物理状态时补写。
-	trigger, detail := prompt.ShouldTriggerReactive(upd.PrevZone, upd.CurZone, upd.PrevObjectIDs, upd.CurObjectIDs, upd.PrevPhysical, upd.CurPhysical, a.physBands)
-	// 事件类触发优先；无事件时检查周期性触发
-	if trigger == "" {
-		trigger, detail = prompt.ShouldTriggerPeriodic(pCount)
-	}
+	// 物理警戒带突破检测（边沿：从正常跨入警戒那一刻才触发）。物理状态由
+	// perception_update 携带全量 3 项，SetPerception 返回 prev/cur 供检测。
+	_, detail := prompt.ShouldTriggerReactive("", "", nil, nil, upd.PrevPhysical, upd.CurPhysical, a.physBands)
 
 	// 感知是 worker 的主驱动源：每次感知到达都唤醒它检查战术队列
 	// （pop 下一个 / refill 新时段）。tacticalRefill 内部的守卫避免重复 LLM 调用。
 	a.signal()
-	return trigger, detail, nil
+	return detail, nil
 }
 
 // updateState 存储兜底物理状态 + 当前任务进度。物理状态主数据源是
@@ -225,19 +220,20 @@ func (a *agentContext) observePerception(payload json.RawMessage) (ReactiveTrigg
 // 当 perception_update 未携带物理状态时由这里补写 latestPhysical。
 // 反应层：检测物理状态突破警戒带，返回 trigger 信息供 message handler
 // 触发 reactiveRunner。current_task_progress 始终更新（战术层在用）。
-func (a *agentContext) updateState(report protocol.StateReportPayload) (ReactiveTrigger, string) {
+func (a *agentContext) updateState(report protocol.StateReportPayload) string {
 	a.coordMu.Lock()
 	if a.stopped {
 		a.coordMu.Unlock()
-		return "", ""
+		return ""
 	}
 	a.coordMu.Unlock()
 
 	physical := report.PhysicalState
 	prevPhysical := a.as.SetPhysicalState(&physical, cloneTask(report.CurrentTaskProgress))
 
-	// 检测物理警戒带突破（zone/objects 不在此检测，由 observePerception 负责）
-	return prompt.ShouldTriggerReactive("", "", nil, nil, prevPhysical, &physical, a.physBands)
+	// 物理警戒带突破检测（P4-12：唯一保留的触发，供事件合成）。
+	_, detail := prompt.ShouldTriggerReactive("", "", nil, nil, prevPhysical, &physical, a.physBands)
+	return detail
 }
 
 // recordActionCompletion 处理 action_completed。所有来源的 completion 都清
@@ -245,7 +241,7 @@ func (a *agentContext) updateState(report protocol.StateReportPayload) (Reactive
 // 完成（failed/interrupted/error）时触发评估——成功完成是常态，每次都问
 // "要不要打断"意义不大（模型看不到战术层整体规划，只能基于贫乏信息答 continue）。
 // 异常完成才是真正需要反应层介入的时机。
-func (a *agentContext) recordActionCompletion(completion protocol.ActionCompletedPayload) (bool, ReactiveTrigger, string) {
+func (a *agentContext) recordActionCompletion(completion protocol.ActionCompletedPayload) (bool, string) {
 	res := a.as.RecordActionCompletion(completion.ActionID, completion.Result, completion.Reason)
 	// Stage 4: best-effort action_history recording — only for tracked in-flight
 	// actions (debug /debug/action path doesn't call recordActionStarted, so its
@@ -300,12 +296,12 @@ func (a *agentContext) recordActionCompletion(completion protocol.ActionComplete
 	// 反应层触发：仅异常完成触发。detail 用 result 作为去抖维度（避免每次
 	// action_id 不同导致去抖失效），相同 result 在 60s 内不重复触发。
 	if completion.Result == protocol.ResultSuccess {
-		return true, "", ""
+		return true, ""
 	}
 	// self-stop 引发的 interrupted 完成（slot 切换主动 stop）不触发反应层——
 	// 这是计划内的打断，replan 会干扰刚下发的新 action。
 	if isSelfStop {
-		return true, "", ""
+		return true, ""
 	}
 	// 异常完成：detail 注入 reaction 层 TriggerDetail，含 UE 给出的 reason
 	// （如"寻路不可达"），让 Ollama 看到 UE 侧的具体失败原因再决策。
@@ -336,7 +332,7 @@ func (a *agentContext) recordActionCompletion(completion protocol.ActionComplete
 		a.as.SetReplanHint(hint)
 	}
 
-	return true, TriggerActionDone, detail
+	return true, detail
 }
 
 // replanHintByReason 根据上次动作失败的 reason 给出针对性的战术层重规划建议。
@@ -641,18 +637,17 @@ func timeStopReplanHint(cmd string, params map[string]any, durationSec float64) 
 	return sb.String()
 }
 
-// recordEventNotification 处理环境事件通知。反应层：返回 trigger 信息供
-// message handler 异步触发 reactiveRunner。环境事件不打断战术队列——
-// reactiveRunner 决策若为 replan 才会发 stop_action。
-func (a *agentContext) recordEventNotification(event protocol.EventNotificationPayload) (ReactiveTrigger, string) {
-	// 提取事件类型用于去抖键（事件 id 每次不同，去抖会失效；type 是合理维度）
+// recordEventNotification 处理环境事件通知：存入 AgentState（供后续
+// 日志/审计），返回事件描述。P4-12 退役后不再触发决策——事件打断
+// 全部由 world_event 事件系统（路由器裁决）承担。
+func (a *agentContext) recordEventNotification(event protocol.EventNotificationPayload) string {
+	// 提取事件类型。
 	eventType, _ := event.Event["type"].(string)
 	if eventType == "" {
 		eventType = "unknown"
 	}
-	detail := fmt.Sprintf("event_id=%s level=%s type=%s",
+	return fmt.Sprintf("event_id=%s level=%s type=%s",
 		event.EventID, event.PerceptionLevel, eventType)
-	return TriggerEventNotify, detail
 }
 
 func (a *agentContext) signal() {
@@ -1336,11 +1331,6 @@ type llmClient interface {
 // 编译期断言：venus.Client 满足 llmClient 接口。
 var _ llmClient = (*venus.Client)(nil)
 
-// reactiveRunnerRef 是进程级反应层执行器（package-level 便于 WS handler 调用）。
-// nil 表示反应层未启用（--ollama-url="" 显式禁用或客户端初始化失败）。
-// trigger() 内部 nil-check，WS handler 无需额外判空。
-var reactiveRunnerRef *reactiveRunner
-
 // capabilityRegistryRef 是进程级能力注册表（package-level 便于战术层 worker 与
 // debug handler 引用，避免长串参数传递）。nil 表示未启用能力过滤（降级为全量
 // 内置工具）。main() 启动时赋值。
@@ -1823,25 +1813,24 @@ func main() {
 		ollamaClient = ollama.New(ollama.Options{
 			BaseURL: *ollamaURL,
 			Model:   *ollamaModel,
-			// HTTP client timeout 作为 backstop，必须 > reactiveCallTimeout，
-			// 让 context deadline 成为真正的硬截止。否则 HTTP 超时会先于
-			// ctx 触发，导致 "Client.Timeout exceeded while awaiting headers"
-			// 错误，违背反应层 "ctx 是硬截止" 的设计意图。
-			Timeout: reactiveCallTimeout + 5*time.Second,
+			// HTTP client timeout as backstop（P4-12：旧反应层退役后
+			// Ollama 仅供 Stage 5 关系判断，5s ctx + 10s HTTP backstop）。
+			Timeout: 10 * time.Second,
 			// CPU 推理线程数。云开发环境（EPYC 96 vCPU）实测默认 96 线程
 			// 反而劣化到 ~8 tok/s，限制到 16 线程可恢复到 ~24 tok/s。
 			// -1 表示不传 num_thread，让 Ollama 自决（本地 GPU 场景用）。
 			NumThread: *ollamaNumThread,
 			Logger:    logger,
 		})
-		reactiveRunnerRef = newReactiveRunner(ollamaClient, ws, kb, profiles, logger)
-		logger.Info("reactive layer enabled",
+		// P4-12：旧反应层（Ollama continue/observe/replan）已退役。
+		// Ollama 客户端仅供 Stage 5 关系判断（maybeUpdateRelationship）使用。
+		logger.Info("ollama enabled for relationship judgments (reactive layer retired, P4-12)",
 			"ollama_url", ollamaClient.BaseURL(),
 			"ollama_model", ollamaClient.Model(),
 			"ollama_num_thread", ollamaClient.NumThread(),
 		)
 	} else {
-		logger.Info("reactive layer disabled (--ollama-url=\"\")")
+		logger.Info("ollama disabled (relationship judgments off; reactive layer retired, P4-12)")
 	}
 
 	// Per-agent context (Phase 1: single agent, but keyed for multi-NPC).

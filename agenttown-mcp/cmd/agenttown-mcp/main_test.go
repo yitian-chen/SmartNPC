@@ -37,7 +37,7 @@ func TestRecordActionCompletion_SignalsWorkerAndClearsInFlight(t *testing.T) {
 	default:
 	}
 
-	queued, _, _ := ac.recordActionCompletion(protocol.ActionCompletedPayload{
+	queued, _ := ac.recordActionCompletion(protocol.ActionCompletedPayload{
 		ActionID: "act_t1", Result: protocol.ResultSuccess, Progress: 1,
 	})
 	if !queued {
@@ -64,14 +64,14 @@ func TestRecordActionCompletion_SignalsWorkerAndClearsInFlight(t *testing.T) {
 // 反应层（成功是常态，无需评估）。
 func TestRecordActionCompletion_SuccessNoTrigger(t *testing.T) {
 	ac, _ := newAgentContext(context.Background())
-	queued, trigger, detail := ac.recordActionCompletion(protocol.ActionCompletedPayload{
+	queued, detail := ac.recordActionCompletion(protocol.ActionCompletedPayload{
 		ActionID: "act_ok_1", Result: protocol.ResultSuccess, Progress: 1,
 	})
 	if !queued {
 		t.Fatal("queued should be true")
 	}
-	if trigger != "" {
-		t.Errorf("success should not trigger, got trigger=%q", trigger)
+	if detail != "" {
+		t.Errorf("success should not produce detail, got %q", detail)
 	}
 	if detail != "" {
 		t.Errorf("success should return empty detail, got %q", detail)
@@ -82,14 +82,11 @@ func TestRecordActionCompletion_SuccessNoTrigger(t *testing.T) {
 // 且 detail 用 result 作为去抖维度（不含 action_id，避免去抖失效）。
 func TestRecordActionCompletion_FailureTriggers(t *testing.T) {
 	ac, _ := newAgentContext(context.Background())
-	queued, trigger, detail := ac.recordActionCompletion(protocol.ActionCompletedPayload{
+	queued, detail := ac.recordActionCompletion(protocol.ActionCompletedPayload{
 		ActionID: "act_fail_1", Result: protocol.ResultFailed, Progress: 0.3,
 	})
 	if !queued {
 		t.Fatal("queued should be true")
-	}
-	if trigger != TriggerActionDone {
-		t.Errorf("trigger: got %q, want %q", trigger, TriggerActionDone)
 	}
 	if !strings.Contains(detail, "failed") {
 		t.Errorf("detail should mention result=failed: %q", detail)
@@ -103,13 +100,10 @@ func TestRecordActionCompletion_FailureTriggers(t *testing.T) {
 // 包含 UE 回传的 reason 字段（如"寻路不可达"），让反应层 Ollama 能看到具体失败原因。
 func TestRecordActionCompletion_FailureDetailIncludesReason(t *testing.T) {
 	ac, _ := newAgentContext(context.Background())
-	_, trigger, detail := ac.recordActionCompletion(protocol.ActionCompletedPayload{
+	_, detail := ac.recordActionCompletion(protocol.ActionCompletedPayload{
 		ActionID: "act_fail_2", Result: protocol.ResultFailed,
 		Reason: "寻路不可达", Progress: 0.3,
 	})
-	if trigger != TriggerActionDone {
-		t.Errorf("trigger: got %q, want %q", trigger, TriggerActionDone)
-	}
 	if !strings.Contains(detail, "reason=寻路不可达") {
 		t.Errorf("detail should contain UE reason: %q", detail)
 	}
@@ -238,14 +232,11 @@ func TestRecordEventNotification_ReturnsTrigger(t *testing.T) {
 
 	// 反应层 P0：recordEventNotification 返回 (TriggerEventNotify, detail)
 	// 供 WS handler 异步触发 reactiveRunner。本测试验证签名 + 队列不被改动。
-	trigger, detail := ac.recordEventNotification(protocol.EventNotificationPayload{
+	detail := ac.recordEventNotification(protocol.EventNotificationPayload{
 		EventID:         "evt_001",
 		PerceptionLevel: "audible",
 		Event:           map[string]any{"type": "alert"},
 	})
-	if trigger != TriggerEventNotify {
-		t.Fatalf("trigger=%q, want %q", trigger, TriggerEventNotify)
-	}
 	if detail == "" {
 		t.Error("detail should not be empty")
 	}
@@ -548,7 +539,7 @@ func TestRecordActionCompletion_SelfStopSuppressesReactive(t *testing.T) {
 
 	ac.as.SetSelfStopInProgress("act_stopped_by_slot_switch")
 
-	queued, trigger, _ := ac.recordActionCompletion(protocol.ActionCompletedPayload{
+	queued, detail := ac.recordActionCompletion(protocol.ActionCompletedPayload{
 		ActionID: "act_stopped_by_slot_switch",
 		Result:   protocol.ResultInterrupted, // stop 引发的完成
 		Progress: 0.5,
@@ -557,8 +548,8 @@ func TestRecordActionCompletion_SelfStopSuppressesReactive(t *testing.T) {
 	if !queued {
 		t.Error("queued should be true (worker signaled)")
 	}
-	if trigger != "" {
-		t.Errorf("trigger=%q, want empty (self-stop should not trigger reactive)", trigger)
+	if detail != "" {
+		t.Errorf("detail=%q, want empty (self-stop should not produce detail)", detail)
 	}
 
 	if ac.as.SelfStopInProgress() != "" {
@@ -572,7 +563,7 @@ func TestRecordActionCompletion_OtherFailureStillTriggers(t *testing.T) {
 	ac, _ := newAgentContext(context.Background())
 
 	// 模拟一个普通的 failed completion（非 self-stop）
-	queued, trigger, _ := ac.recordActionCompletion(protocol.ActionCompletedPayload{
+	queued, _ := ac.recordActionCompletion(protocol.ActionCompletedPayload{
 		ActionID: "act_unexpected_fail",
 		Result:   protocol.ResultFailed,
 		Progress: 0.3,
@@ -580,9 +571,6 @@ func TestRecordActionCompletion_OtherFailureStillTriggers(t *testing.T) {
 
 	if !queued {
 		t.Error("queued should be true")
-	}
-	if trigger != TriggerActionDone {
-		t.Errorf("trigger=%q, want %q (non-self-stop failure should still trigger reactive)", trigger, TriggerActionDone)
 	}
 }
 
