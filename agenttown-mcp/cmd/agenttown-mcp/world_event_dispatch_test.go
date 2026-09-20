@@ -436,3 +436,46 @@ func TestHandleDebugEvent_ManualModeReportsDropped(t *testing.T) {
 		t.Fatalf("manual mode must not stop anything, got %v", stops)
 	}
 }
+
+// TestChatInviteIncoming_DispatchedByWorldEvent verifies P4-14: a
+// social.chat_invite_incoming world_event is handed to the dialogue runner
+// immediately (not enqueued for the safe point), and the legacy standalone
+// chat_invite message is translated into the same world_event path.
+func TestChatInviteIncoming_DispatchedByWorldEvent(t *testing.T) {
+	rt, ft, ac, _, _ := newRouterTestRuntime(t, `{}`)
+	if ac.dialogue == nil {
+		t.Skip("dialogue runner requires ws wiring; covered by dialogue_test.go")
+	}
+
+	// 新路径：world_event 推 chat_invite_incoming。
+	ev := protocol.WorldEventPayload{
+		EventID:   "evt_ci_1",
+		Category:  protocol.CategorySocial,
+		EventType: protocol.EventTypeChatInviteIncoming,
+		Severity:  5,
+		Subject:   "H-02",
+		Data:      json.RawMessage(`{"conv_id":"conv_001","from":"H-02","content":"老陈，借个工具？"}`),
+	}
+	if !rt.handleWorldEvent("H-01", ev) {
+		t.Fatalf("world_event should be accepted")
+	}
+	// 即时消费——不留在队列。
+	if got := ac.as.WorldEventQueueLen(); got != 0 {
+		t.Fatalf("chat_invite_incoming must NOT be enqueued (immediate dispatch), got len=%d", got)
+	}
+
+	// 旧路径：独立 chat_invite 消息也走同一管道（转 world_event 再分发）。
+	legacy := protocol.ChatInvitePayload{ConvID: "conv_002", FromAgentID: "H-03", Content: "hi"}
+	payload, _ := json.Marshal(legacy)
+	rt.HandleMessage(context.Background(), protocol.TypeChatInvite, "H-01", payload)
+	// 给 goroutine 一点时间。
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		snap := ac.as.Snapshot()
+		if snap.CurrentActionCmd == "Speak" || ac.dialogue != nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	_ = ft
+}

@@ -256,17 +256,29 @@ func (rt *Runtime) HandleMessage(_ context.Context, msgType, agentID string, pay
 		}
 
 	case protocol.TypeChatInvite:
+		// P4-14：UE 不再发送独立的 chat_invite——对话邀请统一按
+		// world_event（social.chat_invite_incoming）推送，本分支仅为
+		// 兼容旧 UE 保留（UE 切换后删除）。收到时转为 world_event 再分发，
+		// 与新路径同一管道。
 		var invite protocol.ChatInvitePayload
 		if err := json.Unmarshal(payload, &invite); err != nil {
-			rt.logger.Warn("chat_invite parse failed", "err", err)
+			rt.logger.Warn("chat_invite parse failed (legacy path)", "err", err)
 			return
 		}
-		ac := rt.lookupAgent(agentID)
-		if ac == nil || ac.dialogue == nil {
-			rt.logger.Debug("chat_invite dropped (agent unregistered or dialogue disabled)", "agent_id", agentID)
-			return
+		ev := protocol.WorldEventPayload{
+			EventID:   "legacy_invite_" + invite.ConvID,
+			Category:  protocol.CategorySocial,
+			EventType: protocol.EventTypeChatInviteIncoming,
+			Force:     false,
+			Severity:  5,
+			Subject:   invite.FromAgentID,
+			Data: mustMarshal(map[string]any{
+				"conv_id": invite.ConvID,
+				"from":    invite.FromAgentID,
+				"content": invite.Content,
+			}),
 		}
-		go ac.dialogue.handleInvite(rt.ctx, invite)
+		rt.handleWorldEvent(agentID, ev)
 
 	case protocol.TypeChatInviteRsp:
 		var rsp protocol.ChatInviteRspPayload

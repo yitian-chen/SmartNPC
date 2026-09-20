@@ -117,6 +117,27 @@ func (rt *Runtime) handleWorldEvent(agentID string, ev protocol.WorldEventPayloa
 		return false
 	}
 
+	// P4-14：对话邀请即时消费（不走路由器/队列）——对话建立有实时性
+	// 要求（UE 会话状态机等待 rsp），入队等安全点会把对话拖到几十游戏
+	// 分钟后。协议规定 UE 停发独立 chat_invite、统一按 world_event 推送
+	// social.chat_invite_incoming；Agent 侧在此解包转交对话 runner。
+	if ev.Category == protocol.CategorySocial && ev.EventType == protocol.EventTypeChatInviteIncoming {
+		if ac.dialogue != nil {
+			var d protocol.SocialData
+			_ = json.Unmarshal(ev.Data, &d)
+			go ac.dialogue.handleInvite(rt.ctx, protocol.ChatInvitePayload{
+				ConvID:      d.ConvID,
+				FromAgentID: d.From,
+				Content:     d.Content,
+			})
+			rt.logger.Info("[world_event] 对话邀请已转交对话 runner（即时）",
+				"agent_id", agentID, "event_id", ev.EventID, "from", d.From, "conv_id", d.ConvID)
+		} else {
+			rt.logger.Debug("[world_event] chat_invite dropped (dialogue disabled)", "agent_id", agentID, "event_id", ev.EventID)
+		}
+		return true
+	}
+
 	// 修复 A：combat 类事件是持续状态的边沿——attacked/targeted 登记威胁
 	// 情境（直到 combat_exit 或 TTL），combat_exit 解除。放在 force 分流
 	// 之前：登记/解除对 force 与非 force 路径一视同仁。
