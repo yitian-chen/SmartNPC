@@ -512,3 +512,46 @@ func TestNoSynthesisForSelfInterruptedCompletion(t *testing.T) {
 		t.Fatalf("non-pre-recorded interrupted must produce a detail for synthesis")
 	}
 }
+
+// TestNoSynthesisForTimeToStopAndUntracked verifies the remaining two
+// false-positive sources are fixed:
+//  1. time_to_stop expiry: checkTimeToStop sets the preface flag → subsequent
+//     interrupted completion produces no detail (planned segment switch).
+//  2. Untracked action (cold-start sleep): WasInFlight=false + interrupted →
+//     no detail (NPC born sleeping, first dispatch interrupts it naturally).
+func TestNoSynthesisForTimeToStopAndUntracked(t *testing.T) {
+	// ── 1. time_to_stop 到期 ──
+	ac, _ := newAgentContext(context.Background())
+	ac.as.RecordActionStarted("act-tts", "InteractSmartObject",
+		map[string]any{"semantic_group": "workbench"}, agentstate.SourceTactical, "")
+
+	// 模拟 checkTimeToStop 的行为：recordScheduledEnd → ClearInFlightKeepQueue。
+	ac.recordScheduledEnd()
+	ac.as.ClearInFlightKeepQueue()
+
+	_, detail := ac.recordActionCompletion(protocol.ActionCompletedPayload{
+		ActionID: "act-tts", Result: protocol.ResultInterrupted,
+	})
+	if detail != "" {
+		t.Fatalf("time_to_stop interrupted must NOT produce detail, got %q", detail)
+	}
+
+	// ── 2. 冷启动未追踪动作 ──
+	ac2, _ := newAgentContext(context.Background())
+	// 不调 recordActionStarted——模拟 start_asleep 从未被追踪。
+	_, detail = ac2.recordActionCompletion(protocol.ActionCompletedPayload{
+		ActionID: "start_asleep_H-04", Result: protocol.ResultInterrupted,
+	})
+	if detail != "" {
+		t.Fatalf("untracked interrupted must NOT produce detail, got %q", detail)
+	}
+
+	// 对照：UE 真正的 failed → 照常产生 detail。
+	ac2.as.RecordActionStarted("act-real", "MoveTo", nil, agentstate.SourceTactical, "")
+	_, detail = ac2.recordActionCompletion(protocol.ActionCompletedPayload{
+		ActionID: "act-real", Result: protocol.ResultFailed, Reason: "unreachable",
+	})
+	if detail == "" {
+		t.Fatalf("genuine failed must still produce detail for synthesis")
+	}
+}

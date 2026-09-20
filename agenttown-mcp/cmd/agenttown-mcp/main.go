@@ -320,6 +320,14 @@ func (a *agentContext) recordActionCompletion(completion protocol.ActionComplete
 	if wasPreRecorded && completion.Result == protocol.ResultInterrupted {
 		return true, ""
 	}
+	// 未追踪动作（WasInFlight=false）的 interrupted 也不合成——最典型的是
+	// 冷启动：NPC 出生时 UE 侧自带睡眠状态（start_asleep_*），MCP 从未
+	// recordActionStarted 过它；第一个战术动作下发时 UE 自然打断睡眠并回
+	// interrupted。这是正常冷启动流程，不是动作异常（2026-09-20 仿真：
+	// synth_1 即此来源）。
+	if !res.WasInFlight && completion.Result == protocol.ResultInterrupted {
+		return true, ""
+	}
 	// 异常完成：detail 注入 reaction 层 TriggerDetail，含 UE 给出的 reason
 	// （如"寻路不可达"），让 Ollama 看到 UE 侧的具体失败原因再决策。
 	detail := fmt.Sprintf("result=%s reason=%s",
@@ -600,6 +608,10 @@ func (a *agentContext) checkTimeToStop(agentID string, logger *slog.Logger) {
 	if now <= 0 || now < target {
 		return
 	}
+	// 计划内段切换：先设 preface 标志（recordScheduledEnd），让后续的
+	// interrupted completion 被识别为预期回包——不合成 action_failed 事件
+	// （2026-09-20 仿真：time_to_stop 到期打断被误判为动作异常）。
+	a.recordScheduledEnd()
 	info := a.as.ClearInFlightKeepQueue()
 	if info.ActionCmd != "" && isCompositeCmdDynamic(info.ActionCmd, capabilityRegistryRef) {
 		a.as.SetPendingStopActionID(actionID)
