@@ -30,7 +30,7 @@ import (
 // routerCallTimeout bounds one router LLM call. A few seconds: the verdict
 // feeds an interrupt decision, and holding the event in limbo longer than
 // that is itself a wrong answer — timeout degrades to enqueue.
-const routerCallTimeout = 8 * time.Second
+const routerCallTimeout = 15 * time.Second
 
 // eventRouter runs non-force world events through the lightweight router.
 type eventRouter struct {
