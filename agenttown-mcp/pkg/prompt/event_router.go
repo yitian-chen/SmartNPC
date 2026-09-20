@@ -22,11 +22,29 @@ import (
 )
 
 // RouterDecision is the JSON verdict expected from the router LLM.
+// Motive names the reason for the interrupt — one of the RouterMotive*
+// constants — so the runtime can phrase the tactical hint accordingly
+// (emergency treatment vs resume-schedule vs brief-social-response).
 type RouterDecision struct {
 	Interrupt bool   `json:"interrupt"`
 	Severity  int    `json:"severity"`
 	Reason    string `json:"reason"`
+	Motive    string `json:"motive"`
 }
+
+// Router motive constants: WHY the router chose to interrupt (or not).
+const (
+	// RouterMotiveUrgent: the event itself is urgent/dangerous for this
+	// NPC — full emergency treatment (撤离/避险/支援).
+	RouterMotiveUrgent = "urgent"
+	// RouterMotiveSituationResolved: the event resolves the ongoing
+	// situation that motivated the current action — the action is moot,
+	// stop it and resume the schedule (e.g. combat_exit while fleeing).
+	RouterMotiveSituationResolved = "situation_resolved"
+	// RouterMotiveSocial: social etiquette warrants a brief response,
+	// then resume the original work (e.g. greeting from a non-hostile NPC).
+	RouterMotiveSocial = "social"
+)
 
 // RouterInput aggregates everything the router sees. All fields are
 // pre-rendered strings (the caller composes them from AgentState / KB /
@@ -57,22 +75,32 @@ type RouterInput struct {
 // single question, the cost asymmetry, JSON shape). Static across calls →
 // cacheable. BuildRouterSystem appends the per-agent judgment identity
 // (persona + relationships), which changes rarely within a day.
-const RouterSystemPrompt = `你是小镇居民 NPC 的事件路由模块。世界发生了一件事，正在推送给该 NPC。你只回答一个问题：要不要打断 NPC 手上正在做的事？
+const RouterSystemPrompt = `你是小镇居民 NPC 的事件路由模块。世界发生了一件事，正在推送给该 NPC。你回答一个问题：要不要打断 NPC 手上正在做的事？
 
-【只有两种结论】
-- interrupt=true：这件事对该 NPC 足够紧急，值得立即打断当前行动去处理
-- interrupt=false：不紧急，入队，等当前动作完成后的下一个决策点一并处理
+【打断的三种理由——满足任一即 interrupt=true，motive 填对应值】
+
+1. urgent（紧急处理）：事件本身对该 NPC 足够紧急或危险，值得立即放下手头的事去应对。
+   典型：被攻击、被瞄准、亲近的伙伴发生严重故障。
+
+2. situation_resolved（情境解除）：事件解除了当前持续情境，使 NPC 正在做的动作不再有必要。
+   判断方法：对照【当前动作】和【当前处境】——如果当前动作是对某情境的反应（如逃跑避险），
+   而新事件恰好解除了该情境（如脱离战斗信号），则继续当前动作是浪费时间，应打断恢复日程。
+
+3. social（社交回应）：事件是社交性质的（有人打招呼、搭话、点名），且该 NPC 与事件主体关系不差，
+   社交礼节上值得停下简短回应一声，然后继续原工作。
+   关系恶劣或敌对时不用为此打断。
+
+【不打断】
+以上三种都不满足 → interrupt=false，入队等当前动作完成后的下一个决策点一并处理。
 
 【判断要点】
-- 紧急与否由该 NPC 结合自己的性格、与事件主体的关系、当前处境判断——同一条事件对不同 NPC 结论可以不同
-- 代价不对称：误打断会拖出一整轮重规划、搅乱日程；漏打断只是反应慢几分钟。拿不准时一律 interrupt=false
-- 你只裁决紧急度，不规划具体做什么——做什么、做多久由后续的战术规划决定
-- 事件描述里的 severity 是客观严重度（世界视角的量级），不是"对该 NPC 紧不紧急"，仅供参考
+- 同一条事件对不同 NPC 结论可以不同（性格、关系、当前处境不同）
+- 事件描述里的 severity 是客观严重度（世界视角的量级），仅供参考——你评的 severity 是主观紧急度（0-10），但打断决策看上述三种理由，不只看 severity
+- situation_resolved 型打断的 severity 通常不高（事件本身不危险），但打断依然合理
+- social 型打断的 severity 应很低（1-3），且关系恶劣时不触发
 
 请输出 JSON，格式严格如下，不要输出 JSON 以外的任何内容：
-{"interrupt": true|false, "severity": 0-10, "reason": "简短理由（一句话）"}
-
-其中 severity 是你评估的"对该 NPC 的主观紧急度"（0-10），reason 说明关键依据（如关系、距离、性格）。`
+{"interrupt": true|false, "severity": 0-10, "reason": "简短理由", "motive": "urgent|situation_resolved|social"}`
 
 // BuildRouterSystem constructs the router's system message: the static
 // mechanism text, the shared world setting/theme (【世界背景】+【生产工作流】，
@@ -187,7 +215,7 @@ func BuildRouterPrompt(in RouterInput) string {
 // interrupt field, and any malformed input all degrade to interrupt=false —
 // the conservative enqueue. A well-formed interrupt=true must survive.
 func ParseRouterDecision(raw string) RouterDecision {
-	fallback := RouterDecision{Interrupt: false, Severity: 0, Reason: "parse_failed: " + truncate(raw, 80)}
+	fallback := RouterDecision{Interrupt: false, Severity: 0, Reason: "parse_failed: " + truncate(raw, 80), Motive: RouterMotiveUrgent}
 	cleaned := StripCodeFence(raw)
 	// Tolerate trailing prose / fenced blocks: locate the first { to last }.
 	start := strings.IndexByte(cleaned, '{')
@@ -207,6 +235,13 @@ func ParseRouterDecision(raw string) RouterDecision {
 	}
 	if dec.Reason == "" {
 		dec.Reason = "（模型未给出理由）"
+	}
+	// Motive 降级：空或非法值 → urgent（向后兼容，已有中断语义不变）。
+	switch dec.Motive {
+	case RouterMotiveUrgent, RouterMotiveSituationResolved, RouterMotiveSocial:
+		// 合法值保留。
+	default:
+		dec.Motive = RouterMotiveUrgent
 	}
 	return dec
 }

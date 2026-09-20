@@ -262,3 +262,60 @@ func TestEventRouter_SameEventDifferentNPCs(t *testing.T) {
 	}
 	waitFor(t, 2*time.Second, func() bool { return replanIdle(ac2) })
 }
+
+// TestRouterMotive_SituationResolvedBypassesGuardrail verifies that a
+// situation_resolved verdict interrupts even when its severity is LOWER
+// than the active reaction's severity (combat_exit during a high-severity
+// flee reaction must be allowed through — it's ending the reaction, not
+// competing with it).
+func TestRouterMotive_SituationResolvedBypassesGuardrail(t *testing.T) {
+	rt, ft, ac, _, _ := newRouterTestRuntime(t, `{}`)
+	ac.as.RecordActionStarted("act-1", "MoveTo", map[string]any{"target_id": "repair_bay"}, agentstate.SourceTactical, "")
+	// 武装一个 severity 9 的反应窗口（模拟被攻击后的逃跑反应）。
+	ac.beginReaction(9, ac.as.LatestGameTimeSec())
+	ac.as.EnqueueWorldEvent(reactionTestEvent("evt_g1"))
+
+	// combat_exit：severity 3 << 9，motive=situation_resolved → 应放行。
+	rt.routerInterrupt("H-01", reactionTestEvent("evt_g1"), prompt.RouterDecision{
+		Interrupt: true, Severity: 3,
+		Reason: "战斗已结束，逃跑不再必要", Motive: prompt.RouterMotiveSituationResolved,
+	})
+	if stops := stoppedActions(ft); len(stops) != 1 || stops[0] != "act-1" {
+		t.Fatalf("situation_resolved must bypass the severity ladder, stops=%v", stops)
+	}
+	// 窗口被清除（不是新反应），不再 armed。
+	if active, _, _ := ac.reactionSnapshot(); active {
+		t.Fatalf("situation_resolved should clear the reaction window, not re-arm it")
+	}
+	// hint 带【情境解除】前缀。
+	if hint := ac.as.ReplanHint(); !strings.Contains(hint, "【情境解除】") {
+		t.Fatalf("hint should carry the situation-resolved prefix, got %q", hint)
+	}
+	waitFor(t, 2*time.Second, func() bool { return replanIdle(ac) })
+}
+
+// TestRouterMotive_SocialLowSeverityWindow verifies a social interrupt
+// arms a low-severity reaction window: any subsequent higher-severity
+// interrupt can override it, and a same-or-lower social event is gated.
+func TestRouterMotive_SocialLowSeverityWindow(t *testing.T) {
+	rt, ft, ac, _, _ := newRouterTestRuntime(t, `{}`)
+	ac.as.RecordActionStarted("act-1", "InteractSmartObject",
+		map[string]any{"semantic_group": "workbench"}, agentstate.SourceTactical, "")
+	ac.as.EnqueueWorldEvent(reactionTestEvent("evt_s1"))
+
+	// 社交打断（severity 2）→ 放行 + 低窗口。
+	rt.routerInterrupt("H-01", reactionTestEvent("evt_s1"), prompt.RouterDecision{
+		Interrupt: true, Severity: 2,
+		Reason: "有人打招呼，回应一声", Motive: prompt.RouterMotiveSocial,
+	})
+	if stops := stoppedActions(ft); len(stops) != 1 {
+		t.Fatalf("social interrupt should proceed, stops=%v", stops)
+	}
+	if active, sev, _ := ac.reactionSnapshot(); !active || sev != 2 {
+		t.Fatalf("social should arm a severity-2 window, got active=%v sev=%d", active, sev)
+	}
+	if hint := ac.as.ReplanHint(); !strings.Contains(hint, "【社交回应】") {
+		t.Fatalf("hint should carry the social prefix, got %q", hint)
+	}
+	waitFor(t, 2*time.Second, func() bool { return replanIdle(ac) })
+}

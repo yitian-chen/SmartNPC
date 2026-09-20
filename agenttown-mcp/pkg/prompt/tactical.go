@@ -172,6 +172,17 @@ func tacticalHintLine(in TacticalInput, th BandThresholds) string {
 	if in.Hint == "" {
 		return ""
 	}
+	if strings.HasPrefix(in.Hint, "【情境解除】") {
+		event := strings.TrimPrefix(in.Hint, "【情境解除】")
+		return "【情境已解除】" + event + "\n" +
+			"当前动作是对已解除情境的反应，不再必要。请回到当前时段目标的原有日程正常规划。"
+	}
+	if strings.HasPrefix(in.Hint, "【社交回应】") {
+		event := strings.TrimPrefix(in.Hint, "【社交回应】")
+		return "【社交回应请求】" + event + "\n" +
+			"请简短回应此社交事件（如打招呼、回一句话），然后继续当前时段的原有工作。" +
+			"回应动作应简短，回应完毕后按原计划继续。"
+	}
 	if strings.HasPrefix(in.Hint, "【强制打断】") {
 		event := strings.TrimPrefix(in.Hint, "【强制打断】")
 		return "【紧急事件】" + event + "\n" +

@@ -196,7 +196,11 @@ func (rt *Runtime) routerInterrupt(agentID string, ev protocol.WorldEventPayload
 	// 护栏②（§4.5）：反应打断反应需 severity 严格更高。被拦截的事件保持
 	// 入队（已在队列里，等安全点与后续事件一并统筹——保守方向与 §4.3 一致）。
 	// force 事件不走此护栏（§4.2 不可否决）。
-	if active, curSev, _ := ac.reactionSnapshot(); active && dec.Severity <= curSev {
+	// situation_resolved 绕过 severity 阶梯——它在结束当前反应，不是在与
+	// 当前反应竞争（如逃跑中收到 combat_exit：逃跑反应的 severity 再高，
+	// 解除信号也必须放行，否则 NPC 会继续做已无必要的逃跑）。
+	if active, curSev, _ := ac.reactionSnapshot(); active && dec.Severity <= curSev &&
+		dec.Motive != prompt.RouterMotiveSituationResolved {
 		rt.logger.Info("[事件路由] 反应护栏拦截：severity 不高于进行中的反应，保持入队",
 			"agent_id", agentID, "event_id", ev.EventID,
 			"event_type", ev.EventType, "event_severity", dec.Severity,
@@ -231,11 +235,32 @@ func (rt *Runtime) routerInterrupt(agentID string, ev protocol.WorldEventPayload
 		}
 	}
 
-	hint := fmt.Sprintf("【强制打断】%s（路由裁决：紧急，%s）",
-		prompt.FormatWorldEvent(ev), dec.Reason)
+	var hint string
+	switch dec.Motive {
+	case prompt.RouterMotiveSituationResolved:
+		hint = fmt.Sprintf("【情境解除】%s。当前动作因此不再必要，请停止当前动作并按当前时段目标正常规划。",
+			prompt.FormatWorldEvent(ev))
+	case prompt.RouterMotiveSocial:
+		hint = fmt.Sprintf("【社交回应】%s。请简短回应（如打招呼），然后继续当前时段的原有工作。",
+			prompt.FormatWorldEvent(ev))
+	default: // urgent 或空（向后兼容）
+		hint = fmt.Sprintf("【强制打断】%s（路由裁决：紧急，%s）",
+			prompt.FormatWorldEvent(ev), dec.Reason)
+	}
 	ac.as.SetReplanHint(hint)
-	// 护栏（§4.5）：路由打断开启的反应任务——带截止时间，后续反应打断
-	// 需严格更高 severity。
-	ac.beginReaction(dec.Severity, ac.as.LatestGameTimeSec())
+	// 反应窗口按 motive 区分：
+	//   urgent → 以裁决 severity 开启（后续打断需严格更高）
+	//   situation_resolved → 清除现有窗口、不开启新窗口——它是结束反应，
+	//     不是开始反应；跳过 beginReaction 使后续路由不受阶梯限制
+	//   social → 低 severity 轻量窗口（任何更高级打断可覆盖，防连续社交
+	//     ping-pong）
+	switch dec.Motive {
+	case prompt.RouterMotiveSituationResolved:
+		ac.clearReaction()
+	case prompt.RouterMotiveSocial:
+		ac.beginReaction(2, ac.as.LatestGameTimeSec())
+	default:
+		ac.beginReaction(dec.Severity, ac.as.LatestGameTimeSec())
+	}
 	go ac.forceInterruptReplan(rt.ctx, agentID, rt.ws, *rt.kbPtr, rt.profiles, ev, hint, rt.logger)
 }

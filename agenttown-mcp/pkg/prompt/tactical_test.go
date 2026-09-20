@@ -464,3 +464,36 @@ func TestBuildTactical_ForceEventElevated(t *testing.T) {
 		t.Errorf("force hint must not render as 上次中断原因:\n%s", out)
 	}
 }
+
+// TestTacticalHintLine_SituationResolvedPrefix verifies the 【情境解除】
+// hint renders as 【情境已解除】 with resume-schedule guidance (not the
+// full emergency treatment).
+func TestTacticalHintLine_SituationResolvedPrefix(t *testing.T) {
+	in := TacticalInput{Hint: "【情境解除】玩家互动：与玩家 player_1 的战斗结束（escaped）", AgentID: "H-01"}
+	out := BuildTactical(in)
+	if !strings.Contains(out, "【情境已解除】玩家互动：与玩家 player_1 的战斗结束（escaped）") {
+		t.Fatalf("missing situation-resolved header:\n%s", out)
+	}
+	if !strings.Contains(out, "请回到当前时段目标的原有日程正常规划") {
+		t.Fatalf("missing resume-schedule guidance:\n%s", out)
+	}
+	if strings.Contains(out, "紧急事件") {
+		t.Fatalf("situation_resolved must NOT get emergency treatment:\n%s", out)
+	}
+}
+
+// TestTacticalHintLine_SocialResponsePrefix verifies the 【社交回应】
+// hint renders as 【社交回应请求】 with brief-response-then-resume guidance.
+func TestTacticalHintLine_SocialResponsePrefix(t *testing.T) {
+	in := TacticalInput{Hint: "【社交回应】玩家互动：玩家 player_1 向你发起交互（greet）", AgentID: "H-01"}
+	out := BuildTactical(in)
+	if !strings.Contains(out, "【社交回应请求】玩家互动：玩家 player_1 向你发起交互（greet）") {
+		t.Fatalf("missing social-response header:\n%s", out)
+	}
+	if !strings.Contains(out, "然后继续当前时段的原有工作") {
+		t.Fatalf("missing resume guidance:\n%s", out)
+	}
+	if strings.Contains(out, "紧急事件") {
+		t.Fatalf("social must NOT get emergency treatment:\n%s", out)
+	}
+}

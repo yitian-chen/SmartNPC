@@ -106,13 +106,44 @@ func TestBuildRouterPrompt_Segments(t *testing.T) {
 func TestRouterSystemPrompt_Contract(t *testing.T) {
 	for _, want := range []string{
 		"interrupt=true", "interrupt=false",
-		"拿不准时一律 interrupt=false",
-		"你只裁决紧急度，不规划",
-		`{"interrupt": true|false, "severity": 0-10, "reason":`,
+		"urgent（紧急处理）",
+		"situation_resolved（情境解除）",
+		"social（社交回应）",
+		"打断的三种理由",
+		"社交礼节上值得停下简短回应一声",
+		`{"interrupt": true|false, "severity": 0-10, "reason": "简短理由", "motive": "urgent|situation_resolved|social"}`,
 	} {
 		if !strings.Contains(RouterSystemPrompt, want) {
 			t.Errorf("system prompt missing %q", want)
 		}
+	}
+}
+
+// TestParseRouterDecision_MotiveFallback verifies motive degradation:
+// empty or unrecognized motive values fall back to "urgent" (backward
+// compatible — existing interrupts keep their semantics).
+func TestParseRouterDecision_MotiveFallback(t *testing.T) {
+	valid := `{"interrupt": true, "severity": 5, "reason": "x", "motive": "situation_resolved"}`
+	if dec := ParseRouterDecision(valid); dec.Motive != RouterMotiveSituationResolved {
+		t.Fatalf("valid motive should be preserved, got %q", dec.Motive)
+	}
+	for _, raw := range []string{
+		`{"interrupt": true, "severity": 5, "reason": "x"}`,                      // 无 motive
+		`{"interrupt": true, "severity": 5, "reason": "x", "motive": ""}`,        // 空
+		`{"interrupt": true, "severity": 5, "reason": "x", "motive": "garbage"}`, // 非法
+		`前置 {"interrupt": false, "motive": "social"} 后置`,                         // 散文包裹
+	} {
+		dec := ParseRouterDecision(raw)
+		if dec.Motive != RouterMotiveUrgent && dec.Motive != RouterMotiveSocial {
+			// social 在第 4 例是合法值，前 3 例应降级为 urgent
+			if dec.Motive != RouterMotiveUrgent {
+				t.Fatalf("motive %q should degrade to urgent for %q", dec.Motive, raw)
+			}
+		}
+	}
+	// 解析失败 → fallback 的 motive 也是 urgent。
+	if dec := ParseRouterDecision("not json"); dec.Motive != RouterMotiveUrgent {
+		t.Fatalf("fallback motive = %q, want urgent", dec.Motive)
 	}
 }
 
