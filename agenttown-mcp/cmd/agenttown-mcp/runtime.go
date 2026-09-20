@@ -162,7 +162,7 @@ func (rt *Runtime) HandleMessage(_ context.Context, msgType, agentID string, pay
 		queued, detail := ac.recordActionCompletion(completed)
 		rt.logger.Info("action_completed", "agent_id", agentID,
 			"action_id", completed.ActionID, "result", completed.Result,
-			"reason", completed.Reason, "progress", completed.Progress,
+			"reason", completed.Reason,
 			"decision_queued", queued)
 		// P4-12：异常完成（failed/interrupted/error）→ 合成 action_anomaly
 		// world_event 入队。成功完成不合成——是常态。

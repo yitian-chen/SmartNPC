@@ -38,7 +38,7 @@ func TestRecordActionCompletion_SignalsWorkerAndClearsInFlight(t *testing.T) {
 	}
 
 	queued, _ := ac.recordActionCompletion(protocol.ActionCompletedPayload{
-		ActionID: "act_t1", Result: protocol.ResultSuccess, Progress: 1,
+		ActionID: "act_t1", Result: protocol.ResultSuccess,
 	})
 	if !queued {
 		t.Fatal("completion should return true (handled)")
@@ -65,7 +65,7 @@ func TestRecordActionCompletion_SignalsWorkerAndClearsInFlight(t *testing.T) {
 func TestRecordActionCompletion_SuccessNoTrigger(t *testing.T) {
 	ac, _ := newAgentContext(context.Background())
 	queued, detail := ac.recordActionCompletion(protocol.ActionCompletedPayload{
-		ActionID: "act_ok_1", Result: protocol.ResultSuccess, Progress: 1,
+		ActionID: "act_ok_1", Result: protocol.ResultSuccess,
 	})
 	if !queued {
 		t.Fatal("queued should be true")
@@ -83,7 +83,7 @@ func TestRecordActionCompletion_SuccessNoTrigger(t *testing.T) {
 func TestRecordActionCompletion_FailureTriggers(t *testing.T) {
 	ac, _ := newAgentContext(context.Background())
 	queued, detail := ac.recordActionCompletion(protocol.ActionCompletedPayload{
-		ActionID: "act_fail_1", Result: protocol.ResultFailed, Progress: 0.3,
+		ActionID: "act_fail_1", Result: protocol.ResultFailed,
 	})
 	if !queued {
 		t.Fatal("queued should be true")
@@ -102,7 +102,7 @@ func TestRecordActionCompletion_FailureDetailIncludesReason(t *testing.T) {
 	ac, _ := newAgentContext(context.Background())
 	_, detail := ac.recordActionCompletion(protocol.ActionCompletedPayload{
 		ActionID: "act_fail_2", Result: protocol.ResultFailed,
-		Reason: "寻路不可达", Progress: 0.3,
+		Reason: "寻路不可达",
 	})
 	if !strings.Contains(detail, "reason=寻路不可达") {
 		t.Errorf("detail should contain UE reason: %q", detail)
@@ -127,7 +127,6 @@ func TestRecordActionCompletion_FailureSetsReplanHint(t *testing.T) {
 		ActionID: "act_workbench_fail",
 		Result:   protocol.ResultFailed,
 		Reason:   "claim_queue_not_supported",
-		Progress: 0,
 	})
 
 	snap := ac.as.Snapshot()
@@ -169,7 +168,6 @@ func TestRecordActionCompletion_TooTiredHintGuidesRest(t *testing.T) {
 		ActionID: "act_too_tired",
 		Result:   protocol.ResultFailed,
 		Reason:   "too_tired",
-		Progress: 0,
 	})
 
 	snap := ac.as.Snapshot()
@@ -195,7 +193,6 @@ func TestRecordActionCompletion_FailureNoHintForManualAction(t *testing.T) {
 		ActionID: "act_manual_fail",
 		Result:   protocol.ResultFailed,
 		Reason:   "manual test failure",
-		Progress: 0,
 	})
 	snap := ac.as.Snapshot()
 	if snap.ReplanHint != "" {
@@ -213,7 +210,6 @@ func TestRecordActionCompletion_SuccessNoReplanHint(t *testing.T) {
 	ac.recordActionCompletion(protocol.ActionCompletedPayload{
 		ActionID: "act_work_ok",
 		Result:   protocol.ResultSuccess,
-		Progress: 1,
 	})
 	snap := ac.as.Snapshot()
 	if snap.ReplanHint != "" {
@@ -337,7 +333,7 @@ func TestRecordActionStarted_CompletionAlreadyArrived(t *testing.T) {
 	// recordActionCompletion stashes in completedBeforeArm (currentActionID=""
 	// so wasInFlight=false, timer not armed so it goes to completedBeforeArm).
 	ac.recordActionCompletion(protocol.ActionCompletedPayload{
-		ActionID: "act_short", Result: protocol.ResultSuccess, Progress: 1,
+		ActionID: "act_short", Result: protocol.ResultSuccess,
 	})
 
 	// Drain wake from the completion's signal().
@@ -524,7 +520,7 @@ func TestRecordActionCompletion_ClearsPendingStop(t *testing.T) {
 	ac.as.SetPendingStopActionID("act_old_composite")
 
 	ac.recordActionCompletion(protocol.ActionCompletedPayload{
-		ActionID: "act_old_composite", Result: protocol.ResultSuccess, Progress: 1.0,
+		ActionID: "act_old_composite", Result: protocol.ResultSuccess,
 	})
 
 	if ac.as.PendingStopActionID() != "" {
@@ -542,7 +538,6 @@ func TestRecordActionCompletion_SelfStopSuppressesReactive(t *testing.T) {
 	queued, detail := ac.recordActionCompletion(protocol.ActionCompletedPayload{
 		ActionID: "act_stopped_by_slot_switch",
 		Result:   protocol.ResultInterrupted, // stop 引发的完成
-		Progress: 0.5,
 	})
 
 	if !queued {
@@ -566,7 +561,6 @@ func TestRecordActionCompletion_OtherFailureStillTriggers(t *testing.T) {
 	queued, _ := ac.recordActionCompletion(protocol.ActionCompletedPayload{
 		ActionID: "act_unexpected_fail",
 		Result:   protocol.ResultFailed,
-		Progress: 0.3,
 	})
 
 	if !queued {

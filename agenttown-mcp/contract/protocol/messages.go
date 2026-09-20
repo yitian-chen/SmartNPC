@@ -123,7 +123,6 @@ type ActionCompletedPayload struct {
 	Result     string         `json:"result"` // success/failed/interrupted/error
 	DurationMs int64          `json:"duration_ms"`
 	Reason     string         `json:"reason,omitempty"` // 失败/打断/异常原因（success 时常为空）
-	Progress   float64        `json:"progress"`
 	Details    map[string]any `json:"details"`
 }
 

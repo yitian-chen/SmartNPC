@@ -1318,6 +1318,16 @@ func (a *AgentState) ReplanHint() string {
 	return a.replanHint
 }
 
+// LastEndPrefaced reports whether a stop/switch point has pre-recorded the
+// end (lastEndInterrupted flag still set) — meaning the next
+// action_completed{interrupted} is an expected follow-up to our own stop,
+// not an anomaly. Call BEFORE RecordActionCompletion (which clears it).
+func (a *AgentState) LastEndPrefaced() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.lastEndInterrupted
+}
+
 // SetReplanTimestamps records when a replan happened (wall-clock + game time),
 // used for dedupe and logging.
 func (a *AgentState) SetReplanTimestamps(at time.Time, gameTime string) {

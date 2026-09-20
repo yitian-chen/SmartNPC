@@ -248,6 +248,10 @@ func (a *agentContext) updateState(report protocol.StateReportPayload) string {
 // "要不要打断"意义不大（模型看不到战术层整体规划，只能基于贫乏信息答 continue）。
 // 异常完成才是真正需要反应层介入的时机。
 func (a *agentContext) recordActionCompletion(completion protocol.ActionCompletedPayload) (bool, string) {
+	// 在 RecordActionCompletion 清除 preface 标志之前读取：自己 stop 导致的
+	// interrupted completion 是预期回包，不应合成 action_failed 事件。
+	wasPreRecorded := a.as.LastEndPrefaced()
+
 	res := a.as.RecordActionCompletion(completion.ActionID, completion.Result, completion.Reason)
 	// Stage 4: best-effort action_history recording — only for tracked in-flight
 	// actions (debug /debug/action path doesn't call recordActionStarted, so its
@@ -309,10 +313,17 @@ func (a *agentContext) recordActionCompletion(completion protocol.ActionComplete
 	if isSelfStop {
 		return true, ""
 	}
+	// 我们自己的打断（force/router/social）导致的 interrupted completion
+	// 也不合成事件——打断已触发 replan，这个 completion 只是预期回包。
+	// 2026-09-20 仿真实测：社交打断 stop → UE 回 interrupted → 被误合成
+	// action_failed → 路由判紧急 → 打断刚下发的社交回应 → 死循环。
+	if wasPreRecorded && completion.Result == protocol.ResultInterrupted {
+		return true, ""
+	}
 	// 异常完成：detail 注入 reaction 层 TriggerDetail，含 UE 给出的 reason
 	// （如"寻路不可达"），让 Ollama 看到 UE 侧的具体失败原因再决策。
-	detail := fmt.Sprintf("result=%s reason=%s progress=%.2f",
-		completion.Result, completion.Reason, completion.Progress)
+	detail := fmt.Sprintf("result=%s reason=%s",
+		completion.Result, completion.Reason)
 
 	// Fix A: 失败上下文注入战术层 replanHint。让下一轮战术层 LLM 知道上次
 	// 为什么失败、避免盲重试同一动作（如工作台被占用后无限重试 work_shift）。

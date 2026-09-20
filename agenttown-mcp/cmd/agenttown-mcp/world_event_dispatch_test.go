@@ -479,3 +479,36 @@ func TestChatInviteIncoming_DispatchedByWorldEvent(t *testing.T) {
 	}
 	_ = ft
 }
+
+// TestNoSynthesisForSelfInterruptedCompletion pins the 2026-09-20 fix:
+// a completion{interrupted} that was pre-recorded by our own stop (force/
+// router/social interrupt) must NOT produce a detail string — it's an
+// expected follow-up, not an anomaly. The bug: social interrupt → stop →
+// UE returns interrupted → synthesized as action_failed → router judges
+// urgent → interrupts the just-dispatched social response → infinite loop.
+func TestNoSynthesisForSelfInterruptedCompletion(t *testing.T) {
+	ac, _ := newAgentContext(context.Background())
+
+	// 模拟路由打断：recordInterrupted 先行（设置 preface 标志）→ stop。
+	ac.as.RecordActionStarted("act-1", "InteractSmartObject",
+		map[string]any{"semantic_group": "workbench"}, agentstate.SourceTactical, "")
+	ac.as.RecordActionInterrupted("InteractSmartObject(workbench)", "被紧急事件打断")
+	ac.as.ClearInFlightKeepQueue()
+
+	// 被打断的动作回 interrupted completion——应返回空 detail（不合成事件）。
+	_, detail := ac.recordActionCompletion(protocol.ActionCompletedPayload{
+		ActionID: "act-1", Result: protocol.ResultInterrupted,
+	})
+	if detail != "" {
+		t.Fatalf("pre-recorded interrupted completion must NOT produce a detail, got %q", detail)
+	}
+
+	// 对照：非自己打断的 interrupted（UE 自身原因）→ 产生 detail。
+	ac.as.RecordActionStarted("act-2", "MoveTo", nil, agentstate.SourceTactical, "")
+	_, detail = ac.recordActionCompletion(protocol.ActionCompletedPayload{
+		ActionID: "act-2", Result: protocol.ResultInterrupted, Reason: "dialogue:abandoned by H-03",
+	})
+	if detail == "" {
+		t.Fatalf("non-pre-recorded interrupted must produce a detail for synthesis")
+	}
+}

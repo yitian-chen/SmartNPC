@@ -110,7 +110,7 @@ const StrategicRules = `1. 【硬性要求】每个时段的结束时间减去�
 7. 综合用户信息中【物理状态】的四项状态调整安排侧重点：电量偏低→多充电少工作；疲劳偏高→提前休眠；磨损偏高→安排维护；余额低→多工作少花钱
 8. 整理内务、冥想等动作安排的时间不得超过一小时
 
-格式示例：[{"time":"07:00-09:00","goal":"晨练拉伸"},{"time":"09:00-12:00","goal":"上午车间装配作业"},{"time":"12:00-18:00","goal":"下午继续装配作业"},{"time":"18:00-22:00","goal":"去中央广场长椅休息"},{"time":"22:00-07:00","goal":"夜间在睡眠舱休眠"}]`
+格式示例：[{"time":"07:00-09:00","goal":"xxx"},{"time":"09:00-12:00","goal":"xxx"},{"time":"12:00-14:00","goal":"xxx"},{"time":"14:00-18:00","goal":"xxx"},{"time":"18:00-22:00","goal":"xxx"},{"time":"22:00-07:00","goal":"xxx"}]`
 
 // StrategicPromptInput aggregates the strategic layer user-prompt inputs.
 type StrategicPromptInput struct {
