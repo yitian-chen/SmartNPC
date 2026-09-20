@@ -19,8 +19,8 @@ const TacticalRules = `1. 第一个工具调用必须是 speak（用一段话表
 4. 禁止把同一动作连续重复多次填充时段（工作段之间应穿插休息段）。
 5. InteractSmartObject 的 semantic_group 必须严格使用设施详情中给出的 semantic_group 值，禁止编造、禁止用实例 id（如 Charge-1）。
 6. InteractSmartObject 的 semantic_group 与 interaction 必须严格对应，禁止跨类别组合——所有工种设备与生活设施都可用 InteractSmartObject 直接交互，semantic_group 填设施、interaction 填对应动词即可（如 workbench/assemble、process_machine/process、charger/charge、sleep_pod/sleep、bench/rest 等，完整映射见设施详情）。
-7. 所有非瞬时动作（InteractSmartObject 设施互动、exercise 原地锻炼等需要持续一段时间的）都必须填写 duration 参数（秒，schema 必填）；move_to 的移动时长由 UE 自动决定、无需填 duration；瞬时动作（speak 等立即完成的）也不填 duration。duration 要合理：冥想、整理床铺等单段设 1800 秒左右，不宜超过 1 小时；工作段可设 3600-7200 秒。到点后系统会打断该段并继续执行后续动作段；只有全部动作执行完，系统才会再次询问。推荐模式：工作段（如 1.5 小时）→ 长椅小憩/原地拉伸段（不超过 30 分钟）→ 返回工作段（duration 设为时段剩余时长）。
-8. 每次生成的最后一个动作必须是长动作（InteractSmartObject 长动作），其 duration 设为当前时段的剩余时长（见上文"剩余约 X 分钟"提示）——到点后系统自动切入下一时段，NPC 不会呆站。所有动作的 duration 总和应接近当前时段的剩余时长，避免过短导致队列提前耗尽触发重分解、或过长拖到下一时段。
+7. 所有非瞬时动作（InteractSmartObject 设施互动、exercise 原地锻炼等需要持续一段时间的）都必须填写 duration 参数（秒，schema 必填），包括最后一个动作也不例外——无 duration 的长动作无法被系统按计划终止；move_to 的移动时长由 UE 自动决定、无需填 duration；瞬时动作（speak 等立即完成的）也不填 duration。duration 要合理：冥想、整理床铺等单段设 1800 秒左右，不宜超过 1 小时；工作段可设 3600-7200 秒。到点后系统会打断该段并继续执行后续动作段；只有全部动作执行完，系统才会再次询问。推荐模式：工作段（如 1.5 小时）→ 长椅小憩/原地拉伸段（不超过 30 分钟）→ 返回工作段（duration 设为时段剩余时长）。
+8. 每次生成的最后一个动作必须是长动作（InteractSmartObject 长动作），其 duration 设为当前时段的剩余时长（见上文"剩余约 X 分钟"提示）——到点后系统自动切入下一时段，NPC 不会呆站。所有长动作（包括最后一个）都必须设置 duration，不得省略。所有动作的 duration 总和应接近当前时段的剩余时长，避免过短导致队列提前耗尽触发重分解、或过长拖到下一时段。
 9. 如果是调用 InteractSmartObject 工具，若当前日程目标明确指定了区域（如"去中央广场长椅休息"），**必须**在该工具的 zone 参数中填写对应区域 id（如 central_plaza、logistics_hub）。`
 
 // tacticalCoreRules 是精简模式（Compact=true）下替代完整 TacticalRules 的
@@ -29,7 +29,7 @@ const TacticalRules = `1. 第一个工具调用必须是 speak（用一段话表
 // 指向本日第一条战术 user 消息，不再逐轮重复。
 const tacticalCoreRules = `- 首个工具调用必须是 speak；随后必须返回至少一个带 duration 的长动作，禁止只返回 speak。
 - 除了speak和移动，其他必须填 duration（秒）：中间动作约 1800 秒、工作段 3600-7200 秒。
-- 最后一个动作必须是长动作，duration 设为当前时段剩余时长。`
+- 最后一个动作必须是长动作，duration 设为当前时段剩余时长。所有长动作（含末段）都必须设 duration。`
 
 // tacticalCompactRefLine 是精简模式的引用行：指向本日第一条战术消息的
 // 全量头。"以最新一份为准"覆盖跨日交错等边界下历史出现多份全量头的情况。

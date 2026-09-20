@@ -1522,15 +1522,15 @@ func TestFillDefaultTimeToStopForRest_KeepsExisting(t *testing.T) {
 	}
 }
 
-func TestFillDefaultTimeToStopForRest_TailRestUntouched(t *testing.T) {
+func TestFillDefaultTimeToStopForRest_TailRestFilled(t *testing.T) {
 	actions := []plannedAction{
 		{Action: "speak", Params: map[string]any{"content": "hi"}},
 		{Action: "work_shift", Params: map[string]any{"interaction": "assemble", "semantic_group": "workbench"}},
 		{Action: "InteractSmartObject", Params: map[string]any{"interaction": "rest", "semantic_group": "bench"}},
 	}
 	got := fillDefaultDurationForRest(actions)
-	if _, ok := got[2].Params["duration"]; ok {
-		t.Fatalf("tail rest should stay without duration, got %v", got[2].Params)
+	if v, ok := got[2].Params["duration"]; !ok || v != defaultRestDurationSec {
+		t.Fatalf("tail rest should also get default duration=%d, got %v", defaultRestDurationSec, got[2].Params["duration"])
 	}
 }
 
@@ -1548,13 +1548,13 @@ func TestFillDefaultTimeToStopForRest_NonRestUntouched(t *testing.T) {
 	}
 }
 
-func TestFillDefaultTimeToStopForRest_SingleActionNoop(t *testing.T) {
+func TestFillDefaultTimeToStopForRest_SingleActionFilled(t *testing.T) {
 	actions := []plannedAction{
 		{Action: "InteractSmartObject", Params: map[string]any{"interaction": "rest", "semantic_group": "bench"}},
 	}
 	got := fillDefaultDurationForRest(actions)
-	if _, ok := got[0].Params["duration"]; ok {
-		t.Fatalf("single-action queue should be a no-op, got %v", got[0].Params)
+	if v, ok := got[0].Params["duration"]; !ok || v != defaultRestDurationSec {
+		t.Fatalf("single-action queue should also get default duration=%d, got %v", defaultRestDurationSec, got[0].Params["duration"])
 	}
 }
 
@@ -1596,15 +1596,15 @@ func TestFillDefaultTimeToStopForWork_KeepsExisting(t *testing.T) {
 	}
 }
 
-func TestFillDefaultTimeToStopForWork_TailWorkUntouched(t *testing.T) {
+func TestFillDefaultTimeToStopForWork_TailWorkFilled(t *testing.T) {
 	actions := []plannedAction{
 		{Action: "speak", Params: map[string]any{"content": "hi"}},
 		{Action: "InteractSmartObject", Params: map[string]any{"interaction": "rest", "semantic_group": "bench"}},
 		{Action: "work_shift", Params: map[string]any{"interaction": "assemble", "semantic_group": "workbench"}},
 	}
 	got := fillDefaultDurationForWork(actions)
-	if _, ok := got[2].Params["duration"]; ok {
-		t.Fatalf("tail work should stay without duration, got %v", got[2].Params)
+	if v, ok := got[2].Params["duration"]; !ok || v != defaultWorkDurationSec {
+		t.Fatalf("tail work should also get default duration=%d, got %v", defaultWorkDurationSec, got[2].Params["duration"])
 	}
 }
 

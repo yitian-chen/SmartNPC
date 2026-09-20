@@ -256,14 +256,14 @@ func generateTacticalPlan(
 // 持续到 slot 切换、卡住后续工作动作。此处为兜底，不依赖 LLM 自觉。
 const defaultRestDurationSec = 1800
 
-// fillDefaultDurationForRest 给队列中"非队尾的休息类动作"补齐默认
-// duration（30 分钟）。只处理 InteractSmartObject + interaction=rest
-// （长椅休息）；队尾动作保持不设（自然持续到时段切换）。
+// fillDefaultDurationForRest 给队列中所有休息类动作（含队尾）补齐默认
+// duration（30 分钟）。所有长动作必须设 duration——队尾不设会导致
+// P3-8 延迟切换后 processSlotSwitch 无法靠 time_to_stop 终止它。
 func fillDefaultDurationForRest(actions []plannedAction) []plannedAction {
-	if len(actions) < 2 {
+	if len(actions) == 0 {
 		return actions
 	}
-	for i := 0; i < len(actions)-1; i++ {
+	for i := 0; i < len(actions); i++ {
 		a := &actions[i]
 		if a.Action != "InteractSmartObject" || !paramIs(a.Params, "interaction", "rest") {
 			continue
@@ -341,13 +341,14 @@ func isWorkAction(a *plannedAction) bool {
 	return workInteractions[inter]
 }
 
-// fillDefaultDurationForWork 给队列中"非队尾的工作类动作"补齐默认
-// duration（90 分钟）。队尾动作保持不设（自然持续到时段切换）。
+// fillDefaultDurationForWork 给队列中所有工作类动作（含队尾）补齐默认
+// duration（90 分钟）。所有长动作必须设 duration——队尾不设会导致
+// P3-8 延迟切换后 processSlotSwitch 无法靠 time_to_stop 终止它。
 func fillDefaultDurationForWork(actions []plannedAction) []plannedAction {
-	if len(actions) < 2 {
+	if len(actions) == 0 {
 		return actions
 	}
-	for i := 0; i < len(actions)-1; i++ {
+	for i := 0; i < len(actions); i++ {
 		a := &actions[i]
 		if !isWorkAction(a) {
 			continue
