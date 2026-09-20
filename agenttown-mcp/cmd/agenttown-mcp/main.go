@@ -846,18 +846,17 @@ func runPerceptionWorker(
 				"紧急反应超过截止时间被切回日程")
 		}
 
-		// P3-8：安全点处理延迟的 slot 切换。必须在 hasInFlightAction 之前——
-		// 队尾无 duration 的长动作持续 in-flight，worker 每轮 continue 跳过，
-		// processSlotSwitch 永远到不了（死循环）。pending 时即使有在途动作
-		// 也要 stop 它（slot 边界是它的正常终止方式）。
-		ac.processSlotSwitch(ws, agentID, logger)
-
 		// 在途 action（composite 执行中）时跳过 pop/refill：UE 正忙，pop 出的
 		// action 会被 busy 拒，refill 出的队列也会被拒。等 action_completed 自然
 		// 唤醒 worker（completion 路径会 signal 并清 currentActionID）。
 		if ac.hasInFlightAction() {
 			continue
 		}
+
+		// P3-8：安全点处理延迟的 slot 切换（hasInFlightAction 之后 = 动作已
+		// 自然终止——所有长动作现在都有 duration，由 checkTimeToStop 到点打断
+		// 或自然完成，processSlotSwitch 只做 slot 边界清理 + 选新 slot）。
+		ac.processSlotSwitch(ws, agentID, logger)
 
 		// 对话进行中（social_chat 挂起）时跳过 pop/refill：避免战术层生成新
 		// 动作打断对话。对话结束后 dialogue runner 会调用 signal 唤醒 worker。
