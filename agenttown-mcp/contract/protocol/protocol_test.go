@@ -171,7 +171,7 @@ func TestActionLifecyclePayloads(t *testing.T) {
 		t.Fatalf("action_started round-trip failed: %+v", gotAck)
 	}
 
-	done := ActionCompletedPayload{ActionID: "act_001", Result: ResultSuccess, DurationMs: 30200, Progress: 1.0}
+	done := ActionCompletedPayload{ActionID: "act_001", Result: ResultSuccess, DurationMs: 30200}
 	raw, _ = json.Marshal(done)
 	var gotDone ActionCompletedPayload
 	if json.Unmarshal(raw, &gotDone) != nil || gotDone.Result != ResultSuccess || gotDone.DurationMs != 30200 {
@@ -180,7 +180,7 @@ func TestActionLifecyclePayloads(t *testing.T) {
 
 	// 验证 failed + reason 字段能正确 round-trip（UE 同事新增的 reason 字段）
 	failDone := ActionCompletedPayload{
-		ActionID: "act_002", Result: ResultFailed, Reason: "寻路不可达", Progress: 0.3,
+		ActionID: "act_002", Result: ResultFailed, Reason: "寻路不可达",
 	}
 	rawFail, _ := json.Marshal(failDone)
 	var gotFail ActionCompletedPayload
