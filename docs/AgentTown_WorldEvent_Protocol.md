@@ -83,7 +83,7 @@ Agent 侧正在从「轮询感知」演进为「**事件驱动**」：UE 主动�
 
 ## 三、事件类别与 data 结构
 
-七大类别。下表 `event_type` 为**本期 UE 必须实现的枚举全集**（不做增删）；后续要新增类型时先修订本协议再实现，`category` 七选一不变（Agent 侧按 category 走对应处理分支）。
+六大类别。下表 `event_type` 为**本期 UE 必须实现的枚举全集**（不做增删）。
 
 ### 3.1 physical_threshold（物理跨阈值）
 
@@ -165,7 +165,7 @@ Director 注入的故障、环境事件、剧情事件。来源：Director / 调
 
 ### 3.6 player_interaction（玩家互动事件）
 
-真实玩家对该 NPC 的主动行为，或战斗状态的变化。玩家行为与 NPC 事件有本质区别——**玩家的意图不可预测、不可由系统裁决**，因此被攻击/被瞄准这类直接威胁**固定带 force**，其余（脱离战斗、被注视、被互动）固定不带 force、交路由判。
+真实玩家对该 NPC 的主动行为，或战斗状态的变化。玩家行为与 NPC 事件有本质区别——**玩家的意图不可预测、不可由系统裁决**，因此被攻击/被瞄准这类直接威胁**固定带 force**，其余（脱离战斗、被互动）固定不带 force、交路由判。
 
 | event_type | 说明 | force | data |
 |------------|------|-------|------|
@@ -173,7 +173,6 @@ Director 注入的故障、环境事件、剧情事件。来源：Director / 调
 | `player_targeted` | 被玩家瞄准/锁定 | true | `{"attacker": "player_1"}` |
 | `combat_exit` | 脱离战斗（威胁消失） | false | `{"attacker": "player_1", "outcome": "escaped"}` |
 | `player_interact` | 玩家对 NPC 发起交互（对话/给物品等） | false | `{"player": "player_1", "action": "greet", "detail": "..."}` |
-| `player_watching` | 玩家注视该 NPC 持续 ≥5 游戏秒 | false | `{"player": "player_1", "duration_ms": 5000}` |
 
 ```json
 "data": { "attacker": "player_1", "damage": 20, "damage_type": "physical" }
@@ -188,18 +187,7 @@ Director 注入的故障、环境事件、剧情事件。来源：Director / 调
 | action | string | player_interact 的交互类型（greet / give_item / push / ...） |
 | detail | string | 交互附加信息 |
 
-> **规定：玩家来源的攻击一律推 `player_attacked`**（category 明确、固定 force）；§3.7 的通用 `attacked` 仅用于 NPC 之间的攻击。UE 侧不需要也不允许用通用 `attacked` 表达玩家来源。
-
-### 3.7 force 类（强制，跨类别）
-
-带 `force: true` 的事件属于硬保证通道，**category 不限**（可以是 physical_threshold，也可以是 world 或 player_interaction）。典型来源：
-
-| event_type | 说明 | data |
-|------------|------|------|
-| `attacked` | 被 NPC 攻击（玩家来源一律用 `player_attacked`） | `{"attacker": "H-02", "damage": 20}` |
-| `death` | NPC 死亡（本人视角） | `{"cause": "..."}` |
-| `plot_command` | 剧情强制指令 | `{"description": "..."}` |
-| `debug_command` | 调试命令 | `{"description": "..."}` |
+> **规定：玩家来源的攻击一律推 `player_attacked`**（category 明确、固定 force）。
 
 ## 四、force 硬保证通道
 
