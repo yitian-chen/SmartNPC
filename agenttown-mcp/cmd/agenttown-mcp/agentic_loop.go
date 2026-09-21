@@ -301,7 +301,9 @@ func classifyLLMError(err error) string {
 	if strings.Contains(s, "context deadline exceeded") || strings.Contains(s, "timeout") {
 		return llmmetrics.ErrTimeout
 	}
-	if strings.Contains(s, "venus status") {
+	// "venus status" / "jev status" 分别是 chat completions 与判决 API
+	// （/v1/systemone）的非 200 错误前缀。
+	if strings.Contains(s, "venus status") || strings.Contains(s, "jev status") {
 		return llmmetrics.ErrHTTPError
 	}
 	if strings.Contains(s, "connection refused") || strings.Contains(s, "connection reset") ||

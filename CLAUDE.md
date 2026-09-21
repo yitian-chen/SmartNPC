@@ -86,6 +86,7 @@ graph TB
 - **time_to_stop 兜底**（不依赖 LLM 自觉）：`fillDefaultTimeToStopForRest` 给非队尾休息动作补 1800s、`fillDefaultTimeToStopForWork` 给非队尾工作动作补 5400s——防止中间动作漏设导致队列卡死（NPC 一直坐长椅/一直工作）
 - **LLM 失败兜底**：战术层分解失败且队列空时补发 `fallbackRetryActions()`（speak"网络波动了"+ generic_act look_around 30s），避免呆站，动作执行完 completion 再唤醒重试
 - **zone 透传**：`mapTacticalAction` 对 `InteractSmartObject` 透传 LLM 填写的 `zone` 参数（UE 支持），否则"去中央广场长椅"会落到 NPC 所在 zone 的设施
+- **move_to/turn_to 目标校验（2026-09-21）**：按 target_type 校验必填参数（agent/smart_object/zone → target_id 必填；position → target_position 必填），缺目标指令在 MCP 侧拒绝（不再透传 UE——实测 UE 对无目标 MoveTo 秒回 success，逃跑从未发生且队列瞬间耗尽触发连环 refill）；拒绝原因以 user role 注入会话历史（镜像动作完成结果的注入形态，带 tool_call_id），下一轮分解 LLM 可见并自我纠正。schema 层 `capabilityParamsSchema` 对 target_id/target_position 描述按 target_type 给完整指引（无论 registry 来自 seed 还是 UE push——UE push 的描述只提 actor，LLM 曾因此输出 target_type=zone 却无 target_id）。顺带修复：LLM 坐标经 json.Unmarshal 是 []any，旧 `[]float64` 断言不成立，target_position 从未透传过
 - **`replanInProgress` mutex**：防止 worker 的战术层重规划和 `/debug/schedule` 注入并发调用 `tacticalHc` 冲突
 - **`debugOverride`**：仅阻止 worker 的 idle-wait refill，**不阻止**正在 LLM 调用中的 refill——所以 `/debug/schedule` handler 会同时设 `replanInProgress=true` + `debugOverride=true`
 - **`currentSlot` 加 `__debug__` 前缀**：防止注入的 slot 和 dailyPlan 同名 slot 碰撞触发 `redecomposeCount >= 1` 限制
@@ -98,12 +99,12 @@ graph TB
 - **安全点 drain：事件队列 → 战术层第三输入（§4.4/§5.1，P3-7）**：`generateTacticalPlan` 咽喉点快照事件队列 → `FormatWorldEventList` 渲染 → 战术 prompt 【发生的事件】段（全量与 compact 形态都注入——事件是逐次数据非日内不变块）。**快照注入 + 成功后清空**（`ClearWorldEvents`）：LLM 失败/被 force 取消时事件保留在队列，下一次分解重新看到。drain 覆盖三个调用方（worker refill / force 与路由打断的 replan / debug schedule）——force 打断的重规划一次看到"紧急事件 hint + 队列攒下的事件"全貌
 - **chat_invite 迁移（P4-14）**：UE 停发独立 `chat_invite`，统一按 `world_event`（`social.chat_invite_incoming`）推送；Agent 侧 `handleWorldEvent` 收到后**即时转交** dialogueRunner（不入队等安全点——对话建立有实时性要求，UE 会话状态机在等 rsp）；原三字段（conv_id/from/content）从 `data` 解包。旧独立消息分支保留为兼容路径（收到时转 world_event 再分发）。`chat_invite_rsp`/`chat_turn` 维持原消息类型不变
 - **事件合成器（P4-12，`event_synthesizer.go`）**：本地检测到的状态变化（物理警戒带突破/动作异常完成/event_notification）合成 world_event 走统一事件管道——`dispatchSynthesizedEvent` 入队 + 路由器裁决。event_id 用 `synth_` 前缀与 UE 的 `evt_` 区分。UE 侧 world_event 推送就绪后本层整体删除。这是旧反应层退役后的替代：旧 Ollama continue/observe/replan 决策由路由器 interrupt/入队替代，物理告警升级（upgradeIfPhysicalAlert）由路由器 LLM 判断替代，去抖（lastReactiveAt）由 P2-6 反应护栏（severity 严格递增 + 截止时间）替代
-- **轻量事件路由器（§4.3，P2-5）**：非 force 事件入队后异步走一次路由 LLM 裁决（`event_router.go`，`prompt.BuildRouterPrompt`，8s 超时，复用 per-agent 战术 flash 客户端做**无状态单发**——不碰会话历史）。输出 `{interrupt, severity, reason}`；判不准倾向入队（解析失败/超时/无客户端全部降级 enqueue，事件已在队列不丢）。interrupt=true → `routerInterrupt`：撤下队列中该事件（`RemoveQueuedWorldEvent`，正在处理不再等安全点）+ 掐在途 LLM + stop 在途动作 + hint 带"路由裁决：紧急"+理由 → 复用 `forceInterruptReplan`。裁决输入含角色性格/人际关系（Stage 5）/当前动作与已执行时长/物理分档——同一事件不同 NPC 因关系/性格产生不同裁决（涌现验收点）
+- **轻量事件路由器（§4.3，P2-5）**：非 force 事件入队后异步走一次判决模型裁决（`event_router.go` + `pkg/jev`，Venus 判决 API `POST /v1/systemone`，`--jev-timeout` 默认 5s，per-agent `jevHc` 客户端做**无状态单发**——不碰会话历史，实测 ~0.5s）。请求 = 结构化 state：`conversation`（agentic loop 近期历史，`routerConversation` 取战术层会话尾部窗口 20 条——user 指令原文、assistant 文本或 tool_calls 单行渲染、tool 占位跳过）+ `user`（`prompt.BuildRouterUserAttributes`：npc/world[无区域行/无设施类别行]/role/relationships/physical_state/current_action/active_situations/event——空字段整体省略，规划上下文[生产工作流/设施名册]不入，对紧急度裁决是噪音）+ 三问：`should_interrupt`（noul 概率，阈值 0.5 严格大于）+ `motive`（choice：urgent/situation_resolved/social/no_interrupt，判据写在 instructions/criteria 里）+ `severity`（score 锚点 [日常小事, 紧急事件]）。`routerDecisionFromJev` 映射回 `RouterDecision`（severity=score×10 钳位；social 封顶 3；noul 高但 no_interrupt 自相矛盾 → 保守入队）；判不准倾向入队（超时/HTTP 错/缺 answer/矛盾全部降级 enqueue，事件已在队列不丢）。interrupt=true → `routerInterrupt`：撤下队列中该事件（`RemoveQueuedWorldEvent`，正在处理不再等安全点）+ 掐在途 LLM + stop 在途动作 + hint 带"路由裁决：紧急"+理由 → 复用 `forceInterruptReplan`。裁决输入含角色性格/人际关系（Stage 5）/当前动作与已执行时长/物理分档——同一事件不同 NPC 因关系/性格产生不同裁决（涌现验收点）。路由调用进 llmmetrics（layer="router"，事件路由）与 actual_prompts.md（`### 事件路由 · state` 段）
 - **反应护栏（§4.5 两条，P2-6）**：打断（force 或路由）产生的规划窗口即"反应任务"，agentContext（coordMu）记录 `reactionActive/reactionSeverity/reactionDeadlineGameSec`。① **截止时间**：60 游戏分钟（`reactionDeadlineGameSec` var），worker 循环 `checkReactionDeadline`（replanBusy 守卫后）到期硬切——stop 在途 + 清队列 + 【反应截止】hint 回到日程；"仍 armed"即自反应起无日程 refill（refill/slot 切换/下线都会清除），截止硬切因此有明确归属。② **severity 严格递增**：路由打断须严格高于当前反应的 severity 才放行，否则事件保持入队（保守方向与 §4.3 一致）；force 不受限（§4.2 不可否决）但会重置窗口 bar。severity 收敛 0-10
 
 ### LLM 后端
 
-MCP 直连 Venus（OpenAI Chat Completions 协议），战略/战术层调用 Venus。反应层**始终**走 `pkg/ollama/client.go`（本地 Ollama，5-8s 超时），默认禁用。
+MCP 直连 Venus（OpenAI Chat Completions 协议），战略/战术层调用 Venus。事件路由走 Venus 判决 API（`pkg/jev`，`POST /v1/systemone`，模型 `jev-1.13.0`——state+questions 三型问题：noul/choice/score，与 chat completions 同网关同凭据，`/v1/models` 列表不含它）。Ollama（`pkg/ollama/client.go`）仅剩关系判断用，默认禁用。
 
 **function calling**：战术层经 `tools` 请求字段下发工具（由 `capability_registry` 派生），`tool_choice=required`，多轮 messages（system + 历史 + 最新 user）。战略层用 Structured Outputs（`response_format` json_schema strict）。
 
@@ -663,6 +664,8 @@ cp .env.example .env
 | `--venus-model` | `deepseek-v4.1-flash` | Venus 模型 ID（战术层） |
 | `--venus-strategic-model` | `deepseek-v4-pro` | 战略层模型 ID（空值回退到 `--venus-model`） |
 | `--venus-timeout` | `60s` | Venus 调用超时 |
+| `--jev-model` | `jev-1.13.0` | 事件路由判决模型（Venus `/v1/systemone` 判决 API，与 chat completions 同网关同凭据；空串=禁用路由裁决，非 force 事件只入队等安全点 drain） |
+| `--jev-timeout` | `5s` | 事件路由判决调用超时（实测单次 ~0.5s） |
 | `--tactical-timeout` | `60s` | 战术层 LLM 调用超时（time_scale=90 下 ≈90 游戏分钟，slot 切换拖尾主因之一） |
 | `--tactical-stream` | `false` | 战术层流式输出（`true` 时战术层走 `SendLoopStreaming`，可采集 TTFT/TPOT/ITL；非流式只能测 E2E） |
 | `--llm-metrics-doc` | `docs/llm_metrics.md` | LLM 指标 markdown 报告落盘路径（每次 LLM 调用后 best-effort 覆盖写入；空串关闭） |
@@ -759,6 +762,7 @@ bash start-dev.sh       # 偏移端口 8770/9091 + logs-dev/ 日志目录
 | `agenttown-mcp/cmd/agenttown-mcp/tactical.go` | 战术层：goal → action 分解 |
 | `agenttown-mcp/cmd/agenttown-mcp/reactive.go` | 反应层纯函数：prompt 构建 + 决策解析 |
 | `agenttown-mcp/cmd/agenttown-mcp/reactive_runner.go` | 反应层运行时：Ollama 调用 + WS 副作用 |
+| `agenttown-mcp/cmd/agenttown-mcp/event_router.go` | 事件路由器运行时：jev 判决调用（routerQuestions 三问 + routerDecisionFromJev 映射）+ routerInterrupt |
 | `agenttown-mcp/cmd/agenttown-mcp/memory.go` | Stage 4 记忆层：日终 LLM 总结 action_history → 结构化 memories + narrative |
 | `agenttown-mcp/cmd/agenttown-mcp/relationship.go` | Stage 5 关系层：Ollama 判断 + 关系格式化 + KB 种子导入 |
 | `agenttown-mcp/cmd/agenttown-mcp/capability.go` | NPC 能力注册表：per-agent cmd 能力声明（system 全局默认 + 具体 agent 覆盖） |
@@ -772,6 +776,7 @@ bash start-dev.sh       # 偏移端口 8770/9091 + logs-dev/ 日志目录
 | `agenttown-mcp/pkg/llmtypes/types.go` | LLM 共享响应类型（Response/Block/Content/Usage），venus/战略/战术层复用 |
 | `agenttown-mcp/pkg/llmmetrics/` | LLM 指标聚合（E2E/TTFT/TPOT/ITL 分位数 + 错误分布 + 重试率 + JSON 正确率），手写最近秩分位数，无第三方依赖 |
 | `agenttown-mcp/pkg/venus/client.go` | Venus 客户端：OpenAI Chat Completions 协议直连（唯一战略/战术层后端） |
+| `agenttown-mcp/pkg/jev/client.go` | jev 判决模型客户端：事件路由专用（POST /v1/systemone，state+三型 questions：noul/choice/score） |
 | `agenttown-mcp/pkg/ollama/client.go` | Ollama 客户端：反应层专用，非流式 |
 | `agenttown-mcp/pkg/storage/store.go` | 持久化 Store 接口 + NoopStore（内存模式）+ ScheduleState |
 | `agenttown-mcp/pkg/storage/mysql.go` | MySQLStore：write-through 持久化 + upsert |

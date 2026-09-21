@@ -196,8 +196,8 @@ var BuiltinCmdCapabilities = []protocol.CapabilityAction{
 		UsageHint:   "需要走到某个位置或者某个actor时使用",
 		Params: []protocol.CapabilityParam{
 			{Name: "target_type", Type: "enum", Description: "目标类型", Required: true, DefaultValue: "agent", EnumValues: []string{"agent", "smart_object", "zone", "position"}},
-			{Name: "target_id", Type: "string", Description: "如果目标是actor，用于表示actor的id", DefaultValue: ""},
-			{Name: "target_position", Type: "vector", Description: "如果目标是位置，表示目标的位置", DefaultValue: ""},
+			{Name: "target_id", Type: "string", Description: "目标 id：target_type=agent 时填 actor id；=smart_object 时填物体 id；=zone 时填 zone id。=position 时不填", DefaultValue: ""},
+			{Name: "target_position", Type: "vector", Description: "目标坐标 [x,y,z]（厘米），仅 target_type=position 时必填", DefaultValue: ""},
 		},
 	},
 	{
@@ -215,8 +215,8 @@ var BuiltinCmdCapabilities = []protocol.CapabilityAction{
 		UsageHint:   "需要转身朝向时使用",
 		Params: []protocol.CapabilityParam{
 			{Name: "target_type", Type: "enum", Description: "目标类型", Required: true, DefaultValue: "agent", EnumValues: []string{"agent", "smart_object", "zone", "position"}},
-			{Name: "target_id", Type: "string", Description: "如果转身目标是actor，用于表示actor的id", DefaultValue: ""},
-			{Name: "target_position", Type: "vector", Description: "如果转身目标是位置，表示目标的位置", DefaultValue: ""},
+			{Name: "target_id", Type: "string", Description: "目标 id：target_type=agent 时填 actor id；=smart_object 时填物体 id；=zone 时填 zone id。=position 时不填", DefaultValue: ""},
+			{Name: "target_position", Type: "vector", Description: "目标坐标 [x,y,z]（厘米），仅 target_type=position 时必填", DefaultValue: ""},
 		},
 	},
 	{

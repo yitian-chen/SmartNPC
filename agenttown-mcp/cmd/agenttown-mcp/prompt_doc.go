@@ -20,6 +20,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -76,10 +77,16 @@ func dumpPromptDoc(agentID, layer string, body []byte, logger *slog.Logger) {
 	// 可读 Prompt 预览：每个 layer 的 system + user 内容，还原换行后放在
 	// 文档开头，便于快速查看核心 prompt 而不必在 JSON 里翻找。user 预览
 	// 捡拾末尾两条 user 消息（本轮 user prompt + <agent_state> 状态栏）。
+	// 事件路由走判决 API（jev）：请求体无 messages、有 state+questions，
+	// 预览渲染为 state 单段。
 	fmt.Fprintf(f, "## 可读 Prompt 预览\n\n")
 	for _, l := range promptDocLayers {
 		b, ok := promptDocBodies[l]
 		if !ok {
+			continue
+		}
+		if state := extractJevState(b); state != "" {
+			fmt.Fprintf(f, "### %s · state\n\n%s\n\n", layerNameOf(l), state)
 			continue
 		}
 		sys, usr := extractSystemUser(b)
@@ -157,6 +164,57 @@ func extractSystemUser(body []byte) (system, user string) {
 		return system, users[len(users)-2] + "\n\n" + last
 	}
 	return system, users[len(users)-1]
+}
+
+// extractJevState renders a judgment-API request's state (jev: an object
+// with a conversation array and a user-attributes object, no messages) as a
+// readable preview; "" when body is not a judgment body. Conversation turns
+// render as "[role] content" lines; user attributes as "key: value" lines.
+func extractJevState(body []byte) string {
+	var req struct {
+		Messages json.RawMessage `json:"messages"`
+		State    *struct {
+			Conversation []struct {
+				Role    string `json:"role"`
+				Content string `json:"content"`
+			} `json:"conversation"`
+			User map[string]string `json:"user"`
+		} `json:"state"`
+		Questions json.RawMessage `json:"questions"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		return ""
+	}
+	if req.State == nil || len(req.Questions) == 0 || len(req.Messages) > 0 {
+		return ""
+	}
+	var sb strings.Builder
+	if len(req.State.Conversation) > 0 {
+		sb.WriteString("conversation（agentic loop 近期历史）：\n")
+		for _, m := range req.State.Conversation {
+			fmt.Fprintf(&sb, "[%s] %s\n", m.Role, m.Content)
+		}
+	}
+	if len(req.State.User) > 0 {
+		if sb.Len() > 0 {
+			sb.WriteString("\n")
+		}
+		sb.WriteString("user（该 NPC 的属性）：\n")
+		for _, k := range sortedKeys(req.State.User) {
+			fmt.Fprintf(&sb, "%s: %s\n", k, req.State.User[k])
+		}
+	}
+	return sb.String()
+}
+
+// sortedKeys returns map keys in stable order (deterministic preview).
+func sortedKeys(m map[string]string) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // dumpLastRequestBody 读取 LLM 客户端最近一次发送的完整请求体并落盘。

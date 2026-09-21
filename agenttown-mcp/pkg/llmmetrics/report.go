@@ -174,9 +174,9 @@ func jsonRateStr(lr *LayerReport) string {
 	return fmt.Sprintf("%.1f%%", *lr.JSONRate*100)
 }
 
-// layerOrder is the canonical display order for the three decision layers.
+// layerOrder is the canonical display order for the decision layers.
 func layerOrder() []string {
-	return []string{"strategic", "tactical", "dialogue"}
+	return []string{"strategic", "tactical", "router", "dialogue"}
 }
 
 // layerDisplay maps a layer key to a Chinese display name.
@@ -186,6 +186,8 @@ func layerDisplay(layer string) string {
 		return "战略层"
 	case "tactical":
 		return "战术层"
+	case "router":
+		return "事件路由"
 	case "dialogue":
 		return "对话层"
 	case "unknown":

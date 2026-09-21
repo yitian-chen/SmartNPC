@@ -124,6 +124,26 @@ func TestReport_ToMarkdown(t *testing.T) {
 	}
 }
 
+// TestReport_ToMarkdownRouterLayer pins that the router layer (jev judgment
+// calls) is rendered: layerOrder must include "router", otherwise ToMarkdown
+// silently drops its samples even though Snapshot carries them.
+func TestReport_ToMarkdownRouterLayer(t *testing.T) {
+	c := New()
+	c.RecordCall(CallSample{Layer: "router", E2E: 900 * time.Millisecond, ErrClass: ErrSuccess})
+	c.RecordCall(CallSample{Layer: "router", E2E: 5 * time.Second, ErrClass: ErrTimeout})
+	c.RecordJSON("router", true)
+	rep := c.Snapshot()
+	if rep.Layers["router"] == nil {
+		t.Fatalf("router layer missing from snapshot: %+v", rep.Layers)
+	}
+	md := rep.ToMarkdown()
+	for _, want := range []string{"事件路由", "900.0", "timeout"} {
+		if !strings.Contains(md, want) {
+			t.Errorf("markdown missing %q (router layer dropped from layerOrder?):\n%s", want, md)
+		}
+	}
+}
+
 func TestCollector_E2EStream(t *testing.T) {
 	c := New()
 	// 非流式调用（无 TTFT）：E2E 计入全量，但不计 e2eStream。

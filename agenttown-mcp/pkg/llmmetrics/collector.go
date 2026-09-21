@@ -24,7 +24,7 @@ const (
 // an empty ITLs slice mean the call was non-streaming (those metrics are
 // only obtainable from a stream); they are simply skipped, not recorded as 0.
 type CallSample struct {
-	Layer        string          // "strategic" | "tactical" | "dialogue"
+	Layer        string          // "strategic" | "tactical" | "router" | "dialogue"
 	E2E          time.Duration   // wall-clock from send start to parse finish
 	TTFT         time.Duration   // time to first token (streaming only)
 	TPOT         time.Duration   // time per output token (streaming only)

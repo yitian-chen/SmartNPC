@@ -523,6 +523,16 @@ func capabilityParamsSchema(params []protocol.CapabilityParam, name string) json
 			desc = "目标设施所在的 zone id。日程明确指定区域时必须填该区域 id（如 central_plaza、logistics_hub）；不填默认优先找 NPC 自己所在 zone 的设施。"
 		case "semantic_group":
 			desc = "设施语义组名（UE 从该组自动选一个空闲实例，勿传具体编号）"
+		case "target_id":
+			// UE registry 对 target_id 的描述只提 actor（"如果目标是actor，用于
+			// 表示actor的id"），zone/smart_object 目标该填哪没有说明——实测
+			// 逃跑计划的 LLM 输出 target_type=zone 却无 target_id，UE 对无目标
+			// MoveTo 秒回 success，逃跑从未发生（2026-09-21 仿真：被瞄准后
+			// 连环 4 次 speak 重规划）。此处按 target_type 给完整指引，无论
+			// registry 来自 seed 还是 UE push 都生效。
+			desc = "目标 id：target_type=agent 时填 actor id（如 H-02）；=smart_object 时填物体 id；=zone 时填 zone id（如 central_plaza）。target_type=position 时不填此参数"
+		case "target_position":
+			desc = "目标坐标 [x,y,z]（厘米），仅 target_type=position 时必填；其他类型不填"
 		case "interaction":
 			// 有 enum 的固定值工具，"固定为 X"与 enum 重复，可精简；无 enum
 			// 的（如 InteractSmartObject）描述含 semantic_group↔interaction
@@ -650,27 +660,15 @@ func mapTacticalAction(pa plannedAction, agentID string, kb *worldkb.KB, registr
 		}
 		return protocol.CmdGenericAct, params, nil
 	case "move_to":
-		params := map[string]any{}
-		if t, ok := pa.Params["target_type"].(string); ok && t != "" {
-			params["target_type"] = t
-		}
-		if id, ok := pa.Params["target_id"].(string); ok && id != "" {
-			params["target_id"] = id
-		}
-		if pos, ok := pa.Params["target_position"].([]float64); ok && len(pos) > 0 {
-			params["target_position"] = pos
+		t, id, pos, params := moveTargetParams(pa)
+		if err := validateMoveTarget("move_to", t, id, pos); err != nil {
+			return "", nil, err
 		}
 		return protocol.CmdMoveTo, params, nil
 	case "turn_to":
-		params := map[string]any{}
-		if t, ok := pa.Params["target_type"].(string); ok && t != "" {
-			params["target_type"] = t
-		}
-		if id, ok := pa.Params["target_id"].(string); ok && id != "" {
-			params["target_id"] = id
-		}
-		if pos, ok := pa.Params["target_position"].([]float64); ok && len(pos) > 0 {
-			params["target_position"] = pos
+		t, id, pos, params := moveTargetParams(pa)
+		if err := validateMoveTarget("turn_to", t, id, pos); err != nil {
+			return "", nil, err
 		}
 		return protocol.CmdTurnTo, params, nil
 	case "speak":
@@ -720,6 +718,58 @@ func mapTacticalAction(pa plannedAction, agentID string, kb *worldkb.KB, registr
 		}
 		return "", nil, fmt.Errorf("unknown/unsupported tactical action: %s", pa.Action)
 	}
+}
+
+// moveTargetParams 提取 move_to/turn_to 的目标三元组（target_type /
+// target_id / target_position）并组装透传 params。target_position 经
+// json.Unmarshal 进 map[string]any 后是 []any 而非 []float64——旧断言
+// `.([]float64)` 永远不成立，LLM 给的坐标从未透传过 UE（潜在缺陷，此处
+// 一并修复）；[]any 形态逐元素转换，空数组不透传。
+func moveTargetParams(pa plannedAction) (targetType, targetID string, pos []float64, params map[string]any) {
+	params = map[string]any{}
+	targetType, _ = pa.Params["target_type"].(string)
+	if targetType != "" {
+		params["target_type"] = targetType
+	}
+	targetID, _ = pa.Params["target_id"].(string)
+	if targetID != "" {
+		params["target_id"] = targetID
+	}
+	switch v := pa.Params["target_position"].(type) {
+	case []float64:
+		pos = v
+	case []any:
+		for _, e := range v {
+			if f, ok := e.(float64); ok {
+				pos = append(pos, f)
+			}
+		}
+	}
+	if len(pos) > 0 {
+		params["target_position"] = pos
+	}
+	return targetType, targetID, pos, params
+}
+
+// validateMoveTarget 按目标类型校验 move_to/turn_to 的必填参数，缺目标的
+// 指令在 MCP 侧拒绝（不再透传 UE）。实测 UE 对无目标 MoveTo 秒回
+// success（57~109ms）：逃跑从未发生、队列瞬间耗尽触发 worker 连环 refill
+// ——2026-09-21 仿真中"被瞄准"事件后 LLM 连发 4 条 target_type=zone 但无
+// target_id 的逃跑 move_to，表现为连环 4 次 speak 重规划。
+func validateMoveTarget(tool, targetType, targetID string, pos []float64) error {
+	switch targetType {
+	case "agent", "smart_object", "zone":
+		if targetID == "" {
+			return fmt.Errorf("%s: target_type=%s 时必须同时提供 target_id（对应的 actor/物体/zone id），仅填 target_type 不会移动", tool, targetType)
+		}
+	case "position":
+		if len(pos) == 0 {
+			return fmt.Errorf("%s: target_type=position 时必须同时提供 target_position=[x,y,z] 坐标", tool)
+		}
+	default:
+		return fmt.Errorf("%s: 缺少 target_type（agent/smart_object/zone/position）", tool)
+	}
+	return nil
 }
 
 // toFloat 容错地把 any 转 float64（LLM 可能输出 int/float/string/json.Number）。
