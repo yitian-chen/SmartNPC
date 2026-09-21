@@ -84,12 +84,12 @@ type RouterInput struct {
 // the judgment criteria (three interrupt motives) moved into the questions
 // themselves (routerQuestions, cmd layer).
 //
-// The world overview is passed through worldOverviewWithoutZones: the zone
-// roster line is dropped for the router only (zones are planning context —
-// the tactical layer needs them; for an urgency verdict they are noise,
-// and the event itself already carries its location). The shared
-// WorldOverview used by the strategic/tactical/dialogue layers keeps the
-// zone roster.
+// Planning context is deliberately absent: no 生产工作流 module, and the
+// world overview goes through worldOverviewForRouter, which drops the zone
+// roster and the facility-category roster lines (the tactical layer needs
+// them; for an urgency verdict they are noise, and the event itself already
+// carries its location). The shared WorldOverview / ProductionWorkflowText
+// used by the strategic/tactical/dialogue layers keep everything.
 func BuildRouterState(in RouterInput) string {
 	agentName := in.AgentName
 	if agentName == "" {
@@ -113,15 +113,13 @@ func BuildRouterState(in RouterInput) string {
 	}
 
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "小镇居民 NPC %s 收到一条世界事件，需要判断是否打断其当前正在做的事。以下是该 NPC 的完整背景与当前情况。\n", agentName)
+	fmt.Fprintf(&sb, "小镇居民 NPC %s 收到一条世界事件，需要判断是否打断其当前正在做的事。以下是该 NPC 的背景与当前情况。\n", agentName)
 	if in.WorldOverview != "" {
 		sb.WriteString("\n【世界背景】\n")
-		sb.WriteString(worldOverviewWithoutZones(in.WorldOverview))
+		sb.WriteString(worldOverviewForRouter(in.WorldOverview))
 		sb.WriteString("\n")
 	}
-	sb.WriteString("\n【生产工作流】\n")
-	sb.WriteString(ProductionWorkflowText)
-	sb.WriteString("\n\n【你的角色】\n")
+	sb.WriteString("\n【你的角色】\n")
 	sb.WriteString(agentRole)
 	sb.WriteString("\n")
 	if in.Relationships != "" {
@@ -142,15 +140,18 @@ func BuildRouterState(in RouterInput) string {
 	return sb.String()
 }
 
-// worldOverviewWithoutZones strips the zone-roster line ("区域（N 个）：…")
-// from a rendered WorldOverview. Line-based: the zone roster is exactly one
-// line, so dropping every line with that prefix keeps 设定/主题/设施/居民
-// intact regardless of KB shape.
-func worldOverviewWithoutZones(overview string) string {
+// worldOverviewForRouter strips planning-context lines from a rendered
+// WorldOverview for the router state: the zone roster ("区域（N 个）：…")
+// and the facility-category roster ("可交互设施类别（N 类）：…") are both
+// tactical-layer planning context — for an urgency verdict they are noise,
+// and the event itself already carries its location. Line-based: each roster
+// is exactly one line, so dropping every line with those prefixes keeps
+// 设定/主题/居民 intact regardless of KB shape.
+func worldOverviewForRouter(overview string) string {
 	lines := strings.Split(overview, "\n")
 	kept := make([]string, 0, len(lines))
 	for _, l := range lines {
-		if strings.HasPrefix(l, "区域（") {
+		if strings.HasPrefix(l, "区域（") || strings.HasPrefix(l, "可交互设施类别") {
 			continue
 		}
 		kept = append(kept, l)
