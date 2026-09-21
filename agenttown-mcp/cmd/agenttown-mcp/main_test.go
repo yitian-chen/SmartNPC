@@ -293,6 +293,44 @@ func TestPopAndSendQueueAction_RefillOnBusyRejection(t *testing.T) {
 	}
 }
 
+// TestPopAndSendQueueAction_RejectsGoallessMove pins the 2026-09-21 fix:
+// a malformed move_to (target_type without the required target) is rejected
+// at the MCP side — nothing is dispatched to UE — and the rejection reason is
+// injected into the conversation as a user-role message so the next
+// decomposition can self-correct. Live failure mode: UE completed the
+// goal-less move in ~100ms, the queue drained instantly, and the worker
+// refill-looped through speak-first plans four times.
+func TestPopAndSendQueueAction_RejectsGoallessMove(t *testing.T) {
+	ac, _ := newAgentContext(context.Background())
+	ws := wsserver.New(wsserver.Options{}) // 未连接：若残缺 move_to 被透传，SendAction 也会失败，但断言在"根本不该走到下发"
+	logger := slog.Default()
+	kb := loadTestKB(t)
+
+	setQueueForTest(ac, []plannedAction{
+		{Action: "move_to", Params: map[string]any{"target_type": "zone", "target_position": []any{}}, ToolCallID: "tc_bad_1"},
+	})
+
+	ac.popAndSendQueueAction(context.Background(), "H-01", ws, kb, logger)
+
+	// 无目标 move_to 被拒绝：不下发（无在途 action）。
+	if got := ac.as.CurrentActionID(); got != "" {
+		t.Fatalf("malformed move_to must not be dispatched, got in-flight %q", got)
+	}
+	// 拒绝原因进会话历史（user role，带 tool_call_id 关联）。
+	hist := ac.as.Conversation()
+	found := false
+	for _, m := range hist {
+		if m.Role == "user" && strings.Contains(m.Content, "被拒绝") &&
+			strings.Contains(m.Content, "tc_bad_1") &&
+			strings.Contains(m.Content, "target_id") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("conversation must carry the rejection reason with tool_call_id:\n%+v", hist)
+	}
+}
+
 func TestRecordActionStarted_SetsSource(t *testing.T) {
 	ac, _ := newAgentContext(context.Background())
 

@@ -86,6 +86,7 @@ graph TB
 - **time_to_stop 兜底**（不依赖 LLM 自觉）：`fillDefaultTimeToStopForRest` 给非队尾休息动作补 1800s、`fillDefaultTimeToStopForWork` 给非队尾工作动作补 5400s——防止中间动作漏设导致队列卡死（NPC 一直坐长椅/一直工作）
 - **LLM 失败兜底**：战术层分解失败且队列空时补发 `fallbackRetryActions()`（speak"网络波动了"+ generic_act look_around 30s），避免呆站，动作执行完 completion 再唤醒重试
 - **zone 透传**：`mapTacticalAction` 对 `InteractSmartObject` 透传 LLM 填写的 `zone` 参数（UE 支持），否则"去中央广场长椅"会落到 NPC 所在 zone 的设施
+- **move_to/turn_to 目标校验（2026-09-21）**：按 target_type 校验必填参数（agent/smart_object/zone → target_id 必填；position → target_position 必填），缺目标指令在 MCP 侧拒绝（不再透传 UE——实测 UE 对无目标 MoveTo 秒回 success，逃跑从未发生且队列瞬间耗尽触发连环 refill）；拒绝原因以 user role 注入会话历史（镜像动作完成结果的注入形态，带 tool_call_id），下一轮分解 LLM 可见并自我纠正。schema 层 `capabilityParamsSchema` 对 target_id/target_position 描述按 target_type 给完整指引（无论 registry 来自 seed 还是 UE push——UE push 的描述只提 actor，LLM 曾因此输出 target_type=zone 却无 target_id）。顺带修复：LLM 坐标经 json.Unmarshal 是 []any，旧 `[]float64` 断言不成立，target_position 从未透传过
 - **`replanInProgress` mutex**：防止 worker 的战术层重规划和 `/debug/schedule` 注入并发调用 `tacticalHc` 冲突
 - **`debugOverride`**：仅阻止 worker 的 idle-wait refill，**不阻止**正在 LLM 调用中的 refill——所以 `/debug/schedule` handler 会同时设 `replanInProgress=true` + `debugOverride=true`
 - **`currentSlot` 加 `__debug__` 前缀**：防止注入的 slot 和 dailyPlan 同名 slot 碰撞触发 `redecomposeCount >= 1` 限制

@@ -169,6 +169,112 @@ func TestMapTacticalAction_MoveToPassthrough(t *testing.T) {
 	}
 }
 
+// TestMapTacticalAction_MoveTargetValidation pins the 2026-09-21 fix: a
+// move_to/turn_to without the target required by its target_type is
+// REJECTED at the MCP side. The live failure: the LLM emitted
+// target_type=zone with no target_id (the registry description only
+// mentioned actor ids), UE completed the goal-less move in ~100ms with
+// success — the flee never happened and the worker refill-looped through
+// four speak-first plans.
+func TestMapTacticalAction_MoveTargetValidation(t *testing.T) {
+	kb := loadTestKB(t)
+	cases := []struct {
+		name    string
+		action  string
+		params  map[string]any
+		wantErr bool
+	}{
+		{
+			name:    "zone without target_id is rejected",
+			action:  "move_to",
+			params:  map[string]any{"target_type": "zone", "target_position": []any{}},
+			wantErr: true,
+		},
+		{
+			name:   "zone with target_id passes",
+			action: "move_to",
+			params: map[string]any{"target_type": "zone", "target_id": "central_plaza"},
+		},
+		{
+			name:   "agent with target_id passes",
+			action: "turn_to",
+			params: map[string]any{"target_type": "agent", "target_id": "H-02"},
+		},
+		{
+			name:    "position without coordinates is rejected",
+			action:  "move_to",
+			params:  map[string]any{"target_type": "position", "target_id": "central_plaza"},
+			wantErr: true,
+		},
+		{
+			// LLM 坐标经 json.Unmarshal 进 map[string]any 后是 []any——旧
+			// []float64 断言不成立，坐标从未透传（潜在缺陷，本次一并修复）。
+			name:   "position with []any coordinates passes and converts",
+			action: "move_to",
+			params: map[string]any{"target_type": "position", "target_position": []any{100.0, 200.0, 0.0}},
+		},
+		{
+			name:    "missing target_type is rejected",
+			action:  "move_to",
+			params:  map[string]any{"target_id": "central_plaza"},
+			wantErr: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd, params, err := mapTacticalAction(plannedAction{Action: tc.action, Params: tc.params}, "", kb, nil)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("malformed %s must be rejected, got cmd=%s params=%v", tc.action, cmd, params)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+	// []any 坐标转换后的形态：target_position 为 []float64 且值正确。
+	_, params, err := mapTacticalAction(plannedAction{Action: "move_to",
+		Params: map[string]any{"target_type": "position", "target_position": []any{100.0, 200.0, 0.0}}}, "", kb, nil)
+	if err != nil {
+		t.Fatalf("position move: %v", err)
+	}
+	pos, ok := params["target_position"].([]float64)
+	if !ok || len(pos) != 3 || pos[0] != 100 || pos[2] != 0 {
+		t.Errorf("target_position = %v (%T), want []float64{100,200,0}", params["target_position"], params["target_position"])
+	}
+}
+
+// TestCapabilityParamsSchema_MoveTargetDescriptions pins the schema-side
+// fix: the target_id/target_position descriptions carry the per-target_type
+// guidance regardless of what the registry (seed or UE push) declares —
+// the live failure mode was the LLM filling target_type=zone with nowhere
+// to put the zone id.
+func TestCapabilityParamsSchema_MoveTargetDescriptions(t *testing.T) {
+	// 模拟 UE push 的模糊描述（与线上实测一致）。
+	registryParams := []protocol.CapabilityParam{
+		{Name: "target_type", Type: "enum", Required: true, EnumValues: []string{"agent", "smart_object", "zone", "position"}, Description: "目标类型"},
+		{Name: "target_id", Type: "string", Description: "如果目标是actor，用于表示actor的id"},
+		{Name: "target_position", Type: "vector", Description: "如果目标是位置，表示目标的位置"},
+	}
+	schema := capabilityParamsSchema(registryParams, "move_to")
+	var parsed struct {
+		Properties map[string]struct {
+			Description string `json:"description"`
+		} `json:"properties"`
+	}
+	if err := json.Unmarshal(schema, &parsed); err != nil {
+		t.Fatalf("unmarshal schema: %v", err)
+	}
+	if d := parsed.Properties["target_id"].Description; !strings.Contains(d, "zone") || !strings.Contains(d, "zone id") {
+		t.Errorf("target_id description must state where the zone id goes, got %q", d)
+	}
+	if d := parsed.Properties["target_position"].Description; !strings.Contains(d, "仅 target_type=position") {
+		t.Errorf("target_position description must state it is only for position targets, got %q", d)
+	}
+}
+
 func TestMapTacticalAction_Speak(t *testing.T) {
 	kb := loadTestKB(t)
 	pa := plannedAction{Action: "speak", Params: map[string]any{"content": "你好"}}

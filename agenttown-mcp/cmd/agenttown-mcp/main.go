@@ -1242,6 +1242,20 @@ func (a *agentContext) popAndSendQueueAction(ctx context.Context, agentID string
 	cmd, params, err := mapTacticalAction(pa, agentID, kb, capabilityRegistryRef)
 	if err != nil {
 		logger.Warn("[战术层] action 映射失败，跳过", "agent_id", agentID, "action", pa.Action, "err", err)
+		// 拒绝原因以 user role 注入会话历史末尾（镜像动作完成结果的注入
+		// 形态）：下一轮分解的 LLM 能看到自己的 tool_call 为何没被执行并
+		// 自我纠正——否则它只看到 tool_calls 停在 result=pending，可能原样
+		// 重犯（如 target_type=zone 却无 target_id 的 move_to，UE 对无目标
+		// 移动秒回 success 触发连环 refill，2026-09-21 仿真）。
+		ref := ""
+		if pa.ToolCallID != "" {
+			ref = " tool_call_id=" + pa.ToolCallID
+		}
+		a.as.AppendConversationMessage(llmtypes.Message{
+			Role: "user",
+			Content: fmt.Sprintf("[系统注入] 动作 %s%s 被拒绝，不会执行：%s。请修正参数后重新规划该动作。",
+				pa.Action, ref, err),
+		})
 		// 跳过这一个，signal 让 worker 处理下一个（若队列空则触发 refill）
 		a.signal()
 		return
