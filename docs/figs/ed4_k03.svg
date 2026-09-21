@@ -1,0 +1,71 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1240" height="780" viewBox="0 0 1240 780" font-family="'Segoe UI','Microsoft YaHei',sans-serif">
+  <defs>
+    <marker id="d4-arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#455a64"/></marker>
+    <linearGradient id="d4-gUe" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#1e88e5"/><stop offset="1" stop-color="#1565c0"/></linearGradient>
+    <linearGradient id="d4-gRouter" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fb8c00"/><stop offset="1" stop-color="#ef6c00"/></linearGradient>
+    <linearGradient id="d4-gLoop" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ef5350"/><stop offset="1" stop-color="#c62828"/></linearGradient>
+    <linearGradient id="d4-gQueue" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#43a047"/><stop offset="1" stop-color="#2e7d32"/></linearGradient>
+    <linearGradient id="d4-gTac" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#8e24aa"/><stop offset="1" stop-color="#6a1b9a"/></linearGradient>
+    <linearGradient id="d4-gPlan" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#00897b"/><stop offset="1" stop-color="#00695c"/></linearGradient>
+  </defs>
+
+  <!-- 顶部角色框 -->
+  <g font-size="14" font-weight="700" fill="#fff">
+    <rect x="35" y="40" width="150" height="54" rx="9" fill="url(#d4-gUe)"/><text x="110" y="72" text-anchor="middle" fill="#fff">UE Bridge</text>
+    <rect x="225" y="40" width="150" height="54" rx="9" fill="url(#d4-gRouter)"/><text x="300" y="72" text-anchor="middle" fill="#fff">路由器</text>
+    <rect x="425" y="40" width="150" height="54" rx="9" fill="url(#d4-gLoop)"/><text x="500" y="72" text-anchor="middle" fill="#fff">事件循环</text>
+    <rect x="625" y="40" width="150" height="54" rx="9" fill="url(#d4-gQueue)"/><text x="700" y="72" text-anchor="middle" fill="#fff">队列</text>
+    <rect x="825" y="40" width="150" height="54" rx="9" fill="url(#d4-gTac)"/><text x="900" y="72" text-anchor="middle" fill="#fff">战术层</text>
+    <rect x="1025" y="40" width="150" height="54" rx="9" fill="url(#d4-gPlan)"/><text x="1100" y="72" text-anchor="middle" fill="#fff">日计划</text>
+  </g>
+
+  <!-- 生命线 -->
+  <g stroke="#b0bec5" stroke-width="1.5" stroke-dasharray="4 4">
+    <line x1="110" y1="94" x2="110" y2="760"/>
+    <line x1="300" y1="94" x2="300" y2="760"/>
+    <line x1="500" y1="94" x2="500" y2="760"/>
+    <line x1="700" y1="94" x2="700" y2="760"/>
+    <line x1="900" y1="94" x2="900" y2="760"/>
+    <line x1="1100" y1="94" x2="1100" y2="760"/>
+  </g>
+
+  <!-- 注：等待 -->
+  <rect x="410" y="112" width="180" height="30" rx="6" fill="#fff9c4" stroke="#fbc02d"/>
+  <text x="500" y="132" text-anchor="middle" font-size="11.5" fill="#795548" paint-order="stroke" stroke="#ffffff" stroke-width="3.5" stroke-linejoin="round">阿静在等待，work_shift 到 12:00</text>
+
+  <!-- 消息 -->
+  <g stroke="#455a64" stroke-width="2" marker-end="url(#d4-arr)" fill="#37474f" font-size="12">
+    <line x1="110" y1="150" x2="300" y2="150"/><text x="205" y="144" text-anchor="middle" paint-order="stroke" stroke="#ffffff" stroke-width="3.5" stroke-linejoin="round">K-03 故障，severity 7</text>
+    <line x1="300" y1="182" x2="346" y2="182"/><text x="348" y="176" text-anchor="start" font-size="11" paint-order="stroke" stroke="#ffffff" stroke-width="3.5" stroke-linejoin="round">K-03 是她最亲近的伙伴</text>
+    <line x1="300" y1="214" x2="500" y2="214"/><text x="400" y="208" text-anchor="middle" fill="#c62828" font-weight="700" paint-order="stroke" stroke="#ffffff" stroke-width="3.5" stroke-linejoin="round">打断，severity 8</text>
+    <line x1="500" y1="246" x2="110" y2="246"/><text x="305" y="240" text-anchor="middle" paint-order="stroke" stroke="#ffffff" stroke-width="3.5" stroke-linejoin="round">优雅中断（带过渡）</text>
+    <line x1="500" y1="278" x2="900" y2="278"/><text x="700" y="272" text-anchor="middle" paint-order="stroke" stroke="#ffffff" stroke-width="3.5" stroke-linejoin="round">已打断，完成 3/8 个零件</text>
+    <line x1="900" y1="310" x2="946" y2="310"/><text x="948" y="304" text-anchor="start" font-size="11" paint-order="stroke" stroke="#ffffff" stroke-width="3.5" stroke-linejoin="round">规划救援</text>
+    <line x1="900" y1="342" x2="500" y2="342"/><text x="700" y="336" text-anchor="middle" paint-order="stroke" stroke="#ffffff" stroke-width="3.5" stroke-linejoin="round">move_to K-03，截止 11:30</text>
+    <line x1="500" y1="374" x2="110" y2="374"/><text x="305" y="368" text-anchor="middle" paint-order="stroke" stroke="#ffffff" stroke-width="3.5" stroke-linejoin="round">action_command</text>
+  </g>
+
+  <!-- 注：12:00 定时器 -->
+  <rect x="410" y="402" width="180" height="30" rx="6" fill="#fff9c4" stroke="#fbc02d"/>
+  <text x="500" y="422" text-anchor="middle" font-size="11.5" fill="#795548" paint-order="stroke" stroke="#ffffff" stroke-width="3.5" stroke-linejoin="round">12:00 时段定时器中途触发</text>
+
+  <g stroke="#455a64" stroke-width="2" marker-end="url(#d4-arr)" fill="#37474f" font-size="12">
+    <line x1="500" y1="440" x2="700" y2="440"/><text x="600" y="434" text-anchor="middle" paint-order="stroke" stroke="#ffffff" stroke-width="3.5" stroke-linejoin="round">时段事件入队（不压制）</text>
+    <line x1="110" y1="472" x2="500" y2="472"/><text x="305" y="466" text-anchor="middle" fill="#2e7d32" font-weight="700" paint-order="stroke" stroke="#ffffff" stroke-width="3.5" stroke-linejoin="round">救援完成</text>
+  </g>
+
+  <!-- 注：安全点 -->
+  <rect x="410" y="500" width="180" height="30" rx="6" fill="#ffcdd2" stroke="#e57373"/>
+  <text x="500" y="520" text-anchor="middle" font-size="11.5" font-weight="700" fill="#c62828" paint-order="stroke" stroke="#ffffff" stroke-width="3.5" stroke-linejoin="round">安全点</text>
+
+  <g stroke="#455a64" stroke-width="2" marker-end="url(#d4-arr)" fill="#37474f" font-size="12">
+    <line x1="500" y1="538" x2="700" y2="538"/><text x="600" y="532" text-anchor="middle" paint-order="stroke" stroke="#ffffff" stroke-width="3.5" stroke-linejoin="round">drain 全部</text>
+    <line x1="700" y1="570" x2="900" y2="570"/><text x="800" y="564" text-anchor="middle" paint-order="stroke" stroke="#ffffff" stroke-width="3.5" stroke-linejoin="round">时段事件 + 其它积压</text>
+    <line x1="1100" y1="602" x2="900" y2="602"/><text x="1000" y="596" text-anchor="middle" paint-order="stroke" stroke="#ffffff" stroke-width="3.5" stroke-linejoin="round">下一时段目标</text>
+    <line x1="900" y1="634" x2="946" y2="634"/><text x="948" y="628" text-anchor="start" font-size="11" paint-order="stroke" stroke="#ffffff" stroke-width="3.5" stroke-linejoin="round">重规划本窗口</text>
+    <line x1="900" y1="666" x2="1100" y2="666"/><text x="1000" y="660" text-anchor="middle" paint-order="stroke" stroke="#ffffff" stroke-width="3.5" stroke-linejoin="round">写回实际目标与修订</text>
+    <line x1="900" y1="698" x2="500" y2="698"/><text x="700" y="692" text-anchor="middle" paint-order="stroke" stroke="#ffffff" stroke-width="3.5" stroke-linejoin="round">新动作</text>
+  </g>
+
+  <text x="620" y="748" text-anchor="middle" font-size="12.5" fill="#546e7a" paint-order="stroke" stroke="#ffffff" stroke-width="3.5" stroke-linejoin="round">一条事件，阿静判成紧急立即打断；老陈判成不紧急入队 —— 两人都没破坏动作连贯性。</text>
+</svg>

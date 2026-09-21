@@ -1,0 +1,62 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="560" viewBox="0 0 1000 560" font-family="'Segoe UI','Microsoft YaHei',sans-serif">
+  <defs>
+    <linearGradient id="d5-gIn1" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#8e24aa"/><stop offset="1" stop-color="#6a1b9a"/></linearGradient>
+    <linearGradient id="d5-gIn2" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#1e88e5"/><stop offset="1" stop-color="#1565c0"/></linearGradient>
+    <linearGradient id="d5-gIn3" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#43a047"/><stop offset="1" stop-color="#2e7d32"/></linearGradient>
+    <linearGradient id="d5-gCore" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ef5350"/><stop offset="1" stop-color="#c62828"/></linearGradient>
+    <linearGradient id="d5-gOut1" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#00acc1"/><stop offset="1" stop-color="#00838f"/></linearGradient>
+    <linearGradient id="d5-gOut2" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fb8c00"/><stop offset="1" stop-color="#ef6c00"/></linearGradient>
+    <marker id="d5-arrPurple" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#6a1b9a"/></marker>
+    <marker id="d5-arrBlue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1565c0"/></marker>
+    <marker id="d5-arrGreen" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#2e7d32"/></marker>
+    <marker id="d5-arrCyan" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#00838f"/></marker>
+    <marker id="d5-arrOrange" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#e65100"/></marker>
+  </defs>
+
+  <!-- 输入 1 -->
+  <rect x="40" y="50" width="260" height="104" rx="12" fill="url(#d5-gIn1)" stroke="#4a148c" stroke-width="2"/>
+  <text x="170" y="84" text-anchor="middle" font-size="14" font-weight="700" fill="#fff">IN 1 · 战略规划</text>
+  <text x="170" y="108" text-anchor="middle" font-size="12" fill="#f3e5f5">当前时段的目标</text>
+  <text x="170" y="128" text-anchor="middle" font-size="12" fill="#f3e5f5">（我本来该干什么）</text>
+
+  <!-- 输入 2 -->
+  <rect x="40" y="210" width="260" height="104" rx="12" fill="url(#d5-gIn2)" stroke="#0d47a1" stroke-width="2"/>
+  <text x="170" y="244" text-anchor="middle" font-size="14" font-weight="700" fill="#fff">IN 2 · 实时状态</text>
+  <text x="170" y="268" text-anchor="middle" font-size="12" fill="#e3f2fd">心跳持续刷新的状态栏</text>
+  <text x="170" y="288" text-anchor="middle" font-size="12" fill="#e3f2fd">（我现在是什么情况）</text>
+
+  <!-- 输入 3 -->
+  <rect x="40" y="370" width="260" height="104" rx="12" fill="url(#d5-gIn3)" stroke="#1b5e20" stroke-width="2"/>
+  <text x="170" y="404" text-anchor="middle" font-size="14" font-weight="700" fill="#fff">IN 3 · 待处理事件</text>
+  <text x="170" y="428" text-anchor="middle" font-size="12" fill="#e8f5e9">队列一次性 drain 取出</text>
+  <text x="170" y="448" text-anchor="middle" font-size="12" fill="#e8f5e9">（刚才发生了什么）</text>
+
+  <!-- 战术层 -->
+  <rect x="420" y="200" width="200" height="160" rx="16" fill="url(#d5-gCore)" stroke="#b71c1c" stroke-width="3"/>
+  <text x="520" y="250" text-anchor="middle" font-size="17" font-weight="700" fill="#fff">战术层</text>
+  <text x="520" y="278" text-anchor="middle" font-size="12" fill="#ffcdd2">调整「当前时间窗口」</text>
+  <text x="520" y="296" text-anchor="middle" font-size="12" fill="#ffcdd2">的计划</text>
+  <text x="520" y="322" text-anchor="middle" font-size="12" fill="#ffcdd2">三输入缺一不可</text>
+
+  <!-- 输出 1 -->
+  <rect x="740" y="80" width="240" height="120" rx="12" fill="url(#d5-gOut1)" stroke="#006064" stroke-width="2"/>
+  <text x="860" y="120" text-anchor="middle" font-size="14" font-weight="700" fill="#fff">具体动作</text>
+  <text x="860" y="144" text-anchor="middle" font-size="12" fill="#e0f7fa">每个带</text>
+  <text x="860" y="162" text-anchor="middle" font-size="12" fill="#e0f7fa">绝对截止时间</text>
+
+  <!-- 输出 2 -->
+  <rect x="740" y="320" width="240" height="120" rx="12" fill="url(#d5-gOut2)" stroke="#e65100" stroke-width="2"/>
+  <text x="860" y="360" text-anchor="middle" font-size="14" font-weight="700" fill="#fff">否决并重规划</text>
+  <text x="860" y="384" text-anchor="middle" font-size="12" fill="#fff3e0">计划已与现实脱节</text>
+  <text x="860" y="402" text-anchor="middle" font-size="12" fill="#fff3e0">告诉战略层</text>
+
+  <!-- 连线 -->
+  <line x1="300" y1="100" x2="420" y2="230" stroke="#6a1b9a" stroke-width="2.5" marker-end="url(#d5-arrPurple)"/>
+  <line x1="300" y1="262" x2="420" y2="280" stroke="#1565c0" stroke-width="2.5" marker-end="url(#d5-arrBlue)"/>
+  <line x1="300" y1="424" x2="420" y2="330" stroke="#2e7d32" stroke-width="2.5" marker-end="url(#d5-arrGreen)"/>
+
+  <line x1="620" y1="250" x2="740" y2="150" stroke="#00838f" stroke-width="2.5" marker-end="url(#d5-arrCyan)"/>
+  <line x1="620" y1="310" x2="740" y2="380" stroke="#e65100" stroke-width="2.5" stroke-dasharray="6 5" marker-end="url(#d5-arrOrange)"/>
+
+  <text x="520" y="530" text-anchor="middle" font-size="12.5" fill="#546e7a">输出永远是同一种东西：对当前时间窗口的规划调整。</text>
+</svg>

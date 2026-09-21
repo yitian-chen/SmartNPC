@@ -1,0 +1,77 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="720" viewBox="0 0 1000 720" font-family="'Segoe UI','Microsoft YaHei',sans-serif">
+  <defs>
+    <linearGradient id="d3-gFast" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ef5350"/><stop offset="1" stop-color="#c62828"/></linearGradient>
+    <linearGradient id="d3-gRouter" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fb8c00"/><stop offset="1" stop-color="#ef6c00"/></linearGradient>
+    <linearGradient id="d3-gQueue" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#43a047"/><stop offset="1" stop-color="#2e7d32"/></linearGradient>
+    <linearGradient id="d3-gThink" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#8e24aa"/><stop offset="1" stop-color="#6a1b9a"/></linearGradient>
+    <linearGradient id="d3-gEdge" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#78909c"/><stop offset="1" stop-color="#546e7a"/></linearGradient>
+    <marker id="d3-arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#455a64"/></marker>
+    <marker id="d3-arrRed" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#c62828"/></marker>
+    <marker id="d3-arrOrange" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#e65100"/></marker>
+    <marker id="d3-arrGreen" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#2e7d32"/></marker>
+    <marker id="d3-arrPurple" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#6a1b9a"/></marker>
+  </defs>
+
+  <!-- 事件入口 -->
+  <rect x="350" y="30" width="300" height="66" rx="12" fill="url(#d3-gEdge)" stroke="#37474f" stroke-width="2"/>
+  <text x="500" y="60" text-anchor="middle" font-size="16" font-weight="700" fill="#fff">UE 推送的事件</text>
+  <text x="500" y="80" text-anchor="middle" font-size="12" fill="#eceff1">反应层唯一入口</text>
+
+  <!-- force 判断 -->
+  <polygon points="500,140 575,205 500,270 425,205" fill="#eceff1" stroke="#546e7a" stroke-width="2"/>
+  <text x="500" y="200" text-anchor="middle" font-size="13" font-weight="700" fill="#37474f">带 force 标记？</text>
+  <text x="500" y="218" text-anchor="middle" font-size="11" fill="#546e7a">（UE 打标）</text>
+
+  <!-- 立即打断（红） -->
+  <rect x="60" y="300" width="360" height="96" rx="12" fill="url(#d3-gFast)" stroke="#b71c1c" stroke-width="3"/>
+  <text x="240" y="334" text-anchor="middle" font-size="16" font-weight="700" fill="#fff">立即打断（硬保证）</text>
+  <text x="240" y="358" text-anchor="middle" font-size="12" fill="#ffcdd2">不路由 · 不 LLM · 不判断</text>
+  <text x="240" y="376" text-anchor="middle" font-size="12" fill="#ffcdd2">延迟：微秒级</text>
+
+  <!-- LLM 路由（橙） -->
+  <rect x="600" y="300" width="360" height="96" rx="12" fill="url(#d3-gRouter)" stroke="#e65100" stroke-width="2"/>
+  <text x="780" y="334" text-anchor="middle" font-size="16" font-weight="700" fill="#fff">LLM 路由</text>
+  <text x="780" y="358" text-anchor="middle" font-size="12" fill="#fff3e0">够紧急、现在就打断？</text>
+  <text x="780" y="376" text-anchor="middle" font-size="12" fill="#fff3e0">延迟：几百毫秒</text>
+
+  <!-- 队列（绿） -->
+  <rect x="600" y="470" width="360" height="96" rx="12" fill="url(#d3-gQueue)" stroke="#1b5e20" stroke-width="2"/>
+  <text x="780" y="504" text-anchor="middle" font-size="16" font-weight="700" fill="#fff">待处理队列</text>
+  <text x="780" y="528" text-anchor="middle" font-size="12" fill="#e8f5e9">记住事件</text>
+  <text x="780" y="546" text-anchor="middle" font-size="12" fill="#e8f5e9">当前动作继续跑</text>
+
+  <!-- 战术层（紫） -->
+  <rect x="350" y="610" width="300" height="80" rx="12" fill="url(#d3-gThink)" stroke="#4a148c" stroke-width="2"/>
+  <text x="500" y="646" text-anchor="middle" font-size="16" font-weight="700" fill="#fff">战术层</text>
+  <text x="500" y="668" text-anchor="middle" font-size="12" fill="#f3e5f5">决定实际做什么</text>
+
+  <!-- 连线 -->
+  <line x1="500" y1="96" x2="500" y2="140" stroke="#455a64" stroke-width="2.5" marker-end="url(#d3-arr)"/>
+
+  <!-- force → 立即打断 -->
+  <line x1="425" y1="200" x2="240" y2="300" stroke="#c62828" stroke-width="3.5" marker-end="url(#d3-arrRed)"/>
+  <text x="285" y="238" text-anchor="middle" font-size="11" font-weight="700" fill="#c62828">是 · 第一类（force）</text>
+
+  <!-- force → 路由 -->
+  <line x1="575" y1="200" x2="780" y2="300" stroke="#e65100" stroke-width="2.5" marker-end="url(#d3-arrOrange)"/>
+  <text x="700" y="238" text-anchor="middle" font-size="11" fill="#e65100">否 · 第二类</text>
+
+  <!-- 路由 → 立即打断（紧急） -->
+  <line x1="600" y1="340" x2="420" y2="340" stroke="#e65100" stroke-width="2.5" marker-end="url(#d3-arrOrange)"/>
+  <text x="510" y="330" text-anchor="middle" font-size="11" fill="#e65100">紧急</text>
+
+  <!-- 路由 → 队列（不紧急） -->
+  <line x1="780" y1="396" x2="780" y2="470" stroke="#e65100" stroke-width="2.5" marker-end="url(#d3-arrOrange)"/>
+  <text x="792" y="436" text-anchor="start" font-size="11" fill="#e65100">不紧急</text>
+
+  <!-- 立即打断 → 战术层 -->
+  <line x1="240" y1="396" x2="440" y2="610" stroke="#6a1b9a" stroke-width="2.5" marker-end="url(#d3-arrPurple)"/>
+  <text x="300" y="520" text-anchor="middle" font-size="11" fill="#6a1b9a">打断</text>
+
+  <!-- 队列 → 战术层（安全点 drain） -->
+  <path d="M600 518 L520 518 L520 610" fill="none" stroke="#2e7d32" stroke-width="2.5" stroke-dasharray="6 5" marker-end="url(#d3-arrGreen)"/>
+  <text x="472" y="540" text-anchor="middle" font-size="11" fill="#2e7d32">安全点 drain</text>
+  <text x="470" y="556" text-anchor="middle" font-size="10" fill="#2e7d32">（当前动作做完）</text>
+
+  <text x="500" y="705" text-anchor="middle" font-size="12.5" fill="#546e7a">红色 = 硬保证　橙色 = 判断　绿色 = 等待</text>
+</svg>

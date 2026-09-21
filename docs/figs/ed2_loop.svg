@@ -1,0 +1,113 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="780" viewBox="0 0 1120 780" font-family="'Segoe UI','Microsoft YaHei',sans-serif">
+  <defs>
+    <linearGradient id="d2-gStep" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#1e88e5"/><stop offset="1" stop-color="#1565c0"/></linearGradient>
+    <linearGradient id="d2-gHeart" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ef5350"/><stop offset="1" stop-color="#c62828"/></linearGradient>
+    <linearGradient id="d2-gStay" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#43a047"/><stop offset="1" stop-color="#2e7d32"/></linearGradient>
+    <linearGradient id="d2-gOk" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#00acc1"/><stop offset="1" stop-color="#00838f"/></linearGradient>
+    <linearGradient id="d2-gBad" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fb8c00"/><stop offset="1" stop-color="#ef6c00"/></linearGradient>
+    <linearGradient id="d2-gEdge" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#78909c"/><stop offset="1" stop-color="#546e7a"/></linearGradient>
+    <marker id="d2-arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#455a64"/></marker>
+    <marker id="d2-arrBlue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1565c0"/></marker>
+    <marker id="d2-arrRed" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#c62828"/></marker>
+    <marker id="d2-arrGreen" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#2e7d32"/></marker>
+    <marker id="d2-arrCyan" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#00838f"/></marker>
+    <marker id="d2-arrOrange" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#e65100"/></marker>
+  </defs>
+
+  <!-- 主干链 -->
+  <rect x="70" y="40" width="260" height="64" rx="10" fill="url(#d2-gEdge)" stroke="#37474f" stroke-width="2"/>
+  <text x="200" y="78" text-anchor="middle" font-size="15" font-weight="700" fill="#fff">时段定时器触发</text>
+
+  <rect x="70" y="150" width="260" height="100" rx="10" fill="url(#d2-gStep)" stroke="#0d47a1" stroke-width="2"/>
+  <text x="200" y="186" text-anchor="middle" font-size="15" font-weight="700" fill="#fff">① 战术拆解</text>
+  <text x="200" y="210" text-anchor="middle" font-size="12" fill="#e3f2fd">把时段目标拆成动作</text>
+  <text x="200" y="228" text-anchor="middle" font-size="12" fill="#e3f2fd">每个带绝对截止时间</text>
+
+  <rect x="70" y="290" width="260" height="100" rx="10" fill="url(#d2-gStep)" stroke="#0d47a1" stroke-width="2"/>
+  <text x="200" y="326" text-anchor="middle" font-size="15" font-weight="700" fill="#fff">② 下发动作</text>
+  <text x="200" y="350" text-anchor="middle" font-size="12" fill="#e3f2fd">发 action_command 给 UE</text>
+  <text x="200" y="368" text-anchor="middle" font-size="12" fill="#e3f2fd">不等回复</text>
+
+  <!-- 等待状态（心脏） -->
+  <rect x="110" y="440" width="500" height="130" rx="16" fill="url(#d2-gHeart)" stroke="#b71c1c" stroke-width="3"/>
+  <path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z" transform="translate(150,472) scale(1.6)" fill="#fff" opacity="0.95"/>
+  <text x="250" y="490" text-anchor="middle" font-size="19" font-weight="700" fill="#fff">③ 等待状态 · 安全点</text>
+  <text x="250" y="520" text-anchor="middle" font-size="13" fill="#fff">全程醒着，UE 动作继续执行</text>
+  <text x="250" y="542" text-anchor="middle" font-size="12" fill="#ffcdd2">唯一允许切换任务的位置</text>
+
+  <!-- ④ 重规划 -->
+  <rect x="70" y="600" width="260" height="100" rx="10" fill="url(#d2-gStep)" stroke="#0d47a1" stroke-width="2"/>
+  <text x="200" y="636" text-anchor="middle" font-size="15" font-weight="700" fill="#fff">④ 重规划</text>
+  <text x="200" y="660" text-anchor="middle" font-size="12" fill="#e3f2fd">用最新世界状态重建本时段</text>
+  <text x="200" y="678" text-anchor="middle" font-size="12" fill="#e3f2fd">并 drain 队列</text>
+
+  <!-- 右侧出口 -->
+  <rect x="650" y="150" width="250" height="64" rx="10" fill="url(#d2-gOk)" stroke="#006064" stroke-width="2"/>
+  <text x="775" y="178" text-anchor="middle" font-size="15" font-weight="700" fill="#fff">完成</text>
+  <text x="775" y="198" text-anchor="middle" font-size="12" fill="#e0f7fa">截止时间到</text>
+
+  <polygon points="775,250 855,295 775,340 695,295" fill="#eceff1" stroke="#546e7a" stroke-width="2"/>
+  <text x="775" y="292" text-anchor="middle" font-size="13" font-weight="700" fill="#37474f">本时段还有</text>
+  <text x="775" y="308" text-anchor="middle" font-size="13" font-weight="700" fill="#37474f">动作？</text>
+
+  <rect x="650" y="370" width="250" height="64" rx="10" fill="url(#d2-gEdge)" stroke="#37474f" stroke-width="2"/>
+  <text x="775" y="398" text-anchor="middle" font-size="15" font-weight="700" fill="#fff">空闲</text>
+  <text x="775" y="418" text-anchor="middle" font-size="12" fill="#eceff1">等下一个时段定时器</text>
+
+  <rect x="650" y="440" width="250" height="64" rx="10" fill="url(#d2-gStay)" stroke="#1b5e20" stroke-width="2"/>
+  <text x="775" y="468" text-anchor="middle" font-size="15" font-weight="700" fill="#fff">入队</text>
+  <text x="775" y="488" text-anchor="middle" font-size="12" fill="#e8f5e9">不打断</text>
+
+  <rect x="650" y="550" width="250" height="64" rx="10" fill="url(#d2-gBad)" stroke="#e65100" stroke-width="2"/>
+  <text x="775" y="578" text-anchor="middle" font-size="15" font-weight="700" fill="#fff">打断</text>
+  <text x="775" y="598" text-anchor="middle" font-size="12" fill="#fff3e0">紧急事件 · 带进度</text>
+
+  <rect x="650" y="660" width="250" height="64" rx="10" fill="url(#d2-gBad)" stroke="#e65100" stroke-width="2"/>
+  <text x="775" y="688" text-anchor="middle" font-size="15" font-weight="700" fill="#fff">失败</text>
+  <text x="775" y="708" text-anchor="middle" font-size="12" fill="#fff3e0">UE 上报</text>
+
+  <!-- 连线 -->
+  <line x1="200" y1="104" x2="200" y2="150" stroke="#1565c0" stroke-width="2.5" marker-end="url(#d2-arrBlue)"/>
+  <line x1="200" y1="250" x2="200" y2="290" stroke="#1565c0" stroke-width="2.5" marker-end="url(#d2-arrBlue)"/>
+  <line x1="200" y1="390" x2="300" y2="440" stroke="#1565c0" stroke-width="2.5" marker-end="url(#d2-arrBlue)"/>
+
+  <!-- ③ → 入队（绿色支路，不退出） -->
+  <line x1="610" y1="478" x2="650" y2="470" stroke="#2e7d32" stroke-width="2.5" marker-end="url(#d2-arrGreen)"/>
+  <text x="628" y="456" text-anchor="middle" font-size="11" fill="#2e7d32">非紧急事件</text>
+  <line x1="650" y1="498" x2="610" y2="532" stroke="#2e7d32" stroke-width="2.5" stroke-dasharray="6 5" marker-end="url(#d2-arrGreen)"/>
+  <text x="628" y="524" text-anchor="middle" font-size="11" fill="#2e7d32">入队后继续等</text>
+
+  <!-- ③ → 完成（截止时间到） -->
+  <path d="M480 440 L480 182 L650 182" fill="none" stroke="#00838f" stroke-width="2.5" marker-end="url(#d2-arrCyan)"/>
+  <text x="486" y="300" text-anchor="start" font-size="11" fill="#00838f">截止时间到</text>
+
+  <!-- 完成 → 判断 -->
+  <line x1="775" y1="214" x2="775" y2="250" stroke="#00838f" stroke-width="2.5" marker-end="url(#d2-arrCyan)"/>
+
+  <!-- 判断 → ②（还有） -->
+  <path d="M900 295 L900 340 L330 340" fill="none" stroke="#00838f" stroke-width="2.5" stroke-dasharray="6 5" marker-end="url(#d2-arrCyan)"/>
+  <text x="640" y="332" text-anchor="middle" font-size="11" fill="#00838f">还有</text>
+
+  <!-- 判断 → 空闲（没有） -->
+  <line x1="775" y1="340" x2="775" y2="370" stroke="#546e7a" stroke-width="2.5" marker-end="url(#d2-arr)"/>
+  <text x="788" y="358" text-anchor="start" font-size="11" fill="#546e7a">没有</text>
+
+  <!-- ③ → 打断 -->
+  <line x1="610" y1="545" x2="650" y2="580" stroke="#e65100" stroke-width="2.5" marker-end="url(#d2-arrOrange)"/>
+  <text x="626" y="572" text-anchor="middle" font-size="11" fill="#e65100">紧急事件</text>
+
+  <!-- ③ → 失败 -->
+  <line x1="360" y1="570" x2="650" y2="690" stroke="#e65100" stroke-width="2.5" marker-end="url(#d2-arrOrange)"/>
+  <text x="470" y="645" text-anchor="middle" font-size="11" fill="#e65100">UE 报失败</text>
+
+  <!-- 打断 → ④ -->
+  <line x1="650" y1="600" x2="330" y2="650" stroke="#e65100" stroke-width="2.5" marker-end="url(#d2-arrOrange)"/>
+  <!-- 失败 → ④ -->
+  <line x1="650" y1="690" x2="330" y2="662" stroke="#e65100" stroke-width="2.5" marker-end="url(#d2-arrOrange)"/>
+
+  <!-- ④ → ① 重新规划 -->
+  <path d="M200 600 L40 600 L40 200 L70 200" fill="none" stroke="#1565c0" stroke-width="2.5" stroke-dasharray="6 5" marker-end="url(#d2-arrBlue)"/>
+  <text x="30" y="408" text-anchor="start" font-size="11" fill="#1565c0">重新规划</text>
+
+  <text x="560" y="752" text-anchor="middle" font-size="12.5" fill="#546e7a">绿色支路不会退出等待（入队后继续等）；青 / 橙 / 红三条才真正退出等待。</text>
+</svg>
