@@ -474,17 +474,15 @@ func TestGenerateTacticalPlan_NoRetryOnNon4001(t *testing.T) {
 
 // ─── 精简引用（compact）模式 ─────────────────────────────────
 
-// lastUserPromptOf 取 SendLoop 捕获请求的末条 user 内容（[system,...历史,user]）。
+// lastUserPromptOf 取 SendLoop 捕获请求中最后一条非状态栏的 user 内容
+// （[system,...历史,user,状态栏]——末尾 <agent_state> 是瞬态注入，跳过）。
 func lastUserPromptOf(t *testing.T, msgs []llmtypes.Message) string {
 	t.Helper()
-	if len(msgs) == 0 {
-		t.Fatal("captured messages empty")
+	last := lastUserPromptContent(msgs)
+	if last == "" {
+		t.Fatal("captured messages carry no user prompt")
 	}
-	last := msgs[len(msgs)-1]
-	if last.Role != "user" {
-		t.Fatalf("last message role = %q, want user", last.Role)
-	}
-	return last.Content
+	return last
 }
 
 // speakToolCallResp 构造一个有效的战术成功响应：speak（首动作）+ InteractSmartObject
@@ -669,8 +667,8 @@ func TestBuildTacticalPrompt_NilPhysical(t *testing.T) {
 	if !strings.Contains(promptText, "物理状态") {
 		t.Errorf("prompt should contain '物理状态' with default values for nil physical, got: %s", promptText)
 	}
-	if !strings.Contains(promptText, "电量 高") {
-		t.Errorf("prompt should contain default band 电量 高 for nil physical, got: %s", promptText)
+	if !strings.Contains(promptText, "电量：高") {
+		t.Errorf("prompt should contain default band 电量：高 for nil physical, got: %s", promptText)
 	}
 	// slot 为空时不应有时长提示行
 	if strings.Contains(promptText, "请让步骤总时长接近此时长") {
@@ -685,19 +683,19 @@ func TestBuildTacticalPrompt_ZeroPhysical(t *testing.T) {
 	if !strings.Contains(promptText, "物理状态") {
 		t.Errorf("prompt should contain '物理状态' with default values for all-zero physical, got: %s", promptText)
 	}
-	if !strings.Contains(promptText, "电量 高") {
-		t.Errorf("prompt should contain default band 电量 高 for all-zero physical, got: %s", promptText)
+	if !strings.Contains(promptText, "电量：高") {
+		t.Errorf("prompt should contain default band 电量：高 for all-zero physical, got: %s", promptText)
 	}
 }
 
 func TestBuildTacticalPrompt_WithPhysical(t *testing.T) {
 	promptText := prompt.BuildTactical(prompt.TacticalInput{Goal: "装配", Zone: "main_workshop", TimeOfDay: "09:00", Slot: "09:00-12:00", Physical: &protocol.PhysicalState{Energy: 75, Fatigue: 30, JointWear: 5}, KB: nil, Hint: "", AgentID: ""})
 	// 数值以分段标签呈现：75→中等、30→精神饱满、5→良好
-	if !strings.Contains(promptText, "电量 中等") {
-		t.Errorf("prompt should contain '电量 中等' (75), got: %s", promptText)
+	if !strings.Contains(promptText, "电量：中等") {
+		t.Errorf("prompt should contain '电量：中等' (75), got: %s", promptText)
 	}
-	if !strings.Contains(promptText, "疲劳 精神饱满") {
-		t.Errorf("prompt should contain '疲劳 精神饱满' (30), got: %s", promptText)
+	if !strings.Contains(promptText, "疲劳度：精神饱满") {
+		t.Errorf("prompt should contain '疲劳度：精神饱满' (30), got: %s", promptText)
 	}
 	// slot 有效时应包含时长提示
 	if !strings.Contains(promptText, "当前时段 09:00-12:00，约 180 分钟") {
@@ -1524,15 +1522,15 @@ func TestFillDefaultTimeToStopForRest_KeepsExisting(t *testing.T) {
 	}
 }
 
-func TestFillDefaultTimeToStopForRest_TailRestUntouched(t *testing.T) {
+func TestFillDefaultTimeToStopForRest_TailRestFilled(t *testing.T) {
 	actions := []plannedAction{
 		{Action: "speak", Params: map[string]any{"content": "hi"}},
 		{Action: "work_shift", Params: map[string]any{"interaction": "assemble", "semantic_group": "workbench"}},
 		{Action: "InteractSmartObject", Params: map[string]any{"interaction": "rest", "semantic_group": "bench"}},
 	}
 	got := fillDefaultDurationForRest(actions)
-	if _, ok := got[2].Params["duration"]; ok {
-		t.Fatalf("tail rest should stay without duration, got %v", got[2].Params)
+	if v, ok := got[2].Params["duration"]; !ok || v != defaultRestDurationSec {
+		t.Fatalf("tail rest should also get default duration=%d, got %v", defaultRestDurationSec, got[2].Params["duration"])
 	}
 }
 
@@ -1550,13 +1548,13 @@ func TestFillDefaultTimeToStopForRest_NonRestUntouched(t *testing.T) {
 	}
 }
 
-func TestFillDefaultTimeToStopForRest_SingleActionNoop(t *testing.T) {
+func TestFillDefaultTimeToStopForRest_SingleActionFilled(t *testing.T) {
 	actions := []plannedAction{
 		{Action: "InteractSmartObject", Params: map[string]any{"interaction": "rest", "semantic_group": "bench"}},
 	}
 	got := fillDefaultDurationForRest(actions)
-	if _, ok := got[0].Params["duration"]; ok {
-		t.Fatalf("single-action queue should be a no-op, got %v", got[0].Params)
+	if v, ok := got[0].Params["duration"]; !ok || v != defaultRestDurationSec {
+		t.Fatalf("single-action queue should also get default duration=%d, got %v", defaultRestDurationSec, got[0].Params["duration"])
 	}
 }
 
@@ -1598,15 +1596,15 @@ func TestFillDefaultTimeToStopForWork_KeepsExisting(t *testing.T) {
 	}
 }
 
-func TestFillDefaultTimeToStopForWork_TailWorkUntouched(t *testing.T) {
+func TestFillDefaultTimeToStopForWork_TailWorkFilled(t *testing.T) {
 	actions := []plannedAction{
 		{Action: "speak", Params: map[string]any{"content": "hi"}},
 		{Action: "InteractSmartObject", Params: map[string]any{"interaction": "rest", "semantic_group": "bench"}},
 		{Action: "work_shift", Params: map[string]any{"interaction": "assemble", "semantic_group": "workbench"}},
 	}
 	got := fillDefaultDurationForWork(actions)
-	if _, ok := got[2].Params["duration"]; ok {
-		t.Fatalf("tail work should stay without duration, got %v", got[2].Params)
+	if v, ok := got[2].Params["duration"]; !ok || v != defaultWorkDurationSec {
+		t.Fatalf("tail work should also get default duration=%d, got %v", defaultWorkDurationSec, got[2].Params["duration"])
 	}
 }
 

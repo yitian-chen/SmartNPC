@@ -2,6 +2,7 @@ package protocol
 
 import (
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -170,7 +171,7 @@ func TestActionLifecyclePayloads(t *testing.T) {
 		t.Fatalf("action_started round-trip failed: %+v", gotAck)
 	}
 
-	done := ActionCompletedPayload{ActionID: "act_001", Result: ResultSuccess, DurationMs: 30200, Progress: 1.0}
+	done := ActionCompletedPayload{ActionID: "act_001", Result: ResultSuccess, DurationMs: 30200}
 	raw, _ = json.Marshal(done)
 	var gotDone ActionCompletedPayload
 	if json.Unmarshal(raw, &gotDone) != nil || gotDone.Result != ResultSuccess || gotDone.DurationMs != 30200 {
@@ -179,7 +180,7 @@ func TestActionLifecyclePayloads(t *testing.T) {
 
 	// 验证 failed + reason 字段能正确 round-trip（UE 同事新增的 reason 字段）
 	failDone := ActionCompletedPayload{
-		ActionID: "act_002", Result: ResultFailed, Reason: "寻路不可达", Progress: 0.3,
+		ActionID: "act_002", Result: ResultFailed, Reason: "寻路不可达",
 	}
 	rawFail, _ := json.Marshal(failDone)
 	var gotFail ActionCompletedPayload
@@ -392,5 +393,232 @@ func TestDialoguePayloadRoundTrip(t *testing.T) {
 	var gotInt ChatTurnPayload
 	if err := json.Unmarshal(raw, &gotInt); err != nil || !gotInt.End || !gotInt.Interrupted {
 		t.Fatalf("chat_turn interrupted round-trip failed: %+v err=%v", gotInt, err)
+	}
+}
+
+// TestWorldEventPayloadDocExample unmarshals the verbatim §8.1 example
+// (K-03 malfunction broadcast) from docs/AgentTown_WorldEvent_Protocol.md
+// and asserts every field — the wire format must match the doc exactly.
+func TestWorldEventPayloadDocExample(t *testing.T) {
+	frame := `{
+  "version": "1.0",
+  "msg_id": "uuid-a",
+  "seq": 4001,
+  "timestamp": 1719456402000,
+  "type": "world_event",
+  "agent_id": "H-03",
+  "payload": {
+    "event_id": "evt_20260917_000042",
+    "category": "world",
+    "event_type": "malfunction",
+    "force": false,
+    "severity": 7,
+    "subject": "K-03",
+    "game_time": "D12 10:47:03",
+    "location": "archive_station",
+    "occurred_at": 1719456402000,
+    "data": {
+      "target": "K-03",
+      "description": "K-03 关节锁死，需要救援"
+    }
+  }
+}`
+	var env Envelope
+	if err := json.Unmarshal([]byte(frame), &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if env.Type != TypeWorldEvent || env.AgentID != "H-03" || env.Seq != 4001 {
+		t.Fatalf("envelope fields lost: %+v", env)
+	}
+	var p WorldEventPayload
+	if err := json.Unmarshal(env.Payload, &p); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if p.EventID != "evt_20260917_000042" ||
+		p.Category != CategoryWorld ||
+		p.EventType != EventTypeMalfunction ||
+		p.Force ||
+		p.Severity != 7 ||
+		p.Subject != "K-03" ||
+		p.GameTime != "D12 10:47:03" ||
+		p.Location != "archive_station" ||
+		p.OccurredAt != 1719456402000 {
+		t.Fatalf("payload fields lost: %+v", p)
+	}
+	var d WorldEventData
+	if err := json.Unmarshal(p.Data, &d); err != nil {
+		t.Fatalf("unmarshal world data: %v", err)
+	}
+	if d.Target != "K-03" || d.Description != "K-03 关节锁死，需要救援" {
+		t.Fatalf("world data fields lost: %+v", d)
+	}
+}
+
+// TestWorldEventPayloadRoundTrip marshals a struct through the envelope and
+// back, asserting that required fields (force/severity/occurred_at/data)
+// are always serialized — none of them may carry omitempty — and optional
+// fields (subject/location) are omitted when empty.
+func TestWorldEventPayloadRoundTrip(t *testing.T) {
+	p := WorldEventPayload{
+		EventID:    "evt_20260917_000044",
+		Category:   CategoryPlayerInteraction,
+		EventType:  EventTypePlayerAttacked,
+		Force:      true,
+		Severity:   10,
+		Subject:    "H-03",
+		GameTime:   "D12 12:00:00",
+		Location:   "central_plaza",
+		OccurredAt: 1719456410000,
+		Data:       json.RawMessage(`{"attacker":"player_1","damage":20,"damage_type":"physical"}`),
+	}
+	raw, err := json.Marshal(p)
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	// Required keys must always be present, even at zero values.
+	for _, key := range []string{"event_id", "category", "event_type", "force", "severity", "game_time", "occurred_at", "data"} {
+		if !strings.Contains(string(raw), `"`+key+`":`) {
+			t.Fatalf("required key %q missing from marshal: %s", key, raw)
+		}
+	}
+
+	env := Envelope{Version: Version, MsgID: "uuid-c", Seq: 4003, Timestamp: 1719456410000, Type: TypeWorldEvent, AgentID: "H-03", Payload: raw}
+	frame, err := json.Marshal(env)
+	if err != nil {
+		t.Fatalf("marshal envelope: %v", err)
+	}
+	var gotEnv Envelope
+	if err := json.Unmarshal(frame, &gotEnv); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	var got WorldEventPayload
+	if err := json.Unmarshal(gotEnv.Payload, &got); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if !reflect.DeepEqual(got, p) {
+		t.Fatalf("round-trip mismatch:\n got %+v\nwant %+v", got, p)
+	}
+
+	// Optional fields are omitted when empty.
+	bare := WorldEventPayload{EventID: "e", Category: CategoryWorld, EventType: EventTypeMalfunction, GameTime: "D1 00:00:00", Data: json.RawMessage(`{}`)}
+	bareRaw, _ := json.Marshal(bare)
+	if strings.Contains(string(bareRaw), "subject") || strings.Contains(string(bareRaw), "location") {
+		t.Fatalf("optional fields should be omitted when empty: %s", bareRaw)
+	}
+	// force=false must serialize explicitly (required field, default false).
+	if !strings.Contains(string(bareRaw), `"force":false`) {
+		t.Fatalf("force must serialize even when false: %s", bareRaw)
+	}
+}
+
+// TestWorldEventDataBlocks unmarshals one doc-style example per category
+// into the typed data structs (§三).
+func TestWorldEventDataBlocks(t *testing.T) {
+	cases := []struct {
+		name  string
+		data  string
+		check func(t *testing.T, raw json.RawMessage)
+	}{
+		{"physical_threshold energy_below", `{"attribute":"energy","value":19.8,"threshold":20,"direction":"below"}`, func(t *testing.T, raw json.RawMessage) {
+			var d PhysicalThresholdData
+			if err := json.Unmarshal(raw, &d); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if d.Attribute != ThresholdAttrEnergy || d.Value != 19.8 || d.Threshold != 20 || d.Direction != ThresholdDirectionBelow {
+				t.Fatalf("physical_threshold data lost: %+v", d)
+			}
+		}},
+		{"spatial zone_enter", `{"zone":"archive_station","from":"central_plaza"}`, func(t *testing.T, raw json.RawMessage) {
+			var d SpatialData
+			if err := json.Unmarshal(raw, &d); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if d.Zone != "archive_station" || d.From != "central_plaza" || d.To != "" {
+				t.Fatalf("spatial data lost: %+v", d)
+			}
+		}},
+		{"spatial agent_nearby", `{"other_agent":"H-02","distance_cm":350}`, func(t *testing.T, raw json.RawMessage) {
+			var d SpatialData
+			if err := json.Unmarshal(raw, &d); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if d.OtherAgent != "H-02" || d.DistanceCm != 350 {
+				t.Fatalf("spatial data lost: %+v", d)
+			}
+		}},
+		{"social chat_invite_incoming", `{"conv_id":"conv_001","from":"H-02","content":"老陈，借个工具？"}`, func(t *testing.T, raw json.RawMessage) {
+			var d SocialData
+			if err := json.Unmarshal(raw, &d); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if d.ConvID != "conv_001" || d.From != "H-02" || d.Content != "老陈，借个工具？" {
+				t.Fatalf("social data lost: %+v", d)
+			}
+		}},
+		{"social mentioned", `{"source":"H-02","context":"提到你去过档案馆"}`, func(t *testing.T, raw json.RawMessage) {
+			var d SocialData
+			if err := json.Unmarshal(raw, &d); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if d.Source != "H-02" || d.Context != "提到你去过档案馆" {
+				t.Fatalf("social data lost: %+v", d)
+			}
+		}},
+		{"action_anomaly action_failed", `{"action_id":"act_123","cmd":"MoveTo","reason":"unreachable"}`, func(t *testing.T, raw json.RawMessage) {
+			var d ActionAnomalyData
+			if err := json.Unmarshal(raw, &d); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if d.ActionID != "act_123" || d.Cmd != "MoveTo" || d.Reason != "unreachable" {
+				t.Fatalf("action_anomaly data lost: %+v", d)
+			}
+		}},
+		{"action_anomaly smartobject_occupied", `{"action_id":"act_124","semantic_group":"workbench","occupied_by":"H-02"}`, func(t *testing.T, raw json.RawMessage) {
+			var d ActionAnomalyData
+			if err := json.Unmarshal(raw, &d); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if d.ActionID != "act_124" || d.SemanticGroup != "workbench" || d.OccupiedBy != "H-02" {
+				t.Fatalf("action_anomaly data lost: %+v", d)
+			}
+		}},
+		{"player_interaction combat_exit", `{"attacker":"player_1","outcome":"escaped"}`, func(t *testing.T, raw json.RawMessage) {
+			var d PlayerInteractionData
+			if err := json.Unmarshal(raw, &d); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if d.Attacker != "player_1" || d.Outcome != "escaped" {
+				t.Fatalf("player_interaction data lost: %+v", d)
+			}
+		}},
+		{"player_interaction player_interact", `{"player":"player_1","action":"greet","detail":"挥手"}`, func(t *testing.T, raw json.RawMessage) {
+			var d PlayerInteractionData
+			if err := json.Unmarshal(raw, &d); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if d.Player != "player_1" || d.Action != "greet" || d.Detail != "挥手" {
+				t.Fatalf("player_interaction data lost: %+v", d)
+			}
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.check(t, json.RawMessage(tc.data))
+		})
+	}
+}
+
+// TestWorldEventUnknownTypeTolerated asserts forward compatibility: an
+// unrecognized event_type within a known category (added by a later
+// protocol revision) still unmarshals, since Data stays RawMessage and the
+// category drives the agent-side branch.
+func TestWorldEventUnknownTypeTolerated(t *testing.T) {
+	raw := `{"event_id":"evt_1","category":"world","event_type":"future_happening","force":false,"severity":3,"game_time":"D12 09:00:00","occurred_at":1,"data":{"x":1}}`
+	var p WorldEventPayload
+	if err := json.Unmarshal([]byte(raw), &p); err != nil {
+		t.Fatalf("unknown event_type must still unmarshal: %v", err)
+	}
+	if p.Category != CategoryWorld || p.EventType != "future_happening" || string(p.Data) != `{"x":1}` {
+		t.Fatalf("unexpected fields: %+v", p)
 	}
 }

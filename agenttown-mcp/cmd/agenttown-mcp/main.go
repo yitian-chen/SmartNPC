@@ -30,6 +30,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -83,6 +84,39 @@ type agentContext struct {
 	completedBeforeArm    map[string]struct{}    // action_id completed before timer armed
 	agentEpoch            int64
 	online                bool // coordination aspect (business online flag is in AgentState)
+	// tacticalLLMCancel cancels the in-flight tactical-layer LLM call (nil =
+	// none). Registered by generateTacticalPlan around agenticTurn so the
+	// force path (world_event_dispatch.go) can kill the "blind window"
+	// (设计文档 §3.3) synchronously in the WS receive path. tacticalLLMGen
+	// is the registration generation: a stale call's deregister must not
+	// clear a newer call's registration.
+	tacticalLLMCancel context.CancelFunc
+	tacticalLLMGen    uint64
+
+	// autoPlanEnabled mirrors the --auto-plan flag: strategic replan (P3-9)
+	// must not run in manual mode. Set once at registerAgent; immutable after.
+	autoPlanEnabled bool
+
+	// compacting guards maybeCompactConversation against concurrent
+	// agenticTurns both crossing the threshold (double summarize + stale
+	// overwrite losing messages appended in between).
+	compacting atomic.Bool
+
+	// Reaction-task guard state (P2-6, 设计文档 §4.5 护栏): while a reaction
+	// (interrupt-generated planning window) is active, a new ROUTER interrupt
+	// needs strictly higher severity to cut it (reactionSeverity), and the
+	// whole window is bounded by reactionDeadlineGameSec (authoritative game
+	// seconds). Cleared on deadline expiry / schedule refill / slot switch /
+	// agent stop. Force events ignore the ladder (§4.2 不可否决).
+	reactionActive          bool
+	reactionSeverity        int
+	reactionDeadlineGameSec float64
+	// reactionDesc 记录引发当前反应窗口的事件描述（路由/打断 hint 摘要），
+	// 供 buildInput 注入路由 prompt——让路由 LLM 看到"当前动作是对某事件
+	// 的反应"而不仅看到 MoveTo 的字面目标（2026-09-20 仿真：combat_exit
+	// 到达时路由判"未处于逃跑状态"，因为 MoveTo(residential_quarters)
+	// 看不出是逃跑）。
+	reactionDesc string
 
 	// LLM clients (immutable after construction, no lock needed)
 	strategicHc llmClient
@@ -159,37 +193,32 @@ func redactDSN(dsn string) string {
 }
 
 // observePerception 存储最新感知payload，供战术层 refill 时读取当前世界状态。
-// 反应层：检测 zone 变化 / 新物体出现 / 周期性触发，若显著变化则返回 trigger 信息供
-// message handler 异步触发 reactiveRunner.trigger。
-func (a *agentContext) observePerception(payload json.RawMessage) (ReactiveTrigger, string, error) {
+// observePerception 存最新感知 + 检测物理警戒带突破（P4-12 退役后仅剩
+// 此项）。突破时返回 detail（供 runtime 合成 physical_threshold world_event
+// 入队，走路由器裁决）。zone 变化/新物体/周期触发不再产生决策——事件系统
+// （UE world_event / 物理告警合成）接管全部打断判定。
+func (a *agentContext) observePerception(payload json.RawMessage) (string, error) {
 	// coord check under coordMu (release before calling AgentState)
 	a.coordMu.Lock()
 	if a.stopped {
 		a.coordMu.Unlock()
-		return "", "", nil
+		return "", nil
 	}
 	a.coordMu.Unlock()
 
 	upd, err := a.as.SetPerception(payload)
 	if err != nil {
-		return "", "", err
+		return "", err
 	}
-	pCount := upd.PerceptionCount
 
-	// 检测显著变化（zone/新物体）+ 物理警戒带突破。物理状态由 perception_update
-	// 携带全量 3 项（energy/fatigue/joint_wear）上传，SetPerception 写入
-	// latestPhysical 并返回 PrevPhysical/CurPhysical 供此处警戒带检测。
-	// state_report 路径（updateState）作为兜底，在 perception 未带物理状态时补写。
-	trigger, detail := prompt.ShouldTriggerReactive(upd.PrevZone, upd.CurZone, upd.PrevObjectIDs, upd.CurObjectIDs, upd.PrevPhysical, upd.CurPhysical, a.physBands)
-	// 事件类触发优先；无事件时检查周期性触发
-	if trigger == "" {
-		trigger, detail = prompt.ShouldTriggerPeriodic(pCount)
-	}
+	// 物理警戒带突破检测（边沿：从正常跨入警戒那一刻才触发）。物理状态由
+	// perception_update 携带全量 3 项，SetPerception 返回 prev/cur 供检测。
+	_, detail := prompt.ShouldTriggerReactive("", "", nil, nil, upd.PrevPhysical, upd.CurPhysical, a.physBands)
 
 	// 感知是 worker 的主驱动源：每次感知到达都唤醒它检查战术队列
 	// （pop 下一个 / refill 新时段）。tacticalRefill 内部的守卫避免重复 LLM 调用。
 	a.signal()
-	return trigger, detail, nil
+	return detail, nil
 }
 
 // updateState 存储兜底物理状态 + 当前任务进度。物理状态主数据源是
@@ -197,19 +226,20 @@ func (a *agentContext) observePerception(payload json.RawMessage) (ReactiveTrigg
 // 当 perception_update 未携带物理状态时由这里补写 latestPhysical。
 // 反应层：检测物理状态突破警戒带，返回 trigger 信息供 message handler
 // 触发 reactiveRunner。current_task_progress 始终更新（战术层在用）。
-func (a *agentContext) updateState(report protocol.StateReportPayload) (ReactiveTrigger, string) {
+func (a *agentContext) updateState(report protocol.StateReportPayload) string {
 	a.coordMu.Lock()
 	if a.stopped {
 		a.coordMu.Unlock()
-		return "", ""
+		return ""
 	}
 	a.coordMu.Unlock()
 
 	physical := report.PhysicalState
 	prevPhysical := a.as.SetPhysicalState(&physical, cloneTask(report.CurrentTaskProgress))
 
-	// 检测物理警戒带突破（zone/objects 不在此检测，由 observePerception 负责）
-	return prompt.ShouldTriggerReactive("", "", nil, nil, prevPhysical, &physical, a.physBands)
+	// 物理警戒带突破检测（P4-12：唯一保留的触发，供事件合成）。
+	_, detail := prompt.ShouldTriggerReactive("", "", nil, nil, prevPhysical, &physical, a.physBands)
+	return detail
 }
 
 // recordActionCompletion 处理 action_completed。所有来源的 completion 都清
@@ -217,8 +247,12 @@ func (a *agentContext) updateState(report protocol.StateReportPayload) (Reactive
 // 完成（failed/interrupted/error）时触发评估——成功完成是常态，每次都问
 // "要不要打断"意义不大（模型看不到战术层整体规划，只能基于贫乏信息答 continue）。
 // 异常完成才是真正需要反应层介入的时机。
-func (a *agentContext) recordActionCompletion(completion protocol.ActionCompletedPayload) (bool, ReactiveTrigger, string) {
-	res := a.as.RecordActionCompletion(completion.ActionID)
+func (a *agentContext) recordActionCompletion(completion protocol.ActionCompletedPayload) (bool, string) {
+	// 在 RecordActionCompletion 清除 preface 标志之前读取：自己 stop 导致的
+	// interrupted completion 是预期回包，不应合成 action_failed 事件。
+	wasPreRecorded := a.as.LastEndPrefaced()
+
+	res := a.as.RecordActionCompletion(completion.ActionID, completion.Result, completion.Reason)
 	// Stage 4: best-effort action_history recording — only for tracked in-flight
 	// actions (debug /debug/action path doesn't call recordActionStarted, so its
 	// completions have WasInFlight=false and aren't recorded).
@@ -272,17 +306,32 @@ func (a *agentContext) recordActionCompletion(completion protocol.ActionComplete
 	// 反应层触发：仅异常完成触发。detail 用 result 作为去抖维度（避免每次
 	// action_id 不同导致去抖失效），相同 result 在 60s 内不重复触发。
 	if completion.Result == protocol.ResultSuccess {
-		return true, "", ""
+		return true, ""
 	}
 	// self-stop 引发的 interrupted 完成（slot 切换主动 stop）不触发反应层——
 	// 这是计划内的打断，replan 会干扰刚下发的新 action。
 	if isSelfStop {
-		return true, "", ""
+		return true, ""
+	}
+	// 我们自己的打断（force/router/social）导致的 interrupted completion
+	// 也不合成事件——打断已触发 replan，这个 completion 只是预期回包。
+	// 2026-09-20 仿真实测：社交打断 stop → UE 回 interrupted → 被误合成
+	// action_failed → 路由判紧急 → 打断刚下发的社交回应 → 死循环。
+	if wasPreRecorded && completion.Result == protocol.ResultInterrupted {
+		return true, ""
+	}
+	// 未追踪动作（WasInFlight=false）的 interrupted 也不合成——最典型的是
+	// 冷启动：NPC 出生时 UE 侧自带睡眠状态（start_asleep_*），MCP 从未
+	// recordActionStarted 过它；第一个战术动作下发时 UE 自然打断睡眠并回
+	// interrupted。这是正常冷启动流程，不是动作异常（2026-09-20 仿真：
+	// synth_1 即此来源）。
+	if !res.WasInFlight && completion.Result == protocol.ResultInterrupted {
+		return true, ""
 	}
 	// 异常完成：detail 注入 reaction 层 TriggerDetail，含 UE 给出的 reason
 	// （如"寻路不可达"），让 Ollama 看到 UE 侧的具体失败原因再决策。
-	detail := fmt.Sprintf("result=%s reason=%s progress=%.2f",
-		completion.Result, completion.Reason, completion.Progress)
+	detail := fmt.Sprintf("result=%s reason=%s",
+		completion.Result, completion.Reason)
 
 	// Fix A: 失败上下文注入战术层 replanHint。让下一轮战术层 LLM 知道上次
 	// 为什么失败、避免盲重试同一动作（如工作台被占用后无限重试 work_shift）。
@@ -308,7 +357,7 @@ func (a *agentContext) recordActionCompletion(completion protocol.ActionComplete
 		a.as.SetReplanHint(hint)
 	}
 
-	return true, TriggerActionDone, detail
+	return true, detail
 }
 
 // replanHintByReason 根据上次动作失败的 reason 给出针对性的战术层重规划建议。
@@ -468,25 +517,61 @@ func (a *agentContext) loadRelationships(ctx context.Context, agentID string, kb
 // 反应层 replan 进行中（replanInProgress=true）时本方法仍可执行：schedule
 // 切换优先级高于反应层 replan，清掉的 in-flight 状态不会干扰 replan
 // （replan 自己会重新规划，且 replanInProgress 由 replan 路径自己清除）。
-func (a *agentContext) advanceSlotIfNeeded(ws contract.Transport, agentID string, logger *slog.Logger) {
-	// 检查 slot 是否过期（AgentState 内部持锁判断）
+// advanceSlotIfNeeded 检查 game_time 是否超出 currentSlot。返回 true 当且
+// 仅当切换发生在反应任务进行中（P3-9 触发信号：时间轴被事件挤乱，日程的
+// 剩余部分值得战略层重算）。
+// advanceSlotIfNeeded 检查 game_time 是否超出 currentSlot。返回 true 当且
+// 仅当切换发生在反应任务进行中（P3-9 触发信号）。
+//
+// P3-8 入队化：不再在检测到 slot 过期时强切（清队列+清在途+pendingStop）——
+// 只标记 slotSwitchPending + 清 currentSlot（让 selectCurrentGoal 选新 slot），
+// 不打断当前动作、不清队列。真正的清理等安全点（无在途动作时）由
+// processSlotSwitch 完成。反应进行中也不打断——pending 挂着，reaction
+// 结束后自然处理。
+func (a *agentContext) advanceSlotIfNeeded(ws contract.Transport, agentID string, logger *slog.Logger) bool {
+	// 已有 pending 不重复检测。
+	if a.as.SlotSwitchPending() {
+		return false
+	}
 	_, slot, _ := a.as.SnapshotSchedule()
 	tod := a.as.LatestTimeOfDay()
 	if !prompt.SlotExpired(slot, tod) {
+		return false
+	}
+	// P3-9 触发信号：反应进行中撞上时段边界。
+	reactionCut := false
+	if active, _, _ := a.reactionSnapshot(); active {
+		reactionCut = true
+	}
+	// P3-8：只标记 pending + 清 currentSlot，不强切。
+	a.as.SetSlotSwitchPending()
+	logger.Info("[战术层] schedule 时段切换（延迟到安全点处理）",
+		"agent_id", agentID, "expired_slot", slot, "game_time", tod,
+		"reaction_cut", reactionCut)
+	a.signal()
+	return reactionCut
+}
+
+// processSlotSwitch 在安全点（无在途动作）执行 slot 切换的真正清理：
+// P4-10 记划内结束捕捉 + ClearForSlotSwitch（清队列+清在途+pendingStop）+
+// 清反应窗口（P2-6）。由 worker 在 hasInFlightAction 守卫之后调用。
+func (a *agentContext) processSlotSwitch(ws contract.Transport, agentID string, logger *slog.Logger) {
+	if !a.as.SlotSwitchPending() {
 		return
 	}
+	// P4-10：切时段前捕捉未完成任务槽（结束方式"计划内结束"）。
+	a.recordScheduledEnd()
 	info := a.as.ClearForSlotSwitch()
 	actionID := info.ActionID
 	actionCmd := info.ActionCmd
 	queueLen := info.QueueLen
+	// slot 切换 = 反应窗口结束（P2-6 护栏）。
+	a.clearReaction()
+	a.as.ClearSlotSwitchPending()
 
-	// 只对长复合动作记录 pendingStop：短动作 ~100ms 自然完成，会在 LLM 期间
-	// 被 recordActionCompletion 清除；若 LLM 极快返回仍发 stop 会触发
-	// STOP_ID_MISMATCH（UE 侧短动作不设 busy_action_id）。
 	if actionID != "" && isCompositeCmdDynamic(actionCmd, capabilityRegistryRef) {
 		a.as.SetPendingStopActionID(actionID)
 	}
-	// 取消旧 action 的超时 timer（若有）
 	if actionID != "" {
 		a.coordMu.Lock()
 		if timer, ok := a.pendingActionTimeouts[actionID]; ok {
@@ -495,16 +580,10 @@ func (a *agentContext) advanceSlotIfNeeded(ws contract.Transport, agentID string
 		}
 		a.coordMu.Unlock()
 	}
-
-	logger.Info("[战术层] schedule 时段切换，清队列（stop 延迟到分解完成后）",
-		"agent_id", agentID, "expired_slot", slot, "game_time", tod,
-		"action_id", actionID, "pending_stop", actionID != "" && isCompositeCmdDynamic(actionCmd, capabilityRegistryRef),
+	logger.Info("[战术层] schedule 时段切换清理完成（安全点）",
+		"agent_id", agentID, "action_id", actionID,
+		"pending_stop", actionID != "" && isCompositeCmdDynamic(actionCmd, capabilityRegistryRef),
 		"queue_len", queueLen)
-
-	// 不在此处发 stop_action —— 等 tacticalRefill 分解完成后，
-	// 由 popAndSendQueueAction 在下发新 action 前补发 stop。
-	// signal worker 下一轮走 tacticalRefill 选新 slot
-	a.signal()
 }
 
 // checkTimeToStop 轮询长动作的 time_to_stop：动作设了 time_to_stop 且权威
@@ -529,6 +608,10 @@ func (a *agentContext) checkTimeToStop(agentID string, logger *slog.Logger) {
 	if now <= 0 || now < target {
 		return
 	}
+	// 计划内段切换：先设 preface 标志（recordScheduledEnd），让后续的
+	// interrupted completion 被识别为预期回包——不合成 action_failed 事件
+	// （2026-09-20 仿真：time_to_stop 到期打断被误判为动作异常）。
+	a.recordScheduledEnd()
 	info := a.as.ClearInFlightKeepQueue()
 	if info.ActionCmd != "" && isCompositeCmdDynamic(info.ActionCmd, capabilityRegistryRef) {
 		a.as.SetPendingStopActionID(actionID)
@@ -583,18 +666,17 @@ func timeStopReplanHint(cmd string, params map[string]any, durationSec float64) 
 	return sb.String()
 }
 
-// recordEventNotification 处理环境事件通知。反应层：返回 trigger 信息供
-// message handler 异步触发 reactiveRunner。环境事件不打断战术队列——
-// reactiveRunner 决策若为 replan 才会发 stop_action。
-func (a *agentContext) recordEventNotification(event protocol.EventNotificationPayload) (ReactiveTrigger, string) {
-	// 提取事件类型用于去抖键（事件 id 每次不同，去抖会失效；type 是合理维度）
+// recordEventNotification 处理环境事件通知：存入 AgentState（供后续
+// 日志/审计），返回事件描述。P4-12 退役后不再触发决策——事件打断
+// 全部由 world_event 事件系统（路由器裁决）承担。
+func (a *agentContext) recordEventNotification(event protocol.EventNotificationPayload) string {
+	// 提取事件类型。
 	eventType, _ := event.Event["type"].(string)
 	if eventType == "" {
 		eventType = "unknown"
 	}
-	detail := fmt.Sprintf("event_id=%s level=%s type=%s",
+	return fmt.Sprintf("event_id=%s level=%s type=%s",
 		event.EventID, event.PerceptionLevel, eventType)
-	return TriggerEventNotify, detail
 }
 
 func (a *agentContext) signal() {
@@ -611,6 +693,11 @@ func (a *agentContext) stop() {
 		return
 	}
 	a.stopped = true
+	// P2-6 护栏：下线即解除反应窗口。直接重置字段——此处已持 coordMu，
+	// 不得再调 clearReaction（会自死锁）。
+	a.reactionActive = false
+	a.reactionSeverity = 0
+	a.reactionDeadlineGameSec = 0
 	a.online = false
 	// 停止所有 pending action 超时 timer
 	for _, timer := range a.pendingActionTimeouts {
@@ -728,8 +815,12 @@ func runPerceptionWorker(
 
 		// 时段切换检测：game_time 已超出 currentSlot 结束时间 → 打断长复合动作
 		// + 清队列 + 清 slot，让本轮后续走 tacticalRefill 选新 slot 重新分解。
-		// 这是长复合动作的唯一打断路径（它们不设超时）。
-		ac.advanceSlotIfNeeded(ws, agentID, logger)
+		// 这是长复合动作的唯一打断路径（它们不设超时）。切换发生在反应进行中
+		// 时返回 true → 时间轴被事件挤乱，评估战略层 replan（P3-9）。
+		if ac.advanceSlotIfNeeded(ws, agentID, logger) {
+			go ac.maybeStrategicReplan(ctx, agentID, ws, kb, profiles, weeklySched, logger,
+				"紧急反应跨越时段边界被切断")
+		}
 
 		// time_to_stop 检测：长动作设了执行时长且 game_time 到点 → 打断进入下一轮。
 		ac.checkTimeToStop(agentID, logger)
@@ -771,12 +862,25 @@ func runPerceptionWorker(
 			continue
 		}
 
+		// P2-6 护栏①：反应任务截止——仍在 armed 状态的反应（自反应开始
+		// 未发生过日程 refill）超过 deadline 即切回日程。放 replanBusy 之后：
+		// 不与在途 replan 抢状态。切回即偏差 → 评估战略层 replan（P3-9）。
+		if ac.checkReactionDeadline(agentID, ws, logger) {
+			go ac.maybeStrategicReplan(ctx, agentID, ws, kb, profiles, weeklySched, logger,
+				"紧急反应超过截止时间被切回日程")
+		}
+
 		// 在途 action（composite 执行中）时跳过 pop/refill：UE 正忙，pop 出的
 		// action 会被 busy 拒，refill 出的队列也会被拒。等 action_completed 自然
 		// 唤醒 worker（completion 路径会 signal 并清 currentActionID）。
 		if ac.hasInFlightAction() {
 			continue
 		}
+
+		// P3-8：安全点处理延迟的 slot 切换（hasInFlightAction 之后 = 动作已
+		// 自然终止——所有长动作现在都有 duration，由 checkTimeToStop 到点打断
+		// 或自然完成，processSlotSwitch 只做 slot 边界清理 + 选新 slot）。
+		ac.processSlotSwitch(ws, agentID, logger)
 
 		// 对话进行中（social_chat 挂起）时跳过 pop/refill：避免战术层生成新
 		// 动作打断对话。对话结束后 dialogue runner 会调用 signal 唤醒 worker。
@@ -961,7 +1065,7 @@ func (a *agentContext) armActionTimeout(
 		ac := lookup(agentID)
 		if ac != nil {
 			// 业务状态清理走 AgentState
-			ac.as.RecordActionCompletion(actionID)
+			ac.as.RecordActionCompletion(actionID, "", "")
 			// 协调字段清理走 coordMu
 			ac.coordMu.Lock()
 			delete(ac.pendingActionTimeouts, actionID)
@@ -1256,11 +1360,6 @@ type llmClient interface {
 // 编译期断言：venus.Client 满足 llmClient 接口。
 var _ llmClient = (*venus.Client)(nil)
 
-// reactiveRunnerRef 是进程级反应层执行器（package-level 便于 WS handler 调用）。
-// nil 表示反应层未启用（--ollama-url="" 显式禁用或客户端初始化失败）。
-// trigger() 内部 nil-check，WS handler 无需额外判空。
-var reactiveRunnerRef *reactiveRunner
-
 // capabilityRegistryRef 是进程级能力注册表（package-level 便于战术层 worker 与
 // debug handler 引用，避免长串参数传递）。nil 表示未启用能力过滤（降级为全量
 // 内置工具）。main() 启动时赋值。
@@ -1331,10 +1430,31 @@ func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
 	plan, _, _ := a.as.SnapshotSchedule()
 	tod := a.as.LatestTimeOfDay()
 	goal, slot, idx := selectCurrentGoal(plan, tod)
-	prep := a.as.BeginTacticalRefill(goal, slot, idx, a.tacticalHc != nil)
+	// 修复 C：反应窗口仍 armed（打断以来没有过日程 refill）时，本次 refill
+	// 是"紧急反应刚结束"的衔接点——不发"长动作收尾"自动 hint（反向信号，
+	// 会把 LLM 推回填满时段），情境由 activeSituations 承载。
+	suppressAutoHint := false
+	if reactionArmed, _, _ := a.reactionSnapshot(); reactionArmed {
+		suppressAutoHint = true
+		// 修复2：反应窗口的 hint（BeginTacticalRefill 只在 hint 为空时才
+		// 消费——此处提前注入反应上下文，让 refill 的战术 LLM 知道"你在
+		// 应对紧急事件，动作刚执行完，威胁可能未解除"。2026-09-20 仿真：
+		// 逃跑动作完成后 refill 的 prompt 里紧急上下文全丢，LLM 只看到
+		// "工作台装配"，没有"刚在逃跑"的衔接信息。
+		if a.as.ReplanHint() == "" {
+			if reactionDesc := a.reactionDescSnapshot(); reactionDesc != "" {
+				a.as.SetReplanHint("正在应对紧急事件（" + reactionDesc +
+					"）。上一个反应动作已执行完，若威胁仍未解除请继续应对；若已收到解除信号（如脱离战斗），请回到当前时段目标的原有日程。")
+			}
+		}
+	}
+	prep := a.as.BeginTacticalRefill(goal, slot, idx, a.tacticalHc != nil, suppressAutoHint)
 	if prep.ShouldSkip {
 		return false
 	}
+	// 日程 refill = 反应窗口结束（P2-6 护栏）：NPC 回到日程驱动的规划，
+	// 反应 ladder/截止随之解除。
+	a.clearReaction()
 	goal, slot, idx = prep.Goal, prep.Slot, prep.Index
 	zone := prep.Zone
 	physical := prep.Physical
@@ -1363,6 +1483,14 @@ func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
 
 	// 3. LLM 调用结束后的记账（流式/非流式共用）
 	if err != nil {
+		// 被 force 事件掐掉（§3.3）：半截思考已丢弃，force replan 正在带事件
+		// 上下文接管——此处不得补兜底动作（"网络波动"speak 会与 force 反应
+		// 打架），也不做其他清理，直接让位。
+		if cancelledByForce(err, ctx) {
+			logger.Info("[战术层] 分解被 force 事件取消，让位给 force 重规划",
+				"agent_id", agentID)
+			return false
+		}
 		queued := a.as.QueueLen()
 		logger.Warn("[战术层] 分解失败，保留已入队 action",
 			"agent_id", agentID, "queued", queued, "err", err)
@@ -1412,7 +1540,9 @@ func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
 // tacticalRefillForReplan 供反应层 replan 决策调用：绕过 currentActionID 守卫，
 // 强制重新分解当前时段 goal。规划成功后清空旧队列、写入新队列并 signal worker。
 // 不在此处发 stop_action（由调用方 execute() 在规划成功后发）。
-// 规划失败返回 false，调用方应保持原 action 不打断。
+// 规划失败返回 ok=false，调用方应保持原 action 不打断；cancelled=true 表示
+// LLM 调用被 force 事件掐掉（§3.3）——force replan 已接管，调用方必须跳过
+// 一切失败兜底（hint 覆盖/清队列/stop 都会与 force 反应打架）。
 //
 // 与 tacticalRefill 的区别：
 //  1. 不检查 currentActionID（允许在途 action 期间规划，这是本函数存在的全部意义）
@@ -1422,10 +1552,10 @@ func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
 func (a *agentContext) tacticalRefillForReplan(
 	ctx context.Context, agentID string, ws contract.Transport,
 	kb *worldkb.KB, profiles map[string]*profile.Profile, logger *slog.Logger, replanHint string,
-) bool {
+) (ok bool, cancelled bool) {
 	// 1. 取当前时段 goal —— 不检查 currentActionID（replan 允许在途规划）
 	if a.tacticalHc == nil {
-		return false
+		return false, false
 	}
 	plan, _, _ := a.as.SnapshotSchedule()
 	tod := a.as.LatestTimeOfDay()
@@ -1433,7 +1563,7 @@ func (a *agentContext) tacticalRefillForReplan(
 	if goal == "" {
 		logger.Warn("[战术层/replan] 无当前时段 goal，无法 replan",
 			"agent_id", agentID)
-		return false
+		return false, false
 	}
 	prep := a.as.BeginReplan(goal, slot, idx, a.tacticalHc != nil)
 	goal, slot, idx = prep.Goal, prep.Slot, prep.Index
@@ -1471,10 +1601,17 @@ func (a *agentContext) tacticalRefillForReplan(
 
 	// 3. 失败处理：保留旧队列（不清空），调用方保持原 action
 	if err != nil {
+		// 被 force 事件掐掉（§3.3）：force replan 已接管，本调用方不得做任何
+		// 失败兜底（清队列/覆盖 hint/stop 都会破坏 force 反应）。
+		if cancelledByForce(err, ctx) {
+			logger.Info("[战术层/replan] 规划被 force 事件取消，让位给 force 重规划",
+				"agent_id", agentID)
+			return false, true
+		}
 		queued := a.as.QueueLen()
 		logger.Warn("[战术层/replan] 规划失败，保留原队列和原 action",
 			"agent_id", agentID, "queued", queued, "err", err)
-		return false
+		return false, false
 	}
 
 	// 4. 成功：原子完成——覆盖旧队列、重置计数、清 hint、signal worker
@@ -1490,7 +1627,7 @@ func (a *agentContext) tacticalRefillForReplan(
 
 	// 唤醒 worker（execute() 也会再 signal 一次，幂等）
 	a.signal()
-	return true
+	return true, false
 }
 
 func main() {
@@ -1537,7 +1674,7 @@ func main() {
 			"Venus LLM proxy base URL (OpenAI Chat Completions API compatible)")
 		venusAPIKey = flag.String("venus-api-key", "",
 			"Venus API key (overrides VENUS_API_KEY env var)")
-		venusModel = flag.String("venus-model", "deepseek-v4-flash",
+		venusModel = flag.String("venus-model", "deepseek-v4.1-flash",
 			"Venus model name (used for tactical layer)")
 		venusStrategicModel = flag.String("venus-strategic-model", "deepseek-v4-pro",
 			"Venus model name for strategic layer (daily plan generation). "+
@@ -1716,25 +1853,24 @@ func main() {
 		ollamaClient = ollama.New(ollama.Options{
 			BaseURL: *ollamaURL,
 			Model:   *ollamaModel,
-			// HTTP client timeout 作为 backstop，必须 > reactiveCallTimeout，
-			// 让 context deadline 成为真正的硬截止。否则 HTTP 超时会先于
-			// ctx 触发，导致 "Client.Timeout exceeded while awaiting headers"
-			// 错误，违背反应层 "ctx 是硬截止" 的设计意图。
-			Timeout: reactiveCallTimeout + 5*time.Second,
+			// HTTP client timeout as backstop（P4-12：旧反应层退役后
+			// Ollama 仅供 Stage 5 关系判断，5s ctx + 10s HTTP backstop）。
+			Timeout: 10 * time.Second,
 			// CPU 推理线程数。云开发环境（EPYC 96 vCPU）实测默认 96 线程
 			// 反而劣化到 ~8 tok/s，限制到 16 线程可恢复到 ~24 tok/s。
 			// -1 表示不传 num_thread，让 Ollama 自决（本地 GPU 场景用）。
 			NumThread: *ollamaNumThread,
 			Logger:    logger,
 		})
-		reactiveRunnerRef = newReactiveRunner(ollamaClient, ws, kb, profiles, logger)
-		logger.Info("reactive layer enabled",
+		// P4-12：旧反应层（Ollama continue/observe/replan）已退役。
+		// Ollama 客户端仅供 Stage 5 关系判断（maybeUpdateRelationship）使用。
+		logger.Info("ollama enabled for relationship judgments (reactive layer retired, P4-12)",
 			"ollama_url", ollamaClient.BaseURL(),
 			"ollama_model", ollamaClient.Model(),
 			"ollama_num_thread", ollamaClient.NumThread(),
 		)
 	} else {
-		logger.Info("reactive layer disabled (--ollama-url=\"\")")
+		logger.Info("ollama disabled (relationship judgments off; reactive layer retired, P4-12)")
 	}
 
 	// Per-agent context (Phase 1: single agent, but keyed for multi-NPC).
@@ -1844,6 +1980,7 @@ func main() {
 			}
 		}
 
+		ac.autoPlanEnabled = autoPlanEnabled
 		ac.strategicHc = venus.New(venus.Config{
 			BaseURL: strategicBaseURL,
 			APIKey:  strategicKey,
@@ -1910,6 +2047,17 @@ func main() {
 		kbPtr:                &kb,
 		firstAgentRegistered: &firstAgentRegistered,
 	}
+	// P2-5 轻量事件路由器：非 force world_event 的紧急度裁决（interrupt
+	// or 入队）。借用 per-agent 战术层 flash 客户端做无状态单发调用；LLM
+	// 客户端按 agent 注册后才有（registerAgent 内构造），经 lookupHC 解引用。
+	rt.eventRouter = newEventRouter(
+		func(id string) llmClient {
+			if ac := lookupAgent(id); ac != nil {
+				return ac.tacticalHc
+			}
+			return nil
+		},
+		&kb, profiles, lookupAgent, rt.routerInterrupt, logger)
 	ws.SetDisconnectHandler(rt.OnDisconnect)
 	ws.SetMessageHandler(rt.HandleMessage)
 	// ─── Start serving ─────────────────────────────────────────
@@ -1921,14 +2069,14 @@ func main() {
 	}()
 
 	if *httpAddr != "" {
-		runHTTP(ctx, logger, server, *httpAddr, *httpAllowAnyOrigin, *mcpAPIKey, ws, kb, lookupAgent, listAgentIDs, registerAgent)
+		runHTTP(ctx, logger, server, *httpAddr, *httpAllowAnyOrigin, *mcpAPIKey, ws, kb, lookupAgent, listAgentIDs, registerAgent, rt.handleWorldEvent)
 	} else {
 		runStdio(ctx, logger, server)
 	}
 }
 
 // runHTTP serves the MCP server over Streamable HTTP + a /status endpoint.
-func runHTTP(ctx context.Context, logger *slog.Logger, server *mcp.Server, addr string, allowAnyOrigin bool, apiKey string, ws contract.Transport, kb *worldkb.KB, lookupAgent func(string) *agentContext, listAgentIDs func() []string, registerAgent func(string) (*agentContext, bool)) {
+func runHTTP(ctx context.Context, logger *slog.Logger, server *mcp.Server, addr string, allowAnyOrigin bool, apiKey string, ws contract.Transport, kb *worldkb.KB, lookupAgent func(string) *agentContext, listAgentIDs func() []string, registerAgent func(string) (*agentContext, bool), injectWorldEvent func(agentID string, ev protocol.WorldEventPayload) bool) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/status", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -1947,6 +2095,13 @@ func runHTTP(ctx context.Context, logger *slog.Logger, server *mcp.Server, addr 
 	// 仅联调用，无认证。
 	mux.HandleFunc("/debug/schedule", func(w http.ResponseWriter, r *http.Request) {
 		handleDebugSchedule(ctx, logger, ws, kb, lookupAgent, registerAgent, w, r)
+	})
+	// /debug/event — 联调 debug 端点：合成 world_event 注入事件系统，走与
+	// UE 上报完全相同的分发入口（force 打断/入队/drain 全链路验证）。只注入
+	// 入站消息，不直接向 UE 发任何东西，与 UE 自身推事件不冲突。快速预设见
+	// debug 控制台"事件下发" tab；curl 直接 POST 完整事件。仅联调用，无认证。
+	mux.HandleFunc("/debug/event", func(w http.ResponseWriter, r *http.Request) {
+		handleDebugEvent(logger, lookupAgent, injectWorldEvent, w, r)
 	})
 	// /debug/ — 浏览器 debug 控制台 HTML 页面（无外部依赖，嵌入二进制）。
 	mux.HandleFunc("/debug/", func(w http.ResponseWriter, r *http.Request) {
@@ -2438,6 +2593,16 @@ func handleDebugSchedule(ctx context.Context, logger *slog.Logger, ws contract.T
 		goal, zone, timeOfDay, slot, "", physical, kb, nil, logger, "", "", "", capabilityRegistryRef, nil, nil, nil,
 	)
 	if err != nil {
+		if cancelledByForce(err, ctx) {
+			// 被 force 事件掐掉（§3.3）：force replan 已接管，注入的 schedule 作废。
+			logger.Info("[debug/schedule] decompose 被 force 事件取消，让位给 force 重规划",
+				"agent_id", req.AgentID, "slot", slot, "goal", goal)
+			w.WriteHeader(http.StatusConflict)
+			_ = json.NewEncoder(w).Encode(debugScheduleResponse{
+				Error: "decompose cancelled by a force world_event; the force replan has taken over",
+			})
+			return
+		}
 		logger.Warn("[debug/schedule] decompose failed",
 			"agent_id", req.AgentID, "slot", slot, "goal", goal, "err", err)
 		w.WriteHeader(http.StatusBadGateway)

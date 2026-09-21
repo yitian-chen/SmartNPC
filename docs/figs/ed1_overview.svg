@@ -1,0 +1,182 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1240" height="950" viewBox="0 0 1240 950" font-family="'Segoe UI','Microsoft YaHei',sans-serif">
+  <defs>
+    <linearGradient id="d1-gUe" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#1e88e5"/><stop offset="1" stop-color="#1565c0"/></linearGradient>
+    <linearGradient id="d1-gTimer" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#00acc1"/><stop offset="1" stop-color="#00838f"/></linearGradient>
+    <linearGradient id="d1-gReact" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fb8c00"/><stop offset="1" stop-color="#ef6c00"/></linearGradient>
+    <linearGradient id="d1-gHeart" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ef5350"/><stop offset="1" stop-color="#c62828"/></linearGradient>
+    <linearGradient id="d1-gThink" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#8e24aa"/><stop offset="1" stop-color="#6a1b9a"/></linearGradient>
+    <linearGradient id="d1-gMem" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#43a047"/><stop offset="1" stop-color="#2e7d32"/></linearGradient>
+    <marker id="d1-arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#455a64"/></marker>
+    <marker id="d1-arrRed" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#c62828"/></marker>
+    <marker id="d1-arrOrange" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#e65100"/></marker>
+    <marker id="d1-arrCyan" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#00838f"/></marker>
+    <marker id="d1-arrGreen" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#2e7d32"/></marker>
+    <marker id="d1-arrPurple" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#6a1b9a"/></marker>
+    <marker id="d1-arrBlue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1565c0"/></marker>
+  </defs>
+
+  <!-- ===== 左：UE 世界 ===== -->
+  <rect x="24" y="40" width="260" height="820" rx="14" fill="#e3f2fd" stroke="#90caf9" stroke-width="2"/>
+  <text x="154" y="74" text-anchor="middle" font-size="18" font-weight="700" fill="#0d47a1">UE5 世界</text>
+  <text x="154" y="94" text-anchor="middle" font-size="12" fill="#1565c0">AgentTownBridge</text>
+
+  <g>
+    <rect x="48" y="120" width="222" height="64" rx="10" fill="url(#d1-gUe)" stroke="#0d47a1" stroke-width="2"/>
+    <text x="159" y="148" text-anchor="middle" font-size="16" font-weight="700" fill="#fff">游戏时钟</text>
+    <text x="159" y="168" text-anchor="middle" font-size="12" fill="#e3f2fd">权威时间</text>
+  </g>
+  <g>
+    <rect x="48" y="270" width="222" height="64" rx="10" fill="url(#d1-gUe)" stroke="#0d47a1" stroke-width="2"/>
+    <text x="159" y="298" text-anchor="middle" font-size="16" font-weight="700" fill="#fff">事件推送</text>
+    <text x="159" y="318" text-anchor="middle" font-size="12" fill="#e3f2fd">发生时</text>
+  </g>
+  <g>
+    <rect x="48" y="420" width="222" height="64" rx="10" fill="url(#d1-gUe)" stroke="#0d47a1" stroke-width="2"/>
+    <text x="159" y="448" text-anchor="middle" font-size="16" font-weight="700" fill="#fff">心跳</text>
+    <text x="159" y="468" text-anchor="middle" font-size="12" fill="#e3f2fd">每 3 秒</text>
+  </g>
+  <g>
+    <rect x="48" y="740" width="222" height="84" rx="10" fill="url(#d1-gUe)" stroke="#0d47a1" stroke-width="2"/>
+    <text x="159" y="776" text-anchor="middle" font-size="16" font-weight="700" fill="#fff">动作执行器</text>
+    <text x="159" y="796" text-anchor="middle" font-size="12" fill="#e3f2fd">BT / StateTree</text>
+  </g>
+
+  <!-- ===== 右：Agent 心智 ===== -->
+  <rect x="312" y="40" width="904" height="820" rx="14" fill="#fafafa" stroke="#cfd8dc" stroke-width="2"/>
+  <text x="764" y="74" text-anchor="middle" font-size="18" font-weight="700" fill="#37474f">Agent 心智</text>
+  <text x="764" y="94" text-anchor="middle" font-size="12" fill="#607d8b">每个 NPC 一个 · 单事件循环 / 单指令出口</text>
+
+  <!-- 定时器层 -->
+  <rect x="336" y="110" width="380" height="130" rx="10" fill="#e0f7fa" stroke="#80deea" stroke-width="1.5"/>
+  <text x="526" y="132" text-anchor="middle" font-size="13" font-weight="700" fill="#006064">定时器 · 时间驱动</text>
+  <rect x="344" y="150" width="114" height="56" rx="9" fill="url(#d1-gTimer)" stroke="#006064" stroke-width="2"/>
+  <text x="401" y="183" text-anchor="middle" font-size="14" font-weight="700" fill="#fff">每日 06:00</text>
+  <rect x="466" y="150" width="114" height="56" rx="9" fill="url(#d1-gTimer)" stroke="#006064" stroke-width="2"/>
+  <text x="523" y="183" text-anchor="middle" font-size="14" font-weight="700" fill="#fff">时段边界</text>
+  <rect x="588" y="150" width="114" height="56" rx="9" fill="url(#d1-gTimer)" stroke="#006064" stroke-width="2"/>
+  <text x="645" y="183" text-anchor="middle" font-size="14" font-weight="700" fill="#fff">动作截止</text>
+
+  <!-- 反应层 -->
+  <rect x="736" y="110" width="456" height="130" rx="10" fill="#fff3e0" stroke="#ffcc80" stroke-width="1.5"/>
+  <text x="964" y="132" text-anchor="middle" font-size="13" font-weight="700" fill="#e65100">反应层 · 事件驱动</text>
+  <rect x="752" y="150" width="204" height="56" rx="9" fill="url(#d1-gReact)" stroke="#e65100" stroke-width="2"/>
+  <text x="854" y="180" text-anchor="middle" font-size="14" font-weight="700" fill="#fff">LLM 路由</text>
+  <text x="854" y="196" text-anchor="middle" font-size="11" fill="#fff">急 ? 不急 ?</text>
+  <rect x="968" y="150" width="208" height="56" rx="9" fill="url(#d1-gReact)" stroke="#e65100" stroke-width="2"/>
+  <text x="1072" y="180" text-anchor="middle" font-size="14" font-weight="700" fill="#fff">待处理队列</text>
+  <text x="1072" y="196" text-anchor="middle" font-size="11" fill="#fff">非紧急</text>
+
+  <!-- 事件循环（心脏） -->
+  <rect x="480" y="310" width="560" height="150" rx="16" fill="url(#d1-gHeart)" stroke="#b71c1c" stroke-width="3"/>
+  <path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z" transform="translate(508,318) scale(1.4)" fill="#fff" opacity="0.95"/>
+  <text x="700" y="350" text-anchor="middle" font-size="20" font-weight="700" fill="#fff" paint-order="stroke" stroke="#c62828" stroke-width="3" stroke-linejoin="round">事件循环 · 等待状态（醒着）</text>
+  <text x="700" y="380" text-anchor="middle" font-size="14" fill="#fff">唯一指令出口 —— 所有指令都从这里发出</text>
+  <text x="700" y="404" text-anchor="middle" font-size="12" fill="#ffcdd2">安全点 · 常驻 · 单出口</text>
+
+  <!-- 决策生产者 -->
+  <rect x="336" y="560" width="380" height="150" rx="10" fill="#f3e5f5" stroke="#ce93d8" stroke-width="1.5"/>
+  <text x="526" y="584" text-anchor="middle" font-size="13" font-weight="700" fill="#6a1b9a">决策生产者</text>
+  <rect x="344" y="606" width="170" height="56" rx="9" fill="url(#d1-gThink)" stroke="#4a148c" stroke-width="2"/>
+  <text x="429" y="637" text-anchor="middle" font-size="14" font-weight="700" fill="#fff">战略层</text>
+  <text x="429" y="653" text-anchor="middle" font-size="11" fill="#f3e5f5">每日 1 次</text>
+  <rect x="522" y="606" width="186" height="56" rx="9" fill="url(#d1-gThink)" stroke="#4a148c" stroke-width="2"/>
+  <text x="615" y="637" text-anchor="middle" font-size="14" font-weight="700" fill="#fff">战术层</text>
+  <text x="615" y="653" text-anchor="middle" font-size="11" fill="#f3e5f5">每时段 · 重规划</text>
+
+  <!-- 上下文与记忆 -->
+  <rect x="736" y="560" width="456" height="150" rx="10" fill="#e8f5e9" stroke="#a5d6a7" stroke-width="1.5"/>
+  <text x="964" y="584" text-anchor="middle" font-size="13" font-weight="700" fill="#2e7d32">上下文与记忆</text>
+  <rect x="752" y="606" width="118" height="56" rx="9" fill="url(#d1-gMem)" stroke="#1b5e20" stroke-width="2"/>
+  <text x="811" y="639" text-anchor="middle" font-size="14" font-weight="700" fill="#fff">状态栏</text>
+  <rect x="878" y="606" width="118" height="56" rx="9" fill="url(#d1-gMem)" stroke="#1b5e20" stroke-width="2"/>
+  <text x="937" y="639" text-anchor="middle" font-size="14" font-weight="700" fill="#fff">轨迹</text>
+  <rect x="1004" y="606" width="180" height="56" rx="9" fill="url(#d1-gMem)" stroke="#1b5e20" stroke-width="2"/>
+  <text x="1094" y="637" text-anchor="middle" font-size="14" font-weight="700" fill="#fff">反思压缩</text>
+  <text x="1094" y="653" text-anchor="middle" font-size="11" fill="#e8f5e9">夜间</text>
+
+  <!-- ===== 连线 ===== -->
+  <!-- 时钟 → 三个定时器 -->
+  <line x1="270" y1="146" x2="344" y2="150" stroke="#00838f" stroke-width="2.5" marker-end="url(#d1-arrCyan)"/>
+  <line x1="270" y1="152" x2="466" y2="154" stroke="#00838f" stroke-width="2.5" marker-end="url(#d1-arrCyan)"/>
+  <line x1="270" y1="158" x2="588" y2="154" stroke="#00838f" stroke-width="2.5" marker-end="url(#d1-arrCyan)"/>
+
+  <!-- 每日06:00 → 战略层 -->
+  <line x1="401" y1="206" x2="401" y2="606" stroke="#00838f" stroke-width="2.5" marker-end="url(#d1-arrCyan)"/>
+
+  <!-- 时段边界 / 动作截止 → 事件循环 -->
+  <line x1="523" y1="206" x2="620" y2="310" stroke="#00838f" stroke-width="2.5" marker-end="url(#d1-arrCyan)"/>
+  <line x1="645" y1="206" x2="700" y2="310" stroke="#00838f" stroke-width="2.5" marker-end="url(#d1-arrCyan)"/>
+  <text x="560" y="262" text-anchor="middle" font-size="11" fill="#00838f">到点唤醒</text>
+
+  <!-- 事件推送 → 路由 -->
+  <path d="M270 292 L726 292 L752 160" fill="none" stroke="#e65100" stroke-width="2.5" marker-end="url(#d1-arrOrange)"/>
+  <text x="500" y="284" text-anchor="middle" font-size="11" fill="#e65100">事件</text>
+
+  <!-- 事件推送 → 事件循环（force 旁路） -->
+  <line x1="270" y1="314" x2="480" y2="352" stroke="#c62828" stroke-width="3.5" marker-end="url(#d1-arrRed)"/>
+  <text x="330" y="330" text-anchor="middle" font-size="11" font-weight="700" fill="#c62828">force 旁路（绕过路由）</text>
+
+  <!-- 路由 → 事件循环（紧急） -->
+  <line x1="854" y1="206" x2="760" y2="310" stroke="#e65100" stroke-width="2.5" marker-end="url(#d1-arrOrange)"/>
+  <text x="835" y="250" text-anchor="middle" font-size="11" fill="#e65100">紧急</text>
+
+  <!-- 路由 → 队列（不紧急） -->
+  <line x1="956" y1="178" x2="968" y2="178" stroke="#e65100" stroke-width="2.5" marker-end="url(#d1-arrOrange)"/>
+  <text x="962" y="168" text-anchor="middle" font-size="11" fill="#e65100">不紧急</text>
+
+  <!-- 队列 → 战术层（IN3，绕行） -->
+  <path d="M1176 178 L1200 178 L1200 770 L615 770 L615 662" fill="none" stroke="#2e7d32" stroke-width="2.5" stroke-dasharray="6 5" marker-end="url(#d1-arrGreen)"/>
+  <text x="900" y="788" text-anchor="middle" font-size="11" fill="#2e7d32">IN3 · 队列攒下的事件 · 安全点一次性 drain</text>
+
+  <!-- 心跳 → 状态栏 -->
+  <path d="M270 484 L726 484 L726 634 L752 634" fill="none" stroke="#2e7d32" stroke-width="2" stroke-dasharray="6 5" marker-end="url(#d1-arrGreen)"/>
+  <text x="430" y="506" text-anchor="middle" font-size="11" fill="#2e7d32">实时状态（仅刷新状态栏）</text>
+
+  <!-- 事件循环 → 动作执行器（唯一出口） -->
+  <path d="M480 380 L300 380 L300 782 L270 782" fill="none" stroke="#c62828" stroke-width="4" marker-end="url(#d1-arrRed)"/>
+  <text x="306" y="470" text-anchor="start" font-size="12" font-weight="700" fill="#c62828">action_command</text>
+  <text x="306" y="486" text-anchor="start" font-size="11" fill="#c62828">唯一出口</text>
+
+  <!-- 动作执行器 → 事件推送（结果回传） -->
+  <path d="M24 782 L24 302 L48 302" fill="none" stroke="#78909c" stroke-width="2" stroke-dasharray="6 5" marker-end="url(#d1-arr)"/>
+  <text x="20" y="545" text-anchor="end" font-size="11" fill="#78909c">结果 / 失败</text>
+
+  <!-- 事件循环 → 战术层（动作结果） -->
+  <line x1="760" y1="460" x2="615" y2="606" stroke="#6a1b9a" stroke-width="2.5" marker-end="url(#d1-arrPurple)"/>
+  <text x="720" y="528" text-anchor="middle" font-size="11" fill="#6a1b9a">动作结果</text>
+
+  <!-- 战术层 → 事件循环（下一动作 + 截止） -->
+  <line x1="635" y1="606" x2="780" y2="460" stroke="#6a1b9a" stroke-width="2.5" marker-end="url(#d1-arrPurple)"/>
+  <text x="668" y="548" text-anchor="middle" font-size="11" fill="#6a1b9a">下一动作 + 截止时间</text>
+
+  <!-- 战略层 → 战术层（IN1） -->
+  <line x1="514" y1="634" x2="522" y2="634" stroke="#6a1b9a" stroke-width="2.5" marker-end="url(#d1-arrPurple)"/>
+  <text x="518" y="626" text-anchor="middle" font-size="11" fill="#6a1b9a">IN1</text>
+
+  <!-- 状态栏 → 战术层（IN2） -->
+  <line x1="752" y1="634" x2="708" y2="634" stroke="#2e7d32" stroke-width="2.5" marker-end="url(#d1-arrGreen)"/>
+  <text x="730" y="626" text-anchor="middle" font-size="11" fill="#2e7d32">IN2</text>
+
+  <!-- 战术层 → 战略层（否决重规划） -->
+  <line x1="602" y1="606" x2="429" y2="606" stroke="#6a1b9a" stroke-width="2" stroke-dasharray="6 5" marker-end="url(#d1-arrPurple)"/>
+  <text x="515" y="596" text-anchor="middle" font-size="11" fill="#6a1b9a">否决 → 重规划</text>
+
+  <!-- 轨迹 → 反思压缩 -->
+  <line x1="996" y1="634" x2="1004" y2="634" stroke="#2e7d32" stroke-width="2.5" marker-end="url(#d1-arrGreen)"/>
+  <text x="1000" y="626" text-anchor="middle" font-size="11" fill="#2e7d32">压缩</text>
+
+  <!-- 反思压缩 → 战略层（次日上下文） -->
+  <path d="M1094 662 L1094 780 L429 780 L429 662" fill="none" stroke="#2e7d32" stroke-width="2" stroke-dasharray="6 5" marker-end="url(#d1-arrGreen)"/>
+  <text x="720" y="796" text-anchor="middle" font-size="11" fill="#2e7d32">次日上下文 → 战略层</text>
+
+  <!-- ===== 图例 ===== -->
+  <g font-size="12" fill="#37474f">
+    <rect x="340" y="888" width="15" height="15" rx="3" fill="#1565c0"/><text x="360" y="901">UE · 世界侧</text>
+    <rect x="470" y="888" width="15" height="15" rx="3" fill="#00838f"/><text x="490" y="901">时间驱动</text>
+    <rect x="590" y="888" width="15" height="15" rx="3" fill="#ef6c00"/><text x="610" y="901">事件驱动</text>
+    <rect x="710" y="888" width="15" height="15" rx="3" fill="#c62828"/><text x="730" y="901">事件循环 · 唯一出口</text>
+    <rect x="890" y="888" width="15" height="15" rx="3" fill="#6a1b9a"/><text x="910" y="901">决策</text>
+    <rect x="985" y="888" width="15" height="15" rx="3" fill="#2e7d32"/><text x="1005" y="901">记忆 / 上下文</text>
+  </g>
+  <text x="764" y="928" text-anchor="middle" font-size="12" fill="#78909c">粗箭头 = 主干链路（产生决策 / 指令）　虚线 = 旁支（不产生决策）</text>
+</svg>

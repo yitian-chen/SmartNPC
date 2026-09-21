@@ -291,7 +291,7 @@ func TestBuildTactical_PhysicalNoDuplicatePrefix(t *testing.T) {
 		Slot: "07:00-12:00", Physical: &protocol.PhysicalState{Energy: 75, Fatigue: 30, JointWear: 5},
 		AgentID: "H-01",
 	})
-	if !strings.Contains(out, "【物理状态】\n电量 中等、疲劳 精神饱满") {
+	if !strings.Contains(out, "【物理状态】\n电量：中等、疲劳度：精神饱满") {
 		t.Errorf("physical segment should be header + band line without in-line prefix:\n%s", out)
 	}
 	if strings.Contains(out, "\n物理状态：") {
@@ -433,5 +433,67 @@ func TestBuildTactical_CompactIgnoresDailyPlanField(t *testing.T) {
 	})
 	if strings.Contains(out, "07:00-12:00: 车间装配") || strings.Contains(out, "12:00-14:00: 休息") {
 		t.Errorf("Compact should veto the schedule segment regardless of DailyPlan:\n%s", out)
+	}
+}
+
+// TestBuildTactical_ForceEventElevated 验证 force 事件（【强制打断】前缀 hint）
+// 渲染为【紧急事件】最高优先级指令：显式授权暂停时段目标 + 豁免时长填满，
+// 而不是降格为【上次中断原因】的说明性注释（否则 LLM 的理性选择是一句
+// speak 后继续原时段动作——2026-09-17 仿真实测）。
+func TestBuildTactical_ForceEventElevated(t *testing.T) {
+	in := TacticalInput{
+		Goal:      "去废料回收场拆解台拆解报废设备",
+		Zone:      "recycling_yard",
+		TimeOfDay: "13:07:17",
+		Slot:      "12:07-14:06",
+		Hint:      "【强制打断】玩家互动：被玩家 player_1 瞄准/锁定（主体 H-04，客观严重度 8，游戏时间 D1 13:07:17）",
+		AgentID:   "H-04",
+	}
+	out := BuildTactical(in)
+	for _, want := range []string{
+		"【紧急事件】玩家互动：被玩家 player_1 瞄准/锁定",
+		"最高优先级",
+		"有权暂停原计划",
+		"无需用长动作填满时段剩余时长",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("prompt missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "【上次中断原因】") {
+		t.Errorf("force hint must not render as 上次中断原因:\n%s", out)
+	}
+}
+
+// TestTacticalHintLine_SituationResolvedPrefix verifies the 【情境解除】
+// hint renders as 【情境已解除】 with resume-schedule guidance (not the
+// full emergency treatment).
+func TestTacticalHintLine_SituationResolvedPrefix(t *testing.T) {
+	in := TacticalInput{Hint: "【情境解除】玩家互动：与玩家 player_1 的战斗结束（escaped）", AgentID: "H-01"}
+	out := BuildTactical(in)
+	if !strings.Contains(out, "【情境已解除】玩家互动：与玩家 player_1 的战斗结束（escaped）") {
+		t.Fatalf("missing situation-resolved header:\n%s", out)
+	}
+	if !strings.Contains(out, "请回到当前时段目标的原有日程正常规划") {
+		t.Fatalf("missing resume-schedule guidance:\n%s", out)
+	}
+	if strings.Contains(out, "紧急事件") {
+		t.Fatalf("situation_resolved must NOT get emergency treatment:\n%s", out)
+	}
+}
+
+// TestTacticalHintLine_SocialResponsePrefix verifies the 【社交回应】
+// hint renders as 【社交回应请求】 with brief-response-then-resume guidance.
+func TestTacticalHintLine_SocialResponsePrefix(t *testing.T) {
+	in := TacticalInput{Hint: "【社交回应】玩家互动：玩家 player_1 向你发起交互（greet）", AgentID: "H-01"}
+	out := BuildTactical(in)
+	if !strings.Contains(out, "【社交回应请求】玩家互动：玩家 player_1 向你发起交互（greet）") {
+		t.Fatalf("missing social-response header:\n%s", out)
+	}
+	if !strings.Contains(out, "然后继续当前时段的原有工作") {
+		t.Fatalf("missing resume guidance:\n%s", out)
+	}
+	if strings.Contains(out, "紧急事件") {
+		t.Fatalf("social must NOT get emergency treatment:\n%s", out)
 	}
 }

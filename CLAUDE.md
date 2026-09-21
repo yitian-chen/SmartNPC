@@ -9,7 +9,7 @@ AgentTown_v3 — AI NPC 模拟系统。5 个 NPC（H-01~H-05，各自独立 prof
 **三层决策架构**：
 - **战略层**（`pkg/prompt/strategic.go` + `cmd/agenttown-mcp/strategic.go`）：每日 07:00 生成当天计划（`dailyPlan`，6-8 个时段 goal）。system/user prompt 拆分、规则迁 user prompt、注入生产工作流概述与物理状态分档
 - **战术层**（`pkg/prompt/tactical.go` + `cmd/agenttown-mcp/tactical.go`）：每个时段把 goal 分解为 1-4 个动作段，走 **OpenAI 原生 function calling**（`tools` 字段、`tool_choice=required`、多轮 agentic loop），段间用 `time_to_stop` 控制时长
-- **反应层**（`reactive.go` + `reactive_runner.go`）：**默认禁用**（`--ollama-url=""`）；触发时调本地 Ollama 决策 continue/observe/replan
+- **反应层**（~~已退役 P4-12~~）：打断判定全部由事件系统（world_event + 路由器 + force 通道）承担；Ollama 仅保留 Stage 5 关系判断
 
 **模块化架构**（2026-08-27 拆分，多 module 仓库）：
 - **contract/**（契约 module，无依赖）：`protocol/`（7 字段信封+消息类型）+ `Transport` 接口（决策侧与连接侧的边界）
@@ -17,7 +17,7 @@ AgentTown_v3 — AI NPC 模拟系统。5 个 NPC（H-01~H-05，各自独立 prof
 - **根 module**（`agenttown-mcp/`）：agent 决策 + 装配壳 + `pkg/` 领域库，经根 `go.mod` 的 `replace => ./contract` / `=> ./wsserver` 引用本地 module
 - 依赖倒置：agent 决策侧（`guardedExecutor`/`dialogueRunner`/`reactiveRunner`/worker 循环）只依赖 `contract.Transport` 接口，不依赖 wsserver 实现；入站消息经 `Runtime.HandleMessage`（`cmd/agenttown-mcp/runtime.go`）单入口分发，运输层只注册 `HandleMessage`/`OnDisconnect` 两个回调
 
-**LLM 后端**：MCP 直连 Venus（OpenAI Chat Completions 协议），战略层用 `deepseek-v4-pro`、战术层用 `deepseek-v4-flash`（`--venus-strategic-model`/`--venus-model`）。反应层直连本地 Ollama（`qwen2.5:7b`），不走 Venus。
+**LLM 后端**：MCP 直连 Venus（OpenAI Chat Completions 协议），战略层用 `deepseek-v4-pro`、战术层用 `deepseek-v4.1-flash`（`--venus-strategic-model`/`--venus-model`）。反应层直连本地 Ollama（`qwen2.5:7b`），不走 Venus。
 
 ## 架构总览
 
@@ -30,7 +30,7 @@ graph LR
         MCP["agenttown-mcp (Go)<br/>MCP Server + WS Server<br/>:8760 HTTP / :9092 WS (stable)<br/>三层决策：战略+战术+反应"]
     end
     subgraph LLM["LLM 后端"]
-        VENUS["Venus<br/>战略 deepseek-v4-pro<br/>战术 deepseek-v4-flash<br/>(OpenAI 兼容)"]
+        VENUS["Venus<br/>战略 deepseek-v4-pro<br/>战术 deepseek-v4.1-flash<br/>(OpenAI 兼容)"]
         OLLAMA["Ollama 本地<br/>qwen2.5:7b<br/>(反应层专用，默认禁用)"]
     end
     UE5 <-->|"WebSocket :9092<br/>7-field Envelope"| MCP
@@ -80,6 +80,7 @@ graph TB
 - **worker 循环**：`runPerceptionWorker` 监听 `wake` 信号，队列空时调 `tacticalRefill` → `selectCurrentGoal` → `generateTacticalPlan` → 填 `actionQueue` → `popAndSendQueueAction` 下发
 - **战术层 function calling 多轮对话**：`generateTacticalPlan` 经统一 agentic loop（`agenticTurn` → `SendLoop`）携带多轮历史（user/assistant tool_calls/占位 tool）。**不做滑动窗口截断**（已取消，原 8 轮截断会丢上下文导致目标漂移/重复动作），仅跨游戏日 `ClearConversation` 清空，单日内保留完整对话
 - **战术层 user prompt 首条全量 + 后续精简引用**：日内不变块（【全天日程】+ 完整分解规则）只在每天第一条战术 user 消息出现；同计划后续轮次省略两块、改为核心约束速览 + 引用行（`TacticalInput.Compact`，实测每条 2100→~900 字符，-57%）。判定与置位：`AgentState.tacticalHeaderPlan` 记录"最近成功注入全量头的计划字符串"（成功 agenticTurn 后、parse 之前置位），与当前 dailyPlan 比对——不等（跨日/日内重规划）即重新全量注入；`ClearConversation` 随历史一起重置。dailyPlan=="" 的 `/debug/schedule` 路径永不精简
+- **`<agent_state>` 状态栏**（事件驱动设计 §6.1，`agent_state_bar.go`）：`agenticTurn` 在 messages 末尾追加一条瞬态 user 消息，四行：当前游戏时间（`D<DayCount+1> HH:MM:SS`）、物理状态（`PhysicalLine` 分档自然语言，非裸数值）、当前日程与剩余时间（`[序号/总数] 时段 goal（剩余约 N 分钟）`，跨午夜经 `NormalizeTodToSlot` 归一）、当前动作与剩余时间（工具名+关键参数，剩余按 `time_to_stop` 目标时刻推算）。**不入会话历史**——每轮请求从 AgentState 现查现拼（旧状态栏留在历史里只会误导），前缀保持稳定、KV cache 只失效尾巴；成功落历史的是 userContent 本身。无感知数据（UE 未推首条 perception）返回空串跳过注入
 - **venus 4001 重试**：战术层 LLM 调用返回 4001（venus 校验 tools JSON 失败，LLM 输出坏 JSON）时以相同请求体重试，上限 3 次（`maxTacticalRetries`，`isVenusErrorCode` 匹配错误码）；超时/连接错误不重试，走兜底。实测重试后 4001 全部被救回
 - **多段动作计划 + time_to_stop**：LLM 一次返回 1-4 个动作段，段间设 `time_to_stop` 控制时长；到点 `ClearInFlightKeepQueue` 打断当前段、保留队列继续下一段；末段不设 time_to_stop 自然持续到时段切换
 - **time_to_stop 兜底**（不依赖 LLM 自觉）：`fillDefaultTimeToStopForRest` 给非队尾休息动作补 1800s、`fillDefaultTimeToStopForWork` 给非队尾工作动作补 5400s——防止中间动作漏设导致队列卡死（NPC 一直坐长椅/一直工作）
@@ -90,6 +91,15 @@ graph TB
 - **`currentSlot` 加 `__debug__` 前缀**：防止注入的 slot 和 dailyPlan 同名 slot 碰撞触发 `redecomposeCount >= 1` 限制
 - **反应层去抖**：`lastReactiveAt` map 按 trigger 类型去抖（periodic 60s / zone_change 45s）
 - **反应层 replan**：决策为 `replan` 时调 `ac.tacticalRefillForReplan`，会重置 `actionQueue` 重新调战术层 LLM
+- **world_event 事件系统（事件驱动设计 §四，P1 系列）**：runtime 分发 `world_event`（`world_event_dispatch.go`）。force=true 走硬保证通道——**零 LLM、零去抖、不可否决**，stop 在 WS 接收路径同步发出（goroutine 之前）+ 清在途追踪（stash 保 action_history）+ 注入【强制打断】hint + 异步 `forceInterruptReplan` 重规划（prompt 层渲染为【紧急事件】最高优先级指令，授权暂停时段目标、豁免时长填满）；失败兜底 `abandonCurrentPlan` 清旧队列走 worker 自然 refill。force=false 入 per-agent 事件队列（`pkg/agentstate/world_event_queue.go`，上限 64 丢最旧、event_id 去重防 seq 重放、drain 全取不 pop、仅 Stop 清——slot 切换/replan 不清，安全点在 completion 之后）。手动模式同反应层口径丢弃。联调注入端点 `POST /debug/event`（控制台"事件下发" tab，14 预设 + 自定义）
+- **在途战术层 LLM 请求可取消（§3.3 唯一盲区，P1-4）**：`generateTacticalPlan` 咽喉点注册 cancel 句柄（coordMu + 世代号防旧调用误清新注册）；force 事件在接收路径同步掐掉在途调用（venus ctx 贯穿 HTTP，sendMu 随之中止释放）。半截思考零残留（`agenticTurn` 成功才落历史）。被取消方经 `cancelledByForce`（错误为 Canceled 且 parent ctx 存活——区别于超时 DeadlineExceeded 与父 ctx 关停）判定后**跳过一切失败兜底**：worker `tacticalRefill` 不补 fallback 动作（"网络波动"speak 会与 force 反应打架）、`tacticalRefillForReplan` 返回 `(false, cancelled=true)` 让调用方让位（不清队列不覆盖 hint）、`/debug/schedule` 返回 409。`forceReplanWaitLimit` 由 ~70s 收窄到 5s（取消后 holder 毫秒级释放 slot）
+- **持续威胁情境 + 事件回声 + 反应衔接（P3-9 后续修复 A/B/C，2026-09-18）**：排查"被攻击后反应完成即声称威胁解除"的幻觉——事件是边沿触发，威胁在 combat_exit 到达前持续存在，但反应耗尽后的 refill prompt 里威胁痕迹为零（hint 已消费、事件未入队、未完成任务槽已被反应清空）。**A（情境状态）**：`activeSituations`（agentstate/active_situations.go）——`player_attacked/targeted` 在 handleWorldEvent 中央登记（同 kind 幂等保留最早起点）、`combat_exit` 解除、30 游戏分钟 TTL 兜底；注入四处：状态栏"当前处境"行、战术层【当前处境】段（每轮 refill 可见，防自行认定解除）、路由器输入、紧急事件块补"威胁在解除信号前视为持续"。**B（事件回声）**：force/router 打断的 replan 成功后 `EchoWorldEvent` 把事件再入队（跳过去重）——反应耗尽后的第一次日程 refill 在【发生的事件】里再见到它一次（消费即清）。**C（反向 hint 抑制）**：反应窗口仍 armed 的 refill 跳过"上次队列提前耗尽…安排长动作收尾"自动 hint（它会把 LLM 推回填满时段，恰与"刚被打断"的语境相反）；情境由 A 承载
+- **事件驱动战略层 replan + 写回（§5.5，P3-9 升格）**：07:00 的计划对当天事件无知——反应跨时段被切断（advanceSlotIfNeeded 返回反应进行中）/ 反应超截止被切回日程（checkReactionDeadline 返回 true）时触发 `maybeStrategicReplan`（`strategic_replan.go`）：`generateDailyPlanCore`（triggerStrategicPlanning 抽出的无兜底核心）带修订上下文（原计划 + P4-10 未完成任务槽/上次结束原因）重规划**剩余时段** → `mergeRemainder` 合并（已过时段保留为既成事实）→ `SetDailyPlan` 写回（write-through 持久化）+ `SetCurrentPlanIndex` 指向首个新时段 + `RecordPlanRevision` 留痕（P5-15 反思输入）。节流：每游戏日上限 5 次（尝试即计数）+ 相邻间隔 ≥2 游戏小时（`TryBeginStrategicReplan` 原子判定）+ 手动模式不触发。失败/被 force 取消保留旧计划；持 replanInProgress slot 并注册 LLM 取消句柄
+- **安全点 drain：事件队列 → 战术层第三输入（§4.4/§5.1，P3-7）**：`generateTacticalPlan` 咽喉点快照事件队列 → `FormatWorldEventList` 渲染 → 战术 prompt 【发生的事件】段（全量与 compact 形态都注入——事件是逐次数据非日内不变块）。**快照注入 + 成功后清空**（`ClearWorldEvents`）：LLM 失败/被 force 取消时事件保留在队列，下一次分解重新看到。drain 覆盖三个调用方（worker refill / force 与路由打断的 replan / debug schedule）——force 打断的重规划一次看到"紧急事件 hint + 队列攒下的事件"全貌
+- **chat_invite 迁移（P4-14）**：UE 停发独立 `chat_invite`，统一按 `world_event`（`social.chat_invite_incoming`）推送；Agent 侧 `handleWorldEvent` 收到后**即时转交** dialogueRunner（不入队等安全点——对话建立有实时性要求，UE 会话状态机在等 rsp）；原三字段（conv_id/from/content）从 `data` 解包。旧独立消息分支保留为兼容路径（收到时转 world_event 再分发）。`chat_invite_rsp`/`chat_turn` 维持原消息类型不变
+- **事件合成器（P4-12，`event_synthesizer.go`）**：本地检测到的状态变化（物理警戒带突破/动作异常完成/event_notification）合成 world_event 走统一事件管道——`dispatchSynthesizedEvent` 入队 + 路由器裁决。event_id 用 `synth_` 前缀与 UE 的 `evt_` 区分。UE 侧 world_event 推送就绪后本层整体删除。这是旧反应层退役后的替代：旧 Ollama continue/observe/replan 决策由路由器 interrupt/入队替代，物理告警升级（upgradeIfPhysicalAlert）由路由器 LLM 判断替代，去抖（lastReactiveAt）由 P2-6 反应护栏（severity 严格递增 + 截止时间）替代
+- **轻量事件路由器（§4.3，P2-5）**：非 force 事件入队后异步走一次路由 LLM 裁决（`event_router.go`，`prompt.BuildRouterPrompt`，8s 超时，复用 per-agent 战术 flash 客户端做**无状态单发**——不碰会话历史）。输出 `{interrupt, severity, reason}`；判不准倾向入队（解析失败/超时/无客户端全部降级 enqueue，事件已在队列不丢）。interrupt=true → `routerInterrupt`：撤下队列中该事件（`RemoveQueuedWorldEvent`，正在处理不再等安全点）+ 掐在途 LLM + stop 在途动作 + hint 带"路由裁决：紧急"+理由 → 复用 `forceInterruptReplan`。裁决输入含角色性格/人际关系（Stage 5）/当前动作与已执行时长/物理分档——同一事件不同 NPC 因关系/性格产生不同裁决（涌现验收点）
+- **反应护栏（§4.5 两条，P2-6）**：打断（force 或路由）产生的规划窗口即"反应任务"，agentContext（coordMu）记录 `reactionActive/reactionSeverity/reactionDeadlineGameSec`。① **截止时间**：60 游戏分钟（`reactionDeadlineGameSec` var），worker 循环 `checkReactionDeadline`（replanBusy 守卫后）到期硬切——stop 在途 + 清队列 + 【反应截止】hint 回到日程；"仍 armed"即自反应起无日程 refill（refill/slot 切换/下线都会清除），截止硬切因此有明确归属。② **severity 严格递增**：路由打断须严格高于当前反应的 severity 才放行，否则事件保持入队（保守方向与 §4.3 一致）；force 不受限（§4.2 不可否决）但会重置窗口 bar。severity 收敛 0-10
 
 ### LLM 后端
 
@@ -102,7 +112,7 @@ MCP 直连 Venus（OpenAI Chat Completions 协议），战略/战术层调用 Ve
 ./agenttown-mcp --http :8760 --ws :9092 \
   --venus-url http://v2.open.venus.oa.com/llmproxy \
   --venus-api-key $VENUS_API_KEY \
-  --venus-model deepseek-v4-flash \
+  --venus-model deepseek-v4.1-flash \
   --venus-strategic-model deepseek-v4-pro
 ```
 
@@ -228,6 +238,7 @@ MCP 启动后暴露 HTTP debug 端点（dev 端口 `:8770`，stable `:8760`，�
 | `GET /debug/` | GET | 浏览器控制台 UI（单页 HTML，`//go:embed` 嵌入） |
 | `POST /debug/action` | POST | 直接下发单个 action_command 到 UE（单步调试） |
 | `POST /debug/schedule` | POST | 注入一条 schedule 到战术层，立即分解为 action 序列入队 |
+| `POST /debug/event` | POST | 合成 world_event 注入事件系统（走与 UE 上报相同的分发入口；force 打断/入队全链路联调） |
 | `GET /debug/kb` | GET | 返回 world_kb JSON（zones/objects） |
 | `GET /debug/cap` | GET | 返回 capability_registry 当前状态（global + per-agent cmd） |
 | `GET /debug/agents` | GET | 返回已注册 agent ID 列表（供前端 agent 下拉） |
@@ -256,11 +267,32 @@ MCP 启动后暴露 HTTP debug 端点（dev 端口 `:8770`，stable `:8760`，�
 
 详见 `docs/DebugAction_Tool.md`。
 
+### `/debug/event`（2026-09 新增，事件驱动 P4-13）
+
+合成 `world_event` 注入事件系统，**走与 UE 上报完全相同的分发入口**（`Runtime.handleWorldEvent`）——force=true 走硬保证通道（同步 stop 在途动作 + 异步重规划），force=false 入队等安全点 drain。只注入入站消息，不直接向 UE 发任何东西，与 UE 自身推事件不冲突（注入事件的 event_id 用 `evt_debug_` 前缀与 UE 的 id 空间隔离）。
+
+请求体（`event` 为完整 `WorldEventPayload`，缺省字段服务端自动补齐：`event_id`（evt_debug_*）、`occurred_at`（now）、`game_time`（该 NPC 当前权威游戏时间）、`data`（空对象））：
+```json
+{
+  "agent_id": "H-01",
+  "event": {
+    "category": "player_interaction",
+    "event_type": "player_attacked",
+    "force": true,
+    "severity": 10,
+    "data": {"attacker": "player_1", "damage": 20, "damage_type": "physical"}
+  }
+}
+```
+
+`category`/`event_type` 六类别枚举见 `docs/AgentTown_WorldEvent_Protocol.md`。浏览器控制台"事件下发" tab 提供 14 个快速预设（被玩家攻击/脱离战斗/K-03 故障广播/能量跌破等）+ 自定义表单。
+
 ### 浏览器 UI
 
 `/debug/` 单页控制台，多面板：
 - **单 Action**：填 cmd + params，直接下发 UE
 - **Schedule 注入**：填 schedule 文本，触发战术层分解
+- **事件下发**：快速预设（被玩家攻击/脱离战斗等 14 项）+ 自定义 world_event，走事件系统分发入口
 - **当日 schedule**：右侧面板展示 dailyPlan（时段 + goal + 当前高亮）
 - **战术层分解情况**：全宽面板展示每个 NPC 当前时段 goal + 在途 action（含全部参数）+ 待执行队列（每 5s 刷新）
 - **MCP 日志**：全宽面板，按 level 筛选的环形日志
@@ -314,6 +346,7 @@ type Envelope struct {
 | `error` | 双向 | 错误上报 | 异常情况 |
 | `capability_registry` | UE→Agent | NPC 能力声明（哪些 cmd 可执行） | UE 连接后 / 能力变更时 |
 | `world_kb` | UE→Agent | 世界知识库下发（generated + authored） | UE 连接后（首个 `agent_registered` 之前） |
+| `world_event` | UE→Agent | 世界事件上传（事件驱动反应层的判定输入；force=硬保证打断，非 force=入队/路由） | 事件发生那一刻（边沿触发），见 `docs/AgentTown_WorldEvent_Protocol.md` |
 
 ### 动作生命周期
 
@@ -627,7 +660,7 @@ cp .env.example .env
 | `--ws` | `:9090` | WebSocket 监听（UE5 连接；start-debug.sh 默认传 `:9092` stable / `:9091` dev） |
 | `--venus-url` | `http://v2.open.venus.oa.com/llmproxy` | Venus 后端 URL |
 | `--venus-api-key` | `""` | Venus API key（**必填**，否则 401）。env 回退 `VENUS_API_KEY` |
-| `--venus-model` | `deepseek-v4-flash` | Venus 模型 ID（战术层） |
+| `--venus-model` | `deepseek-v4.1-flash` | Venus 模型 ID（战术层） |
 | `--venus-strategic-model` | `deepseek-v4-pro` | 战略层模型 ID（空值回退到 `--venus-model`） |
 | `--venus-timeout` | `60s` | Venus 调用超时 |
 | `--tactical-timeout` | `60s` | 战术层 LLM 调用超时（time_scale=90 下 ≈90 游戏分钟，slot 切换拖尾主因之一） |

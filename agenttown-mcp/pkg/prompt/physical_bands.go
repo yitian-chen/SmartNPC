@@ -16,8 +16,8 @@ package prompt
 import (
 	"fmt"
 
-	"github.com/AgentTown/agenttown-mcp/pkg/profile"
 	"github.com/AgentTown/agenttown-mcp/contract/protocol"
+	"github.com/AgentTown/agenttown-mcp/pkg/profile"
 )
 
 // BandThresholds splits each physical attribute's 0-100 range into 4
@@ -128,8 +128,11 @@ func (b BandThresholds) JointWearBand(v float64) string {
 // PhysicalLineActual renders the 物理状态 line for a concrete physical
 // state (no default substitution), using band labels for energy/fatigue/
 // joint_wear and a raw number for money (余额 stays numeric — it is an
-// economic balance, not an alert-style state).
+// economic balance, not an alert-style state). Attribute names carry a 度
+// suffix (疲劳度/关节磨损度) and are separated from their band labels by a
+// colon (疲劳度：非常疲劳), matching the facility-effect prose wording
+// (电量中等下降、疲劳度明显提升、…).
 func PhysicalLineActual(p protocol.PhysicalState, th BandThresholds) string {
-	return fmt.Sprintf("物理状态：电量 %s、疲劳 %s、关节磨损 %s、余额 %.0f。",
+	return fmt.Sprintf("物理状态：电量：%s、疲劳度：%s、关节磨损度：%s、余额：%.0f。",
 		th.EnergyBand(p.Energy), th.FatigueBand(p.Fatigue), th.JointWearBand(p.JointWear), p.Money)
 }

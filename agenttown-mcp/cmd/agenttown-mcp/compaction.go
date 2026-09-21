@@ -25,7 +25,7 @@ const (
 	// 紧跟的 tool 占位与后续注入的 [系统注入] 结果）。
 	compactTailRounds = 4
 	// compactSummaryMaxChars：摘要块长度上限（字符）。
-	compactSummaryMaxChars = 800
+	compactSummaryMaxChars = 200
 	// compactSummaryTimeout：摘要 LLM 调用的独立超时。摘要与战术层主调用
 	// 解耦——不复用 tacticalCallTimeout（60s），因为战略层模型慢 + 摘要输入
 	// 大，60s 内经常完不成导致「摘要失败→跳过」，压缩永远落不了地；失败时
@@ -34,24 +34,38 @@ const (
 )
 
 // compactSystemPrompt 是上下文压缩的 system 消息：机制文本，静态可缓存。
-const compactSystemPrompt = `你是小镇居民 NPC 的对话压缩模块。用户信息给出 NPC 的角色与一段多轮决策对话历史（按时间顺序），请把这段历史压缩成一份紧凑摘要，用于替代原文、供后续决策参考。
+const compactSystemPrompt = `你是小镇居民 NPC 的记忆压缩模块。请把下方多轮决策历史压缩成一段简短的回忆式摘要——写 NPC 亲身经历的事，不是系统日志。
 
 要求：
-1. 摘要不超过 800 字，纯散文、无 markdown、无列表符号
-2. 必须覆盖四点：
-   - 已完成动作时间线：NPC 今天已经做了什么、结果如何
-   - 当前时段目标与进度：现在在做什么、进行到哪一步
-   - 未完成/待办：接下来还计划做什么
-   - 关键约束与社交约定：任何中断原因、与其它 NPC 的约定、需要记住的事项
-3. 直接输出摘要文本本身，不要任何解释或前缀`
+1. 不超过 200 字，纯散文、口语化
+2. 只写三类内容：
+   - 干了什么事（一两句话概括，不要列举每个动作的参数和规则）
+   - 有什么感想或经验（如"老是被玩家骚扰很烦"、"老李这人不错"）
+   - 与谁有过什么互动（人际关系变化）
+3. 不要包含：物理状态数字、日程计划文本、系统提示语（如"路由裁决"、"时段切换"）、分解规则原文`
 
-// compactUserTemplate 是上下文压缩的 user 消息模板。
+// compactUserTemplate 是上下文压缩的首轮 user 消息模板（无历史摘要时）。
 // 占位符：%s = 角色上下文，%s = 按时间顺序渲染的对话历史。
 const compactUserTemplate = `[压缩层/上下文压缩] 请压缩以下多轮决策历史。
 
 %s
 
 【历史原文】（按时间顺序）
+%s`
+
+// compactMergeUserTemplate 是连续压缩的合并式模板：此前已有一份摘要
+// （覆盖更早的历史），本次必须把它与新一段历史**合并**成一份更新后的
+// 摘要——不是拼接、更不是丢弃旧摘要只写新块（那会让每次压缩都遗忘
+// 上一次逐出的内容，摘要块失去"滚动吸收"语义）。
+// 占位符：%s = 角色上下文，%s = 此前摘要，%s = 新一段历史。
+const compactMergeUserTemplate = `[压缩层/上下文压缩] 此前已有一份摘要（更早的对话历史已压缩为该摘要），请把它与下方新一段历史合并，输出一份更新后的完整摘要：覆盖两者的全部关键信息，删除重复，保持时间线连贯。合并后仍不超过 200 字，保持回忆式叙事风格。不要只概括新历史、不要遗漏旧摘要中的事实。
+
+%s
+
+【此前摘要】
+%s
+
+【新一段历史原文】（按时间顺序）
 %s`
 
 // maybeCompactConversation 估算本次请求输入 token，超阈值时把旧历史摘要
@@ -71,7 +85,18 @@ func (a *agentContext) maybeCompactConversation(system string, tools []venus.Too
 	if len(evict) == 0 {
 		return // 已是小尾巴，无从逐出
 	}
-	newSummary, err := a.summarizeConversation(evict, agentID, kb, profiles, logger)
+	// in-flight 互斥：两个并发 agenticTurn（worker refill 进行中 + 战略
+	// replan 插入等——worker 的 LLM 调用期间不持 replanInProgress）可能
+	// 同时过阈值：双倍摘要成本，且第二次 CompactConversation 用旧快照
+	// 覆盖会丢两次写入之间追加的消息。进行中则跳过，下轮调用重试
+	// （2026-09-18 日志实测同秒双 COMPACT-PROMPT、双完成）。
+	if !a.compacting.CompareAndSwap(false, true) {
+		logger.Debug("[压缩层] 已有压缩在进行，跳过本次（下轮重试）", "agent_id", agentID)
+		return
+	}
+	defer a.compacting.Store(false)
+
+	newSummary, err := a.summarizeConversation(evict, summary, agentID, kb, profiles, logger)
 	if err != nil {
 		logger.Warn("[压缩层] 摘要生成失败，跳过本次压缩（下轮重试）",
 			"agent_id", agentID, "evict_msgs", len(evict), "err", err)
@@ -81,18 +106,24 @@ func (a *agentContext) maybeCompactConversation(system string, tools []venus.Too
 	logger.Info("[压缩层] 上下文压缩完成",
 		"agent_id", agentID,
 		"before_msgs", len(history), "after_msgs", len(tail),
-		"summary_chars", len(newSummary),
+		"summary_chars", len(newSummary), "merged", summary != "",
 		"est_tokens", estimateInputTokens(system, tools, newSummary, tail, userContent))
 }
 
 // summarizeConversation 用战术层模型把 evict 历史压缩成一份摘要串（best-effort，
-// 不 JSON 解析，直接取文本）。
-func (a *agentContext) summarizeConversation(evict []llmtypes.Message, agentID string, kb *worldkb.KB, profiles map[string]*profile.Profile, logger *slog.Logger) (string, error) {
+// 不 JSON 解析，直接取文本）。prevSummary 非空时走合并式模板——旧摘要与新
+// 历史合并成更新后的摘要，连续压缩不丢更早的内容。
+func (a *agentContext) summarizeConversation(evict []llmtypes.Message, prevSummary, agentID string, kb *worldkb.KB, profiles map[string]*profile.Profile, logger *slog.Logger) (string, error) {
 	roleCtx := ""
 	if role := prompt.AgentRole(kb, profiles, agentID); role != "" {
 		roleCtx = "【你的角色】\n" + role
 	}
-	promptText := fmt.Sprintf(compactUserTemplate, roleCtx, formatConversationForSummary(evict))
+	var promptText string
+	if prevSummary != "" {
+		promptText = fmt.Sprintf(compactMergeUserTemplate, roleCtx, prevSummary, formatConversationForSummary(evict))
+	} else {
+		promptText = fmt.Sprintf(compactUserTemplate, roleCtx, formatConversationForSummary(evict))
+	}
 
 	logger.Info("[MCP→LLM/COMPACT-PROMPT]", "agent_id", agentID,
 		"evict_msgs", len(evict), "text", promptText)
@@ -102,6 +133,12 @@ func (a *agentContext) summarizeConversation(evict []llmtypes.Message, agentID s
 	summaryCtx, cancel := context.WithTimeout(context.Background(), compactSummaryTimeout)
 	defer cancel()
 	resp, err := a.tacticalHc.SendWithSummary(summaryCtx, compactSystemPrompt, promptText)
+	// 清掉压缩调用留下的 lastRequestBody——防 dumpLastRequestBody 把
+	// 压缩请求体误记为战术层请求（压缩 user prompt 含完整历史原文，
+	// 在 actual_prompts.md 里会显示为大量重复段）。
+	if c, ok := any(a.tacticalHc).(interface{ ClearLastRequestBody() }); ok {
+		c.ClearLastRequestBody()
+	}
 	if err != nil {
 		return "", fmt.Errorf("compact llm: %w", err)
 	}

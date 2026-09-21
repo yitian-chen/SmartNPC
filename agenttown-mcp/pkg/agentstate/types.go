@@ -52,7 +52,17 @@ type Snapshot struct {
 	CurrentActionCmd    string
 	CurrentActionParams map[string]any
 	CurrentActionStart  time.Time
-	CurrentActionSrc    ActionSource
+	// P4-10（§6.1 状态栏补全）：在途动作游戏时间起点 / 上次动作结束方式
+	// 与原因 / 未完成任务槽（预渲染，含进度与离开原因）。
+	CurrentActionStartGame float64
+	LastEndResult          string
+	LastEndWhy             string
+	UnfinishedTask         string
+	// ActiveSituations carries the raw situation list（TTL 由读取方按
+	// 当前游戏时间过滤，见 FilterSituations/ActiveSituations）。
+	ActiveSituations  []ActiveSituation
+	SlotSwitchPending bool
+	CurrentActionSrc  ActionSource
 	// Queue state (约定21): populated when UE notifies the agent is
 	// queued for an occupied Smart Object. Empty/zero when not queued.
 	QueuedActionID      string

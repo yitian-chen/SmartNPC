@@ -65,6 +65,14 @@ type AgentState struct {
 	queuedPosition      *int
 	queuedEstimatedWait *float64
 	queuedAt            time.Time
+	// worldEventQueue is the per-agent bounded FIFO of non-force world
+	// events awaiting the next safe point (§4.4) — see world_event_queue.go
+	// for the API and the deliberate non-clearing on slot switch / replan.
+	// worldEventSeen dedups by event_id (reconnect seq-replay cannot
+	// re-enqueue a delivered event); worldEventSeenFIFO is its eviction order.
+	worldEventQueue     []protocol.WorldEventPayload
+	worldEventSeen      map[string]struct{}
+	worldEventSeenFIFO  []string
 	actionQueue         []PlannedAction
 	redecomposeCount    int
 	pendingStopActionID string
@@ -77,12 +85,44 @@ type AgentState struct {
 	// so callers (recordActionHistory) still record the full action row
 	// for long-composite actions interrupted by slot switch or replan
 	// fallback. One-shot: matched → cleared. Overwritten by next clear.
-	clearedAction   *clearedActionInfo
-	prevZone        string
-	prevObjectIDs   []string
-	lastReactiveAt  map[string]time.Time
-	perceptionCount int
-	replanHint      string
+	clearedAction *clearedActionInfo
+	// P4-10（§6.1 状态栏补全）字段：未完成任务槽 + 上次动作结束原因 +
+	// 在途动作的游戏时间起点（已执行时长推算用）。
+	// currentActionStartGame 记录在途动作开始时的权威游戏秒（<=0 = 当时
+	// 无感知，已执行时长省略）。
+	currentActionStartGame float64
+	// lastEndResult/lastEndWhy 记录最近一次在途动作的结束方式与原因：
+	// result 为协议值（success/failed/interrupted/error）或 "scheduled"
+	// （时段切换的计划内结束，渲染"正常结束"），why 为 UE reason 或打断
+	// 来源（如"被玩家攻击强制打断"）。lastEndInterrupted 是 preface 标记：
+	// stop/切换点已预先记下结束方式——迟到的 action_completed{interrupted}
+	// 只确认结果，不覆盖预记的更具体 why。
+	lastEndResult      string
+	lastEndWhy         string
+	lastEndInterrupted bool
+	// unfinishedTask 承载被打断任务的事实（任务描述+进度+离开原因，预渲染），
+	// 供状态栏与下一次重规划参考；下个动作开始即清（事实已被消费）。
+	unfinishedTask string
+	// P3-9 升格（事件驱动战略层 replan）状态：节流（每游戏日上限 + 游戏时间
+	// 去抖，strategicReplanCount/Day/lastGT）与修订留痕（planRevisions，
+	// 供当晚反思消费——P5-15；进程内不持久化）。
+	strategicReplanCount  int
+	strategicReplanDay    int
+	lastStrategicReplanGT float64
+	planRevisions         []string
+	// activeSituations 是事件登记的持续情境（combat 类）：登记/解除见
+	// active_situations.go。TTL 过滤在读取时做。
+	activeSituations []ActiveSituation
+	// slotSwitchPending: advanceSlotIfNeeded 检测到 slot 过期但不再强切
+	// （P3-8 入队化）：只清 currentSlot 标记 pending，等安全点（无在途
+	// 动作）时由 worker 做真正的清理 + 选新 slot。反应进行中也不打断——
+	// pending 挂着，reaction 结束后自然处理。
+	slotSwitchPending bool
+	prevZone          string
+	prevObjectIDs     []string
+	lastReactiveAt    map[string]time.Time
+	perceptionCount   int
+	replanHint        string
 	// lastQueueOnlySpeak 记录最近一次战术层分解（ReplaceQueue 路径）的队列
 	// 是否只含 speak——用于 BeginTacticalRefill 在"队列提前耗尽"时生成
 	// 针对性 hint（LLM 只返回 1 个 speak、队列数秒即耗尽的场景）。
@@ -135,6 +175,7 @@ func New() *AgentState {
 		currentDay:            -1,
 		timeStopTargetGameSec: -1,
 		lastReactiveAt:        make(map[string]time.Time),
+		worldEventSeen:        make(map[string]struct{}),
 	}
 }
 
@@ -341,6 +382,8 @@ func (a *AgentState) SetOnline(v bool) {
 }
 
 // RecordActionStarted records a newly-dispatched in-flight action.
+// The unfinished-task slot is cleared here: the interruption fact has been
+// consumed by the decision that produced this action.
 func (a *AgentState) RecordActionStarted(actionID, cmd string, params map[string]any, src ActionSource, toolCallID string) {
 	a.mu.Lock()
 	a.currentActionID = actionID
@@ -349,7 +392,60 @@ func (a *AgentState) RecordActionStarted(actionID, cmd string, params map[string
 	a.currentActionParams = params
 	a.currentActionStart = time.Now()
 	a.currentActionToolCallID = toolCallID
+	a.currentActionStartGame = latestGameTimeSecLocked(a.latestPerception)
+	a.unfinishedTask = ""
 	a.mu.Unlock()
+}
+
+// RecordActionInterrupted captures the current in-flight action as the
+// unfinished-task slot with the interrupt reason (P4-10，§3.4：三种结束
+// 方式必须区分——把打断当成功继续走是最典型的幻觉来源)。 Call at every
+// stop point BEFORE the in-flight tracking is cleared
+// (ClearInFlightKeepQueue / ClearForSlotSwitch). No-op when nothing is
+// in flight — usually an earlier stop point already captured a more
+// specific reason, and a later capture must not overwrite it.
+func (a *AgentState) RecordActionInterrupted(taskDesc, reason string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.currentActionID == "" {
+		return
+	}
+	a.lastEndResult = "interrupted"
+	a.lastEndWhy = reason
+	a.lastEndInterrupted = true
+	a.unfinishedTask = taskDesc
+}
+
+// RecordActionEndedBySchedule records a PLANNED end of the in-flight
+// action — the slot boundary. 时段切换是本系统的正常终止方式（长动作
+// 设计上持续到时段边界），不是"被中断"：把它渲染成 被中断（时段切换）
+// 会让 LLM 误以为受到了干扰。The task still lands in the unfinished-task
+// slot (its facts feed the next slot's planning); only the end REASON is
+// "scheduled"（状态栏渲染"正常结束"）. Like RecordActionInterrupted, the
+// delayed action_completed{interrupted} must not overwrite this record.
+func (a *AgentState) RecordActionEndedBySchedule(taskDesc string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.currentActionID == "" {
+		return
+	}
+	a.lastEndResult = "scheduled"
+	a.lastEndWhy = ""
+	a.lastEndInterrupted = true // preface flag：迟到的 interrupted completion 只确认，不覆盖
+	a.unfinishedTask = taskDesc
+}
+
+// latestGameTimeSecLocked parses the authoritative game seconds out of the
+// latest perception JSON. Caller holds a.mu.
+func latestGameTimeSecLocked(perception json.RawMessage) float64 {
+	if len(perception) == 0 {
+		return 0
+	}
+	var p protocol.PerceptionPayload
+	if err := json.Unmarshal(perception, &p); err != nil {
+		return 0
+	}
+	return p.Environment.GameTimeSec
 }
 
 // CompletionResult carries the flags computed by RecordActionCompletion
@@ -374,10 +470,20 @@ type CompletionResult struct {
 // and resolves pendingStop/selfStop markers. Returns flags describing
 // what was cleared so the caller can handle coordination timers
 // (pendingActionTimeouts, completedBeforeArm) and reactive triggers.
-func (a *AgentState) RecordActionCompletion(actionID string) CompletionResult {
+func (a *AgentState) RecordActionCompletion(actionID, result, reason string) CompletionResult {
 	a.mu.Lock()
 	if a.currentTask != nil && a.currentTask.ActionID == actionID {
 		a.currentTask = nil
+	}
+	// P4-10：上次结束方式记账。stop 点已预告 interrupted（why 更具体——
+	// 事件/裁决来源）时，迟到的 interrupted completion 只确认结果、不覆盖
+	// why；其余情况（success/failed/error，或未经 stop 点的 interrupted）
+	// 按实际结果覆盖。
+	if result == "interrupted" && a.lastEndInterrupted {
+		a.lastEndInterrupted = false
+	} else if result != "" {
+		a.lastEndResult = result
+		a.lastEndWhy = reason
 	}
 	wasInFlight := a.currentActionID == actionID
 	// Stage 4: capture in-flight fields BEFORE clearing, for action_history.
@@ -752,12 +858,94 @@ func (a *AgentState) Stop() {
 	a.currentActionToolCallID = ""
 	a.actionQueue = nil
 	a.clearQueueStatusLocked()
+	// World-event queue + dedup seen-set reset together: after a reconnect
+	// UE only replays messages the agent never received, so nothing
+	// received-and-consumed can come back (world_event_queue.go).
+	a.worldEventQueue = nil
+	a.worldEventSeen = nil
+	a.worldEventSeenFIFO = nil
+	a.currentActionStartGame = 0
+	a.lastEndResult = ""
+	a.lastEndWhy = ""
+	a.lastEndInterrupted = false
+	a.unfinishedTask = ""
+	a.slotSwitchPending = false
 	a.currentSlot = ""
 	a.redecomposeCount = 0
 	a.clearedAction = nil // drop stash — offline agent has no pending completion
 	snap := a.snapshotPersistentLocked()
 	a.mu.Unlock()
 	a.persistSchedule(snap)
+}
+
+// TryBeginStrategicReplan atomically checks the strategic-replan throttle
+// (per-game-day cap + game-time debounce) and commits the attempt when
+// allowed. The attempt counts even if the replan later fails — an event
+// storm must not turn into a replan storm.
+func (a *AgentState) TryBeginStrategicReplan(nowGameSec float64, day, maxPerDay int, minGapGameSec float64) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if day != a.strategicReplanDay {
+		a.strategicReplanDay = day
+		a.strategicReplanCount = 0
+	}
+	if a.strategicReplanCount >= maxPerDay {
+		return false
+	}
+	if a.lastStrategicReplanGT > 0 && nowGameSec > 0 && nowGameSec-a.lastStrategicReplanGT < minGapGameSec {
+		return false
+	}
+	a.strategicReplanCount++
+	a.lastStrategicReplanGT = nowGameSec
+	return true
+}
+
+// RecordPlanRevision appends a revision note (当日计划修订留痕，P3-9/P5-15）。
+// Bounded: keeps the most recent notes only.
+func (a *AgentState) RecordPlanRevision(note string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.planRevisions = append(a.planRevisions, note)
+	if len(a.planRevisions) > 32 {
+		a.planRevisions = a.planRevisions[len(a.planRevisions)-32:]
+	}
+}
+
+// PlanRevisions returns a copy of the revision notes for tonight's
+// reflection (P5-15).
+func (a *AgentState) PlanRevisions() []string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return append([]string(nil), a.planRevisions...)
+}
+
+// SetSlotSwitchPending marks that a slot boundary was crossed but the
+// switch was deferred to a safe point (P3-8). The worker clears currentSlot
+// here (so selectCurrentGoal picks the new slot on the next refill), but
+// does NOT clear the action queue or in-flight tracking — those wait until
+// the action completes naturally (or is stopped by time_to_stop).
+func (a *AgentState) SetSlotSwitchPending() {
+	a.mu.Lock()
+	a.currentSlot = ""
+	a.slotSwitchPending = true
+	snap := a.snapshotPersistentLocked()
+	a.mu.Unlock()
+	a.persistSchedule(snap)
+}
+
+// SlotSwitchPending reports whether a deferred slot switch is pending.
+func (a *AgentState) SlotSwitchPending() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.slotSwitchPending
+}
+
+// ClearSlotSwitchPending consumes the pending flag (the worker has done
+// the cleanup: ClearForSlotSwitch / pendingStop / new-slot refill).
+func (a *AgentState) ClearSlotSwitchPending() {
+	a.mu.Lock()
+	a.slotSwitchPending = false
+	a.mu.Unlock()
 }
 
 // RefillQueue replaces the action queue with the given actions and records
@@ -889,7 +1077,13 @@ type TacticalRefillPrep struct {
 // (via selectCurrentGoal on the daily plan). If ShouldSkip is true the
 // caller must abort the refill. On success, the action queue is cleared
 // and the replanHint is consumed (returned in Hint for prompt injection).
-func (a *AgentState) BeginTacticalRefill(goal, slot string, idx int, hasTacticalHc bool) TacticalRefillPrep {
+//
+// suppressAutoHint skips the queue-exhaustion auto-hint（"上次队列提前耗尽…
+// 安排长动作收尾"）：该 hint 在紧急反应刚结束的 refill 里是反向信号——
+// 它把 LLM 推回"填满时段的长动作"，而此刻正确语境是刚被打断的紧急
+// 情境（由 activeSituations 承载）。调用方（tacticalRefill）在反应窗口
+// 仍 armed 时传 true。
+func (a *AgentState) BeginTacticalRefill(goal, slot string, idx int, hasTacticalHc, suppressAutoHint bool) TacticalRefillPrep {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	prep := TacticalRefillPrep{
@@ -924,8 +1118,9 @@ func (a *AgentState) BeginTacticalRefill(goal, slot string, idx int, hasTactical
 		}
 		// 注入"未安排长动作"hint；上次队列只含 speak 时给出更具体的诊断
 		// （该失败模式实测高频：LLM 只返回 1 个 speak，队列数秒即耗尽，
-		// NPC 在两次 LLM 调用之间呆站）。
-		if a.replanHint == "" {
+		// NPC 在两次 LLM 调用之间呆站）。反应窗口内的 refill 跳过（见
+		// suppressAutoHint 注释）。
+		if a.replanHint == "" && !suppressAutoHint {
 			if a.lastQueueOnlySpeak {
 				a.replanHint = "上次分解只返回了 1 个 speak，队列数秒即耗尽导致频繁重分解。本次必须在 speak 之后返回至少一个带 duration 的长动作（InteractSmartObject 设施互动或 exercise 原地锻炼），让 NPC 持续活动到时段结束"
 			} else {
@@ -1115,6 +1310,24 @@ func (a *AgentState) SetReplanHint(reason string) {
 	a.mu.Unlock()
 }
 
+// ReplanHint returns the currently stored replan hint ("" = none pending).
+// The hint is consumed (cleared) by the next BeginTacticalRefill.
+func (a *AgentState) ReplanHint() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.replanHint
+}
+
+// LastEndPrefaced reports whether a stop/switch point has pre-recorded the
+// end (lastEndInterrupted flag still set) — meaning the next
+// action_completed{interrupted} is an expected follow-up to our own stop,
+// not an anomaly. Call BEFORE RecordActionCompletion (which clears it).
+func (a *AgentState) LastEndPrefaced() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.lastEndInterrupted
+}
+
 // SetReplanTimestamps records when a replan happened (wall-clock + game time),
 // used for dedupe and logging.
 func (a *AgentState) SetReplanTimestamps(at time.Time, gameTime string) {
@@ -1284,35 +1497,40 @@ func (a *AgentState) Snapshot() Snapshot {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return Snapshot{
-		Online:              a.online,
-		LatestPhysical:      clonePhysical(a.latestPhysical),
-		LatestPerception:    cloneRawMessage(a.latestPerception),
-		LatestVisibleAgents: append([]protocol.VisibleAgent(nil), a.latestVisibleAgents...),
-		CurrentTask:         cloneTask(a.currentTask),
-		CurrentActionID:     a.currentActionID,
-		CurrentActionCmd:    a.currentActionCmd,
-		CurrentActionParams: cloneParams(a.currentActionParams),
-		CurrentActionStart:  a.currentActionStart,
-		CurrentActionSrc:    a.currentActionSrc,
-		QueuedActionID:      a.queuedActionID,
-		QueuedGroup:         a.queuedGroup,
-		QueuedPosition:      cloneIntPtr(a.queuedPosition),
-		QueuedEstimatedWait: cloneFloat64Ptr(a.queuedEstimatedWait),
-		QueuedAt:            a.queuedAt,
-		ActionQueue:         cloneQueue(a.actionQueue),
-		DailyPlan:           a.dailyPlan,
-		CurrentDay:          a.currentDay,
-		CurrentPlanIndex:    a.currentPlanIndex,
-		CurrentSlot:         a.currentSlot,
-		RedecomposeCount:    a.redecomposeCount,
-		PrevZone:            a.prevZone,
-		PrevObjectIDs:       cloneStrings(a.prevObjectIDs),
-		PerceptionCount:     a.perceptionCount,
-		ReplanHint:          a.replanHint,
-		LastReplanAt:        a.lastReplanAt,
-		LastReplanGameTime:  a.lastReplanGameTime,
-		PendingStopActionID: a.pendingStopActionID,
-		SelfStopInProgress:  a.selfStopInProgress,
+		Online:                 a.online,
+		LatestPhysical:         clonePhysical(a.latestPhysical),
+		LatestPerception:       cloneRawMessage(a.latestPerception),
+		LatestVisibleAgents:    append([]protocol.VisibleAgent(nil), a.latestVisibleAgents...),
+		CurrentTask:            cloneTask(a.currentTask),
+		CurrentActionID:        a.currentActionID,
+		CurrentActionCmd:       a.currentActionCmd,
+		CurrentActionParams:    cloneParams(a.currentActionParams),
+		CurrentActionStart:     a.currentActionStart,
+		CurrentActionStartGame: a.currentActionStartGame,
+		CurrentActionSrc:       a.currentActionSrc,
+		LastEndResult:          a.lastEndResult,
+		LastEndWhy:             a.lastEndWhy,
+		UnfinishedTask:         a.unfinishedTask,
+		ActiveSituations:       append([]ActiveSituation(nil), a.activeSituations...),
+		QueuedActionID:         a.queuedActionID,
+		QueuedGroup:            a.queuedGroup,
+		QueuedPosition:         cloneIntPtr(a.queuedPosition),
+		QueuedEstimatedWait:    cloneFloat64Ptr(a.queuedEstimatedWait),
+		QueuedAt:               a.queuedAt,
+		ActionQueue:            cloneQueue(a.actionQueue),
+		DailyPlan:              a.dailyPlan,
+		CurrentDay:             a.currentDay,
+		CurrentPlanIndex:       a.currentPlanIndex,
+		CurrentSlot:            a.currentSlot,
+		RedecomposeCount:       a.redecomposeCount,
+		PrevZone:               a.prevZone,
+		PrevObjectIDs:          cloneStrings(a.prevObjectIDs),
+		PerceptionCount:        a.perceptionCount,
+		ReplanHint:             a.replanHint,
+		LastReplanAt:           a.lastReplanAt,
+		LastReplanGameTime:     a.lastReplanGameTime,
+		PendingStopActionID:    a.pendingStopActionID,
+		SelfStopInProgress:     a.selfStopInProgress,
 	}
 }
 

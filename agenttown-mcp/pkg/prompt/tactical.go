@@ -19,8 +19,8 @@ const TacticalRules = `1. 第一个工具调用必须是 speak（用一段话表
 4. 禁止把同一动作连续重复多次填充时段（工作段之间应穿插休息段）。
 5. InteractSmartObject 的 semantic_group 必须严格使用设施详情中给出的 semantic_group 值，禁止编造、禁止用实例 id（如 Charge-1）。
 6. InteractSmartObject 的 semantic_group 与 interaction 必须严格对应，禁止跨类别组合——所有工种设备与生活设施都可用 InteractSmartObject 直接交互，semantic_group 填设施、interaction 填对应动词即可（如 workbench/assemble、process_machine/process、charger/charge、sleep_pod/sleep、bench/rest 等，完整映射见设施详情）。
-7. 所有非瞬时动作（InteractSmartObject 设施互动、exercise 原地锻炼等需要持续一段时间的）都必须填写 duration 参数（秒，schema 必填）；move_to 的移动时长由 UE 自动决定、无需填 duration；瞬时动作（speak 等立即完成的）也不填 duration。duration 要合理：冥想、整理床铺等单段设 1800 秒左右，不宜超过 1 小时；工作段可设 3600-7200 秒。到点后系统会打断该段并继续执行后续动作段；只有全部动作执行完，系统才会再次询问。推荐模式：工作段（如 1.5 小时）→ 长椅小憩/原地拉伸段（不超过 30 分钟）→ 返回工作段（duration 设为时段剩余时长）。
-8. 每次生成的最后一个动作必须是长动作（InteractSmartObject 长动作），其 duration 设为当前时段的剩余时长（见上文"剩余约 X 分钟"提示）——到点后系统自动切入下一时段，NPC 不会呆站。所有动作的 duration 总和应接近当前时段的剩余时长，避免过短导致队列提前耗尽触发重分解、或过长拖到下一时段。
+7. 所有非瞬时动作（InteractSmartObject 设施互动、exercise 原地锻炼等需要持续一段时间的）都必须填写 duration 参数（秒，schema 必填），包括最后一个动作也不例外——无 duration 的长动作无法被系统按计划终止；move_to 的移动时长由 UE 自动决定、无需填 duration；瞬时动作（speak 等立即完成的）也不填 duration。duration 要合理：冥想、整理床铺等单段设 1800 秒左右，不宜超过 1 小时；工作段可设 3600-7200 秒。到点后系统会打断该段并继续执行后续动作段；只有全部动作执行完，系统才会再次询问。推荐模式：工作段（如 1.5 小时）→ 长椅小憩/原地拉伸段（不超过 30 分钟）→ 返回工作段（duration 设为时段剩余时长）。
+8. 每次生成的最后一个动作必须是长动作（InteractSmartObject 长动作），其 duration 设为当前时段的剩余时长（见上文"剩余约 X 分钟"提示）——到点后系统自动切入下一时段，NPC 不会呆站。所有长动作（包括最后一个）都必须设置 duration，不得省略。所有动作的 duration 总和应接近当前时段的剩余时长，避免过短导致队列提前耗尽触发重分解、或过长拖到下一时段。
 9. 如果是调用 InteractSmartObject 工具，若当前日程目标明确指定了区域（如"去中央广场长椅休息"），**必须**在该工具的 zone 参数中填写对应区域 id（如 central_plaza、logistics_hub）。`
 
 // tacticalCoreRules 是精简模式（Compact=true）下替代完整 TacticalRules 的
@@ -29,7 +29,7 @@ const TacticalRules = `1. 第一个工具调用必须是 speak（用一段话表
 // 指向本日第一条战术 user 消息，不再逐轮重复。
 const tacticalCoreRules = `- 首个工具调用必须是 speak；随后必须返回至少一个带 duration 的长动作，禁止只返回 speak。
 - 除了speak和移动，其他必须填 duration（秒）：中间动作约 1800 秒、工作段 3600-7200 秒。
-- 最后一个动作必须是长动作，duration 设为当前时段剩余时长。`
+- 最后一个动作必须是长动作，duration 设为当前时段剩余时长。所有长动作（含末段）都必须设 duration。`
 
 // tacticalCompactRefLine 是精简模式的引用行：指向本日第一条战术消息的
 // 全量头。"以最新一份为准"覆盖跨日交错等边界下历史出现多份全量头的情况。
@@ -78,6 +78,21 @@ func BuildTactical(in TacticalInput) string {
 		// PhysicalLine 自带"物理状态："前缀，与段头【物理状态】去重。
 		sb.WriteString("【物理状态】\n")
 		sb.WriteString(strings.TrimPrefix(line, "物理状态：") + "\n")
+	}
+	// P3-7 安全点 drain（§4.4/§5.1 三输入之一）：攒下的非 force 事件
+	// 一次性全取注入。逐次变化的数据，compact 模式同样注入（非日内不变块）。
+	if in.Events != "" {
+		sb.WriteString("【发生的事件】（自上次规划以来世界上发生的事，请纳入本轮安排考虑）\n")
+		sb.WriteString(in.Events)
+		sb.WriteString("\n")
+	}
+	// P3-9 修复 A：持续情境（未被解除的威胁）。事件是边沿触发的，但威胁
+	// 在解除信号到达前持续存在——每轮 refill 都要可见，否则 LLM 会脑补
+	// "威胁解除了"。
+	if in.Situations != "" {
+		sb.WriteString("【当前处境】以下情境仍在持续、尚未收到解除信号，安排行动时必须考虑：\n")
+		sb.WriteString(in.Situations)
+		sb.WriteString("\n")
 	}
 	if in.Memories != "" {
 		sb.WriteString("【过往经验】\n" + in.Memories)
@@ -138,17 +153,46 @@ func BuildTactical(in TacticalInput) string {
 	return sb.String()
 }
 
-// tacticalHintLine renders the replan hint plus, when the hint carries the
-// "物理状态告警" marker (set by upgradeIfPhysicalAlert), type-specific
-// recovery constraints based on which physical values are actually in alert.
-// Pairs with physicalAlertOverrideGoal (code-layer goal override) as double
-// insurance. Different alert types drive different recovery actions:
+// tacticalHintLine renders the replan hint. Two hint flavors:
+//   - "【强制打断】" 前缀（force 事件，P1-3）：升级为【紧急事件】最高优先级
+//     指令——显式授权战术层暂停时段目标（设计文档 §4.2/§5.5 的否决权），
+//     并豁免"时长填满/末段长动作"规则。不这样写的话，事件只是规则段前
+//     的一行说明性注释，主指令（分解时段目标 + 填满剩余时长）全部指向
+//     恢复原工作——LLM 的理性选择就是一句 speak 后继续原时段动作
+//     （2026-09-17 仿真实测：被玩家瞄准 → 说"先躲躲" → 继续拆解原设备）。
+//   - "物理状态告警" marker (set by upgradeIfPhysicalAlert): type-specific
+//     recovery constraints based on which physical values are actually in
+//     alert. Pairs with physicalAlertOverrideGoal (code-layer goal override)
+//     as double insurance. Different alert types drive different recovery
+//     actions:
 //   - 低电量 → charge_at_station 充电
 //   - 高疲劳 → charge_at_station 充电 / rest_at_residence 休息
 //   - 高关节磨损 → self_maintenance 维修保养
 func tacticalHintLine(in TacticalInput, th BandThresholds) string {
 	if in.Hint == "" {
 		return ""
+	}
+	if strings.HasPrefix(in.Hint, "【情境解除】") {
+		event := strings.TrimPrefix(in.Hint, "【情境解除】")
+		return "【情境已解除】" + event + "\n" +
+			"当前动作是对已解除情境的反应，不再必要。请回到当前时段目标的原有日程正常规划。"
+	}
+	if strings.HasPrefix(in.Hint, "【社交回应】") {
+		event := strings.TrimPrefix(in.Hint, "【社交回应】")
+		return "【社交回应请求】" + event + "\n" +
+			"请简短回应此社交事件（如打招呼、回一句话），然后继续当前时段的原有工作。" +
+			"回应动作应简短，回应完毕后按原计划继续。"
+	}
+	if strings.HasPrefix(in.Hint, "【强制打断】") {
+		event := strings.TrimPrefix(in.Hint, "【强制打断】")
+		return "【紧急事件】" + event + "\n" +
+			"本轮规划的最高优先级是应对上述紧急事件，它优先于【当前时段目标】和下方分解规则：" +
+			"你有权暂停原计划，先妥善处置事件（如撤离威胁范围、移动到安全位置、寻找同伴支援、保持警戒观察等，" +
+			"具体做法由你结合角色性格与事件性质决定），处理完且时间允许时再回到时段目标。" +
+			"本轮动作时长按应对事件的实际需要安排即可，无需用长动作填满时段剩余时长——" +
+			"事件应对只需短时间时，队列耗尽后系统会自然重新规划回到日程。" +
+			"若该事件描述的是威胁类情境（如被攻击/被瞄准），在收到明确的解除信号（脱离战斗）之前应视为持续存在，" +
+			"不得自行认定威胁已解除。"
 	}
 	hintLine := "【上次中断原因】" + in.Hint + "（请据此调整本轮规划）"
 	if !strings.Contains(in.Hint, "物理状态告警") || in.Physical == nil || in.Physical.IsZero() {

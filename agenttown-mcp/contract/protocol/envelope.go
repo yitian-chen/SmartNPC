@@ -21,8 +21,8 @@ const SystemAgentID = "system"
 // Envelope is the fixed 7-field outer structure shared by all messages.
 type Envelope struct {
 	Version   string          `json:"version"`
-	MsgID     string          `json:"msg_id"`   // UUID, for dedup/tracing
-	Seq       int64           `json:"seq"`      // per-sender monotonic sequence
+	MsgID     string          `json:"msg_id"`    // UUID, for dedup/tracing
+	Seq       int64           `json:"seq"`       // per-sender monotonic sequence
 	Timestamp int64           `json:"timestamp"` // Unix epoch milliseconds
 	Type      string          `json:"type"`
 	AgentID   string          `json:"agent_id"`
@@ -79,6 +79,18 @@ const (
 	TypeChatInvite    = "chat_invite"     // UE → B: A wants to talk (carries conv_id + A's opening line)
 	TypeChatInviteRsp = "chat_invite_rsp" // B → UE (forwarded to A): accept/reject decision only
 	TypeChatTurn      = "chat_turn"       // speaker → UE (forwarded to peer): one utterance
+
+	// TypeWorldEvent is pushed by UE the moment something happens in the
+	// world (edge-triggered, never level-triggered): physical threshold
+	// crossings, zone changes, social signals, action anomalies, world
+	// injections and player interactions. The envelope's agent_id is the
+	// RECEIVING NPC; a broadcast is one message per target NPC, all
+	// sharing the same payload event_id. force=true bypasses the router
+	// entirely (no LLM, no debounce, cannot be vetoed — §四 of
+	// docs/AgentTown_WorldEvent_Protocol.md); force=false is judged by the
+	// lightweight router as interrupt-or-enqueue. Category enums and the
+	// payload struct live in messages.go.
+	TypeWorldEvent = "world_event" // UE → Agent
 )
 
 // action_command cmd constants (§2.3).
@@ -98,12 +110,12 @@ const (
 	CmdInteractSmartObject = "InteractSmartObject"
 	CmdEmote               = "Emote"
 	// Composite cmds (6).
-	CmdWorkShift        = "WorkShift"
-	CmdChargeAtStation  = "ChargeAtStation"
-	CmdSelfMaintenance  = "SelfMaintenance"
-	CmdRestAtResidence  = "RestAtResidence"
-	CmdSurfInternet     = "SurfInternet"
-	CmdSocialChat       = "SocialChat" // Phase 2 Module C: proactive NPC-to-NPC dialogue
+	CmdWorkShift       = "WorkShift"
+	CmdChargeAtStation = "ChargeAtStation"
+	CmdSelfMaintenance = "SelfMaintenance"
+	CmdRestAtResidence = "RestAtResidence"
+	CmdSurfInternet    = "SurfInternet"
+	CmdSocialChat      = "SocialChat" // Phase 2 Module C: proactive NPC-to-NPC dialogue
 )
 
 // IsCompositeCmd reports whether the given cmd is one of the long
@@ -138,11 +150,11 @@ const (
 
 // error_code constants (§2.3).
 const (
-	ErrActionFailed    = "ACTION_FAILED"
-	ErrStopIDMismatch  = "STOP_ID_MISMATCH"
-	ErrInvalidMessage  = "INVALID_MESSAGE"
-	ErrUnknownAgent    = "UNKNOWN_AGENT"
-	ErrInternalError   = "INTERNAL_ERROR"
+	ErrActionFailed   = "ACTION_FAILED"
+	ErrStopIDMismatch = "STOP_ID_MISMATCH"
+	ErrInvalidMessage = "INVALID_MESSAGE"
+	ErrUnknownAgent   = "UNKNOWN_AGENT"
+	ErrInternalError  = "INTERNAL_ERROR"
 )
 
 // perception_level constants for event_notification (§2.3).

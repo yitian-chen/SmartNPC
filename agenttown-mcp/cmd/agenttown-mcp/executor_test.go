@@ -151,7 +151,7 @@ func TestSendAction_CapabilityGate(t *testing.T) {
 
 func TestSendAction_Success(t *testing.T) {
 	ws := &fakeTransport{
-		connected:    true,
+		connected:     true,
 		sendActionAck: &protocol.ActionStartedPayload{ActionID: "act_ok"},
 	}
 	ac, _ := newAgentContext(context.Background())

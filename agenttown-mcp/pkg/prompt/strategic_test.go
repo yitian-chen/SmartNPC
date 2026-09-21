@@ -230,29 +230,17 @@ func TestOtherAgentsLine_OmitsProfessionWhenEmpty(t *testing.T) {
 	}
 }
 
-// TestBuildStrategicUserContext_InjectsOtherNPCsSegment 验证战略层 user
-// prompt 注入【其他NPC】花名册段（社交目标清单），排除 self、含 peer 职业；
-// system prompt 严格三层统一，不含此段。
-func TestBuildStrategicUserContext_InjectsOtherNPCsSegment(t *testing.T) {
+// TestBuildStrategicUserContext_NoOtherNPCsSegment 验证战略层 user prompt
+// 不再注入【其他NPC】花名册段（social_chat 已向战略层 LLM 屏蔽，规划阶段
+// 不引导主动社交）。
+func TestBuildStrategicUserContext_NoOtherNPCsSegment(t *testing.T) {
 	kb := strategicRosterKB()
 	got := BuildStrategicUserContext("H-01", kb, nil, nil, "")
-	const header = "【其他NPC】（你可以主动找其中某位聊天 social_chat"
-	npcIdx := strings.Index(got, header)
-	if npcIdx < 0 {
-		t.Fatalf("missing 【其他NPC】 segment header (with social guidance) in:\n%s", got)
+	if strings.Contains(got, "【其他NPC】") {
+		t.Errorf("strategic user context should NOT inject 【其他NPC】 roster (social_chat masked):\n%s", got)
 	}
-	// 【其他NPC】段在【物理状态】之后（preamble → 今日日程 → 物理状态 → 其他NPC）。
-	// self 不出现在花名册里。
-	npcSection := got[npcIdx:]
-	if strings.Contains(npcSection, "老陈（id=H-01）") {
-		t.Errorf("self H-01 should not appear in 【其他NPC】 roster:\n%s", npcSection)
-	}
-	// peer 带 id + 职业。
-	if !strings.Contains(npcSection, "老王（id=H-02）职业：物流分拣员") {
-		t.Errorf("peer 老王 with profession missing in roster:\n%s", npcSection)
-	}
-	if !strings.Contains(npcSection, "老李（id=H-03）职业：精密装配技术员") {
-		t.Errorf("peer 老李 with profession missing in roster:\n%s", npcSection)
+	if strings.Contains(got, "social_chat") {
+		t.Errorf("strategic user context should NOT mention social_chat:\n%s", got)
 	}
 	// system prompt 不得含【其他NPC】（三层严格统一，层专属内容在 user）。
 	if sys := BuildSharedSystemPrompt(kb, nil, "H-01"); strings.Contains(sys, "【其他NPC】") {
@@ -260,23 +248,22 @@ func TestBuildStrategicUserContext_InjectsOtherNPCsSegment(t *testing.T) {
 	}
 }
 
-func TestStrategicSystemPrompt_HasSocialGuidance(t *testing.T) {
-	// 社交引导：规则集的 social_chat 映射 + 格式示例含 social_chat 时段，让
-	// LLM 把聊天当作合法计划项。社交频次建议（规则 9）已被删除——现在 social_chat
-	// 通过请求体 tools 字段披露给战略层（tool_choice=none），LLM 能自行决定是否
-	// 安排社交时段，不再需要 prompt 文本强行建议频次。
-	for _, want := range []string{
+func TestStrategicSystemPrompt_NoSocialGuidance(t *testing.T) {
+	// social_chat 已向战略层屏蔽：规则集不再把聊天映射到 social_chat，
+	// 格式示例也不含社交时段示范。
+	for _, banned := range []string{
 		"聊天/社交/对话类活动用 social_chat 实现",
 		"找老王聊聊天（social_chat）",
+		"social_chat",
 	} {
-		if !strings.Contains(StrategicRules, want) {
-			t.Errorf("StrategicRules missing social guidance %q:\n%s", want, StrategicRules)
+		if strings.Contains(StrategicRules, banned) {
+			t.Errorf("StrategicRules should NOT contain %q (social_chat masked):\n%s", banned, StrategicRules)
 		}
 	}
-	// 单 agent KB 不应产生【其他NPC】段（无 peer）。
-	single := &worldkb.KB{Version: "1.0", Agents: []worldkb.Agent{{ID: "H-01", DisplayName: "老陈"}}}
-	if got := BuildStrategicUserContext("H-01", single, nil, nil, ""); strings.Contains(got, "【其他NPC】") {
-		t.Errorf("single-agent KB should not produce 【其他NPC】 segment:\n%s", got)
+	// 多 agent KB 也不应产生【其他NPC】段（社交目标清单已整体移除）。
+	kb := strategicRosterKB()
+	if got := BuildStrategicUserContext("H-01", kb, nil, nil, ""); strings.Contains(got, "【其他NPC】") {
+		t.Errorf("multi-agent KB should NOT produce 【其他NPC】 segment:\n%s", got)
 	}
 }
 

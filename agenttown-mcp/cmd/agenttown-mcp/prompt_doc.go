@@ -20,6 +20,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -28,7 +29,8 @@ import (
 const promptDocAgent = "H-01"
 
 // promptDocLayers 是文档中按此顺序展示的 layer（可读预览 + 完整 JSON）。
-var promptDocLayers = []string{"strategic", "tactical", "dialogue"}
+// router = 事件路由器（P2-5，无状态单发，event_router.go）。
+var promptDocLayers = []string{"strategic", "tactical", "router", "dialogue"}
 
 var (
 	promptDocMu     sync.Mutex
@@ -72,7 +74,8 @@ func dumpPromptDoc(agentID, layer string, body []byte, logger *slog.Logger) {
 	fmt.Fprintf(f, "# 实际 LLM 请求体留存\n\n记录 H-01 最新一次发给 LLM 的战略层/战术层/对话层请求体完整 JSON（model/messages/tools 等所有字段），由 MCP 运行时覆盖落盘。\n\n")
 
 	// 可读 Prompt 预览：每个 layer 的 system + user 内容，还原换行后放在
-	// 文档开头，便于快速查看核心 prompt 而不必在 JSON 里翻找。
+	// 文档开头，便于快速查看核心 prompt 而不必在 JSON 里翻找。user 预览
+	// 捡拾末尾两条 user 消息（本轮 user prompt + <agent_state> 状态栏）。
 	fmt.Fprintf(f, "## 可读 Prompt 预览\n\n")
 	for _, l := range promptDocLayers {
 		b, ok := promptDocBodies[l]
@@ -110,6 +113,8 @@ func layerNameOf(layer string) string {
 		return "战略层"
 	case "tactical":
 		return "战术层"
+	case "router":
+		return "事件路由"
 	case "dialogue":
 		return "对话层"
 	default:
@@ -117,7 +122,12 @@ func layerNameOf(layer string) string {
 	}
 }
 
-// extractSystemUser 从请求体 JSON 提取 system 与最后一条 user 的 content。
+// extractSystemUser 从请求体 JSON 提取 system 与末尾 user 的 content。
+//
+// 末尾 user 捡拾倒数两条：agenticTurn 在本轮 user prompt 之后追加瞬态
+// <agent_state> 状态栏（同为 user role），只取最后一条会只剩状态栏——
+// 预览应为"最后一条 user prompt + 状态栏"两条拼接。请求未带状态栏
+// （无感知数据等）时保持原行为，只取最后一条 user。
 func extractSystemUser(body []byte) (system, user string) {
 	var req struct {
 		Messages []struct {
@@ -128,6 +138,7 @@ func extractSystemUser(body []byte) (system, user string) {
 	if err := json.Unmarshal(body, &req); err != nil {
 		return "", ""
 	}
+	var users []string
 	for _, m := range req.Messages {
 		switch m.Role {
 		case "system":
@@ -135,10 +146,17 @@ func extractSystemUser(body []byte) (system, user string) {
 				system = m.Content
 			}
 		case "user":
-			user = m.Content // 覆盖取最后一条
+			users = append(users, m.Content)
 		}
 	}
-	return system, user
+	if len(users) == 0 {
+		return system, ""
+	}
+	// 末条是状态栏 → 拼上其前一条（本轮 user prompt），两条都进预览。
+	if last := users[len(users)-1]; strings.HasPrefix(last, agentStateBarOpen) && len(users) >= 2 {
+		return system, users[len(users)-2] + "\n\n" + last
+	}
+	return system, users[len(users)-1]
 }
 
 // dumpLastRequestBody 读取 LLM 客户端最近一次发送的完整请求体并落盘。
@@ -151,7 +169,39 @@ func dumpLastRequestBody(agentID, layer string, lc any, logger *slog.Logger) {
 	if !ok {
 		return
 	}
-	if body := rb.LastRequestBody(); len(body) > 0 {
-		dumpPromptDoc(agentID, layer, body, logger)
+	body := rb.LastRequestBody()
+	if len(body) == 0 {
+		return
 	}
+	// 跳过压缩层请求体：maybeCompactConversation 在 agenticTurn 内部用同一
+	// tacticalHc 调 SendWithSummary 做压缩，lastRequestBody 可能被设为压缩
+	// 请求体（system 含"对话压缩模块"）。某些路径（流式/限流重试）下
+	// send() 未覆盖它，dumpLastRequestBody 就会把压缩请求体记为战术层
+	// 请求体——压缩层 user prompt 含完整历史原文（每轮战术 prompt 重复
+	// 【全天日程】/【分解规则】等），在 actual_prompts.md 里显示为大量重复。
+	if isCompactRequestBody(body) {
+		return
+	}
+	dumpPromptDoc(agentID, layer, body, logger)
+}
+
+// isCompactRequestBody reports whether a request body is the compaction
+// layer's (system message = 对话压缩模块), so dumpLastRequestBody can skip
+// it — it must not be recorded as a tactical/strategic/dialogue request.
+func isCompactRequestBody(body []byte) bool {
+	var req struct {
+		Messages []struct {
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		return false
+	}
+	for _, m := range req.Messages {
+		if m.Role == "system" && strings.Contains(m.Content, "对话压缩模块") {
+			return true
+		}
+	}
+	return false
 }

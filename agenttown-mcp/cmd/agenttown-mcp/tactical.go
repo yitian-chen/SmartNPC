@@ -65,6 +65,7 @@ const (
 //     屏蔽这些快捷工具可把 tools 数组从 15 个瘦到 6 个（省 ~62%）。
 //   - turn_to / emote 为非必要瞬时动作，一并屏蔽。
 //   - scan_area / stop / wait 本就不属于战术层排队工具。
+//
 // 目录派生（tacticalToolsFromRegistry）与校验（tacticalActionAvailable）
 // 共用这一份清单，保证「不展示 = 拒绝」一致。
 var maskedTacticalTools = map[string]bool{
@@ -156,6 +157,13 @@ func generateTacticalPlan(
 	nearbyObjects []protocol.NearbyObject,
 	visibleAgents []protocol.VisibleAgent,
 ) ([]plannedAction, error) {
+	// P1-4（§3.3 唯一盲区）：注册本次 LLM 调用的取消句柄——force 事件到达时
+	// 由 handleForceEvent 同步掐掉（半截思考丢弃：agenticTurn 成功才落历史），
+	// 被取消方经 cancelledByForce 判定后跳过失败兜底。三个调用方（worker
+	// tacticalRefill / tacticalRefillForReplan / /debug/schedule）共用本咽喉点。
+	ctx, deregLLM := ac.registerTacticalLLMCall(ctx)
+	defer deregLLM()
+
 	// 精简引用判定：当天同一 dailyPlan 的全量头（【全天日程】+完整
 	// 【分解规则】）已在本日会话历史中（由上一次成功全量轮写入
 	// tacticalHeaderPlan 标记）→ 本轮省略日内不变块，改为核心约束速览 +
@@ -163,6 +171,15 @@ func generateTacticalPlan(
 	// 调试要确定性，且 auto-plan=false 时历史可能从无全量头，纯引用会
 	// 指向不存在的规则。计划变化（日内重规划）→ 比对不等 → 重新全量
 	// 注入。单次读取存局部变量，判定与置位复用同一值。
+	// P3-7 安全点 drain（§4.4/§5.1 第三输入）：攒下的非 force 事件一次性
+	// 全取注入本轮战术 prompt。快照注入 + 成功后清空——LLM 失败/被 force
+	// 取消时事件保留在队列，下一次分解重新看到（事件是决策输入，不因一次
+	// 失败调用丢弃）。drain 在本咽喉点覆盖三个调用方：worker tacticalRefill
+	// / tacticalRefillForReplan（force 与路由打断的重规划）/ /debug/schedule。
+	worldEvents := ac.as.WorldEventQueueSnapshot()
+	// P3-9 修复 A：持续情境注入【当前处境】段（combat_exit/TTL 解除前
+	// 每轮可见——防"威胁解除了"幻觉）。
+	situations := formatActiveSituations(ac.as.Snapshot().ActiveSituations, ac.as.LatestGameTimeSec())
 	headerPlan := ac.as.TacticalHeaderPlan()
 	compact := dailyPlan != "" && headerPlan == dailyPlan
 	promptText := prompt.BuildTactical(prompt.TacticalInput{
@@ -178,6 +195,8 @@ func generateTacticalPlan(
 		Hint:          hint,
 		Memories:      memories,
 		Relationships: relationships,
+		Events:        prompt.FormatWorldEventList(worldEvents),
+		Situations:    situations,
 		AgentID:       agentID,
 		ObjectStatus:  objectStatus,
 		NearbyObjects: nearbyObjects,
@@ -216,6 +235,8 @@ func generateTacticalPlan(
 		llmMetricsCollector.RecordJSON("tactical", false)
 		return nil, fmt.Errorf("tactical plan has no actions (raw=%s)", truncateText(raw, 200))
 	}
+	// 分解成功：安全点 drain 完成，消费事件队列（一次性交出）。
+	ac.as.ClearWorldEvents()
 	// JSON 正确率埋点：agenticTurn 成功后（LLM 已返回 tool_calls）按
 	// parseToolCalls 结果记 ok。venus 层的坏 JSON（4001）已在 agenticTurn
 	// 记作 bad_json_4001 错误类别，此处只记 MCP 层解析结果。
@@ -235,14 +256,14 @@ func generateTacticalPlan(
 // 持续到 slot 切换、卡住后续工作动作。此处为兜底，不依赖 LLM 自觉。
 const defaultRestDurationSec = 1800
 
-// fillDefaultDurationForRest 给队列中"非队尾的休息类动作"补齐默认
-// duration（30 分钟）。只处理 InteractSmartObject + interaction=rest
-// （长椅休息）；队尾动作保持不设（自然持续到时段切换）。
+// fillDefaultDurationForRest 给队列中所有休息类动作（含队尾）补齐默认
+// duration（30 分钟）。所有长动作必须设 duration——队尾不设会导致
+// P3-8 延迟切换后 processSlotSwitch 无法靠 time_to_stop 终止它。
 func fillDefaultDurationForRest(actions []plannedAction) []plannedAction {
-	if len(actions) < 2 {
+	if len(actions) == 0 {
 		return actions
 	}
-	for i := 0; i < len(actions)-1; i++ {
+	for i := 0; i < len(actions); i++ {
 		a := &actions[i]
 		if a.Action != "InteractSmartObject" || !paramIs(a.Params, "interaction", "rest") {
 			continue
@@ -320,13 +341,14 @@ func isWorkAction(a *plannedAction) bool {
 	return workInteractions[inter]
 }
 
-// fillDefaultDurationForWork 给队列中"非队尾的工作类动作"补齐默认
-// duration（90 分钟）。队尾动作保持不设（自然持续到时段切换）。
+// fillDefaultDurationForWork 给队列中所有工作类动作（含队尾）补齐默认
+// duration（90 分钟）。所有长动作必须设 duration——队尾不设会导致
+// P3-8 延迟切换后 processSlotSwitch 无法靠 time_to_stop 终止它。
 func fillDefaultDurationForWork(actions []plannedAction) []plannedAction {
-	if len(actions) < 2 {
+	if len(actions) == 0 {
 		return actions
 	}
-	for i := 0; i < len(actions)-1; i++ {
+	for i := 0; i < len(actions); i++ {
 		a := &actions[i]
 		if !isWorkAction(a) {
 			continue

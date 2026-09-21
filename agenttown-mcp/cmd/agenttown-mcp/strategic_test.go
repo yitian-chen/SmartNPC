@@ -37,8 +37,8 @@ func (f *fakeStrategicCaller) SendWithSummaryTools(_ context.Context, _, user st
 }
 
 func (f *fakeStrategicCaller) SendMessagesTools(_ context.Context, messages []llmtypes.Message, _ []venus.Tool) (*llmtypes.Response, error) {
-	if len(messages) > 0 {
-		f.capturedInput = messages[len(messages)-1].Content
+	if got := lastUserPromptContent(messages); got != "" {
+		f.capturedInput = got
 	}
 	return f.resp, f.err
 }
@@ -61,7 +61,8 @@ func (f *fakeStrategicCaller) SendWithSchema(_ context.Context, system, user, sc
 func (f *fakeStrategicCaller) SendLoop(_ context.Context, messages []llmtypes.Message, _ []venus.Tool, _, schemaName string, _ []byte) (*llmtypes.Response, error) {
 	if len(messages) > 0 {
 		f.capturedSystem = messages[0].Content
-		f.capturedInput = messages[len(messages)-1].Content
+		// 请求末尾是瞬态 <agent_state> 状态栏，捕获 user 输入时跳过。
+		f.capturedInput = lastUserPromptContent(messages)
 	}
 	f.capturedSchemaName = schemaName
 	return f.resp, f.err

@@ -272,7 +272,7 @@ func TestRecordActionStarted_Completion(t *testing.T) {
 		t.Errorf("snapshot = %+v", snap)
 	}
 
-	res := a.RecordActionCompletion("act-1")
+	res := a.RecordActionCompletion("act-1", "", "")
 	if !res.WasInFlight {
 		t.Error("WasInFlight = false, want true")
 	}
@@ -317,7 +317,7 @@ func TestAgentState_Accessors(t *testing.T) {
 func TestRecordActionCompletion_PendingStopMatch(t *testing.T) {
 	a := New()
 	a.SetPendingStopActionID("act-old")
-	res := a.RecordActionCompletion("act-old")
+	res := a.RecordActionCompletion("act-old", "", "")
 	if !res.WasPendingStop {
 		t.Error("WasPendingStop = false, want true")
 	}
@@ -329,7 +329,7 @@ func TestRecordActionCompletion_PendingStopMatch(t *testing.T) {
 func TestRecordActionCompletion_SelfStopMatch(t *testing.T) {
 	a := New()
 	a.SetSelfStopInProgress("act-stop")
-	res := a.RecordActionCompletion("act-stop")
+	res := a.RecordActionCompletion("act-stop", "", "")
 	if !res.WasSelfStop {
 		t.Error("WasSelfStop = false, want true")
 	}
@@ -428,7 +428,7 @@ func TestClearForSlotSwitch_thenCompletionRestoresStash(t *testing.T) {
 	a.RecordActionStarted("act-new", "MoveTo", nil, SourceTactical, "")
 
 	// Delayed stop completion for the old long action arrives.
-	res := a.RecordActionCompletion("act-long")
+	res := a.RecordActionCompletion("act-long", "", "")
 	if !res.WasInFlight {
 		t.Error("WasInFlight = false, want true (restored from clearedAction stash)")
 	}
@@ -447,7 +447,7 @@ func TestClearForSlotSwitch_thenCompletionRestoresStash(t *testing.T) {
 
 	// Stash is one-shot — a second completion for the same ID must not
 	// restore WasInFlight again.
-	res2 := a.RecordActionCompletion("act-long")
+	res2 := a.RecordActionCompletion("act-long", "", "")
 	if res2.WasInFlight {
 		t.Error("second completion: WasInFlight = true, want false (stash already consumed)")
 	}
@@ -462,7 +462,7 @@ func TestRecordActionCompletion_NoStashMatch(t *testing.T) {
 	a.RecordActionStarted("act-long", "ExecuteComposite", map[string]any{"k": "v"}, SourceTactical, "")
 	a.ClearForSlotSwitch()
 
-	res := a.RecordActionCompletion("act-other")
+	res := a.RecordActionCompletion("act-other", "", "")
 	if res.WasInFlight {
 		t.Error("WasInFlight = true for unrelated actionID, want false")
 	}
@@ -555,7 +555,7 @@ func TestBeginTacticalRefill_OnlySpeakHint(t *testing.T) {
 	a.CommitTacticalRefill("09:00-12:00", 0, false)
 	// 队列耗尽后同 slot 重分解（模拟 speak 完成、队列清空）。
 	a.PopAction()
-	prep := a.BeginTacticalRefill("装配", "09:00-12:00", 0, true)
+	prep := a.BeginTacticalRefill("装配", "09:00-12:00", 0, true, false)
 	if prep.ShouldSkip {
 		t.Fatal("refill should proceed")
 	}
@@ -571,7 +571,7 @@ func TestBeginTacticalRefill_OnlySpeakHint(t *testing.T) {
 	a.CommitTacticalRefill("09:00-12:00", 0, true) // redecompose，保持同 slot
 	a.PopAction()
 	a.PopAction()
-	prep2 := a.BeginTacticalRefill("装配", "09:00-12:00", 0, true)
+	prep2 := a.BeginTacticalRefill("装配", "09:00-12:00", 0, true, false)
 	if prep2.ShouldSkip {
 		t.Fatal("refill should proceed")
 	}
@@ -1068,7 +1068,7 @@ func TestRecordActionCompletion_ClearsQueueStatus(t *testing.T) {
 		Group:    "workbench",
 	})
 	// Action completes (any result) → queue state must be cleared.
-	a.RecordActionCompletion("act_001")
+	a.RecordActionCompletion("act_001", "", "")
 	snap := a.Snapshot()
 	if snap.QueuedActionID != "" {
 		t.Errorf("queue state should be cleared on completion, got %q", snap.QueuedActionID)
@@ -1203,7 +1203,6 @@ func TestClearConversation_ClearsSummary(t *testing.T) {
 		t.Errorf("conversation after clear = %d, want 0", len(got))
 	}
 }
-
 
 func TestTacticalHeaderPlan_NotPersistedNoStoreWrite(t *testing.T) {
 	fs := newFakeStore()
