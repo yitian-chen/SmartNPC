@@ -21,11 +21,10 @@ func routerTestEvent(severity int) protocol.WorldEventPayload {
 	}
 }
 
-// TestBuildRouterState_Segments verifies the single state string the
-// judgment model sees: identity + world + workflow + persona + relationships
-// + realtime state + action + event, all in one text (the jev API has no
-// system/user split). Optional segments collapse cleanly.
-func TestBuildRouterState_Segments(t *testing.T) {
+// TestBuildRouterUserAttributes verifies the judgment state's "user" object:
+// every RouterInput field lands under its key, world overview drops the
+// planning rosters, and empty optional fields are omitted entirely.
+func TestBuildRouterUserAttributes(t *testing.T) {
 	in := RouterInput{
 		AgentID:       "H-03",
 		AgentName:     "阿静",
@@ -35,58 +34,46 @@ func TestBuildRouterState_Segments(t *testing.T) {
 		PhysicalLine:  "物理状态：电量：中等、疲劳度：精神饱满。",
 		Relationships: "- 与 K-03：熟悉度 12、好感 8（互动 3 次）",
 		CurrentAction: "InteractSmartObject(workbench/assemble)，已执行约 47 分钟（来源：tactical）",
+		Situations:    "- 被玩家 player_1 攻击（起始 D12 10:20）",
 		WorldOverview: "设定：工业机器人小镇\n主题：一座封闭工业园区。\n区域（2 个）：主生产车间（main_workshop）、中央广场（central_plaza）。\n可交互设施类别（2 类）：工作台（workbench）。\n居民（2 位）：老陈（H-01）。\n",
 		Event:         routerTestEvent(7),
 	}
-	state := BuildRouterState(in)
-	for _, want := range []string{
-		"小镇居民 NPC 阿静 收到一条世界事件",
-		"【世界背景】\n设定：工业机器人小镇",
-		"主题：",
-		"居民（2 位）",
-		"【你的角色】\n档案管理员，性格细腻",
-		"【人际关系】\n- 与 K-03：熟悉度 12",
-		"【当前状态】\n游戏时间：10:47\n位置：main_workshop",
-		"物理状态：",
-		"【当前动作】\nInteractSmartObject(workbench/assemble)，已执行约 47 分钟",
-		"【收到的事件】",
-		"世界事件：发生故障：K-03 关节锁死，需要救援（主体 K-03，客观严重度 7",
+	m := BuildRouterUserAttributes(in)
+	for key, want := range map[string]string{
+		"npc":               "阿静",
+		"role":              "档案管理员，性格细腻",
+		"time":              "游戏时间 10:47",
+		"zone":              "main_workshop",
+		"physical_state":    "物理状态：电量：中等",
+		"relationships":     "- 与 K-03：熟悉度 12",
+		"current_action":    "InteractSmartObject(workbench/assemble)，已执行约 47 分钟",
+		"active_situations": "- 被玩家 player_1 攻击（起始 D12 10:20）",
+		"event":             "世界事件：发生故障：K-03 关节锁死，需要救援（主体 K-03，客观严重度 7",
+		"world":             "居民（2 位）",
 	} {
-		if !strings.Contains(state, want) {
-			t.Errorf("state missing %q:\n%s", want, state)
+		got, ok := m[key]
+		if !ok || !strings.Contains(got, want) {
+			t.Errorf("user.%s = %q (ok=%v), want containing %q", key, got, ok, want)
 		}
 	}
-	// 规划上下文不入判决 state：区域名册、设施类别名册、生产工作流都是
-	// 战术层的分解输入，对紧急度裁决是噪音（事件本身已带位置）。
-	for _, banned := range []string{"区域（", "可交互设施类别", "【生产工作流】"} {
-		if strings.Contains(state, banned) {
-			t.Errorf("router state must drop planning context %q:\n%s", banned, state)
-		}
+	// 规划上下文不入判决 state：区域名册、设施类别名册是战术层的分解
+	// 输入，对紧急度裁决是噪音（事件本身已带位置）。
+	if world := m["world"]; strings.Contains(world, "区域（") || strings.Contains(world, "可交互设施类别") {
+		t.Errorf("user.world must drop the planning rosters:\n%s", world)
 	}
 
-	// 持续处境段：非空时整段注入。
-	withSit := in
-	withSit.Situations = "- 被玩家 player_1 攻击（起始 D12 10:20）"
-	if state := BuildRouterState(withSit); !strings.Contains(state, "【当前处境】仍在持续、尚未解除") {
-		t.Errorf("state must carry active situations:\n%s", state)
-	}
-
-	// 空可选段 + 空闲：降级占位、不残留段头（无 KB 时世界背景省略）。
-	minimalIn := RouterInput{AgentID: "H-01", TimeOfDay: "09:00", Zone: "z", Event: routerTestEvent(3)}
-	minimal := BuildRouterState(minimalIn)
-	if !strings.Contains(minimal, "NPC H-01 收到一条世界事件") || !strings.Contains(minimal, "（无角色信息）") {
-		t.Errorf("minimal state missing identity placeholders:\n%s", minimal)
-	}
-	if strings.Contains(minimal, "【世界背景】") || strings.Contains(minimal, "【人际关系】") {
-		t.Errorf("minimal state should omit empty world/relationships:\n%s", minimal)
-	}
-	for _, want := range []string{"无（空闲）", "【当前状态】", "【收到的事件】"} {
-		if !strings.Contains(minimal, want) {
-			t.Errorf("minimal state missing %q:\n%s", want, minimal)
+	// 空可选段 + 空闲：字段整体省略（不发空值）；空闲有明确占位。
+	minimal := BuildRouterUserAttributes(RouterInput{AgentID: "H-01", TimeOfDay: "09:00", Zone: "z", Event: routerTestEvent(3)})
+	for _, banned := range []string{"world", "relationships", "physical_state", "active_situations", "role"} {
+		if _, ok := minimal[banned]; ok {
+			t.Errorf("minimal user must omit empty field %q:\n%v", banned, minimal)
 		}
 	}
-	if strings.Contains(minimal, "物理状态：") {
-		t.Errorf("minimal state should omit the empty physical line:\n%s", minimal)
+	if minimal["npc"] != "H-01" || minimal["current_action"] != "无（空闲）" {
+		t.Errorf("minimal identity/idle placeholders wrong: %v", minimal)
+	}
+	if !strings.Contains(minimal["event"], "客观严重度 3") {
+		t.Errorf("minimal event rendering wrong: %v", minimal)
 	}
 }
 

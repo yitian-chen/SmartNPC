@@ -20,6 +20,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -165,23 +166,55 @@ func extractSystemUser(body []byte) (system, user string) {
 	return system, users[len(users)-1]
 }
 
-// extractJevState returns the state text when body is a judgment-API request
-// (jev: no messages, has state + questions), "" otherwise. The router's
-// requests carry the whole decision context in one state string, so the
-// readable preview renders it as a single "state" section.
+// extractJevState renders a judgment-API request's state (jev: an object
+// with a conversation array and a user-attributes object, no messages) as a
+// readable preview; "" when body is not a judgment body. Conversation turns
+// render as "[role] content" lines; user attributes as "key: value" lines.
 func extractJevState(body []byte) string {
 	var req struct {
-		Messages  json.RawMessage `json:"messages"`
-		State     string          `json:"state"`
+		Messages json.RawMessage `json:"messages"`
+		State    *struct {
+			Conversation []struct {
+				Role    string `json:"role"`
+				Content string `json:"content"`
+			} `json:"conversation"`
+			User map[string]string `json:"user"`
+		} `json:"state"`
 		Questions json.RawMessage `json:"questions"`
 	}
 	if err := json.Unmarshal(body, &req); err != nil {
 		return ""
 	}
-	if req.State == "" || len(req.Questions) == 0 || len(req.Messages) > 0 {
+	if req.State == nil || len(req.Questions) == 0 || len(req.Messages) > 0 {
 		return ""
 	}
-	return req.State
+	var sb strings.Builder
+	if len(req.State.Conversation) > 0 {
+		sb.WriteString("conversation（agentic loop 近期历史）：\n")
+		for _, m := range req.State.Conversation {
+			fmt.Fprintf(&sb, "[%s] %s\n", m.Role, m.Content)
+		}
+	}
+	if len(req.State.User) > 0 {
+		if sb.Len() > 0 {
+			sb.WriteString("\n")
+		}
+		sb.WriteString("user（该 NPC 的属性）：\n")
+		for _, k := range sortedKeys(req.State.User) {
+			fmt.Fprintf(&sb, "%s: %s\n", k, req.State.User[k])
+		}
+	}
+	return sb.String()
+}
+
+// sortedKeys returns map keys in stable order (deterministic preview).
+func sortedKeys(m map[string]string) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // dumpLastRequestBody 读取 LLM 客户端最近一次发送的完整请求体并落盘。

@@ -1,13 +1,14 @@
 // Package jev is a client for the Venus judgment-model API (POST /v1/systemone).
 //
 // Unlike the chat-completions models, the judgment model does not generate
-// text: the caller submits a state (free-form context text) plus a fixed set
-// of typed questions, and gets back calibrated answers — noul (probability
-// that an instruction holds), choice (one of the given options with the full
-// probability distribution), and score (a value anchored by two endpoint
-// descriptions). It is a natural fit for the event router's single verdict
-// (interrupt or enqueue): ~1s latency, no JSON-in-prose parsing, and the
-// judgment criteria travel inside the questions themselves.
+// text: the caller submits a state (structured context — a conversation
+// array plus subject attributes) and a fixed set of typed questions, and
+// gets back calibrated answers — noul (probability that an instruction
+// holds), choice (one of the given options with the full probability
+// distribution), and score (a value anchored by two endpoint descriptions).
+// It is a natural fit for the event router's single verdict (interrupt or
+// enqueue): ~1s latency, no JSON-in-prose parsing, and the judgment criteria
+// travel inside the questions themselves.
 //
 // The API shares the Venus gateway and Bearer credentials with chat
 // completions (same BaseURL / APIKey), but is a separate API surface: the
@@ -122,8 +123,25 @@ func ScoreQuestion(instructions, lowAnchor, highAnchor string) Question {
 // Request is one judgment call: state plus the questions to answer.
 type Request struct {
 	Model     string              `json:"model"` // empty → filled from Config.Model
-	State     string              `json:"state"`
+	State     State               `json:"state"`
 	Questions map[string]Question `json:"questions"`
+}
+
+// ConversationMessage is one turn in the state's conversation array
+// ({"role": "user"|"assistant", "content": "..."}).
+type ConversationMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+// State is the judged subject's context, structured: Conversation carries
+// the recent dialogue history (for the event router, the agent's agentic-loop
+// context — what the NPC has been asked to do and what it did); User carries
+// the subject's structured attributes (caller-defined schema: persona,
+// physical state, current action, the event, ...). Both are optional.
+type State struct {
+	Conversation []ConversationMessage `json:"conversation,omitempty"`
+	User         any                   `json:"user,omitempty"`
 }
 
 // Answer is one question's answer. Only the field matching Type is set;

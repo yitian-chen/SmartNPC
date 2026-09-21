@@ -14,12 +14,13 @@ package prompt
 // wrecks the schedule — so when unsure, enqueue (§4.3 判不动的时候倾向入队).
 //
 // The verdict comes from the Venus judgment model (jev, POST /v1/systemone):
-// this layer renders the decision context into a single state string
-// (BuildRouterState); the judgment criteria and the answer mapping live in
-// cmd/agenttown-mcp/event_router.go (routerQuestions / routerDecisionFromJev).
+// this layer renders the judged NPC's structured attributes (BuildRouterUser
+// — the state's "user" object); the agentic-loop conversation history rides
+// in the state's "conversation" array (cmd layer's routerConversation), and
+// the judgment criteria and the answer mapping live in cmd/agenttown-mcp/
+// event_router.go (routerQuestions / routerDecisionFromJev).
 
 import (
-	"fmt"
 	"strings"
 
 	"github.com/AgentTown/agenttown-mcp/contract/protocol"
@@ -75,14 +76,16 @@ type RouterInput struct {
 	Event         protocol.WorldEventPayload
 }
 
-// BuildRouterState renders the router's decision context into the single
-// state string the judgment model (jev) sees. It merges what used to be the
-// system message (world setting + persona + relationships) and the user
-// message (realtime state / action / event) — the judgment API has no
-// system/user split, one state carries everything. Segment wording follows
-// the previous prompt pair so verdicts stay anchored to the same context;
-// the judgment criteria (three interrupt motives) moved into the questions
-// themselves (routerQuestions, cmd layer).
+// BuildRouterUserAttributes builds the judgment state's "user" object from
+// the router input: the judged NPC's structured attributes (persona, world,
+// relationships, realtime state, current action, the event itself). All
+// values are pre-rendered strings; the judgment model (jev) reads them as a
+// structured subject profile. Empty optional fields (world overview,
+// relationships, physical line, situations) are omitted, never sent blank.
+//
+// The agentic-loop conversation history rides alongside in the state's
+// "conversation" array (cmd layer's routerConversation) — the NPC's recent
+// decisions give the verdict its context knowledge.
 //
 // Planning context is deliberately absent: no 生产工作流 module, and the
 // world overview goes through worldOverviewForRouter, which drops the zone
@@ -90,54 +93,38 @@ type RouterInput struct {
 // them; for an urgency verdict they are noise, and the event itself already
 // carries its location). The shared WorldOverview / ProductionWorkflowText
 // used by the strategic/tactical/dialogue layers keep everything.
-func BuildRouterState(in RouterInput) string {
+func BuildRouterUserAttributes(in RouterInput) map[string]string {
 	agentName := in.AgentName
 	if agentName == "" {
 		agentName = in.AgentID
-	}
-	agentRole := in.AgentRole
-	if agentRole == "" {
-		agentRole = "（无角色信息）"
 	}
 	action := in.CurrentAction
 	if action == "" {
 		action = "无（空闲）"
 	}
-	physicalSeg := ""
-	if in.PhysicalLine != "" {
-		physicalSeg = in.PhysicalLine + "\n"
+	m := map[string]string{
+		"npc":            agentName,
+		"time":           "游戏时间 " + in.TimeOfDay,
+		"zone":           in.Zone,
+		"current_action": action,
+		"event":          FormatWorldEvent(in.Event),
 	}
-	situationsSeg := ""
-	if in.Situations != "" {
-		situationsSeg = "【当前处境】仍在持续、尚未解除：\n" + in.Situations + "\n"
+	if in.AgentRole != "" {
+		m["role"] = in.AgentRole
 	}
-
-	var sb strings.Builder
-	fmt.Fprintf(&sb, "小镇居民 NPC %s 收到一条世界事件，需要判断是否打断其当前正在做的事。以下是该 NPC 的背景与当前情况。\n", agentName)
 	if in.WorldOverview != "" {
-		sb.WriteString("\n【世界背景】\n")
-		sb.WriteString(worldOverviewForRouter(in.WorldOverview))
-		sb.WriteString("\n")
+		m["world"] = worldOverviewForRouter(in.WorldOverview)
 	}
-	sb.WriteString("\n【你的角色】\n")
-	sb.WriteString(agentRole)
-	sb.WriteString("\n")
 	if in.Relationships != "" {
-		sb.WriteString("\n【人际关系】\n")
-		sb.WriteString(in.Relationships)
-		sb.WriteString("\n")
+		m["relationships"] = in.Relationships
 	}
-	sb.WriteString("\n【当前状态】\n")
-	fmt.Fprintf(&sb, "游戏时间：%s\n位置：%s\n", in.TimeOfDay, in.Zone)
-	sb.WriteString(physicalSeg)
-	sb.WriteString("\n【当前动作】\n")
-	sb.WriteString(action)
-	sb.WriteString("\n")
-	sb.WriteString(situationsSeg)
-	sb.WriteString("\n【收到的事件】\n")
-	sb.WriteString(FormatWorldEvent(in.Event))
-	sb.WriteString("\n")
-	return sb.String()
+	if in.PhysicalLine != "" {
+		m["physical_state"] = in.PhysicalLine
+	}
+	if in.Situations != "" {
+		m["active_situations"] = in.Situations
+	}
+	return m
 }
 
 // worldOverviewForRouter strips planning-context lines from a rendered

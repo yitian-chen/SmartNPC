@@ -152,9 +152,10 @@ func TestExtractSystemUser_InvalidJSON(t *testing.T) {
 }
 
 // TestDumpPromptDoc_JevBodyPreview verifies the router layer's judgment-API
-// request body ({model, state, questions} — no messages) renders a readable
-// "state" section instead of silently losing the preview, while the raw
-// JSON section keeps the full body.
+// request body ({model, state{conversation,user}, questions} — no messages)
+// renders a readable "state" section (conversation turns + user attributes)
+// instead of silently losing the preview, while the raw JSON section keeps
+// the full body.
 func TestDumpPromptDoc_JevBodyPreview(t *testing.T) {
 	dir := t.TempDir()
 	doc := filepath.Join(dir, "actual_prompts.md")
@@ -164,7 +165,7 @@ func TestDumpPromptDoc_JevBodyPreview(t *testing.T) {
 	dumpPromptDoc("H-01", "tactical",
 		[]byte(`{"model":"m-t","messages":[{"role":"system","content":"SYS-TACTICAL"},{"role":"user","content":"U"}]}`),
 		testLogger())
-	dumpPromptDoc("H-01", "router", []byte(`{"model":"jev-1.13.0","state":"STATE-判决上下文","questions":{"should_interrupt":{"type":"noul","instructions":"应该打断吗？"}}}`), testLogger())
+	dumpPromptDoc("H-01", "router", []byte(`{"model":"jev-1.13.0","state":{"conversation":[{"role":"user","content":"当前时段目标：冥想收心"},{"role":"assistant","content":"rest_at_residence(sleep_pod/meditate)"}],"user":{"npc":"老陈（H-01）","event":"玩家挥手打招呼"}},"questions":{"should_interrupt":{"type":"noul","instructions":"应该打断吗？"}}}`), testLogger())
 
 	got, err := os.ReadFile(doc)
 	if err != nil {
@@ -173,7 +174,12 @@ func TestDumpPromptDoc_JevBodyPreview(t *testing.T) {
 	s := string(got)
 	for _, want := range []string{
 		"### 事件路由 · state",
-		"STATE-判决上下文",
+		"conversation（agentic loop 近期历史）：",
+		"[user] 当前时段目标：冥想收心",
+		"[assistant] rest_at_residence(sleep_pod/meditate)",
+		"user（该 NPC 的属性）：",
+		"npc: 老陈（H-01）",
+		"event: 玩家挥手打招呼",
 		"H-01 最新事件路由请求体",
 		`"should_interrupt"`,
 		"### 战术层 · user",
@@ -188,17 +194,17 @@ func TestDumpPromptDoc_JevBodyPreview(t *testing.T) {
 	}
 }
 
-// TestExtractJevState pins the shape discrimination: state+questions without
-// messages is a judgment body; chat-completions bodies (with messages) and
-// malformed input are not.
+// TestExtractJevState pins the shape discrimination: an object state with
+// questions and no messages is a judgment body; chat-completions bodies
+// (with messages), string-state bodies, and malformed input are not.
 func TestExtractJevState(t *testing.T) {
-	if got := extractJevState([]byte(`{"model":"m","state":"S","questions":{"q":{"type":"noul"}}}`)); got != "S" {
-		t.Errorf("jev body state = %q, want S", got)
+	if got := extractJevState([]byte(`{"model":"m","state":{"user":{"npc":"老陈"}},"questions":{"q":{"type":"noul"}}}`)); !strings.Contains(got, "npc: 老陈") {
+		t.Errorf("jev body state = %q, want containing user attributes", got)
 	}
 	for name, body := range map[string]string{
-		"chat completions": `{"model":"m","messages":[{"role":"user","content":"x"}],"state":"S","questions":{"q":{}}}`,
-		"no questions":     `{"model":"m","state":"S"}`,
-		"empty state":      `{"model":"m","state":"","questions":{"q":{}}}`,
+		"chat completions": `{"model":"m","messages":[{"role":"user","content":"x"}],"state":{"user":{"npc":"x"}},"questions":{"q":{}}}`,
+		"no questions":     `{"model":"m","state":{"user":{"npc":"x"}}}`,
+		"string state":     `{"model":"m","state":"S","questions":{"q":{}}}`,
 		"not json":         `nonsense`,
 	} {
 		if got := extractJevState([]byte(body)); got != "" {

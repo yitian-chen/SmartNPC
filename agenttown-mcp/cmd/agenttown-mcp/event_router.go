@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/AgentTown/agenttown-mcp/contract/protocol"
+	"github.com/AgentTown/agenttown-mcp/pkg/agentstate"
 	"github.com/AgentTown/agenttown-mcp/pkg/jev"
 	"github.com/AgentTown/agenttown-mcp/pkg/llmmetrics"
 	"github.com/AgentTown/agenttown-mcp/pkg/profile"
@@ -54,25 +55,73 @@ const routerJudgeSeverityCapSocial = 3
 
 // routerQuestions is the fixed question set for every router call. The
 // judgment criteria (three interrupt motives) live here, in the questions —
-// the jev API has no system prompt, instructions carry the criteria.
+// the jev API has no system prompt, instructions carry the criteria. The
+// instructions read the state's "user" attributes and "conversation"
+// (agentic-loop history) alongside.
 var routerQuestions = map[string]jev.Question{
 	"should_interrupt": jev.NoulQuestion(
-		"结合该 NPC 的角色、人际关系、当前动作与处境判断：是否应该打断该 NPC 当前正在做的事去应对这条事件？" +
+		"结合该 NPC 的角色、人际关系、近期对话（conversation，它最近在被要求做什么、做了什么）、当前动作与处境判断：是否应该打断该 NPC 当前正在做的事去应对这条事件？" +
 			"事件威胁到该 NPC 或其亲近伙伴时应打断（被攻击、被瞄准、亲近的伙伴发生严重故障）；" +
-			"快完成的动作与日常小事不值得打断；社交事件（有人打招呼、搭话、点名）在与事件主体关系不差时值得打断简短回应，" +
-			"关系恶劣或敌对时不用。注意当前动作可能是对先前紧急事件的反应（如正在逃跑）。" +
-			"事件描述里的客观严重度是世界视角量级，仅供参考。拿不准时倾向不打断（错误打断会拖出一整轮重规划）。"),
+			"社交事件（有人打招呼、搭话、点名）默认值得停下简短回应，对陌生玩家也一样（礼貌回应后继续原工作），" +
+			"只有关系明确恶劣或敌对时才不理会。注意当前动作可能是对先前紧急事件的反应（如正在逃跑）。" +
+			"事件描述里的客观严重度是世界视角量级，仅供参考。紧急类事件拿不准时倾向不打断（错误打断会拖出一整轮重规划）。"),
 	"motive": jev.ChoiceQuestion(
 		"若应打断，最主要原因属于哪种？若不应打断，选 no_interrupt。",
 		map[string]string{
 			"urgent":             "事件本身对该 NPC 紧急或危险（被攻击、被瞄准、亲近的伙伴严重故障），需立即应对",
 			"situation_resolved": "事件解除了当前持续情境，使正在做的动作不再有必要（如逃跑中收到脱离战斗信号，应停止逃跑回日程）",
-			"social":             "事件是社交性质的且与事件主体关系不差，礼节上值得停下简短回应后继续原工作",
+			"social":             "事件是社交性质的，礼节上值得停下简短回应后继续原工作（对陌生玩家也一样，除非关系恶劣）",
 			"no_interrupt":       "以上都不满足，不需要打断",
 		}),
 	"severity": jev.ScoreQuestion(
 		"该事件对该 NPC 的主观紧急程度（situation_resolved 型通常不高；social 型应很低）。",
 		"日常小事，无需在意", "紧急事件，需要立即处理"),
+}
+
+// routerConversationWindow caps the conversation tail sent to the judgment
+// model. The tactical history is already bounded within a day (compaction
+// folds the head into a summary), but the first-of-day full header alone is
+// ~2KB; the recent tail is what colors the verdict, so anything older is cut.
+const routerConversationWindow = 20
+
+// routerConversation renders the agent's agentic-loop history (tactical-layer
+// conversation) as the judgment state's "conversation" array — this is what
+// gives the router its context knowledge (what the NPC has been asked to do,
+// what it did, what it said). user turns carry the tactical instructions
+// verbatim; assistant turns carry their text, or the tool calls rendered as
+// compact one-liners; tool-role placeholders (result=pending) carry no
+// information and are skipped — real action results arrive in the history as
+// user-role messages already.
+func routerConversation(as *agentstate.AgentState) []jev.ConversationMessage {
+	hist := as.Conversation()
+	if len(hist) > routerConversationWindow {
+		hist = hist[len(hist)-routerConversationWindow:]
+	}
+	out := make([]jev.ConversationMessage, 0, len(hist))
+	for _, m := range hist {
+		switch m.Role {
+		case "user":
+			if m.Content == "" {
+				continue
+			}
+			out = append(out, jev.ConversationMessage{Role: "user", Content: m.Content})
+		case "assistant":
+			content := m.Content
+			if content == "" && len(m.ToolCalls) > 0 {
+				parts := make([]string, 0, len(m.ToolCalls))
+				for _, tc := range m.ToolCalls {
+					var args map[string]any
+					_ = json.Unmarshal([]byte(tc.Function.Arguments), &args)
+					parts = append(parts, describeAction(tc.Function.Name, args))
+				}
+				content = joinStrings(parts, "；")
+			}
+			if content != "" {
+				out = append(out, jev.ConversationMessage{Role: "assistant", Content: content})
+			}
+		}
+	}
+	return out
 }
 
 // routerDecisionFromJev maps a judgment response to the runtime's verdict.
@@ -188,11 +237,18 @@ func (r *eventRouter) route(ctx context.Context, agentID string, ev protocol.Wor
 	}
 
 	in := r.buildInput(agentID, ac, ev)
-	state := prompt.BuildRouterState(in)
 
 	// 超时单源：jev.Config.Timeout（http.Client.Timeout，--jev-timeout）。
+	// state 结构化：conversation = agentic loop 近期历史（上下文知识），
+	// user = 该 NPC 的结构化属性（角色/关系/状态/动作/事件）。
 	t0 := time.Now()
-	resp, err := j.Judge(ctx, &jev.Request{State: state, Questions: routerQuestions})
+	resp, err := j.Judge(ctx, &jev.Request{
+		State: jev.State{
+			Conversation: routerConversation(ac.as),
+			User:         prompt.BuildRouterUserAttributes(in),
+		},
+		Questions: routerQuestions,
+	})
 	// 判决请求体落盘 docs/actual_prompts.md（layer="router"，仿战略/战术/
 	// 对话层；无论成败都记最新一次）。
 	dumpLastRequestBody(agentID, "router", j, r.logger)

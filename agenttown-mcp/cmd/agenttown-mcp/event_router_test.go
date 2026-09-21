@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -14,6 +15,7 @@ import (
 	"github.com/AgentTown/agenttown-mcp/contract/protocol"
 	"github.com/AgentTown/agenttown-mcp/pkg/agentstate"
 	"github.com/AgentTown/agenttown-mcp/pkg/jev"
+	"github.com/AgentTown/agenttown-mcp/pkg/llmtypes"
 	"github.com/AgentTown/agenttown-mcp/pkg/prompt"
 )
 
@@ -33,13 +35,13 @@ func judgeResp(noul float64, motive string, score float64) *jev.Response {
 }
 
 // scriptedJudge implements routerJudge returning a scripted response (or
-// error) per call. It records the states so tests can assert the router saw
-// the right inputs (persona / relationships / event).
+// error) per call. It records the requests so tests can assert the router
+// sent the right state (conversation + user attributes).
 type scriptedJudge struct {
-	mu     sync.Mutex
-	resp   *jev.Response
-	err    error
-	states []string
+	mu   sync.Mutex
+	resp *jev.Response
+	err  error
+	reqs []*jev.Request
 }
 
 func newScriptedJudge(resp *jev.Response) *scriptedJudge { return &scriptedJudge{resp: resp} }
@@ -49,7 +51,7 @@ func notInterruptJudge() *scriptedJudge { return newScriptedJudge(judgeResp(0.1,
 func (f *scriptedJudge) Judge(_ context.Context, req *jev.Request) (*jev.Response, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.states = append(f.states, req.State)
+	f.reqs = append(f.reqs, req)
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -59,19 +61,37 @@ func (f *scriptedJudge) Judge(_ context.Context, req *jev.Request) (*jev.Respons
 // LastRequestBody returns nil — dumpLastRequestBody no-ops on it in tests.
 func (f *scriptedJudge) LastRequestBody() []byte { return nil }
 
+// lastState renders the last request's state as one searchable blob — what
+// the judgment model sees (conversation turns + user attributes, JSON).
 func (f *scriptedJudge) lastState() string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if len(f.states) == 0 {
+	if len(f.reqs) == 0 {
 		return ""
 	}
-	return f.states[len(f.states)-1]
+	b, _ := json.Marshal(f.reqs[len(f.reqs)-1].State)
+	return string(b)
+}
+
+// lastReq returns the last request as-is (for structured assertions).
+func (f *scriptedJudge) lastReq() *jev.Request {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.reqs) == 0 {
+		return nil
+	}
+	return f.reqs[len(f.reqs)-1]
 }
 
 func (f *scriptedJudge) statesOf() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return append([]string(nil), f.states...)
+	out := make([]string, 0, len(f.reqs))
+	for _, r := range f.reqs {
+		b, _ := json.Marshal(r.State)
+		out = append(out, string(b))
+	}
+	return out
 }
 
 var _ routerJudge = (*scriptedJudge)(nil)
@@ -248,6 +268,89 @@ func TestEventRouter_StateCarriesJudgmentInputs(t *testing.T) {
 		if !strings.Contains(p, want) {
 			t.Errorf("router state missing %q:\n%s", want, p)
 		}
+	}
+}
+
+// TestRouterConversation_Rendering verifies the agentic-loop history →
+// judgment "conversation" array mapping: user turns verbatim, assistant text
+// kept, assistant tool_calls rendered as compact one-liners, tool placeholders
+// skipped, and the tail-window cap applied.
+func TestRouterConversation_Rendering(t *testing.T) {
+	as := agentstate.New()
+	as.SetIdentity("H-01", nil)
+	as.AppendConversationMessage(llmtypes.Message{Role: "user", Content: "当前时段目标：清晨冥想收心"})
+	as.AppendConversationMessage(llmtypes.Message{
+		Role: "assistant",
+		ToolCalls: []llmtypes.ToolCall{
+			{ID: "tc-1", Type: "function", Function: llmtypes.ToolFunction{
+				Name:      "rest_at_residence",
+				Arguments: `{"semantic_group":"sleep_pod","interaction":"meditate"}`,
+			}},
+			{ID: "tc-2", Type: "function", Function: llmtypes.ToolFunction{
+				Name:      "speak",
+				Arguments: `{"content":"先定神再开工"}`,
+			}},
+		},
+	})
+	as.AppendConversationMessage(llmtypes.Message{Role: "tool", Content: "result=pending", ToolCallID: "tc-1"})
+	as.AppendConversationMessage(llmtypes.Message{Role: "assistant", Content: "冥想结束，准备开工"})
+
+	conv := routerConversation(as)
+	if len(conv) != 3 { // user + assistant(tool_calls) + assistant(text)；tool 占位跳过
+		t.Fatalf("conversation len = %d, want 3 (tool placeholder skipped):\n%+v", len(conv), conv)
+	}
+	if conv[0].Role != "user" || conv[0].Content != "当前时段目标：清晨冥想收心" {
+		t.Errorf("conv[0] wrong: %+v", conv[0])
+	}
+	// assistant tool_calls → describeAction 单行渲染（多个以"；"连接）。
+	if !strings.Contains(conv[1].Content, "rest_at_residence(semantic_group=sleep_pod, interaction=meditate)") ||
+		!strings.Contains(conv[1].Content, "speak(content=先定神再开工)") {
+		t.Errorf("conv[1] tool_calls rendering wrong: %+v", conv[1])
+	}
+	if conv[2].Content != "冥想结束，准备开工" {
+		t.Errorf("conv[2] assistant text wrong: %+v", conv[2])
+	}
+
+	// 窗口截断：超窗时只留尾部。
+	for i := 0; i < routerConversationWindow+5; i++ {
+		as.AppendConversationMessage(llmtypes.Message{Role: "user", Content: fmt.Sprintf("第 %d 条", i)})
+	}
+	conv = routerConversation(as)
+	if len(conv) > routerConversationWindow {
+		t.Fatalf("conversation must be capped at %d, got %d", routerConversationWindow, len(conv))
+	}
+	if last := conv[len(conv)-1].Content; last != fmt.Sprintf("第 %d 条", routerConversationWindow+4) {
+		t.Errorf("window must keep the tail, last = %q", last)
+	}
+}
+
+// TestEventRouter_ConversationRidesInState verifies route() puts the
+// agentic-loop history into the judgment request's state.conversation —
+// the router's context knowledge.
+func TestEventRouter_ConversationRidesInState(t *testing.T) {
+	rt, _, ac, j, _ := newRouterTestRuntime(t, notInterruptJudge())
+	ac.as.AppendConversationMessage(llmtypes.Message{Role: "user", Content: "当前时段目标：清晨冥想收心"})
+	ac.as.AppendConversationMessage(llmtypes.Message{Role: "assistant", Content: "冥想中"})
+
+	dispatchTestEvent(t, rt, "H-01", nonForceTestEvent("evt_conv_1"))
+
+	waitFor(t, 2*time.Second, func() bool { return strings.Contains(j.lastState(), "世界事件：发生故障") })
+	req := j.lastReq()
+	if req == nil {
+		t.Fatal("judge never called")
+	}
+	found := false
+	for _, m := range req.State.Conversation {
+		if m.Role == "user" && m.Content == "当前时段目标：清晨冥想收心" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("state.conversation must carry the agentic-loop history:\n%+v", req.State.Conversation)
+	}
+	usr, ok := req.State.User.(map[string]string)
+	if !ok || !strings.Contains(usr["event"], "K-03 关节锁死") {
+		t.Fatalf("state.user must carry the event:\n%v", req.State.User)
 	}
 }
 

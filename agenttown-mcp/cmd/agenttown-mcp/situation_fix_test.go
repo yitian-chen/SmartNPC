@@ -171,8 +171,9 @@ func TestSituation_InRouterPrompt(t *testing.T) {
 
 	dispatchTestEvent(t, rt, "H-01", nonForceTestEvent("evt_s4"))
 	waitFor(t, 2*time.Second, func() bool { return strings.Contains(llm.lastState(), "世界事件") })
-	if p := llm.lastState(); !strings.Contains(p, "【当前处境】仍在持续、尚未解除") || !strings.Contains(p, "被玩家 player_1 瞄准") {
-		t.Fatalf("router prompt must carry active situations:\n%s", p)
+	// 判决 state 的 user 属性带 active_situations 键（结构化 state）。
+	if p := llm.lastState(); !strings.Contains(p, "active_situations") || !strings.Contains(p, "被玩家 player_1 瞄准") {
+		t.Fatalf("router state must carry active situations:\n%s", p)
 	}
 	_ = ft
 }
