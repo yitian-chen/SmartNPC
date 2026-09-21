@@ -1,44 +1,149 @@
 package main
 
-// Lightweight event router runtime (事件驱动设计 §4.3, P2-5).
+// Lightweight event router (事件驱动设计 §4.3, P2-5).
 //
-// Every non-force world event goes through one small LLM call that answers
-// exactly one question: interrupt or enqueue? The verdict's interrupt branch
-// reuses the force machinery minus the hard guarantee (stop with progress
-// + replan with the event injected); the enqueue branch is the default and
-// the failure fallback (判不动的时候倾向入队 — the cost asymmetry).
+// Every non-force world event goes through one judgment-model call that
+// answers exactly one question: interrupt or enqueue? The verdict's
+// interrupt branch reuses the force machinery minus the hard guarantee
+// (stop with progress + replan with the event injected); the enqueue branch
+// is the default and the failure fallback (判不动的时候倾向入队 — the cost
+// asymmetry).
 //
-// Router calls go through the tactical flash client via Venus (not Ollama:
-// cold-start timeouts were what paralyzed the old reactive layer). Unlike
-// the tactical layer, router calls are stateless one-shots — they never
-// touch the agent's conversation history, so a cancelled/failed verdict
-// leaves no trace.
+// Router calls go through the Venus judgment API (pkg/jev, POST
+// /v1/systemone): a state string (prompt.BuildRouterState merges what used
+// to be the system+user prompts) plus three typed questions — noul
+// (should_interrupt 概率), choice (motive), score (severity). ~1s latency,
+// no JSON-in-prose parsing, judgment criteria travel inside the questions.
+// Unlike the old flash-LLM path there is no conversation history involved:
+// each verdict is a stateless one-shot. A cancelled/failed verdict leaves
+// no trace (the event is already enqueued at receipt).
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"math"
 	"time"
 
 	"github.com/AgentTown/agenttown-mcp/contract/protocol"
+	"github.com/AgentTown/agenttown-mcp/pkg/jev"
+	"github.com/AgentTown/agenttown-mcp/pkg/llmmetrics"
 	"github.com/AgentTown/agenttown-mcp/pkg/profile"
 	"github.com/AgentTown/agenttown-mcp/pkg/prompt"
 	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
 )
 
-// routerCallTimeout bounds one router LLM call. A few seconds: the verdict
-// feeds an interrupt decision, and holding the event in limbo longer than
-// that is itself a wrong answer — timeout degrades to enqueue.
-const routerCallTimeout = 15 * time.Second
+// routerJudge is the router's slice of the judgment client: one call plus
+// the dump hook. Narrow so tests can script it without dragging the full
+// llmClient surface around.
+type routerJudge interface {
+	Judge(ctx context.Context, req *jev.Request) (*jev.Response, error)
+	LastRequestBody() []byte
+}
 
-// eventRouter runs non-force world events through the lightweight router.
+// routerInterruptNoulThreshold is the noul probability above which
+// should_interrupt counts as an interrupt (strictly greater — a tie stays
+// conservative). Live measurements: attack ~0.92, stranger-greeting ~0.15.
+const routerInterruptNoulThreshold = 0.5
+
+// routerJudgeSeverityCapSocial caps severity for social-motive interrupts:
+// the guardrail ladder compares severities, and a social response must not
+// outrank genuine emergencies (the old LLM path asked for severity 1-3).
+const routerJudgeSeverityCapSocial = 3
+
+// routerQuestions is the fixed question set for every router call. The
+// judgment criteria (three interrupt motives) live here, in the questions —
+// the jev API has no system prompt, instructions carry the criteria.
+var routerQuestions = map[string]jev.Question{
+	"should_interrupt": jev.NoulQuestion(
+		"结合该 NPC 的角色、人际关系、当前动作与处境判断：是否应该打断该 NPC 当前正在做的事去应对这条事件？" +
+			"事件威胁到该 NPC 或其亲近伙伴时应打断（被攻击、被瞄准、亲近的伙伴发生严重故障）；" +
+			"快完成的动作与日常小事不值得打断；社交事件（有人打招呼、搭话、点名）在与事件主体关系不差时值得打断简短回应，" +
+			"关系恶劣或敌对时不用。注意当前动作可能是对先前紧急事件的反应（如正在逃跑）。" +
+			"事件描述里的客观严重度是世界视角量级，仅供参考。拿不准时倾向不打断（错误打断会拖出一整轮重规划）。"),
+	"motive": jev.ChoiceQuestion(
+		"若应打断，最主要原因属于哪种？若不应打断，选 no_interrupt。",
+		map[string]string{
+			"urgent":             "事件本身对该 NPC 紧急或危险（被攻击、被瞄准、亲近的伙伴严重故障），需立即应对",
+			"situation_resolved": "事件解除了当前持续情境，使正在做的动作不再有必要（如逃跑中收到脱离战斗信号，应停止逃跑回日程）",
+			"social":             "事件是社交性质的且与事件主体关系不差，礼节上值得停下简短回应后继续原工作",
+			"no_interrupt":       "以上都不满足，不需要打断",
+		}),
+	"severity": jev.ScoreQuestion(
+		"该事件对该 NPC 的主观紧急程度（situation_resolved 型通常不高；social 型应很低）。",
+		"日常小事，无需在意", "紧急事件，需要立即处理"),
+}
+
+// routerDecisionFromJev maps a judgment response to the runtime's verdict.
+// ok=false means the response is unusable (missing should_interrupt answer)
+// — the caller treats it exactly like a failed call: conservative enqueue.
+//
+// 判不动的时候倾向入队（§4.3）: a self-contradictory verdict (noul>threshold
+// but motive=no_interrupt) also degrades to interrupt=false.
+func routerDecisionFromJev(resp *jev.Response) (prompt.RouterDecision, bool) {
+	fallback := prompt.RouterDecision{Interrupt: false, Severity: 0, Motive: prompt.RouterMotiveUrgent}
+	if resp == nil {
+		fallback.Reason = "jev_nil_response"
+		return fallback, false
+	}
+	noulAns, ok := resp.Answers["should_interrupt"]
+	if !ok || noulAns.Noul == nil {
+		fallback.Reason = "jev_missing_answer: should_interrupt"
+		return fallback, false
+	}
+	noul := *noulAns.Noul
+
+	// motive 白名单：空/非法 → urgent；no_interrupt 不是合法打断动机，但
+	// 保留原值供下面的自相矛盾检查（概率说打断、动机说不用 → 保守不打断）。
+	rawMotive := resp.Answers["motive"].Choice
+	motive := prompt.RouterMotiveUrgent
+	switch rawMotive {
+	case prompt.RouterMotiveUrgent, prompt.RouterMotiveSituationResolved, prompt.RouterMotiveSocial:
+		motive = rawMotive
+	}
+
+	// severity：score 0-1 → 0-10 四舍五入；缺失 → 0（与旧 parse 的缺省一致）。
+	severity := 0
+	if scoreAns, ok := resp.Answers["severity"]; ok && scoreAns.Score != nil {
+		severity = int(math.Round(*scoreAns.Score * 10))
+		if severity < 0 {
+			severity = 0
+		}
+		if severity > 10 {
+			severity = 10
+		}
+	}
+
+	interrupt := noul > routerInterruptNoulThreshold
+	// 自相矛盾（概率说打断、动机说不用）→ 保守不打断。
+	if interrupt && rawMotive == "no_interrupt" {
+		interrupt = false
+	}
+	// 社交打断压低 severity：护栏阶梯比较 severity，社交回应不得凌驾真实紧急。
+	if interrupt && motive == prompt.RouterMotiveSocial && severity > routerJudgeSeverityCapSocial {
+		severity = routerJudgeSeverityCapSocial
+	}
+
+	dec := prompt.RouterDecision{Interrupt: interrupt, Severity: severity, Motive: motive}
+	if interrupt {
+		dec.Reason = fmt.Sprintf("打断概率%.2f，动机%s，紧急度%d/10", noul, motive, severity)
+		if conf := resp.Answers["motive"].Confidence; conf != nil {
+			dec.Reason = fmt.Sprintf("打断概率%.2f，动机%s（置信度%.2f），紧急度%d/10", noul, motive, *conf, severity)
+		}
+	} else {
+		dec.Reason = fmt.Sprintf("不应打断（概率%.2f）", noul)
+	}
+	return dec, true
+}
+
+// eventRouter runs non-force world events through the judgment model.
 type eventRouter struct {
-	// lookupHC resolves the agent's tactical flash client (LLM clients are
-	// per-agent in this codebase — registerAgent builds one venus.Client
-	// per agentContext). The router borrows it for a stateless one-shot
-	// call; it never touches the agent's conversation history.
-	lookupHC    func(string) llmClient
+	// lookupJudge resolves the agent's judgment client (per-agent, built in
+	// registerAgent alongside strategicHc/tacticalHc). nil (no client —
+	// --jev-model="" disables router verdicts) makes every event degrade
+	// to enqueue.
+	lookupJudge func(string) routerJudge
 	kbPtr       **worldkb.KB
 	profiles    map[string]*profile.Profile
 	logger      *slog.Logger
@@ -48,14 +153,14 @@ type eventRouter struct {
 	processVerdict func(agentID string, ev protocol.WorldEventPayload, dec prompt.RouterDecision)
 }
 
-// newEventRouter builds the router. lookupHC returning nil (no LLM client
-// for the agent) makes every event degrade to enqueue.
-func newEventRouter(lookupHC func(string) llmClient, kbPtr **worldkb.KB,
+// newEventRouter builds the router. lookupJudge returning nil (no judgment
+// client for the agent) makes every event degrade to enqueue.
+func newEventRouter(lookupJudge func(string) routerJudge, kbPtr **worldkb.KB,
 	profiles map[string]*profile.Profile, lookupAgent func(string) *agentContext,
 	processVerdict func(agentID string, ev protocol.WorldEventPayload, dec prompt.RouterDecision),
 	logger *slog.Logger) *eventRouter {
 	return &eventRouter{
-		lookupHC:       lookupHC,
+		lookupJudge:    lookupJudge,
 		kbPtr:          kbPtr,
 		profiles:       profiles,
 		logger:         logger,
@@ -65,39 +170,60 @@ func newEventRouter(lookupHC func(string) llmClient, kbPtr **worldkb.KB,
 }
 
 // route runs the router for one event (called async from
-// Runtime.handleWorldEvent). Timeout / client-nil / parse failure all
-// degrade to enqueue — which already happened at receipt, so those paths
-// simply log and return. Only an explicit interrupt=true acts.
+// Runtime.handleWorldEvent). Timeout (client-side, --jev-timeout) / client-nil
+// / unusable answers all degrade to enqueue — which already happened at
+// receipt, so those paths simply log and return. Only an explicit interrupt
+// acts.
 func (r *eventRouter) route(ctx context.Context, agentID string, ev protocol.WorldEventPayload) {
 	if r == nil {
 		return
 	}
-	hc := r.lookupHC(agentID)
-	if hc == nil {
-		return // no LLM client: enqueue-only mode
+	j := r.lookupJudge(agentID)
+	if j == nil {
+		return // 无判决客户端：enqueue-only（事件已在队列）
 	}
 	ac := r.lookupAgent(agentID)
 	if ac == nil {
 		return
 	}
 
-	routerCtx, cancel := context.WithTimeout(ctx, routerCallTimeout)
-	defer cancel()
-
 	in := r.buildInput(agentID, ac, ev)
-	system := prompt.BuildRouterSystem(in)
-	user := prompt.BuildRouterPrompt(in)
-	resp, err := hc.SendWithSummary(routerCtx, system, user)
-	// 路由请求体落盘 docs/actual_prompts.md（layer="router"，仿战略/战术/
+	state := prompt.BuildRouterState(in)
+
+	// 超时单源：jev.Config.Timeout（http.Client.Timeout，--jev-timeout）。
+	t0 := time.Now()
+	resp, err := j.Judge(ctx, &jev.Request{State: state, Questions: routerQuestions})
+	// 判决请求体落盘 docs/actual_prompts.md（layer="router"，仿战略/战术/
 	// 对话层；无论成败都记最新一次）。
-	dumpLastRequestBody(agentID, "router", hc, r.logger)
+	dumpLastRequestBody(agentID, "router", j, r.logger)
+	e2e := time.Since(t0)
+
+	// 指标埋点：E2E/错误分类/输出 token（非流式无 TTFT/TPOT）。
+	outputTokens := 0
+	if resp != nil {
+		outputTokens = resp.Usage.OutputTokens
+	}
+	llmMetricsCollector.RecordCall(llmmetrics.CallSample{
+		Layer:        "router",
+		E2E:          e2e,
+		OutputTokens: outputTokens,
+		ErrClass:     classifyLLMError(err),
+	})
+	dumpLLMMetrics(r.logger)
+
 	if err != nil {
-		// 路由失败 → 保持入队（保守）。事件已在接收路径入队，无需补偿。
-		r.logger.Info("[事件路由] 裁决调用失败，按入队处理（保守）",
+		// 判决失败 → 保持入队（保守）。事件已在接收路径入队，无需补偿。
+		r.logger.Info("[事件路由] 判决调用失败，按入队处理（保守）",
 			"agent_id", agentID, "event_id", ev.EventID, "err", err)
 		return
 	}
-	dec := prompt.ParseRouterDecision(resp.ExtractText())
+	dec, ok := routerDecisionFromJev(resp)
+	llmMetricsCollector.RecordJSON("router", ok)
+	if !ok {
+		r.logger.Info("[事件路由] 判决响应缺 should_interrupt，按入队处理（保守）",
+			"agent_id", agentID, "event_id", ev.EventID)
+		return
+	}
 	if !dec.Interrupt {
 		r.logger.Info("[事件路由] 裁决不紧急，保持入队",
 			"agent_id", agentID, "event_id", ev.EventID,

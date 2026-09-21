@@ -41,6 +41,7 @@ import (
 	"github.com/AgentTown/agenttown-mcp/contract/protocol"
 	"github.com/AgentTown/agenttown-mcp/internal/log"
 	"github.com/AgentTown/agenttown-mcp/pkg/agentstate"
+	"github.com/AgentTown/agenttown-mcp/pkg/jev"
 	"github.com/AgentTown/agenttown-mcp/pkg/llmconfig"
 	"github.com/AgentTown/agenttown-mcp/pkg/llmtypes"
 	"github.com/AgentTown/agenttown-mcp/pkg/ollama"
@@ -121,6 +122,11 @@ type agentContext struct {
 	// LLM clients (immutable after construction, no lock needed)
 	strategicHc llmClient
 	tacticalHc  llmClient
+	// jevHc is the per-agent judgment-model client for event-router
+	// verdicts. nil when --jev-model="" disables router verdicts (router
+	// degrades to enqueue-only). Shares the venus gateway credentials.
+	// Immutable after construction.
+	jevHc routerJudge
 
 	// ollama is the local Ollama client for relationship-update judgments
 	// (Stage 5). nil when --ollama-url="" explicitly disables the reactive
@@ -1685,6 +1691,13 @@ func main() {
 			"hard timeout for a single tactical-layer LLM call (streaming or not)")
 		llmConfigPath = flag.String("llm-config", "",
 			"path to LLM backend config YAML (OpenAI-compatible; when set, overrides --venus-url/--venus-model/--venus-strategic-model/--venus-api-key/--venus-timeout)")
+		// ─── 事件路由判决模型（jev，POST /v1/systemone） ─────────────
+		// 与 chat completions 同网关同 Bearer 凭据（--venus-url/--venus-api-key），
+		// 仅 model/timeout 单独配置。--llm-config 的分层覆盖不适用于 jev。
+		jevModel = flag.String("jev-model", "jev-1.13.0",
+			"Venus judgment model ID for the event router (state+questions API, ~1s per verdict; empty disables router verdicts — non-force events only enqueue for the safe-point drain)")
+		jevTimeout = flag.Duration("jev-timeout", 5*time.Second,
+			"Venus judgment API timeout per event-router call")
 		// autoPlanFlag 是自动规划总开关。关闭（false）时 MCP 进入手动模式：
 		// 不调战略层 generateDailyPlan、不调战术层 tacticalRefill、不主动发 idle wait、
 		// 不触发反应层 Ollama 决策。仅 /debug/schedule 注入和 /debug/action 手动下发
@@ -1751,6 +1764,8 @@ func main() {
 		"venus_url", *venusURL,
 		"venus_model", *venusModel,
 		"venus_strategic_model", *venusStrategicModel,
+		"jev_model", *jevModel,
+		"jev_timeout", *jevTimeout,
 		"tactical_stream", tacticalStreamingEnabled,
 		"tactical_timeout", tacticalCallTimeout,
 		"ollama_url", *ollamaURL,
@@ -1995,6 +2010,19 @@ func main() {
 			Logger:  logger,
 			Timeout: tacticalTimeout,
 		})
+		// P2-5 事件路由判决模型（jev）：每 agent 一个判决客户端。--jev-model
+		// 空串禁用（路由器 enqueue-only）。恒指 --venus-url + 已解析的 venus
+		// key——判决 API 与 chat completions 同网关；--llm-config 的分层
+		// 覆盖不适用（自建后端没有 /v1/systemone，建议那种部署显式关掉）。
+		if *jevModel != "" {
+			ac.jevHc = jev.New(jev.Config{
+				BaseURL: *venusURL,
+				APIKey:  venusAPIKeyValue,
+				Model:   *jevModel,
+				Logger:  logger,
+				Timeout: *jevTimeout,
+			})
+		}
 		// Stage 5: 注入 Ollama 客户端供关系层判断。nil 表示 --ollama-url=""
 		// 显式禁用反应层时，maybeUpdateRelationship 会早返回不调用 Ollama。
 		ac.ollama = ollamaClient
@@ -2048,12 +2076,13 @@ func main() {
 		firstAgentRegistered: &firstAgentRegistered,
 	}
 	// P2-5 轻量事件路由器：非 force world_event 的紧急度裁决（interrupt
-	// or 入队）。借用 per-agent 战术层 flash 客户端做无状态单发调用；LLM
-	// 客户端按 agent 注册后才有（registerAgent 内构造），经 lookupHC 解引用。
+	// or 入队）。裁决走 Venus 判决模型（jev，POST /v1/systemone）——每 agent
+	// 一个判决客户端（registerAgent 内构造，--jev-model 空串时不构造），
+	// 经 lookupJudge 解引用。
 	rt.eventRouter = newEventRouter(
-		func(id string) llmClient {
+		func(id string) routerJudge {
 			if ac := lookupAgent(id); ac != nil {
-				return ac.tacticalHc
+				return ac.jevHc
 			}
 			return nil
 		},

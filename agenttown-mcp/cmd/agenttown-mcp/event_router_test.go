@@ -1,10 +1,11 @@
 package main
 
-// P2-5 轻量事件路由器运行时测试。
+// P2-5 轻量事件路由器运行时测试（jev 判决模型版）。
 
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -12,36 +13,68 @@ import (
 
 	"github.com/AgentTown/agenttown-mcp/contract/protocol"
 	"github.com/AgentTown/agenttown-mcp/pkg/agentstate"
-	"github.com/AgentTown/agenttown-mcp/pkg/llmtypes"
+	"github.com/AgentTown/agenttown-mcp/pkg/jev"
 	"github.com/AgentTown/agenttown-mcp/pkg/prompt"
-	"github.com/AgentTown/agenttown-mcp/pkg/venus"
 )
 
-// scriptedRouterLLM implements llmClient returning a scripted response body
-// per call. It records the last user prompt so tests can assert the router
-// saw the right inputs (persona / relationships / event).
-type scriptedRouterLLM struct {
-	fakeStrategicCaller
-	mu       sync.Mutex
-	response string   // raw body returned by every call
-	prompts  []string // captured user prompts
+// pf is a pointer-to-float64 helper for building scripted answers.
+func pf(v float64) *float64 { return &v }
+
+// judgeResp builds a full judgment response (three questions answered).
+func judgeResp(noul float64, motive string, score float64) *jev.Response {
+	return &jev.Response{
+		Model: "jev-1.13.0",
+		Answers: map[string]jev.Answer{
+			"should_interrupt": {Type: jev.TypeNoul, Noul: pf(noul)},
+			"motive":           {Type: jev.TypeChoice, Choice: motive, Confidence: pf(0.9)},
+			"severity":         {Type: jev.TypeScore, Score: pf(score)},
+		},
+	}
 }
 
-func (f *scriptedRouterLLM) SendWithSummary(_ context.Context, _, user string, _ ...[]venus.Tool) (*llmtypes.Response, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.prompts = append(f.prompts, user)
-	return makeStrategicResponse(f.response), nil
+// scriptedJudge implements routerJudge returning a scripted response (or
+// error) per call. It records the states so tests can assert the router saw
+// the right inputs (persona / relationships / event).
+type scriptedJudge struct {
+	mu     sync.Mutex
+	resp   *jev.Response
+	err    error
+	states []string
 }
 
-func (f *scriptedRouterLLM) lastPrompt() string {
+func newScriptedJudge(resp *jev.Response) *scriptedJudge { return &scriptedJudge{resp: resp} }
+
+func notInterruptJudge() *scriptedJudge { return newScriptedJudge(judgeResp(0.1, "no_interrupt", 0.1)) }
+
+func (f *scriptedJudge) Judge(_ context.Context, req *jev.Request) (*jev.Response, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if len(f.prompts) == 0 {
+	f.states = append(f.states, req.State)
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.resp, nil
+}
+
+// LastRequestBody returns nil — dumpLastRequestBody no-ops on it in tests.
+func (f *scriptedJudge) LastRequestBody() []byte { return nil }
+
+func (f *scriptedJudge) lastState() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.states) == 0 {
 		return ""
 	}
-	return f.prompts[len(f.prompts)-1]
+	return f.states[len(f.states)-1]
 }
+
+func (f *scriptedJudge) statesOf() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.states...)
+}
+
+var _ routerJudge = (*scriptedJudge)(nil)
 
 // verdictRecorder is a concurrency-safe interrupt-verdict collector.
 type verdictRecorder struct {
@@ -62,18 +95,17 @@ func (v *verdictRecorder) len() int {
 }
 
 // newRouterTestRuntime wires a Runtime whose eventRouter uses the scripted
-// LLM. verdicts collects interrupt verdicts instead of executing them.
-func newRouterTestRuntime(t *testing.T, llmBody string) (*Runtime, *fakeTransport, *agentContext, *scriptedRouterLLM, *verdictRecorder) {
+// judge. verdicts collects interrupt verdicts instead of executing them.
+func newRouterTestRuntime(t *testing.T, j *scriptedJudge) (*Runtime, *fakeTransport, *agentContext, *scriptedJudge, *verdictRecorder) {
 	t.Helper()
 	rt, ft, ac := newWorldEventTestRuntime(t)
 	seedPerception(t, ac)
-	llm := &scriptedRouterLLM{response: llmBody}
-	ac.tacticalHc = llm
+	ac.jevHc = j
 	verdicts := &verdictRecorder{}
 	rt.eventRouter = newEventRouter(
-		func(id string) llmClient {
+		func(id string) routerJudge {
 			if id == "H-01" {
-				return llm
+				return j
 			}
 			return nil
 		},
@@ -83,19 +115,19 @@ func newRouterTestRuntime(t *testing.T, llmBody string) (*Runtime, *fakeTranspor
 		},
 		testLogger(),
 	)
-	return rt, ft, ac, llm, verdicts
+	return rt, ft, ac, j, verdicts
 }
 
-// TestEventRouter_NotUrgentStaysQueued verifies the enqueue branch: an
-// interrupt=false verdict leaves the event queued and stops nothing.
+// TestEventRouter_NotUrgentStaysQueued verifies the enqueue branch: a
+// low-interrupt-probability verdict leaves the event queued and stops nothing.
 func TestEventRouter_NotUrgentStaysQueued(t *testing.T) {
-	rt, ft, ac, llm, _ := newRouterTestRuntime(t, `{"interrupt": false, "severity": 2, "reason": "关系一般，先忙手上的活"}`)
+	rt, ft, ac, j, _ := newRouterTestRuntime(t, newScriptedJudge(judgeResp(0.15, "no_interrupt", 0.2)))
 	ac.as.RecordActionStarted("act-1", protocol.CmdWorkShift, nil, agentstate.SourceTactical, "")
 
 	dispatchTestEvent(t, rt, "H-01", nonForceTestEvent("evt_r1"))
 
 	// 裁决完成：无打断、事件仍在队列。
-	waitFor(t, 2*time.Second, func() bool { return strings.Contains(llm.lastPrompt(), "世界事件") })
+	waitFor(t, 2*time.Second, func() bool { return strings.Contains(j.lastState(), "世界事件") })
 	if got := ac.as.WorldEventQueueLen(); got != 1 {
 		t.Fatalf("not-urgent event must stay queued, got len=%d", got)
 	}
@@ -107,20 +139,14 @@ func TestEventRouter_NotUrgentStaysQueued(t *testing.T) {
 	}
 }
 
-// promptsOf is a tiny accessor to keep waitFor readable.
-func (f *scriptedRouterLLM) promptsOf() []string {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return append([]string(nil), f.prompts...)
-}
-
 // TestEventRouter_UrgentInterrupts verifies the interrupt branch end to
-// end with the REAL routerInterrupt: verdict=true → event pulled from the
-// queue → stop in-flight action → hint with the verdict reason → replan
-// takes over (the scripted LLM's body has no tool calls → replan fails →
-// abandon path clears the queue).
+// end with the REAL routerInterrupt: noul above threshold → event pulled
+// from the queue → stop in-flight action → hint with the verdict reason →
+// replan takes over (the scripted judge's replan has no tool calls →
+// replan fails → abandon path clears the queue).
 func TestEventRouter_UrgentInterrupts(t *testing.T) {
-	rt, ft, ac, llm, _ := newRouterTestRuntime(t, `{"interrupt": true, "severity": 8, "reason": "K-03 是最亲近的伙伴"}`)
+	// noul 0.92 + urgent + score 0.8 → severity 8。
+	rt, ft, ac, j, _ := newRouterTestRuntime(t, newScriptedJudge(judgeResp(0.92, "urgent", 0.8)))
 	// 走真实 routerInterrupt（撤队 + stop + replan hint 全链路）。
 	rt.eventRouter.processVerdict = rt.routerInterrupt
 	ac.as.RecordActionStarted("act-1", protocol.CmdWorkShift, nil, agentstate.SourceTactical, "")
@@ -132,29 +158,29 @@ func TestEventRouter_UrgentInterrupts(t *testing.T) {
 
 	// 裁决产生 → 事件被撤下队列 + 在途动作被打断。
 	waitFor(t, 2*time.Second, func() bool {
-		return strings.Contains(llm.lastPrompt(), "世界事件") && ac.as.WorldEventQueueLen() == 0
+		return strings.Contains(j.lastState(), "世界事件") && ac.as.WorldEventQueueLen() == 0
 	})
 	if stops := stoppedActions(ft); len(stops) != 1 || stops[0] != "act-1" {
 		t.Fatalf("urgent verdict must stop the in-flight action, got %v", stops)
 	}
-	// hint 携带事件与裁决理由，走 force 同款重规划（失败 → abandon 清队列）。
+	// hint 携带事件与裁决理由（jev 无自由文本，理由由概率/动机/紧急度合成），
+	// 走 force 同款重规划（失败 → abandon 清队列）。
 	waitFor(t, 2*time.Second, func() bool { return ac.as.QueueLen() == 0 && replanIdle(ac) })
-	if hint := ac.as.ReplanHint(); !containsAll(hint, "【强制打断】", "K-03", "路由裁决：紧急", "最亲近的伙伴") {
+	if hint := ac.as.ReplanHint(); !containsAll(hint, "【强制打断】", "K-03", "路由裁决：紧急", "打断概率0.92") {
 		t.Fatalf("hint must carry event + verdict reason, got %q", hint)
 	}
 }
 
 // TestEventRouter_FailureDegradesToEnqueue verifies the conservative
-// fallback: LLM error / unparseable output → the event stays queued, no
-// interrupt.
+// fallback: no judgment client / call error / unusable answers → the event
+// stays queued, no interrupt.
 func TestEventRouter_FailureDegradesToEnqueue(t *testing.T) {
-	// 用 newWorldEventTestRuntime（tacticalHc=nil → lookupHC 返回 nil）
-	// 验证"无 LLM 客户端"路径 + 用坏 JSON 验证解析失败路径。
+	// 无判决客户端（--jev-model=""）：lookupJudge 返回 nil。
 	rt, ft, ac := newWorldEventTestRuntime(t)
 	seedPerception(t, ac)
 	calls := 0
 	rt.eventRouter = newEventRouter(
-		func(string) llmClient { calls++; return nil },
+		func(string) routerJudge { calls++; return nil },
 		rt.kbPtr, nil, rt.lookupAgent, func(string, protocol.WorldEventPayload, prompt.RouterDecision) {},
 		testLogger(),
 	)
@@ -168,27 +194,42 @@ func TestEventRouter_FailureDegradesToEnqueue(t *testing.T) {
 		t.Fatalf("no-client router must not stop anything, got %v", stops)
 	}
 
-	// 解析失败路径：坏 JSON 输出 → interrupt=false。
-	rt2, ft2, ac2, llm2, verdicts2 := newRouterTestRuntime(t, "完全不是 JSON")
+	// 调用失败路径（超时/网络等）。
+	rt2, ft2, ac2, j2, verdicts2 := newRouterTestRuntime(t,
+		&scriptedJudge{err: errors.New("jev status 403: 模型不存在")})
 	dispatchTestEvent(t, rt2, "H-01", nonForceTestEvent("evt_r4"))
-	waitFor(t, 2*time.Second, func() bool { return strings.Contains(llm2.lastPrompt(), "世界事件") })
+	waitFor(t, 2*time.Second, func() bool { return strings.Contains(j2.lastState(), "世界事件") })
 	if verdicts2.len() != 0 {
-		t.Fatalf("unparseable verdict must not interrupt, got %d verdicts", verdicts2.len())
+		t.Fatalf("failed call must not interrupt, got %d verdicts", verdicts2.len())
 	}
 	if got := ac2.as.WorldEventQueueLen(); got != 1 {
-		t.Fatalf("unparseable verdict must keep the event queued, got len=%d", got)
+		t.Fatalf("failed call must keep the event queued, got len=%d", got)
 	}
 	if stops := stoppedActions(ft2); len(stops) != 0 {
-		t.Fatalf("unparseable verdict must not stop anything, got %v", stops)
+		t.Fatalf("failed call must not stop anything, got %v", stops)
+	}
+
+	// 响应缺 should_interrupt（ok=false）→ 同样保守入队。
+	rt3, ft3, ac3, j3, verdicts3 := newRouterTestRuntime(t,
+		newScriptedJudge(&jev.Response{Answers: map[string]jev.Answer{}}))
+	dispatchTestEvent(t, rt3, "H-01", nonForceTestEvent("evt_r4b"))
+	waitFor(t, 2*time.Second, func() bool { return strings.Contains(j3.lastState(), "世界事件") })
+	if verdicts3.len() != 0 {
+		t.Fatalf("unusable answers must not interrupt, got %d verdicts", verdicts3.len())
+	}
+	if got := ac3.as.WorldEventQueueLen(); got != 1 {
+		t.Fatalf("unusable answers must keep the event queued, got len=%d", got)
+	}
+	if stops := stoppedActions(ft3); len(stops) != 0 {
+		t.Fatalf("unusable answers must not stop anything, got %v", stops)
 	}
 }
 
-// TestEventRouter_PromptCarriesJudgmentInputs verifies the router's prompt
-// actually contains the per-NPC judgment inputs: persona from KB/profiles,
-// current action with elapsed time, physical band line, and the rendered
-// event.
-func TestEventRouter_PromptCarriesJudgmentInputs(t *testing.T) {
-	rt, _, ac, llm, _ := newRouterTestRuntime(t, `{"interrupt": false, "severity": 1, "reason": "x"}`)
+// TestEventRouter_StateCarriesJudgmentInputs verifies the judgment state
+// actually contains the per-NPC judgment inputs: current action with
+// elapsed time, physical band line, and the rendered event.
+func TestEventRouter_StateCarriesJudgmentInputs(t *testing.T) {
+	rt, _, ac, j, _ := newRouterTestRuntime(t, notInterruptJudge())
 	ac.as.RecordActionStarted("act-9", protocol.CmdInteractSmartObject,
 		map[string]any{"semantic_group": "workbench", "interaction": "assemble"}, agentstate.SourceTactical, "")
 	// 物理状态：让 PhysicalLine 非空（62/31/78/340 → 中等/精神饱满/严重磨损）。
@@ -196,8 +237,8 @@ func TestEventRouter_PromptCarriesJudgmentInputs(t *testing.T) {
 
 	dispatchTestEvent(t, rt, "H-01", nonForceTestEvent("evt_r5"))
 
-	waitFor(t, 2*time.Second, func() bool { return strings.Contains(llm.lastPrompt(), "世界事件：发生故障") })
-	p := llm.lastPrompt()
+	waitFor(t, 2*time.Second, func() bool { return strings.Contains(j.lastState(), "世界事件：发生故障") })
+	p := j.lastState()
 	for _, want := range []string{
 		"游戏时间", "main_workshop",
 		"InteractSmartObject", "已执行约",
@@ -205,37 +246,37 @@ func TestEventRouter_PromptCarriesJudgmentInputs(t *testing.T) {
 		"客观严重度 7",
 	} {
 		if !strings.Contains(p, want) {
-			t.Errorf("router prompt missing %q:\n%s", want, p)
+			t.Errorf("router state missing %q:\n%s", want, p)
 		}
 	}
 }
 
 // TestEventRouter_SameEventDifferentNPCs verifies the emergence contract
 // (§4.3 验收点): the same event routed for two agents with different
-// scripted verdicts produces one interrupt and one enqueue — the router
-// call itself is per-agent (different prompts), and only the interrupt
+// scripted verdicts produces one interrupt and one enqueue — the judgment
+// call itself is per-agent (different states), and only the interrupt
 // verdict acts. H-02's verdict drives the real routerInterrupt (queue
 // pull + stop); H-01's stays queued.
 func TestEventRouter_SameEventDifferentNPCs(t *testing.T) {
-	rt, ft, ac, _, _ := newRouterTestRuntime(t, `{"interrupt": false, "severity": 2, "reason": "不熟"}`)
+	rt, ft, ac, _, _ := newRouterTestRuntime(t, notInterruptJudge())
 
-	// H-02: 阿静式的近关系裁决（脚本换成 interrupt=true）。
+	// H-02: 阿静式的近关系裁决（脚本换成高打断概率）。
 	ac2, _ := newAgentContext(context.Background())
 	seedPerception(t, ac2)
 	agents := map[string]*agentContext{"H-01": ac, "H-02": ac2}
 	rt.lookupAgent = func(id string) *agentContext { return agents[id] }
-	// 路由器按 lookupAgent 解析 per-agent 客户端（真实装配同款）。
+	// 路由器按 lookupAgent 解析 per-agent 判决客户端（真实装配同款）。
 	rt.eventRouter.lookupAgent = rt.lookupAgent
-	rt.eventRouter.lookupHC = func(id string) llmClient {
+	rt.eventRouter.lookupJudge = func(id string) routerJudge {
 		if a := rt.lookupAgent(id); a != nil {
-			return a.tacticalHc
+			return a.jevHc
 		}
 		return nil
 	}
-	llmH1 := &scriptedRouterLLM{response: `{"interrupt": false, "severity": 2, "reason": "与 K-03 关系一般"}`}
-	llmH2 := &scriptedRouterLLM{response: `{"interrupt": true, "severity": 9, "reason": "K-03 是阿静最亲近的伙伴"}`}
-	ac.tacticalHc = llmH1
-	ac2.tacticalHc = llmH2
+	jH1 := newScriptedJudge(judgeResp(0.15, "no_interrupt", 0.2))
+	jH2 := newScriptedJudge(judgeResp(0.95, "urgent", 0.9))
+	ac.jevHc = jH1
+	ac2.jevHc = jH2
 	// 真实 routerInterrupt：H-02 的打断裁决走完整链路。
 	rt.eventRouter.processVerdict = rt.routerInterrupt
 	ac2.as.RecordActionStarted("act-2", protocol.CmdWorkShift, nil, agentstate.SourceTactical, "")
@@ -248,7 +289,7 @@ func TestEventRouter_SameEventDifferentNPCs(t *testing.T) {
 
 	// 两个裁决都完成。
 	waitFor(t, 2*time.Second, func() bool {
-		return strings.Contains(llmH1.lastPrompt(), "世界事件") && strings.Contains(llmH2.lastPrompt(), "世界事件")
+		return strings.Contains(jH1.lastState(), "世界事件") && strings.Contains(jH2.lastState(), "世界事件")
 	})
 	// H-01 的事件留在队列（入队），H-02 的被撤下（打断）。
 	waitFor(t, 2*time.Second, func() bool { return ac2.as.WorldEventQueueLen() == 0 })
@@ -263,13 +304,122 @@ func TestEventRouter_SameEventDifferentNPCs(t *testing.T) {
 	waitFor(t, 2*time.Second, func() bool { return replanIdle(ac2) })
 }
 
+// TestRouterDecisionFromJev pins the verdict mapping: threshold boundary,
+// motive whitelist, self-contradiction degradation, severity scaling and
+// the social cap.
+func TestRouterDecisionFromJev(t *testing.T) {
+	cases := []struct {
+		name       string
+		resp       *jev.Response
+		wantOK     bool
+		wantInter  bool
+		wantMotive string
+		wantSev    int
+	}{
+		{
+			name:   "nil response",
+			resp:   nil,
+			wantOK: false,
+		},
+		{
+			name:   "missing should_interrupt",
+			resp:   &jev.Response{Answers: map[string]jev.Answer{}},
+			wantOK: false,
+		},
+		{
+			name: "should_interrupt without noul value",
+			resp: &jev.Response{Answers: map[string]jev.Answer{
+				"should_interrupt": {Type: jev.TypeNoul},
+			}},
+			wantOK: false,
+		},
+		{
+			name:   "boundary 0.5 stays conservative",
+			resp:   judgeResp(0.5, "urgent", 0.5),
+			wantOK: true, wantInter: false, wantMotive: "urgent", wantSev: 5,
+		},
+		{
+			name:   "boundary 0.51 interrupts",
+			resp:   judgeResp(0.51, "urgent", 0.5),
+			wantOK: true, wantInter: true, wantMotive: "urgent", wantSev: 5,
+		},
+		{
+			name:   "noul 0.92 urgent score 0.86 → severity 9",
+			resp:   judgeResp(0.92, "urgent", 0.86),
+			wantOK: true, wantInter: true, wantMotive: "urgent", wantSev: 9,
+		},
+		{
+			name:   "score 1.05 clamps to 10",
+			resp:   judgeResp(0.95, "urgent", 1.05),
+			wantOK: true, wantInter: true, wantMotive: "urgent", wantSev: 10,
+		},
+		{
+			name:   "score negative clamps to 0",
+			resp:   judgeResp(0.6, "urgent", -0.2),
+			wantOK: true, wantInter: true, wantMotive: "urgent", wantSev: 0,
+		},
+		{
+			name: "missing severity → 0",
+			resp: &jev.Response{Answers: map[string]jev.Answer{
+				"should_interrupt": {Type: jev.TypeNoul, Noul: pf(0.9)},
+			}},
+			wantOK: true, wantInter: true, wantMotive: "urgent", wantSev: 0,
+		},
+		{
+			name:   "social severity capped at 3",
+			resp:   judgeResp(0.9, "social", 0.8),
+			wantOK: true, wantInter: true, wantMotive: "social", wantSev: 3,
+		},
+		{
+			name:   "situation_resolved keeps its severity",
+			resp:   judgeResp(0.85, "situation_resolved", 0.3),
+			wantOK: true, wantInter: true, wantMotive: "situation_resolved", wantSev: 3,
+		},
+		{
+			name:   "unknown motive degrades to urgent",
+			resp:   judgeResp(0.9, "garbage", 0.5),
+			wantOK: true, wantInter: true, wantMotive: "urgent", wantSev: 5,
+		},
+		{
+			name:   "self-contradiction noul high + no_interrupt → conservative",
+			resp:   judgeResp(0.8, "no_interrupt", 0.5),
+			wantOK: true, wantInter: false, wantSev: 5,
+		},
+		{
+			name:   "low noul stays queued",
+			resp:   judgeResp(0.15, "no_interrupt", 0.1),
+			wantOK: true, wantInter: false, wantSev: 1,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dec, ok := routerDecisionFromJev(tc.resp)
+			if ok != tc.wantOK {
+				t.Fatalf("ok = %v, want %v", ok, tc.wantOK)
+			}
+			if dec.Interrupt != tc.wantInter {
+				t.Fatalf("interrupt = %v, want %v", dec.Interrupt, tc.wantInter)
+			}
+			if tc.wantMotive != "" && dec.Motive != tc.wantMotive {
+				t.Fatalf("motive = %q, want %q", dec.Motive, tc.wantMotive)
+			}
+			if dec.Severity != tc.wantSev {
+				t.Fatalf("severity = %d, want %d", dec.Severity, tc.wantSev)
+			}
+			if dec.Reason == "" {
+				t.Fatalf("reason must never be empty, got %+v", dec)
+			}
+		})
+	}
+}
+
 // TestRouterMotive_SituationResolvedBypassesGuardrail verifies that a
 // situation_resolved verdict interrupts even when its severity is LOWER
 // than the active reaction's severity (combat_exit during a high-severity
 // flee reaction must be allowed through — it's ending the reaction, not
 // competing with it).
 func TestRouterMotive_SituationResolvedBypassesGuardrail(t *testing.T) {
-	rt, ft, ac, _, _ := newRouterTestRuntime(t, `{}`)
+	rt, ft, ac, _, _ := newRouterTestRuntime(t, notInterruptJudge())
 	ac.as.RecordActionStarted("act-1", "MoveTo", map[string]any{"target_id": "repair_bay"}, agentstate.SourceTactical, "")
 	// 武装一个 severity 9 的反应窗口（模拟被攻击后的逃跑反应）。
 	ac.beginReaction(9, ac.as.LatestGameTimeSec(), "")
@@ -298,7 +448,7 @@ func TestRouterMotive_SituationResolvedBypassesGuardrail(t *testing.T) {
 // arms a low-severity reaction window: any subsequent higher-severity
 // interrupt can override it, and a same-or-lower social event is gated.
 func TestRouterMotive_SocialLowSeverityWindow(t *testing.T) {
-	rt, ft, ac, _, _ := newRouterTestRuntime(t, `{}`)
+	rt, ft, ac, _, _ := newRouterTestRuntime(t, notInterruptJudge())
 	ac.as.RecordActionStarted("act-1", "InteractSmartObject",
 		map[string]any{"semantic_group": "workbench"}, agentstate.SourceTactical, "")
 	ac.as.EnqueueWorldEvent(reactionTestEvent("evt_s1"))
@@ -320,12 +470,12 @@ func TestRouterMotive_SocialLowSeverityWindow(t *testing.T) {
 	waitFor(t, 2*time.Second, func() bool { return replanIdle(ac) })
 }
 
-// TestRouter_ReactionDescInjectedIntoPrompt pins the 2026-09-20 fix: when a
-// reaction window is armed, the router prompt's 【当前动作】 carries the
-// reaction context — the router LLM can see "this MoveTo is a flee response"
-// and correctly judge a combat_exit as situation_resolved.
-func TestRouter_ReactionDescInjectedIntoPrompt(t *testing.T) {
-	rt, _, ac, llm, _ := newRouterTestRuntime(t, `{"interrupt": false, "severity": 1, "reason": "x"}`)
+// TestRouter_ReactionDescInjectedIntoState pins the 2026-09-20 fix: when a
+// reaction window is armed, the judgment state's 【当前动作】 carries the
+// reaction context — the judgment model can see "this MoveTo is a flee
+// response" and correctly judge a combat_exit as situation_resolved.
+func TestRouter_ReactionDescInjectedIntoState(t *testing.T) {
+	rt, _, ac, j, _ := newRouterTestRuntime(t, notInterruptJudge())
 	seedPerception(t, ac)
 	ac.as.RecordActionStarted("act-1", "MoveTo",
 		map[string]any{"target_type": "zone", "target_id": "residential_quarters"}, agentstate.SourceTactical, "")
@@ -333,14 +483,14 @@ func TestRouter_ReactionDescInjectedIntoPrompt(t *testing.T) {
 	ac.beginReaction(9, ac.as.LatestGameTimeSec(), "玩家互动：被玩家 player_1 攻击（伤害 20，类型 physical）")
 
 	dispatchTestEvent(t, rt, "H-01", nonForceTestEvent("evt_desc_1"))
-	waitFor(t, 2*time.Second, func() bool { return strings.Contains(llm.lastPrompt(), "世界事件") })
+	waitFor(t, 2*time.Second, func() bool { return strings.Contains(j.lastState(), "世界事件") })
 
-	p := llm.lastPrompt()
+	p := j.lastState()
 	if !strings.Contains(p, "这是对紧急事件的反应动作") {
-		t.Fatalf("router prompt must carry the reaction context when the window is armed:\n%s", p)
+		t.Fatalf("router state must carry the reaction context when the window is armed:\n%s", p)
 	}
 	if !strings.Contains(p, "被玩家 player_1 攻击") {
-		t.Fatalf("router prompt must carry the reaction's origin event:\n%s", p)
+		t.Fatalf("router state must carry the reaction's origin event:\n%s", p)
 	}
 }
 
@@ -349,7 +499,7 @@ func TestRouter_ReactionDescInjectedIntoPrompt(t *testing.T) {
 // the tactical prompt carries the reaction context — the LLM knows it was
 // mid-reaction, not just seeing "工作台装配" with no transition context.
 func TestTacticalRefill_ReactionContextHint(t *testing.T) {
-	_, ft, ac, _, _ := newRouterTestRuntime(t, `{}`)
+	_, ft, ac, _, _ := newRouterTestRuntime(t, notInterruptJudge())
 	seedPerception(t, ac)
 	ac.as.SetDailyPlan("09:00-12:00: 车间装配作业", 11)
 	ac.beginReaction(9, ac.as.LatestGameTimeSec(), "被玩家攻击")

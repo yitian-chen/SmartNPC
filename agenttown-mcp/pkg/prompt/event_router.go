@@ -12,19 +12,23 @@ package prompt
 // Cost asymmetry drives the tie-break: a missed interrupt makes the NPC
 // look dull for minutes; a wrong interrupt drags out a full replan and
 // wrecks the schedule — so when unsure, enqueue (§4.3 判不动的时候倾向入队).
+//
+// The verdict comes from the Venus judgment model (jev, POST /v1/systemone):
+// this layer renders the decision context into a single state string
+// (BuildRouterState); the judgment criteria and the answer mapping live in
+// cmd/agenttown-mcp/event_router.go (routerQuestions / routerDecisionFromJev).
 
 import (
-	"encoding/json"
 	"fmt"
 	"strings"
 
 	"github.com/AgentTown/agenttown-mcp/contract/protocol"
 )
 
-// RouterDecision is the JSON verdict expected from the router LLM.
-// Motive names the reason for the interrupt — one of the RouterMotive*
-// constants — so the runtime can phrase the tactical hint accordingly
-// (emergency treatment vs resume-schedule vs brief-social-response).
+// RouterDecision is the router's verdict. Motive names the reason for the
+// interrupt — one of the RouterMotive* constants — so the runtime can phrase
+// the tactical hint accordingly (emergency treatment vs resume-schedule vs
+// brief-social-response).
 type RouterDecision struct {
 	Interrupt bool   `json:"interrupt"`
 	Severity  int    `json:"severity"`
@@ -71,43 +75,14 @@ type RouterInput struct {
 	Event         protocol.WorldEventPayload
 }
 
-// RouterSystemPrompt is the router's system message: mechanism only (the
-// single question, the cost asymmetry, JSON shape). Static across calls →
-// cacheable. BuildRouterSystem appends the per-agent judgment identity
-// (persona + relationships), which changes rarely within a day.
-const RouterSystemPrompt = `你是小镇居民 NPC 的事件路由模块。世界发生了一件事，正在推送给该 NPC。你回答一个问题：要不要打断 NPC 手上正在做的事？
-
-【打断的三种理由——满足任一即 interrupt=true，motive 填对应值】
-
-1. urgent（紧急处理）：事件本身对该 NPC 足够紧急或危险，值得立即放下手头的事去应对。
-   典型：被攻击、被瞄准、亲近的伙伴发生严重故障。
-
-2. situation_resolved（情境解除）：事件解除了当前持续情境，使 NPC 正在做的动作不再有必要。
-   例如，当NPC被玩家攻击后正在逃跑，此时收到了脱离战斗的信息，则逃跑动作不再有必要，可以打断。
-
-3. social（社交回应）：事件是社交性质的（有人打招呼、搭话、点名），且该 NPC 与事件主体关系不差，
-   社交礼节上值得停下简短回应一声，然后继续原工作。
-   关系恶劣或敌对时不用为此打断。
-
-【不打断】
-以上三种都不满足 → interrupt=false，入队等当前动作完成后的下一个决策点一并处理。
-
-【判断要点】
-- 同一条事件对不同 NPC 结论可以不同（性格、关系、当前处境不同）
-- 事件描述里的 severity 是客观严重度（世界视角的量级），仅供参考——你评的 severity 是主观紧急度（0-10），但打断决策看上述三种理由，不只看 severity
-- situation_resolved 型打断的 severity 通常不高（事件本身不危险），但打断依然合理
-- social 型打断的 severity 应很低（1-3），且关系恶劣时不触发
-
-请输出 JSON，格式严格如下，不要输出 JSON 以外的任何内容：
-{"interrupt": true|false, "severity": 0-10, "reason": "简短理由", "motive": "urgent|situation_resolved|social"}`
-
-// BuildRouterSystem constructs the router's system message: the static
-// mechanism text, the shared world setting/theme (【世界背景】+【生产工作流】，
-// the same modules the other three layers inject — 路由器与整套心智共用
-// 同一份世界模型), and the per-agent judgment identity (【你的角色】 +
-// 【人际关系】). Identity lives in the system message (not the user
-// message) so the user message carries only what changes per event —
-// state, action, event — keeping the per-call prefix minimal.
+// BuildRouterState renders the router's decision context into the single
+// state string the judgment model (jev) sees. It merges what used to be the
+// system message (world setting + persona + relationships) and the user
+// message (realtime state / action / event) — the judgment API has no
+// system/user split, one state carries everything. Segment wording follows
+// the previous prompt pair so verdicts stay anchored to the same context;
+// the judgment criteria (three interrupt motives) moved into the questions
+// themselves (routerQuestions, cmd layer).
 //
 // The world overview is passed through worldOverviewWithoutZones: the zone
 // roster line is dropped for the router only (zones are planning context —
@@ -115,25 +90,38 @@ const RouterSystemPrompt = `你是小镇居民 NPC 的事件路由模块。世�
 // and the event itself already carries its location). The shared
 // WorldOverview used by the strategic/tactical/dialogue layers keeps the
 // zone roster.
-func BuildRouterSystem(in RouterInput) string {
+func BuildRouterState(in RouterInput) string {
 	agentName := in.AgentName
 	if agentName == "" {
 		agentName = in.AgentID
 	}
 	agentRole := in.AgentRole
-	if agentRole == "（无角色信息）" || agentRole == "" {
+	if agentRole == "" {
 		agentRole = "（无角色信息）"
 	}
-	var sb strings.Builder
-	sb.WriteString(RouterSystemPrompt)
-	if in.WorldOverview != "" {
-		sb.WriteString("\n\n【世界背景】\n")
-		sb.WriteString(worldOverviewWithoutZones(in.WorldOverview))
+	action := in.CurrentAction
+	if action == "" {
+		action = "无（空闲）"
 	}
-	sb.WriteString("\n\n【生产工作流】\n")
+	physicalSeg := ""
+	if in.PhysicalLine != "" {
+		physicalSeg = in.PhysicalLine + "\n"
+	}
+	situationsSeg := ""
+	if in.Situations != "" {
+		situationsSeg = "【当前处境】仍在持续、尚未解除：\n" + in.Situations + "\n"
+	}
+
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "小镇居民 NPC %s 收到一条世界事件，需要判断是否打断其当前正在做的事。以下是该 NPC 的完整背景与当前情况。\n", agentName)
+	if in.WorldOverview != "" {
+		sb.WriteString("\n【世界背景】\n")
+		sb.WriteString(worldOverviewWithoutZones(in.WorldOverview))
+		sb.WriteString("\n")
+	}
+	sb.WriteString("\n【生产工作流】\n")
 	sb.WriteString(ProductionWorkflowText)
-	fmt.Fprintf(&sb, "\n\n你是 NPC %s 的事件路由模块。判断时的角色与关系背景如下：\n", agentName)
-	sb.WriteString("\n【你的角色】\n")
+	sb.WriteString("\n\n【你的角色】\n")
 	sb.WriteString(agentRole)
 	sb.WriteString("\n")
 	if in.Relationships != "" {
@@ -141,6 +129,16 @@ func BuildRouterSystem(in RouterInput) string {
 		sb.WriteString(in.Relationships)
 		sb.WriteString("\n")
 	}
+	sb.WriteString("\n【当前状态】\n")
+	fmt.Fprintf(&sb, "游戏时间：%s\n位置：%s\n", in.TimeOfDay, in.Zone)
+	sb.WriteString(physicalSeg)
+	sb.WriteString("\n【当前动作】\n")
+	sb.WriteString(action)
+	sb.WriteString("\n")
+	sb.WriteString(situationsSeg)
+	sb.WriteString("\n【收到的事件】\n")
+	sb.WriteString(FormatWorldEvent(in.Event))
+	sb.WriteString("\n")
 	return sb.String()
 }
 
@@ -158,89 +156,4 @@ func worldOverviewWithoutZones(overview string) string {
 		kept = append(kept, l)
 	}
 	return strings.Join(kept, "\n")
-}
-
-// RouterUserTemplate is the router's user message template. Per-call data
-// only: realtime state, in-flight action, the event.
-const RouterUserTemplate = `NPC %s 收到一条世界事件，请裁决是否打断当前行动。
-
-【当前状态】
-游戏时间：%s
-位置：%s
-%s
-【当前动作】
-%s
-%s
-【收到的事件】
-%s
-
-请给出你的裁决。`
-
-// BuildRouterPrompt constructs the router's user message. Pure function.
-// Per-call data only (state / action / event); the per-agent identity
-// (persona + relationships) goes into the system message — see
-// BuildRouterSystem.
-func BuildRouterPrompt(in RouterInput) string {
-	agentName := in.AgentName
-	if agentName == "" {
-		agentName = in.AgentID
-	}
-	action := in.CurrentAction
-	if action == "" {
-		action = "无（空闲）"
-	}
-	physicalSeg := ""
-	if in.PhysicalLine != "" {
-		physicalSeg = in.PhysicalLine + "\n"
-	}
-	situationsSeg := ""
-	if in.Situations != "" {
-		situationsSeg = "【当前处境】仍在持续、尚未解除：\n" + in.Situations + "\n"
-	}
-	return fmt.Sprintf(RouterUserTemplate,
-		agentName,
-		in.TimeOfDay,
-		in.Zone,
-		physicalSeg,
-		action,
-		situationsSeg,
-		FormatWorldEvent(in.Event),
-	)
-}
-
-// ParseRouterDecision parses the router LLM's output.
-//
-// Fault tolerance (判不动的时候倾向入队): JSON parse failure, a missing
-// interrupt field, and any malformed input all degrade to interrupt=false —
-// the conservative enqueue. A well-formed interrupt=true must survive.
-func ParseRouterDecision(raw string) RouterDecision {
-	fallback := RouterDecision{Interrupt: false, Severity: 0, Reason: "parse_failed: " + truncate(raw, 80), Motive: RouterMotiveUrgent}
-	cleaned := StripCodeFence(raw)
-	// Tolerate trailing prose / fenced blocks: locate the first { to last }.
-	start := strings.IndexByte(cleaned, '{')
-	end := strings.LastIndexByte(cleaned, '}')
-	if start < 0 || end <= start {
-		return fallback
-	}
-	var dec RouterDecision
-	if err := json.Unmarshal([]byte(cleaned[start:end+1]), &dec); err != nil {
-		return fallback
-	}
-	if dec.Severity < 0 {
-		dec.Severity = 0
-	}
-	if dec.Severity > 10 {
-		dec.Severity = 10
-	}
-	if dec.Reason == "" {
-		dec.Reason = "（模型未给出理由）"
-	}
-	// Motive 降级：空或非法值 → urgent（向后兼容，已有中断语义不变）。
-	switch dec.Motive {
-	case RouterMotiveUrgent, RouterMotiveSituationResolved, RouterMotiveSocial:
-		// 合法值保留。
-	default:
-		dec.Motive = RouterMotiveUrgent
-	}
-	return dec
 }

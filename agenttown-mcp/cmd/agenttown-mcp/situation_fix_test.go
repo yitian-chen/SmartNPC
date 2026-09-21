@@ -17,7 +17,7 @@ import (
 // dispatch entry: attacked/targeted registers the ongoing threat, a repeat
 // keeps the earliest start, combat_exit resolves it.
 func TestCombatSituation_RegisterAndResolve(t *testing.T) {
-	rt, _, ac, _, _ := newRouterTestRuntime(t, `{}`)
+	rt, _, ac, _, _ := newRouterTestRuntime(t, notInterruptJudge())
 	seedPerception(t, ac)
 
 	// 被攻击（force）→ 登记。
@@ -49,7 +49,7 @@ func TestCombatSituation_RegisterAndResolve(t *testing.T) {
 // TestCombatSituation_TTLExpiry verifies the fallback: a situation with no
 // resolution event auto-degrades after the TTL.
 func TestCombatSituation_TTLExpiry(t *testing.T) {
-	_, _, ac, _, _ := newRouterTestRuntime(t, `{}`)
+	_, _, ac, _, _ := newRouterTestRuntime(t, notInterruptJudge())
 	seedPerception(t, ac)
 	now := ac.as.LatestGameTimeSec()
 	ac.as.BeginSituation(situationKindCombat, "被玩家攻击", now)
@@ -123,7 +123,7 @@ func TestEcho_ConsumedByPostReactionRefill(t *testing.T) {
 // window still armed, the refill skips the queue-exhaustion auto-hint
 // ("上次队列提前耗尽…安排长动作收尾")——反应刚结束时它是反向信号。
 func TestReactionRefill_SuppressesAutoHint(t *testing.T) {
-	_, ft, ac, _, _ := newRouterTestRuntime(t, `{}`)
+	_, ft, ac, _, _ := newRouterTestRuntime(t, notInterruptJudge())
 	seedPerception(t, ac)
 	ac.as.SetDailyPlan("09:00-12:00: 车间装配作业", 11)
 	ac.tacticalHc = newFailedVenusClient()
@@ -165,13 +165,13 @@ func TestReactionRefill_SuppressesAutoHint(t *testing.T) {
 // TestSituation_InRouterPrompt verifies the router sees ongoing situations
 // (an existing threat colors how urgent a NEW event is).
 func TestSituation_InRouterPrompt(t *testing.T) {
-	rt, ft, ac, llm, _ := newRouterTestRuntime(t, `{"interrupt": false, "severity": 2, "reason": "x"}`)
+	rt, ft, ac, llm, _ := newRouterTestRuntime(t, notInterruptJudge())
 	seedPerception(t, ac)
 	ac.as.BeginSituation(situationKindCombat, "被玩家 player_1 瞄准/锁定", ac.as.LatestGameTimeSec())
 
 	dispatchTestEvent(t, rt, "H-01", nonForceTestEvent("evt_s4"))
-	waitFor(t, 2*time.Second, func() bool { return strings.Contains(llm.lastPrompt(), "世界事件") })
-	if p := llm.lastPrompt(); !strings.Contains(p, "【当前处境】仍在持续、尚未解除") || !strings.Contains(p, "被玩家 player_1 瞄准") {
+	waitFor(t, 2*time.Second, func() bool { return strings.Contains(llm.lastState(), "世界事件") })
+	if p := llm.lastState(); !strings.Contains(p, "【当前处境】仍在持续、尚未解除") || !strings.Contains(p, "被玩家 player_1 瞄准") {
 		t.Fatalf("router prompt must carry active situations:\n%s", p)
 	}
 	_ = ft

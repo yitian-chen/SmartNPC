@@ -150,3 +150,59 @@ func TestExtractSystemUser_InvalidJSON(t *testing.T) {
 		t.Errorf("invalid JSON should return empty, got %q/%q", sys, usr)
 	}
 }
+
+// TestDumpPromptDoc_JevBodyPreview verifies the router layer's judgment-API
+// request body ({model, state, questions} — no messages) renders a readable
+// "state" section instead of silently losing the preview, while the raw
+// JSON section keeps the full body.
+func TestDumpPromptDoc_JevBodyPreview(t *testing.T) {
+	dir := t.TempDir()
+	doc := filepath.Join(dir, "actual_prompts.md")
+	resetPromptDocForTest(doc)
+
+	// 战术层（messages 形态）+ 路由层（jev 形态）同落一份文档。
+	dumpPromptDoc("H-01", "tactical",
+		[]byte(`{"model":"m-t","messages":[{"role":"system","content":"SYS-TACTICAL"},{"role":"user","content":"U"}]}`),
+		testLogger())
+	dumpPromptDoc("H-01", "router", []byte(`{"model":"jev-1.13.0","state":"STATE-判决上下文","questions":{"should_interrupt":{"type":"noul","instructions":"应该打断吗？"}}}`), testLogger())
+
+	got, err := os.ReadFile(doc)
+	if err != nil {
+		t.Fatalf("doc not written: %v", err)
+	}
+	s := string(got)
+	for _, want := range []string{
+		"### 事件路由 · state",
+		"STATE-判决上下文",
+		"H-01 最新事件路由请求体",
+		`"should_interrupt"`,
+		"### 战术层 · user",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("doc missing %q:\n%s", want, s)
+		}
+	}
+	// jev body 没有 system/user 消息，不得渲染旧的双段预览。
+	if strings.Contains(s, "### 事件路由 · system") || strings.Contains(s, "### 事件路由 · user") {
+		t.Errorf("jev body must not render the system/user preview sections:\n%s", s)
+	}
+}
+
+// TestExtractJevState pins the shape discrimination: state+questions without
+// messages is a judgment body; chat-completions bodies (with messages) and
+// malformed input are not.
+func TestExtractJevState(t *testing.T) {
+	if got := extractJevState([]byte(`{"model":"m","state":"S","questions":{"q":{"type":"noul"}}}`)); got != "S" {
+		t.Errorf("jev body state = %q, want S", got)
+	}
+	for name, body := range map[string]string{
+		"chat completions": `{"model":"m","messages":[{"role":"user","content":"x"}],"state":"S","questions":{"q":{}}}`,
+		"no questions":     `{"model":"m","state":"S"}`,
+		"empty state":      `{"model":"m","state":"","questions":{"q":{}}}`,
+		"not json":         `nonsense`,
+	} {
+		if got := extractJevState([]byte(body)); got != "" {
+			t.Errorf("%s: extractJevState = %q, want empty", name, got)
+		}
+	}
+}

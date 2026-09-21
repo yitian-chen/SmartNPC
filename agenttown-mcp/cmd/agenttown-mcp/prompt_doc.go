@@ -76,10 +76,16 @@ func dumpPromptDoc(agentID, layer string, body []byte, logger *slog.Logger) {
 	// 可读 Prompt 预览：每个 layer 的 system + user 内容，还原换行后放在
 	// 文档开头，便于快速查看核心 prompt 而不必在 JSON 里翻找。user 预览
 	// 捡拾末尾两条 user 消息（本轮 user prompt + <agent_state> 状态栏）。
+	// 事件路由走判决 API（jev）：请求体无 messages、有 state+questions，
+	// 预览渲染为 state 单段。
 	fmt.Fprintf(f, "## 可读 Prompt 预览\n\n")
 	for _, l := range promptDocLayers {
 		b, ok := promptDocBodies[l]
 		if !ok {
+			continue
+		}
+		if state := extractJevState(b); state != "" {
+			fmt.Fprintf(f, "### %s · state\n\n%s\n\n", layerNameOf(l), state)
 			continue
 		}
 		sys, usr := extractSystemUser(b)
@@ -157,6 +163,25 @@ func extractSystemUser(body []byte) (system, user string) {
 		return system, users[len(users)-2] + "\n\n" + last
 	}
 	return system, users[len(users)-1]
+}
+
+// extractJevState returns the state text when body is a judgment-API request
+// (jev: no messages, has state + questions), "" otherwise. The router's
+// requests carry the whole decision context in one state string, so the
+// readable preview renders it as a single "state" section.
+func extractJevState(body []byte) string {
+	var req struct {
+		Messages  json.RawMessage `json:"messages"`
+		State     string          `json:"state"`
+		Questions json.RawMessage `json:"questions"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		return ""
+	}
+	if req.State == "" || len(req.Questions) == 0 || len(req.Messages) > 0 {
+		return ""
+	}
+	return req.State
 }
 
 // dumpLastRequestBody 读取 LLM 客户端最近一次发送的完整请求体并落盘。

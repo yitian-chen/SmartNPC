@@ -442,7 +442,7 @@ func TestHandleDebugEvent_ManualModeReportsDropped(t *testing.T) {
 // immediately (not enqueued for the safe point), and the legacy standalone
 // chat_invite message is translated into the same world_event path.
 func TestChatInviteIncoming_DispatchedByWorldEvent(t *testing.T) {
-	rt, ft, ac, _, _ := newRouterTestRuntime(t, `{}`)
+	rt, ft, ac, _, _ := newRouterTestRuntime(t, notInterruptJudge())
 	if ac.dialogue == nil {
 		t.Skip("dialogue runner requires ws wiring; covered by dialogue_test.go")
 	}

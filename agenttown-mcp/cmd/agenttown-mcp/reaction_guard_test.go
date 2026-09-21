@@ -44,7 +44,7 @@ func dispatchRouterInterrupt(t *testing.T, rt *Runtime, agentID string, ev proto
 // goroutine (deterministic; the interrupt-arms-window wiring is asserted
 // on the proceeding branch below).
 func TestReactionGuard_HigherSeverityRequired(t *testing.T) {
-	rt, ft, ac, _, _ := newRouterTestRuntime(t, `{}`)
+	rt, ft, ac, _, _ := newRouterTestRuntime(t, notInterruptJudge())
 	ac.as.RecordActionStarted("act-1", protocol.CmdWorkShift, nil, agentstate.SourceTactical, "")
 	// 直接武装 severity 8 的反应窗口（等价于一次 severity 8 打断后的护栏状态）。
 	ac.beginReaction(8, ac.as.LatestGameTimeSec(), "")
@@ -78,7 +78,7 @@ func TestReactionGuard_HigherSeverityRequired(t *testing.T) {
 // the severity ladder entirely — even a severity-2 force event cuts an
 // active severity-9 reaction.
 func TestReactionGuard_ForceBypassesLadder(t *testing.T) {
-	rt, ft, ac, _, _ := newRouterTestRuntime(t, `{}`)
+	rt, ft, ac, _, _ := newRouterTestRuntime(t, notInterruptJudge())
 	ac.as.RecordActionStarted("act-1", protocol.CmdWorkShift, nil, agentstate.SourceTactical, "")
 	ac.beginReaction(9, ac.as.LatestGameTimeSec(), "")
 
@@ -95,7 +95,7 @@ func TestReactionGuard_ForceBypassesLadder(t *testing.T) {
 // queue dropped, hint tells the next refill to return to the schedule, and
 // the guard is lifted.
 func TestReactionGuard_DeadlineCutsBackToSchedule(t *testing.T) {
-	_, ft, ac, _, _ := newRouterTestRuntime(t, `{}`)
+	_, ft, ac, _, _ := newRouterTestRuntime(t, notInterruptJudge())
 	seedPerception(t, ac) // D12 10:47:03 → gameSec 989223
 	ac.as.RecordActionStarted("act-1", protocol.CmdWorkShift, nil, agentstate.SourceTactical, "")
 	ac.as.RefillQueue([]agentstate.PlannedAction{
@@ -131,7 +131,7 @@ func TestReactionGuard_DeadlineCutsBackToSchedule(t *testing.T) {
 // TestReactionGuard_DeadlineNotYetReached verifies the check is inert
 // before the deadline and for unarmed agents.
 func TestReactionGuard_DeadlineNotYetReached(t *testing.T) {
-	_, ft, ac, _, _ := newRouterTestRuntime(t, `{}`)
+	_, ft, ac, _, _ := newRouterTestRuntime(t, notInterruptJudge())
 	seedPerception(t, ac)
 	ac.as.RecordActionStarted("act-1", protocol.CmdWorkShift, nil, agentstate.SourceTactical, "")
 
@@ -160,7 +160,7 @@ func TestReactionGuard_DeadlineNotYetReached(t *testing.T) {
 // worker schedule refill (tacticalRefill) lifts the reaction window — the
 // NPC has returned to schedule-driven planning.
 func TestReactionGuard_ScheduleRefillClears(t *testing.T) {
-	_, ft, ac, _, _ := newRouterTestRuntime(t, `{}`)
+	_, ft, ac, _, _ := newRouterTestRuntime(t, notInterruptJudge())
 	seedPerception(t, ac)
 	ac.as.SetDailyPlan("09:00-12:00: 车间装配作业", 11)
 	ac.beginReaction(8, ac.as.LatestGameTimeSec(), "")
@@ -177,7 +177,7 @@ func TestReactionGuard_ScheduleRefillClears(t *testing.T) {
 
 // TestReactionGuard_StopClears verifies agent shutdown lifts the guard.
 func TestReactionGuard_StopClears(t *testing.T) {
-	_, _, ac, _, _ := newRouterTestRuntime(t, `{}`)
+	_, _, ac, _, _ := newRouterTestRuntime(t, notInterruptJudge())
 	ac.beginReaction(8, 1000, "")
 	ac.stop()
 	if active, _, _ := ac.reactionSnapshot(); active {
@@ -188,7 +188,7 @@ func TestReactionGuard_StopClears(t *testing.T) {
 // TestReactionGuard_BeginClampsSeverity verifies the severity bar clamps
 // to 0..10 regardless of source (force events trust UE's field).
 func TestReactionGuard_BeginClampsSeverity(t *testing.T) {
-	_, _, ac, _, _ := newRouterTestRuntime(t, `{}`)
+	_, _, ac, _, _ := newRouterTestRuntime(t, notInterruptJudge())
 	ac.beginReaction(99, 1000, "")
 	if _, sev, _ := ac.reactionSnapshot(); sev != 10 {
 		t.Fatalf("severity 99 must clamp to 10, got %d", sev)
@@ -203,7 +203,7 @@ func TestReactionGuard_BeginClampsSeverity(t *testing.T) {
 // no perception (nowGameSec<=0) leaves the deadline check inert until the
 // first perception arrives.
 func TestReactionGuard_NoPerceptionDeadlineInert(t *testing.T) {
-	_, ft, ac, _, _ := newRouterTestRuntime(t, `{}`)
+	_, ft, ac, _, _ := newRouterTestRuntime(t, notInterruptJudge())
 	ac.beginReaction(8, 0, "") // 无感知
 	ac.checkReactionDeadline("H-01", ft, testLogger())
 	if active, _, _ := ac.reactionSnapshot(); !active {

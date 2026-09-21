@@ -89,7 +89,7 @@ func TestGenerateTacticalPlan_FailureKeepsEvents(t *testing.T) {
 // also sees the queued events: force event in the emergency hint + the
 // other queued events in 【发生的事件】 — one LLM call sees the whole world.
 func TestForceReplan_PromptCarriesQueuedEvents(t *testing.T) {
-	rt, ft, ac, _, _ := newRouterTestRuntime(t, "")
+	rt, ft, ac, _, _ := newRouterTestRuntime(t, notInterruptJudge())
 	fake := &fakeLoopLLM{resp: speakToolCallResp()}
 	ac.tacticalHc = fake
 	seedPerception(t, ac)
