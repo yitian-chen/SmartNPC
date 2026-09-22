@@ -497,3 +497,23 @@ func TestTacticalHintLine_SocialResponsePrefix(t *testing.T) {
 		t.Fatalf("social must NOT get emergency treatment:\n%s", out)
 	}
 }
+
+// TestTacticalHintLine_CombatEndPrefix verifies the 【战斗结束】 hint (combat-
+// detach reclaim) renders post-combat recovery guidance — not emergency
+// treatment, and not a bare interruption note.
+func TestTacticalHintLine_CombatEndPrefix(t *testing.T) {
+	in := TacticalInput{Hint: "【战斗结束】玩家互动：与玩家 player_1 的战斗结束（escaped）", AgentID: "H-01"}
+	out := BuildTactical(in)
+	if !strings.Contains(out, "【战斗结束】玩家互动：与玩家 player_1 的战斗结束（escaped）") {
+		t.Fatalf("missing combat-end header:\n%s", out)
+	}
+	if !strings.Contains(out, "恢复自主控制") {
+		t.Fatalf("missing recovery-of-control guidance:\n%s", out)
+	}
+	if !strings.Contains(out, "维修、充电、返回岗位") {
+		t.Fatalf("missing post-combat recovery options:\n%s", out)
+	}
+	if strings.Contains(out, "紧急事件") {
+		t.Fatalf("combat end must NOT get emergency treatment:\n%s", out)
+	}
+}

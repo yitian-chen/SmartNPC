@@ -122,6 +122,18 @@ func (rt *Runtime) handleWorldEvent(agentID string, ev protocol.WorldEventPayloa
 	// 分钟后。协议规定 UE 停发独立 chat_invite、统一按 world_event 推送
 	// social.chat_invite_incoming；Agent 侧在此解包转交对话 runner。
 	if ev.Category == protocol.CategorySocial && ev.EventType == protocol.EventTypeChatInviteIncoming {
+		// 战斗让位中礼貌拒绝（不转交 runner——战斗中的身体不会去聊天，
+		// 但 rsp 必须回：UE 会话状态机在等，静默丢弃会把对端 A 挂死）。
+		if ac.combatYieldActive() {
+			var d protocol.SocialData
+			_ = json.Unmarshal(ev.Data, &d)
+			if ac.dialogue != nil && d.ConvID != "" {
+				ac.dialogue.sendInviteRsp(d.ConvID, false)
+			}
+			rt.logger.Info("[world_event] 战斗让位中，对话邀请已礼貌拒绝",
+				"agent_id", agentID, "event_id", ev.EventID, "from", d.From, "conv_id", d.ConvID)
+			return true
+		}
 		if ac.dialogue != nil {
 			var d protocol.SocialData
 			_ = json.Unmarshal(ev.Data, &d)
@@ -141,15 +153,25 @@ func (rt *Runtime) handleWorldEvent(agentID string, ev protocol.WorldEventPayloa
 	// 修复 A：combat 类事件是持续状态的边沿——attacked/targeted 登记威胁
 	// 情境（直到 combat_exit 或 TTL），combat_exit 解除。放在 force 分流
 	// 之前：登记/解除对 force 与非 force 路径一视同仁。
-	if isCombatStartEvent(ev) {
+	if prompt.IsCombatStartEvent(ev) {
 		ac.as.BeginSituation(situationKindCombat, prompt.FormatWorldEvent(ev), ac.as.LatestGameTimeSec())
 		rt.logger.Info("[world_event] 登记持续威胁情境（combat_exit 或 TTL 解除）",
 			"agent_id", agentID, "event_id", ev.EventID, "event_type", ev.EventType)
-	} else if isCombatExitEvent(ev) {
+	} else if prompt.IsCombatExitEvent(ev) {
 		if ac.as.EndSituation(situationKindCombat) {
 			rt.logger.Info("[world_event] 威胁情境已解除（combat_exit）",
 				"agent_id", agentID, "event_id", ev.EventID)
 		}
+	}
+
+	// Combat-detach 归还：让位中的 combat_exit 是确定性交接的完成信号，
+	// 不走路由器——让位期间 agent 无在途动作、无反应窗口，路由判决必然
+	// 缺上下文（大概率误判 no_interrupt，控制权就永远收不回；detach 让位
+	// 本就不经裁决，归还对称地确定性接收）。放在 force 分流之前：force
+	// 与非 force 两种 combat_exit 都接得住。
+	if prompt.IsCombatExitEvent(ev) && ac.combatYieldActive() {
+		ac.reclaimFromCombatYield(rt.ctx, agentID, rt.ws, *rt.kbPtr, rt.profiles, ev, false, rt.logger)
+		return true
 	}
 
 	if ev.Force {
@@ -192,6 +214,29 @@ func (rt *Runtime) handleForceEvent(ac *agentContext, agentID string, ev protoco
 	if !ac.as.MarkWorldEventSeen(ev.EventID) {
 		rt.logger.Info("[world_event/force] 重复事件已丢弃（seq 重放）",
 			"agent_id", agentID, "event_id", ev.EventID)
+		return
+	}
+
+	// Combat-detach（UE 战斗 AI 接管）：detach=true 时下方全部动作（hint +
+	// 反应窗口 + 重规划 + 新动作下发）都会与 UE 战斗系统抢身体——这正是
+	// 2026-09-22 实测的 bug（MCP 1 秒内重规划下发逃跑，UE 战斗 AI 从未拿到
+	// 控制权）。让位分支代替之：静默交出身体。combat_exit 误带 detach 时不
+	// 进入（那是归还信号，不是接管信号）。
+	if ev.Detach && !prompt.IsCombatExitEvent(ev) {
+		rt.handleCombatDetach(ac, agentID, ev)
+		return
+	}
+	// 让位期间的普通 force 事件同样不得 stop/重规划（身体在 UE 手里直到
+	// combat_exit）：echo 回事件队列（上面的 MarkSeen 已烧掉 event_id 的
+	// 正常入队通道，echo 特意绕过 dedup），归还后的第一次分解在
+	// 【发生的事件】里见到它。
+	if ac.combatYieldActive() {
+		if ev.EventID != "" || ev.EventType != "" {
+			ac.as.EchoWorldEvent(ev)
+		}
+		rt.logger.Info("[world_event/force] 战斗让位中，force 事件入队等待归还后处理（不打断不重规划）",
+			"agent_id", agentID, "event_id", ev.EventID, "event_type", ev.EventType,
+			"severity", ev.Severity)
 		return
 	}
 
@@ -245,6 +290,143 @@ func (rt *Runtime) handleForceEvent(ac *agentContext, agentID string, ev protoco
 // goal and the duration-filling rules) instead of a mere interruption note.
 func forceEventHint(ev protocol.WorldEventPayload) string {
 	return "【强制打断】" + prompt.FormatWorldEvent(ev)
+}
+
+// handleCombatDetach executes the combat-detach handover, synchronously in
+// the WS receive path (mirroring handleForceEvent). UE's combat AI is taking
+// the body, so the agent stands down COMPLETELY: stop/clear the in-flight
+// action as the handover assist, then yield — no replan, no new actions, no
+// hint, no reaction window, until combat_exit (or the TTL safety net)
+// returns control. Repeat attacks while already yielded only refresh the TTL
+// anchor and the echoed event (idempotent entry).
+func (rt *Runtime) handleCombatDetach(ac *agentContext, agentID string, ev protocol.WorldEventPayload) {
+	alreadyYielded := ac.combatYieldActive()
+	if !alreadyYielded {
+		// 掐在途战术层 LLM（如此前非 detach 事件触发的逃跑重规划）：半截
+		// 思考丢弃，被取消方不做失败兜底——但也不像 force 路径那样有新
+		// replan 接管，让位本身即终态。
+		if ac.cancelInFlightTacticalLLM() {
+			rt.logger.Info("[combat-detach] 已取消在途战术层 LLM 请求（让位，不重规划）",
+				"agent_id", agentID, "event_id", ev.EventID)
+		}
+		// 交接辅助：stop 在途动作，给 UE 战斗 AI 一个空闲身体。实测 UE
+		// 不会预停我们的动作（2026-09-22：MCP 的 stop 才是打断 Exercise
+		// 的那个）——所以这一步仍属必要。
+		if actionID := ac.as.CurrentActionID(); actionID != "" {
+			if err := rt.ws.SendStopAction(agentID, actionID); err != nil {
+				// 发送失败也照常让位：UE 已持有身体，残留动作由 UE 战斗
+				// 系统自然覆盖，无 replan 会去重试 stop。
+				rt.logger.Warn("[combat-detach] stop_action 发送失败（UE 已接管，继续让位）",
+					"agent_id", agentID, "action_id", actionID, "err", err)
+			} else {
+				ac.recordInterrupted("战斗让位（UE 战斗系统接管）：" + truncateRunes(prompt.FormatWorldEvent(ev), 60))
+			}
+		}
+		// 业务复位：队列 + 在途 + slot（让位时长未知；归还 replan 经
+		// selectCurrentGoal 按游戏时间从 dailyPlan 重推 goal）。事件队列被
+		// ClearForReplan 保留——战斗前的上下文要活到归还后的 drain。在途
+		// 动作 stash 进 clearedAction，迟到的 interrupted completion 仍能
+		// 记满 action_history 行（与既有 Clear 语义一致）。
+		info := ac.as.ClearForReplan()
+		// 取消在途动作的超时 timer：迟到回调会发游离 stop / 提前烧掉
+		// clearedAction stash（镜像 abandonCurrentPlan；普通 force 路径
+		// 从不取消 timer 是既有 wart，让位路径不复制它）。
+		if info.ActionID != "" {
+			ac.coordMu.Lock()
+			if timer, ok := ac.pendingActionTimeouts[info.ActionID]; ok {
+				timer.Stop()
+				delete(ac.pendingActionTimeouts, info.ActionID)
+			}
+			ac.coordMu.Unlock()
+		}
+		// 此前事件 arm 的反应窗口不得在让位期间触发截止硬切（stop+hint+
+		// signal 全套都会惊扰 UE 的战斗）。
+		ac.clearReaction()
+		// 陈旧的 slotSwitchPending 若带过让位期，归还 replan 提交新队列后
+		// 会被 processSlotSwitch 整队清掉——入口处就地解除（slot 边界迁移
+		// 已被让位吞并，归还后按时间重推）。
+		ac.as.ClearSlotSwitchPending()
+	}
+	ac.beginCombatYield(ev, ac.as.LatestGameTimeSec())
+	rt.logger.Warn("[combat-detach] UE 战斗系统接管，agent 让位（静默至 combat_exit 或 TTL 兜底）",
+		"agent_id", agentID, "event_id", ev.EventID, "event_type", ev.EventType,
+		"severity", ev.Severity, "subject", ev.Subject, "repeat_attack", alreadyYielded)
+}
+
+// reclaimFromCombatYield ends a combat-detach yield and hands control back to
+// the agent. Shared by the two reclaim triggers:
+//   - combat_exit handback (ttl=false, ev = the exit event; the exit event is
+//     echoed by forceInterruptReplan on success, so 【发生的事件】 reads the
+//     chronological pair 被攻击 → 脱战),
+//   - TTL safety net (ttl=true, ev = the last detach attack — UE never sent
+//     combat_exit; the hint says so).
+// The post-combat replan re-derives its goal from dailyPlan by game time
+// (tacticalRefillForReplan → selectCurrentGoal), so the slot cleared at yield
+// entry costs nothing.
+func (a *agentContext) reclaimFromCombatYield(ctx context.Context, agentID string,
+	ws contract.Transport, kb *worldkb.KB, profiles map[string]*profile.Profile,
+	ev protocol.WorldEventPayload, ttl bool, logger *slog.Logger) {
+
+	_, _, lastAttack := a.combatYieldSnapshot()
+	a.endCombatYield()
+	// 双保险：入口已 clearReaction，但让位横跨多个事件，归还时确保无
+	// 残留反应窗口（deadline 硬切会 stop+hint+signal 惊扰刚接回的身体）。
+	a.clearReaction()
+	// 攻击事件回声（修复 B 同款"再见一次"语义）：归还后的第一次分解在
+	// 【发生的事件】里见到战斗的起因，而不只 hint 一句话。TTL 失败兜底
+	// 路径（abandonCurrentPlan）同样不丢。EventID/EventType 全空（合成/
+	// 测试事件）时跳过。
+	if lastAttack.EventID != "" || lastAttack.EventType != "" {
+		a.as.EchoWorldEvent(lastAttack)
+	}
+	var hint string
+	if ttl {
+		hint = fmt.Sprintf("【战斗结束】威胁情境超过 %.0f 游戏分钟未收到解除信号（combat_exit），系统兜底收回控制权。", combatYieldTTLGameSec/60)
+	} else {
+		hint = "【战斗结束】" + prompt.FormatWorldEvent(ev)
+	}
+	// hint 先落 AgentState：acquireReplanSlot 超时 / replan 失败两条兜底
+	// 路径都靠 worker 自然 refill 时读到战后上下文。
+	a.as.SetReplanHint(hint)
+	go a.forceInterruptReplan(ctx, agentID, ws, kb, profiles, ev, hint, logger)
+	logger.Info("[combat-detach] 控制权归还 agent（战斗结束），重规划回日程",
+		"agent_id", agentID, "event_id", ev.EventID, "event_type", ev.EventType, "ttl_expiry", ttl)
+}
+
+// checkCombatYieldExpiry implements the combat-detach TTL safety net, called
+// from the worker loop's yield guard. Cold-start convention (mirrors the
+// reaction deadline): a yield begun before the first perception stores
+// since=0 and stays inert until a real game time latches the anchor —
+// otherwise the first perception's clock jump would instantly "expire" the
+// yield mid-combat. Returns true when a TTL reclaim was triggered.
+func (a *agentContext) checkCombatYieldExpiry(ctx context.Context, agentID string,
+	ws contract.Transport, kb *worldkb.KB, profiles map[string]*profile.Profile,
+	logger *slog.Logger) bool {
+
+	active, since, lastEvent := a.combatYieldSnapshot()
+	if !active {
+		return false
+	}
+	now := a.as.LatestGameTimeSec()
+	if since <= 0 {
+		if now > 0 {
+			// 首条感知到达：从此刻起算 TTL（beginCombatYield 时无感知，
+			// 挂 0 占位）。
+			a.coordMu.Lock()
+			a.combatYieldSinceGameSec = now
+			a.coordMu.Unlock()
+			logger.Info("[combat-detach] 首条感知到达，让位 TTL 起点锁存",
+				"agent_id", agentID, "game_time_sec", now)
+		}
+		return false
+	}
+	if now <= 0 || now-since < combatYieldTTLGameSec {
+		return false
+	}
+	logger.Warn("[combat-detach] 让位超时未收到 combat_exit，TTL 兜底收回控制权",
+		"agent_id", agentID, "since_game_sec", since, "now_game_sec", now)
+	a.reclaimFromCombatYield(ctx, agentID, ws, kb, profiles, lastEvent, true, logger)
+	return true
 }
 
 // forceInterruptReplan runs the post-interrupt replan for a force event.
@@ -431,6 +613,7 @@ type debugEventResponse struct {
 	Category  string `json:"category,omitempty"`
 	EventType string `json:"event_type,omitempty"`
 	Force     bool   `json:"force"`
+	Detach    bool   `json:"detach"`
 	Severity  int    `json:"severity"`
 	GameTime  string `json:"game_time,omitempty"`
 	QueueLen  int    `json:"queue_len"`
@@ -469,9 +652,16 @@ func handleDebugEvent(logger *slog.Logger, lookupAgent func(string) *agentContex
 	}
 	ev := req.Event
 	if ev.Category == "" {
-		w.WriteHeader(http.StatusBadRequest)
-		_ = json.NewEncoder(w).Encode(debugEventResponse{Error: "event.category is required"})
-		return
+		// Combat-detach 联调需要复现 UE 的畸形事件（category 缺失、
+		// event_type 用短名）：命中战斗别名表时放行并按 effective
+		// category 补齐，端到端验证容错逻辑；其余类别仍须显式携带。
+		if eff := prompt.EffectiveCategory(ev); eff != "" {
+			ev.Category = eff
+		} else {
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(debugEventResponse{Error: "event.category is required"})
+			return
+		}
 	}
 	if ev.EventType == "" {
 		w.WriteHeader(http.StatusBadRequest)
@@ -498,6 +688,8 @@ func handleDebugEvent(logger *slog.Logger, lookupAgent func(string) *agentContex
 	note := "已入队，等待安全点 drain（action_completed 时交战术层统筹）"
 	if !handled {
 		note = "事件被策略丢弃（手动模式或 agent 离线，见 MCP 日志）"
+	} else if ev.Force && ev.Detach && !prompt.IsCombatExitEvent(ev) {
+		note = "force + detach 战斗接管：已停在途动作并让位 UE 战斗 AI（MCP 静默至 combat_exit 或 TTL 兜底，见 [combat-detach] 日志）"
 	} else if ev.Force {
 		note = "force 硬保证：在途动作已同步打断，重规划异步进行（见 [world_event/force] 日志）"
 	}
@@ -513,6 +705,7 @@ func handleDebugEvent(logger *slog.Logger, lookupAgent func(string) *agentContex
 		Category:  ev.Category,
 		EventType: ev.EventType,
 		Force:     ev.Force,
+		Detach:    ev.Detach,
 		Severity:  ev.Severity,
 		GameTime:  ev.GameTime,
 		QueueLen:  ac.as.WorldEventQueueLen(),
@@ -647,6 +840,56 @@ func (a *agentContext) checkReactionDeadline(agentID string, ws contract.Transpo
 	return true
 }
 
+// ─── Combat-detach yield state (combat-detach) ──────────────────────────────
+//
+// detach=true 的战斗事件 = "UE 战斗 AI 接管身体，agent 让位"。与 reaction
+// guard 的本质区别：reaction 是 agent 自己的反应任务（有 deadline、会被
+// refill 清除），yield 是把身体交给 UE（agent 全静默，直到 combat_exit 或
+// TTL 兜底收回）。字段生命周期见 agentContext 定义处的注释。
+
+// combatYieldActive reports whether UE's combat AI currently owns the body.
+func (a *agentContext) combatYieldActive() bool {
+	a.coordMu.Lock()
+	defer a.coordMu.Unlock()
+	return a.combatYield
+}
+
+// combatYieldSnapshot returns the full yield state for the TTL check and the
+// reclaim path.
+func (a *agentContext) combatYieldSnapshot() (active bool, sinceGameSec float64, lastEvent protocol.WorldEventPayload) {
+	a.coordMu.Lock()
+	defer a.coordMu.Unlock()
+	return a.combatYield, a.combatYieldSinceGameSec, a.combatYieldLastEvent
+}
+
+// beginCombatYield enters (or refreshes) the yield. Idempotent: a repeat
+// attack while already yielded refreshes the TTL anchor and the echoed
+// event, but never re-stops/re-clears (the caller's stop/clear work only
+// happens on entry — see handleForceEvent's detach branch). nowGameSec
+// follows beginReaction's convention: <= 0 (no perception yet) stores 0 and
+// leaves the TTL inert until checkCombatYieldExpiry latches a real time.
+func (a *agentContext) beginCombatYield(ev protocol.WorldEventPayload, nowGameSec float64) {
+	a.coordMu.Lock()
+	defer a.coordMu.Unlock()
+	a.combatYield = true
+	a.combatYieldLastEvent = ev
+	if nowGameSec > 0 {
+		a.combatYieldSinceGameSec = nowGameSec
+	} else {
+		a.combatYieldSinceGameSec = 0
+	}
+}
+
+// endCombatYield lifts the yield. The caller (returnFromCombatYield) drives
+// the post-combat replan; this only clears the flag.
+func (a *agentContext) endCombatYield() {
+	a.coordMu.Lock()
+	a.combatYield = false
+	a.combatYieldSinceGameSec = 0
+	a.combatYieldLastEvent = protocol.WorldEventPayload{}
+	a.coordMu.Unlock()
+}
+
 // situationKindCombat is the ongoing-threat situation kind (P3-9 修复 A).
 const situationKindCombat = "combat"
 
@@ -654,16 +897,8 @@ const situationKindCombat = "combat"
 // (combat_exit never arrives): 30 game minutes, then it auto-degrades.
 const situationTTLGameSec = 30 * 60.0
 
-// isCombatStartEvent reports whether the event starts a combat threat
-// (player_attacked / player_targeted — both are force by protocol, but the
-// check is label-based so a mislabeled non-force one still registers).
-func isCombatStartEvent(ev protocol.WorldEventPayload) bool {
-	return ev.Category == protocol.CategoryPlayerInteraction &&
-		(ev.EventType == protocol.EventTypePlayerAttacked || ev.EventType == protocol.EventTypePlayerTargeted)
-}
-
-// isCombatExitEvent reports whether the event resolves the combat threat.
-func isCombatExitEvent(ev protocol.WorldEventPayload) bool {
-	return ev.Category == protocol.CategoryPlayerInteraction &&
-		ev.EventType == protocol.EventTypeCombatExit
-}
+// combatYieldTTLGameSec bounds a combat-detach yield without a combat_exit
+// handback (UE forgot / not implemented / bug): the agent reclaims control
+// after this many game seconds since the LAST detach event. Each new attack
+// refreshes the window, so an ongoing fight never expires mid-combat.
+const combatYieldTTLGameSec = 30 * 60.0

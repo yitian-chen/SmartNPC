@@ -119,6 +119,26 @@ type agentContext struct {
 	// 看不出是逃跑）。
 	reactionDesc string
 
+	// Combat-detach yield state (combat-detach, 2026-09-22): while combatYield
+	// is set, UE's combat AI owns the body — the worker loop skips slot
+	// switching/dispatch/refill, the router stays silent, and NO action is
+	// sent until combat_exit (or combatYieldTTLGameSec since the last detach
+	// event, the safety net) returns control. combatYieldSinceGameSec
+	// follows beginReaction's cold-start convention (<= 0 = no perception yet,
+	// the TTL check stays inert until the first perception latches it).
+	// combatYieldLastEvent is echoed back into the world-event queue at
+	// reclaim so the first post-combat decomposition sees why the gap exists.
+	//
+	// Deliberately NOT cleared by stop()/reconnect: UE never re-sends detach
+	// after a reconnect (AgentState.Stop wipes the dedup seen-set too), so
+	// clearing here would let MCP steal the body back mid-combat on every WS
+	// blip. The game-time TTL bounds the worst case (UE process gone without
+	// agent unregister) at combatYieldTTLGameSec of autonomy loss — the safe
+	// direction (stay still rather than fight the combat AI for the body).
+	combatYield             bool
+	combatYieldSinceGameSec float64
+	combatYieldLastEvent    protocol.WorldEventPayload
+
 	// LLM clients (immutable after construction, no lock needed)
 	strategicHc llmClient
 	tacticalHc  llmClient
@@ -837,7 +857,10 @@ func runPerceptionWorker(
 		// 让 NPC 自然睡到 07:00，由 advanceSlotIfNeeded 打断后走 tacticalRefill
 		// 选新计划 slot。手动模式（autoPlanEnabled=false）跳过。
 		if autoPlanEnabled {
-			if rollover, prevDay, newDay := ac.detectDayRollover(); rollover {
+			if rollover, prevDay, newDay := ac.detectDayRollover(); rollover && !ac.combatYieldActive() {
+				// 战斗让位中跳过跨日处理（combat-detach）：跨日是电平检测
+				// （day > prev），归还后首个 wake 自然补上，不漏。让位中跑会
+				// 清会话历史 + 白烧两次 LLM。
 				logger.Info("[战略层] 检测到跨日，重新生成当日计划",
 					"agent_id", agentID, "prev_day", prevDay, "new_day", newDay)
 				// Stage 4: 日终记忆生成——从昨日 action_history 总结出
@@ -880,6 +903,16 @@ func runPerceptionWorker(
 		// action 会被 busy 拒，refill 出的队列也会被拒。等 action_completed 自然
 		// 唤醒 worker（completion 路径会 signal 并清 currentActionID）。
 		if ac.hasInFlightAction() {
+			continue
+		}
+
+		// Combat-detach 让位（UE 战斗 AI 持有身体）：跳过 slot 切换（陈旧
+		// pending 已在让位入口解除；slot 边界迁移由归还 replan 按游戏时间
+		// 重推）、跳过 pop/refill（任何新动作都在抢身体）。先查 TTL 兜底
+		// （combat_exit 未到时到期收回控制权）。放在 processSlotSwitch 之前：
+		// 它会 ClearForSlotSwitch 清队列 + clearReaction，惊扰交接。
+		if ac.combatYieldActive() {
+			ac.checkCombatYieldExpiry(ctx, agentID, ws, kb, profiles, logger)
 			continue
 		}
 
@@ -965,6 +998,12 @@ func (g *guardedExecutor) SendAction(ctx context.Context, agentID string, decisi
 	ac, err := g.validate(agentID)
 	if err != nil {
 		return nil, err
+	}
+	// Combat-detach 让位中拒绝下发（防御纵深）：UE 战斗 AI 持有身体，任何
+	// action_command 都是在抢身体。正常路径下让位期间无 LLM 调用、无工具
+	// 调用，此门禁挡的是绕过 worker 的残留/未来路径。
+	if ac.combatYieldActive() {
+		return nil, fmt.Errorf("agent %s is combat-detach yielded (UE combat AI owns the body)", agentID)
 	}
 	// Per-agent capability gate: reject if the agent doesn't have the
 	// required cmd in its effective capability set (per-agent override
@@ -2252,6 +2291,9 @@ type debugActionResponse struct {
 	Accepted             bool    `json:"accepted,omitempty"`
 	EstimatedDurationSec float64 `json:"estimated_duration_sec,omitempty"`
 	Error                string  `json:"error,omitempty"`
+	// Warning carries non-fatal notices (e.g. the agent is combat-detach
+	// yielded — the manual action went out but fights UE's combat AI).
+	Warning string `json:"warning,omitempty"`
 }
 
 // debugScheduleRequest 是 /debug/schedule 的请求体。
@@ -2455,6 +2497,15 @@ func handleDebugAction(ctx context.Context, logger *slog.Logger, ws contract.Tra
 	if ack.EstimatedDurationSec != nil {
 		resp.EstimatedDurationSec = *ack.EstimatedDurationSec
 	}
+	// Combat-detach 让位中的手动下发是显式的人工干预：放行（联调工具，
+	// 有人盯着），但响应带警告——这个动作在与 UE 战斗 AI 抢身体。
+	if lookupAgent != nil {
+		if ac := lookupAgent(req.AgentID); ac != nil && ac.combatYieldActive() {
+			resp.Warning = "agent is combat-detach yielded (UE combat AI owns the body); this manual action fights the takeover"
+			logger.Warn("[debug/action] 手动下发于战斗让位期间（与 UE 战斗 AI 抢身体）",
+				"agent_id", req.AgentID, "cmd", req.Cmd)
+		}
+	}
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(resp)
 }
@@ -2577,6 +2628,16 @@ func handleDebugSchedule(ctx context.Context, logger *slog.Logger, ws contract.T
 	// 互斥：检查 replanInProgress（防 worker 并发 refill 撞 tacticalHc session）；
 	// 检查 tacticalHc 是否就绪。设 replanInProgress=true + debugOverride=true。
 	ac.coordMu.Lock()
+	if ac.combatYield {
+		// Combat-detach 让位中：身体在 UE 战斗 AI 手里，注入的 schedule
+		// 会进队列却无法下发（worker 守卫），归还 replan 还会整队覆盖它。
+		ac.coordMu.Unlock()
+		w.WriteHeader(http.StatusConflict)
+		_ = json.NewEncoder(w).Encode(debugScheduleResponse{
+			Error: "agent is combat-detach yielded (UE combat AI owns the body), retry after combat_exit",
+		})
+		return
+	}
 	if ac.replanInProgress {
 		ac.coordMu.Unlock()
 		w.WriteHeader(http.StatusConflict)

@@ -235,6 +235,15 @@ func (r *eventRouter) route(ctx context.Context, agentID string, ev protocol.Wor
 	if ac == nil {
 		return
 	}
+	// 战斗让位中不裁决（combat-detach）：身体在 UE 战斗 AI 手里，任何
+	// interrupt 都是在抢身体。事件已在队列，归还后的第一次分解会 drain
+	// 到它。该守卫同时覆盖两个发射点（handleWorldEvent 与
+	// dispatchSynthesizedEvent——战斗期间恰是物理告警合成事件高发期）。
+	if ac.combatYieldActive() {
+		r.logger.Debug("[事件路由] 战斗让位中，跳过判决（事件留队列等归还）",
+			"agent_id", agentID, "event_id", ev.EventID)
+		return
+	}
 
 	in := r.buildInput(agentID, ac, ev)
 
@@ -383,6 +392,15 @@ func (rt *Runtime) routerInterrupt(agentID string, ev protocol.WorldEventPayload
 	stopped := ac.stopped
 	ac.coordMu.Unlock()
 	if stopped {
+		return
+	}
+	// 战斗让位中不执行打断（combat-detach）：UE 战斗 AI 持有身体，stop +
+	// 重规划都是在抢身体。必须在 RemoveQueuedWorldEvent 之前 return——
+	// 事件留在队列，归还后的第一次分解 drain 到它。该守卫挡住在途竞态：
+	// 让位开始前 ~jev-timeout 内已发出的判决，会在让位生效后返回到这里。
+	if ac.combatYieldActive() {
+		rt.logger.Info("[事件路由] 战斗让位中，打断让位（事件留队列等归还）",
+			"agent_id", agentID, "event_id", ev.EventID, "event_type", ev.EventType)
 		return
 	}
 

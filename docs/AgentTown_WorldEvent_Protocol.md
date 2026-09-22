@@ -61,9 +61,10 @@ Agent 侧正在从「轮询感知」演进为「**事件驱动**」：UE 主动�
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
 | event_id | string | ✅ | 事件唯一 ID，格式固定为 `evt_<YYYYMMDD>_<6 位递增序号>`（如 `evt_20260917_000042`，进程内单调递增）。同一广播事件推给多个 NPC 时**保持相同 event_id**，Agent 侧据此去重与关联 |
-| category | string | ✅ | 事件类别（见 §三，枚举） |
+| category | string | ✅ | 事件类别（见 §三，枚举）。*Agent 侧容错：缺失时按 event_type 别名表推断（见 §3.6 备注）* |
 | event_type | string | ✅ | 类别内具体事件类型（见 §三，枚举） |
 | force | bool | ✅ | 强制打断标记，默认 false。true = 硬保证通道（见 §四） |
+| detach | bool | ❌ | **战斗接管标记**（combat-detach）。true = UE 战斗 AI 接管该 NPC，Agent 让位（停在途动作后**不重规划、不下发任何动作**），直到 `combat_exit`（或 Agent 侧 30 游戏分钟 TTL 兜底）归还控制权。仅 `player_attacked`/`player_targeted` 携带，省略 = false |
 | severity | int | ✅ | UE 视角的客观严重度 **0~10**。10 = 最严重（死亡/被攻击/剧情强制）。仅作路由参考，Agent 侧结合自身状态裁决 |
 | subject | string | ❌ | 事件的主体对象 id（谁的能量、谁在搭话、谁故障）。无明确主体时省略 |
 | game_time | string | ✅ | 事件发生时刻的**游戏时间**（`"D12 10:47:03"`，D 后为天数）。所有事件以游戏时钟为准 |
@@ -167,11 +168,13 @@ Director 注入的故障、环境事件、剧情事件。来源：Director / 调
 
 真实玩家对该 NPC 的主动行为，或战斗状态的变化。玩家行为与 NPC 事件有本质区别——**玩家的意图不可预测、不可由系统裁决**，因此被攻击/被瞄准这类直接威胁**固定带 force**，其余（脱离战斗、被互动）固定不带 force、交路由判。
 
+**战斗接管（combat-detach）**：`player_attacked`/`player_targeted` 可携带 `detach: true`，表示 UE 战斗 AI 接管该 NPC 的行为——Agent 侧停在途动作后**完全让位**（不重规划、不下发任何 action_command，slot 切换挂起，路由静默），直到收到 `combat_exit` 归还控制权（Agent 带战后上下文重规划回日程）。`combat_exit` 是唯一的归还信号；Agent 侧另有 30 游戏分钟 TTL 兜底（UE 忘发/未实现时自动收回，重复攻击会刷新计时）。
+
 | event_type | 说明 | force | data |
 |------------|------|-------|------|
-| `player_attacked` | 被玩家攻击 | true | `{"attacker": "player_1", "damage": 20, "damage_type": "physical"}` |
-| `player_targeted` | 被玩家瞄准/锁定 | true | `{"attacker": "player_1"}` |
-| `combat_exit` | 脱离战斗（威胁消失） | false | `{"attacker": "player_1", "outcome": "escaped"}` |
+| `player_attacked` | 被玩家攻击（可带 detach=true 战斗接管） | true | `{"attacker": "player_1", "damage": 20, "damage_type": "physical"}` |
+| `player_targeted` | 被玩家瞄准/锁定（可带 detach=true 战斗接管） | true | `{"attacker": "player_1"}` |
+| `combat_exit` | 脱离战斗（威胁消失；若处于战斗让位，同时归还控制权） | false | `{"attacker": "player_1", "outcome": "escaped"}` |
 | `player_interact` | 玩家对 NPC 发起交互（对话/给物品等） | false | `{"player": "player_1", "action": "greet", "detail": "..."}` |
 
 ```json
@@ -188,6 +191,8 @@ Director 注入的故障、环境事件、剧情事件。来源：Director / 调
 | detail | string | 交互附加信息 |
 
 > **规定：玩家来源的攻击一律推 `player_attacked`**（category 明确、固定 force）。
+>
+> **UE 实现偏差备注（2026-09-22 实测，Agent 侧已容错）**：UE 首版战斗推送使用短名 `event_type:"attacked"`（无 `player_` 前缀）且**未携带 category 字段**。Agent 侧按 event_type 别名表（`attacked`/`targeted`/`combat_exit`）容错匹配与渲染，两种拼写在 MCP 侧行为一致。UE 侧仍建议对齐协议命名，新事件类型不得依赖容错。
 
 ## 四、force 硬保证通道
 
@@ -197,6 +202,7 @@ Director 注入的故障、环境事件、剧情事件。来源：Director / 调
 2. **不可否决**：Agent 侧不能有任何逻辑能拒绝它——没有阈值、没有预算、没有"最近打断太频繁"的抑制。UE 侧打标即生效。
 3. **打断后的动作**：复用现有 `PreemptForDialogue` 优雅中断路径（放下工具、起身），而非硬切动画。
 4. **典型语义**：被攻击（含被玩家攻击）、死亡、剧情强制、Director 高优先级注入、调试命令。
+5. **detach 例外（combat-detach）**：`force=true` 且 `detach=true` 的战斗事件，Agent 侧承诺的是**让位**而非反应——同步停掉在途动作（交接辅助）后不重规划、不下发任何动作，把身体完整交给 UE 战斗 AI；slot 切换挂起、路由静默、对话邀请礼貌拒绝。控制权由 `combat_exit` 归还（确定性接收，不经路由裁决），Agent 随即带战后上下文（物理状态变化 + 攻击/脱战事件对）重规划回日程。**不可否决**对 detach 同样成立：Agent 侧没有任何逻辑能拒绝让位。
 
 **打标责任在 UE 侧硬编码**，不依赖配置或模型判断。
 
@@ -213,17 +219,19 @@ Director 注入的故障、环境事件、剧情事件。来源：Director / 调
 
 UE 按本协议推送后，Agent 侧保证：
 
-1. `force=true` 的事件：立即打断当前动作（不调 LLM），带进度快照转重规划。
-2. `force=false` 的事件：交轻量路由模型判定——结果只有**打断**或**入队**；判不准时倾向入队。
-3. 入队的事件在下一个安全点（当前动作完成）**一次性 drain 全部**，连同战略规划与实时状态交给战术层统筹。
+1. `force=true` 的事件：立即打断当前动作（不调 LLM），带进度快照转重规划。**例外**：携带 `detach=true` 的战斗事件改为战斗让位（见 §四第 5 条），不重规划。
+2. `force=false` 的事件：交轻量路由模型判定——结果只有**打断**或**入队**；判不准时倾向入队。**例外**：处于战斗让位时收到 `combat_exit`，不走路由，确定性归还控制权（让位期间 agent 无在途动作无反应上下文，路由判决必然缺依据）。
+3. 入队的事件在下一个安全点（当前动作完成）**一次性 drain 全部**，连同战略规划与实时状态交给战术层统筹。战斗让位期间入队的事件保留到归还后的第一次重规划一并 drain。
 4. 事件包含 Agent 决策所需的完整事实（谁/何时/何地/严重度），路由不再回查 UE。
+5. 容错：category 缺失或 event_type 使用战斗短名（`attacked`/`targeted`）时按别名表推断，行为与协议命名一致（见 §3.6 备注）。
 
 ## 七、现有协议的增改清单
 
 | 项 | 变更 |
 |----|------|
 | 消息类型 | 新增 `world_event`（UE → Agent） |
-| 信封 | **不变**（7 字段，无新增顶层字段；force 在 payload 内） |
+| 信封 | **不变**（7 字段，无新增顶层字段；force/detach 在 payload 内） |
+| payload | 新增可选字段 `detach`（combat-detach 战斗接管标记，见 §2.2/§3.6/§四） |
 | `event_notification` | 保持现状（Agent 内部路由用，Director 事件的 Agent→Agent 转发可后续并入本通道） |
 | `error` 消息 | 保留**仅协议级错误**（INVALID_MESSAGE / UNKNOWN_AGENT / INTERNAL_ERROR / STOP_ID_MISMATCH）；业务级动作异常一律走 `world_event.action_anomaly`，不再上报 ACTION_FAILED |
 | `chat_invite` | **停用**：UE 一律按 `world_event`（social.chat_invite_incoming）推对话邀请，原 payload 三字段并入 data（见 §3.3）；`chat_invite_rsp` / `chat_turn` 不变 |
@@ -308,6 +316,7 @@ UE 按本协议推送后，Agent 侧保证：
     "category": "player_interaction",
     "event_type": "player_attacked",
     "force": true,
+    "detach": true,
     "severity": 10,
     "subject": "H-03",
     "game_time": "D12 12:00:00",
@@ -322,7 +331,7 @@ UE 按本协议推送后，Agent 侧保证：
 }
 ```
 
-战斗结束、威胁消失——非 force，交路由判（结合性格：胆小的 NPC 可能判紧急立刻撤离，沉着的可能入队继续手上的事）：
+战斗结束、威胁消失——非 force，交路由判（结合性格：胆小的 NPC 可能判紧急立刻撤离，沉着的可能入队继续手上的事）。**若上一条攻击带 detach=true（Agent 正战斗让位），本事件不经路由，确定性归还控制权**——Agent 带战后上下文（物理状态变化 + 攻击→脱战事件对）重规划回日程：
 
 ```json
 {

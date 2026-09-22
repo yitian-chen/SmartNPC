@@ -551,6 +551,14 @@
       </div>
 
       <div class="field">
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:normal;">
+          <input type="checkbox" id="event-detach" style="width:auto;margin:0;" />
+          <span>detach — 战斗接管：UE 战斗 AI 接管身体，MCP 让位静默（至 combat_exit / TTL）</span>
+        </label>
+        <div class="hint">仅战斗事件（attacked/targeted）携带；勾选后 MCP 停在途动作但<b>不</b>重规划不下发（见 [combat-detach] 日志）；配套"脱离战斗"预设可收回控制权</div>
+      </div>
+
+      <div class="field">
         <label for="event-data">data（JSON，类别专属载荷）</label>
         <textarea id="event-data" rows="3" placeholder='{"attacker":"player_1","damage":20}'></textarea>
       </div>
@@ -754,6 +762,12 @@ function renderTactical(entries) {
     const queueBody = e.queue_len > 0
       ? `<div class="tac-queue">${queue}</div>`
       : '<div class="tac-queue muted">队列为空（等待分解）</div>';
+    const detached = e.detached
+      ? `<div class="tac-inflight-line" style="color:#e67e22;">⚔ 战斗让位中 — UE 战斗 AI 接管，MCP 静默（至 combat_exit / TTL）</div>`
+      : '';
+    const situations = e.situations
+      ? `<div class="tac-goal">当前处境：${escapeHtml(e.situations)}</div>`
+      : '';
     return `<div class="tac-entry">
       <div class="tac-header">
         <span class="tac-agent">${escapeHtml(e.agent_id)}</span>
@@ -761,8 +775,10 @@ function renderTactical(entries) {
         ${slot}
         <span class="tac-qlen">队列 ${e.queue_len}</span>
       </div>
+      ${detached}
       ${inflight}
       ${goal}
+      ${situations}
       ${queueBody}
     </div>`;
   }).join('');
@@ -1356,8 +1372,9 @@ document.addEventListener('DOMContentLoaded', () => {
 // subject: '@agent' 表示填充为当前选择的接收 agent。
 const EVENT_PRESETS = [
   {name:'被玩家攻击（force）', category:'player_interaction', event_type:'player_attacked', force:true, severity:10, subject:'@agent', data:{attacker:'player_1', damage:20, damage_type:'physical'}},
+  {name:'被玩家攻击（force + detach 战斗接管）', category:'player_interaction', event_type:'player_attacked', force:true, detach:true, severity:10, subject:'@agent', data:{attacker:'player_1', damage:20, damage_type:'physical'}},
   {name:'被玩家瞄准（force）', category:'player_interaction', event_type:'player_targeted', force:true, severity:8, subject:'@agent', data:{attacker:'player_1'}},
-  {name:'脱离战斗', category:'player_interaction', event_type:'combat_exit', severity:3, subject:'@agent', data:{attacker:'player_1', outcome:'escaped'}},
+  {name:'脱离战斗（combat_exit，收回让位控制权）', category:'player_interaction', event_type:'combat_exit', severity:3, subject:'@agent', data:{attacker:'player_1', outcome:'escaped'}},
   {name:'玩家交互（greet）', category:'player_interaction', event_type:'player_interact', severity:3, subject:'@agent', data:{player:'player_1', action:'greet', detail:'挥手打招呼'}},
   {name:'NPC 故障广播（K-03）', category:'world', event_type:'malfunction', severity:7, subject:'K-03', data:{target:'K-03', description:'K-03 关节锁死，需要救援'}},
   {name:'剧情指令（force）', category:'world', event_type:'director_directive', force:true, severity:9, data:{description:'全员立即前往中央广场集合'}},
@@ -1387,6 +1404,7 @@ function applyEventPreset() {
     ['event-category', 'event-type', 'event-subject', 'event-location', 'event-game-time'].forEach(id => { document.getElementById(id).value = ''; });
     document.getElementById('event-severity').value = 5;
     document.getElementById('event-force').checked = false;
+    document.getElementById('event-detach').checked = false;
     document.getElementById('event-data').value = '';
   } else {
     const agent = document.getElementById('event-agent') ? document.getElementById('event-agent').value : '';
@@ -1394,6 +1412,7 @@ function applyEventPreset() {
     document.getElementById('event-type').value = p.event_type;
     document.getElementById('event-severity').value = p.severity;
     document.getElementById('event-force').checked = !!p.force;
+    document.getElementById('event-detach').checked = !!p.detach;
     document.getElementById('event-subject').value = p.subject === '@agent' ? agent : (p.subject || '');
     document.getElementById('event-location').value = p.location || '';
     document.getElementById('event-game-time').value = ''; // 留空让后端取当前游戏时间
@@ -1418,6 +1437,7 @@ function collectEventRequest() {
         category: document.getElementById('event-category').value.trim(),
         event_type: document.getElementById('event-type').value.trim(),
         force: document.getElementById('event-force').checked,
+        detach: document.getElementById('event-detach').checked,
         severity: parseInt(document.getElementById('event-severity').value || '0', 10) || 0,
         subject: document.getElementById('event-subject').value.trim(),
         location: document.getElementById('event-location').value.trim(),
@@ -1475,6 +1495,8 @@ document.addEventListener('DOMContentLoaded', () => {
   });
   const evForce = document.getElementById('event-force');
   if (evForce) evForce.addEventListener('change', updateEventCurlPreview);
+  const evDetach = document.getElementById('event-detach');
+  if (evDetach) evDetach.addEventListener('change', updateEventCurlPreview);
 });
 
 function renderResponse(resp, json, err, elapsed) {
@@ -1569,6 +1591,7 @@ function replayHistory(i) {
     document.getElementById('event-type').value = e.event_type || '';
     document.getElementById('event-severity').value = (e.severity != null) ? e.severity : 5;
     document.getElementById('event-force').checked = !!e.force;
+    document.getElementById('event-detach').checked = !!e.detach;
     document.getElementById('event-subject').value = e.subject || '';
     document.getElementById('event-location').value = e.location || '';
     document.getElementById('event-game-time').value = e.game_time || '';
