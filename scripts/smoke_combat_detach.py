@@ -162,32 +162,34 @@ async def main():
             "data": {"attacker": "player_1", "damage": 20, "damage_type": "physical"},
         })
         print(f"    note: {resp.get('note')}")
-        await wait_for(lambda: log.stops, 5, "让位 stop 在途动作")
-        if log.stops[-1] != first_id:
-            raise SystemExit(f"[FAIL] stop 目标错误：{log.stops[-1]} != {first_id}")
 
-        # 让位静默期：8 秒内零新 action_command。
+        # 让位静默期：8 秒内零新 action_command、且零 stop_action
+        # （stop 的 UE 语义是"中断行为树"，会杀掉 UE 刚启动的战斗接管——
+        # 2026-09-22 呆站假设；归还时才对旧动作补一次精确 stop）。
         silence_start = len(log.actions)
         await asyncio.sleep(8)
         if len(log.actions) != silence_start:
             raise SystemExit(f"[FAIL] 让位期间下发了动作：{log.actions[silence_start:]}")
+        if log.stops:
+            raise SystemExit(f"[FAIL] 让位期间不应发 stop（会杀 UE 战斗接管）：{log.stops}")
         entries = [e for e in get_debug_tactical() if e.get("agent_id") == AGENT]
         if not entries or not entries[0].get("detached"):
             raise SystemExit(f"[FAIL] /debug/tactical 应显示 detached=true：{entries}")
-        print(f"[4] 让位验证通过：stop×1、8s 静默零下发、detached=true（situations={entries[0].get('situations', '')!r}）")
+        print(f"[4] 让位验证通过：8s 静默零下发零 stop、detached=true（situations={entries[0].get('situations', '')!r}）")
 
-        # 3. 注入 combat_exit → 归还重规划（真实 LLM）。
+        # 3. 注入 combat_exit → 归还：补 stop 旧动作 + 重规划（真实 LLM）。
         print("[5] POST /debug/event：combat_exit（归还控制权）...")
         resp = post_debug_event({
             "event_type": "combat_exit", "severity": 6, "subject": AGENT,
             "data": {"attacker": "player_1", "outcome": "escaped"},
         })
         print(f"    note: {resp.get('note')}")
+        await wait_for(lambda: first_id in log.stops, 5, "归还补 stop 让位前在途动作")
         await wait_for(lambda: len(log.actions) > silence_start, 45, "战后重规划产出新 action_command")
         post_cmds = [a[0] for a in log.actions[silence_start:]]
-        print(f"[6] 归还验证通过：战后新动作 {post_cmds}")
+        print(f"[6] 归还验证通过：补 stop {first_id}、战后新动作 {post_cmds}")
 
-    print("\n[PASS] combat-detach 冒烟全链路通过：让位（stop+静默+detached）→ combat_exit 归还（重规划新动作）")
+    print("\n[PASS] combat-detach 冒烟全链路通过：让位（不发 stop + 静默 + detached）→ combat_exit 归还（补 stop 旧动作 + 重规划新动作）")
 
 
 if __name__ == "__main__":

@@ -294,13 +294,23 @@ func forceEventHint(ev protocol.WorldEventPayload) string {
 
 // handleCombatDetach executes the combat-detach handover, synchronously in
 // the WS receive path (mirroring handleForceEvent). UE's combat AI is taking
-// the body, so the agent stands down COMPLETELY: stop/clear the in-flight
-// action as the handover assist, then yield — no replan, no new actions, no
-// hint, no reaction window, until combat_exit (or the TTL safety net)
-// returns control. Repeat attacks while already yielded only refresh the TTL
-// anchor and the echoed event (idempotent entry).
+// the body, so the agent stands down COMPLETELY, then yields — no replan, no
+// new actions, no hint, no reaction window, until combat_exit (or the TTL
+// safety net) returns control. Repeat attacks while already yielded only
+// refresh the TTL anchor and the echoed event (idempotent entry).
+//
+// The yield deliberately does NOT send stop_action for the in-flight action:
+// stop's UE-side semantics is "abort the behavior tree" (协议 §排队机制),
+// and the detach event was sent AFTER UE started its combat takeover — a
+// stop arriving milliseconds later kills that takeover along with the old
+// action (the standing hypothesis for the 2026-09-22 呆站: MCP's stop was
+// the only thing interrupting anything, bystanders saw the robot go straight
+// from Exercise to idle). Stopping the old action is UE's takeover's own
+// responsibility; the reclaim path sends one precise catch-up stop for the
+// remembered action id so the body is free before post-combat re-driving.
 func (rt *Runtime) handleCombatDetach(ac *agentContext, agentID string, ev protocol.WorldEventPayload) {
 	alreadyYielded := ac.combatYieldActive()
+	var prevActionID string
 	if !alreadyYielded {
 		// 掐在途战术层 LLM（如此前非 detach 事件触发的逃跑重规划）：半截
 		// 思考丢弃，被取消方不做失败兜底——但也不像 force 路径那样有新
@@ -309,28 +319,20 @@ func (rt *Runtime) handleCombatDetach(ac *agentContext, agentID string, ev proto
 			rt.logger.Info("[combat-detach] 已取消在途战术层 LLM 请求（让位，不重规划）",
 				"agent_id", agentID, "event_id", ev.EventID)
 		}
-		// 交接辅助：stop 在途动作，给 UE 战斗 AI 一个空闲身体。实测 UE
-		// 不会预停我们的动作（2026-09-22：MCP 的 stop 才是打断 Exercise
-		// 的那个）——所以这一步仍属必要。
-		if actionID := ac.as.CurrentActionID(); actionID != "" {
-			if err := rt.ws.SendStopAction(agentID, actionID); err != nil {
-				// 发送失败也照常让位：UE 已持有身体，残留动作由 UE 战斗
-				// 系统自然覆盖，无 replan 会去重试 stop。
-				rt.logger.Warn("[combat-detach] stop_action 发送失败（UE 已接管，继续让位）",
-					"agent_id", agentID, "action_id", actionID, "err", err)
-			} else {
-				ac.recordInterrupted("战斗让位（UE 战斗系统接管）：" + truncateRunes(prompt.FormatWorldEvent(ev), 60))
-			}
+		// 记住在途动作（归还时补 stop 用）+ 未完成任务槽（队列即将清空，
+		// P4-10 上下文留给战后重规划）。不 stop——见函数头注释。
+		prevActionID = ac.as.CurrentActionID()
+		if prevActionID != "" {
+			ac.recordInterrupted("战斗让位（UE 战斗系统接管）：" + truncateRunes(prompt.FormatWorldEvent(ev), 60))
 		}
 		// 业务复位：队列 + 在途 + slot（让位时长未知；归还 replan 经
 		// selectCurrentGoal 按游戏时间从 dailyPlan 重推 goal）。事件队列被
 		// ClearForReplan 保留——战斗前的上下文要活到归还后的 drain。在途
-		// 动作 stash 进 clearedAction，迟到的 interrupted completion 仍能
-		// 记满 action_history 行（与既有 Clear 语义一致）。
+		// 动作 stash 进 clearedAction，UE 接管停掉它后回的 interrupted
+		// completion 仍能记满 action_history 行（与既有 Clear 语义一致）。
 		info := ac.as.ClearForReplan()
-		// 取消在途动作的超时 timer：迟到回调会发游离 stop / 提前烧掉
-		// clearedAction stash（镜像 abandonCurrentPlan；普通 force 路径
-		// 从不取消 timer 是既有 wart，让位路径不复制它）。
+		// 取消在途动作的超时 timer：迟到回调会发游离 stop（会让位期间杀
+		// UE 战斗接管，正是要避免的）。
 		if info.ActionID != "" {
 			ac.coordMu.Lock()
 			if timer, ok := ac.pendingActionTimeouts[info.ActionID]; ok {
@@ -347,10 +349,11 @@ func (rt *Runtime) handleCombatDetach(ac *agentContext, agentID string, ev proto
 		// 已被让位吞并，归还后按时间重推）。
 		ac.as.ClearSlotSwitchPending()
 	}
-	ac.beginCombatYield(ev, ac.as.LatestGameTimeSec())
-	rt.logger.Warn("[combat-detach] UE 战斗系统接管，agent 让位（静默至 combat_exit 或 TTL 兜底）",
+	ac.beginCombatYield(ev, ac.as.LatestGameTimeSec(), prevActionID)
+	rt.logger.Warn("[combat-detach] UE 战斗系统接管，agent 让位（不发 stop，静默至 combat_exit 或 TTL 兜底）",
 		"agent_id", agentID, "event_id", ev.EventID, "event_type", ev.EventType,
-		"severity", ev.Severity, "subject", ev.Subject, "repeat_attack", alreadyYielded)
+		"severity", ev.Severity, "subject", ev.Subject,
+		"prev_action_id", prevActionID, "repeat_attack", alreadyYielded)
 }
 
 // reclaimFromCombatYield ends a combat-detach yield and hands control back to
@@ -367,11 +370,28 @@ func (a *agentContext) reclaimFromCombatYield(ctx context.Context, agentID strin
 	ws contract.Transport, kb *worldkb.KB, profiles map[string]*profile.Profile,
 	ev protocol.WorldEventPayload, ttl bool, logger *slog.Logger) {
 
+	a.coordMu.Lock()
+	prevActionID := a.combatYieldPrevActionID
+	a.coordMu.Unlock()
 	_, _, lastAttack := a.combatYieldSnapshot()
 	a.endCombatYield()
 	// 双保险：入口已 clearReaction，但让位横跨多个事件，归还时确保无
 	// 残留反应窗口（deadline 硬切会 stop+hint+signal 惊扰刚接回的身体）。
 	a.clearReaction()
+	// 补 stop 让位前记下的在途动作：入口不 stop（防杀 UE 战斗接管），但若
+	// UE 接管没停它（接管未触发/UE 只换行为不清动作），战后重规划的新动作
+	// 会被 UE busy 拒——归还时先确保身体空闲。UE 已停过则回
+	// STOP_ID_MISMATCH，无害。此时 UE 战斗已结束（combat_exit）或已被判定
+	// 超时（TTL），stop 不会误伤进行中的战斗。
+	if prevActionID != "" {
+		if err := ws.SendStopAction(agentID, prevActionID); err != nil {
+			logger.Warn("[combat-detach] 归还补 stop 发送失败（新动作可能被 busy 拒）",
+				"agent_id", agentID, "action_id", prevActionID, "err", err)
+		} else {
+			logger.Info("[combat-detach] 归还补 stop 让位前在途动作",
+				"agent_id", agentID, "action_id", prevActionID)
+		}
+	}
 	// 攻击事件回声（修复 B 同款"再见一次"语义）：归还后的第一次分解在
 	// 【发生的事件】里见到战斗的起因，而不只 hint 一句话。TTL 失败兜底
 	// 路径（abandonCurrentPlan）同样不丢。EventID/EventType 全空（合成/
@@ -689,7 +709,7 @@ func handleDebugEvent(logger *slog.Logger, lookupAgent func(string) *agentContex
 	if !handled {
 		note = "事件被策略丢弃（手动模式或 agent 离线，见 MCP 日志）"
 	} else if ev.Force && ev.Detach && !prompt.IsCombatExitEvent(ev) {
-		note = "force + detach 战斗接管：已停在途动作并让位 UE 战斗 AI（MCP 静默至 combat_exit 或 TTL 兜底，见 [combat-detach] 日志）"
+		note = "force + detach 战斗接管：MCP 让位（不发 stop、不重规划、不下发，UE 接管自含停旧动作），至 combat_exit 或 TTL 兜底归还（见 [combat-detach] 日志）"
 	} else if ev.Force {
 		note = "force 硬保证：在途动作已同步打断，重规划异步进行（见 [world_event/force] 日志）"
 	}
@@ -864,15 +884,22 @@ func (a *agentContext) combatYieldSnapshot() (active bool, sinceGameSec float64,
 
 // beginCombatYield enters (or refreshes) the yield. Idempotent: a repeat
 // attack while already yielded refreshes the TTL anchor and the echoed
-// event, but never re-stops/re-clears (the caller's stop/clear work only
-// happens on entry — see handleForceEvent's detach branch). nowGameSec
-// follows beginReaction's convention: <= 0 (no perception yet) stores 0 and
-// leaves the TTL inert until checkCombatYieldExpiry latches a real time.
-func (a *agentContext) beginCombatYield(ev protocol.WorldEventPayload, nowGameSec float64) {
+// event, but never re-stops/re-clears (the caller's entry work only happens
+// on entry — see handleCombatDetach). prevActionID is the in-flight action
+// captured at entry (empty on repeats — it was cleared); the reclaim path
+// sends one catch-up stop for it. nowGameSec follows beginReaction's
+// convention: <= 0 (no perception yet) stores 0 and leaves the TTL inert
+// until checkCombatYieldExpiry latches a real time.
+func (a *agentContext) beginCombatYield(ev protocol.WorldEventPayload, nowGameSec float64, prevActionID string) {
 	a.coordMu.Lock()
 	defer a.coordMu.Unlock()
 	a.combatYield = true
 	a.combatYieldLastEvent = ev
+	// 只在首次进入时记住在途动作（重复攻击传 ""——首入口已清空在途，
+	// 让位期间也不会有新动作，空值不应覆盖已记住的 id）。
+	if prevActionID != "" {
+		a.combatYieldPrevActionID = prevActionID
+	}
 	if nowGameSec > 0 {
 		a.combatYieldSinceGameSec = nowGameSec
 	} else {
@@ -880,13 +907,14 @@ func (a *agentContext) beginCombatYield(ev protocol.WorldEventPayload, nowGameSe
 	}
 }
 
-// endCombatYield lifts the yield. The caller (returnFromCombatYield) drives
-// the post-combat replan; this only clears the flag.
+// endCombatYield lifts the yield. The caller (reclaimFromCombatYield) drives
+// the post-combat replan; this only clears the flags.
 func (a *agentContext) endCombatYield() {
 	a.coordMu.Lock()
 	a.combatYield = false
 	a.combatYieldSinceGameSec = 0
 	a.combatYieldLastEvent = protocol.WorldEventPayload{}
+	a.combatYieldPrevActionID = ""
 	a.coordMu.Unlock()
 }
 

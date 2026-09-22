@@ -52,10 +52,13 @@ func yieldViaDetach(t *testing.T, rt *Runtime, id string) {
 	waitFor(t, time.Second, func() bool { return rt.lookupAgent("H-01").combatYieldActive() })
 }
 
-// TestHandleWorldEvent_DetachYieldsControl verifies the yield entry: the
-// in-flight stop is the handover assist (synchronous), business state resets
-// (queue/slot/in-flight), and — the whole point — NO replan, NO hint, NO
-// reaction window follows.
+// TestHandleWorldEvent_DetachYieldsControl verifies the yield entry: business
+// state resets (queue/slot/in-flight), the yield engages, and — the whole
+// point — NO replan, NO hint, NO reaction window, and NO stop_action
+// follows. The no-stop rule is the standing hypothesis for the 2026-09-22
+// 呆站 bug: stop_action aborts UE's behavior tree, killing the combat
+// takeover that detach just started; stopping the old action is UE's
+// takeover's own responsibility (the reclaim path sends a catch-up stop).
 func TestHandleWorldEvent_DetachYieldsControl(t *testing.T) {
 	rt, ft, ac := newWorldEventTestRuntime(t)
 	ac.as.RecordActionStarted("act-1", protocol.CmdWorkShift,
@@ -66,10 +69,10 @@ func TestHandleWorldEvent_DetachYieldsControl(t *testing.T) {
 
 	dispatchTestEvent(t, rt, "H-01", detachTestEvent("evt_d1"))
 
-	// 交接辅助 stop 同步发出；在途追踪清空（ClearForReplan 已跑）。
-	stops := stoppedActions(ft)
-	if len(stops) != 1 || stops[0] != "act-1" {
-		t.Fatalf("detach must stop the in-flight action as handover assist, got %v", stops)
+	// 不发 stop（防杀 UE 战斗接管）；在途追踪照常清空（ClearForReplan 已跑，
+	// 记住的 act-1 由归还路径补 stop）。
+	if stops := stoppedActions(ft); len(stops) != 0 {
+		t.Fatalf("detach must NOT send stop_action (it would kill UE's combat takeover), got %v", stops)
 	}
 	if ac.as.CurrentActionID() != "" {
 		t.Fatalf("in-flight tracking must be cleared")
@@ -400,9 +403,10 @@ func TestCombatExit_ReturnsControl(t *testing.T) {
 	if verdicts.len() != 0 {
 		t.Fatalf("no interrupt verdicts expected, got %d", verdicts.len())
 	}
-	// 交接辅助 stop 恰一次（进入让位时）。
+	// 入口不发 stop（防杀 UE 战斗接管）；归还时对记下的在途动作补恰好
+	// 一次精确 stop（act-1），确保身体空闲后再驱动战后新动作。
 	if stops := stoppedActions(ft); len(stops) != 1 || stops[0] != "act-1" {
-		t.Fatalf("expected exactly the handover stop, got %v", stops)
+		t.Fatalf("expected exactly the reclaim catch-up stop for act-1, got %v", stops)
 	}
 }
 
@@ -633,8 +637,9 @@ func TestHandleDebugEvent_DetachEchoAndNote(t *testing.T) {
 	if !strings.Contains(resp.Note, "战斗接管") || !strings.Contains(resp.Note, "让位") {
 		t.Fatalf("note should explain the yield, got %q", resp.Note)
 	}
-	if stops := stoppedActions(ft); len(stops) != 1 || stops[0] != "act-1" {
-		t.Fatalf("detach injection must stop the in-flight action, got %v", stops)
+	// 不发 stop（防杀 UE 战斗接管）——旧动作由归还路径补 stop。
+	if stops := stoppedActions(ft); len(stops) != 0 {
+		t.Fatalf("detach injection must NOT stop the in-flight action, got %v", stops)
 	}
 	waitFor(t, time.Second, func() bool { return ac.combatYieldActive() })
 	if hint := ac.as.ReplanHint(); hint != "" {

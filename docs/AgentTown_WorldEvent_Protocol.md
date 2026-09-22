@@ -64,7 +64,7 @@ Agent 侧正在从「轮询感知」演进为「**事件驱动**」：UE 主动�
 | category | string | ✅ | 事件类别（见 §三，枚举）。*Agent 侧容错：缺失时按 event_type 别名表推断（见 §3.6 备注）* |
 | event_type | string | ✅ | 类别内具体事件类型（见 §三，枚举） |
 | force | bool | ✅ | 强制打断标记，默认 false。true = 硬保证通道（见 §四） |
-| detach | bool | ❌ | **战斗接管标记**（combat-detach）。true = UE 战斗 AI 接管该 NPC，Agent 让位（停在途动作后**不重规划、不下发任何动作**），直到 `combat_exit`（或 Agent 侧 30 游戏分钟 TTL 兜底）归还控制权。仅 `player_attacked`/`player_targeted` 携带，省略 = false |
+| detach | bool | ❌ | **战斗接管标记**（combat-detach）。true = UE 战斗 AI 接管该 NPC，Agent 让位（**不发 stop、不重规划、不下发任何动作**，停旧动作由 UE 接管自含），直到 `combat_exit`（或 Agent 侧 30 游戏分钟 TTL 兜底）归还控制权。仅 `player_attacked`/`player_targeted` 携带，省略 = false |
 | severity | int | ✅ | UE 视角的客观严重度 **0~10**。10 = 最严重（死亡/被攻击/剧情强制）。仅作路由参考，Agent 侧结合自身状态裁决 |
 | subject | string | ❌ | 事件的主体对象 id（谁的能量、谁在搭话、谁故障）。无明确主体时省略 |
 | game_time | string | ✅ | 事件发生时刻的**游戏时间**（`"D12 10:47:03"`，D 后为天数）。所有事件以游戏时钟为准 |
@@ -202,7 +202,7 @@ Director 注入的故障、环境事件、剧情事件。来源：Director / 调
 2. **不可否决**：Agent 侧不能有任何逻辑能拒绝它——没有阈值、没有预算、没有"最近打断太频繁"的抑制。UE 侧打标即生效。
 3. **打断后的动作**：复用现有 `PreemptForDialogue` 优雅中断路径（放下工具、起身），而非硬切动画。
 4. **典型语义**：被攻击（含被玩家攻击）、死亡、剧情强制、Director 高优先级注入、调试命令。
-5. **detach 例外（combat-detach）**：`force=true` 且 `detach=true` 的战斗事件，Agent 侧承诺的是**让位**而非反应——同步停掉在途动作（交接辅助）后不重规划、不下发任何动作，把身体完整交给 UE 战斗 AI；slot 切换挂起、路由静默、对话邀请礼貌拒绝。控制权由 `combat_exit` 归还（确定性接收，不经路由裁决），Agent 随即带战后上下文（物理状态变化 + 攻击/脱战事件对）重规划回日程。**不可否决**对 detach 同样成立：Agent 侧没有任何逻辑能拒绝让位。
+5. **detach 例外（combat-detach）**：`force=true` 且 `detach=true` 的战斗事件，Agent 侧承诺的是**让位**而非反应——**不发送 stop_action**（stop 的 UE 侧语义是"中断行为树"，而 detach 事件在 UE 启动战斗接管之后才发出，迟到的 stop 会把刚启动的接管连同旧动作一起杀掉；停止旧动作是 UE 接管自身的职责）、不重规划、不下发任何动作，把身体完整交给 UE 战斗 AI；slot 切换挂起、路由静默、对话邀请礼貌拒绝。控制权由 `combat_exit` 归还（确定性接收，不经路由裁决），Agent 先对让位前在途动作补发一次精确 stop（UE 已停则回 STOP_ID_MISMATCH，无害）确保身体空闲，随即带战后上下文（物理状态变化 + 攻击/脱战事件对）重规划回日程。**不可否决**对 detach 同样成立：Agent 侧没有任何逻辑能拒绝让位。
 
 **打标责任在 UE 侧硬编码**，不依赖配置或模型判断。
 

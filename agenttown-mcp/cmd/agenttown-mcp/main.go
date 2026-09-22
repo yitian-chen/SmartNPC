@@ -138,6 +138,13 @@ type agentContext struct {
 	combatYield             bool
 	combatYieldSinceGameSec float64
 	combatYieldLastEvent    protocol.WorldEventPayload
+	// combatYieldPrevActionID remembers the in-flight action at yield entry.
+	// The yield itself does NOT stop it (stop_action's UE semantics is
+	// "abort the behavior tree", which would kill UE's freshly-started combat
+	// takeover — the standing hypothesis for the 2026-09-22 呆站). The reclaim
+	// path sends one precise stop for it so the body is free before the
+	// post-combat replan re-drives it (STOP_ID_MISMATCH if UE already did).
+	combatYieldPrevActionID string
 
 	// LLM clients (immutable after construction, no lock needed)
 	strategicHc llmClient
