@@ -761,9 +761,11 @@ function renderTactical(entries) {
     }).join('');
     const queueBody = e.queue_len > 0
       ? `<div class="tac-queue">${queue}</div>`
-      : '<div class="tac-queue muted">队列为空（等待分解）</div>';
+      : (e.detached
+          ? '<div class="tac-queue muted">队列为空（脱管中，不分解不下发）</div>'
+          : '<div class="tac-queue muted">队列为空（等待分解）</div>');
     const detached = e.detached
-      ? `<div class="tac-inflight-line" style="color:#e67e22;">⚔ 战斗让位中 — UE 战斗 AI 接管，MCP 静默（至 combat_exit / TTL）</div>`
+      ? `<div class="tac-inflight-line" style="color:#e67e22;">⚔ 脱管中（UE 战斗 AI 接管）— MCP 静默不下发，至 combat_exit 或 TTL 兜底归还</div>`
       : '';
     const situations = e.situations
       ? `<div class="tac-goal">当前处境：${escapeHtml(e.situations)}</div>`
