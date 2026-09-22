@@ -115,6 +115,23 @@ async def heartbeat_task(ws, state):
             return
 
 
+async def perception_task(ws, state):
+    """每 3s 推一条 perception（模拟真实 UE 节奏）——worker 循环依赖感知唤醒，
+    宽限期 stop 与 TTL 检查都跑在 worker 的让位守卫里。游戏时间每推 +300s。"""
+    gt = PERCEPTION["environment"]["game_time_sec"]
+    while True:
+        await asyncio.sleep(3)
+        gt += 300
+        state["seq"] += 1
+        p = json.loads(json.dumps(PERCEPTION))
+        p["environment"]["game_time_sec"] = gt
+        p["environment"]["time_of_day_sec"] = gt
+        try:
+            await ws.send(json.dumps(envelope(state["seq"], "perception_update", AGENT, p)))
+        except websockets.ConnectionClosed:
+            return
+
+
 async def wait_for(cond, timeout, what):
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -131,6 +148,7 @@ async def main():
     async with websockets.connect(WS_URL, max_size=2**22) as ws:
         asyncio.create_task(recv_task(ws, log))
         asyncio.create_task(heartbeat_task(ws, state))
+        asyncio.create_task(perception_task(ws, state))
 
         def next_seq():
             state["seq"] += 1
@@ -163,33 +181,38 @@ async def main():
         })
         print(f"    note: {resp.get('note')}")
 
-        # 让位静默期：8 秒内零新 action_command、且零 stop_action
-        # （stop 的 UE 语义是"中断行为树"，会杀掉 UE 刚启动的战斗接管——
-        # 2026-09-22 呆站假设；归还时才对旧动作补一次精确 stop）。
+        # 让位静默期：宽限期（2s）+ worker 感知唤醒（3s 推送）内不发 stop
+        # （给 UE 接管留窗口）；宽限期过后旧动作仍未结束（接管未触发）则
+        # MCP 代为 stop 恰一次——脱管物理落地。之后至 combat_exit 前零新
+        # action_command、零新 stop。
         silence_start = len(log.actions)
-        await asyncio.sleep(8)
+        await wait_for(lambda: first_id in log.stops, 10, "宽限期代为 stop 旧动作（脱管落地）")
+        grace_stops = len(log.stops)
+        await asyncio.sleep(3)
         if len(log.actions) != silence_start:
             raise SystemExit(f"[FAIL] 让位期间下发了动作：{log.actions[silence_start:]}")
-        if log.stops:
-            raise SystemExit(f"[FAIL] 让位期间不应发 stop（会杀 UE 战斗接管）：{log.stops}")
+        if len(log.stops) != grace_stops:
+            raise SystemExit(f"[FAIL] 宽限 stop 后不应再发 stop：{log.stops}")
         entries = [e for e in get_debug_tactical() if e.get("agent_id") == AGENT]
         if not entries or not entries[0].get("detached"):
             raise SystemExit(f"[FAIL] /debug/tactical 应显示 detached=true：{entries}")
-        print(f"[4] 让位验证通过：8s 静默零下发零 stop、detached=true（situations={entries[0].get('situations', '')!r}）")
+        print(f"[4] 让位验证通过：宽限 stop {first_id}、静默零下发、detached=true（situations={entries[0].get('situations', '')!r}）")
 
-        # 3. 注入 combat_exit → 归还：补 stop 旧动作 + 重规划（真实 LLM）。
+        # 3. 注入 combat_exit → 归还重规划（真实 LLM）。宽限 stop 已清 prev，
+        # 归还不再重复 stop；直接产出战后新动作。
         print("[5] POST /debug/event：combat_exit（归还控制权）...")
         resp = post_debug_event({
             "event_type": "combat_exit", "severity": 6, "subject": AGENT,
             "data": {"attacker": "player_1", "outcome": "escaped"},
         })
         print(f"    note: {resp.get('note')}")
-        await wait_for(lambda: first_id in log.stops, 5, "归还补 stop 让位前在途动作")
         await wait_for(lambda: len(log.actions) > silence_start, 45, "战后重规划产出新 action_command")
+        if len(log.stops) != grace_stops:
+            raise SystemExit(f"[FAIL] 归还不应重复 stop（宽限 stop 已处理）：{log.stops}")
         post_cmds = [a[0] for a in log.actions[silence_start:]]
-        print(f"[6] 归还验证通过：补 stop {first_id}、战后新动作 {post_cmds}")
+        print(f"[6] 归还验证通过：零重复 stop、战后新动作 {post_cmds}")
 
-    print("\n[PASS] combat-detach 冒烟全链路通过：让位（不发 stop + 静默 + detached）→ combat_exit 归还（补 stop 旧动作 + 重规划新动作）")
+    print("\n[PASS] combat-detach 冒烟全链路通过：让位（宽限 stop 落地 + 静默 + detached）→ combat_exit 归还（零重复 stop + 重规划新动作）")
 
 
 if __name__ == "__main__":

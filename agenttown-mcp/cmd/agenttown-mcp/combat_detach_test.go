@@ -540,6 +540,57 @@ func TestCombatYield_SurvivesStopAndReconnect(t *testing.T) {
 	}
 }
 
+// TestCombatYield_GraceStopStopsStaleAction verifies the takeover grace
+// window: no stop during the grace (UE's takeover gets its chance), then
+// exactly one MCP-side stop once the grace expires with the action still
+// uncompleted — 脱管 must be physically true (the robot stops agent-driven
+// behavior) even when the takeover doesn't engage.
+func TestCombatYield_GraceStopStopsStaleAction(t *testing.T) {
+	rt, ft, ac := newWorldEventTestRuntime(t)
+	ac.as.RecordActionStarted("act-1", protocol.CmdWorkShift, nil, agentstate.SourceTactical, "")
+	old := combatYieldTakeoverGrace
+	combatYieldTakeoverGrace = 10 * time.Millisecond
+	defer func() { combatYieldTakeoverGrace = old }()
+
+	dispatchTestEvent(t, rt, "H-01", detachTestEvent("evt_d1"))
+	if stops := stoppedActions(ft); len(stops) != 0 {
+		t.Fatalf("grace period must not stop immediately, got %v", stops)
+	}
+	time.Sleep(20 * time.Millisecond)
+	ac.checkCombatYieldTakeoverStop("H-01", ft, testLogger())
+	if stops := stoppedActions(ft); len(stops) != 1 || stops[0] != "act-1" {
+		t.Fatalf("grace expiry must stop the stale action exactly once, got %v", stops)
+	}
+	// 幂等：prev 已清，重复检查不重复 stop。
+	ac.checkCombatYieldTakeoverStop("H-01", ft, testLogger())
+	if stops := stoppedActions(ft); len(stops) != 1 {
+		t.Fatalf("grace stop must fire exactly once, got %v", stops)
+	}
+}
+
+// TestCombatYield_GraceStopCancelledByCompletion verifies the completion
+// hook in recordActionCompletion: when the remembered action ends (UE's
+// takeover stopped it → interrupted, or it finished naturally), the grace
+// stop is cancelled — a working takeover never sees MCP's stop.
+func TestCombatYield_GraceStopCancelledByCompletion(t *testing.T) {
+	rt, ft, ac := newWorldEventTestRuntime(t)
+	ac.as.RecordActionStarted("act-1", protocol.CmdWorkShift, nil, agentstate.SourceTactical, "")
+	old := combatYieldTakeoverGrace
+	combatYieldTakeoverGrace = 10 * time.Millisecond
+	defer func() { combatYieldTakeoverGrace = old }()
+
+	dispatchTestEvent(t, rt, "H-01", detachTestEvent("evt_d1"))
+	// UE 接管停掉旧动作 → interrupted completion（stash 记账 + 挂钩清 prev）。
+	ac.recordActionCompletion(protocol.ActionCompletedPayload{
+		ActionID: "act-1", Result: "interrupted", DurationMs: 1200,
+	})
+	time.Sleep(20 * time.Millisecond)
+	ac.checkCombatYieldTakeoverStop("H-01", ft, testLogger())
+	if stops := stoppedActions(ft); len(stops) != 0 {
+		t.Fatalf("completion must cancel the grace stop, got %v", stops)
+	}
+}
+
 // ─── 协议容错（event_type 短名 + category 缺失）─────────────────
 
 // TestIsCombatStartEvent_AliasesAndMissingCategory pins the tolerant combat

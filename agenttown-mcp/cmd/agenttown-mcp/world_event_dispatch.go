@@ -709,7 +709,7 @@ func handleDebugEvent(logger *slog.Logger, lookupAgent func(string) *agentContex
 	if !handled {
 		note = "事件被策略丢弃（手动模式或 agent 离线，见 MCP 日志）"
 	} else if ev.Force && ev.Detach && !prompt.IsCombatExitEvent(ev) {
-		note = "force + detach 战斗接管：MCP 让位（不发 stop、不重规划、不下发，UE 接管自含停旧动作），至 combat_exit 或 TTL 兜底归还（见 [combat-detach] 日志）"
+		note = "force + detach 战斗接管：MCP 让位（宽限期内不发 stop 等 UE 接管停旧动作，超时未接管则代为 stop；不重规划不下发），至 combat_exit 或 TTL 兜底归还（见 [combat-detach] 日志）"
 	} else if ev.Force {
 		note = "force 硬保证：在途动作已同步打断，重规划异步进行（见 [world_event/force] 日志）"
 	}
@@ -895,6 +895,7 @@ func (a *agentContext) beginCombatYield(ev protocol.WorldEventPayload, nowGameSe
 	defer a.coordMu.Unlock()
 	a.combatYield = true
 	a.combatYieldLastEvent = ev
+	a.combatYieldSinceWall = time.Now()
 	// 只在首次进入时记住在途动作（重复攻击传 ""——首入口已清空在途，
 	// 让位期间也不会有新动作，空值不应覆盖已记住的 id）。
 	if prevActionID != "" {
@@ -913,7 +914,42 @@ func (a *agentContext) endCombatYield() {
 	a.coordMu.Lock()
 	a.combatYield = false
 	a.combatYieldSinceGameSec = 0
+	a.combatYieldSinceWall = time.Time{}
 	a.combatYieldLastEvent = protocol.WorldEventPayload{}
+	a.combatYieldPrevActionID = ""
+	a.coordMu.Unlock()
+}
+
+// checkCombatYieldTakeoverStop implements the takeover grace window, called
+// from the worker loop's yield guard (perception-woken, ~3s cadence): once
+// combatYieldTakeoverGrace has passed since yield entry with the remembered
+// action still uncompleted (no completion hook hit — UE's takeover did not
+// stop it), MCP stops the action itself. Without this, a non-firing takeover
+// leaves the robot running its old agent action through the whole yield —
+// the badge says 脱管 but the body clearly isn't (2026-09-22 user report).
+// The completion hook in recordActionCompletion clears the remembered id
+// when the action ends (UE takeover stop or natural completion), so a
+// working takeover never sees this stop.
+func (a *agentContext) checkCombatYieldTakeoverStop(agentID string, ws contract.Transport, logger *slog.Logger) {
+	a.coordMu.Lock()
+	yielded := a.combatYield
+	prev := a.combatYieldPrevActionID
+	sinceWall := a.combatYieldSinceWall
+	a.coordMu.Unlock()
+	if !yielded || prev == "" || sinceWall.IsZero() {
+		return
+	}
+	if time.Since(sinceWall) < combatYieldTakeoverGrace {
+		return
+	}
+	if err := ws.SendStopAction(agentID, prev); err != nil {
+		logger.Warn("[combat-detach] 宽限期后代为 stop 发送失败（旧动作可能仍在执行）",
+			"agent_id", agentID, "action_id", prev, "err", err)
+	} else {
+		logger.Info("[combat-detach] UE 接管未在宽限期内停掉旧动作，MCP 代为 stop（脱管落地）",
+			"agent_id", agentID, "action_id", prev)
+	}
+	a.coordMu.Lock()
 	a.combatYieldPrevActionID = ""
 	a.coordMu.Unlock()
 }
@@ -930,3 +966,13 @@ const situationTTLGameSec = 30 * 60.0
 // after this many game seconds since the LAST detach event. Each new attack
 // refreshes the window, so an ongoing fight never expires mid-combat.
 const combatYieldTTLGameSec = 30 * 60.0
+
+// combatYieldTakeoverGrace is the wall-clock window after yield entry during
+// which MCP waits for UE's combat takeover to stop the old in-flight action
+// itself (the completion hook in recordActionCompletion cancels the grace
+// stop when that happens). Once it expires with the action still running —
+// the takeover didn't engage (observed 2026-09-22 in all three
+// configurations) — MCP stops the action itself so 脱管 is physically true:
+// the robot must stop agent-driven behavior when the badge says so. var 便
+// 于测试注入。
+var combatYieldTakeoverGrace = 2 * time.Second

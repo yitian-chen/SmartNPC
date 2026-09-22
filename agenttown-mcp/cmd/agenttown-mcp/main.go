@@ -138,12 +138,18 @@ type agentContext struct {
 	combatYield             bool
 	combatYieldSinceGameSec float64
 	combatYieldLastEvent    protocol.WorldEventPayload
+	// combatYieldSinceWall anchors the takeover grace window (wall clock —
+	// UE's combat takeover is a real-time reaction, not game-time paced).
+	combatYieldSinceWall time.Time
 	// combatYieldPrevActionID remembers the in-flight action at yield entry.
-	// The yield itself does NOT stop it (stop_action's UE semantics is
-	// "abort the behavior tree", which would kill UE's freshly-started combat
-	// takeover — the standing hypothesis for the 2026-09-22 呆站). The reclaim
-	// path sends one precise stop for it so the body is free before the
-	// post-combat replan re-drives it (STOP_ID_MISMATCH if UE already did).
+	// The yield itself does NOT stop it for the first combatYieldTakeoverGrace
+	// (stop_action's UE semantics is "abort the behavior tree", which would
+	// kill UE's freshly-started combat takeover); if the action is still
+	// running once the grace expires (no completion arrived — takeover didn't
+	// engage), checkCombatYieldTakeoverStop stops it so the yield is visible
+	// (脱管 must mean the robot stops agent-driven behavior). Cleared by the
+	// completion hook in recordActionCompletion when the action ends, and by
+	// the reclaim path's catch-up stop path.
 	combatYieldPrevActionID string
 
 	// LLM clients (immutable after construction, no lock needed)
@@ -286,6 +292,14 @@ func (a *agentContext) recordActionCompletion(completion protocol.ActionComplete
 	wasPreRecorded := a.as.LastEndPrefaced()
 
 	res := a.as.RecordActionCompletion(completion.ActionID, completion.Result, completion.Reason)
+	// Combat-detach 宽限期挂钩：让位前记下的在途动作收到 completion（UE
+	// 接管把它停了 → interrupted，或自然完成）即解除宽限期 stop 的必要性
+	// ——checkCombatYieldTakeoverStop 不再代为 stop。
+	a.coordMu.Lock()
+	if a.combatYield && a.combatYieldPrevActionID == completion.ActionID {
+		a.combatYieldPrevActionID = ""
+	}
+	a.coordMu.Unlock()
 	// Stage 4: best-effort action_history recording — only for tracked in-flight
 	// actions (debug /debug/action path doesn't call recordActionStarted, so its
 	// completions have WasInFlight=false and aren't recorded).
@@ -916,10 +930,12 @@ func runPerceptionWorker(
 		// Combat-detach 让位（UE 战斗 AI 持有身体）：跳过 slot 切换（陈旧
 		// pending 已在让位入口解除；slot 边界迁移由归还 replan 按游戏时间
 		// 重推）、跳过 pop/refill（任何新动作都在抢身体）。先查 TTL 兜底
-		// （combat_exit 未到时到期收回控制权）。放在 processSlotSwitch 之前：
+		// （combat_exit 未到时到期收回控制权）与接管宽限期（旧动作未被 UE
+		// 停掉时代为 stop，让脱管物理成立）。放在 processSlotSwitch 之前：
 		// 它会 ClearForSlotSwitch 清队列 + clearReaction，惊扰交接。
 		if ac.combatYieldActive() {
 			ac.checkCombatYieldExpiry(ctx, agentID, ws, kb, profiles, logger)
+			ac.checkCombatYieldTakeoverStop(agentID, ws, logger)
 			continue
 		}
 
