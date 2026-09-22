@@ -15,7 +15,7 @@
 前置条件：
   - .env 含 VENUS_API_KEY（MCP 启动需要，但握手不触发 LLM 调用）
   - Go 工具链可用（首次会编译 MCP 二进制）
-  - :8770/:9091 端口空闲（dev 端口，避开 stable 的 :8760/:9090）
+  - :8770/:9093 端口空闲（dev 端口，避开 stable 的 :8760/:9090）
 """
 import asyncio
 import json
@@ -34,7 +34,7 @@ from agenttown.mock_ue import MockUE  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[1]
 MCP_BIN = REPO / "mcp"
-HTTP_PORT, WS_PORT = 8770, 9091
+HTTP_PORT, WS_PORT = 8770, 9093
 HTTP_URL = f"http://127.0.0.1:{HTTP_PORT}"
 WS_URL = f"ws://127.0.0.1:{WS_PORT}/ws"
 

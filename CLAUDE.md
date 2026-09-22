@@ -149,12 +149,12 @@ sequenceDiagram
 
 ```bash
 cd /data/workspace/dev
-bash start-dev.sh              # dev 实例：端口 8770/9091，日志 logs-dev/
+bash start-dev.sh              # dev 实例：端口 8770/9093，日志 logs-dev/
 cd /data/workspace/stable
 bash start-debug.sh            # stable 实例：端口 8760/9092，日志 logs/
 ```
 
-`start-debug.sh`/`start-dev.sh` 执行顺序：**读取 .env → 拉起 MySQL → 编译+启动 MCP → 等健康检查通过**。UE5 端由外部启动连接 MCP 的 WS 端点（`:9092` stable / `:9091` dev）。
+`start-debug.sh`/`start-dev.sh` 执行顺序：**读取 .env → 拉起 MySQL → 编译+启动 MCP → 等健康检查通过**。UE5 端由外部启动连接 MCP 的 WS 端点（`:9092` stable / `:9093` dev）。
 
 ### Go 构建 / 测试
 
@@ -624,7 +624,7 @@ UE5 推送 `perception_update` → MCP 的 `pkg/agentstate` 语义化（zone 判
 
 ### 网络拓扑
 
-MCP 监听 `0.0.0.0:8760`（HTTP）+ `0.0.0.0:9092`（WS，stable 脚本默认）。UE5 通过 `ws://<host>:9092/ws` 连接（dev 实例为 `:9091`）。Venus 远程服务通过 HTTPS 调用。Ollama 本地服务通过 `http://localhost:11434` 调用。
+MCP 监听 `0.0.0.0:8760`（HTTP）+ `0.0.0.0:9092`（WS，stable 脚本默认）。UE5 通过 `ws://<host>:9092/ws` 连接（dev 实例为 `:9093`）。Venus 远程服务通过 HTTPS 调用。Ollama 本地服务通过 `http://localhost:11434` 调用。
 
 ## 代码规范
 
@@ -658,7 +658,7 @@ cp .env.example .env
 | flag | 默认值 | 说明 |
 |------|--------|------|
 | `--http` | `:8760` | MCP HTTP 监听地址（空=stdio 模式） |
-| `--ws` | `:9090` | WebSocket 监听（UE5 连接；start-debug.sh 默认传 `:9092` stable / `:9091` dev） |
+| `--ws` | `:9090` | WebSocket 监听（UE5 连接；start-debug.sh 默认传 `:9092` stable / `:9093` dev） |
 | `--venus-url` | `http://v2.open.venus.oa.com/llmproxy` | Venus 后端 URL |
 | `--venus-api-key` | `""` | Venus API key（**必填**，否则 401）。env 回退 `VENUS_API_KEY` |
 | `--venus-model` | `deepseek-v4.1-flash` | Venus 模型 ID（战术层） |
@@ -694,7 +694,7 @@ cp .env.example .env  # 填入 VENUS_API_KEY
 # 3. 启动 MCP（直连 Venus）
 bash start-debug.sh    # stable 实例（或 bash start-dev.sh 起 dev 实例）
 
-# 4. UE5 端启动 AgentTown 地图，连接 MCP 的 WS 端点（:9092 stable / :9091 dev）
+# 4. UE5 端启动 AgentTown 地图，连接 MCP 的 WS 端点（:9092 stable / :9093 dev）
 
 # 5.（可选）启用反应层需在 MCP 启动时加 --ollama-url http://localhost:11434，
 #    并启动本地 Ollama：
@@ -713,7 +713,7 @@ ollama pull qwen2.5:7b-instruct-q4_K_M
 | 目录 | 分支 | 用途 | MCP HTTP | MCP WS | debug 控制台 | 日志目录 |
 |------|------|------|----------|--------|--------------|----------|
 | `/data/workspace/stable` | `master` | 稳定运行、验证 | `:8760` | `:9092` | `http://localhost:8760/debug/` | `logs/` |
-| `/data/workspace/dev` | `dev-working` | 日常开发、调试 | `:8770` | `:9091` | `http://localhost:8770/debug/` | `logs-dev/` |
+| `/data/workspace/dev` | `dev-working` | 日常开发、调试 | `:8770` | `:9093` | `http://localhost:8770/debug/` | `logs-dev/` |
 
 **初始化**（每个目录独立 clone + 编译）：
 ```bash
@@ -741,10 +741,10 @@ bash start-debug.sh     # 或直接 ./mcp --http :8760 --ws :9092 --venus-api-ke
 **启动 dev**（终端 2 — MCP）：
 ```bash
 cd /data/workspace/dev
-bash start-dev.sh       # 偏移端口 8770/9091 + logs-dev/ 日志目录
+bash start-dev.sh       # 偏移端口 8770/9093 + logs-dev/ 日志目录
 ```
 
-**端口隔离原则**：stable 用 `8760/9092`，dev 用 `8770/9091`，互不干扰，可同时运行各自独立的仿真。日志分别写入 `/data/workspace/stable/logs/` 和 `/data/workspace/dev/logs-dev/`（各按 `YYYY-MM-DD/debug-mcp.log` 组织，由 `start-debug.sh` / `start-dev.sh` 分别写入）。
+**端口隔离原则**：stable 用 `8760/9092`，dev 用 `8770/9093`，互不干扰，可同时运行各自独立的仿真。日志分别写入 `/data/workspace/stable/logs/` 和 `/data/workspace/dev/logs-dev/`（各按 `YYYY-MM-DD/debug-mcp.log` 组织，由 `start-debug.sh` / `start-dev.sh` 分别写入）。
 
 **本地 Windows 对比**：本地用 `D:\SmartNPC_v3`（dev worktree）和 `D:\SmartNPC_v3-stable`（stable worktree，`master` 分支）两个 worktree 实现同样的分离，端口约定一致。
 
@@ -806,7 +806,7 @@ bash start-dev.sh       # 偏移端口 8770/9091 + logs-dev/ 日志目录
 | `assets/profiles/H-01.md` ~ `H-05.md` | NPC 人设档案（5 个）：纯 markdown 固定标题分段（名字/职业/背景/性格特质/说话风格/属性分段），三层决策 persona override |
 | `assets/weekly_schedule.yaml` | 每周日程配置：7 天周期（工作日/休息日/运动日/冥想日），战略层注入【今日日程】段 |
 | `start-debug.sh` | 云环境启动脚本：拉起 MySQL + MCP + 读取 .env（stable 实例，端口 8760/9092，日志 logs/） |
-| `start-dev.sh` | dev 实例启动 wrapper（偏移端口 8770/9091，日志 logs-dev/） |
+| `start-dev.sh` | dev 实例启动 wrapper（偏移端口 8770/9093，日志 logs-dev/） |
 | `start-tunnel.sh` | Windows 端 SSH 反向隧道脚本（云端 11435 → 本地 Ollama 11434，反应层用） |
 | `scripts/pretty_log.py` | 日志可读化工具（HTML 报告 + 终端渲染；--hermes 系列参数 DEPRECATED 仅供历史日志） |
 | `.env` | 环境变量（VENUS_API_KEY 等，不入库） |

@@ -2,11 +2,11 @@
 # AgentTown_v3 — 开发实例启动 wrapper（供 dev 目录使用）
 #
 # 启动开发实例（本目录 /data/workspace/dev，跑 dev-working 分支，偏移端口
-# 8770/9091）。与 stable 目录的实例（/data/workspace/stable，跑 master
+# 8770/9093）。与 stable 目录的实例（/data/workspace/stable，跑 master
 # 分支，默认端口 8760/9092）端口隔离，可同时运行。
 #
 # 端口分配（dev 偏移端口）：
-#   MCP WS    9091
+#   MCP WS    9093（2026-09-22 由 9091 迁移：规避外部无名 UE 客户端反复接入 9091）
 #   MCP HTTP  8770
 #
 # LLM 后端：MCP 直连 Venus（OpenAI Chat Completions 协议），
@@ -21,7 +21,7 @@
 #   bash start-dev.sh --stop         # 停开发实例
 
 # 端口：dev 偏移端口（与 stable 默认端口 8760/9092 隔离）
-export WS_PORT=9091
+export WS_PORT=9093
 export HTTP_PORT=8770
 
 # 数据库：dev 实例用 agenttown_dev，与 stable 的 agenttown_stable 隔离，防止串台

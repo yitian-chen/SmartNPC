@@ -531,7 +531,7 @@
 ```bash
 # 假设 MCP 已启动但 Mock UE 尚未连接（启动窗口未关闭）
 # 用 wscat 或 Python websockets 推送消息一：
-wscat -c ws://localhost:9091/ws < docs/AgentTown_WorldKB_TestMessages.jsonl
+wscat -c ws://localhost:9093/ws < docs/AgentTown_WorldKB_TestMessages.jsonl
 ```
 
 或用 Python 一行推送（从本文档解析 JSON 后发送）：
@@ -541,7 +541,7 @@ import asyncio, json, websockets
 
 async def push():
     msg = json.load(open("docs/AgentTown_WorldKB_TestMessages.jsonl"))  # 选一条
-    async with websockets.connect("ws://localhost:9091/ws") as ws:
+    async with websockets.connect("ws://localhost:9093/ws") as ws:
         await ws.send(json.dumps(msg, ensure_ascii=False))
 
 asyncio.run(push())

@@ -10,20 +10,20 @@
 {"version":"1.0","msg_id":"uuid-capability-001","seq":1001,"timestamp":1722400000000,"type":"capability_registry","agent_id":"system","payload":{"actions":[{"cmd":"MoveTo","kind":"atomic","description":"移动到指定目标","usage_hint":"需要走到某个位置时使用","estimated_duration_sec":10,"params":[{"name":"target_type","type":"enum","required":true,"description":"目标类型","enum_values":["agent","smart_object","zone","position"],"default_value":""},{"name":"target_id","type":"string","required":false,"description":"目标语义ID，target_type非position时必填","enum_values":[],"default_value":""},{"name":"target_position","type":"vector","required":false,"description":"直接坐标，target_type=position时必填","enum_values":[],"default_value":""}]},{"cmd":"Wait","kind":"atomic","description":"原地等待","usage_hint":"需要在原地停留一段时间时使用","estimated_duration_sec":0,"params":[{"name":"duration_sec","type":"number","required":true,"description":"等待秒数","enum_values":[],"default_value":""}]},{"cmd":"WorkShift","kind":"composite","description":"去指定工作设施执行一段工作","usage_hint":"日程工作时间到达时使用","estimated_duration_sec":7200,"params":[{"name":"target_type","type":"enum","required":true,"description":"目标类型，固定为smart_object","enum_values":["smart_object"],"default_value":"smart_object"},{"name":"target_id","type":"string","required":true,"description":"工作设施ID，如workbench_01","enum_values":[],"default_value":""},{"name":"interaction","type":"enum","required":true,"description":"工作类型","enum_values":["assemble","inspect","sort"],"default_value":""},{"name":"duration_sec","type":"number","required":false,"description":"持续秒数","enum_values":[],"default_value":"3600"}]},{"cmd":"ChargeAtStation","kind":"composite","description":"去充电桩充电","usage_hint":"能量低时使用","estimated_duration_sec":1800,"params":[{"name":"target_type","type":"enum","required":true,"description":"目标类型，固定为smart_object","enum_values":["smart_object"],"default_value":"smart_object"},{"name":"target_id","type":"string","required":true,"description":"充电桩ID，如charging_pillar_01","enum_values":[],"default_value":""},{"name":"interaction","type":"enum","required":true,"description":"交互类型，固定为charge","enum_values":["charge"],"default_value":"charge"},{"name":"duration_sec","type":"number","required":false,"description":"充电持续秒数，不填则充至满","enum_values":[],"default_value":""}]},{"cmd":"SelfMaintenance","kind":"composite","description":"去维修台进行自检和维修","usage_hint":"磨损高或需要维护时使用","estimated_duration_sec":1800,"params":[{"name":"target_type","type":"enum","required":true,"description":"目标类型，固定为smart_object","enum_values":["smart_object"],"default_value":"smart_object"},{"name":"target_id","type":"string","required":true,"description":"维修台ID，如repair_table_01","enum_values":[],"default_value":""},{"name":"interaction","type":"enum","required":true,"description":"交互类型，固定为repair_self","enum_values":["repair_self"],"default_value":"repair_self"}]},{"cmd":"RestAtResidence","kind":"composite","description":"回休眠舱休息","usage_hint":"夜间或疲劳高时使用","estimated_duration_sec":28800,"params":[{"name":"target_type","type":"enum","required":true,"description":"目标类型，固定为smart_object","enum_values":["smart_object"],"default_value":"smart_object"},{"name":"target_id","type":"string","required":true,"description":"休眠舱ID，如sleep_pod_01","enum_values":[],"default_value":""},{"name":"interaction","type":"enum","required":true,"description":"交互类型，固定为sleep","enum_values":["sleep"],"default_value":"sleep"},{"name":"duration_sec","type":"number","required":false,"description":"休息持续秒数","enum_values":[],"default_value":"28800"}]}]}}
 ```
 
-**用法**（dev 端 MCP WS 在 `:9091`）：
+**用法**（dev 端 MCP WS 在 `:9093`）：
 
 ```bash
 # 方法 A：wscat -x 一次性发送（推荐）
-wscat -c ws://localhost:9091/ws -x '<上面整条单行 JSON>'
+wscat -c ws://localhost:9093/ws -x '<上面整条单行 JSON>'
 
 # 方法 B：从文件读取，避免 shell 转义陷阱
-wscat -c ws://localhost:9091/ws -x "$(cat /tmp/cap.json)"
+wscat -c ws://localhost:9093/ws -x "$(cat /tmp/cap.json)"
 
 # 方法 C：python websockets（最稳，不受 wscat 交互模式影响）
 python3 -c "
 import asyncio, websockets, json
 async def main():
-    async with websockets.connect('ws://localhost:9091/ws') as ws:
+    async with websockets.connect('ws://localhost:9093/ws') as ws:
         with open('/tmp/cap.json') as f:
             await ws.send(f.read())
         print(await asyncio.wait_for(ws.recv(), timeout=2))
@@ -685,7 +685,7 @@ MCP 的 `stop` 工具（用于打断当前在途动作）通过控制消息 `Typ
 
 ```bash
 # 用 wscat 推送消息二（H-01 车间主管）：
-wscat -c ws://localhost:9091/ws
+wscat -c ws://localhost:9093/ws
 # 连接后粘贴消息二 JSON 并回车
 
 # 或用 Python 推送：
@@ -693,7 +693,7 @@ python3 -c "
 import asyncio, json, websockets
 async def push():
     msg = json.load(open('docs/AgentTown_CapabilityRegistry_TestMessages.jsonl'))  # 选一条
-    async with websockets.connect('ws://localhost:9091/ws') as ws:
+    async with websockets.connect('ws://localhost:9093/ws') as ws:
         await ws.send(json.dumps(msg, ensure_ascii=False))
 asyncio.run(push())
 "
