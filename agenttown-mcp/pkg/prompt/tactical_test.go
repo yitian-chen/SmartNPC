@@ -517,3 +517,41 @@ func TestTacticalHintLine_CombatEndPrefix(t *testing.T) {
 		t.Fatalf("combat end must NOT get emergency treatment:\n%s", out)
 	}
 }
+
+// TestTacticalHintLine_CombatEndPhysicalAlert verifies the 【战斗结束】 hint
+// escalates to the mandatory-recovery constraints when combat's aftermath
+// crossed an alert threshold (combat's most common consequence is exactly
+// the wear/fatigue spike) — and stays clean when it didn't.
+func TestTacticalHintLine_CombatEndPhysicalAlert(t *testing.T) {
+	// 战后磨损暴涨（越过严重磨损档）：泛化的"结合物理状态"升级为"必须
+	// 优先维护保养"的硬要求，并禁止无助于恢复的动作。
+	worn := TacticalInput{
+		Hint:     "【战斗结束】玩家互动：与玩家 player_1 的战斗结束（escaped）战斗期间物理属性变化：关节磨损 22→68（+46）。",
+		AgentID:  "H-01",
+		Physical: &protocol.PhysicalState{Energy: 55, Fatigue: 30, JointWear: 75},
+	}
+	out := BuildTactical(worn)
+	if !strings.Contains(out, "【物理告警强制约束】") {
+		t.Fatalf("post-combat wear spike must append the mandatory-recovery block:\n%s", out)
+	}
+	if !strings.Contains(out, "关节磨损过高：必须优先 InteractSmartObject 维护保养") {
+		t.Fatalf("wear alert must mandate repair:\n%s", out)
+	}
+	if !strings.Contains(out, "禁止规划以下动作") {
+		t.Fatalf("wear alert must forbid non-recovery actions:\n%s", out)
+	}
+
+	// 战后属性未越线：只有恢复指引，不追加强制约束。
+	fine := TacticalInput{
+		Hint:     "【战斗结束】玩家互动：与玩家 player_1 的战斗结束（escaped）",
+		AgentID:  "H-01",
+		Physical: &protocol.PhysicalState{Energy: 80, Fatigue: 10, JointWear: 22},
+	}
+	out2 := BuildTactical(fine)
+	if strings.Contains(out2, "物理告警强制约束") {
+		t.Fatalf("no threshold crossed → no mandatory block:\n%s", out2)
+	}
+	if !strings.Contains(out2, "恢复自主控制") {
+		t.Fatalf("recovery guidance still expected:\n%s", out2)
+	}
+}

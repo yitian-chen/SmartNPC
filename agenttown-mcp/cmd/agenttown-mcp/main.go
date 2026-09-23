@@ -151,6 +151,14 @@ type agentContext struct {
 	// completion hook in recordActionCompletion when the action ends, and by
 	// the reclaim path's catch-up stop path.
 	combatYieldPrevActionID string
+	// combatYieldPhys snapshots the physical state at yield entry (nil when
+	// the yield began before the first perception). At reclaim it grounds
+	// "战斗导致属性变化" in concrete numbers (joint wear 22→68): the delta is
+	// appended to the 【战斗结束】 tactical hint and cited as the revision
+	// reason of the post-combat strategic replan — combat's most common
+	// consequence is exactly the attribute drift (wear/fatigue spikes) the
+	// day's remaining schedule must absorb.
+	combatYieldPhys *protocol.PhysicalState
 
 	// LLM clients (immutable after construction, no lock needed)
 	strategicHc llmClient
@@ -934,7 +942,7 @@ func runPerceptionWorker(
 		// 停掉时代为 stop，让脱管物理成立）。放在 processSlotSwitch 之前：
 		// 它会 ClearForSlotSwitch 清队列 + clearReaction，惊扰交接。
 		if ac.combatYieldActive() {
-			ac.checkCombatYieldExpiry(ctx, agentID, ws, kb, profiles, logger)
+			ac.checkCombatYieldExpiry(ctx, agentID, ws, kb, profiles, weeklySched, logger)
 			ac.checkCombatYieldTakeoverStop(agentID, ws, logger)
 			continue
 		}

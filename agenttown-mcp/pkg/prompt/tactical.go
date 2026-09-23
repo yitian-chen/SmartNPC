@@ -179,10 +179,15 @@ func tacticalHintLine(in TacticalInput, th BandThresholds) string {
 	}
 	if strings.HasPrefix(in.Hint, "【战斗结束】") {
 		event := strings.TrimPrefix(in.Hint, "【战斗结束】")
-		return "【战斗结束】" + event + "\n" +
+		line := "【战斗结束】" + event + "\n" +
 			"你刚经历一场战斗（期间由外部战斗系统接管你的身体，自主控制曾中断），现已脱离战斗、恢复自主控制。" +
 			"请结合当前物理状态与位置变化（可能受损、电量下降、不在原位置）决定后续行为——" +
 			"如维修、充电、返回岗位或继续当前时段目标；除非收到新的威胁信号，不必继续逃跑或警戒。"
+		// 战斗最常见的后果正是属性恶化（磨损/疲劳暴涨）：越过警戒阈值时
+		// 追加与"物理状态告警" hint 同一套强制恢复约束——把上面泛化的
+		// "结合物理状态"升级为"必须优先维修/充电"的硬要求（否则高磨损下
+		// LLM 仍可能按原日程继续装配）。无感知或未越线时为空串，无影响。
+		return line + physicalAlertConstraints(in, th)
 	}
 	if strings.HasPrefix(in.Hint, "【社交回应】") {
 		event := strings.TrimPrefix(in.Hint, "【社交回应】")
@@ -202,8 +207,21 @@ func tacticalHintLine(in TacticalInput, th BandThresholds) string {
 			"不得自行认定威胁已解除。"
 	}
 	hintLine := "【上次中断原因】" + in.Hint + "（请据此调整本轮规划）"
-	if !strings.Contains(in.Hint, "物理状态告警") || in.Physical == nil || in.Physical.IsZero() {
+	if !strings.Contains(in.Hint, "物理状态告警") {
 		return hintLine
+	}
+	return hintLine + physicalAlertConstraints(in, th)
+}
+
+// physicalAlertConstraints renders the mandatory-recovery block appended to a
+// hint when the current physical state crosses alert thresholds (energy low /
+// fatigue high / joint wear high). Shared by the "物理状态告警" hint and the
+// 【战斗结束】 hint — combat's attribute drift must gate the post-combat
+// decomposition the same way a synthesized physical alert gates a normal one.
+// Empty when there is no physical reading or nothing crosses a threshold.
+func physicalAlertConstraints(in TacticalInput, th BandThresholds) string {
+	if in.Physical == nil || in.Physical.IsZero() {
+		return ""
 	}
 	var reqs, forbids []string
 	if in.Physical.Energy < th.EnergyAlert() {
@@ -228,14 +246,15 @@ func tacticalHintLine(in TacticalInput, th BandThresholds) string {
 	if fatigueAlert {
 		forbids = append(forbids, "move_to 到非恢复设施区域")
 	}
-	if len(reqs) > 0 {
-		hintLine += "\n【物理告警强制约束】当前物理状态已突破警戒阈值，必须立即规划恢复类动作：\n" +
-			strings.Join(reqs, "\n")
-		if len(forbids) > 0 {
-			hintLine += "\n禁止规划以下动作：" + strings.Join(forbids, "、")
-		}
+	if len(reqs) == 0 {
+		return ""
 	}
-	return hintLine
+	out := "\n【物理告警强制约束】当前物理状态已突破警戒阈值，必须立即规划恢复类动作：\n" +
+		strings.Join(reqs, "\n")
+	if len(forbids) > 0 {
+		out += "\n禁止规划以下动作：" + strings.Join(forbids, "、")
+	}
+	return out
 }
 
 // SlotDurationHint constructs a hint line based on slot "HH:MM-HH:MM" and

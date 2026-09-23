@@ -28,6 +28,7 @@ type fakeLoopLLM struct {
 	capturedSc   string
 	resetCount   int
 	calls        int
+	gate         chan struct{} // 非-nil 时 SendLoop 阻塞至 close（并发时序测试用）
 }
 
 func (f *fakeLoopLLM) SendWithSummary(_ context.Context, _, _ string, _ ...[]venus.Tool) (*llmtypes.Response, error) {
@@ -49,6 +50,9 @@ func (f *fakeLoopLLM) SendMessagesTools(_ context.Context, _ []llmtypes.Message,
 	return f.resp, f.err
 }
 func (f *fakeLoopLLM) SendLoop(_ context.Context, msgs []llmtypes.Message, tools []venus.Tool, toolChoice, schemaName string, _ []byte) (*llmtypes.Response, error) {
+	if f.gate != nil {
+		<-f.gate
+	}
 	f.calls++
 	f.capturedMsgs = append([]llmtypes.Message(nil), msgs...)
 	f.capturedTool = tools

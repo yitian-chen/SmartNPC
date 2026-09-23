@@ -384,10 +384,10 @@ func TestCombatExit_ReturnsControl(t *testing.T) {
 	})
 	user := lastUserPromptOf(t, fake.capturedMsgs)
 	for _, want := range []string{
-		"【战斗结束】",                      // hint 渲染（战后恢复指引）
-		"与玩家 player_1 的战斗结束",              // exit 事件（hint 携带）
-		"被玩家 player_1 攻击",                 // 攻击回声（【发生的事件】）
-		"恢复自主控制",                        // 战后恢复指引文案
+		"【战斗结束】",             // hint 渲染（战后恢复指引）
+		"与玩家 player_1 的战斗结束", // exit 事件（hint 携带）
+		"被玩家 player_1 攻击",    // 攻击回声（【发生的事件】）
+		"恢复自主控制",             // 战后恢复指引文案
 	} {
 		if !strings.Contains(user, want) {
 			t.Fatalf("post-combat replan prompt missing %q:\n%s", want, user)
@@ -455,7 +455,7 @@ func TestCombatYieldTTL_ExpiryReturnsControl(t *testing.T) {
 	ac.coordMu.Unlock()
 
 	kb := *rt.kbPtr
-	if !ac.checkCombatYieldExpiry(context.Background(), "H-01", ft, kb, nil, testLogger()) {
+	if !ac.checkCombatYieldExpiry(context.Background(), "H-01", ft, kb, nil, nil, testLogger()) {
 		t.Fatalf("expired yield must report a reclaim")
 	}
 	if ac.combatYieldActive() {
@@ -491,7 +491,7 @@ func TestCombatYieldTTL_NoPerceptionInert(t *testing.T) {
 	}
 
 	kb := *rt.kbPtr
-	if ac.checkCombatYieldExpiry(context.Background(), "H-01", ft, kb, nil, testLogger()) {
+	if ac.checkCombatYieldExpiry(context.Background(), "H-01", ft, kb, nil, nil, testLogger()) {
 		t.Fatalf("cold-start yield must stay inert (no instant expiry)")
 	}
 	if !ac.combatYieldActive() {
@@ -500,7 +500,7 @@ func TestCombatYieldTTL_NoPerceptionInert(t *testing.T) {
 
 	// 首条感知到达：起点锁存为当前时刻（不按 since=0 差值误判）。
 	seedPerception(t, ac)
-	if ac.checkCombatYieldExpiry(context.Background(), "H-01", ft, kb, nil, testLogger()) {
+	if ac.checkCombatYieldExpiry(context.Background(), "H-01", ft, kb, nil, nil, testLogger()) {
 		t.Fatalf("freshly latched anchor must not be expired")
 	}
 	_, since2, _ := ac.combatYieldSnapshot()
@@ -715,5 +715,243 @@ func TestDebugTactical_DetachedField(t *testing.T) {
 	}
 	if len(entries) != 1 || !entries[0].Detached {
 		t.Fatalf("entry must report detached=true, got %+v", entries)
+	}
+}
+
+// ─── Post-combat strategic replan（脱战后战略层重规划）─────────────────────
+//
+// 战斗导致属性显著变化（磨损/疲劳暴涨、电量下降）：归还链在战术 replan
+// （快模型，hint 携带 before→after delta）之后接战略层修订（剩余时段重排，
+// 同一份 delta 作为修订原因）。两步共享 replanInProgress slot，必须链式
+// 串行，不得并发竞抢。
+
+// seedPerceptionWithPhys seeds a perception carrying the full physical state
+// at the given time-of-day — the pre-combat baseline and the post-combat
+// readings both come through this path.
+func seedPerceptionWithPhys(t *testing.T, ac *agentContext, todSec, energy, fatigue, wear float64) {
+	t.Helper()
+	zone := "main_workshop"
+	p := protocol.PerceptionPayload{
+		Location:    protocol.Location{CurrentZone: &zone},
+		Environment: protocol.Environment{GameTimeSec: 11*86400 + todSec, TimeOfDaySec: todSec, DayCount: 11, TimeScale: 90},
+		PhysicalStateDelta: map[string]float64{
+			"energy": energy, "fatigue": fatigue, "joint_wear": wear, "money": 200,
+		},
+	}
+	b, err := json.Marshal(p)
+	if err != nil {
+		t.Fatalf("marshal perception: %v", err)
+	}
+	if _, err := ac.as.SetPerception(b); err != nil {
+		t.Fatalf("SetPerception: %v", err)
+	}
+}
+
+// TestCombatExit_StrategicReplanWithPhysDelta drives the full post-combat
+// chain: combat_exit reclaims → tactical replan (【战斗结束】hint with the
+// concrete attribute drift) → strategic replan revises the REMAINDER of the
+// day citing the same delta — combat's wear spike is exactly the
+// "07:00 的计划对当下无知" case maybeStrategicReplan exists for.
+func TestCombatExit_StrategicReplanWithPhysDelta(t *testing.T) {
+	rt, _, ac, _, _ := newRouterTestRuntime(t, notInterruptJudge())
+	ac.autoPlanEnabled = true
+	tactical := &fakeLoopLLM{resp: speakToolCallResp()}
+	ac.tacticalHc = tactical
+	strategic := &fakeLoopLLM{resp: planJSONResponse(
+		`{"time":"11:00-13:00","goal":"维修保养"},{"time":"13:00-18:00","goal":"下午拆解"}`)}
+	ac.strategicHc = strategic
+	seedPerceptionWithPhys(t, ac, 38823, 80, 10, 22) // D12 10:47:03 战前基线
+	ac.as.SetDailyPlan("07:00-09:00: 晨练\n09:00-12:00: 车间装配\n14:00-18:00: 下午拆解", 11)
+	ac.as.RecordActionStarted("act-1", "WorkShift", nil, agentstate.SourceTactical, "")
+
+	yieldViaDetach(t, rt, "evt_atk")
+	// 战斗期间感知照收：磨损 22→68、疲劳 10→30、电量 80→55。
+	seedPerceptionWithPhys(t, ac, 39003, 55, 30, 68) // D12 10:50:03
+	dispatchTestEvent(t, rt, "H-01", combatExitTestEvent("evt_exit"))
+
+	// 链式完成：战术 replan + 战略修订留痕 + slot 释放。
+	waitFor(t, 3*time.Second, func() bool {
+		return len(ac.as.PlanRevisions()) == 1 && replanIdle(ac) && strategic.calls >= 1
+	})
+
+	// 战术层 prompt：【战斗结束】hint 携带具体属性变化（before→after）。
+	user := lastUserPromptOf(t, tactical.capturedMsgs)
+	for _, want := range []string{
+		"【战斗结束】",
+		"战斗期间物理属性变化",
+		"关节磨损 22→68（+46）",
+		"疲劳 10→30（+20）",
+		"电量 80→55（-25）",
+	} {
+		if !strings.Contains(user, want) {
+			t.Fatalf("post-combat tactical prompt missing %q:\n%s", want, user)
+		}
+	}
+	// 战略层修订 prompt：修订原因带战斗归还 + 同一份 delta + 重排指引。
+	suser := lastUserPromptOf(t, strategic.capturedMsgs)
+	for _, want := range []string{
+		"战斗让位归还",
+		"关节磨损 22→68（+46）",
+		"重排剩余时段",
+	} {
+		if !strings.Contains(suser, want) {
+			t.Fatalf("strategic revision prompt missing %q:\n%s", want, suser)
+		}
+	}
+	// 修订写回：已过时段（07:00-09:00，10:50 视角）保留为既成事实，剩余
+	// 时段替换为新计划。
+	plan, _, _ := ac.as.SnapshotSchedule()
+	items := parseFormattedPlan(plan)
+	if len(items) != 3 {
+		t.Fatalf("revised plan should have 3 slots (1 past + 2 new), got %d:\n%s", len(items), plan)
+	}
+	if items[0].Goal != "晨练" {
+		t.Fatalf("past slot must be preserved verbatim, got:\n%s", plan)
+	}
+	if items[1].Goal != "维修保养" || items[2].Goal != "下午拆解" {
+		t.Fatalf("new remainder goals wrong:\n%s", plan)
+	}
+}
+
+// TestCombatExit_StrategicThrottledOnRepeatCombat: a second combat within
+// the strategic replan gap (2 game hours) still gets its tactical replan but
+// skips the strategic revision — the existing throttle guards plan churn.
+func TestCombatExit_StrategicThrottledOnRepeatCombat(t *testing.T) {
+	rt, _, ac, _, _ := newRouterTestRuntime(t, notInterruptJudge())
+	ac.autoPlanEnabled = true
+	tactical := &fakeLoopLLM{resp: speakToolCallResp()}
+	ac.tacticalHc = tactical
+	strategic := &fakeLoopLLM{resp: planJSONResponse(`{"time":"11:00-13:00","goal":"维修保养"}`)}
+	ac.strategicHc = strategic
+	seedPerceptionWithPhys(t, ac, 38823, 80, 10, 22)
+	ac.as.SetDailyPlan("09:00-12:00: 车间装配作业", 11)
+	ac.as.RecordActionStarted("act-1", "WorkShift", nil, agentstate.SourceTactical, "")
+
+	// 第一次战斗：完整链（战术 + 战略）。
+	yieldViaDetach(t, rt, "evt_atk")
+	seedPerceptionWithPhys(t, ac, 39003, 55, 30, 68)
+	dispatchTestEvent(t, rt, "H-01", combatExitTestEvent("evt_exit"))
+	waitFor(t, 3*time.Second, func() bool {
+		return len(ac.as.PlanRevisions()) == 1 && replanIdle(ac) && strategic.calls == 1
+	})
+
+	// 第二次战斗（同一游戏时刻，间隔 0 < 2 游戏小时）：战术 replan 照常，
+	// 战略修订被节流跳过。
+	callsBefore := tactical.calls
+	yieldViaDetach(t, rt, "evt_atk2")
+	dispatchTestEvent(t, rt, "H-01", combatExitTestEvent("evt_exit2"))
+	waitFor(t, 3*time.Second, func() bool {
+		return tactical.calls > callsBefore && replanIdle(ac)
+	})
+	time.Sleep(150 * time.Millisecond) // 让链的下一跳（被节流的 maybe）执行完
+	if got := strategic.calls; got != 1 {
+		t.Fatalf("second combat within the gap must not re-run the strategic replan, got %d calls", got)
+	}
+	if got := len(ac.as.PlanRevisions()); got != 1 {
+		t.Fatalf("plan revisions must stay at 1, got %d", got)
+	}
+}
+
+// TestCombatExit_StrategicSkippedWhenReyieldedMidChain: a repeat attack that
+// re-enters the yield while the chained tactical replan is in flight must
+// also skip the strategic step — no LLM planning while UE holds the body
+// (the guard sits at the top of maybeStrategicReplan).
+func TestCombatExit_StrategicSkippedWhenReyieldedMidChain(t *testing.T) {
+	rt, _, ac, _, _ := newRouterTestRuntime(t, notInterruptJudge())
+	ac.autoPlanEnabled = true
+	gate := make(chan struct{})
+	tactical := &fakeLoopLLM{resp: speakToolCallResp(), gate: gate}
+	ac.tacticalHc = tactical
+	strategic := &fakeLoopLLM{resp: planJSONResponse(`{"time":"11:00-13:00","goal":"维修保养"}`)}
+	ac.strategicHc = strategic
+	seedPerceptionWithPhys(t, ac, 38823, 80, 10, 22)
+	ac.as.SetDailyPlan("09:00-12:00: 车间装配作业", 11)
+	ac.as.RecordActionStarted("act-1", "WorkShift", nil, agentstate.SourceTactical, "")
+
+	yieldViaDetach(t, rt, "evt_atk")
+	dispatchTestEvent(t, rt, "H-01", combatExitTestEvent("evt_exit"))
+	// 战术 replan 阻塞在 gate 上（链持有 slot）。
+	waitFor(t, 2*time.Second, func() bool { return !replanIdle(ac) })
+
+	// 重复攻击重新让位（真实场景中在途 LLM 会被 ctx 掐掉；fake 不感知
+	// ctx，用 gate 控制时序）。
+	dispatchTestEvent(t, rt, "H-01", detachTestEvent("evt_atk2"))
+	waitFor(t, 2*time.Second, func() bool { return ac.combatYieldActive() })
+	close(gate) // 放行战术 replan
+
+	waitFor(t, 2*time.Second, func() bool { return replanIdle(ac) })
+	time.Sleep(150 * time.Millisecond) // 链下一跳执行完（守卫命中即静默返回）
+	if got := strategic.calls; got != 0 {
+		t.Fatalf("strategic replan must be skipped while re-yielded, got %d calls", got)
+	}
+	if got := len(ac.as.PlanRevisions()); got != 0 {
+		t.Fatalf("no plan revision expected while re-yielded, got %d", got)
+	}
+}
+
+// TestCombatExit_NoPhysBaselineOmitsDelta: a yield begun from a perception
+// without physical state (no baseline) degrades gracefully — no delta line
+// in the hint, and the strategic reason falls back to the generic wording.
+func TestCombatExit_NoPhysBaselineOmitsDelta(t *testing.T) {
+	rt, _, ac, _, _ := newRouterTestRuntime(t, notInterruptJudge())
+	ac.autoPlanEnabled = true
+	tactical := &fakeLoopLLM{resp: speakToolCallResp()}
+	ac.tacticalHc = tactical
+	strategic := &fakeLoopLLM{resp: planJSONResponse(`{"time":"11:00-13:00","goal":"维修保养"}`)}
+	ac.strategicHc = strategic
+	seedPerception(t, ac) // 感知无 PhysicalStateDelta → 基线 nil
+	ac.as.SetDailyPlan("09:00-12:00: 车间装配作业", 11)
+	ac.as.RecordActionStarted("act-1", "WorkShift", nil, agentstate.SourceTactical, "")
+
+	yieldViaDetach(t, rt, "evt_atk")
+	dispatchTestEvent(t, rt, "H-01", combatExitTestEvent("evt_exit"))
+	waitFor(t, 3*time.Second, func() bool {
+		return len(ac.as.PlanRevisions()) == 1 && replanIdle(ac)
+	})
+
+	user := lastUserPromptOf(t, tactical.capturedMsgs)
+	if !strings.Contains(user, "【战斗结束】") {
+		t.Fatalf("combat-end hint expected:\n%s", user)
+	}
+	if strings.Contains(user, "战斗期间物理属性变化") {
+		t.Fatalf("no baseline → no delta line, got:\n%s", user)
+	}
+	suser := lastUserPromptOf(t, strategic.capturedMsgs)
+	if !strings.Contains(suser, "物理属性可能已显著变化") {
+		t.Fatalf("strategic reason should use the generic wording:\n%s", suser)
+	}
+}
+
+// TestCombatYieldTTL_StrategicReplanAlsoTriggered: the TTL reclaim path
+// shares the chained strategic replan, with the expiry wording in the
+// revision reason.
+func TestCombatYieldTTL_StrategicReplanAlsoTriggered(t *testing.T) {
+	rt, ft, ac, _, _ := newRouterTestRuntime(t, notInterruptJudge())
+	ac.autoPlanEnabled = true
+	ac.tacticalHc = &fakeLoopLLM{resp: speakToolCallResp()}
+	strategic := &fakeLoopLLM{resp: planJSONResponse(`{"time":"11:00-13:00","goal":"维修保养"}`)}
+	ac.strategicHc = strategic
+	seedPerceptionWithPhys(t, ac, 38823, 80, 10, 22)
+	ac.as.SetDailyPlan("09:00-12:00: 车间装配作业", 11)
+	yieldViaDetach(t, rt, "evt_atk")
+	seedPerceptionWithPhys(t, ac, 39003, 55, 30, 68)
+
+	// 把 TTL 起点拨回到期之前（测试直接操作 coordMu 字段）。
+	ac.coordMu.Lock()
+	ac.combatYieldSinceGameSec = ac.as.LatestGameTimeSec() - combatYieldTTLGameSec - 1
+	ac.coordMu.Unlock()
+
+	kb := *rt.kbPtr
+	if !ac.checkCombatYieldExpiry(context.Background(), "H-01", ft, kb, nil, nil, testLogger()) {
+		t.Fatalf("expired yield must report a reclaim")
+	}
+	waitFor(t, 3*time.Second, func() bool {
+		return len(ac.as.PlanRevisions()) == 1 && replanIdle(ac)
+	})
+	suser := lastUserPromptOf(t, strategic.capturedMsgs)
+	for _, want := range []string{"超时兜底归还", "关节磨损 22→68（+46）"} {
+		if !strings.Contains(suser, want) {
+			t.Fatalf("TTL strategic reason missing %q:\n%s", want, suser)
+		}
 	}
 }

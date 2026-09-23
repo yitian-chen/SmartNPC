@@ -21,6 +21,7 @@ import (
 	"log/slog"
 	"math"
 	"net/http"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -29,6 +30,7 @@ import (
 	"github.com/AgentTown/agenttown-mcp/pkg/agentstate"
 	"github.com/AgentTown/agenttown-mcp/pkg/profile"
 	"github.com/AgentTown/agenttown-mcp/pkg/prompt"
+	"github.com/AgentTown/agenttown-mcp/pkg/weeklyschedule"
 	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
 )
 
@@ -170,7 +172,7 @@ func (rt *Runtime) handleWorldEvent(agentID string, ev protocol.WorldEventPayloa
 	// 本就不经裁决，归还对称地确定性接收）。放在 force 分流之前：force
 	// 与非 force 两种 combat_exit 都接得住。
 	if prompt.IsCombatExitEvent(ev) && ac.combatYieldActive() {
-		ac.reclaimFromCombatYield(rt.ctx, agentID, rt.ws, *rt.kbPtr, rt.profiles, ev, false, rt.logger)
+		ac.reclaimFromCombatYield(rt.ctx, agentID, rt.ws, *rt.kbPtr, rt.profiles, rt.weeklySched, ev, false, rt.logger)
 		return true
 	}
 
@@ -349,7 +351,14 @@ func (rt *Runtime) handleCombatDetach(ac *agentContext, agentID string, ev proto
 		// 已被让位吞并，归还后按时间重推）。
 		ac.as.ClearSlotSwitchPending()
 	}
-	ac.beginCombatYield(ev, ac.as.LatestGameTimeSec(), prevActionID)
+	// 属性基线（首入口时）：归还时对比战斗期间的属性变化（磨损/疲劳/电量
+	// before→after），作为战术层【战斗结束】hint 与战略层修订原因的事实依据。
+	// 无感知（冷启动让位）时为 nil，归还路径优雅降级为不带 delta 的表述。
+	var physBaseline *protocol.PhysicalState
+	if !alreadyYielded {
+		physBaseline = ac.as.Snapshot().LatestPhysical
+	}
+	ac.beginCombatYield(ev, ac.as.LatestGameTimeSec(), prevActionID, physBaseline)
 	rt.logger.Warn("[combat-detach] UE 战斗系统接管，agent 让位（不发 stop，静默至 combat_exit 或 TTL 兜底）",
 		"agent_id", agentID, "event_id", ev.EventID, "event_type", ev.EventType,
 		"severity", ev.Severity, "subject", ev.Subject,
@@ -363,15 +372,26 @@ func (rt *Runtime) handleCombatDetach(ac *agentContext, agentID string, ev proto
 //     chronological pair 被攻击 → 脱战),
 //   - TTL safety net (ttl=true, ev = the last detach attack — UE never sent
 //     combat_exit; the hint says so).
+//
 // The post-combat replan re-derives its goal from dailyPlan by game time
 // (tacticalRefillForReplan → selectCurrentGoal), so the slot cleared at yield
 // entry costs nothing.
+//
+// Replan chaining (tactical first, then strategic): the two share the
+// replanInProgress slot, so they must NOT race. The tactical replan (flash
+// model, fast) gets the body moving under the 【战斗结束】 hint; the strategic
+// replan (pro model) then revises the REMAINDER of the day — combat's
+// attribute drift (wear/fatigue spikes) is exactly the "07:00 的计划对当下
+// 无知" case maybeStrategicReplan exists for. The chain skips the strategic
+// step when a repeat attack re-entered the yield (no LLM planning while UE
+// holds the body).
 func (a *agentContext) reclaimFromCombatYield(ctx context.Context, agentID string,
 	ws contract.Transport, kb *worldkb.KB, profiles map[string]*profile.Profile,
-	ev protocol.WorldEventPayload, ttl bool, logger *slog.Logger) {
+	weeklySched *weeklyschedule.Schedule, ev protocol.WorldEventPayload, ttl bool, logger *slog.Logger) {
 
 	a.coordMu.Lock()
 	prevActionID := a.combatYieldPrevActionID
+	basePhys := a.combatYieldPhys
 	a.coordMu.Unlock()
 	_, _, lastAttack := a.combatYieldSnapshot()
 	a.endCombatYield()
@@ -399,18 +419,75 @@ func (a *agentContext) reclaimFromCombatYield(ctx context.Context, agentID strin
 	if lastAttack.EventID != "" || lastAttack.EventType != "" {
 		a.as.EchoWorldEvent(lastAttack)
 	}
+	// 战斗期间属性变化（有基线且有实变时）：磨损/疲劳/电量 before→after。
+	deltaLine := combatPhysDeltaLine(basePhys, a.as.Snapshot().LatestPhysical)
 	var hint string
 	if ttl {
 		hint = fmt.Sprintf("【战斗结束】威胁情境超过 %.0f 游戏分钟未收到解除信号（combat_exit），系统兜底收回控制权。", combatYieldTTLGameSec/60)
 	} else {
 		hint = "【战斗结束】" + prompt.FormatWorldEvent(ev)
 	}
+	if deltaLine != "" {
+		hint += "战斗期间物理属性变化：" + deltaLine + "。"
+	}
 	// hint 先落 AgentState：acquireReplanSlot 超时 / replan 失败两条兜底
 	// 路径都靠 worker 自然 refill 时读到战后上下文。
 	a.as.SetReplanHint(hint)
-	go a.forceInterruptReplan(ctx, agentID, ws, kb, profiles, ev, hint, logger)
+	// 战略层修订原因：战斗归还即"显著偏差"——当前物理状态已非计划制定时
+	// 的假设，剩余时段需要重排（如插入维修/充电）。delta 有实变时带具体
+	// 数字；TTL 变体注明未收到解除信号。
+	reason := "战斗让位归还（刚经历战斗，期间由外部战斗系统接管身体）"
+	if deltaLine != "" {
+		reason += "，战斗期间物理属性变化：" + deltaLine
+	} else {
+		reason += "，物理属性可能已显著变化"
+	}
+	if ttl {
+		reason += "（超时兜底归还：未收到 combat_exit 解除信号）"
+	}
+	reason += "，当前状态已偏离当日计划制定时的假设，请重排剩余时段（如优先安排维修、充电等恢复时段，再回到原日程）"
+	go func() {
+		a.forceInterruptReplan(ctx, agentID, ws, kb, profiles, ev, hint, logger)
+		// 重复攻击在战术 replan 期间重新让位（被掐掉）时，maybeStrategicReplan
+		// 顶部的让位守卫会跳过战略修订——让位中不该有任何 LLM 规划，下一次
+		// 归还会再次触发完整链路。
+		a.maybeStrategicReplan(ctx, agentID, ws, kb, profiles, weeklySched, logger, reason)
+	}()
 	logger.Info("[combat-detach] 控制权归还 agent（战斗结束），重规划回日程",
-		"agent_id", agentID, "event_id", ev.EventID, "event_type", ev.EventType, "ttl_expiry", ttl)
+		"agent_id", agentID, "event_id", ev.EventID, "event_type", ev.EventType, "ttl_expiry", ttl,
+		"phys_delta", deltaLine)
+}
+
+// combatPhysDeltaLine renders the attribute drift during a combat yield
+// (baseline at entry vs current), e.g. "关节磨损 22→68（+46）、电量 80→55（-25）".
+// Empty when there is no baseline (yield began before the first perception),
+// no current reading, or nothing changed materially (|Δ| < 1).
+func combatPhysDeltaLine(before, after *protocol.PhysicalState) string {
+	if before == nil || after == nil {
+		return ""
+	}
+	type attrDelta struct {
+		name     string
+		from, to float64
+	}
+	deltas := []attrDelta{
+		{"关节磨损", before.JointWear, after.JointWear},
+		{"疲劳", before.Fatigue, after.Fatigue},
+		{"电量", before.Energy, after.Energy},
+	}
+	var parts []string
+	for _, d := range deltas {
+		diff := d.to - d.from
+		if diff > -1 && diff < 1 {
+			continue
+		}
+		sign := "+"
+		if diff < 0 {
+			sign = "" // 负数自带负号
+		}
+		parts = append(parts, fmt.Sprintf("%s %.0f→%.0f（%s%.0f）", d.name, d.from, d.to, sign, diff))
+	}
+	return strings.Join(parts, "、")
 }
 
 // checkCombatYieldExpiry implements the combat-detach TTL safety net, called
@@ -421,7 +498,7 @@ func (a *agentContext) reclaimFromCombatYield(ctx context.Context, agentID strin
 // yield mid-combat. Returns true when a TTL reclaim was triggered.
 func (a *agentContext) checkCombatYieldExpiry(ctx context.Context, agentID string,
 	ws contract.Transport, kb *worldkb.KB, profiles map[string]*profile.Profile,
-	logger *slog.Logger) bool {
+	weeklySched *weeklyschedule.Schedule, logger *slog.Logger) bool {
 
 	active, since, lastEvent := a.combatYieldSnapshot()
 	if !active {
@@ -445,7 +522,7 @@ func (a *agentContext) checkCombatYieldExpiry(ctx context.Context, agentID strin
 	}
 	logger.Warn("[combat-detach] 让位超时未收到 combat_exit，TTL 兜底收回控制权",
 		"agent_id", agentID, "since_game_sec", since, "now_game_sec", now)
-	a.reclaimFromCombatYield(ctx, agentID, ws, kb, profiles, lastEvent, true, logger)
+	a.reclaimFromCombatYield(ctx, agentID, ws, kb, profiles, weeklySched, lastEvent, true, logger)
 	return true
 }
 
@@ -887,10 +964,13 @@ func (a *agentContext) combatYieldSnapshot() (active bool, sinceGameSec float64,
 // event, but never re-stops/re-clears (the caller's entry work only happens
 // on entry — see handleCombatDetach). prevActionID is the in-flight action
 // captured at entry (empty on repeats — it was cleared); the reclaim path
-// sends one catch-up stop for it. nowGameSec follows beginReaction's
-// convention: <= 0 (no perception yet) stores 0 and leaves the TTL inert
-// until checkCombatYieldExpiry latches a real time.
-func (a *agentContext) beginCombatYield(ev protocol.WorldEventPayload, nowGameSec float64, prevActionID string) {
+// sends one catch-up stop for it. phys is the physical baseline at entry
+// (nil on repeats and on perception-less cold starts); it latches only once
+// so repeat attacks never move the pre-combat baseline mid-fight.
+// nowGameSec follows beginReaction's convention: <= 0 (no perception yet)
+// stores 0 and leaves the TTL inert until checkCombatYieldExpiry latches a
+// real time.
+func (a *agentContext) beginCombatYield(ev protocol.WorldEventPayload, nowGameSec float64, prevActionID string, phys *protocol.PhysicalState) {
 	a.coordMu.Lock()
 	defer a.coordMu.Unlock()
 	a.combatYield = true
@@ -900,6 +980,10 @@ func (a *agentContext) beginCombatYield(ev protocol.WorldEventPayload, nowGameSe
 	// 让位期间也不会有新动作，空值不应覆盖已记住的 id）。
 	if prevActionID != "" {
 		a.combatYieldPrevActionID = prevActionID
+	}
+	// 属性基线同理只锁存一次：重复攻击传入 nil，不得覆盖首入口的战前基线。
+	if phys != nil && a.combatYieldPhys == nil {
+		a.combatYieldPhys = phys
 	}
 	if nowGameSec > 0 {
 		a.combatYieldSinceGameSec = nowGameSec
@@ -917,6 +1001,7 @@ func (a *agentContext) endCombatYield() {
 	a.combatYieldSinceWall = time.Time{}
 	a.combatYieldLastEvent = protocol.WorldEventPayload{}
 	a.combatYieldPrevActionID = ""
+	a.combatYieldPhys = nil
 	a.coordMu.Unlock()
 }
 

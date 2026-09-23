@@ -37,11 +37,21 @@ const (
 )
 
 // maybeStrategicReplan evaluates the trigger and spawns the replan when
-// allowed. Called async from the worker loop at the two cut points.
+// allowed. Called async from the worker loop at the two cut points, and from
+// the combat-detach reclaim chain (tactical replan first, then this).
 func (a *agentContext) maybeStrategicReplan(ctx context.Context, agentID string,
 	ws contract.Transport, kb *worldkb.KB, profiles map[string]*profile.Profile,
 	weeklySched *weeklyschedule.Schedule, logger *slog.Logger, triggerReason string) {
 
+	// 战斗让位中不规划（combat-detach）：UE 战斗 AI 持有身体期间任何 LLM
+	// 规划都是抢身体。worker 的两个触发点实际到不了这里（让位守卫先
+	// continue，且 slot/反应已在让位入口清空），此守卫主要挡 combat 归还
+	// 链的竞态窗口——战术 replan 进行中重复攻击重新让位时，链的下一跳
+	// 在此静默跳过，下一次归还会重新触发。
+	if a.combatYieldActive() {
+		logger.Info("[战略层/replan] 战斗让位中，跳过计划修订", "agent_id", agentID, "trigger", triggerReason)
+		return
+	}
 	// 手动模式 / 无战略客户端 / 无当日计划：无事可做。
 	if !a.autoPlanEnabled || a.strategicHc == nil {
 		return
