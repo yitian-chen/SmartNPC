@@ -177,6 +177,13 @@ func tacticalHintLine(in TacticalInput, th BandThresholds) string {
 		return "【情境已解除】" + event + "\n" +
 			"当前动作是对已解除情境的反应，不再必要。请回到当前时段目标的原有日程正常规划。"
 	}
+	if strings.HasPrefix(in.Hint, "【战斗结束】") {
+		event := strings.TrimPrefix(in.Hint, "【战斗结束】")
+		return "【战斗结束】" + event + "\n" +
+			"你刚经历一场战斗（期间由外部战斗系统接管你的身体，自主控制曾中断），现已脱离战斗、恢复自主控制。" +
+			"请结合当前物理状态与位置变化（可能受损、电量下降、不在原位置）决定后续行为——" +
+			"如维修、充电、返回岗位或继续当前时段目标；除非收到新的威胁信号，不必继续逃跑或警戒。"
+	}
 	if strings.HasPrefix(in.Hint, "【社交回应】") {
 		event := strings.TrimPrefix(in.Hint, "【社交回应】")
 		return "【社交回应请求】" + event + "\n" +

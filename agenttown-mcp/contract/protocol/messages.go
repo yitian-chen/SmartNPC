@@ -347,6 +347,7 @@ type WorldEventPayload struct {
 	Category   string          `json:"category"`           // Category* constant
 	EventType  string          `json:"event_type"`         // EventType* constant
 	Force      bool            `json:"force"`              // true = 硬保证通道：不路由、不调 LLM、不可否决
+	Detach     bool            `json:"detach,omitempty"`   // true = UE 战斗 AI 接管该 NPC，Agent 让位（不下发动作）直到 combat_exit 或 TTL；仅 player_interaction 战斗事件携带
 	Severity   int             `json:"severity"`           // UE 视角的客观严重度 0~10；紧急与否由 Agent 结合关系/性格裁决
 	Subject    string          `json:"subject,omitempty"`  // 事件主体（谁的能量、谁在搭话、谁故障）
 	GameTime   string          `json:"game_time"`          // 事件发生时刻的游戏时间（"D12 10:47:03"，决策依据）

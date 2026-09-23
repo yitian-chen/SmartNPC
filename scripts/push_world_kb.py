@@ -12,20 +12,20 @@ charging_station + workbench_01 / charging_station_01），用新 schema 格式
 不一致的 bug 已在此版本修正）。
 
 使用方法：
-  # 1. 启动 MCP（dev 端口 :9091）
-  ./mcp --llm-backend=venus --http :8770 --ws :9091 \
+  # 1. 启动 MCP（dev 端口 :9093）
+  ./mcp --llm-backend=venus --http :8770 --ws :9093 \
     --venus-api-key "$VENUS_API_KEY" --log-level debug
 
   # 2. 在 Mock UE 连接之前，运行本脚本推送新 KB
   python3 scripts/push_world_kb.py
   # 或指定 WS 地址
-  python3 scripts/push_world_kb.py --ws ws://localhost:9091/ws
+  python3 scripts/push_world_kb.py --ws ws://localhost:9093/ws
 
   # 3. 启动 Mock UE（需用同一份 KB 或跳过 world_kb 推送，否则会覆盖）
   python3 src/run_day.py
 
 可选参数：
-  --ws URL    MCP WebSocket 地址（默认 ws://localhost:9091/ws，dev 端口）
+  --ws URL    MCP WebSocket 地址（默认 ws://localhost:9093/ws，dev 端口）
   --yaml PATH 自定义 KB yaml 文件路径（新 schema 格式）；省略则用内置 3zone 版本
 
 推送成功后 MCP 会：
@@ -420,8 +420,8 @@ def main():
         description="Push a new world_kb to MCP via WebSocket (startup window only).",
     )
     parser.add_argument(
-        "--ws", default="ws://localhost:9091/ws",
-        help="MCP WebSocket URL (default: ws://localhost:9091/ws, dev port)",
+        "--ws", default="ws://localhost:9093/ws",
+        help="MCP WebSocket URL (default: ws://localhost:9093/ws, dev port)",
     )
     parser.add_argument(
         "--yaml", default=None,

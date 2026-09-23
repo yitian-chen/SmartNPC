@@ -15,6 +15,73 @@ import (
 // so an event reads identically wherever the LLM meets it. Unknown
 // categories / event types degrade to their raw ids rather than erroring —
 // the protocol may grow new types (forward compatibility, §三).
+//
+// UE's first combat implementation shipped event_type="attacked"/"targeted"
+// (protocol names are player_attacked/player_targeted) and omitted category
+// entirely. The alias table + Effective* helpers below normalize both spellings
+// so rendering, situation registration, and combat-detach handling all agree
+// regardless of which side fixes their half first.
+
+// combatEventTypeAliases maps UE-side short event_type ids to the protocol
+// canonical constants (§3.6 player_interaction).
+var combatEventTypeAliases = map[string]string{
+	"attacked": protocol.EventTypePlayerAttacked,
+	"targeted": protocol.EventTypePlayerTargeted,
+}
+
+// EffectiveCategory returns the event's category, inferring
+// player_interaction from known combat event_type ids (canonical or alias)
+// when UE omitted the category field.
+func EffectiveCategory(ev protocol.WorldEventPayload) string {
+	if ev.Category != "" {
+		return ev.Category
+	}
+	switch EffectiveEventType(ev) {
+	case protocol.EventTypePlayerAttacked, protocol.EventTypePlayerTargeted, protocol.EventTypeCombatExit:
+		return protocol.CategoryPlayerInteraction
+	}
+	return ev.Category
+}
+
+// EffectiveEventType returns the canonical event_type, resolving UE-side
+// short aliases ("attacked" → player_attacked). Unknown ids pass through.
+func EffectiveEventType(ev protocol.WorldEventPayload) string {
+	if canonical, ok := combatEventTypeAliases[ev.EventType]; ok {
+		return canonical
+	}
+	return ev.EventType
+}
+
+// IsCombatStartEvent reports whether ev marks the start of a player-combat
+// threat: attacked / targeted under player_interaction, tolerant of a missing
+// category and of UE's short event_type aliases.
+func IsCombatStartEvent(ev protocol.WorldEventPayload) bool {
+	if !combatCategoryOK(ev) {
+		return false
+	}
+	switch EffectiveEventType(ev) {
+	case protocol.EventTypePlayerAttacked, protocol.EventTypePlayerTargeted:
+		return true
+	}
+	return false
+}
+
+// IsCombatExitEvent reports whether ev resolves the player-combat threat
+// (combat_exit), tolerant of a missing category. This is also the signal
+// that returns control to the agent after a combat-detach yield.
+func IsCombatExitEvent(ev protocol.WorldEventPayload) bool {
+	if !combatCategoryOK(ev) {
+		return false
+	}
+	return EffectiveEventType(ev) == protocol.EventTypeCombatExit
+}
+
+// combatCategoryOK accepts an omitted category (UE tolerance) or the
+// protocol player_interaction category; a conflicting non-empty category
+// does not count as combat.
+func combatCategoryOK(ev protocol.WorldEventPayload) bool {
+	return ev.Category == "" || ev.Category == protocol.CategoryPlayerInteraction
+}
 
 // FormatWorldEvent renders one world event as a compact natural-language
 // line: 类别：描述（主体…，客观严重度 N，地点…，游戏时间…）. Optional
@@ -33,7 +100,13 @@ func FormatWorldEvent(ev protocol.WorldEventPayload) string {
 	if ev.GameTime != "" {
 		parts = append(parts, "游戏时间 "+ev.GameTime)
 	}
-	out := fmt.Sprintf("%s：%s", worldEventCategoryLabel(ev.Category), worldEventDescription(ev))
+	// Normalize UE's combat spellings (missing category / short event_type)
+	// BEFORE rendering so both the label and the typed description resolve —
+	// without this a bare "attacked" loses its attacker/damage facts.
+	canon := ev
+	canon.Category = EffectiveCategory(ev)
+	canon.EventType = EffectiveEventType(ev)
+	out := fmt.Sprintf("%s：%s", worldEventCategoryLabel(canon.Category), worldEventDescription(canon))
 	if len(parts) > 0 {
 		out += "（" + strings.Join(parts, "，") + "）"
 	}

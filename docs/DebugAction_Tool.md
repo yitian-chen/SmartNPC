@@ -48,7 +48,7 @@ http://localhost:8770/debug/      # dev 实例
 | 用途 | stable 实例 | dev 实例 | 说明 |
 |---|---|---|---|
 | MCP HTTP（本端点） | `8760` | `8770` | `/debug/action` 走这个端口 |
-| MCP WebSocket | `9090` | `9091` | UE 连这个收 action_command |
+| MCP WebSocket | `9090` | `9093` | UE 连这个收 action_command |
 | Hermes | `8642` | `8643` | LLM 推理服务 |
 | CodeBuddy Adapter | `8761` | `8771` | 模型适配层 |
 | CLI | `52001` | `52002` | Hermes CLI 端口 |

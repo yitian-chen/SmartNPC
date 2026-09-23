@@ -229,3 +229,48 @@ func TestBuildTactical_EventsSegment(t *testing.T) {
 		t.Fatalf("empty events must omit the segment:\n%s", empty)
 	}
 }
+
+// TestFormatWorldEvent_InfersCategoryFromEventType pins the UE-tolerance
+// normalization (2026-09-22 field bug): UE shipped event_type="attacked" with
+// NO category. Both the label AND the typed description must resolve —
+// without the description half, the attacker/damage facts are lost.
+func TestFormatWorldEvent_InfersCategoryFromEventType(t *testing.T) {
+	ev := protocol.WorldEventPayload{
+		EventID:   "evt_20260922_000034",
+		EventType: "attacked", // UE 实测形态：短名、无 category
+		Force:     true,
+		Severity:  10,
+		Subject:   "H-01",
+		GameTime:  "D1 07:44:04",
+		Data:      json.RawMessage(`{"attacker":"player_1","damage":10,"damage_type":"physical"}`),
+	}
+	out := FormatWorldEvent(ev)
+	for _, want := range []string{
+		"玩家互动：",               // label 推断（不再是"未知类别"）
+		"被玩家 player_1 攻击",        // description 推断（typed data 解析）
+		"伤害 10",                 // damage 事实保留
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("combat alias rendering missing %q: %s", want, out)
+		}
+	}
+	if strings.Contains(out, "未知类别") || strings.Contains(out, "发生了 attacked 事件") {
+		t.Fatalf("bare alias must not degrade to unknown-category/raw fallback: %s", out)
+	}
+
+	// targeted 别名与 combat_exit 同理。
+	targeted := protocol.WorldEventPayload{EventType: "targeted", Data: json.RawMessage(`{"attacker":"player_1"}`)}
+	if out := FormatWorldEvent(targeted); !strings.Contains(out, "玩家互动：被玩家 player_1 瞄准") {
+		t.Fatalf("targeted alias rendering: %s", out)
+	}
+	exit := protocol.WorldEventPayload{EventType: "combat_exit", Data: json.RawMessage(`{"attacker":"player_1","outcome":"escaped"}`)}
+	if out := FormatWorldEvent(exit); !strings.Contains(out, "玩家互动：与玩家 player_1 的战斗结束") {
+		t.Fatalf("combat_exit alias rendering: %s", out)
+	}
+
+	// 非战斗类别不受推断影响：未知类别仍降级（前向兼容语义不变）。
+	unknown := protocol.WorldEventPayload{EventType: "some_future_type"}
+	if out := FormatWorldEvent(unknown); !strings.Contains(out, "未知类别") {
+		t.Fatalf("non-combat unknown category must keep the raw fallback: %s", out)
+	}
+}

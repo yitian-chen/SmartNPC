@@ -243,6 +243,9 @@ type debugTacticalEntry struct {
 	InFlight       string                `json:"in_flight,omitempty"`        // 当前在途 action_id
 	InFlightCmd    string                `json:"in_flight_cmd,omitempty"`    // 当前在途 action 的工具名
 	InFlightParams map[string]any        `json:"in_flight_params,omitempty"` // 当前在途 action 的全部参数
+	// Combat-detach 让位中（UE 战斗 AI 持有身体，MCP 静默至 combat_exit/TTL）
+	Detached   bool   `json:"detached"`
+	Situations string `json:"situations,omitempty"` // 持续情境行（状态栏同款渲染）
 }
 
 // debugTacticalAction 是队列中的一个战术层分解任务（对应一次工具调用）。
@@ -297,6 +300,8 @@ func handleDebugTactical(w http.ResponseWriter, r *http.Request, lookupAgent fun
 			InFlight:       snap.CurrentActionID,
 			InFlightCmd:    snap.CurrentActionCmd,
 			InFlightParams: snap.CurrentActionParams,
+			Detached:       ac.combatYieldActive(),
+			Situations:     formatActiveSituations(snap.ActiveSituations, ac.as.LatestGameTimeSec()),
 		})
 	}
 	if resp == nil {

@@ -105,7 +105,7 @@ flowchart TB
 | 目录 | 分支            | MCP HTTP / WS | MySQL 库 | 日志目录 |
 |------|---------------|---------------|----------|----------|
 | `/data/workspace/stable` | `master`      | `8760` / `9092` | `agenttown_stable` | `logs/` |
-| `/data/workspace/dev` | `dev-working` | `8770` / `9091` | `agenttown_dev` | `logs-dev/` |
+| `/data/workspace/dev` | `dev-working` | `8770` / `9093` | `agenttown_dev` | `logs-dev/` |
 
 `start-dev.sh` 只是 `start-debug.sh` 的 wrapper（export 偏移端口 + dev 库名 + `logs-dev/`），实际启动逻辑都在 `start-debug.sh`。
 

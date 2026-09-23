@@ -464,6 +464,7 @@ func TestWorldEventPayloadRoundTrip(t *testing.T) {
 		Category:   CategoryPlayerInteraction,
 		EventType:  EventTypePlayerAttacked,
 		Force:      true,
+		Detach:     true,
 		Severity:   10,
 		Subject:    "H-03",
 		GameTime:   "D12 12:00:00",
@@ -508,6 +509,14 @@ func TestWorldEventPayloadRoundTrip(t *testing.T) {
 	// force=false must serialize explicitly (required field, default false).
 	if !strings.Contains(string(bareRaw), `"force":false`) {
 		t.Fatalf("force must serialize even when false: %s", bareRaw)
+	}
+	// detach is omitempty: serialized when true (UE combat takeover marker),
+	// omitted when false — UE does not send it on non-combat events.
+	if !strings.Contains(string(raw), `"detach":true`) {
+		t.Fatalf("detach must serialize when true: %s", raw)
+	}
+	if strings.Contains(string(bareRaw), "detach") {
+		t.Fatalf("detach should be omitted when false: %s", bareRaw)
 	}
 }
 
