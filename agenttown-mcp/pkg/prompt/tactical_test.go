@@ -537,8 +537,45 @@ func TestTacticalHintLine_CombatEndPhysicalAlert(t *testing.T) {
 	if !strings.Contains(out, "关节磨损过高：必须优先 InteractSmartObject 维护保养") {
 		t.Fatalf("wear alert must mandate repair:\n%s", out)
 	}
+	// 磨损严重：维修时长建议 ≥7200 秒，且明确可以超过时段剩余时长。
+	if !strings.Contains(out, "维修的 duration 建议不少于 7200 秒") {
+		t.Fatalf("severe wear must recommend a long repair duration:\n%s", out)
+	}
+	if !strings.Contains(out, "可以超过当前时段的剩余时长") {
+		t.Fatalf("recovery duration must be exempt from the slot-remaining anchor:\n%s", out)
+	}
 	if !strings.Contains(out, "禁止规划以下动作") {
 		t.Fatalf("wear alert must forbid non-recovery actions:\n%s", out)
+	}
+
+	// 战后严重疲劳：睡眠舱休息时长建议 ≥7200 秒（充电不背长时建议）。
+	tired := TacticalInput{
+		Hint:     "【战斗结束】玩家互动：与玩家 player_1 的战斗结束（escaped）",
+		AgentID:  "H-01",
+		Physical: &protocol.PhysicalState{Energy: 55, Fatigue: 88, JointWear: 40},
+	}
+	outT := BuildTactical(tired)
+	if !strings.Contains(outT, "严重疲劳时睡眠舱休息的 duration 建议不少于 7200 秒") {
+		t.Fatalf("severe fatigue must recommend a long sleep duration:\n%s", outT)
+	}
+
+	// 仅电量低：充电快速恢复，不带 7200 长时建议。
+	lowBattery := TacticalInput{
+		Hint:     "【战斗结束】玩家互动：与玩家 player_1 的战斗结束（escaped）",
+		AgentID:  "H-01",
+		Physical: &protocol.PhysicalState{Energy: 30, Fatigue: 20, JointWear: 30},
+	}
+	outE := BuildTactical(lowBattery)
+	if !strings.Contains(outE, "电量过低：必须优先 InteractSmartObject 充电") {
+		t.Fatalf("energy alert must mandate charging:\n%s", outE)
+	}
+	if strings.Contains(outE, "建议不少于 7200 秒") {
+		t.Fatalf("fast-recovery charging must not carry the 7200s recommendation:\n%s", outE)
+	}
+
+	// 战斗结束总则：恢复要充分、可安排较长连续时长。
+	if !strings.Contains(out, "恢复要充分，可以安排较长的连续时长") {
+		t.Fatalf("combat-end guidance must encourage full recovery:\n%s", out)
 	}
 
 	// 战后属性未越线：只有恢复指引，不追加强制约束。
@@ -548,10 +585,15 @@ func TestTacticalHintLine_CombatEndPhysicalAlert(t *testing.T) {
 		Physical: &protocol.PhysicalState{Energy: 80, Fatigue: 10, JointWear: 22},
 	}
 	out2 := BuildTactical(fine)
-	if strings.Contains(out2, "物理告警强制约束") {
+	// 规则 7 文案会引用块名"【物理告警强制约束】"，故匹配块的完整开头
+	//（只在块真正渲染时出现）。
+	if strings.Contains(out2, "【物理告警强制约束】当前物理状态已突破警戒阈值") {
 		t.Fatalf("no threshold crossed → no mandatory block:\n%s", out2)
 	}
 	if !strings.Contains(out2, "恢复自主控制") {
 		t.Fatalf("recovery guidance still expected:\n%s", out2)
+	}
+	if strings.Contains(out2, "建议不少于 7200 秒") {
+		t.Fatalf("no severity → no 7200s recommendation in the combat-end guidance:\n%s", out2)
 	}
 }

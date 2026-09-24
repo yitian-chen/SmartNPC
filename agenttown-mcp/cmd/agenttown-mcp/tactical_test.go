@@ -1597,7 +1597,9 @@ func TestBuildTacticalPrompt_NoPhysicalAlertConstraint(t *testing.T) {
 	// 普通 hint（无"物理状态告警"标记）不应插入强约束段
 	promptText := prompt.BuildTactical(prompt.TacticalInput{Goal: "车间装配", Zone: "main_workshop", TimeOfDay: "09:00", Slot: "09:00-12:00", Physical: &protocol.PhysicalState{Energy: 90, Fatigue: 20, JointWear: 0}, KB: kb, Hint: "上次中断原因：zone 变化", AgentID: "H-01"})
 
-	if strings.Contains(promptText, "【物理告警强制约束】") {
+	// 规则 7 文案引用块名"【物理告警强制约束】"，匹配块的完整开头（只在
+	// 块真正渲染时出现）。
+	if strings.Contains(promptText, "【物理告警强制约束】当前物理状态已突破警戒阈值") {
 		t.Errorf("non-physical-alert hint should NOT contain constraint section, got: %s", promptText)
 	}
 }

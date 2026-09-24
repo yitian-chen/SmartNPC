@@ -19,7 +19,7 @@ const TacticalRules = `1. 第一个工具调用必须是 speak（用一段话表
 4. 禁止把同一动作连续重复多次填充时段（工作段之间应穿插休息段）。
 5. InteractSmartObject 的 semantic_group 必须严格使用设施详情中给出的 semantic_group 值，禁止编造、禁止用实例 id（如 Charge-1）。
 6. InteractSmartObject 的 semantic_group 与 interaction 必须严格对应，禁止跨类别组合——所有工种设备与生活设施都可用 InteractSmartObject 直接交互，semantic_group 填设施、interaction 填对应动词即可（如 workbench/assemble、process_machine/process、charger/charge、sleep_pod/sleep、bench/rest 等，完整映射见设施详情）。
-7. 所有非瞬时动作（InteractSmartObject 设施互动、exercise 原地锻炼等需要持续一段时间的）都必须填写 duration 参数（秒，schema 必填），包括最后一个动作也不例外——无 duration 的长动作无法被系统按计划终止；move_to 的移动时长由 UE 自动决定、无需填 duration；瞬时动作（speak 等立即完成的）也不填 duration。duration 要合理：冥想、整理床铺等单段设 1800 秒左右，不宜超过 1 小时；工作段可设 3600-7200 秒。到点后系统会打断该段并继续执行后续动作段；只有全部动作执行完，系统才会再次询问。推荐模式：工作段（如 1.5 小时）→ 长椅小憩/原地拉伸段（不超过 30 分钟）→ 返回工作段（duration 设为时段剩余时长）。
+7. 所有非瞬时动作（InteractSmartObject 设施互动、exercise 原地锻炼等需要持续一段时间的）都必须填写 duration 参数（秒，schema 必填），包括最后一个动作也不例外——无 duration 的长动作无法被系统按计划终止；move_to 的移动时长由 UE 自动决定、无需填 duration；瞬时动作（speak 等立即完成的）也不填 duration。duration 要合理：冥想、整理床铺等单段设 1800 秒左右，不宜超过 1 小时；受伤后的维修/休息可设 3600-7200 秒，磨损/疲劳严重时更长（以【物理告警强制约束】中的建议为准）；工作段可设 3600-7200 秒。到点后系统会打断该段并继续执行后续动作段；只有全部动作执行完，系统才会再次询问。推荐模式：工作段（如 1.5 小时）→ 长椅小憩/原地拉伸段（不超过 30 分钟）→ 返回工作段（duration 设为时段剩余时长）。
 8. 每次生成的最后一个动作必须是长动作（InteractSmartObject 长动作），其 duration 设为当前时段的剩余时长（见上文"剩余约 X 分钟"提示）——到点后系统自动切入下一时段，NPC 不会呆站。所有长动作（包括最后一个）都必须设置 duration，不得省略。所有动作的 duration 总和应接近当前时段的剩余时长，避免过短导致队列提前耗尽触发重分解、或过长拖到下一时段。
 9. 如果是调用 InteractSmartObject 工具，若当前日程目标明确指定了区域（如"去中央广场长椅休息"），**必须**在该工具的 zone 参数中填写对应区域 id（如 central_plaza、logistics_hub）。`
 
@@ -28,7 +28,7 @@ const TacticalRules = `1. 第一个工具调用必须是 speak（用一段话表
 // 末段非长动作、semantic_group 编造）。完整规则经 tacticalCompactRefLine
 // 指向本日第一条战术 user 消息，不再逐轮重复。
 const tacticalCoreRules = `- 首个工具调用必须是 speak；随后必须返回至少一个带 duration 的长动作，禁止只返回 speak。
-- 除了speak和移动，其他必须填 duration（秒）：中间动作约 1800 秒、工作段 3600-7200 秒。
+- 除了speak和移动，其他必须填 duration（秒）：中间动作约 1800 秒、工作段 3600-7200 秒；恢复类动作（维修/充电/睡眠）按恢复需要设置，可以更长，不受这些档位限制。
 - 最后一个动作必须是长动作，duration 设为当前时段剩余时长。所有长动作（含末段）都必须设 duration。`
 
 // tacticalCompactRefLine 是精简模式的引用行：指向本日第一条战术消息的
@@ -182,7 +182,8 @@ func tacticalHintLine(in TacticalInput, th BandThresholds) string {
 		line := "【战斗结束】" + event + "\n" +
 			"你刚经历一场战斗（期间由外部战斗系统接管你的身体，自主控制曾中断），现已脱离战斗、恢复自主控制。" +
 			"请结合当前物理状态与位置变化（可能受损、电量下降、不在原位置）决定后续行为——" +
-			"如维修、充电、返回岗位或继续当前时段目标；除非收到新的威胁信号，不必继续逃跑或警戒。"
+			"如维修、充电、返回岗位或继续当前时段目标；恢复要充分，可以安排较长的连续时长，不必急于返回岗位；" +
+			"除非收到新的威胁信号，不必继续逃跑或警戒。"
 		// 战斗最常见的后果正是属性恶化（磨损/疲劳暴涨）：越过警戒阈值时
 		// 追加与"物理状态告警" hint 同一套强制恢复约束——把上面泛化的
 		// "结合物理状态"升级为"必须优先维修/充电"的硬要求（否则高磨损下
@@ -228,10 +229,12 @@ func physicalAlertConstraints(in TacticalInput, th BandThresholds) string {
 		reqs = append(reqs, "- 电量过低：必须优先 InteractSmartObject 充电（charger/charge）补能")
 	}
 	if in.Physical.Fatigue > th.FatigueAlert() {
-		reqs = append(reqs, "- 疲劳过高：优先 InteractSmartObject 充电（charger/charge）或到睡眠舱休息（sleep_pod/sleep），充电后若仍疲劳追加休息")
+		reqs = append(reqs, "- 疲劳过高：优先 InteractSmartObject 充电（charger/charge）或到睡眠舱休息（sleep_pod/sleep），充电后若仍疲劳追加休息；"+
+			"严重疲劳时睡眠舱休息的 duration 建议不少于 7200 秒（约 2 小时），充分恢复后再回到日程")
 	}
 	if in.Physical.JointWear > th.JointWearAlert() {
-		reqs = append(reqs, "- 关节磨损过高：必须优先 InteractSmartObject 维护保养（repair_table/repair），否则持续工作会加剧损耗")
+		reqs = append(reqs, "- 关节磨损过高：必须优先 InteractSmartObject 维护保养（repair_table/repair），否则持续工作会加剧损耗；"+
+			"维修的 duration 建议不少于 7200 秒（约 2 小时），让磨损充分恢复")
 	}
 	// 禁止项：仅禁止与所有活跃告警冲突的消耗性动作
 	// 关节磨损告警时不禁维护保养（那是需要的恢复动作）
@@ -249,8 +252,13 @@ func physicalAlertConstraints(in TacticalInput, th BandThresholds) string {
 	if len(reqs) == 0 {
 		return ""
 	}
+	// 时长澄清：分解规则里"末段 duration = 时段剩余时长"/"中间动作约 1800 秒"
+	// 的锚点会把恢复动作压短（磨损 -50/小时、睡眠 -25/小时，30 分钟根本
+	// 恢复不动）。恢复动作按自身预算执行，超出的部分由时段切换在安全点
+	// 等待（P3-8）——明确告诉 LLM 可以超过时段剩余，不必为赶日程缩短恢复。
 	out := "\n【物理告警强制约束】当前物理状态已突破警戒阈值，必须立即规划恢复类动作：\n" +
-		strings.Join(reqs, "\n")
+		strings.Join(reqs, "\n") +
+		"\n恢复类动作的 duration 按实际恢复需要设置即可，可以超过当前时段的剩余时长——时段切换会等恢复动作结束后再进行，不要为赶日程缩短恢复时间。"
 	if len(forbids) > 0 {
 		out += "\n禁止规划以下动作：" + strings.Join(forbids, "、")
 	}
