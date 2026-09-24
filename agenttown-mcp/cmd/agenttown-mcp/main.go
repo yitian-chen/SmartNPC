@@ -555,28 +555,17 @@ func (a *agentContext) loadRelationships(ctx context.Context, agentID string, kb
 	return formatRelationshipsForPrompt(rels, agentID)
 }
 
-// advanceSlotIfNeeded 检查当前 game_time 是否已超出 currentSlot 结束时间，
-// 若是则清队列 + 清 currentSlot + 清在途追踪，让 worker 下一轮走 tacticalRefill
-// 自然选新 slot 分解新队列。
+// advanceSlotIfNeeded 检查当前 game_time 是否已超出 currentSlot 结束时间。
+// P3-8 入队化：检测到 slot 过期时**不强切**——只标记 slotSwitchPending +
+// 清 currentSlot（让 selectCurrentGoal 选新 slot），不打断当前动作、不清队列。
+// 真正的清理（ClearForSlotSwitch + P4-10 计划内结束捕捉）等安全点（无在途
+// 动作）由 processSlotSwitch 完成；末段的终止靠它自身的 time_to_stop 预算
+// （duration schema 必填，规则 8 要求末段 duration = 时段剩余时长）或自然
+// 完成，不是本方法打断。反应进行中同样只挂 pending，不打断——反应结束后的
+// 首个安全点自然处理（设计文档 §4.5"时段切换也走队列"）。
 //
-// 延迟 stop 策略：本方法**不立即发 stop_action**。若旧 action 是长复合动作，
-// 把 actionID 记到 pendingStopActionID，由 popAndSendQueueAction 在下发新 action
-// 前补发。这样 NPC 在战术层 LLM 调用期间继续旧动作（仍在车间装配/充电），
-// 不会愣住。若旧 action 在 LLM 期间自然完成，recordActionCompletion 清除
-// pendingStopActionID，popAndSendQueueAction 跳过 stop。
-//
-// 这是"长复合动作唯一打断路径"：长复合动作不设超时（IsCompositeCmd 跳过
-// armActionTimeout），持续执行到时段切换由本方法记录待 stop。
-//
-// 不在此处调 LLM——只打扫战场，新队列由 worker 下一轮 tacticalRefill 生成。
-// 反应层 replan 进行中（replanInProgress=true）时本方法仍可执行：schedule
-// 切换优先级高于反应层 replan，清掉的 in-flight 状态不会干扰 replan
-// （replan 自己会重新规划，且 replanInProgress 由 replan 路径自己清除）。
-// advanceSlotIfNeeded 检查 game_time 是否超出 currentSlot。返回 true 当且
-// 仅当切换发生在反应任务进行中（P3-9 触发信号：时间轴被事件挤乱，日程的
-// 剩余部分值得战略层重算）。
-// advanceSlotIfNeeded 检查 game_time 是否超出 currentSlot。返回 true 当且
-// 仅当切换发生在反应任务进行中（P3-9 触发信号）。
+// 返回 true 当且仅当切换发生在反应任务进行中（P3-9 触发信号：时间轴被事件
+// 挤乱，日程的剩余部分值得战略层重算）。
 //
 // P3-8 入队化：不再在检测到 slot 过期时强切（清队列+清在途+pendingStop）——
 // 只标记 slotSwitchPending + 清 currentSlot（让 selectCurrentGoal 选新 slot），
@@ -826,7 +815,8 @@ func cloneTask(task *protocol.CurrentTaskProgress) *protocol.CurrentTaskProgress
 
 // runPerceptionWorker 是战术层队列驱动的状态机：wake → UE 连接检查 →
 // 时段切换检测 → pop 队列下一个 action；队列空则 tacticalRefill。
-// 长复合动作不设超时，持续执行到时段切换由 advanceSlotIfNeeded 打断。
+// 长复合动作不设超时，靠必填 duration 的 time_to_stop 预算终止；slot 过期
+// 只标记 pending，安全点（无在途动作）才由 processSlotSwitch 清理切换。
 // 反应层仅 continue/observe/replan：replan 通过 tacticalRefillForReplan
 // 重规划并打断在途 action，不打断 worker 正常的 pop/refill 循环。
 func runPerceptionWorker(
@@ -883,8 +873,9 @@ func runPerceptionWorker(
 		// 多日循环：检测 day_count 递增（跨日），重新调用战略层生成新一天的 dailyPlan。
 		// 通常在 06:00-07:00 规划窗口内触发（selectCurrentGoal 已屏蔽战术层分解，
 		// NPC 仍在执行夜间睡眠 composite）。仅替换 dailyPlan，不打断在途睡眠——
-		// 让 NPC 自然睡到 07:00，由 advanceSlotIfNeeded 打断后走 tacticalRefill
-		// 选新计划 slot。手动模式（autoPlanEnabled=false）跳过。
+		// 让 NPC 睡到睡眠段 time_to_stop 预算到点（P3-8 后 slot 过期只标记
+		// pending，不打断），安全点后走 tacticalRefill 选新计划 slot。手动模式
+		// （autoPlanEnabled=false）跳过。
 		if autoPlanEnabled {
 			if rollover, prevDay, newDay := ac.detectDayRollover(); rollover && !ac.combatYieldActive() {
 				// 战斗让位中跳过跨日处理（combat-detach）：跨日是电平检测
@@ -903,8 +894,8 @@ func runPerceptionWorker(
 				ac.as.ClearTimeStop()
 				dayCtx := weeklyschedule.WeeklyLine(newDay, weeklySched)
 				plan := ac.triggerStrategicPlanning(ctx, agentID, kb, profiles, logger, narrative, dayCtx, "早晨例行制定每日日程安排", "07:00")
-				// 不清 currentSlot/actionQueue/currentActionID：让 NPC 自然睡眠到 07:00，
-				// 由 advanceSlotIfNeeded 打断后走 tacticalRefill 选新计划 slot。
+				// 不清 currentSlot/actionQueue/currentActionID：让 NPC 睡到睡眠段
+				// time_to_stop 预算到点，安全点后走 tacticalRefill 选新计划 slot。
 				// currentDay 已由 detectDayRollover 更新为 newDay。
 				ac.as.SetDailyPlan(plan, newDay)
 			}
@@ -1244,9 +1235,9 @@ func (a *agentContext) latestTimeOfDay() string {
 //
 // 重新规划时机选在 06:00-07:00 规划窗口内（selectCurrentGoal 已屏蔽战术层
 // 分解），此时 NPC 通常在执行夜间睡眠 composite。detectDayRollover 仅替换
-// dailyPlan，**不打断**在途睡眠——让 NPC 自然睡到 07:00，由 advanceSlotIfNeeded
-// 打断后走 tacticalRefill 选新计划 slot。这样避免了"06:00 强制打断睡眠后
-// NPC 空等 1 小时"的尴尬。
+// dailyPlan，**不打断**在途睡眠——让 NPC 睡到睡眠段 time_to_stop 预算到点
+// （P3-8 后 slot 过期只标记 pending），安全点后走 tacticalRefill 选新计划
+// slot。这样避免了"06:00 强制打断睡眠后 NPC 空等 1 小时"的尴尬。
 func (a *agentContext) detectDayRollover() (rollover bool, prevDay, newDay int) {
 	return a.as.DetectDayRollover()
 }
@@ -1256,12 +1247,14 @@ func (a *agentContext) latestZone() string {
 	return a.as.LatestZone()
 }
 
-// idleWaitSeconds 与 sendIdleWait 已移除：长复合动作持续到时段切换由
-// advanceSlotIfNeeded 打断，短动作队列空时由 tacticalRefill 重新分解
+// idleWaitSeconds 与 sendIdleWait 已移除：长复合动作靠必填 duration 的
+// time_to_stop 预算终止，短动作队列空时由 tacticalRefill 重新分解
 // （内部注入"未安排长动作"hint），不再发 idle wait。
 
 // isCompositeCmdDynamic 判断 cmd 是否为长复合动作（不设 action_completed 超时，
-// 持续执行到下一 schedule 时段切换由 advanceSlotIfNeeded 主动打断）。
+// 终止靠必填 duration 武装的 time_to_stop 预算——P3-8 后 slot 过期只标记
+// pending 等安全点，不再主动打断；若 LLM 违反 schema 漏填 duration，复合
+// 动作将无终止路径，靠 fillDefaultDuration* 兜底的部分交互除外）。
 //
 // 先查 protocol.IsCompositeCmd 硬编码的 6 个内置复合 cmd（向后兼容），
 // 再查 capability_registry 的 Kind 字段兜底——UE5 通过 capability_registry
@@ -1295,12 +1288,15 @@ func (a *agentContext) popAndSendQueueAction(ctx context.Context, agentID string
 		return
 	}
 
-	// slot 切换后首次下发：先发 stop 停掉旧复合动作（UE 仍 busy），
-	// 再发新 action_command。WS 顺序保证 UE 先处理 stop 清 busy 再处理新 action。
-	// 标记 selfStopInProgress：等 stop 引发的 action_completed(interrupted) 到达时
-	// 由 recordActionCompletion 抑制反应层触发（slot 切换是计划内，不应 replan）。
+	// 延迟 stop 补发：pendingStopActionID 的设置点有两处——checkTimeToStop
+	// （段切换：当前段 time_to_stop 到点）与 processSlotSwitch（slot 切换：
+	// 安全点清理时旧复合动作仍在 UE 执行）。两种来源都在此统一补发 stop，
+	// 再发新 action_command。WS 顺序保证 UE 先处理 stop 清 busy 再处理新
+	// action。标记 selfStopInProgress：等 stop 引发的 action_completed
+	// (interrupted) 到达时由 recordActionCompletion 抑制反应层触发（计划内
+	// 打断，不应 replan）。
 	if pendingStop != "" {
-		logger.Info("[战术层] slot 切换后补发 stop 再下发新 action",
+		logger.Info("[战术层] 补发延迟 stop 再下发新 action",
 			"agent_id", agentID, "stop_action_id", pendingStop, "new_action", pa.Action)
 		if err := ws.SendStopAction(agentID, pendingStop); err != nil {
 			logger.Warn("[战术层] 补发 stop_action 失败",
@@ -1385,9 +1381,10 @@ func (a *agentContext) popAndSendQueueAction(ctx context.Context, agentID string
 					"agent_id", agentID, "action_id", ack.ActionID, "duration_sec", tts, "target_game_time", start+tts)
 			}
 		}
-		// 长复合动作不设超时：持续执行到下一 schedule 时段切换由
-		// advanceSlotIfNeeded 主动打断，自己不会超时。
-		// 用动态判断兜底 UE5 新推送的复合 cmd（如 WorkShift/SelfMaintenance）。
+		// 长复合动作不设 action_completed 超时：终止靠必填 duration 武装的
+		// time_to_stop 预算（P3-8 后 slot 过期只标记 pending 等安全点，不再
+		// 主动打断复合动作）。用动态判断兜底 UE5 新推送的复合 cmd（如
+		// WorkShift/SelfMaintenance）。
 		if !isCompositeCmdDynamic(cmd, capabilityRegistryRef) {
 			// lookup 返回 a 自身——超时回滚只需清当前 agent 状态
 			a.armActionTimeout(ack.ActionID, ack.EstimatedDurationSec, ws, agentID, func(string) *agentContext { return a })

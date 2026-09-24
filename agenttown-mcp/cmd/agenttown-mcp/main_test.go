@@ -1302,8 +1302,8 @@ func TestWorldKBSwap_MergeErrorPreservesOldKB(t *testing.T) {
 	}
 }
 
-// ─── idleWaitSeconds 测试已移除：函数本身已删除（长复合动作持续到时段切换
-//     由 advanceSlotIfNeeded 打断，短动作队列空时由 tacticalRefill 重新分解，
+// ─── idleWaitSeconds 测试已移除：函数本身已删除（长复合动作靠必填 duration
+//     的 time_to_stop 预算终止，短动作队列空时由 tacticalRefill 重新分解，
 //     不再发 idle wait）。
 
 // TestFormatTodSec 验证 time_of_day_sec → "HH:MM" 转换（约定 19）。

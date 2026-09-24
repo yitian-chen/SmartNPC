@@ -82,8 +82,8 @@ graph TB
 - **战术层 user prompt 首条全量 + 后续精简引用**：日内不变块（【全天日程】+ 完整分解规则）只在每天第一条战术 user 消息出现；同计划后续轮次省略两块、改为核心约束速览 + 引用行（`TacticalInput.Compact`，实测每条 2100→~900 字符，-57%）。判定与置位：`AgentState.tacticalHeaderPlan` 记录"最近成功注入全量头的计划字符串"（成功 agenticTurn 后、parse 之前置位），与当前 dailyPlan 比对——不等（跨日/日内重规划）即重新全量注入；`ClearConversation` 随历史一起重置。dailyPlan=="" 的 `/debug/schedule` 路径永不精简
 - **`<agent_state>` 状态栏**（事件驱动设计 §6.1，`agent_state_bar.go`）：`agenticTurn` 在 messages 末尾追加一条瞬态 user 消息，四行：当前游戏时间（`D<DayCount+1> HH:MM:SS`）、物理状态（`PhysicalLine` 分档自然语言，非裸数值）、当前日程与剩余时间（`[序号/总数] 时段 goal（剩余约 N 分钟）`，跨午夜经 `NormalizeTodToSlot` 归一）、当前动作与剩余时间（工具名+关键参数，剩余按 `time_to_stop` 目标时刻推算）。**不入会话历史**——每轮请求从 AgentState 现查现拼（旧状态栏留在历史里只会误导），前缀保持稳定、KV cache 只失效尾巴；成功落历史的是 userContent 本身。无感知数据（UE 未推首条 perception）返回空串跳过注入
 - **venus 4001 重试**：战术层 LLM 调用返回 4001（venus 校验 tools JSON 失败，LLM 输出坏 JSON）时以相同请求体重试，上限 3 次（`maxTacticalRetries`，`isVenusErrorCode` 匹配错误码）；超时/连接错误不重试，走兜底。实测重试后 4001 全部被救回
-- **多段动作计划 + time_to_stop**：LLM 一次返回 1-4 个动作段，段间设 `time_to_stop` 控制时长；到点 `ClearInFlightKeepQueue` 打断当前段、保留队列继续下一段；末段不设 time_to_stop 自然持续到时段切换
-- **time_to_stop 兜底**（不依赖 LLM 自觉）：`fillDefaultTimeToStopForRest` 给非队尾休息动作补 1800s、`fillDefaultTimeToStopForWork` 给非队尾工作动作补 5400s——防止中间动作漏设导致队列卡死（NPC 一直坐长椅/一直工作）
+- **多段动作计划 + time_to_stop**：LLM 一次返回 1-4 个动作段，`duration` 在工具 schema 中必填（2026-09-03 起——实测 optional 的 duration 从不被填），规则 8 要求末段 duration = 时段剩余时长；到点 `ClearInFlightKeepQueue` 打断当前段、保留队列继续下一段，stop 延迟到下一段下发前补发（期间 NPC 继续旧动作不呆站）。**slot 切换事件化（P3-8，§4.5"时段切换也走队列"）**：slot 过期**不强切**——`advanceSlotIfNeeded` 只标记 `slotSwitchPending` + 清 currentSlot，真正清理（`ClearForSlotSwitch` + 计划内结束捕捉）等安全点（无在途动作）由 `processSlotSwitch` 执行；末段终止靠自身 time_to_stop 预算（目标时刻通常 ≈ slot 边界，±几分钟）或自然完成，反应进行中同样只挂 pending。实测（2026-09-24 会话）：全天 24 个 stop_action 中 23 个是段/slot 切换的延迟补发、1 个 force 事件，slot 切换机制本身零 stop；slot 过期 → 安全点清理间隔 0-19s（反应跨边界挂起等反应结束）
+- **time_to_stop 兜底**（不依赖 LLM 自觉）：`fillDefaultDurationForRest` 给所有休息动作（含队尾）补 1800s、`fillDefaultDurationForWork` 给所有工作类动作（含队尾）补 5400s——队尾不设 duration 会导致 P3-8 延迟切换后 `processSlotSwitch` 永远等不到安全点。**已知空缺**：兜底只覆盖 rest/工作类 interaction，charge/sleep/repair/surf 及复合工具漏 duration 时无兜底——复合 cmd 豁免 `armActionTimeout` 且无 time_to_stop 即无终止路径（实测 09-23/24 会话 136 个长动作仅 2 个漏 duration，均为 atomic 有超时兜底，未发生悬挂）
 - **LLM 失败兜底**：战术层分解失败且队列空时补发 `fallbackRetryActions()`（speak"网络波动了"+ generic_act look_around 30s），避免呆站，动作执行完 completion 再唤醒重试
 - **zone 透传**：`mapTacticalAction` 对 `InteractSmartObject` 透传 LLM 填写的 `zone` 参数（UE 支持），否则"去中央广场长椅"会落到 NPC 所在 zone 的设施
 - **move_to/turn_to 目标校验（2026-09-21）**：按 target_type 校验必填参数（agent/smart_object/zone → target_id 必填；position → target_position 必填），缺目标指令在 MCP 侧拒绝（不再透传 UE——实测 UE 对无目标 MoveTo 秒回 success，逃跑从未发生且队列瞬间耗尽触发连环 refill）；拒绝原因以 user role 注入会话历史（镜像动作完成结果的注入形态，带 tool_call_id），下一轮分解 LLM 可见并自我纠正。schema 层 `capabilityParamsSchema` 对 target_id/target_position 描述按 target_type 给完整指引（无论 registry 来自 seed 还是 UE push——UE push 的描述只提 actor，LLM 曾因此输出 target_type=zone 却无 target_id）。顺带修复：LLM 坐标经 json.Unmarshal 是 []any，旧 `[]float64` 断言不成立，target_position 从未透传过
@@ -561,7 +561,7 @@ NPC 行为随 7 天周期变化：前 5 天工作日、后 2 天休息日；第 
 
 ### UE Busy 状态
 
-长耗时复合动作（`WorkShift`/`ChargeAtStation`/`SelfMaintenance`/`RestAtResidence`/`SurfInternet`）由 UE5 行为树执行，MCP 侧通过 time_to_stop 或 slot 切换打断。感知循环自然推进时间，NPC 留在原位直到时间到达。
+长耗时复合动作（`WorkShift`/`ChargeAtStation`/`SelfMaintenance`/`RestAtResidence`/`SurfInternet`）由 UE5 行为树执行，MCP 侧通过 time_to_stop 预算到点打断（duration schema 必填）；slot 过期不硬切——标记 pending 等动作结束后安全点切换（P3-8）。感知循环自然推进时间，NPC 留在原位直到时间到达。
 
 - 忙碌期间拒绝破坏性动作：`MoveTo`/`TurnTo`/`InteractSmartObject`/5 个复合 cmd/`Wait`
 - 短动作立即执行 + 发 `action_completed`
@@ -861,7 +861,7 @@ bash start-dev.sh       # 偏移端口 8770/9093 + logs-dev/ 日志目录
 按严重度排序：
 
 1. **UE 端 zone 查找 bug（no_smartobject_in_zone）**：带旋转（yaw≠0）的 zone（logistics_hub 41°、residential_quarters 45°）内物体查找失败——world_kb 导出与 UE 运行时的旋转方向约定不一致，`InteractSmartObject zone=logistics_hub` 全部秒拒（bench/process_machine 均中招）；WorkShift 等复合动作按 semantic_group 全地图查找不受影响。**需 UE 端修复**；MCP 侧可做规避（失败剥离 zone 重试 / 引导优先用 WorkShift）
-2. **充电/维修动作被 slot 切换打断**：战略层给的充电 slot 仅 30 分钟，战术层动作（speak 前置 + tts 1500s）还没充完就撞上 slot 边界被 stop，充电未生效——低电量 NPC 尝试充电 8 次全部 interrupted，电量持续下降。修复方向：战略层给充电/维修安排 ≥1 小时 slot，或战术层在 slot 末尾不安排会被打断的长动作
+2. **充电/维修动作在 slot 边界被打断**：战略层给的充电 slot 仅 30 分钟，战术层动作（speak 前置 + tts 1500s）还没充完，末段 time_to_stop 预算（规则 8 要求 ≈ 时段剩余时长）就在 slot 边界到点切段，充电未生效——低电量 NPC 尝试充电 8 次全部 interrupted，电量持续下降（注：slot 切换机制本身已事件化不强切，P3-8；打断来自末段预算设计）。修复方向：战略层给充电/维修安排 ≥1 小时 slot，或战术层在 slot 末尾不安排会被打断的长动作
 3. **夜间时段切换请求突发超时**：22:00 前后所有 NPC 日程同时切到睡眠时段，5 个战术层请求 18 秒内并发打向 venus，后端排队导致 4 个 60s 超时（重试错峰后恢复）。修复方向：slot 切换触发的分解加随机错峰延迟
 4. **战术层队列提前耗尽**：LLM 给的 action 总时长不够 slot 时长，触发重分解。已用 time_to_stop 兜底（rest/work 补默认值）部分缓解
 5. **战略层日程质量参差**：同一 prompt 下 LLM 采样方差大（4-9 条不等），首段可能违反"禁止安排工作"硬约束。短时段裁剪逻辑已停用
