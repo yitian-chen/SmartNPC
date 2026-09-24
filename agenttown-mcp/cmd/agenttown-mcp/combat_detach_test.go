@@ -11,6 +11,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -437,6 +438,176 @@ func TestCombatExit_ForceVariantAlsoReturns(t *testing.T) {
 		}
 		return false
 	})
+}
+
+// ─── 脱战桥接动作（2026-09-24）────────────────────────
+//
+// 脱战归还 → 战术重规划 LLM（实测 ~2-6s，上限 tactical-timeout 60s）→
+// 新队列 pop 之间 NPC 确定性呆站。桥接动作：归还即 goroutine 直发
+// generic_act look_around 填空窗，不记在途（不挡 PopActionIfIdle 在途
+// 守卫、不污染 UnfinishedTask/LastEndResult），收尾由 pop 的
+// pendingStopActionID 延迟补发在首个真动作前精确 stop。
+
+// TestCombatExit_BridgeActionFillsReplanWindow 钉住桥接的存在意义：LLM
+// 门控期间（模拟战术层生成中）桥接已下发且 pendingStop 已置位、replan
+// 仍持有 slot（计划未提交）——三者同时成立即"桥接填的是 LLM 空窗"。
+// 放行后 pop 先补发桥接 stop，再下发首个真动作。
+func TestCombatExit_BridgeActionFillsReplanWindow(t *testing.T) {
+	rt, ft, ac := newWorldEventTestRuntime(t)
+	gate := make(chan struct{})
+	ac.tacticalHc = &fakeLoopLLM{resp: speakToolCallResp(), gate: gate}
+	seedPerception(t, ac)
+	// worker boot 在手动模式下会重置 dailyPlan（runPerceptionWorker 入口
+	// SetDailyPlan("",-1)）——先装哨兵计划等 boot 抹掉，再装真计划，消除
+	// "boot 晚于装计划把计划清空"的竞态（replan 会因无 goal 秒退）。
+	ac.as.SetDailyPlan("sentinel", -1)
+	startTestWorker(t, ac, ft)
+	waitFor(t, 2*time.Second, func() bool {
+		plan, _, _ := ac.as.SnapshotSchedule()
+		return plan == ""
+	})
+	ac.as.SetDailyPlan("09:00-12:00: 车间装配作业", 11)
+
+	yieldViaDetach(t, rt, "evt_atk")
+	ft.mu.Lock()
+	ft.sendActionAck = &protocol.ActionStartedPayload{ActionID: "act_bridge"}
+	ft.mu.Unlock()
+
+	dispatchTestEvent(t, rt, "H-01", combatExitTestEvent("evt_exit"))
+
+	// 门控期间：桥接已下发 + pendingStop 置位 + replan 在途。
+	waitFor(t, 2*time.Second, func() bool {
+		ft.mu.Lock()
+		hasBridge := len(ft.sentActions) > 0 && ft.sentActions[0].cmd == protocol.CmdGenericAct
+		ft.mu.Unlock()
+		return hasBridge && ac.as.PendingStopActionID() == "act_bridge" && !replanIdle(ac)
+	})
+	ft.mu.Lock()
+	behavior := ft.sentActions[0].params["behavior"]
+	ft.mu.Unlock()
+	if behavior != "look_around" {
+		t.Fatalf("bridge behavior = %v, want look_around", behavior)
+	}
+
+	// 放行 LLM：计划提交 → replan 释放 → 补一次 signal 兜底（生产里由
+	// perception 周期兜底，测试里显式给）→ pop 先补发桥接 stop 再下发
+	// 首个真动作（speak 首段）。
+	close(gate)
+	waitFor(t, 2*time.Second, func() bool { return replanIdle(ac) })
+	ac.signal()
+	waitFor(t, 3*time.Second, func() bool {
+		ft.mu.Lock()
+		stops := append([]string(nil), ft.stopActionIDs...)
+		actions := append([]sentAction(nil), ft.sentActions...)
+		ft.mu.Unlock()
+		bridgeStops := 0
+		for _, s := range stops {
+			if s == "act_bridge" {
+				bridgeStops++
+			}
+		}
+		return bridgeStops == 1 && len(actions) >= 2 && actions[1].cmd == protocol.CmdSpeak
+	})
+}
+
+// TestCombatExit_BridgeSkippedWhenNoAck：UE 未 ack（fakeTransport 默认
+// sendActionAck=nil）时桥接静默跳过——归还路径行为与改动前完全一致，
+// 既有 stop 断言零扰动。
+func TestCombatExit_BridgeSkippedWhenNoAck(t *testing.T) {
+	rt, ft, ac, _, _ := newRouterTestRuntime(t, notInterruptJudge())
+	ac.tacticalHc = &fakeLoopLLM{resp: speakToolCallResp()}
+	seedPerception(t, ac)
+	ac.as.SetDailyPlan("09:00-12:00: 车间装配作业", 11)
+	ac.as.RecordActionStarted("act-1", "WorkShift", nil, agentstate.SourceTactical, "")
+
+	yieldViaDetach(t, rt, "evt_atk")
+	dispatchTestEvent(t, rt, "H-01", combatExitTestEvent("evt_exit"))
+	waitFor(t, 2*time.Second, func() bool { return replanIdle(ac) })
+
+	ft.mu.Lock()
+	actions := append([]sentAction(nil), ft.sentActions...)
+	ft.mu.Unlock()
+	for _, a := range actions {
+		if a.cmd == protocol.CmdGenericAct {
+			t.Fatalf("bridge must be skipped without an ack, got %+v", a)
+		}
+	}
+	if ps := ac.as.PendingStopActionID(); ps != "" {
+		t.Fatalf("pendingStop = %q, want empty (no bridge dispatched)", ps)
+	}
+	if stops := stoppedActions(ft); len(stops) != 1 || stops[0] != "act-1" {
+		t.Fatalf("expected exactly the catch-up stop for act-1, got %v", stops)
+	}
+}
+
+// TestCombatExit_BridgeNaturalCompletionClearsPendingStop：桥接在计划
+// 就绪前自然完成（UE montage 结束）时，completion 按 ID 匹配清掉
+// pendingStop（清除不依赖在途记账）——后续 pop 不补发陈旧 stop。
+func TestCombatExit_BridgeNaturalCompletionClearsPendingStop(t *testing.T) {
+	rt, ft, ac := newWorldEventTestRuntime(t)
+	ac.tacticalHc = &fakeLoopLLM{resp: speakToolCallResp()}
+	seedPerception(t, ac)
+	ac.as.SetDailyPlan("09:00-12:00: 车间装配作业", 11)
+
+	yieldViaDetach(t, rt, "evt_atk")
+	ft.mu.Lock()
+	ft.sendActionAck = &protocol.ActionStartedPayload{ActionID: "act_bridge"}
+	ft.mu.Unlock()
+	dispatchTestEvent(t, rt, "H-01", combatExitTestEvent("evt_exit"))
+
+	waitFor(t, 2*time.Second, func() bool { return ac.as.PendingStopActionID() == "act_bridge" })
+	// UE 自然完成桥接（untracked completion，不合成事件）。
+	ac.recordActionCompletion(protocol.ActionCompletedPayload{
+		ActionID: "act_bridge", Result: protocol.ResultSuccess,
+	})
+	if ps := ac.as.PendingStopActionID(); ps != "" {
+		t.Fatalf("natural completion must clear pendingStop, got %q", ps)
+	}
+}
+
+// TestCombatExit_BridgeSendFailureProceeds：桥接 SendAction 失败（UE 断连
+// 瞬间）时链路不死锁——bridgeDone 照常关闭，重规划照常提交新队列。
+func TestCombatExit_BridgeSendFailureProceeds(t *testing.T) {
+	rt, ft, ac := newWorldEventTestRuntime(t)
+	ac.tacticalHc = &fakeLoopLLM{resp: speakToolCallResp()}
+	seedPerception(t, ac)
+	ac.as.SetDailyPlan("09:00-12:00: 车间装配作业", 11)
+
+	yieldViaDetach(t, rt, "evt_atk")
+	ft.mu.Lock()
+	ft.sendActionErr = errors.New("ue disconnected")
+	ft.mu.Unlock()
+	dispatchTestEvent(t, rt, "H-01", combatExitTestEvent("evt_exit"))
+
+	// 锚定"计划已提交"而非仅 replanIdle（后者在链路尚未 acquire 时也为真）。
+	waitFor(t, 2*time.Second, func() bool {
+		return replanIdle(ac) && ac.hasQueueNext()
+	})
+	if ac.combatYieldActive() {
+		t.Fatalf("yield must still end when the bridge dispatch fails")
+	}
+	if ps := ac.as.PendingStopActionID(); ps != "" {
+		t.Fatalf("failed bridge must not set pendingStop, got %q", ps)
+	}
+}
+
+// TestCombatExit_BridgeOverwritesStalePendingStop：进战斗前残留的陈旧
+// pendingStop（段切换刚置位就 detach 的场景）被桥接 ID 覆盖——单槽语义
+// 自愈，不泄漏陈旧 stop。
+func TestCombatExit_BridgeOverwritesStalePendingStop(t *testing.T) {
+	rt, ft, ac := newWorldEventTestRuntime(t)
+	ac.tacticalHc = &fakeLoopLLM{resp: speakToolCallResp()}
+	seedPerception(t, ac)
+	ac.as.SetDailyPlan("09:00-12:00: 车间装配作业", 11)
+
+	ac.as.SetPendingStopActionID("stale_seg_stop")
+	yieldViaDetach(t, rt, "evt_atk")
+	ft.mu.Lock()
+	ft.sendActionAck = &protocol.ActionStartedPayload{ActionID: "act_bridge"}
+	ft.mu.Unlock()
+	dispatchTestEvent(t, rt, "H-01", combatExitTestEvent("evt_exit"))
+
+	waitFor(t, 2*time.Second, func() bool { return ac.as.PendingStopActionID() == "act_bridge" })
 }
 
 // TestCombatYieldTTL_ExpiryReturnsControl verifies the TTL safety net: no

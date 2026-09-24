@@ -267,6 +267,9 @@ func TestStrategicReplan_BracketlessResponseEndToEnd(t *testing.T) {
 
 // startTestWorker boots a real runPerceptionWorker（包级 autoPlanEnabled 在
 // 测试中保持 false：worker 只走守卫链 + pop 路径，不产生任何 LLM 调用）。
+// 注意：worker 入口在手动模式下会 SetDailyPlan("",-1) 重置计划——需要
+// dailyPlan 的测试先装哨兵计划等 boot 抹掉后再装真计划（见
+// TestCombatExit_BridgeActionFillsReplanWindow），否则 replan 因无 goal 秒退。
 func startTestWorker(t *testing.T, ac *agentContext, ft *fakeTransport) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())

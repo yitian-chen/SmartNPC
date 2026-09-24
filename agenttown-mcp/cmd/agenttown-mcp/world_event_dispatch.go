@@ -446,7 +446,14 @@ func (a *agentContext) reclaimFromCombatYield(ctx context.Context, agentID strin
 		reason += "（超时兜底归还：未收到 combat_exit 解除信号）"
 	}
 	reason += "，当前状态已偏离当日计划制定时的假设，请重排剩余时段（如优先安排维修、充电等恢复时段，再回到原日程）"
+	// 脱战桥接动作：归还即下发短 look_around，填补下方战术重规划 LLM 的
+	// 几秒空窗（机制详见 dispatchCombatExitBridgeAction）。
+	bridgeDone := a.dispatchCombatExitBridgeAction(ctx, agentID, ws, logger)
 	go func() {
+		// 桥接先落地（或失败）再重规划：保证"桥接命令先发、计划后提交"的
+		// 全序，防止两路 action_command 交错（计划先提交会让 UE 拿
+		// look_around 盖过队列里的真动作）。
+		<-bridgeDone
 		a.forceInterruptReplan(ctx, agentID, ws, kb, profiles, ev, hint, logger)
 		// 重复攻击在战术 replan 期间重新让位（被掐掉）时，maybeStrategicReplan
 		// 顶部的让位守卫会跳过战略修订——让位中不该有任何 LLM 规划，下一次
@@ -456,6 +463,64 @@ func (a *agentContext) reclaimFromCombatYield(ctx context.Context, agentID strin
 	logger.Info("[combat-detach] 控制权归还 agent（战斗结束），重规划回日程",
 		"agent_id", agentID, "event_id", ev.EventID, "event_type", ev.EventType, "ttl_expiry", ttl,
 		"phys_delta", deltaLine)
+}
+
+// dispatchCombatExitBridgeAction 下发脱战桥接动作：combat_exit 归还后、
+// 战术重规划 LLM 生成新队列前（flash 实测 ~2-6s，上限 tactical-timeout
+// 60s）的空窗里，先给 UE 一个短 generic_act look_around，NPC 环顾四周
+// 确认安全而非呆站。TTL 兜底归还与 combat_exit 共用本函数。
+//
+// 实现约束（每条都有明确理由）：
+//   - 必须在独立 goroutine 里 SendAction：wsserver 的消息 handler 在读循环
+//     goroutine 上 inline 执行，而 SendAction 要等 action_started ack——
+//     同一条读循环才能读到的入站消息——在读循环路径（combat_exit 分支）
+//     同步调用必然死等到超时。TTL 归还路径虽在 worker goroutine，统一
+//     goroutine 化。
+//   - 不 recordActionStarted（不记在途）：桥接是填充物不是决策产物——入账
+//     会挡住 PopActionIfIdle 的在途守卫（新队列要等桥接的 interrupted
+//     completion 往返才能下发），还会清 UnfinishedTask/改写 LastEndResult
+//     污染战略层修订原因。不记账则其 completion 走 untracked 路径，不合成
+//     事件、不写 action_history。收尾改用 slot-switch 同款
+//     pendingStopActionID 延迟补发机制：pop 下发第一个真动作前自动补发
+//     精确 stop（popAndSendQueueAction 的延迟补发路径，同 goroutine WS
+//     有序，UE 先清 busy 再收新 action）；桥接自然完成时
+//     RecordActionCompletion 按 ID 匹配清掉标记，不发陈旧 stop；战术失败
+//     → abandon → refill 后的第一次 pop 照样收尾（该标记不被
+//     ClearForReplan 清）。单槽覆盖也让让位前残留的陈旧标记自愈。
+//   - 不 ArmTimeStop / 不 armActionTimeout：time_to_stop 预算是游戏秒，
+//     time_scale=90 下 30 游戏秒 ≈ 0.33 墙秒，即刻到点无意义；不记账也无
+//     从 arm 墙钟保险丝。UE 的 look_around montage 自身有限长，最坏 UE
+//     挂起时仅视觉残留，无状态腐坏。
+//   - 返回的 chan 在 ack 处理完（或失败）后关闭：归还链 goroutine 等它
+//     再开始重规划，保证"桥接命令先发、计划后提交"的全序。等待上限 =
+//     ack 超时，只在 UE 无响应时发生（彼时 LLM 计划也白发）。
+//
+// 已接受的微小竞态：reclaim 的归还补 stop（inline 写）与桥接命令（本
+// goroutine 写）的写序不保证——输掉的后果只是桥接被 UE busy 拒（ack 带
+// 错误 → 无桥接，退回现状），不腐坏任何状态。
+func (a *agentContext) dispatchCombatExitBridgeAction(ctx context.Context, agentID string,
+	ws contract.Transport, logger *slog.Logger) chan struct{} {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		// GenericAct 非智能体对象 cmd，autoQueue=false 与 shouldAutoQueue
+		// 口径一致；duration 是 MCP 侧游戏秒控制字段，刻意不带（见上）。
+		params := map[string]any{
+			"behavior": "look_around",
+			"thought":  "战斗刚结束，环顾四周确认安全",
+		}
+		ack, err := ws.SendAction(ctx, agentID, protocol.CmdGenericAct, params, false)
+		if err != nil || ack == nil {
+			logger.Debug("[combat-detach] 脱战桥接动作未下发（发送失败或 UE 未 ack），空窗保持原状",
+				"agent_id", agentID, "err", err)
+			return
+		}
+		// 收尾由 pop 的延迟补发 stop 接管（见函数头注释）。
+		a.as.SetPendingStopActionID(ack.ActionID)
+		logger.Info("[combat-detach] 脱战桥接动作已下发（填补战术重规划空窗）",
+			"agent_id", agentID, "action_id", ack.ActionID)
+	}()
+	return done
 }
 
 // combatPhysDeltaLine renders the attribute drift during a combat yield
