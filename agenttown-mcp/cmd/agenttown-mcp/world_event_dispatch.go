@@ -526,6 +526,19 @@ func (a *agentContext) checkCombatYieldExpiry(ctx context.Context, agentID strin
 	return true
 }
 
+// replan slot 的持有者种类（replanKind 字段）。
+const (
+	// replanKindTactical：force/路由打断的战术重规划（forceInterruptReplan）
+	// 与 /debug/schedule 注入。入口已 ClearForReplan 清空队列，worker 在途
+	// 期间保持全跳过（pop/refill 都不放行）。
+	replanKindTactical = "tactical"
+	// replanKindStrategic：战略层修订（strategic_replan.go）。只改
+	// dailyPlan/slot，不碰已提交的战术队列——worker 在其 LLM 在途期间
+	// 放行 pop（2026-09-24 修复：归还链第二跳曾阻塞第一跳队列 60s，
+	// NPC 呆站至修订超时、slot 过期后队列被安全点清理丢弃）。
+	replanKindStrategic = "strategic"
+)
+
 // forceInterruptReplan runs the post-interrupt replan for a force event.
 // The interruption itself already fired synchronously in handleForceEvent
 // (the §4.2 guarantee); this goroutine only does the tactical work of
@@ -538,14 +551,10 @@ func (a *agentContext) forceInterruptReplan(ctx context.Context, agentID string,
 	ws contract.Transport, kb *worldkb.KB, profiles map[string]*profile.Profile,
 	ev protocol.WorldEventPayload, hint string, logger *slog.Logger) {
 
-	if !a.acquireReplanSlot(agentID, hint, logger) {
+	if !a.acquireReplanSlot(agentID, hint, logger, replanKindTactical) {
 		return
 	}
-	defer func() {
-		a.coordMu.Lock()
-		a.replanInProgress = false
-		a.coordMu.Unlock()
-	}()
+	defer a.releaseReplanSlot()
 
 	ok, cancelled := a.tacticalRefillForReplan(ctx, agentID, ws, kb, profiles, logger, hint)
 	if cancelled {
@@ -589,8 +598,10 @@ func (a *agentContext) forceInterruptReplan(ctx context.Context, agentID string,
 // reactive layer) to finish, then takes the replanInProgress slot. Bails on
 // agent stop or wait-limit expiry — in both, the interruption has already
 // fired and the hint is set, so the worker's natural refill still carries
-// the event context.
-func (a *agentContext) acquireReplanSlot(agentID, hint string, logger *slog.Logger) bool {
+// the event context. kind records the holder (replanKindTactical/Strategic):
+// the worker exempts strategic holders from the pop block (see
+// runPerceptionWorker 的 replanBusy 分支).
+func (a *agentContext) acquireReplanSlot(agentID, hint string, logger *slog.Logger, kind string) bool {
 	deadline := time.Now().Add(forceReplanWaitLimit)
 	for {
 		a.coordMu.Lock()
@@ -600,6 +611,7 @@ func (a *agentContext) acquireReplanSlot(agentID, hint string, logger *slog.Logg
 			return false
 		case !a.replanInProgress:
 			a.replanInProgress = true
+			a.replanKind = kind
 			a.coordMu.Unlock()
 			return true
 		}
@@ -612,6 +624,16 @@ func (a *agentContext) acquireReplanSlot(agentID, hint string, logger *slog.Logg
 		}
 		time.Sleep(forceReplanPollInterval)
 	}
+}
+
+// releaseReplanSlot releases the replanInProgress slot and its kind mark.
+// Callers that clear the slot inline (abandonCurrentPlan, /debug/schedule)
+// must clear replanKind the same way.
+func (a *agentContext) releaseReplanSlot() {
+	a.coordMu.Lock()
+	a.replanInProgress = false
+	a.replanKind = ""
+	a.coordMu.Unlock()
 }
 
 // abandonCurrentPlan drops the stale plan after a failed replan: clears the
@@ -635,6 +657,7 @@ func (a *agentContext) abandonCurrentPlan(agentID string, ws contract.Transport,
 
 	a.coordMu.Lock()
 	a.replanInProgress = false
+	a.replanKind = ""
 	if actionID != "" {
 		if timer, ok := a.pendingActionTimeouts[actionID]; ok {
 			timer.Stop()

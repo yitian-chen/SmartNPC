@@ -10,10 +10,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/AgentTown/agenttown-mcp/contract/protocol"
 	"github.com/AgentTown/agenttown-mcp/pkg/agentstate"
 	"github.com/AgentTown/agenttown-mcp/pkg/llmtypes"
 	"github.com/AgentTown/agenttown-mcp/pkg/prompt"
 	"github.com/AgentTown/agenttown-mcp/pkg/venus"
+	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
 )
 
 // fakeLoopLLM 需要 tools 目录（agenticTurn 会派生 tools）——空目录即可
@@ -252,5 +254,106 @@ func TestStrategicReplan_BracketlessResponseEndToEnd(t *testing.T) {
 	}
 	if items[2].Goal != "处理故障后续" || idx != 2 {
 		t.Fatalf("bracket-less response must still revise the plan, got %q idx=%d", items[2].Goal, idx)
+	}
+}
+
+// ─── 归还链第二跳阻塞修复（2026-09-24）────────────────────────
+//
+// 实测（09-24 会话）：combat_exit 归还链的第一跳（战术重规划）提交队列后，
+// 第二跳（战略层修订）同毫秒持有 replanInProgress，worker 的 replanBusy
+// 守卫连 pop 一起跳过——修订 LLM 60s 超时期间 NPC 呆站，slot 过期后队列
+// 还被安全点清理丢弃。修复：replanKind 区分持有者，战略修订期间放行 pop
+// （refill 仍禁止）；战术 replan 行为不变。
+
+// startTestWorker boots a real runPerceptionWorker（包级 autoPlanEnabled 在
+// 测试中保持 false：worker 只走守卫链 + pop 路径，不产生任何 LLM 调用）。
+func startTestWorker(t *testing.T, ac *agentContext, ft *fakeTransport) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(func() { cancel(); ac.stop() })
+	go runPerceptionWorker(ctx, "H-01", ac, ft, &worldkb.KB{}, nil, nil, testLogger())
+}
+
+func sentActionCount(ft *fakeTransport) int {
+	ft.mu.Lock()
+	defer ft.mu.Unlock()
+	return len(ft.sentActions)
+}
+
+// TestWorker_PopsQueueDuringStrategicReplan 钉住修复本身：战略修订持有
+// slot 期间，第一跳已提交的战术队列照常 pop 下发——pop 不等修订完成。
+func TestWorker_PopsQueueDuringStrategicReplan(t *testing.T) {
+	_, ft, ac := newWorldEventTestRuntime(t)
+	seedPerceptionWithPhys(t, ac, 9*3600, 80, 10, 20) // 09:00
+
+	if !ac.acquireReplanSlot("H-01", "test", testLogger(), replanKindStrategic) {
+		t.Fatalf("acquire strategic slot failed")
+	}
+	ft.sendActionAck = &protocol.ActionStartedPayload{ActionID: "act_strat_pop_1"}
+	ac.as.ReplaceQueue([]agentstate.PlannedAction{
+		{Action: "speak", Params: map[string]any{"content": "测试独白"}},
+		{Action: "generic_act", Params: map[string]any{"behavior": "look_around"}},
+	})
+
+	startTestWorker(t, ac, ft)
+	ac.signal()
+
+	waitFor(t, 3*time.Second, func() bool { return sentActionCount(ft) >= 1 })
+	// 关键断言：下发发生时 slot 仍被战略修订持有。
+	if replanIdle(ac) {
+		t.Fatalf("replan slot must still be held by the strategic revision")
+	}
+	ac.releaseReplanSlot()
+}
+
+// TestWorker_NoPopDuringTacticalReplan 钉住原行为：战术 replan（force/路由
+// 打断、/debug/schedule）在途期间 pop 保持全跳过——kind 豁免只给战略修订。
+func TestWorker_NoPopDuringTacticalReplan(t *testing.T) {
+	_, ft, ac := newWorldEventTestRuntime(t)
+	seedPerceptionWithPhys(t, ac, 9*3600, 80, 10, 20)
+
+	if !ac.acquireReplanSlot("H-01", "test", testLogger(), replanKindTactical) {
+		t.Fatalf("acquire tactical slot failed")
+	}
+	ft.sendActionAck = &protocol.ActionStartedPayload{ActionID: "act_tac_pop_1"}
+	ac.as.ReplaceQueue([]agentstate.PlannedAction{
+		{Action: "speak", Params: map[string]any{"content": "测试独白"}},
+	})
+
+	startTestWorker(t, ac, ft)
+	ac.signal()
+	// 若误放行，首个 wake（µs 级）就会下发；150ms 足以排除。
+	time.Sleep(150 * time.Millisecond)
+	if got := sentActionCount(ft); got != 0 {
+		t.Fatalf("tactical replan must block pops, got %d dispatches", got)
+	}
+
+	// 释放后照常 pop——证明此前只有 kind 在阻断，队列本身可下发。
+	ac.releaseReplanSlot()
+	ac.signal()
+	waitFor(t, 3*time.Second, func() bool { return sentActionCount(ft) >= 1 })
+}
+
+// TestAcquireReplanSlot_KindBookkeeping 钉住 kind 记账：acquire 置位、
+// release 归零。
+func TestAcquireReplanSlot_KindBookkeeping(t *testing.T) {
+	_, _, ac := newWorldEventTestRuntime(t)
+
+	if !ac.acquireReplanSlot("H-01", "test", testLogger(), replanKindStrategic) {
+		t.Fatalf("acquire failed")
+	}
+	ac.coordMu.Lock()
+	kind := ac.replanKind
+	ac.coordMu.Unlock()
+	if kind != replanKindStrategic {
+		t.Fatalf("replanKind = %q, want %q", kind, replanKindStrategic)
+	}
+
+	ac.releaseReplanSlot()
+	ac.coordMu.Lock()
+	busy, kind := ac.replanInProgress, ac.replanKind
+	ac.coordMu.Unlock()
+	if busy || kind != "" {
+		t.Fatalf("after release: replanInProgress=%v replanKind=%q, want idle/empty", busy, kind)
 	}
 }

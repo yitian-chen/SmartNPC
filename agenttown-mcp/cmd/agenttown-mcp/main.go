@@ -77,10 +77,16 @@ type agentContext struct {
 	as *agentstate.AgentState
 
 	// coordMu protects coordination fields below.
-	coordMu               sync.Mutex
-	stopped               bool
-	debugOverride         bool
-	replanInProgress      bool
+	coordMu          sync.Mutex
+	stopped          bool
+	debugOverride    bool
+	replanInProgress bool
+	// replanKind 标记当前持有 replanInProgress 的重规划种类（replanKind*
+	// 常量，"" = 无在途）。战略层修订只改 dailyPlan/slot、不碰第一跳已
+	// 提交的战术队列——worker 在其 LLM 在途期间仍可 pop 执行（归还链
+	// "战术先行"的设计意图）；战术 replan 在途期间队列已被 ClearForReplan
+	// 清空，worker 保持全跳过。
+	replanKind            string
 	pendingActionTimeouts map[string]*time.Timer // action_id → timeout timer
 	completedBeforeArm    map[string]struct{}    // action_id completed before timer armed
 	agentEpoch            int64
@@ -906,8 +912,21 @@ func runPerceptionWorker(
 		// 覆盖正在生成的新队列。
 		ac.coordMu.Lock()
 		replanBusy := ac.replanInProgress
+		replanKind := ac.replanKind
 		ac.coordMu.Unlock()
 		if replanBusy {
+			// 例外：战略层修订（归还链第二跳）只改 dailyPlan/slot，不碰第一
+			// 跳已提交的战术队列——修订 LLM 在途期间照常 pop，NPC 不因修订
+			// 而呆站（2026-09-24 实测：修订 60s 超时期间队列 2 个动作不能
+			// pop，NPC 呆站，slot 过期后队列还被安全点清理丢弃）。slot 已
+			// 过期（pending）也照常 pop：旧队列动作有自身 time_to_stop 有界，
+			// 修订落地后安全点自然收敛到新计划——比呆站整个修订时长更优。
+			// refill 仍禁止：修订正在重写计划，refill 会用旧计划白烧一次
+			// LLM 并与写回竞态。战术 replan 在途不放行：其队列已被
+			// ClearForReplan 清空（pop 本就 no-op），保持全跳过让语义单一。
+			if replanKind == replanKindStrategic && ac.hasQueueNext() {
+				ac.popAndSendQueueAction(ctx, agentID, ws, kb, logger)
+			}
 			continue
 		}
 
@@ -2681,14 +2700,15 @@ func handleDebugSchedule(ctx context.Context, logger *slog.Logger, ws contract.T
 		return
 	}
 	ac.replanInProgress = true
+	ac.replanKind = replanKindTactical
 	ac.debugOverride = true
 	curID := ac.as.CurrentActionID()
 	ac.coordMu.Unlock()
 
 	// defer：清互斥 + signal 唤醒 worker（处理入队后的 pop）。
 	defer func() {
+		ac.releaseReplanSlot()
 		ac.coordMu.Lock()
-		ac.replanInProgress = false
 		ac.debugOverride = false
 		ac.coordMu.Unlock()
 		ac.signal()

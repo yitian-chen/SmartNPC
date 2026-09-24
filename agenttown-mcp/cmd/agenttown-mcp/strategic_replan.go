@@ -79,14 +79,10 @@ func (a *agentContext) strategicReplan(ctx context.Context, agentID string,
 	ws contract.Transport, kb *worldkb.KB, profiles map[string]*profile.Profile,
 	weeklySched *weeklyschedule.Schedule, logger *slog.Logger, triggerReason string) {
 
-	if !a.acquireReplanSlot(agentID, triggerReason, logger) {
+	if !a.acquireReplanSlot(agentID, triggerReason, logger, replanKindStrategic) {
 		return
 	}
-	defer func() {
-		a.coordMu.Lock()
-		a.replanInProgress = false
-		a.coordMu.Unlock()
-	}()
+	defer a.releaseReplanSlot()
 
 	snap := a.as.Snapshot()
 	tod := snap.LatestTimeOfDay()

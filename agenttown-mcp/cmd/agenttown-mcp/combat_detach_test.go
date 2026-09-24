@@ -835,8 +835,12 @@ func TestCombatExit_StrategicThrottledOnRepeatCombat(t *testing.T) {
 		return len(ac.as.PlanRevisions()) == 1 && replanIdle(ac) && strategic.calls == 1
 	})
 
-	// 第二次战斗（同一游戏时刻，间隔 0 < 2 游戏小时）：战术 replan 照常，
-	// 战略修订被节流跳过。
+	// 第二次战斗（间隔 40 游戏分钟 < 2 游戏小时）：战术 replan 照常，
+	// 战略修订被节流跳过。游戏时间推进到 11:30——修订后的新时段起点带
+	// ±planJitterMinutes 扰动（10:50-11:15），固定在 10:50 会落进"无匹配
+	// slot"的空隙（链 2 战术 replan 因无 goal 退出，flaky）；11:30 在任意
+	// 扰动下都位于修订段内部。
+	seedPerceptionWithPhys(t, ac, 41400, 55, 30, 68) // 11:30
 	callsBefore := tactical.calls
 	yieldViaDetach(t, rt, "evt_atk2")
 	dispatchTestEvent(t, rt, "H-01", combatExitTestEvent("evt_exit2"))
