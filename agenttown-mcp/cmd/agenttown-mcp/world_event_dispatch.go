@@ -222,8 +222,9 @@ func (rt *Runtime) handleForceEvent(ac *agentContext, agentID string, ev protoco
 	// Combat-detach（UE 战斗 AI 接管）：detach=true 时下方全部动作（hint +
 	// 反应窗口 + 重规划 + 新动作下发）都会与 UE 战斗系统抢身体——这正是
 	// 2026-09-22 实测的 bug（MCP 1 秒内重规划下发逃跑，UE 战斗 AI 从未拿到
-	// 控制权）。让位分支代替之：静默交出身体。combat_exit 误带 detach 时不
-	// 进入（那是归还信号，不是接管信号）。
+	// 控制权）。让位分支代替之：交出身体，仅下发战斗动作（routeCombat 选定
+	// 风格），其余静默。combat_exit 误带 detach 时不进入（那是归还信号，
+	// 不是接管信号）。
 	if ev.Detach && !prompt.IsCombatExitEvent(ev) {
 		rt.handleCombatDetach(ac, agentID, ev)
 		return
@@ -295,11 +296,16 @@ func forceEventHint(ev protocol.WorldEventPayload) string {
 }
 
 // handleCombatDetach executes the combat-detach handover, synchronously in
-// the WS receive path (mirroring handleForceEvent). UE's combat AI is taking
-// the body, so the agent stands down COMPLETELY, then yields — no replan, no
-// new actions, no hint, no reaction window, until combat_exit (or the TTL
-// safety net) returns control. Repeat attacks while already yielded only
-// refresh the TTL anchor and the echoed event (idempotent entry).
+// the WS receive path (mirroring handleForceEvent). UE's combat AI takes the
+// body, so the agent yields — no replan, no hint, no reaction window, no
+// non-combat actions, until combat_exit (or the TTL safety net) returns
+// control. The ONE action it does dispatch is the combat behavior-tree action:
+// since 2026-10-09 UE no longer auto-runs a combat BT — it takes the body and
+// waits for the agent to select a combat style (via the jev router's
+// routeCombat) and dispatch it (dispatchCombatAction, async goroutine).
+// Repeat attacks while already yielded only refresh the TTL anchor and the
+// echoed event (idempotent entry); the combat action is dispatched once, on
+// first entry.
 //
 // The yield deliberately does NOT send stop_action for the in-flight action:
 // stop's UE-side semantics is "abort the behavior tree" (协议 §排队机制),
@@ -359,10 +365,57 @@ func (rt *Runtime) handleCombatDetach(ac *agentContext, agentID string, ev proto
 		physBaseline = ac.as.Snapshot().LatestPhysical
 	}
 	ac.beginCombatYield(ev, ac.as.LatestGameTimeSec(), prevActionID, physBaseline)
-	rt.logger.Warn("[combat-detach] UE 战斗系统接管，agent 让位（不发 stop，静默至 combat_exit 或 TTL 兜底）",
+	// 战斗动作下发（仅首次进入）：UE 接管身体后等待 Agent 下发战斗行为树，
+	// 由 jev 路由迅速选定风格（当前仅 ExecuteCombatBT_Default）并 goroutine
+	// 直发。重复攻击不重发——战斗 BT 已在跑。goroutine 必需：jev 判决 ~1s +
+	// SendAction 等 ack，读循环路径不能同步。
+	if !alreadyYielded {
+		go rt.dispatchCombatAction(rt.ctx, agentID, ev)
+	}
+	rt.logger.Warn("[combat-detach] UE 战斗系统接管，agent 让位（不发 stop，下发战斗动作后静默至 combat_exit 或 TTL 兜底）",
 		"agent_id", agentID, "event_id", ev.EventID, "event_type", ev.EventType,
 		"severity", ev.Severity, "subject", ev.Subject,
 		"prev_action_id", prevActionID, "repeat_attack", alreadyYielded)
+}
+
+// dispatchCombatAction selects and dispatches the combat behavior-tree action
+// after a combat-detach entry. Called in a goroutine from handleCombatDetach:
+// the jev judgment (~1s) and SendAction (which waits for the action_started
+// ack on the same read loop that must read that ack) cannot run inline in the
+// WS receive path.
+//
+// The combat action is dispatched UNTRACKED (no recordActionStarted), for the
+// same reasons as the bridge action: it is not a tactical decision product —
+// in-flight tracking would leave CurrentActionID set across the whole yield,
+// blocking PopActionIfIdle at reclaim and polluting UnfinishedTask/
+// LastEndResult. UE ends the combat BT itself on combat_exit, so no stop is
+// needed at reclaim.
+func (rt *Runtime) dispatchCombatAction(ctx context.Context, agentID string, ev protocol.WorldEventPayload) {
+	cmd := defaultCombatStyleCmd
+	if rt.eventRouter != nil {
+		cmd = rt.eventRouter.routeCombat(ctx, agentID, ev)
+	}
+	ac := rt.lookupAgent(agentID)
+	if ac == nil {
+		return
+	}
+	// 战斗已结束（combat_exit 先于 jev 返回到达，战斗极短）→ 不下发战斗动作，
+	// 避免抢刚接回的身体。
+	if !ac.combatYieldActive() {
+		rt.logger.Info("[combat-detach] 战斗已归还，跳过战斗动作下发",
+			"agent_id", agentID, "event_id", ev.EventID)
+		return
+	}
+	// 空参数：UE 已知战斗上下文（它主动发的 detach 事件），战斗动作只需
+	// 声明"用哪套风格"。autoQueue=false（战斗 cmd 非智能体对象 cmd）。
+	ack, err := rt.ws.SendAction(ctx, agentID, cmd, map[string]any{}, false)
+	if err != nil || ack == nil {
+		rt.logger.Warn("[combat-detach] 战斗动作下发失败（发送失败或 UE 未 ack）",
+			"agent_id", agentID, "cmd", cmd, "event_id", ev.EventID, "err", err)
+		return
+	}
+	rt.logger.Info("[combat-detach] 战斗动作已下发（UE 战斗行为树启动）",
+		"agent_id", agentID, "cmd", cmd, "action_id", ack.ActionID, "event_id", ev.EventID)
 }
 
 // reclaimFromCombatYield ends a combat-detach yield and hands control back to
@@ -874,7 +927,7 @@ func handleDebugEvent(logger *slog.Logger, lookupAgent func(string) *agentContex
 	if !handled {
 		note = "事件被策略丢弃（手动模式或 agent 离线，见 MCP 日志）"
 	} else if ev.Force && ev.Detach && !prompt.IsCombatExitEvent(ev) {
-		note = "force + detach 战斗接管：MCP 让位（宽限期内不发 stop 等 UE 接管停旧动作，超时未接管则代为 stop；不重规划不下发），至 combat_exit 或 TTL 兜底归还（见 [combat-detach] 日志）"
+		note = "force + detach 战斗接管：MCP 让位（宽限期内不发 stop 等 UE 接管停旧动作，超时未接管则代为 stop；经 jev 路由下发战斗动作后不重规划），至 combat_exit 或 TTL 兜底归还（见 [combat-detach] 日志）"
 	} else if ev.Force {
 		note = "force 硬保证：在途动作已同步打断，重规划异步进行（见 [world_event/force] 日志）"
 	}

@@ -127,13 +127,17 @@ type agentContext struct {
 
 	// Combat-detach yield state (combat-detach, 2026-09-22): while combatYield
 	// is set, UE's combat AI owns the body — the worker loop skips slot
-	// switching/dispatch/refill, the router stays silent, and NO action is
-	// sent until combat_exit (or combatYieldTTLGameSec since the last detach
-	// event, the safety net) returns control. combatYieldSinceGameSec
-	// follows beginReaction's cold-start convention (<= 0 = no perception yet,
-	// the TTL check stays inert until the first perception latches it).
-	// combatYieldLastEvent is echoed back into the world-event queue at
-	// reclaim so the first post-combat decomposition sees why the gap exists.
+	// switching/dispatch/refill, the interrupt router stays silent, and no
+	// NON-combat action is sent until combat_exit (or combatYieldTTLGameSec
+	// since the last detach event, the safety net) returns control. The one
+	// exception: at first entry the agent dispatches the combat behavior-tree
+	// action (routeCombat → dispatchCombatAction, untracked) — since
+	// 2026-10-09 UE waits for the agent's combat-style choice instead of
+	// auto-running a BT. combatYieldSinceGameSec follows beginReaction's
+	// cold-start convention (<= 0 = no perception yet, the TTL check stays
+	// inert until the first perception latches it). combatYieldLastEvent is
+	// echoed back into the world-event queue at reclaim so the first
+	// post-combat decomposition sees why the gap exists.
 	//
 	// Deliberately NOT cleared by stop()/reconnect: UE never re-sends detach
 	// after a reconnect (AgentState.Stop wipes the dedup seen-set too), so

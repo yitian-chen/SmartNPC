@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -27,7 +28,7 @@ type fakeLoopLLM struct {
 	capturedTC   string
 	capturedSc   string
 	resetCount   int
-	calls        int
+	calls        atomic.Int64
 	gate         chan struct{} // 非-nil 时 SendLoop 阻塞至 close（并发时序测试用）
 }
 
@@ -53,7 +54,7 @@ func (f *fakeLoopLLM) SendLoop(_ context.Context, msgs []llmtypes.Message, tools
 	if f.gate != nil {
 		<-f.gate
 	}
-	f.calls++
+	f.calls.Add(1)
 	f.capturedMsgs = append([]llmtypes.Message(nil), msgs...)
 	f.capturedTool = tools
 	f.capturedTC = toolChoice
@@ -69,7 +70,7 @@ func (f *fakeLoopLLM) SendLoop(_ context.Context, msgs []llmtypes.Message, tools
 }
 
 func (f *fakeLoopLLM) SendLoopStreaming(_ context.Context, msgs []llmtypes.Message, tools []venus.Tool, toolChoice, schemaName string, _ []byte, onDelta func(string), onToolCall func(llmtypes.ToolCall)) (*llmtypes.Response, error) {
-	f.calls++
+	f.calls.Add(1)
 	f.capturedMsgs = append([]llmtypes.Message(nil), msgs...)
 	f.capturedTool = tools
 	f.capturedTC = toolChoice
@@ -265,8 +266,8 @@ func TestAgenticTurn_RateLimitRetrySucceeds(t *testing.T) {
 	if resp == nil {
 		t.Fatal("resp should be non-nil")
 	}
-	if fake.calls != 3 {
-		t.Errorf("SendLoop calls = %d, want 3 (2 rate-limited + 1 success)", fake.calls)
+	if fake.calls.Load() != 3 {
+		t.Errorf("SendLoop calls = %d, want 3 (2 rate-limited + 1 success)", fake.calls.Load())
 	}
 	// 成功后历史正常追加（user + assistant）。
 	if hist := as.Conversation(); len(hist) != 2 {
@@ -295,8 +296,8 @@ func TestAgenticTurn_RateLimitRetriesExhausted(t *testing.T) {
 		t.Fatal("expected error after retries exhausted")
 	}
 	// 1 次首发 + 3 次重试 = 4 次调用。
-	if fake.calls != 1+maxTacticalRetries {
-		t.Errorf("SendLoop calls = %d, want %d", fake.calls, 1+maxTacticalRetries)
+	if fake.calls.Load() != 1+maxTacticalRetries {
+		t.Errorf("SendLoop calls = %d, want %d", fake.calls.Load(), 1+maxTacticalRetries)
 	}
 	if hist := as.Conversation(); len(hist) != 0 {
 		t.Errorf("history should stay empty on failure, got %d msgs", len(hist))
@@ -318,8 +319,8 @@ func TestAgenticTurn_TimeoutErrorNoRetry(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	if fake.calls != 1 {
-		t.Errorf("SendLoop calls = %d, want 1 (timeout must not retry)", fake.calls)
+	if fake.calls.Load() != 1 {
+		t.Errorf("SendLoop calls = %d, want 1 (timeout must not retry)", fake.calls.Load())
 	}
 }
 
@@ -342,8 +343,8 @@ func TestAgenticTurn_EmptyCompletionRetrySucceeds(t *testing.T) {
 	if resp == nil {
 		t.Fatal("resp should be non-nil")
 	}
-	if fake.calls != 2 {
-		t.Errorf("SendLoop calls = %d, want 2 (1 empty completion + 1 success)", fake.calls)
+	if fake.calls.Load() != 2 {
+		t.Errorf("SendLoop calls = %d, want 2 (1 empty completion + 1 success)", fake.calls.Load())
 	}
 	// 成功后历史正常追加（user + assistant）。
 	if hist := as.Conversation(); len(hist) != 2 {
@@ -371,8 +372,8 @@ func TestAgenticTurn_StreamingTacticalCollectsTTFT(t *testing.T) {
 		"tactical", "分解请求", "required", "", nil); err != nil {
 		t.Fatalf("agenticTurn: %v", err)
 	}
-	if fake.calls != 1 {
-		t.Fatalf("calls = %d, want 1", fake.calls)
+	if fake.calls.Load() != 1 {
+		t.Fatalf("calls = %d, want 1", fake.calls.Load())
 	}
 	rep := llmMetricsCollector.Snapshot()
 	lr := rep.Layers["tactical"]
@@ -455,8 +456,8 @@ func TestAgenticTurn_EmptyResultRetries(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected empty-result error after retries exhausted")
 	}
-	if fake.calls != 1+maxTacticalRetries {
-		t.Errorf("SendLoop calls = %d, want %d (1 initial + 3 retries)", fake.calls, 1+maxTacticalRetries)
+	if fake.calls.Load() != 1+maxTacticalRetries {
+		t.Errorf("SendLoop calls = %d, want %d (1 initial + 3 retries)", fake.calls.Load(), 1+maxTacticalRetries)
 	}
 	// 历史不应追加（失败不留半截）。
 	if hist := as.Conversation(); len(hist) != 0 {

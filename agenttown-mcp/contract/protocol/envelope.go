@@ -116,6 +116,16 @@ const (
 	CmdRestAtResidence = "RestAtResidence"
 	CmdSurfInternet    = "SurfInternet"
 	CmdSocialChat      = "SocialChat" // Phase 2 Module C: proactive NPC-to-NPC dialogue
+
+	// Combat-detach cmds (one per combat style — combat-detach, 2026-10-09).
+	// UE's combat AI takes over the body but no longer auto-runs a behavior
+	// tree: it waits for the agent to dispatch one of these. The combat-detach
+	// entry selects the style via the jev router (routeCombat) and dispatches
+	// the chosen cmd verbatim. These are NOT tactical tools — the tactical LLM
+	// never selects them, and they are deliberately absent from
+	// BuiltinCmdCapabilities. Future combat styles add more ExecuteCombatBT_*
+	// cmds (horizontal expansion).
+	CmdExecuteCombatBTDefault = "ExecuteCombatBT_Default"
 )
 
 // IsCompositeCmd reports whether the given cmd is one of the long
