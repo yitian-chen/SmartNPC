@@ -38,7 +38,8 @@ const (
 
 // maybeStrategicReplan evaluates the trigger and spawns the replan when
 // allowed. Called async from the worker loop at the two cut points, and from
-// the combat-detach reclaim chain (tactical replan first, then this).
+// the combat-detach reclaim chain (after the worker's natural refill — the
+// tactical re-decomposition is the worker's job, not a dedicated replan).
 func (a *agentContext) maybeStrategicReplan(ctx context.Context, agentID string,
 	ws contract.Transport, kb *worldkb.KB, profiles map[string]*profile.Profile,
 	weeklySched *weeklyschedule.Schedule, logger *slog.Logger, triggerReason string) {

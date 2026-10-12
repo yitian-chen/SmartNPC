@@ -243,7 +243,7 @@ type debugTacticalEntry struct {
 	InFlight       string                `json:"in_flight,omitempty"`        // 当前在途 action_id
 	InFlightCmd    string                `json:"in_flight_cmd,omitempty"`    // 当前在途 action 的工具名
 	InFlightParams map[string]any        `json:"in_flight_params,omitempty"` // 当前在途 action 的全部参数
-	// Combat-detach 让位中（UE 战斗 AI 持有身体，MCP 静默至 combat_exit/TTL）
+	// Combat-detach 让位中（UE 战斗 AI 持有身体，MCP 下发战斗动作后静默至 combat_exit/TTL）
 	Detached   bool   `json:"detached"`
 	Situations string `json:"situations,omitempty"` // 持续情境行（状态栏同款渲染）
 }

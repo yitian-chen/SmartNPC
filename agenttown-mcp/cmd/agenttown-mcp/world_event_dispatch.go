@@ -222,8 +222,9 @@ func (rt *Runtime) handleForceEvent(ac *agentContext, agentID string, ev protoco
 	// Combat-detach（UE 战斗 AI 接管）：detach=true 时下方全部动作（hint +
 	// 反应窗口 + 重规划 + 新动作下发）都会与 UE 战斗系统抢身体——这正是
 	// 2026-09-22 实测的 bug（MCP 1 秒内重规划下发逃跑，UE 战斗 AI 从未拿到
-	// 控制权）。让位分支代替之：静默交出身体。combat_exit 误带 detach 时不
-	// 进入（那是归还信号，不是接管信号）。
+	// 控制权）。让位分支代替之：交出身体，仅下发战斗动作（routeCombat 选定
+	// 风格），其余静默。combat_exit 误带 detach 时不进入（那是归还信号，
+	// 不是接管信号）。
 	if ev.Detach && !prompt.IsCombatExitEvent(ev) {
 		rt.handleCombatDetach(ac, agentID, ev)
 		return
@@ -295,11 +296,16 @@ func forceEventHint(ev protocol.WorldEventPayload) string {
 }
 
 // handleCombatDetach executes the combat-detach handover, synchronously in
-// the WS receive path (mirroring handleForceEvent). UE's combat AI is taking
-// the body, so the agent stands down COMPLETELY, then yields — no replan, no
-// new actions, no hint, no reaction window, until combat_exit (or the TTL
-// safety net) returns control. Repeat attacks while already yielded only
-// refresh the TTL anchor and the echoed event (idempotent entry).
+// the WS receive path (mirroring handleForceEvent). UE's combat AI takes the
+// body, so the agent yields — no replan, no hint, no reaction window, no
+// non-combat actions, until combat_exit (or the TTL safety net) returns
+// control. The ONE action it does dispatch is the combat behavior-tree action:
+// since 2026-10-09 UE no longer auto-runs a combat BT — it takes the body and
+// waits for the agent to select a combat style (via the jev router's
+// routeCombat) and dispatch it (dispatchCombatAction, async goroutine).
+// Repeat attacks while already yielded only refresh the TTL anchor and the
+// echoed event (idempotent entry); the combat action is dispatched once, on
+// first entry.
 //
 // The yield deliberately does NOT send stop_action for the in-flight action:
 // stop's UE-side semantics is "abort the behavior tree" (协议 §排队机制),
@@ -359,32 +365,80 @@ func (rt *Runtime) handleCombatDetach(ac *agentContext, agentID string, ev proto
 		physBaseline = ac.as.Snapshot().LatestPhysical
 	}
 	ac.beginCombatYield(ev, ac.as.LatestGameTimeSec(), prevActionID, physBaseline)
-	rt.logger.Warn("[combat-detach] UE 战斗系统接管，agent 让位（不发 stop，静默至 combat_exit 或 TTL 兜底）",
+	// 战斗动作下发（仅首次进入）：UE 接管身体后等待 Agent 下发战斗行为树，
+	// 由 jev 路由迅速选定风格（当前仅 ExecuteCombatBT_Default）并 goroutine
+	// 直发。重复攻击不重发——战斗 BT 已在跑。goroutine 必需：jev 判决 ~1s +
+	// SendAction 等 ack，读循环路径不能同步。
+	if !alreadyYielded {
+		go rt.dispatchCombatAction(rt.ctx, agentID, ev)
+	}
+	rt.logger.Warn("[combat-detach] UE 战斗系统接管，agent 让位（不发 stop，下发战斗动作后静默至 combat_exit 或 TTL 兜底）",
 		"agent_id", agentID, "event_id", ev.EventID, "event_type", ev.EventType,
 		"severity", ev.Severity, "subject", ev.Subject,
 		"prev_action_id", prevActionID, "repeat_attack", alreadyYielded)
 }
 
+// dispatchCombatAction selects and dispatches the combat behavior-tree action
+// after a combat-detach entry. Called in a goroutine from handleCombatDetach:
+// the jev judgment (~1s) and SendAction (which waits for the action_started
+// ack on the same read loop that must read that ack) cannot run inline in the
+// WS receive path.
+//
+// The combat action is dispatched UNTRACKED (no recordActionStarted), for the
+// same reasons as the bridge action: it is not a tactical decision product —
+// in-flight tracking would leave CurrentActionID set across the whole yield,
+// blocking PopActionIfIdle at reclaim and polluting UnfinishedTask/
+// LastEndResult. UE ends the combat BT itself on combat_exit, so no stop is
+// needed at reclaim.
+func (rt *Runtime) dispatchCombatAction(ctx context.Context, agentID string, ev protocol.WorldEventPayload) {
+	cmd := defaultCombatStyleCmd
+	if rt.eventRouter != nil {
+		cmd = rt.eventRouter.routeCombat(ctx, agentID, ev)
+	}
+	ac := rt.lookupAgent(agentID)
+	if ac == nil {
+		return
+	}
+	// 战斗已结束（combat_exit 先于 jev 返回到达，战斗极短）→ 不下发战斗动作，
+	// 避免抢刚接回的身体。
+	if !ac.combatYieldActive() {
+		rt.logger.Info("[combat-detach] 战斗已归还，跳过战斗动作下发",
+			"agent_id", agentID, "event_id", ev.EventID)
+		return
+	}
+	// 空参数：UE 已知战斗上下文（它主动发的 detach 事件），战斗动作只需
+	// 声明"用哪套风格"。autoQueue=false（战斗 cmd 非智能体对象 cmd）。
+	ack, err := rt.ws.SendAction(ctx, agentID, cmd, map[string]any{}, false)
+	if err != nil || ack == nil {
+		rt.logger.Warn("[combat-detach] 战斗动作下发失败（发送失败或 UE 未 ack）",
+			"agent_id", agentID, "cmd", cmd, "event_id", ev.EventID, "err", err)
+		return
+	}
+	rt.logger.Info("[combat-detach] 战斗动作已下发（UE 战斗行为树启动）",
+		"agent_id", agentID, "cmd", cmd, "action_id", ack.ActionID, "event_id", ev.EventID)
+}
+
 // reclaimFromCombatYield ends a combat-detach yield and hands control back to
 // the agent. Shared by the two reclaim triggers:
-//   - combat_exit handback (ttl=false, ev = the exit event; the exit event is
-//     echoed by forceInterruptReplan on success, so 【发生的事件】 reads the
-//     chronological pair 被攻击 → 脱战),
+//   - combat_exit handback (ttl=false, ev = the exit event; both the attack and
+//     the exit are echoed below, so 【发生的事件】 reads the chronological pair
+//     被攻击 → 脱战),
 //   - TTL safety net (ttl=true, ev = the last detach attack — UE never sent
 //     combat_exit; the hint says so).
 //
-// The post-combat replan re-derives its goal from dailyPlan by game time
-// (tacticalRefillForReplan → selectCurrentGoal), so the slot cleared at yield
-// entry costs nothing.
+// No dedicated tactical replan here: the yield entry already cleared the queue,
+// and the reclaim re-echoes the events + sets the 【战斗结束】 hint + signals
+// the worker, so the worker's natural refill re-derives the current slot by
+// game time (selectCurrentGoal) and re-decomposes it — getting the body moving
+// under the hint. A dedicated tactical replan would race that natural refill
+// (two LLM decompositions → the NPC says "战斗结束" twice), so it was removed
+// (2026-10-12).
 //
-// Replan chaining (tactical first, then strategic): the two share the
-// replanInProgress slot, so they must NOT race. The tactical replan (flash
-// model, fast) gets the body moving under the 【战斗结束】 hint; the strategic
-// replan (pro model) then revises the REMAINDER of the day — combat's
-// attribute drift (wear/fatigue spikes) is exactly the "07:00 的计划对当下
-// 无知" case maybeStrategicReplan exists for. The chain skips the strategic
-// step when a repeat attack re-entered the yield (no LLM planning while UE
-// holds the body).
+// The strategic replan (pro model) still runs after the bridge action lands,
+// revising the REMAINDER of the day — combat's attribute drift (wear/fatigue
+// spikes) is exactly the "07:00 的计划对当下无知" case maybeStrategicReplan
+// exists for. It is skipped when a repeat attack re-entered the yield (no LLM
+// planning while UE holds the body).
 func (a *agentContext) reclaimFromCombatYield(ctx context.Context, agentID string,
 	ws contract.Transport, kb *worldkb.KB, profiles map[string]*profile.Profile,
 	weeklySched *weeklyschedule.Schedule, ev protocol.WorldEventPayload, ttl bool, logger *slog.Logger) {
@@ -419,6 +473,12 @@ func (a *agentContext) reclaimFromCombatYield(ctx context.Context, agentID strin
 	if lastAttack.EventID != "" || lastAttack.EventType != "" {
 		a.as.EchoWorldEvent(lastAttack)
 	}
+	// 脱战事件回声（修复 B 同款）：worker 自然 refill 的第一次分解在
+	// 【发生的事件】里见到"被攻击 → 脱战"的时序对。TTL 路径 ev 即
+	// lastAttack，已在上方回声，勿重复。
+	if !ttl && (ev.EventID != "" || ev.EventType != "") {
+		a.as.EchoWorldEvent(ev)
+	}
 	// 战斗期间属性变化（有基线且有实变时）：磨损/疲劳/电量 before→after。
 	deltaLine := combatPhysDeltaLine(basePhys, a.as.Snapshot().LatestPhysical)
 	var hint string
@@ -446,18 +506,19 @@ func (a *agentContext) reclaimFromCombatYield(ctx context.Context, agentID strin
 		reason += "（超时兜底归还：未收到 combat_exit 解除信号）"
 	}
 	reason += "，当前状态已偏离当日计划制定时的假设，请重排剩余时段（如优先安排维修、充电等恢复时段，再回到原日程）"
-	// 脱战桥接动作：归还即下发短 look_around，填补下方战术重规划 LLM 的
-	// 几秒空窗（机制详见 dispatchCombatExitBridgeAction）。
+	// 脱战桥接动作：归还即下发短 look_around，填补 worker 自然 refill 的
+	// LLM 空窗（机制详见 dispatchCombatExitBridgeAction）。
 	bridgeDone := a.dispatchCombatExitBridgeAction(ctx, agentID, ws, logger)
+	// 战术层不专门重规划：worker 自然 refill 会带着【战斗结束】hint 重新
+	// 分解当前时段（让 NPC 尽快动起来）——不再与 worker refill 撞车导致 NPC
+	// 连说两遍战斗结束。此处唤醒 worker，并在桥接落定后只做战略层剩余时段
+	// 修订（桥接先落地再修订，维持"桥接命令先发"全序）。
+	a.signal()
 	go func() {
-		// 桥接先落地（或失败）再重规划：保证"桥接命令先发、计划后提交"的
-		// 全序，防止两路 action_command 交错（计划先提交会让 UE 拿
-		// look_around 盖过队列里的真动作）。
 		<-bridgeDone
-		a.forceInterruptReplan(ctx, agentID, ws, kb, profiles, ev, hint, logger)
-		// 重复攻击在战术 replan 期间重新让位（被掐掉）时，maybeStrategicReplan
-		// 顶部的让位守卫会跳过战略修订——让位中不该有任何 LLM 规划，下一次
-		// 归还会再次触发完整链路。
+		// 战略修订期间重复攻击重新让位时，maybeStrategicReplan 顶部的让位
+		// 守卫会跳过战略修订——让位中不该有任何 LLM 规划，下一次归还会
+		// 再次触发完整链路。
 		a.maybeStrategicReplan(ctx, agentID, ws, kb, profiles, weeklySched, logger, reason)
 	}()
 	logger.Info("[combat-detach] 控制权归还 agent（战斗结束），重规划回日程",
@@ -598,9 +659,9 @@ const (
 	// 期间保持全跳过（pop/refill 都不放行）。
 	replanKindTactical = "tactical"
 	// replanKindStrategic：战略层修订（strategic_replan.go）。只改
-	// dailyPlan/slot，不碰已提交的战术队列——worker 在其 LLM 在途期间
-	// 放行 pop（2026-09-24 修复：归还链第二跳曾阻塞第一跳队列 60s，
-	// NPC 呆站至修订超时、slot 过期后队列被安全点清理丢弃）。
+	// dailyPlan/slot，不碰 worker 自然 refill 已提交的战术队列——worker 在
+	// 其 LLM 在途期间放行 pop（2026-09-24 修复：战略修订曾阻塞已提交队列
+	// 60s，NPC 呆站至修订超时、slot 过期后队列被安全点清理丢弃）。
 	replanKindStrategic = "strategic"
 )
 
@@ -874,7 +935,7 @@ func handleDebugEvent(logger *slog.Logger, lookupAgent func(string) *agentContex
 	if !handled {
 		note = "事件被策略丢弃（手动模式或 agent 离线，见 MCP 日志）"
 	} else if ev.Force && ev.Detach && !prompt.IsCombatExitEvent(ev) {
-		note = "force + detach 战斗接管：MCP 让位（宽限期内不发 stop 等 UE 接管停旧动作，超时未接管则代为 stop；不重规划不下发），至 combat_exit 或 TTL 兜底归还（见 [combat-detach] 日志）"
+		note = "force + detach 战斗接管：MCP 让位（宽限期内不发 stop 等 UE 接管停旧动作，超时未接管则代为 stop；经 jev 路由下发战斗动作后不重规划），至 combat_exit 或 TTL 兜底归还（见 [combat-detach] 日志）"
 	} else if ev.Force {
 		note = "force 硬保证：在途动作已同步打断，重规划异步进行（见 [world_event/force] 日志）"
 	}
@@ -1131,14 +1192,14 @@ func (a *agentContext) checkCombatYieldTakeoverStop(agentID string, ws contract.
 const situationKindCombat = "combat"
 
 // situationTTLGameSec bounds a situation without a resolution event
-// (combat_exit never arrives): 30 game minutes, then it auto-degrades.
-const situationTTLGameSec = 30 * 60.0
+// (combat_exit never arrives): 120 game minutes, then it auto-degrades.
+const situationTTLGameSec = 120 * 60.0
 
 // combatYieldTTLGameSec bounds a combat-detach yield without a combat_exit
 // handback (UE forgot / not implemented / bug): the agent reclaims control
 // after this many game seconds since the LAST detach event. Each new attack
 // refreshes the window, so an ongoing fight never expires mid-combat.
-const combatYieldTTLGameSec = 30 * 60.0
+const combatYieldTTLGameSec = 120 * 60.0
 
 // combatYieldTakeoverGrace is the wall-clock window after yield entry during
 // which MCP waits for UE's combat takeover to stop the old in-flight action

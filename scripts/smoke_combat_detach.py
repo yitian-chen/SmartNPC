@@ -5,8 +5,8 @@
 然后经 /debug/event 注入：
 
   1. detach 攻击事件（force+detach，event_type 用 UE 实测短名 attacked、无
-     category——顺带验证协议容错）→ 断言：stop 在途 action + 让位静默期零
-     action_command + /debug/tactical 显示 detached
+     category——顺带验证协议容错）→ 断言：下发战斗动作 ExecuteCombatBT_Default
+     + stop 在途 action + 战斗动作后零其它 action_command + /debug/tactical 显示 detached
   2. combat_exit → 断言：重规划（真实 Venus 战术层调用）产出战后新动作
 
 使用方法（dev 实例需已启动，端口 8770/9093）：
@@ -181,22 +181,27 @@ async def main():
         })
         print(f"    note: {resp.get('note')}")
 
-        # 让位静默期：宽限期（2s）+ worker 感知唤醒（3s 推送）内不发 stop
-        # （给 UE 接管留窗口）；宽限期过后旧动作仍未结束（接管未触发）则
-        # MCP 代为 stop 恰一次——脱管物理落地。之后至 combat_exit 前零新
-        # action_command、零新 stop。
+        # 战斗动作 + 让位静默期：detach 入口经 jev 路由选定战斗风格并直发
+        # ExecuteCombatBT_Default（当前唯一风格）——UE 不再默认启动战斗 BT，
+        # 等 agent 下发。之后至 combat_exit 前零其它 action_command。宽限期
+        # （2s）+ worker 感知唤醒（3s 推送）内不发 stop（给 UE 接管留窗口）；
+        # 宽限期过后旧动作仍未结束（接管未触发）则 MCP 代为 stop 恰一次。
+        await wait_for(
+            lambda: any(a[0] == "ExecuteCombatBT_Default" for a in log.actions),
+            15, "战斗动作 ExecuteCombatBT_Default 下发",
+        )
         silence_start = len(log.actions)
         await wait_for(lambda: first_id in log.stops, 10, "宽限期代为 stop 旧动作（脱管落地）")
         grace_stops = len(log.stops)
         await asyncio.sleep(3)
         if len(log.actions) != silence_start:
-            raise SystemExit(f"[FAIL] 让位期间下发了动作：{log.actions[silence_start:]}")
+            raise SystemExit(f"[FAIL] 战斗动作后不应再下发其它动作：{log.actions[silence_start:]}")
         if len(log.stops) != grace_stops:
             raise SystemExit(f"[FAIL] 宽限 stop 后不应再发 stop：{log.stops}")
         entries = [e for e in get_debug_tactical() if e.get("agent_id") == AGENT]
         if not entries or not entries[0].get("detached"):
             raise SystemExit(f"[FAIL] /debug/tactical 应显示 detached=true：{entries}")
-        print(f"[4] 让位验证通过：宽限 stop {first_id}、静默零下发、detached=true（situations={entries[0].get('situations', '')!r}）")
+        print(f"[4] 让位验证通过：战斗动作 ExecuteCombatBT_Default、宽限 stop {first_id}、零其它下发、detached=true（situations={entries[0].get('situations', '')!r}）")
 
         # 3. 注入 combat_exit → 归还重规划（真实 LLM）。宽限 stop 已清 prev，
         # 归还不再重复 stop；直接产出战后新动作。
@@ -212,7 +217,7 @@ async def main():
         post_cmds = [a[0] for a in log.actions[silence_start:]]
         print(f"[6] 归还验证通过：零重复 stop、战后新动作 {post_cmds}")
 
-    print("\n[PASS] combat-detach 冒烟全链路通过：让位（宽限 stop 落地 + 静默 + detached）→ combat_exit 归还（零重复 stop + 重规划新动作）")
+    print("\n[PASS] combat-detach 冒烟全链路通过：让位（战斗动作下发 + 宽限 stop 落地 + detached）→ combat_exit 归还（零重复 stop + 重规划新动作）")
 
 
 if __name__ == "__main__":

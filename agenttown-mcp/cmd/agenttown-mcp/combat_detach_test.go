@@ -1,8 +1,9 @@
 package main
 
 // combat-detach（战斗让位）测试：detach=true 的攻击事件 = UE 战斗 AI 接管
-// 身体，agent 完全静默让位（不重规划、不下发），直到 combat_exit 或 TTL
-// 兜底归还。覆盖：入口（停动作+业务复位+置位、幂等、timer/pending 清理）、
+// 身体，agent 让位（不重规划、除战斗动作外不下发），直到 combat_exit 或
+// TTL 兜底归还。首次进入经 jev 路由下发战斗动作（ExecuteCombatBT_Default）。
+// 覆盖：入口（停动作+业务复位+置位、幂等、timer/pending 清理）、
 // 让位期间抑制面（worker 守卫语义、路由双守卫、chat_invite 拒绝、
 // executor 门禁、/debug/schedule 409）、归还（combat_exit 确定性接收、
 // force 变体、TTL 到期与冷启动 inert、非让位回归）、跨断线存续、
@@ -20,6 +21,7 @@ import (
 
 	"github.com/AgentTown/agenttown-mcp/contract/protocol"
 	"github.com/AgentTown/agenttown-mcp/pkg/agentstate"
+	"github.com/AgentTown/agenttown-mcp/pkg/jev"
 	"github.com/AgentTown/agenttown-mcp/pkg/prompt"
 )
 
@@ -215,10 +217,12 @@ func TestHandleWorldEvent_NonForceDuringYieldEnqueuesWithoutRouting(t *testing.T
 	if got := ac.as.WorldEventQueueLen(); got != 1 {
 		t.Fatalf("non-force event must still enqueue during yield, got len=%d", got)
 	}
-	// route() 的让位守卫：给异步 goroutine 一点时间后断言判决从未发生。
+	// route() 的让位守卫：非 force 事件不触发 interrupt 裁决。detach 入口
+	// 的战斗风格选择（routeCombat）已占 1 次 Judge 调用，非 force 事件不应
+	// 再新增——interrupt 会抢 UE 战斗 AI 的身体。
 	time.Sleep(100 * time.Millisecond)
-	if got := len(j.statesOf()); got != 0 {
-		t.Fatalf("router must not judge during yield, got %d verdict calls", got)
+	if got := len(j.statesOf()); got != 1 {
+		t.Fatalf("non-force event must not route during yield (only the combat selection should judge, 1), got %d", got)
 	}
 }
 
@@ -368,38 +372,29 @@ func TestCombatExit_ReturnsControl(t *testing.T) {
 		// 归还路径已同步清标志（reclaimFromCombatYield 在接收路径跑）。
 		t.Fatalf("combat_exit must end the yield")
 	}
-	// 归还 replan 成功（fake 返回 tool_calls）：攻击回声被 drain 进 prompt，
-	// exit 事件成功后回声入队（修复 B 同款）。等待条件锚定"exit 回声出现
-	// 且 replan 空闲"——reclaim 同步回声的攻击事件会让 queue==1 在 replan
-	// 启动前就成立，不能作为完成信号。
-	waitFor(t, 2*time.Second, func() bool {
-		if !replanIdle(ac) {
-			return false
-		}
-		for _, e := range ac.as.WorldEventQueueSnapshot() {
-			if e.EventID == "evt_exit" {
-				return true
-			}
-		}
-		return false
-	})
-	user := lastUserPromptOf(t, fake.capturedMsgs)
+	// 归还不再专门做战术重规划：只落 hint + 回声攻击/脱战事件 + 唤醒 worker，
+	// 由 worker 自然 refill 重新分解当前时段（hint 携带战斗结束指引 + 脱战事件）。
+	hint := ac.as.ReplanHint()
 	for _, want := range []string{
-		"【战斗结束】",             // hint 渲染（战后恢复指引）
+		"【战斗结束】",             // hint 前缀（战后恢复指引）
 		"与玩家 player_1 的战斗结束", // exit 事件（hint 携带）
-		"被玩家 player_1 攻击",    // 攻击回声（【发生的事件】）
-		"恢复自主控制",             // 战后恢复指引文案
 	} {
-		if !strings.Contains(user, want) {
-			t.Fatalf("post-combat replan prompt missing %q:\n%s", want, user)
+		if !strings.Contains(hint, want) {
+			t.Fatalf("post-combat hint missing %q: %q", want, hint)
 		}
 	}
-	if q := ac.as.WorldEventQueueSnapshot(); len(q) != 1 || q[0].EventID != "evt_exit" {
-		t.Fatalf("post-combat queue must hold exactly the exit echo, got %+v", q)
+	// 攻击 + 脱战双回声入队（供 worker 自然 refill 的第一次分解在【发生的事件】
+	// 里按时间序见到 被攻击 → 脱战）。
+	if q := ac.as.WorldEventQueueSnapshot(); len(q) != 2 || q[0].EventID != "evt_atk" || q[1].EventID != "evt_exit" {
+		t.Fatalf("post-combat queue must hold [attack, exit] echoes, got %+v", q)
 	}
-	// 归还不走路由器：判决记录为空（route 守卫 + handleWorldEvent 直连分支）。
-	if got := len(j.statesOf()); got != 0 {
-		t.Fatalf("combat_exit reclaim must bypass the router, got %d verdict calls", got)
+	// 归还不走路由器（interrupt 裁决）：判决记录仅 detach 入口的战斗风格
+	// 选择（routeCombat）那 1 次，combat_exit 归不触发 interrupt 裁决（route
+	// 守卫 + handleWorldEvent 直连分支）。战斗风格选择在 goroutine 里异步
+	// 判决，等它完成再断言。
+	waitFor(t, 2*time.Second, func() bool { return len(j.statesOf()) == 1 })
+	if got := len(j.statesOf()); got != 1 {
+		t.Fatalf("combat_exit reclaim must bypass the interrupt router (only the combat selection should judge, 1), got %d", got)
 	}
 	if verdicts.len() != 0 {
 		t.Fatalf("no interrupt verdicts expected, got %d", verdicts.len())
@@ -457,15 +452,6 @@ func TestCombatExit_BridgeActionFillsReplanWindow(t *testing.T) {
 	gate := make(chan struct{})
 	ac.tacticalHc = &fakeLoopLLM{resp: speakToolCallResp(), gate: gate}
 	seedPerception(t, ac)
-	// worker boot 在手动模式下会重置 dailyPlan（runPerceptionWorker 入口
-	// SetDailyPlan("",-1)）——先装哨兵计划等 boot 抹掉，再装真计划，消除
-	// "boot 晚于装计划把计划清空"的竞态（replan 会因无 goal 秒退）。
-	ac.as.SetDailyPlan("sentinel", -1)
-	startTestWorker(t, ac, ft)
-	waitFor(t, 2*time.Second, func() bool {
-		plan, _, _ := ac.as.SnapshotSchedule()
-		return plan == ""
-	})
 	ac.as.SetDailyPlan("09:00-12:00: 车间装配作业", 11)
 
 	yieldViaDetach(t, rt, "evt_atk")
@@ -475,26 +461,37 @@ func TestCombatExit_BridgeActionFillsReplanWindow(t *testing.T) {
 
 	dispatchTestEvent(t, rt, "H-01", combatExitTestEvent("evt_exit"))
 
-	// 门控期间：桥接已下发 + pendingStop 置位 + replan 在途。
-	waitFor(t, 2*time.Second, func() bool {
-		ft.mu.Lock()
-		hasBridge := len(ft.sentActions) > 0 && ft.sentActions[0].cmd == protocol.CmdGenericAct
-		ft.mu.Unlock()
-		return hasBridge && ac.as.PendingStopActionID() == "act_bridge" && !replanIdle(ac)
-	})
+	// 归还即下发桥接 + 置位 pendingStop：填补 worker 自然 refill（战术 LLM）
+	// 生成新队列前的空窗。桥接按 cmd 搜索而非锁 index 0——detach 入口可能
+	// 先下发 ExecuteCombatBT_Default 战斗动作（goroutine，竞态），占据
+	// sentActions 前部。
+	waitFor(t, 2*time.Second, func() bool { return ac.as.PendingStopActionID() == "act_bridge" })
 	ft.mu.Lock()
-	behavior := ft.sentActions[0].params["behavior"]
+	var bridgeBehavior any
+	for _, a := range ft.sentActions {
+		if a.cmd == protocol.CmdGenericAct {
+			bridgeBehavior = a.params["behavior"]
+			break
+		}
+	}
 	ft.mu.Unlock()
-	if behavior != "look_around" {
-		t.Fatalf("bridge behavior = %v, want look_around", behavior)
+	if bridgeBehavior != "look_around" {
+		t.Fatalf("bridge behavior = %v, want look_around", bridgeBehavior)
+	}
+	// 门控期间（战术 LLM 未就绪）：队列仍未填充，NPC 靠桥接 look_around 而非呆站。
+	if q := ac.as.QueueLen(); q != 0 {
+		t.Fatalf("queue must stay empty while the refill LLM is gated, got %d", q)
 	}
 
-	// 放行 LLM：计划提交 → replan 释放 → 补一次 signal 兜底（生产里由
-	// perception 周期兜底，测试里显式给）→ pop 先补发桥接 stop 再下发
-	// 首个真动作（speak 首段）。
+	// 模拟 worker 自然 refill（gate 控制"LLM 空窗"）：完成后队列就绪，pop
+	// 首个真动作前补发桥接 stop，再下发 speak 首段。
+	done := make(chan struct{})
+	go func() {
+		ac.tacticalRefill(context.Background(), "H-01", ft, nil, nil, testLogger())
+		close(done)
+	}()
 	close(gate)
-	waitFor(t, 2*time.Second, func() bool { return replanIdle(ac) })
-	ac.signal()
+	<-done
 	waitFor(t, 3*time.Second, func() bool {
 		ft.mu.Lock()
 		stops := append([]string(nil), ft.stopActionIDs...)
@@ -506,7 +503,14 @@ func TestCombatExit_BridgeActionFillsReplanWindow(t *testing.T) {
 				bridgeStops++
 			}
 		}
-		return bridgeStops == 1 && len(actions) >= 2 && actions[1].cmd == protocol.CmdSpeak
+		hasSpeak := false
+		for _, a := range actions {
+			if a.cmd == protocol.CmdSpeak {
+				hasSpeak = true
+				break
+			}
+		}
+		return bridgeStops == 1 && hasSpeak
 	})
 }
 
@@ -579,9 +583,10 @@ func TestCombatExit_BridgeSendFailureProceeds(t *testing.T) {
 	ft.mu.Unlock()
 	dispatchTestEvent(t, rt, "H-01", combatExitTestEvent("evt_exit"))
 
-	// 锚定"计划已提交"而非仅 replanIdle（后者在链路尚未 acquire 时也为真）。
+	// 锚定"归还已落地"（hint 已置位）——桥接失败不影响归还主链路（yield 清除
+	// + 事件回声 + hint + worker 唤醒）。
 	waitFor(t, 2*time.Second, func() bool {
-		return replanIdle(ac) && ac.hasQueueNext()
+		return replanIdle(ac) && ac.as.ReplanHint() != ""
 	})
 	if ac.combatYieldActive() {
 		t.Fatalf("yield must still end when the bridge dispatch fails")
@@ -608,6 +613,134 @@ func TestCombatExit_BridgeOverwritesStalePendingStop(t *testing.T) {
 	dispatchTestEvent(t, rt, "H-01", combatExitTestEvent("evt_exit"))
 
 	waitFor(t, 2*time.Second, func() bool { return ac.as.PendingStopActionID() == "act_bridge" })
+}
+
+// ─── 战斗动作下发（2026-10-09）────────────────────────
+//
+// detach 入口经 jev 路由选定战斗风格并直发战斗动作（ExecuteCombatBT_Default），
+// 不记在途、空参数。UE 不再默认启动战斗 BT，改为等 agent 下发。
+
+// combatActionsDispatched counts the dispatched ExecuteCombatBT_Default cmds.
+func combatActionsDispatched(ft *fakeTransport) int {
+	ft.mu.Lock()
+	defer ft.mu.Unlock()
+	n := 0
+	for _, a := range ft.sentActions {
+		if a.cmd == protocol.CmdExecuteCombatBTDefault {
+			n++
+		}
+	}
+	return n
+}
+
+// TestCombatDetach_DispatchCombatAction：detach（带 ack）→ 下发默认战斗动作，
+// 不记在途（CurrentActionID 空）、params 空。无 eventRouter 时走默认风格。
+func TestCombatDetach_DispatchCombatAction(t *testing.T) {
+	rt, ft, ac := newWorldEventTestRuntime(t)
+	seedPerception(t, ac)
+	ft.mu.Lock()
+	ft.sendActionAck = &protocol.ActionStartedPayload{ActionID: "act_combat"}
+	ft.mu.Unlock()
+
+	yieldViaDetach(t, rt, "evt_atk")
+
+	waitFor(t, 2*time.Second, func() bool { return combatActionsDispatched(ft) == 1 })
+	if got := ac.as.CurrentActionID(); got != "" {
+		t.Fatalf("combat action must be untracked (CurrentActionID empty), got %q", got)
+	}
+	ft.mu.Lock()
+	for _, a := range ft.sentActions {
+		if a.cmd == protocol.CmdExecuteCombatBTDefault && len(a.params) != 0 {
+			t.Fatalf("combat action params should be empty, got %+v", a.params)
+		}
+	}
+	ft.mu.Unlock()
+}
+
+// TestCombatDetach_CombatActionFallbackNoJudge：路由在但 lookupJudge 返回 nil
+// （--jev-model="" 无判决客户端）→ 仍回退默认下发，战斗不死锁。
+func TestCombatDetach_CombatActionFallbackNoJudge(t *testing.T) {
+	rt, ft, ac, _, _ := newRouterTestRuntime(t, notInterruptJudge())
+	rt.eventRouter.lookupJudge = func(string) routerJudge { return nil }
+	seedPerception(t, ac)
+	ft.mu.Lock()
+	ft.sendActionAck = &protocol.ActionStartedPayload{ActionID: "act_combat"}
+	ft.mu.Unlock()
+
+	yieldViaDetach(t, rt, "evt_atk")
+
+	waitFor(t, 2*time.Second, func() bool { return combatActionsDispatched(ft) == 1 })
+}
+
+// TestCombatDetach_NoRedispatchOnRepeat：重复攻击不重发战斗动作（仅首次 entry
+// 下发一次，战斗 BT 已在跑）。
+func TestCombatDetach_NoRedispatchOnRepeat(t *testing.T) {
+	rt, ft, ac := newWorldEventTestRuntime(t)
+	seedPerception(t, ac)
+	ft.mu.Lock()
+	ft.sendActionAck = &protocol.ActionStartedPayload{ActionID: "act_combat"}
+	ft.mu.Unlock()
+
+	yieldViaDetach(t, rt, "evt_atk")
+	waitFor(t, 2*time.Second, func() bool { return combatActionsDispatched(ft) == 1 })
+
+	dispatchTestEvent(t, rt, "H-01", detachTestEvent("evt_atk2"))
+	time.Sleep(100 * time.Millisecond)
+	if got := combatActionsDispatched(ft); got != 1 {
+		t.Fatalf("repeat detach must not re-dispatch the combat action, got %d", got)
+	}
+}
+
+// TestCombatDetach_CombatActionSkippedIfNotYielded：未让位（已归还）时调用
+// dispatchCombatAction 直接跳过——钉住 combat_exit 先于 jev 返回时不抢身体。
+func TestCombatDetach_CombatActionSkippedIfNotYielded(t *testing.T) {
+	rt, ft, ac := newWorldEventTestRuntime(t)
+	seedPerception(t, ac)
+	ft.mu.Lock()
+	ft.sendActionAck = &protocol.ActionStartedPayload{ActionID: "act_combat"}
+	ft.mu.Unlock()
+
+	// 未让位直接调用（模拟 combat_exit 已先归还、yield 已结束）。
+	rt.dispatchCombatAction(context.Background(), "H-01", detachTestEvent("evt_atk"))
+	time.Sleep(50 * time.Millisecond)
+	if got := combatActionsDispatched(ft); got != 0 {
+		t.Fatalf("combat action must be skipped when not yielded, got %d", got)
+	}
+}
+
+// TestRouteCombat_Whitelist：routeCombat 的选择白名单——合法 choice 返回该
+// cmd；未知/缺 choice 回退默认；无判决客户端回退默认。
+func TestRouteCombat_Whitelist(t *testing.T) {
+	cases := []struct {
+		name   string
+		choice string
+		known  bool
+		want   string
+	}{
+		{"valid", protocol.CmdExecuteCombatBTDefault, true, protocol.CmdExecuteCombatBTDefault},
+		{"unknown", "ExecuteCombatBT_Hallucinated", true, defaultCombatStyleCmd},
+		{"missing", "", false, defaultCombatStyleCmd},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := &jev.Response{Answers: map[string]jev.Answer{}}
+			if tc.known {
+				resp.Answers["combat_style"] = jev.Answer{Type: jev.TypeChoice, Choice: tc.choice}
+			}
+			rt, _, _, _, _ := newRouterTestRuntime(t, newScriptedJudge(resp))
+			got := rt.eventRouter.routeCombat(context.Background(), "H-01", detachTestEvent("evt_x"))
+			if got != tc.want {
+				t.Fatalf("routeCombat(choice=%q) = %q, want %q", tc.choice, got, tc.want)
+			}
+		})
+	}
+
+	// 无判决客户端（lookupJudge 返回 nil）→ 默认。
+	rt, _, _, _, _ := newRouterTestRuntime(t, notInterruptJudge())
+	rt.eventRouter.lookupJudge = func(string) routerJudge { return nil }
+	if got := rt.eventRouter.routeCombat(context.Background(), "H-01", detachTestEvent("evt_x")); got != defaultCombatStyleCmd {
+		t.Fatalf("nil-judge routeCombat = %q, want default %q", got, defaultCombatStyleCmd)
+	}
 }
 
 // TestCombatYieldTTL_ExpiryReturnsControl verifies the TTL safety net: no
@@ -940,13 +1073,14 @@ func TestCombatExit_StrategicReplanWithPhysDelta(t *testing.T) {
 	seedPerceptionWithPhys(t, ac, 39003, 55, 30, 68) // D12 10:50:03
 	dispatchTestEvent(t, rt, "H-01", combatExitTestEvent("evt_exit"))
 
-	// 链式完成：战术 replan + 战略修订留痕 + slot 释放。
+	// 归还链完成：hint 落位 + 战略修订留痕 + slot 释放。
 	waitFor(t, 3*time.Second, func() bool {
-		return len(ac.as.PlanRevisions()) == 1 && replanIdle(ac) && strategic.calls >= 1
+		return len(ac.as.PlanRevisions()) == 1 && replanIdle(ac) && strategic.calls.Load() >= 1
 	})
 
-	// 战术层 prompt：【战斗结束】hint 携带具体属性变化（before→after）。
-	user := lastUserPromptOf(t, tactical.capturedMsgs)
+	// 归还落位：【战斗结束】hint 携带具体属性变化（before→after），由 worker
+	// 自然 refill 消费注入战术层 prompt（不再有专门的战术重规划）。
+	hint := ac.as.ReplanHint()
 	for _, want := range []string{
 		"【战斗结束】",
 		"战斗期间物理属性变化",
@@ -954,8 +1088,8 @@ func TestCombatExit_StrategicReplanWithPhysDelta(t *testing.T) {
 		"疲劳 10→30（+20）",
 		"电量 80→55（-25）",
 	} {
-		if !strings.Contains(user, want) {
-			t.Fatalf("post-combat tactical prompt missing %q:\n%s", want, user)
+		if !strings.Contains(hint, want) {
+			t.Fatalf("post-combat hint missing %q: %q", want, hint)
 		}
 	}
 	// 战略层修订 prompt：修订原因带战斗归还 + 同一份 delta + 重排指引。
@@ -1003,23 +1137,19 @@ func TestCombatExit_StrategicThrottledOnRepeatCombat(t *testing.T) {
 	seedPerceptionWithPhys(t, ac, 39003, 55, 30, 68)
 	dispatchTestEvent(t, rt, "H-01", combatExitTestEvent("evt_exit"))
 	waitFor(t, 3*time.Second, func() bool {
-		return len(ac.as.PlanRevisions()) == 1 && replanIdle(ac) && strategic.calls == 1
+		return len(ac.as.PlanRevisions()) == 1 && replanIdle(ac) && strategic.calls.Load() == 1
 	})
 
-	// 第二次战斗（间隔 40 游戏分钟 < 2 游戏小时）：战术 replan 照常，
-	// 战略修订被节流跳过。游戏时间推进到 11:30——修订后的新时段起点带
-	// ±planJitterMinutes 扰动（10:50-11:15），固定在 10:50 会落进"无匹配
-	// slot"的空隙（链 2 战术 replan 因无 goal 退出，flaky）；11:30 在任意
-	// 扰动下都位于修订段内部。
+	// 第二次战斗（间隔 40 游戏分钟 < 2 游戏小时）：不再有专门战术 replan，
+	// 归还链的 maybeStrategicReplan 被节流跳过（战略修订有当日上限 + 间隔门槛）。
 	seedPerceptionWithPhys(t, ac, 41400, 55, 30, 68) // 11:30
-	callsBefore := tactical.calls
 	yieldViaDetach(t, rt, "evt_atk2")
 	dispatchTestEvent(t, rt, "H-01", combatExitTestEvent("evt_exit2"))
 	waitFor(t, 3*time.Second, func() bool {
-		return tactical.calls > callsBefore && replanIdle(ac)
+		return !ac.combatYieldActive() && replanIdle(ac)
 	})
-	time.Sleep(150 * time.Millisecond) // 让链的下一跳（被节流的 maybe）执行完
-	if got := strategic.calls; got != 1 {
+	time.Sleep(150 * time.Millisecond) // 让归还链的 maybeStrategicReplan（被节流）执行完
+	if got := strategic.calls.Load(); got != 1 {
 		t.Fatalf("second combat within the gap must not re-run the strategic replan, got %d calls", got)
 	}
 	if got := len(ac.as.PlanRevisions()); got != 1 {
@@ -1034,29 +1164,16 @@ func TestCombatExit_StrategicThrottledOnRepeatCombat(t *testing.T) {
 func TestCombatExit_StrategicSkippedWhenReyieldedMidChain(t *testing.T) {
 	rt, _, ac, _, _ := newRouterTestRuntime(t, notInterruptJudge())
 	ac.autoPlanEnabled = true
-	gate := make(chan struct{})
-	tactical := &fakeLoopLLM{resp: speakToolCallResp(), gate: gate}
-	ac.tacticalHc = tactical
 	strategic := &fakeLoopLLM{resp: planJSONResponse(`{"time":"11:00-13:00","goal":"维修保养"}`)}
 	ac.strategicHc = strategic
 	seedPerceptionWithPhys(t, ac, 38823, 80, 10, 22)
 	ac.as.SetDailyPlan("09:00-12:00: 车间装配作业", 11)
-	ac.as.RecordActionStarted("act-1", "WorkShift", nil, agentstate.SourceTactical, "")
 
+	// 让位中直接调 maybeStrategicReplan：让位守卫应静默跳过（零战略调用、
+	// 零留痕）——重复攻击在归还链期间重新让位时，战略修订不抢身体。
 	yieldViaDetach(t, rt, "evt_atk")
-	dispatchTestEvent(t, rt, "H-01", combatExitTestEvent("evt_exit"))
-	// 战术 replan 阻塞在 gate 上（链持有 slot）。
-	waitFor(t, 2*time.Second, func() bool { return !replanIdle(ac) })
-
-	// 重复攻击重新让位（真实场景中在途 LLM 会被 ctx 掐掉；fake 不感知
-	// ctx，用 gate 控制时序）。
-	dispatchTestEvent(t, rt, "H-01", detachTestEvent("evt_atk2"))
-	waitFor(t, 2*time.Second, func() bool { return ac.combatYieldActive() })
-	close(gate) // 放行战术 replan
-
-	waitFor(t, 2*time.Second, func() bool { return replanIdle(ac) })
-	time.Sleep(150 * time.Millisecond) // 链下一跳执行完（守卫命中即静默返回）
-	if got := strategic.calls; got != 0 {
+	ac.maybeStrategicReplan(context.Background(), "H-01", nil, nil, nil, nil, testLogger(), "重复攻击重新让位")
+	if got := strategic.calls.Load(); got != 0 {
 		t.Fatalf("strategic replan must be skipped while re-yielded, got %d calls", got)
 	}
 	if got := len(ac.as.PlanRevisions()); got != 0 {
@@ -1084,12 +1201,12 @@ func TestCombatExit_NoPhysBaselineOmitsDelta(t *testing.T) {
 		return len(ac.as.PlanRevisions()) == 1 && replanIdle(ac)
 	})
 
-	user := lastUserPromptOf(t, tactical.capturedMsgs)
-	if !strings.Contains(user, "【战斗结束】") {
-		t.Fatalf("combat-end hint expected:\n%s", user)
+	hint := ac.as.ReplanHint()
+	if !strings.Contains(hint, "【战斗结束】") {
+		t.Fatalf("combat-end hint expected: %q", hint)
 	}
-	if strings.Contains(user, "战斗期间物理属性变化") {
-		t.Fatalf("no baseline → no delta line, got:\n%s", user)
+	if strings.Contains(hint, "战斗期间物理属性变化") {
+		t.Fatalf("no baseline → no delta line, got: %q", hint)
 	}
 	suser := lastUserPromptOf(t, strategic.capturedMsgs)
 	if !strings.Contains(suser, "物理属性可能已显著变化") {

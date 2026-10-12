@@ -78,6 +78,34 @@ var routerQuestions = map[string]jev.Question{
 		"日常小事，无需在意", "紧急事件，需要立即处理"),
 }
 
+// combatStyleOptions maps the combat-style choice key (= the dispatched
+// action_command cmd) to its human description. The jev model picks one
+// choice; routeCombat dispatches the chosen key verbatim as the cmd. This is
+// the combat-detach horizontal-expansion point: future combat styles append
+// entries here (one per ExecuteCombatBT_* cmd) and UE implements the matching
+// behavior tree — no dispatch-logic change needed.
+var combatStyleOptions = map[string]string{
+	protocol.CmdExecuteCombatBTDefault: "默认战斗行为树（近战格斗，通用战斗风格）",
+}
+
+// defaultCombatStyleCmd is the fallback combat action when no jev client is
+// configured (--jev-model=""), the judgment call fails, or the answer is
+// unusable/unknown. There is always exactly one safe default so combat never
+// deadlocks waiting for the router: UE is holding the body and needs a combat
+// action to proceed.
+const defaultCombatStyleCmd = protocol.CmdExecuteCombatBTDefault
+
+// combatQuestions is the fixed question set for combat-style selection at a
+// combat-detach entry. Unlike routerQuestions (interrupt-or-enqueue), combat
+// selection asks a single choice question — the detach event already forced
+// the combat, so the agent only picks WHICH behavior tree to run. The choice
+// options (combatStyleOptions) key the cmd names; the jev model returns one.
+var combatQuestions = map[string]jev.Question{
+	"combat_style": jev.ChoiceQuestion(
+		"该 NPC 已进入战斗（被玩家攻击/瞄准），UE 战斗系统已接管身体并等待 Agent 下发一套战斗行为树。请结合该 NPC 的角色与当前处境，选择最合适的战斗风格。",
+		combatStyleOptions),
+}
+
 // routerConversationWindow caps the conversation tail sent to the judgment
 // model. The tactical history is already bounded within a day (compaction
 // folds the head into a summary), but the first-of-day full header alone is
@@ -301,6 +329,84 @@ func (r *eventRouter) route(ctx context.Context, agentID string, ev protocol.Wor
 		"agent_id", agentID, "event_id", ev.EventID,
 		"event_type", ev.EventType, "severity", dec.Severity, "reason", dec.Reason)
 	r.processVerdict(agentID, ev, dec)
+}
+
+// routeCombat selects the combat behavior-tree for a combat-detach entry and
+// returns the action_command cmd to dispatch (defaultCombatStyleCmd on any
+// failure). Unlike route(), this is deliberately NOT gated by the
+// combat-yield guard — the yield IS the combat context: UE has taken the body
+// and is waiting for the agent's combat action, so the only question is WHICH
+// style, never "should we fight". The caller (Runtime.dispatchCombatAction)
+// re-checks combatYieldActive() before sending, so a combat_exit arriving
+// mid-judgment (~1s) still skips the dispatch.
+//
+// Failure is cheap and safe: the choice whitelist (combatStyleOptions) has one
+// default, so any unusable answer degrades to it — combat never deadlocks
+// waiting on the router.
+func (r *eventRouter) routeCombat(ctx context.Context, agentID string, ev protocol.WorldEventPayload) string {
+	if r == nil {
+		return defaultCombatStyleCmd
+	}
+	j := r.lookupJudge(agentID)
+	if j == nil {
+		return defaultCombatStyleCmd
+	}
+	ac := r.lookupAgent(agentID)
+	if ac == nil {
+		return defaultCombatStyleCmd
+	}
+	in := r.buildInput(agentID, ac, ev)
+
+	t0 := time.Now()
+	resp, err := j.Judge(ctx, &jev.Request{
+		State: jev.State{
+			Conversation: routerConversation(ac.as),
+			User:         prompt.BuildRouterUserAttributes(in),
+		},
+		Questions: combatQuestions,
+	})
+	e2e := time.Since(t0)
+	outputTokens := 0
+	if resp != nil {
+		outputTokens = resp.Usage.OutputTokens
+	}
+	llmMetricsCollector.RecordCall(llmmetrics.CallSample{
+		Layer:        "router",
+		E2E:          e2e,
+		OutputTokens: outputTokens,
+		ErrClass:     classifyLLMError(err),
+	})
+	dumpLLMMetrics(r.logger)
+
+	if err != nil {
+		r.logger.Info("[事件路由] 战斗风格判决调用失败，回退默认战斗行为树",
+			"agent_id", agentID, "event_id", ev.EventID, "err", err)
+		llmMetricsCollector.RecordJSON("router", false)
+		return defaultCombatStyleCmd
+	}
+	if resp == nil {
+		llmMetricsCollector.RecordJSON("router", false)
+		return defaultCombatStyleCmd
+	}
+	ans, ok := resp.Answers["combat_style"]
+	if !ok || ans.Choice == "" {
+		r.logger.Info("[事件路由] 战斗风格判决缺 choice，回退默认战斗行为树",
+			"agent_id", agentID, "event_id", ev.EventID)
+		llmMetricsCollector.RecordJSON("router", false)
+		return defaultCombatStyleCmd
+	}
+	// 白名单校验：choice 必须是已登记的 combatStyleOptions key（= 合法 cmd），
+	// 未知/幻觉选项回退默认，绝不透传未实现的 cmd。
+	if _, known := combatStyleOptions[ans.Choice]; !known {
+		r.logger.Warn("[事件路由] 战斗风格判决返回未知选项，回退默认战斗行为树",
+			"agent_id", agentID, "event_id", ev.EventID, "choice", ans.Choice)
+		llmMetricsCollector.RecordJSON("router", false)
+		return defaultCombatStyleCmd
+	}
+	llmMetricsCollector.RecordJSON("router", true)
+	r.logger.Info("[事件路由] 战斗风格判决：选定 "+ans.Choice,
+		"agent_id", agentID, "event_id", ev.EventID)
+	return ans.Choice
 }
 
 // buildInput snapshots the agent state and composes the router's view.

@@ -82,10 +82,9 @@ type agentContext struct {
 	debugOverride    bool
 	replanInProgress bool
 	// replanKind 标记当前持有 replanInProgress 的重规划种类（replanKind*
-	// 常量，"" = 无在途）。战略层修订只改 dailyPlan/slot、不碰第一跳已
-	// 提交的战术队列——worker 在其 LLM 在途期间仍可 pop 执行（归还链
-	// "战术先行"的设计意图）；战术 replan 在途期间队列已被 ClearForReplan
-	// 清空，worker 保持全跳过。
+	// 常量，"" = 无在途）。战略层修订只改 dailyPlan/slot、不碰 worker 自然
+	// refill 已提交的战术队列——worker 在其 LLM 在途期间仍可 pop 执行；
+	// 战术 replan 在途期间队列已被 ClearForReplan 清空，worker 保持全跳过。
 	replanKind            string
 	pendingActionTimeouts map[string]*time.Timer // action_id → timeout timer
 	completedBeforeArm    map[string]struct{}    // action_id completed before timer armed
@@ -127,13 +126,17 @@ type agentContext struct {
 
 	// Combat-detach yield state (combat-detach, 2026-09-22): while combatYield
 	// is set, UE's combat AI owns the body — the worker loop skips slot
-	// switching/dispatch/refill, the router stays silent, and NO action is
-	// sent until combat_exit (or combatYieldTTLGameSec since the last detach
-	// event, the safety net) returns control. combatYieldSinceGameSec
-	// follows beginReaction's cold-start convention (<= 0 = no perception yet,
-	// the TTL check stays inert until the first perception latches it).
-	// combatYieldLastEvent is echoed back into the world-event queue at
-	// reclaim so the first post-combat decomposition sees why the gap exists.
+	// switching/dispatch/refill, the interrupt router stays silent, and no
+	// NON-combat action is sent until combat_exit (or combatYieldTTLGameSec
+	// since the last detach event, the safety net) returns control. The one
+	// exception: at first entry the agent dispatches the combat behavior-tree
+	// action (routeCombat → dispatchCombatAction, untracked) — since
+	// 2026-10-09 UE waits for the agent's combat-style choice instead of
+	// auto-running a BT. combatYieldSinceGameSec follows beginReaction's
+	// cold-start convention (<= 0 = no perception yet, the TTL check stays
+	// inert until the first perception latches it). combatYieldLastEvent is
+	// echoed back into the world-event queue at reclaim so the first
+	// post-combat decomposition sees why the gap exists.
 	//
 	// Deliberately NOT cleared by stop()/reconnect: UE never re-sends detach
 	// after a reconnect (AgentState.Stop wipes the dedup seen-set too), so
@@ -915,8 +918,8 @@ func runPerceptionWorker(
 		replanKind := ac.replanKind
 		ac.coordMu.Unlock()
 		if replanBusy {
-			// 例外：战略层修订（归还链第二跳）只改 dailyPlan/slot，不碰第一
-			// 跳已提交的战术队列——修订 LLM 在途期间照常 pop，NPC 不因修订
+			// 例外：战略层修订（归还链）只改 dailyPlan/slot，不碰 worker 自然
+			// refill 已提交的战术队列——修订 LLM 在途期间照常 pop，NPC 不因修订
 			// 而呆站（2026-09-24 实测：修订 60s 超时期间队列 2 个动作不能
 			// pop，NPC 呆站，slot 过期后队列还被安全点清理丢弃）。slot 已
 			// 过期（pending）也照常 pop：旧队列动作有自身 time_to_stop 有界，
