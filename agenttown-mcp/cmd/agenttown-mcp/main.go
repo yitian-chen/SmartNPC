@@ -82,10 +82,9 @@ type agentContext struct {
 	debugOverride    bool
 	replanInProgress bool
 	// replanKind 标记当前持有 replanInProgress 的重规划种类（replanKind*
-	// 常量，"" = 无在途）。战略层修订只改 dailyPlan/slot、不碰第一跳已
-	// 提交的战术队列——worker 在其 LLM 在途期间仍可 pop 执行（归还链
-	// "战术先行"的设计意图）；战术 replan 在途期间队列已被 ClearForReplan
-	// 清空，worker 保持全跳过。
+	// 常量，"" = 无在途）。战略层修订只改 dailyPlan/slot、不碰 worker 自然
+	// refill 已提交的战术队列——worker 在其 LLM 在途期间仍可 pop 执行；
+	// 战术 replan 在途期间队列已被 ClearForReplan 清空，worker 保持全跳过。
 	replanKind            string
 	pendingActionTimeouts map[string]*time.Timer // action_id → timeout timer
 	completedBeforeArm    map[string]struct{}    // action_id completed before timer armed
@@ -919,8 +918,8 @@ func runPerceptionWorker(
 		replanKind := ac.replanKind
 		ac.coordMu.Unlock()
 		if replanBusy {
-			// 例外：战略层修订（归还链第二跳）只改 dailyPlan/slot，不碰第一
-			// 跳已提交的战术队列——修订 LLM 在途期间照常 pop，NPC 不因修订
+			// 例外：战略层修订（归还链）只改 dailyPlan/slot，不碰 worker 自然
+			// refill 已提交的战术队列——修订 LLM 在途期间照常 pop，NPC 不因修订
 			// 而呆站（2026-09-24 实测：修订 60s 超时期间队列 2 个动作不能
 			// pop，NPC 呆站，slot 过期后队列还被安全点清理丢弃）。slot 已
 			// 过期（pending）也照常 pop：旧队列动作有自身 time_to_stop 有界，
