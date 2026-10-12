@@ -1184,14 +1184,14 @@ func (a *agentContext) checkCombatYieldTakeoverStop(agentID string, ws contract.
 const situationKindCombat = "combat"
 
 // situationTTLGameSec bounds a situation without a resolution event
-// (combat_exit never arrives): 30 game minutes, then it auto-degrades.
-const situationTTLGameSec = 30 * 60.0
+// (combat_exit never arrives): 120 game minutes, then it auto-degrades.
+const situationTTLGameSec = 120 * 60.0
 
 // combatYieldTTLGameSec bounds a combat-detach yield without a combat_exit
 // handback (UE forgot / not implemented / bug): the agent reclaims control
 // after this many game seconds since the LAST detach event. Each new attack
 // refreshes the window, so an ongoing fight never expires mid-combat.
-const combatYieldTTLGameSec = 30 * 60.0
+const combatYieldTTLGameSec = 120 * 60.0
 
 // combatYieldTakeoverGrace is the wall-clock window after yield entry during
 // which MCP waits for UE's combat takeover to stop the old in-flight action
