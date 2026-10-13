@@ -243,6 +243,7 @@ func generateTacticalPlan(
 	llmMetricsCollector.RecordJSON("tactical", true)
 	actions = fillDefaultDurationForRest(actions)
 	actions = fillDefaultDurationForWork(actions)
+	actions = forceConversationDuration(actions)
 	actions = insertRestBetweenDuplicateWork(actions)
 	actionsJSON, _ := json.Marshal(actions)
 	logger.Info("[战术层] 分解成功",
@@ -360,6 +361,32 @@ func fillDefaultDurationForWork(actions []plannedAction) []plannedAction {
 			a.Params = map[string]any{}
 		}
 		a.Params["duration"] = defaultWorkDurationSec
+	}
+	return actions
+}
+
+// defaultConversationDurationSec 是对话类动作（speak_to）的固定 duration
+// （60 游戏分钟会话窗口）。speak_to 是回合制对话的开场，duration 是 agent 侧
+// time_to_stop 预算——LLM 常只填 60 秒（"说一句话"的直觉），到点即被打断、
+// NPC 说完就跑，多回合对话起不来。方案 A 把 duration 当"会话窗口"：此处强制
+// 覆盖 LLM 填的短时长，让 NPC 留在对话状态，由对方的 speech_heard 事件驱动
+// 后续回合（事件打断不受 time_to_stop 影响）。
+const defaultConversationDurationSec = 3600
+
+// forceConversationDuration 把队列中所有对话类动作（speak_to）的 duration
+// 强制设为 defaultConversationDurationSec。与 fillDefaultDurationForRest/Work
+// 不同：speak_to 的 duration 在 schema 中必填（LLM 一定会填），但填的是短时长
+// 而非会话窗口，所以这里是"覆盖"而非"补齐"。
+func forceConversationDuration(actions []plannedAction) []plannedAction {
+	for i := 0; i < len(actions); i++ {
+		a := &actions[i]
+		if a.Action != "speak_to" {
+			continue
+		}
+		if a.Params == nil {
+			a.Params = map[string]any{}
+		}
+		a.Params["duration"] = defaultConversationDurationSec
 	}
 	return actions
 }

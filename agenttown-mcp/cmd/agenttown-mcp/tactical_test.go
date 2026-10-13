@@ -1679,6 +1679,39 @@ func TestFillDefaultTimeToStopForWork_NonWorkUntouched(t *testing.T) {
 	}
 }
 
+// ─── forceConversationDuration ──────────────────────────────
+
+// TestForceConversationDuration_ShortOverridden verifies speak_to 的 duration
+// 被强制覆盖为 defaultConversationDurationSec——LLM 常填 60 秒，方案 A 要求
+// 会话窗口（3600 游戏秒），否则 NPC 说完就跑、对话起不来。
+func TestForceConversationDuration_ShortOverridden(t *testing.T) {
+	actions := []plannedAction{
+		{Action: "speak", Params: map[string]any{"content": "hi"}},
+		{Action: "speak_to", Params: map[string]any{"target_agent_id": "H-02", "content": "老王", "duration": 60}},
+		{Action: "InteractSmartObject", Params: map[string]any{"interaction": "rest", "semantic_group": "bench", "duration": 900}},
+	}
+	got := forceConversationDuration(actions)
+	if v, ok := got[1].Params["duration"]; !ok || v != defaultConversationDurationSec {
+		t.Fatalf("speak_to duration should be overridden to %d, got %v", defaultConversationDurationSec, got[1].Params["duration"])
+	}
+	// 非 speak_to 动作不受影响。
+	if v := got[2].Params["duration"]; v != 900 {
+		t.Fatalf("non-speak_to duration should be preserved, got %v", v)
+	}
+}
+
+// TestForceConversationDuration_NoDurationFilled verifies speak_to 缺 duration
+// 时同样补到默认值（虽然 schema 必填，但兜底）。
+func TestForceConversationDuration_NoDurationFilled(t *testing.T) {
+	actions := []plannedAction{
+		{Action: "speak_to", Params: map[string]any{"target_agent_id": "H-02", "content": "老王"}},
+	}
+	got := forceConversationDuration(actions)
+	if v, ok := got[0].Params["duration"]; !ok || v != defaultConversationDurationSec {
+		t.Fatalf("speak_to without duration should get default %d, got %v", defaultConversationDurationSec, got[0].Params["duration"])
+	}
+}
+
 // ─── fallbackRetryActions ────────────────────────────────────
 
 func TestFallbackRetryActions(t *testing.T) {
