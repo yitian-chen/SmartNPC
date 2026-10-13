@@ -13,7 +13,7 @@ import (
 // 【附近NPC】/【物体实时占用】 point at the user message's dynamic segments.
 // The available tools are NOT listed here — they arrive via the
 // function-calling `tools` request field.
-const TacticalRules = `1. 第一个工具调用必须是 speak（用一段话表达此刻内心想法或独白），随后必须返回至少一个带 duration 的长动作（InteractSmartObject 设施互动、exercise 原地锻炼或 speak_to 找人聊天），最多 6 个动作段，按执行顺序排列。禁止只返回 speak——只返回 speak 会被系统判定为失败并重试。可以在动作之间穿插speak表达现在的情况。
+const TacticalRules = `1. 第一个工具调用必须是 speak（用一段话表达此刻内心想法或独白；找某位 NPC 聊天时豁免，见规则 10），随后必须返回至少一个带 duration 的长动作（InteractSmartObject 设施互动、exercise 原地锻炼或 speak_to 找人聊天），最多 6 个动作段，按执行顺序排列。禁止只返回 speak——只返回 speak 会被系统判定为失败并重试。可以在动作之间穿插speak表达现在的情况。
 2. 你可以根据当前NPC的实际属性、实际游戏时间等信息灵活安排，如果当前此条日程并不合理，例如半夜不睡觉而是跑步/工作、电量不为低时就去充电等情况，请下发更合理的动作，不必遵守原有日程规定。
 3. InteractSmartObject 通过 zone + semantic_group 定位目标设施实例并完成互动，直接调用并填好 semantic_group / interaction / zone / duration 即可，无需在其前面额外调用 move_to。
 4. 禁止把同一动作连续重复多次填充时段（工作段之间应穿插休息段）。
@@ -22,15 +22,15 @@ const TacticalRules = `1. 第一个工具调用必须是 speak（用一段话表
 7. 所有非瞬时动作（InteractSmartObject 设施互动、exercise 原地锻炼、speak_to 找人聊天等需要持续一段时间的）都必须填写 duration 参数（秒，schema 必填），包括最后一个动作也不例外——无 duration 的长动作无法被系统按计划终止；move_to 的移动时长由 UE 自动决定、无需填 duration；瞬时动作（speak 等立即完成的）也不填 duration。duration 要合理：冥想、整理床铺等单段设 1800 秒左右，不宜超过 1 小时；受伤后的维修/休息可设 3600-7200 秒，磨损/疲劳严重时更长（以【物理告警强制约束】中的建议为准）；工作段可设 3600-7200 秒。到点后系统会打断该段并继续执行后续动作段；只有全部动作执行完，系统才会再次询问。推荐模式：工作段（如 1.5 小时）→ 长椅小憩/原地拉伸段（不超过 30 分钟）→ 返回工作段（duration 设为时段剩余时长）。
 8. 每次生成的最后一个动作必须是长动作（InteractSmartObject 或 speak_to 等长动作），其 duration 设为当前时段的剩余时长（见上文"剩余约 X 分钟"提示）——到点后系统自动切入下一时段，NPC 不会呆站。所有长动作（包括最后一个）都必须设置 duration，不得省略。所有动作的 duration 总和应接近当前时段的剩余时长，避免过短导致队列提前耗尽触发重分解、或过长拖到下一时段。
 9. 如果是调用 InteractSmartObject 工具，若当前日程目标明确指定了区域（如"去中央广场长椅休息"），**必须**在该工具的 zone 参数中填写对应区域 id（如 central_plaza、logistics_hub）。
-10. 想找某位 NPC 聊天/对话时用 speak_to 工具：target_agent_id 填对方 id（【附近NPC】/【其他NPC】中给出的 id），content 填你想说的内容，interrupt 填 true；speak_to 是长动作，按规则 7 填 duration。不要用 move_to 走向对方——speak_to 已经包含走过去这一步。`
+10. 想找某位 NPC 聊天/对话时：**豁免规则 1 的"以 speak 开头"**，并且**只输出一条 speak_to**（不要先 speak 独白、也不要再补其他长动作）——target_agent_id 填对方 id（【附近NPC】/【其他NPC】中给出的 id），content 填你想说的内容，interrupt 填 true；speak_to 是长动作，按规则 7 填 duration。`
 
 // tacticalCoreRules 是精简模式（Compact=true）下替代完整 TacticalRules 的
 // 核心约束速览，覆盖实测高频失败模式（speak-only 队列、duration 漏填、
 // 末段非长动作、semantic_group 编造）。完整规则经 tacticalCompactRefLine
 // 指向本日第一条战术 user 消息，不再逐轮重复。
-const tacticalCoreRules = `- 首个工具调用必须是 speak；随后必须返回至少一个带 duration 的长动作，禁止只返回 speak。
+const tacticalCoreRules = `- 首个工具调用必须是 speak；随后必须返回至少一个带 duration 的长动作，禁止只返回 speak（找某位 NPC 聊天除外——只输出一条 speak_to，不需要 speak 开头）。
 - 除了speak和移动，其他必须填 duration（秒）：中间动作约 1800 秒、工作段 3600-7200 秒；恢复类动作（维修/充电/睡眠）按恢复需要设置，可以更长，不受这些档位限制。
-- 找人聊天/对话用 speak_to 工具（target_agent_id 填对方 id，content 填内容，interrupt 填 true）。
+- 找人聊天/对话时只输出一条 speak_to 工具（target_agent_id 填对方 id，content 填内容，interrupt 填 true）。
 - 最后一个动作必须是长动作，duration 设为当前时段剩余时长。所有长动作（含末段）都必须设 duration。`
 
 // tacticalCompactRefLine 是精简模式的引用行：指向本日第一条战术消息的
@@ -151,7 +151,7 @@ func BuildTactical(in TacticalInput) string {
 
 	// ── 四、任务 ──
 	sb.WriteString("\n四、任务\n")
-	sb.WriteString("请通过工具调用（function calling）把【当前时段目标】分解为动作序列，按顺序执行（首个工具调用是 speak）。\n")
+	sb.WriteString("请通过工具调用（function calling）把【当前时段目标】分解为动作序列，按顺序执行（找某位 NPC 聊天时只输出一条 speak_to、不需要 speak 开头；其余目标首个工具调用是 speak）。\n")
 	return sb.String()
 }
 
