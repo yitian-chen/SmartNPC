@@ -100,6 +100,15 @@ func TestFormatWorldEvent_EachCategory(t *testing.T) {
 			want: "空间变化：H-02 进入对话距离，相距约 3.5 米",
 		},
 		{
+			name: "speech_heard",
+			ev: protocol.WorldEventPayload{
+				Category:  protocol.CategorySocial,
+				EventType: protocol.EventTypeSpeechHeard,
+				Data:      json.RawMessage(`{"speaker_id":"H-04","speaker_name":"老刘","addressee_id":"H-02","content":"老王，今天你干啥？"}`),
+			},
+			want: "社交信号：老刘（H-04）对你说：老王，今天你干啥？",
+		},
+		{
 			name: "action_failed",
 			ev: protocol.WorldEventPayload{
 				Category:  protocol.CategoryActionAnomaly,

@@ -490,6 +490,15 @@ func TestWorldEventDataBlocks(t *testing.T) {
 				t.Fatalf("social data lost: %+v", d)
 			}
 		}},
+		{"social speech_heard", `{"speaker_id":"H-04","speaker_name":"老刘","addressee_id":"H-02","content":"老王，今天你干啥？","distance":518.2}`, func(t *testing.T, raw json.RawMessage) {
+			var d SpeechHeardData
+			if err := json.Unmarshal(raw, &d); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if d.SpeakerID != "H-04" || d.SpeakerName != "老刘" || d.AddresseeID != "H-02" || d.Content != "老王，今天你干啥？" {
+				t.Fatalf("speech_heard data lost: %+v", d)
+			}
+		}},
 		{"action_anomaly action_failed", `{"action_id":"act_123","cmd":"MoveTo","reason":"unreachable"}`, func(t *testing.T, raw json.RawMessage) {
 			var d ActionAnomalyData
 			if err := json.Unmarshal(raw, &d); err != nil {

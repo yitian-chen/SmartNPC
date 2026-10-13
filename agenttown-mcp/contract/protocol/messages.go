@@ -349,6 +349,7 @@ const (
 	// social
 	EventTypeBroadcastHeard = "broadcast_heard" // 听到广播/大声说话
 	EventTypeMentioned      = "mentioned"       // 被点名/被提及
+	EventTypeSpeechHeard    = "speech_heard"    // 听到有人对自己说话（speak_to 定向话语的听者侧）
 	// action_anomaly
 	EventTypeActionFailed        = "action_failed"        // 动作执行失败（不再走 error 通道，§3.4）
 	EventTypeSmartObjectOccupied = "smartobject_occupied" // 目标 Smart Object 被占用
@@ -400,6 +401,19 @@ type SocialData struct {
 	Source  string `json:"source,omitempty"`  // 广播/提名的来源 agent id
 	Content string `json:"content,omitempty"` // 消息内容
 	Context string `json:"context,omitempty"` // 被提及时的上下文
+}
+
+// SpeechHeardData is the data block of category social event_type
+// speech_heard (§3.3): a directed utterance from one NPC to this agent
+// (the addressee). UE fills the speaker identity, the spoken content, and
+// the distance at which it was delivered. SpeakerName is a display
+// convenience (falls back to SpeakerID when empty).
+type SpeechHeardData struct {
+	SpeakerID   string  `json:"speaker_id"`
+	SpeakerName string  `json:"speaker_name,omitempty"`
+	AddresseeID string  `json:"addressee_id,omitempty"`
+	Content     string  `json:"content,omitempty"`
+	DistanceCm  float64 `json:"distance,omitempty"`
 }
 
 // ActionAnomalyData is the data block of category action_anomaly (§3.4).
