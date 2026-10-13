@@ -160,17 +160,16 @@ func TestHandleDebugCap_ReturnsAgents(t *testing.T) {
 	if !ok {
 		t.Fatal("Agents missing \"system\" key")
 	}
-	// handleDebugCap 始终追加合成 Stop 项，SocialChat 作为 MCP-side 兜底自动注入，
-	// 所以 len = 注册数 + 1 (SocialChat) + 1 (Stop)
-	if len(sys) != 4 {
-		t.Fatalf("system actions len = %d; want 4 (2 registered + SocialChat + 1 synthetic Stop)", len(sys))
+	// handleDebugCap 始终追加合成 Stop 项，所以 len = 注册数 + 1 (Stop)
+	if len(sys) != 3 {
+		t.Fatalf("system actions len = %d; want 3 (2 registered + 1 synthetic Stop)", len(sys))
 	}
-	// 前 3 项按 Cmd 排序：MoveTo < SocialChat < Speak；末尾是合成 Stop
-	if sys[0].Cmd != protocol.CmdMoveTo || sys[1].Cmd != protocol.CmdSocialChat || sys[2].Cmd != protocol.CmdSpeak {
-		t.Errorf("system actions order = %s, %s, %s; want MoveTo, SocialChat, Speak", sys[0].Cmd, sys[1].Cmd, sys[2].Cmd)
+	// 前 2 项按 Cmd 排序：MoveTo < Speak；末尾是合成 Stop
+	if sys[0].Cmd != protocol.CmdMoveTo || sys[1].Cmd != protocol.CmdSpeak {
+		t.Errorf("system actions order = %s, %s; want MoveTo, Speak", sys[0].Cmd, sys[1].Cmd)
 	}
-	if sys[3].Cmd != "Stop" {
-		t.Errorf("system actions[3].Cmd = %q; want Stop (synthetic)", sys[3].Cmd)
+	if sys[2].Cmd != "Stop" {
+		t.Errorf("system actions[2].Cmd = %q; want Stop (synthetic)", sys[2].Cmd)
 	}
 }
 
@@ -215,15 +214,14 @@ func TestHandleDebugCap_ToolNameField(t *testing.T) {
 		t.Fatalf("decode: %v", err)
 	}
 	sys := resp.Agents[protocol.SystemAgentID]
-	// 3 registered + SocialChat fallback + 1 synthetic Stop
-	if len(sys) != 5 {
-		t.Fatalf("system actions len = %d; want 5 (3 registered + SocialChat + 1 synthetic Stop)", len(sys))
+	// 3 registered + 1 synthetic Stop
+	if len(sys) != 4 {
+		t.Fatalf("system actions len = %d; want 4 (3 registered + 1 synthetic Stop)", len(sys))
 	}
 	wantTool := map[string]string{
 		"MoveTo":              "move_to",
 		"InteractSmartObject": "InteractSmartObject",
 		"WaveHand":            "wave_hand",
-		"SocialChat":          "social_chat",
 		"Stop":                "stop",
 	}
 	for _, a := range sys {
@@ -376,5 +374,44 @@ func TestHandleDebugLLMMetrics_Empty(t *testing.T) {
 	}
 	if rep.Layers == nil {
 		t.Error("empty snapshot should encode layers as {} not null")
+	}
+}
+
+// TestHandleDebugAutoDispatch verifies the runtime "pause auto dispatch" switch:
+// GET returns the current state, POST flips it, and the package-level flag
+// tracks the POST. The flag is reset at the end so other tests are unaffected.
+func TestHandleDebugAutoDispatch(t *testing.T) {
+	logger := slog.Default()
+	defer autoDispatchPaused.Store(false)
+
+	// GET 初始：未暂停。
+	req := httptest.NewRequest(http.MethodGet, "/debug/auto-dispatch", nil)
+	rec := httptest.NewRecorder()
+	handleDebugAutoDispatch(rec, req, logger)
+	var got map[string]bool
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got["paused"] != false {
+		t.Errorf("GET paused = %v, want false", got["paused"])
+	}
+
+	// POST paused=true：写入并回读。
+	req = httptest.NewRequest(http.MethodPost, "/debug/auto-dispatch", strings.NewReader(`{"paused":true}`))
+	rec = httptest.NewRecorder()
+	handleDebugAutoDispatch(rec, req, logger)
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got["paused"] != true || !autoDispatchPaused.Load() {
+		t.Errorf("POST paused = %v, flag = %v, want true", got["paused"], autoDispatchPaused.Load())
+	}
+
+	// POST 非法 JSON：400。
+	req = httptest.NewRequest(http.MethodPost, "/debug/auto-dispatch", strings.NewReader(`not-json`))
+	rec = httptest.NewRecorder()
+	handleDebugAutoDispatch(rec, req, logger)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("invalid JSON should be 400, got %d", rec.Code)
 	}
 }

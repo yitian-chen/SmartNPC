@@ -100,13 +100,13 @@ func TestFormatWorldEvent_EachCategory(t *testing.T) {
 			want: "空间变化：H-02 进入对话距离，相距约 3.5 米",
 		},
 		{
-			name: "chat_invite_incoming",
+			name: "speech_heard",
 			ev: protocol.WorldEventPayload{
 				Category:  protocol.CategorySocial,
-				EventType: protocol.EventTypeChatInviteIncoming,
-				Data:      json.RawMessage(`{"conv_id":"conv_001","from":"H-02","content":"老陈，借个工具？"}`),
+				EventType: protocol.EventTypeSpeechHeard,
+				Data:      json.RawMessage(`{"speaker_id":"H-04","speaker_name":"老刘","addressee_id":"H-02","content":"老王，今天你干啥？"}`),
 			},
-			want: "社交信号：H-02 向你发起对话：老陈，借个工具？",
+			want: "社交信号：老刘（H-04）对你说：老王，今天你干啥？",
 		},
 		{
 			name: "action_failed",
@@ -246,9 +246,9 @@ func TestFormatWorldEvent_InfersCategoryFromEventType(t *testing.T) {
 	}
 	out := FormatWorldEvent(ev)
 	for _, want := range []string{
-		"玩家互动：",               // label 推断（不再是"未知类别"）
-		"被玩家 player_1 攻击",        // description 推断（typed data 解析）
-		"伤害 10",                 // damage 事实保留
+		"玩家互动：",           // label 推断（不再是"未知类别"）
+		"被玩家 player_1 攻击", // description 推断（typed data 解析）
+		"伤害 10",           // damage 事实保留
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("combat alias rendering missing %q: %s", want, out)

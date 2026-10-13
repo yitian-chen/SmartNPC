@@ -12,7 +12,7 @@ import (
 // fakeTransport is a contract.Transport test double. It records every
 // outbound call so tests can assert on what the decision layer dispatched,
 // and can be toggled connected/disconnected to exercise the guards in
-// guardedExecutor / dialogueRunner / reactiveRunner without a real WS server.
+// guardedExecutor / reactiveRunner without a real WS server.
 //
 // Recording is mutex-guarded: the world_event force path dispatches async
 // goroutines (replan / stop retries) that write concurrently with the test

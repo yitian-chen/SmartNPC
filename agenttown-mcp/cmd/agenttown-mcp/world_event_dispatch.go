@@ -119,37 +119,14 @@ func (rt *Runtime) handleWorldEvent(agentID string, ev protocol.WorldEventPayloa
 		return false
 	}
 
-	// P4-14：对话邀请即时消费（不走路由器/队列）——对话建立有实时性
-	// 要求（UE 会话状态机等待 rsp），入队等安全点会把对话拖到几十游戏
-	// 分钟后。协议规定 UE 停发独立 chat_invite、统一按 world_event 推送
-	// social.chat_invite_incoming；Agent 侧在此解包转交对话 runner。
-	if ev.Category == protocol.CategorySocial && ev.EventType == protocol.EventTypeChatInviteIncoming {
-		// 战斗让位中礼貌拒绝（不转交 runner——战斗中的身体不会去聊天，
-		// 但 rsp 必须回：UE 会话状态机在等，静默丢弃会把对端 A 挂死）。
-		if ac.combatYieldActive() {
-			var d protocol.SocialData
-			_ = json.Unmarshal(ev.Data, &d)
-			if ac.dialogue != nil && d.ConvID != "" {
-				ac.dialogue.sendInviteRsp(d.ConvID, false)
-			}
-			rt.logger.Info("[world_event] 战斗让位中，对话邀请已礼貌拒绝",
-				"agent_id", agentID, "event_id", ev.EventID, "from", d.From, "conv_id", d.ConvID)
-			return true
+	// 对话会话累积：收到 speech_heard（有人对我说话）时把对方这一句记进
+	// 会话 transcript，供对话结束后的好感度评估。放在 force 分流之前——force
+	// 与非 force 的 speech_heard 都要记。
+	if ev.Category == protocol.CategorySocial && ev.EventType == protocol.EventTypeSpeechHeard {
+		var d protocol.SpeechHeardData
+		if err := json.Unmarshal(ev.Data, &d); err == nil && d.SpeakerID != "" {
+			ac.recordConversationTurn(d.SpeakerID, d.SpeakerID, d.Content, ac.as.LatestGameTimeSec())
 		}
-		if ac.dialogue != nil {
-			var d protocol.SocialData
-			_ = json.Unmarshal(ev.Data, &d)
-			go ac.dialogue.handleInvite(rt.ctx, protocol.ChatInvitePayload{
-				ConvID:      d.ConvID,
-				FromAgentID: d.From,
-				Content:     d.Content,
-			})
-			rt.logger.Info("[world_event] 对话邀请已转交对话 runner（即时）",
-				"agent_id", agentID, "event_id", ev.EventID, "from", d.From, "conv_id", d.ConvID)
-		} else {
-			rt.logger.Debug("[world_event] chat_invite dropped (dialogue disabled)", "agent_id", agentID, "event_id", ev.EventID)
-		}
-		return true
 	}
 
 	// 修复 A：combat 类事件是持续状态的边沿——attacked/targeted 登记威胁
@@ -356,6 +333,8 @@ func (rt *Runtime) handleCombatDetach(ac *agentContext, agentID string, ev proto
 		// 会被 processSlotSwitch 整队清掉——入口处就地解除（slot 边界迁移
 		// 已被让位吞并，归还后按时间重推）。
 		ac.as.ClearSlotSwitchPending()
+		// 战斗让位中断对话：丢弃在途会话 transcript（被战斗打断的对话不评估）。
+		ac.clearConversation()
 	}
 	// 属性基线（首入口时）：归还时对比战斗期间的属性变化（磨损/疲劳/电量
 	// before→after），作为战术层【战斗结束】hint 与战略层修订原因的事实依据。

@@ -120,36 +120,6 @@ func TestMapTacticalAction_Composite(t *testing.T) {
 	}
 }
 
-// TestMapTacticalAction_SocialChat verifies the Phase 2 Module C dialogue
-// action maps to CmdSocialChat with target_agent_id + content params and
-// NO auto_queue (dialogue targets an NPC, not a queueable Smart Object).
-func TestMapTacticalAction_SocialChat(t *testing.T) {
-	kb := loadTestKB(t)
-	pa := plannedAction{Action: "social_chat", Params: map[string]any{
-		"target_agent_id": "H-02",
-		"content":         "最近怎么样？",
-	}}
-	cmd, params, err := mapTacticalAction(pa, "H-01", kb, nil)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if cmd != protocol.CmdSocialChat {
-		t.Errorf("cmd=%q, want %q", cmd, protocol.CmdSocialChat)
-	}
-	if params["target_agent_id"] != "H-02" {
-		t.Errorf("target_agent_id=%v, want H-02", params["target_agent_id"])
-	}
-	if params["content"] != "最近怎么样？" {
-		t.Errorf("content=%v", params["content"])
-	}
-	if _, has := params["auto_queue"]; has {
-		t.Errorf("social_chat must NOT carry auto_queue (dialogue is not a queueable Smart Object action): %+v", params)
-	}
-	if _, has := params["semantic_group"]; has {
-		t.Errorf("social_chat must NOT carry semantic_group: %+v", params)
-	}
-}
-
 func TestMapTacticalAction_MoveToPassthrough(t *testing.T) {
 	kb := loadTestKB(t)
 	pa := plannedAction{Action: "move_to", Params: map[string]any{"target_type": "zone", "target_id": "main_workshop"}}
@@ -1274,24 +1244,19 @@ func TestTacticalToolsFromRegistry_BuildsTools(t *testing.T) {
 			},
 		},
 	})
-	// Register(system) 会自动注入 social_chat（MCP 侧对话工具），所以总数
-	// = MoveTo + InteractSmartObject + SocialChat。
 	got := tacticalToolsFromRegistry(reg, "H-01")
 	byName := map[string]venus.Tool{}
 	for _, tool := range got {
 		byName[tool.Function.Name] = tool
 	}
-	if len(got) != 3 {
-		t.Fatalf("tools len = %d, want 3 (MoveTo + InteractSmartObject + SocialChat)", len(got))
+	if len(got) != 2 {
+		t.Fatalf("tools len = %d, want 2 (MoveTo + InteractSmartObject)", len(got))
 	}
 	if _, ok := byName["move_to"]; !ok {
 		t.Fatalf("move_to tool missing: %v", got)
 	}
 	if _, ok := byName["InteractSmartObject"]; !ok {
 		t.Fatalf("InteractSmartObject tool missing: %v", got)
-	}
-	if _, ok := byName["social_chat"]; !ok {
-		t.Fatalf("social_chat tool missing: %v", got)
 	}
 	if byName["InteractSmartObject"].Type != "function" {
 		t.Errorf("tool type should be function")
@@ -1324,22 +1289,6 @@ func TestTacticalToolsFromRegistry_BuildsTools(t *testing.T) {
 	}
 	if !hasDur {
 		t.Errorf("schema.required = %v, want duration included", schema.Required)
-	}
-	// social_chat 不追加 duration（对话挂起直到结束，duration 会打断对话）。
-	var sschema struct {
-		Properties map[string]any `json:"properties"`
-		Required   []string       `json:"required"`
-	}
-	if err := json.Unmarshal(byName["social_chat"].Function.Parameters, &sschema); err != nil {
-		t.Fatalf("social_chat parameters is not valid JSON: %v", err)
-	}
-	if _, ok := sschema.Properties["duration"]; ok {
-		t.Errorf("social_chat should not have duration property")
-	}
-	for _, r := range sschema.Required {
-		if r == "duration" {
-			t.Errorf("social_chat duration must not be required")
-		}
 	}
 	// 瞬时工具（speak/emote 等）不追加 duration 的验证见
 	// TestCapabilityParamsSchema_DurationRequiredForNonInstant。
@@ -1374,7 +1323,7 @@ func TestTacticalToolsFromRegistry_MasksCompositeTools(t *testing.T) {
 	for _, tl := range tacticalToolsFromRegistry(r, "H-01") {
 		names[tl.Function.Name] = true
 	}
-	for _, keep := range []string{"InteractSmartObject", "generic_act", "move_to", "social_chat", "speak"} {
+	for _, keep := range []string{"InteractSmartObject", "generic_act", "move_to", "speak"} {
 		if !names[keep] {
 			t.Errorf("tool %s should be present, got %v", keep, names)
 		}
@@ -1727,6 +1676,39 @@ func TestFillDefaultTimeToStopForWork_NonWorkUntouched(t *testing.T) {
 		if _, ok := a.Params["duration"]; ok {
 			t.Fatalf("non-work action %d should not get duration, got %v", i, a.Params)
 		}
+	}
+}
+
+// ─── forceConversationDuration ──────────────────────────────
+
+// TestForceConversationDuration_ShortOverridden verifies speak_to 的 duration
+// 被强制覆盖为 defaultConversationDurationSec——LLM 常填 60 秒，方案 A 要求
+// 会话窗口（3600 游戏秒），否则 NPC 说完就跑、对话起不来。
+func TestForceConversationDuration_ShortOverridden(t *testing.T) {
+	actions := []plannedAction{
+		{Action: "speak", Params: map[string]any{"content": "hi"}},
+		{Action: "speak_to", Params: map[string]any{"target_agent_id": "H-02", "content": "老王", "duration": 60}},
+		{Action: "InteractSmartObject", Params: map[string]any{"interaction": "rest", "semantic_group": "bench", "duration": 900}},
+	}
+	got := forceConversationDuration(actions)
+	if v, ok := got[1].Params["duration"]; !ok || v != defaultConversationDurationSec {
+		t.Fatalf("speak_to duration should be overridden to %d, got %v", defaultConversationDurationSec, got[1].Params["duration"])
+	}
+	// 非 speak_to 动作不受影响。
+	if v := got[2].Params["duration"]; v != 900 {
+		t.Fatalf("non-speak_to duration should be preserved, got %v", v)
+	}
+}
+
+// TestForceConversationDuration_NoDurationFilled verifies speak_to 缺 duration
+// 时同样补到默认值（虽然 schema 必填，但兜底）。
+func TestForceConversationDuration_NoDurationFilled(t *testing.T) {
+	actions := []plannedAction{
+		{Action: "speak_to", Params: map[string]any{"target_agent_id": "H-02", "content": "老王"}},
+	}
+	got := forceConversationDuration(actions)
+	if v, ok := got[0].Params["duration"]; !ok || v != defaultConversationDurationSec {
+		t.Fatalf("speak_to without duration should get default %d, got %v", defaultConversationDurationSec, got[0].Params["duration"])
 	}
 }
 

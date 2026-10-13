@@ -1,6 +1,6 @@
 // Package main — 统一 agentic loop 编排。
 //
-// 每个 NPC 每天的战略/战术/对话三层共用一份会话历史（AgentState.
+// 每个 NPC 每天的战略/战术两层共用一份会话历史（AgentState.
 // conversation）：每次 LLM 调用（无论哪层）以 [system, ...历史, 本次 user,
 // <agent_state> 状态栏] 发送，成功后把 user + assistant 两条消息追加进历史
 // （状态栏是瞬态注入，不落历史，下一轮重新现拼）；跨日
@@ -9,13 +9,12 @@
 //
 // 各层差异收敛为 agenticTurn 的三个参数：
 //   - userContent：本次 append 的 user role 内容（各层 prompt builder 产出）
-//   - toolChoice：战略/对话 = "none"（披露目录但必须以文本/JSON 作答），
+//   - toolChoice：战略 = "none"（披露目录但必须以文本/JSON 作答），
 //     战术 = "required"（必须调用工具）
 //   - schemaName/schema：战略层传 daily_plan（response_format json_schema
 //     strict），其余层空（不带 response_format）
 //
-// tools 字段每次请求都传（tacticalToolsFromRegistry 派生）；战略层额外屏蔽
-// social_chat（规划阶段不引导主动社交），战术/对话层仍披露。
+// tools 字段每次请求都传（tacticalToolsFromRegistry 派生）。
 //
 // 失败语义：LLM 调用失败（含 4001 重试耗尽）时历史保持不变——失败的
 // user 消息不留悬空在历史里，下次调用重试完整请求。
@@ -42,18 +41,17 @@ import (
 // user(本次), <agent_state> 状态栏]；成功后 append user + assistant 两条消息
 // 进 AgentState.conversation（a.as，状态栏不落历史），失败则历史不动。
 //
-// hc 决定本轮模型（战略轮传 strategicHc=pro，战术/对话轮传 tacticalHc=
-// flash——Venus 客户端无状态，同一份历史在不同轮次间切模型可行）。
+// hc 决定本轮模型（战略轮传 strategicHc=pro，战术轮传 tacticalHc=flash——
+// Venus 客户端无状态，同一份历史在不同轮次间切模型可行）。
 // kb/profiles 用于拼共享 system prompt（与各层 prompt 构建同源）。
-// layer 仅用于日志与 docs/actual_prompts.md dump（"strategic"|"tactical"|
-// "dialogue"）。
+// layer 仅用于日志与 docs/actual_prompts.md dump（"strategic"|"tactical"）。
 //
 // 4001 重试（venus 校验 tools JSON 失败）在此统一处理，三层共用：相同请求体
 // 立即重试上限 maxTacticalRetries 次。429 限流（公共模型服务并发有限，
 // 30/min）退避重试——退避 + 随机抖动既等限流窗口恢复，也让同时被拒的
 // 多个 NPC（如 5 个 worker 同时注册触发的战略轮）重试自然错峰。超时/
 // 连接/其他错误不重试，由各层调用方自行兜底（战略层默认计划 / 战术层
-// fallback 动作 / 对话层默认拒绝或收尾）。
+// fallback 动作）。
 func (a *agentContext) agenticTurn(ctx context.Context, hc llmClient, kb *worldkb.KB, profiles map[string]*profile.Profile, logger *slog.Logger, agentID, layer, userContent, toolChoice, schemaName string, schema []byte) (*llmtypes.Response, error) {
 	if hc == nil {
 		return nil, fmt.Errorf("no LLM client")
@@ -63,15 +61,10 @@ func (a *agentContext) agenticTurn(ctx context.Context, hc llmClient, kb *worldk
 	// 对同一 agent 字节级一致，可缓存）。
 	system := prompt.BuildSharedSystemPrompt(kb, profiles, agentID)
 
-	// tools 每次都传：与战术层一致的完整行动目录。战略层额外屏蔽
-	// social_chat（规划阶段不引导 NPC 主动社交；对话由对话层/战术层在
-	// 运行时触发），请求体 tools 目录不再披露该工具。
+	// tools 每次都传：与战术层一致的完整行动目录。
 	var tools []venus.Tool
 	if capabilityRegistryRef != nil {
 		tools = tacticalToolsFromRegistry(capabilityRegistryRef, agentID)
-		if layer == "strategic" {
-			tools = dropTool(tools, "social_chat")
-		}
 	}
 
 	// 上下文压缩：估算输入 token，超阈值时把旧历史摘要成稳定 digest、
@@ -236,19 +229,6 @@ func (a *agentContext) agenticTurn(ctx context.Context, hc llmClient, kb *worldk
 // conversation 前缀稳定、Venus prefix cache 可复用。真实结果不覆盖它，
 // 而是以 user role 追加到末尾。
 const pendingToolResult = "result=pending"
-
-// dropTool 从 tools 目录中移除 Function.Name == name 的工具。目录派生
-// （tacticalToolsFromRegistry）对三层一致，战略层在 tool_choice=none 下
-// 仍会收到完整目录，这里按层剔除不应披露的工具（当前仅 social_chat）。
-func dropTool(tools []venus.Tool, name string) []venus.Tool {
-	out := make([]venus.Tool, 0, len(tools))
-	for _, t := range tools {
-		if t.Function.Name != name {
-			out = append(out, t)
-		}
-	}
-	return out
-}
 
 // rateLimitBackoffBase 是 429 限流重试的退避基础时长（实际退避 = base +
 // [0, 3/4·base) 随机抖动）。包级变量便于测试临时调小加速。

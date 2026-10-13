@@ -169,6 +169,15 @@ type agentContext struct {
 	// day's remaining schedule must absorb.
 	combatYieldPhys *protocol.PhysicalState
 
+	// Conversation session state (affection evaluation): the in-progress
+	// NPC↔NPC conversation transcript. Turns accumulate from speak_to
+	// dispatches (recordActionStarted) and speech_heard events (handleWorldEvent);
+	// the worker closes the session once it idles past
+	// conversationIdleTimeoutGameSec and spawns the affection LLM evaluation.
+	convPeerID      string
+	convTurns       []conversationTurn
+	convLastGameSec float64
+
 	// LLM clients (immutable after construction, no lock needed)
 	strategicHc llmClient
 	tacticalHc  llmClient
@@ -190,11 +199,6 @@ type agentContext struct {
 	// Used by observePerception/updateState physical alert detection.
 	// Immutable after construction.
 	physBands prompt.BandThresholds
-
-	// dialogue is the per-agent conversation runner (Phase 2 Module C).
-	// nil when dialogue is disabled (no ws). Immutable after construction;
-	// the runner protects its own conversation state with an internal mutex.
-	dialogue *dialogueRunner
 
 	// Lifecycle (no lock needed — single writer: worker goroutine for cancel,
 	// stop() for stopped flag under coordMu)
@@ -337,17 +341,7 @@ func (a *agentContext) recordActionCompletion(completion protocol.ActionComplete
 				Content: fmt.Sprintf("[系统注入] 任务 tool_call_id=%s 已完成，结果如下：%s", res.ToolCallID, content),
 			})
 		}
-		// Phase 2 Module C: social_chat 走对话 runner 自己的关系增长路径，
-		// 跳过 Ollama 的 maybeUpdateRelationship 判断（避免双重 bump）。
-		if res.Cmd != protocol.CmdSocialChat {
-			go a.maybeUpdateRelationship(completion, res)
-		}
-		// 通知对话 runner：social_chat 动作结束（UE 已关 social_chat），
-		// runner 清理对话状态并归档记忆/关系。在 signal 之前调用，确保
-		// worker 唤醒时 inDialogue() 已返回 false。
-		if res.Cmd == protocol.CmdSocialChat && a.dialogue != nil {
-			a.dialogue.onActionCompleted(completion, res)
-		}
+		go a.maybeUpdateRelationship(completion, res)
 	}
 	isSelfStop := res.WasSelfStop
 
@@ -789,6 +783,14 @@ func (a *agentContext) recordActionStarted(actionID, cmd string, params map[stri
 
 	a.as.RecordActionStarted(actionID, cmd, params, src, toolCallID)
 
+	// 对话会话累积：下发定向对话（speak_to，带 target_agent_id + content）时
+	// 把本句记进会话 transcript，供对话结束后的好感度评估。
+	if target, ok := params["target_agent_id"].(string); ok && target != "" {
+		if content, ok := params["content"].(string); ok && content != "" {
+			a.recordConversationTurn(a.as.AgentID(), target, content, a.as.LatestGameTimeSec())
+		}
+	}
+
 	// TOCTOU 兜底：completion 可能在上面检查和 RecordActionStarted 之间到达。
 	// 此时 currentActionID 刚被设置但 completion 已以 wasInFlight=false 跑过。
 	// 清掉陈旧的 currentActionID，留 completedBeforeArm 条目给 armActionTimeout。
@@ -867,11 +869,15 @@ func runPerceptionWorker(
 			continue
 		}
 
+		// 暂停自动下发（debug web 开关）：本轮只做反应/护栏，跳过 slot 切换、
+		// 战术分解与队列下发。事件反应走 force/路由 replan 的独立路径，不受影响。
+		paused := autoDispatchPaused.Load()
+
 		// 时段切换检测：game_time 已超出 currentSlot 结束时间 → 打断长复合动作
 		// + 清队列 + 清 slot，让本轮后续走 tacticalRefill 选新 slot 重新分解。
 		// 这是长复合动作的唯一打断路径（它们不设超时）。切换发生在反应进行中
 		// 时返回 true → 时间轴被事件挤乱，评估战略层 replan（P3-9）。
-		if ac.advanceSlotIfNeeded(ws, agentID, logger) {
+		if !paused && ac.advanceSlotIfNeeded(ws, agentID, logger) {
 			go ac.maybeStrategicReplan(ctx, agentID, ws, kb, profiles, weeklySched, logger,
 				"紧急反应跨越时段边界被切断")
 		}
@@ -879,13 +885,18 @@ func runPerceptionWorker(
 		// time_to_stop 检测：长动作设了执行时长且 game_time 到点 → 打断进入下一轮。
 		ac.checkTimeToStop(agentID, logger)
 
+		// 对话结束检测：会话空闲超时则关闭并后台评估好感度（best-effort）。
+		if peer, turns := ac.closeConversationIfIdle(ac.as.LatestGameTimeSec()); peer != "" {
+			go ac.evaluateConversationAffection(ctx, agentID, peer, turns, kb, profiles, logger)
+		}
+
 		// 多日循环：检测 day_count 递增（跨日），重新调用战略层生成新一天的 dailyPlan。
 		// 通常在 06:00-07:00 规划窗口内触发（selectCurrentGoal 已屏蔽战术层分解，
 		// NPC 仍在执行夜间睡眠 composite）。仅替换 dailyPlan，不打断在途睡眠——
 		// 让 NPC 睡到睡眠段 time_to_stop 预算到点（P3-8 后 slot 过期只标记
 		// pending，不打断），安全点后走 tacticalRefill 选新计划 slot。手动模式
 		// （autoPlanEnabled=false）跳过。
-		if autoPlanEnabled {
+		if autoPlanEnabled && !paused {
 			if rollover, prevDay, newDay := ac.detectDayRollover(); rollover && !ac.combatYieldActive() {
 				// 战斗让位中跳过跨日处理（combat-detach）：跨日是电平检测
 				// （day > prev），归还后首个 wake 自然补上，不漏。让位中跑会
@@ -963,12 +974,8 @@ func runPerceptionWorker(
 		// P3-8：安全点处理延迟的 slot 切换（hasInFlightAction 之后 = 动作已
 		// 自然终止——所有长动作现在都有 duration，由 checkTimeToStop 到点打断
 		// 或自然完成，processSlotSwitch 只做 slot 边界清理 + 选新 slot）。
-		ac.processSlotSwitch(ws, agentID, logger)
-
-		// 对话进行中（social_chat 挂起）时跳过 pop/refill：避免战术层生成新
-		// 动作打断对话。对话结束后 dialogue runner 会调用 signal 唤醒 worker。
-		if ac.inDialogue() {
-			continue
+		if !paused {
+			ac.processSlotSwitch(ws, agentID, logger)
 		}
 
 		// debug 手动 action 期间暂停 dispatch：debug 端点刚发了 stop_action 清 UE
@@ -985,13 +992,20 @@ func runPerceptionWorker(
 			// 队列还有下一个：pop 并直发。
 			// 手动模式下 /debug/schedule 注入的 action 进队列后由 ac.signal() 唤醒
 			// worker 走这条路径下发，所以 popAndSendQueueAction 不受 autoPlanEnabled 限制。
+			// 暂停自动下发时，仅反应窗口（reactionActive）放行 pop——反应动作由
+			// force/路由打断的 replan 填队，需照常下发；否则跳过，不再主动下发。
+			if paused {
+				if active, _, _ := ac.reactionSnapshot(); !active {
+					continue
+				}
+			}
 			ac.popAndSendQueueAction(ctx, agentID, ws, kb, logger)
-		} else if autoPlanEnabled {
-			// 队列空 + 自动规划开启：尝试战术 refill。refill 返回 false（无 goal /
-			// redecomposeCount 达上限）时不主动发任何指令，阻塞等下一次感知唤醒——
-			// 感知推进 game_time 后会进入新 slot，redecomposeCount 重置即可重新分解。
-			// 不再发 idle wait：长复合动作应持续到时段切换，短动作队列空时让
-			// 战术层重新分解（tacticalRefill 内部会在重分解时注入"未安排长动作"hint）。
+		} else if autoPlanEnabled && !paused {
+			// 队列空 + 自动规划开启 + 未暂停：尝试战术 refill。refill 返回 false
+			// （无 goal / redecomposeCount 达上限）时不主动发任何指令，阻塞等下一次
+			// 感知唤醒——感知推进 game_time 后会进入新 slot，redecomposeCount 重置即可
+			// 重新分解。不再发 idle wait：长复合动作应持续到时段切换，短动作队列空时
+			// 让战术层重新分解（tacticalRefill 内部会在重分解时注入"未安排长动作"hint）。
 			ac.tacticalRefill(ctx, agentID, ws, kb, profiles, logger)
 		}
 		// 队列空 + 自动规划关闭：不主动下发，阻塞在 wake 等手动注入 signal。
@@ -1057,23 +1071,9 @@ func (g *guardedExecutor) SendAction(ctx context.Context, agentID string, decisi
 	if g.caps != nil && !g.caps.HasCmd(agentID, cmd) {
 		return nil, fmt.Errorf("agent %s lacks capability for cmd %s", agentID, cmd)
 	}
-	// Phase 2 Module C：social_chat 下发前检查目标 NPC 是否可搭话（多 NPC 抢
-	// 同一目标）。目标忙时拒绝发起，避免注定被拒的对话。
-	if cmd == protocol.CmdSocialChat {
-		if targetID, ok := params["target_agent_id"].(string); ok && !dialogueTargetAvailable(targetID) {
-			return nil, fmt.Errorf("dialogue target %s unavailable", targetID)
-		}
-	}
 	ack, err := g.ws.SendAction(ctx, agentID, cmd, params, shouldAutoQueue(cmd))
 	if err == nil && ack != nil {
 		ac.recordActionStarted(ack.ActionID, cmd, params, decisionEpoch, sourceTool, "")
-		// Phase 2 Module C: social_chat 下发后初始化对话发起方（A）状态，
-		// 否则 A 收不到 B 转发的 rsp/turn（phase=none 会被忽略）。
-		if cmd == protocol.CmdSocialChat && ac.dialogue != nil {
-			if target, ok := params["target_agent_id"].(string); ok {
-				ac.dialogue.initiateDialogue(target, openingContent(params))
-			}
-		}
 		// 长复合动作不设超时：它们持续执行直到下一 schedule 时段切换
 		// （advanceSlotIfNeeded 主动 stop + 重规划），自己不会超时。
 		// 用动态判断兜底 UE5 新推送的复合 cmd（如 WorkShift/SelfMaintenance）。
@@ -1201,34 +1201,6 @@ func (a *agentContext) hasInFlightAction() bool {
 	return a.as.HasInFlightAction()
 }
 
-// inDialogue 返回是否正在对话中（Phase 2 Module C）。worker 用它在主
-// 循环跳过 pop/refill，避免对话期间生成新战术动作打断社交。
-func (a *agentContext) inDialogue() bool {
-	return a.dialogue != nil && a.dialogue.active()
-}
-
-// dialogueTargetAvailable 检查目标 NPC 是否可搭话（Phase 2 Module C）。
-// 返回 false 表示目标未注册、已下线、或已在对话中（dialogue.active()）。
-// A 发起 social_chat 前调用，避免发起注定被拒的对话——目标忙时 handleInvite
-// 会拒绝，A 的社交落空并可能重试同一目标造成混乱（多 NPC 抢同一目标）。
-func dialogueTargetAvailable(targetID string) bool {
-	if lookupAgentRef == nil {
-		return true // 未启用检查，降级为直接发起
-	}
-	ac := lookupAgentRef(targetID)
-	if ac == nil {
-		return false // 目标未注册/下线
-	}
-	ac.coordMu.Lock()
-	stopped := ac.stopped
-	ac.coordMu.Unlock()
-	if stopped {
-		return false
-	}
-	// 目标已在对话中（作为 target 被邀请/在聊，或作为 initiator 正在找别人）。
-	return ac.dialogue == nil || !ac.dialogue.active()
-}
-
 // queueLen 返回队列长度。
 func (a *agentContext) queueLen() int {
 	return a.as.QueueLen()
@@ -1349,20 +1321,6 @@ func (a *agentContext) popAndSendQueueAction(ctx context.Context, agentID string
 		return
 	}
 
-	// Phase 2 Module C：social_chat 下发前检查目标 NPC 是否可搭话。目标已在
-	// 对话中（多 NPC 抢同一目标）时跳过本动作，并注入 hint 引导战术层换目标
-	// 或改做别的，避免发起注定被拒的对话（被拒后重试同一目标造成混乱）。
-	if cmd == protocol.CmdSocialChat {
-		targetID, _ := params["target_agent_id"].(string)
-		if !dialogueTargetAvailable(targetID) {
-			logger.Info("[战术层] social_chat 目标不可用，跳过",
-				"agent_id", agentID, "target", targetID)
-			a.as.SetReplanHint(fmt.Sprintf("目标 %s 正在和别人聊天或不可用，请换一位【附近NPC】/【其他NPC】中的 NPC，或改做别的活动。", targetID))
-			a.signal()
-			return
-		}
-	}
-
 	// duration 是 MCP 侧控制字段（非瞬时动作的持续时长），不传给 UE。
 	tts, hasTTS := numericParam(pa.Params["duration"])
 	delete(params, "duration")
@@ -1387,14 +1345,6 @@ func (a *agentContext) popAndSendQueueAction(ctx context.Context, agentID string
 	if ack != nil {
 		// 复用现有记账 + 超时机制；source=tactical 让 completion 走队列路径
 		a.recordActionStarted(ack.ActionID, cmd, params, 0 /*无 decision_epoch*/, sourceTactical, pa.ToolCallID)
-		// Phase 2 Module C: social_chat 下发后初始化对话发起方（A）状态，
-		// 否则 A 的 dialogueRunner 一直 phase=none，收到 B 转发的 rsp/turn
-		// 会被当成"无会话"忽略，对话无法往返。
-		if cmd == protocol.CmdSocialChat && a.dialogue != nil {
-			if target, ok := params["target_agent_id"].(string); ok {
-				a.dialogue.initiateDialogue(target, openingContent(params))
-			}
-		}
 		// time_to_stop：长动作设了执行时长，记下目标 game_time 供 checkTimeToStop 轮询。
 		if hasTTS && tts > 0 {
 			if start := a.as.LatestGameTimeSec(); start > 0 {
@@ -1474,10 +1424,11 @@ var _ llmClient = (*venus.Client)(nil)
 // 内置工具）。main() 启动时赋值。
 var capabilityRegistryRef *CapabilityRegistry
 
-// lookupAgentRef 是进程级 agent 查找函数（package-level 供战术层 worker 在
-// social_chat 下发前检查目标 NPC 是否可搭话，避免长串参数传递）。main() 启动
-// 时赋值；nil 表示未启用目标可用性检查（降级为直接发起）。
-var lookupAgentRef func(string) *agentContext
+// autoDispatchPaused 是运行时可切换的"暂停自动下发"开关（debug web 控制）。
+// true 时 worker 跳过 slot 切换 / 战术层分解 / 队列下发（非反应路径），仅保留
+// 事件反应（force/路由打断 → 反应动作照常入队下发）。atomic.Bool：worker 多
+// goroutine 读、/debug handler 写。零值 false = 自动下发开启。
+var autoDispatchPaused atomic.Bool
 
 // kbRef 是当前生效的 world KB 指针（package-level 供 debug handler 引用）。
 // worldKBSwap 成功后同步更新；runHTTP 的 /debug/kb handler 读 kbRef 而不是
@@ -1614,17 +1565,6 @@ func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
 		return false
 	}
 
-	// refill 的 LLM 调用期间（最长 30s），agent 可能已进入对话（收到
-	// chat_invite 或自己发起了 social_chat）。worker 主循环的 inDialogue()
-	// 守卫在 refill 之前，但 handleInvite 是异步 go routine，两者存在竞态：
-	// 本 refill 可能在对话建立后才返回。此时继续填充队列并下发，会触发
-	// UE 的 "dialogue:abandoned by B" 误判，打断刚建立的对话（2026-09-01
-	// 仿真：B 被邀请后 refill 返回并发下 Speak，UE 判 abandoned，双方呆站）。
-	// 丢弃这段战术动作：对话结束后 worker 被 signal 唤醒重新 refill。
-	if a.inDialogue() {
-		logger.Info("[战术层] refill 期间进入对话，丢弃战术动作", "agent_id", agentID)
-		return false
-	}
 	a.as.ReplaceQueue(actions)
 	// assistant（含 tool_calls）已由 agenticTurn 追加进当天 loop 历史。
 	a.as.CommitTacticalRefill(slot, idx, prep.IsRedecompose)
@@ -2005,7 +1945,6 @@ func main() {
 		defer agentsMu.Unlock()
 		return agents[id]
 	}
-	lookupAgentRef = lookupAgent // expose to tactical worker for social_chat target availability check
 	// listAgentIDs 返回当前已注册的全部 agent ID（按字典序），供 debug 端点做默认值
 	// 选择（如 /debug/plan 在未显式指定 agent_id 时回落到首个注册 agent，而非硬编码）。
 	listAgentIDs := func() []string {
@@ -2129,9 +2068,6 @@ func main() {
 		// Stage 5: 注入 Ollama 客户端供关系层判断。nil 表示 --ollama-url=""
 		// 显式禁用反应层时，maybeUpdateRelationship 会早返回不调用 Ollama。
 		ac.ollama = ollamaClient
-		// Phase 2 Module C: 每个 agent 一个对话 runner，复用战术层 Venus 客户端
-		// 做对话生成。ws==nil 时返回 nil（对话禁用）。
-		ac.dialogue = newDialogueRunner(ac, ws, kb, profiles, logger)
 		agents[id] = ac
 		go runPerceptionWorker(workerCtx, id, ac, ws, kb, profiles, weeklySched, logger)
 		return ac, true
@@ -2234,6 +2170,12 @@ func runHTTP(ctx context.Context, logger *slog.Logger, server *mcp.Server, addr 
 	// debug 控制台"事件下发" tab；curl 直接 POST 完整事件。仅联调用，无认证。
 	mux.HandleFunc("/debug/event", func(w http.ResponseWriter, r *http.Request) {
 		handleDebugEvent(logger, lookupAgent, injectWorldEvent, w, r)
+	})
+	// /debug/auto-dispatch — 运行时可切换"暂停自动下发"开关：关闭后 worker
+	// 不再自动下发 slot 安排 / 战术分解 / action（但保留事件反应）。GET 读当前
+	// 状态，POST {"paused":bool} 设置。仅联调用，无认证。
+	mux.HandleFunc("/debug/auto-dispatch", func(w http.ResponseWriter, r *http.Request) {
+		handleDebugAutoDispatch(w, r, logger)
 	})
 	// /debug/ — 浏览器 debug 控制台 HTML 页面（无外部依赖，嵌入二进制）。
 	mux.HandleFunc("/debug/", func(w http.ResponseWriter, r *http.Request) {
@@ -2527,16 +2469,6 @@ func handleDebugAction(ctx context.Context, logger *slog.Logger, ws contract.Tra
 		w.WriteHeader(http.StatusBadGateway)
 		_ = json.NewEncoder(w).Encode(debugActionResponse{Error: "ws.SendAction failed: " + err.Error()})
 		return
-	}
-
-	// Phase 2 Module C: /debug/action 手动下发 social_chat 时同样初始化
-	// 发起方（A）状态，否则 A 收不到 B 转发的 rsp/turn（phase=none 会被忽略）。
-	if protoCmd == protocol.CmdSocialChat && lookupAgent != nil {
-		if ac := lookupAgent(req.AgentID); ac != nil && ac.dialogue != nil {
-			if target, ok := params["target_agent_id"].(string); ok {
-				ac.dialogue.initiateDialogue(target, openingContent(params))
-			}
-		}
 	}
 
 	resp := debugActionResponse{

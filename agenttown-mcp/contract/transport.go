@@ -35,7 +35,7 @@ type Transport interface {
 	RequestScan(ctx context.Context, agentID, scanID string) error
 	// SendStopAction sends a stop_action control message (fire-and-forget).
 	SendStopAction(agentID, actionID string) error
-	// SendEnvelope sends an arbitrary envelope (e.g. chat_invite_rsp / chat_turn).
+	// SendEnvelope sends an arbitrary envelope.
 	SendEnvelope(agentID, msgType string, payload any) error
 	// IsConnected reports whether a UE WebSocket connection is active.
 	IsConnected() bool

@@ -231,6 +231,34 @@ func handleDebugLLMMetrics(w http.ResponseWriter, r *http.Request, logger *slog.
 	}
 }
 
+// handleDebugAutoDispatch 读写"暂停自动下发"开关（autoDispatchPaused）。
+// GET 返回当前状态；POST 设置状态（body: {"paused": bool}）。暂停后 worker
+// 跳过 slot 切换 / 战术层分解 / 队列下发（非反应路径），仅保留事件反应。
+func handleDebugAutoDispatch(w http.ResponseWriter, r *http.Request, logger *slog.Logger) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+
+	switch r.Method {
+	case http.MethodGet:
+		_ = json.NewEncoder(w).Encode(map[string]bool{"paused": autoDispatchPaused.Load()})
+	case http.MethodPost:
+		var req struct {
+			Paused bool `json:"paused"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "invalid JSON body: " + err.Error()})
+			return
+		}
+		autoDispatchPaused.Store(req.Paused)
+		logger.Info("[debug/auto-dispatch] 自动下发开关已切换", "paused", req.Paused)
+		_ = json.NewEncoder(w).Encode(map[string]bool{"paused": autoDispatchPaused.Load()})
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "method not allowed, use GET or POST"})
+	}
+}
+
 // debugTacticalEntry 是 /debug/tactical 返回的单个 agent 战术层分解快照：
 // 当前在途 action + 当前时段 goal + 战术层队列中待执行的任务列表。
 type debugTacticalEntry struct {

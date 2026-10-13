@@ -58,8 +58,8 @@ func TestFormatRelationshipsForPrompt_WithRels(t *testing.T) {
 	// First row: H-01 is agent_a, other side is H-02.
 	// Second row: H-01 is agent_b, other side is H-03.
 	wantContains := []string{
-		"与 H-02：熟悉度 5、好感 2（互动 3 次）",
-		"与 H-03：熟悉度 1、好感 0（互动 1 次）",
+		"与 H-02：熟悉度 5、好感 2/10（互动 3 次）",
+		"与 H-03：熟悉度 1、好感 0/10（互动 1 次）",
 	}
 	for _, w := range wantContains {
 		if !contains(got, w) {
@@ -124,12 +124,6 @@ func (s *relationshipFakeStore) SeedRelationship(_ context.Context, agentA, agen
 		AgentA: agentA, AgentB: agentB, Familiarity: fam, Affection: aff,
 	})
 	return nil
-}
-func (s *relationshipFakeStore) SaveDialogue(_ context.Context, _ storage.Dialogue) error {
-	return nil
-}
-func (s *relationshipFakeStore) LoadRecentDialogues(_ context.Context, _ string, _ int) ([]storage.Dialogue, error) {
-	return nil, nil
 }
 func (s *relationshipFakeStore) Close() error { return nil }
 
@@ -249,14 +243,14 @@ func TestSeedRelationshipsFromKB_ThreeNPCColdStart(t *testing.T) {
 		Agents: []worldkb.Agent{{ID: "H-01"}, {ID: "H-02"}, {ID: "H-03"}},
 		Relationships: []worldkb.Relationship{
 			// H-01 ↔ H-02 (colleague)
-			{From: "H-01", To: "H-02", Familiarity: 60, Affection: 50, Type: "colleague"},
-			{From: "H-02", To: "H-01", Familiarity: 60, Affection: 50, Type: "colleague"},
+			{From: "H-01", To: "H-02", Familiarity: 60, Affection: 8, Type: "colleague"},
+			{From: "H-02", To: "H-01", Familiarity: 60, Affection: 8, Type: "colleague"},
 			// H-01 ↔ H-03 (colleague)
-			{From: "H-01", To: "H-03", Familiarity: 55, Affection: 45, Type: "colleague"},
-			{From: "H-03", To: "H-01", Familiarity: 55, Affection: 45, Type: "colleague"},
+			{From: "H-01", To: "H-03", Familiarity: 55, Affection: 7, Type: "colleague"},
+			{From: "H-03", To: "H-01", Familiarity: 55, Affection: 7, Type: "colleague"},
 			// H-02 ↔ H-03 (acquaintance)
-			{From: "H-02", To: "H-03", Familiarity: 30, Affection: 35, Type: "acquaintance"},
-			{From: "H-03", To: "H-02", Familiarity: 30, Affection: 35, Type: "acquaintance"},
+			{From: "H-02", To: "H-03", Familiarity: 30, Affection: 6, Type: "acquaintance"},
+			{From: "H-03", To: "H-02", Familiarity: 30, Affection: 6, Type: "acquaintance"},
 		},
 	}
 
@@ -267,22 +261,22 @@ func TestSeedRelationshipsFromKB_ThreeNPCColdStart(t *testing.T) {
 		{
 			registering: "H-01",
 			wantSeeded: []storage.Relationship{
-				{AgentA: "H-01", AgentB: "H-02", Familiarity: 60, Affection: 50},
-				{AgentA: "H-01", AgentB: "H-03", Familiarity: 55, Affection: 45},
+				{AgentA: "H-01", AgentB: "H-02", Familiarity: 60, Affection: 8},
+				{AgentA: "H-01", AgentB: "H-03", Familiarity: 55, Affection: 7},
 			},
 		},
 		{
 			registering: "H-02",
 			wantSeeded: []storage.Relationship{
-				{AgentA: "H-02", AgentB: "H-01", Familiarity: 60, Affection: 50},
-				{AgentA: "H-02", AgentB: "H-03", Familiarity: 30, Affection: 35},
+				{AgentA: "H-02", AgentB: "H-01", Familiarity: 60, Affection: 8},
+				{AgentA: "H-02", AgentB: "H-03", Familiarity: 30, Affection: 6},
 			},
 		},
 		{
 			registering: "H-03",
 			wantSeeded: []storage.Relationship{
-				{AgentA: "H-03", AgentB: "H-01", Familiarity: 55, Affection: 45},
-				{AgentA: "H-03", AgentB: "H-02", Familiarity: 30, Affection: 35},
+				{AgentA: "H-03", AgentB: "H-01", Familiarity: 55, Affection: 7},
+				{AgentA: "H-03", AgentB: "H-02", Familiarity: 30, Affection: 6},
 			},
 		},
 	}
@@ -338,7 +332,7 @@ func TestFormatRelationshipsForPrompt_DedupByOtherAgent(t *testing.T) {
 		{AgentA: "H-03", AgentB: "H-01", Familiarity: 3, Affection: 2, InteractionCount: 5},
 	}
 	got = formatRelationshipsForPrompt(rels, "H-01")
-	if !strings.Contains(got, "熟悉度 3、好感 2（互动 5 次）") {
+	if !strings.Contains(got, "熟悉度 3、好感 2/10（互动 5 次）") {
 		t.Fatalf("should show the higher values, got:\n%s", got)
 	}
 	// 多个不同 agent 不误并。
@@ -349,5 +343,63 @@ func TestFormatRelationshipsForPrompt_DedupByOtherAgent(t *testing.T) {
 	got = formatRelationshipsForPrompt(rels, "H-01")
 	if strings.Count(got, "\n") != 1 {
 		t.Fatalf("two distinct agents → two lines, got:\n%s", got)
+	}
+}
+
+// ─── 好感度：会话累积 / 结束检测 / delta 解析 ──────────────
+
+func TestConversationSession_AccumulateAndClose(t *testing.T) {
+	ac := &agentContext{}
+	ac.recordConversationTurn("H-01", "H-02", "老王，今天干啥？", 100)
+	ac.recordConversationTurn("H-02", "H-02", "老陈，分拣呢。", 120)
+
+	// 未到空闲超时：不关闭。
+	if peer, turns := ac.closeConversationIfIdle(100 + conversationIdleTimeoutGameSec - 1); peer != "" || turns != nil {
+		t.Fatalf("should not close before idle timeout, got peer=%q turns=%v", peer, turns)
+	}
+	// 到点关闭：返回 peer + 完整 transcript。
+	peer, turns := ac.closeConversationIfIdle(120 + conversationIdleTimeoutGameSec)
+	if peer != "H-02" || len(turns) != 2 {
+		t.Fatalf("close: peer=%q turns=%v, want H-02 + 2 turns", peer, turns)
+	}
+	if turns[0].speakerID != "H-01" || turns[0].content != "老王，今天干啥？" {
+		t.Fatalf("turn[0] = %+v, want H-01 开场白", turns[0])
+	}
+	// 关闭后清空。
+	if peer2, _ := ac.closeConversationIfIdle(9999); peer2 != "" {
+		t.Fatalf("after close should be empty, got peer=%q", peer2)
+	}
+}
+
+func TestConversationSession_PeerChangeClears(t *testing.T) {
+	ac := &agentContext{}
+	ac.recordConversationTurn("H-01", "H-02", "老王", 100)
+	ac.recordConversationTurn("H-01", "H-03", "老李", 200) // 换人：旧 H-02 会话丢弃
+	ac.recordConversationTurn("H-03", "H-03", "老陈？", 220)
+
+	peer, turns := ac.closeConversationIfIdle(220 + conversationIdleTimeoutGameSec)
+	if peer != "H-03" || len(turns) != 2 {
+		t.Fatalf("peer change: peer=%q turns=%v, want H-03 + 2 turns (H-02 session discarded)", peer, turns)
+	}
+}
+
+func TestConversationSession_Clear(t *testing.T) {
+	ac := &agentContext{}
+	ac.recordConversationTurn("H-01", "H-02", "老王", 100)
+	ac.clearConversation()
+	if peer, _ := ac.closeConversationIfIdle(9999); peer != "" {
+		t.Fatalf("cleared session should be empty, got peer=%q", peer)
+	}
+}
+
+func TestParseAffectionDelta(t *testing.T) {
+	if d, err := parseAffectionDelta(`{"delta": 2}`); err != nil || d != 2 {
+		t.Fatalf("parse delta=2: got %d err=%v", d, err)
+	}
+	if d, err := parseAffectionDelta(`{"delta": -3}`); err != nil || d != -3 {
+		t.Fatalf("parse delta=-3: got %d err=%v", d, err)
+	}
+	if _, err := parseAffectionDelta(`not-json`); err == nil {
+		t.Fatal("parse invalid should error")
 	}
 }

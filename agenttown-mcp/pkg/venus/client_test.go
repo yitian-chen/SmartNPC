@@ -399,7 +399,7 @@ func TestSendWithSchema_ToolChoiceNone(t *testing.T) {
 	tools := []Tool{{
 		Type: "function",
 		Function: ToolFunction{
-			Name:        "social_chat",
+			Name:        "move_to",
 			Description: "主动去找另一个 NPC 开始对话",
 			Parameters:  json.RawMessage(`{"type":"object","properties":{"target_agent_id":{"type":"string"}},"required":["target_agent_id"]}`),
 		},
@@ -410,8 +410,8 @@ func TestSendWithSchema_ToolChoiceNone(t *testing.T) {
 	if len(capturedRequest.Tools) != 1 {
 		t.Fatalf("tools len = %d, want 1", len(capturedRequest.Tools))
 	}
-	if capturedRequest.Tools[0].Function.Name != "social_chat" {
-		t.Errorf("tools[0].name = %q, want social_chat", capturedRequest.Tools[0].Function.Name)
+	if capturedRequest.Tools[0].Function.Name != "move_to" {
+		t.Errorf("tools[0].name = %q, want move_to", capturedRequest.Tools[0].Function.Name)
 	}
 	// tool_choice 必须为 "none"：披露目录但不允许 tool_call（战略层产出 JSON 计划文本）。
 	choice, _ := capturedRequest.ToolChoice.(string)
@@ -439,7 +439,7 @@ func TestSendWithSummary_ToolChoiceNone(t *testing.T) {
 	defer server.Close()
 
 	c := newTestClient(t, server.URL)
-	tools := []Tool{{Type: "function", Function: ToolFunction{Name: "social_chat"}}}
+	tools := []Tool{{Type: "function", Function: ToolFunction{Name: "move_to"}}}
 	if _, err := c.SendWithSummary(context.Background(), "sys", "user", tools); err != nil {
 		t.Fatalf("SendWithSummary: %v", err)
 	}
@@ -884,7 +884,7 @@ func TestSendLoop_ToolChoiceAndSchema(t *testing.T) {
 	defer server.Close()
 
 	c := newTestClient(t, server.URL)
-	tools := []Tool{{Type: "function", Function: ToolFunction{Name: "social_chat"}}}
+	tools := []Tool{{Type: "function", Function: ToolFunction{Name: "move_to"}}}
 	messages := []llmtypes.Message{
 		{Role: "system", Content: "sys"},
 		{Role: "user", Content: "u1"},

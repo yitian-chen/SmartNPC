@@ -66,7 +66,7 @@ type TacticalInput struct {
 	NearbyObjects []protocol.NearbyObject
 	// VisibleAgents is the visible-NPC list from the latest
 	// perception_update (Phase 2 Module C). Injected as 【附近NPC】 so the
-	// LLM can pick a social_chat target_agent_id. nil/empty = no nearby
+	// LLM can pick a conversation target. nil/empty = no nearby
 	// NPCs → skip the segment.
 	VisibleAgents []protocol.VisibleAgent
 }

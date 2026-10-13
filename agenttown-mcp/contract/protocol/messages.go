@@ -296,40 +296,6 @@ type WorldKBPayload struct {
 	Authored  json.RawMessage `json:"authored"`  // world.authored.json blob
 }
 
-// ─── chat_invite (UE → target agent B, §3.1) ───────────────────
-//
-// UE delivers A's invitation to B after A's social_chat action_command
-// opens a session. conv_id is UE-generated and threads through the
-// subsequent rsp/turn messages. content is A's opening line (the same
-// content A sent in the social_chat action_command params).
-type ChatInvitePayload struct {
-	ConvID      string `json:"conv_id"`
-	FromAgentID string `json:"from"` // UE sends "from", not "from_agent_id"
-	Content     string `json:"content"`
-}
-
-// ─── chat_invite_rsp (B → UE, forwarded to A) ──────────────────
-//
-// Carries ONLY the accept/reject decision. Any reply content goes as a
-// separate chat_turn (§3.1 职责分离: rsp 只承载决策，所有话语都走 chat_turn).
-type ChatInviteRspPayload struct {
-	ConvID string `json:"conv_id"`
-	Accept bool   `json:"accept"`
-}
-
-// ─── chat_turn (speaker → UE, forwarded to peer) ─────────────────
-//
-// One utterance in an active dialogue. end=true signals graceful close
-// (speaker is done talking); interrupted=true signals the peer already
-// left and this turn is a best-effort tail (§3.5 fallback). Both flags
-// default to false (omitempty) for normal mid-conversation turns.
-type ChatTurnPayload struct {
-	ConvID      string `json:"conv_id"`
-	Content     string `json:"content"`
-	End         bool   `json:"end,omitempty"`
-	Interrupted bool   `json:"interrupted,omitempty"`
-}
-
 // ─── world_event (UE → Agent, 事件驱动设计 §四) ─────────────────
 //
 // docs/AgentTown_WorldEvent_Protocol.md v1.0. UE pushes the moment
@@ -381,9 +347,9 @@ const (
 	EventTypeAgentNearby      = "agent_nearby"       // 另一 NPC 进入对话距离（500cm）
 	EventTypeAgentLeaveNearby = "agent_leave_nearby" // 另一 NPC 离开对话距离
 	// social
-	EventTypeChatInviteIncoming = "chat_invite_incoming" // 有人发起对话（替代独立 chat_invite 消息，§3.3）
-	EventTypeBroadcastHeard     = "broadcast_heard"      // 听到广播/大声说话
-	EventTypeMentioned          = "mentioned"            // 被点名/被提及
+	EventTypeBroadcastHeard = "broadcast_heard" // 听到广播/大声说话
+	EventTypeMentioned      = "mentioned"       // 被点名/被提及
+	EventTypeSpeechHeard    = "speech_heard"    // 听到有人对自己说话（speak_to 定向话语的听者侧）
 	// action_anomaly
 	EventTypeActionFailed        = "action_failed"        // 动作执行失败（不再走 error 通道，§3.4）
 	EventTypeSmartObjectOccupied = "smartobject_occupied" // 目标 Smart Object 被占用
@@ -429,16 +395,25 @@ type SpatialData struct {
 	DistanceCm float64 `json:"distance_cm,omitempty"` // 对话距离（阈值固定 500cm）
 }
 
-// SocialData is the data block of category social (§3.3). ChatInviteIncoming
-// fills ConvID+From+Content (the three fields of the legacy chat_invite
-// payload, verbatim); BroadcastHeard fills Source+Content; Mentioned fills
-// Source+Context.
+// SocialData is the data block of category social (§3.3). BroadcastHeard
+// fills Source+Content; Mentioned fills Source+Context.
 type SocialData struct {
-	ConvID  string `json:"conv_id,omitempty"` // 对话会话 id（UE 生成）
-	From    string `json:"from,omitempty"`    // 发起方 agent id（UE 发 "from"）
 	Source  string `json:"source,omitempty"`  // 广播/提名的来源 agent id
 	Content string `json:"content,omitempty"` // 消息内容
 	Context string `json:"context,omitempty"` // 被提及时的上下文
+}
+
+// SpeechHeardData is the data block of category social event_type
+// speech_heard (§3.3): a directed utterance from one NPC to this agent
+// (the addressee). UE fills the speaker identity, the spoken content, and
+// the distance at which it was delivered. SpeakerName is a display
+// convenience (falls back to SpeakerID when empty).
+type SpeechHeardData struct {
+	SpeakerID   string  `json:"speaker_id"`
+	SpeakerName string  `json:"speaker_name,omitempty"`
+	AddresseeID string  `json:"addressee_id,omitempty"`
+	Content     string  `json:"content,omitempty"`
+	DistanceCm  float64 `json:"distance,omitempty"`
 }
 
 // ActionAnomalyData is the data block of category action_anomaly (§3.4).

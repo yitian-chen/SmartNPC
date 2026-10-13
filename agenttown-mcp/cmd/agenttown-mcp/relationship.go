@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/AgentTown/agenttown-mcp/pkg/ollama"
+	"github.com/AgentTown/agenttown-mcp/pkg/profile"
+	"github.com/AgentTown/agenttown-mcp/pkg/prompt"
 	"github.com/AgentTown/agenttown-mcp/pkg/storage"
 	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
 )
@@ -103,7 +105,7 @@ func formatRelationshipsForPrompt(rels []storage.Relationship, agentID string) s
 	var sb strings.Builder
 	for _, other := range keys {
 		r := best[other]
-		fmt.Fprintf(&sb, "- 与 %s：熟悉度 %d、好感 %d（互动 %d 次）\n",
+		fmt.Fprintf(&sb, "- 与 %s：熟悉度 %d、好感 %d/10（互动 %d 次）\n",
 			other, r.familiarity, r.affection, r.interactions)
 	}
 	return strings.TrimSuffix(sb.String(), "\n")
@@ -152,6 +154,10 @@ func seedRelationshipsFromKB(ctx context.Context, kb *worldkb.KB, store storage.
 		if other == "" {
 			continue // self-relationship guard, shouldn't happen (KB validates)
 		}
+		// 好感度默认 5：KB 未声明（affection=0）或越界时回落默认。
+		if aff <= 0 || aff > 10 {
+			aff = 5
+		}
 		if seen[other] {
 			continue // already seeded agentID→other in this call (KB declared both directions)
 		}
@@ -174,3 +180,175 @@ func seedRelationshipsFromKB(ctx context.Context, kb *worldkb.KB, store storage.
 // shouldUpdateRelationship. Shorter than the reactive layer's 20s because the
 // judgment is a trivial yes/no and the update is best-effort.
 const relationshipJudgeTimeout = 5 * time.Second
+
+// ─── 好感度（affection）会话与评估 ──────────────────────────────
+
+// conversationTurn is one utterance in an in-progress NPC↔NPC conversation.
+type conversationTurn struct {
+	speakerID string
+	content   string
+}
+
+// conversationIdleTimeoutGameSec bounds how long a conversation may sit idle
+// (no turn) before the worker closes it and triggers the affection evaluation.
+// 5 游戏分钟：对话冷掉即视为结束，既给多轮往返留足时间、也不无限挂起。
+const conversationIdleTimeoutGameSec = 5 * 60.0
+
+// recordConversationTurn appends a turn to the agent's in-progress conversation
+// session keyed by peerID. A peer change clears the old session (an abandoned
+// conversation is discarded, not evaluated). nowGameSec is the authoritative
+// game time of the turn.
+func (a *agentContext) recordConversationTurn(speakerID, peerID, content string, nowGameSec float64) {
+	a.coordMu.Lock()
+	defer a.coordMu.Unlock()
+	if a.convPeerID != peerID {
+		a.convPeerID = peerID
+		a.convTurns = nil
+	}
+	a.convTurns = append(a.convTurns, conversationTurn{speakerID: speakerID, content: content})
+	a.convLastGameSec = nowGameSec
+}
+
+// closeConversationIfIdle closes the in-progress conversation session once it
+// has idled past conversationIdleTimeoutGameSec, returning the captured peer +
+// turns (empty peer = no session or not yet idle). The caller spawns the
+// affection evaluation in the background.
+func (a *agentContext) closeConversationIfIdle(nowGameSec float64) (string, []conversationTurn) {
+	a.coordMu.Lock()
+	defer a.coordMu.Unlock()
+	if a.convPeerID == "" || a.convLastGameSec <= 0 {
+		return "", nil
+	}
+	if nowGameSec-a.convLastGameSec < conversationIdleTimeoutGameSec {
+		return "", nil
+	}
+	peer := a.convPeerID
+	turns := a.convTurns
+	a.convPeerID = ""
+	a.convTurns = nil
+	a.convLastGameSec = 0
+	return peer, turns
+}
+
+// clearConversation discards the in-progress conversation session (combat-detach
+// entry). An interrupted conversation is not evaluated.
+func (a *agentContext) clearConversation() {
+	a.coordMu.Lock()
+	a.convPeerID = ""
+	a.convTurns = nil
+	a.convLastGameSec = 0
+	a.coordMu.Unlock()
+}
+
+// conversationAffectionSystemPrompt is the affection evaluation's system text.
+const conversationAffectionSystemPrompt = `你是 NPC 好感度评估模块。用户信息给出该 NPC 的人设、与对方当前的好感度、以及刚结束的一段对话记录。请判断这段对话对该 NPC（对对方）好感度的影响，输出一个整数 delta：正数=更亲近、负数=更疏远、0=无变化，范围 -3 到 +3。只输出 JSON。`
+
+// conversationAffectionSchema is the structured-output schema for the affection
+// evaluation: a single integer delta in [-3, +3].
+const conversationAffectionSchema = `{"type":"object","properties":{"delta":{"type":"integer","description":"好感度变化量，范围 -3 到 +3"}},"required":["delta"],"additionalProperties":false}`
+
+// evaluateConversationAffection runs the post-conversation affection evaluation
+// in the background (best-effort): the agent's persona, the current affection
+// toward peer, and the full transcript go to the strategic (pro) model, which
+// returns a delta; the delta is clamped to [-3,+3] and the resulting affection
+// to [0,10], then applied to the A→B directional row only (B evaluates its own
+// direction when its own session closes). Any error is logged and dropped.
+func (a *agentContext) evaluateConversationAffection(ctx context.Context, agentID, peerID string, turns []conversationTurn, kb *worldkb.KB, profiles map[string]*profile.Profile, logger *slog.Logger) {
+	store := a.as.Store()
+	if store == nil || a.strategicHc == nil || len(turns) == 0 {
+		return // 内存模式 / 无战略客户端 / 无对话
+	}
+
+	// 当前好感度（本方向 agentID→peerID）。
+	cur := 5
+	if rels, err := store.LoadRelationships(ctx, agentID, 10); err == nil {
+		for _, r := range rels {
+			other := r.AgentB
+			if r.AgentA != agentID {
+				other = r.AgentA
+			}
+			if other == peerID {
+				if r.Affection >= 0 && r.Affection <= 10 {
+					cur = r.Affection
+				}
+				break
+			}
+		}
+	}
+
+	agentName := agentID
+	peerName := peerID
+	if kb != nil {
+		if ag := kb.GetAgent(agentID); ag != nil && ag.DisplayName != "" {
+			agentName = ag.DisplayName
+		}
+		if ag := kb.GetAgent(peerID); ag != nil && ag.DisplayName != "" {
+			peerName = ag.DisplayName
+		}
+	}
+	role := prompt.AgentRole(kb, profiles, agentID)
+	user := fmt.Sprintf("你是 %s（id=%s）。\n%s\n\n【与对方的好感度】%s（%d/10）\n\n【本次对话记录】\n%s\n\n请评估这段对话对你与 %s 之间好感度的影响，输出一个整数 delta（-3 到 +3）。",
+		agentName, agentID, role, peerName, cur, formatConversationTurns(turns, kb), peerName)
+
+	evalCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	resp, err := a.strategicHc.SendWithSchema(evalCtx, conversationAffectionSystemPrompt, user, "affection_delta", []byte(conversationAffectionSchema))
+	if err != nil {
+		logger.Warn("[关系层] 好感度评估调用失败，跳过", "agent_id", agentID, "peer", peerID, "err", err)
+		return
+	}
+	delta, err := parseAffectionDelta(resp.ExtractText())
+	if err != nil {
+		logger.Warn("[关系层] 好感度评估解析失败，跳过", "agent_id", agentID, "peer", peerID, "err", err)
+		return
+	}
+	if delta < -3 {
+		delta = -3
+	}
+	if delta > 3 {
+		delta = 3
+	}
+	newAff := cur + delta
+	if newAff < 0 {
+		newAff = 0
+	}
+	if newAff > 10 {
+		newAff = 10
+	}
+	applied := newAff - cur
+	if applied == 0 {
+		return
+	}
+	if err := store.SaveRelationship(evalCtx, agentID, peerID, 0, applied); err != nil {
+		logger.Warn("[关系层] 保存好感度 A→B 失败", "agent_id", agentID, "peer", peerID, "err", err)
+		return
+	}
+	logger.Info("[关系层] 好感度已调整", "agent_id", agentID, "peer", peerID, "delta", applied, "affection", newAff)
+}
+
+// parseAffectionDelta extracts the integer delta from the structured-output JSON.
+func parseAffectionDelta(raw string) (int, error) {
+	var out struct {
+		Delta int `json:"delta"`
+	}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(raw)), &out); err != nil {
+		return 0, fmt.Errorf("parse delta: %w", err)
+	}
+	return out.Delta, nil
+}
+
+// formatConversationTurns renders the turn transcript as "名字：内容" lines
+// (chronological, most recent last), using KB display names where available.
+func formatConversationTurns(turns []conversationTurn, kb *worldkb.KB) string {
+	var sb strings.Builder
+	for _, t := range turns {
+		name := t.speakerID
+		if kb != nil {
+			if ag := kb.GetAgent(t.speakerID); ag != nil && ag.DisplayName != "" {
+				name = ag.DisplayName
+			}
+		}
+		fmt.Fprintf(&sb, "%s：%s\n", name, t.content)
+	}
+	return strings.TrimSuffix(sb.String(), "\n")
+}

@@ -182,13 +182,22 @@ func worldEventDescription(ev protocol.WorldEventPayload) string {
 			}
 		}
 	case protocol.CategorySocial:
+		// speech_heard 用独立的字段集（speaker_id/speaker_name/content），
+		// 与 broadcast_heard/mentioned 的 SocialData 不同，单独解包渲染——
+		// 把"谁对我说了、说了什么"转成自然语言，供战术层 LLM 决定如何回应。
+		if ev.EventType == protocol.EventTypeSpeechHeard {
+			var d protocol.SpeechHeardData
+			if err := json.Unmarshal(ev.Data, &d); err == nil && d.SpeakerID != "" {
+				name := d.SpeakerName
+				if name == "" {
+					name = d.SpeakerID
+				}
+				return fmt.Sprintf("%s（%s）对你说：%s", name, d.SpeakerID, d.Content)
+			}
+		}
 		var d protocol.SocialData
 		if err := json.Unmarshal(ev.Data, &d); err == nil {
 			switch ev.EventType {
-			case protocol.EventTypeChatInviteIncoming:
-				if d.From != "" {
-					return fmt.Sprintf("%s 向你发起对话：%s", d.From, d.Content)
-				}
 			case protocol.EventTypeBroadcastHeard:
 				if d.Source != "" {
 					return fmt.Sprintf("听到 %s 的广播：%s", d.Source, d.Content)

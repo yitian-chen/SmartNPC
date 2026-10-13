@@ -205,14 +205,17 @@ func (s *MySQLStore) LoadActionHistory(ctx context.Context, agentID string, limi
 // affection are incremented by the supplied deltas, interaction_count is
 // bumped by 1, and last_interaction_at is refreshed. Callers update both
 // directions by invoking this twice with swapped arguments.
+//
+// affection 是 0-10 好感度（默认 5）：新建行不显式传 affection，靠列 DEFAULT 5
+// （见 0003 迁移）；重复键时按 delta 累加并夹紧到 [0,10]。
 func (s *MySQLStore) SaveRelationship(ctx context.Context, agentA, agentB string, familiarityDelta, affectionDelta int) error {
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO agent_relationships
-		   (agent_a, agent_b, familiarity, affection, interaction_count, last_interaction_at)
-		 VALUES (?, ?, ?, ?, 1, NOW())
+		   (agent_a, agent_b, familiarity, interaction_count, last_interaction_at)
+		 VALUES (?, ?, ?, 1, NOW())
 		 ON DUPLICATE KEY UPDATE
 		   familiarity = familiarity + VALUES(familiarity),
-		   affection   = affection   + VALUES(affection),
+		   affection   = GREATEST(0, LEAST(10, affection + ?)),
 		   interaction_count = interaction_count + 1,
 		   last_interaction_at = NOW()`,
 		agentA, agentB, familiarityDelta, affectionDelta,
@@ -269,63 +272,4 @@ func (s *MySQLStore) SeedRelationship(ctx context.Context, agentA, agentB string
 		return fmt.Errorf("seed relationship %s→%s: %w", agentA, agentB, err)
 	}
 	return nil
-}
-
-// SaveDialogue inserts one dialogue turn row (Phase 2 Module C). is_end is
-// stored as TINYINT(1); created_at defaults to NOW() in the schema but we
-// pass the caller-supplied timestamp so replays/tests stay deterministic.
-func (s *MySQLStore) SaveDialogue(ctx context.Context, d Dialogue) error {
-	endVal := 0
-	if d.IsEnd {
-		endVal = 1
-	}
-	createdAt := d.CreatedAt
-	if createdAt.IsZero() {
-		createdAt = time.Now()
-	}
-	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO agent_dialogues
-		   (conv_id, speaker_id, listener_id, content, turn_index, is_end, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		d.ConvID, d.SpeakerID, d.ListenerID, d.Content, d.TurnIndex, endVal, createdAt,
-	)
-	if err != nil {
-		return fmt.Errorf("save dialogue conv=%s speaker=%s: %w", d.ConvID, d.SpeakerID, err)
-	}
-	return nil
-}
-
-// LoadRecentDialogues returns the top-N dialogue turns involving agentID
-// (as speaker OR listener) by created_at DESC. The UNION ALL avoids an OR
-// sweep that could skip indexes on small tables; each branch hits its
-// dedicated (speaker_id, created_at) / (listener_id, created_at) index.
-// Caller reverses the slice for chronological order before summarizing.
-func (s *MySQLStore) LoadRecentDialogues(ctx context.Context, agentID string, limit int) ([]Dialogue, error) {
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, conv_id, speaker_id, listener_id, content, turn_index, is_end, created_at
-		 FROM (
-		   (SELECT id, conv_id, speaker_id, listener_id, content, turn_index, is_end, created_at
-		    FROM agent_dialogues WHERE speaker_id = ? ORDER BY created_at DESC LIMIT ?)
-		   UNION ALL
-		   (SELECT id, conv_id, speaker_id, listener_id, content, turn_index, is_end, created_at
-		    FROM agent_dialogues WHERE listener_id = ? ORDER BY created_at DESC LIMIT ?)
-		 ) AS u
-		 ORDER BY created_at DESC`,
-		agentID, limit, agentID, limit)
-	if err != nil {
-		return nil, fmt.Errorf("load recent dialogues for %s: %w", agentID, err)
-	}
-	defer rows.Close()
-	var out []Dialogue
-	for rows.Next() {
-		var d Dialogue
-		var isEnd int
-		if err := rows.Scan(&d.ID, &d.ConvID, &d.SpeakerID, &d.ListenerID,
-			&d.Content, &d.TurnIndex, &isEnd, &d.CreatedAt); err != nil {
-			return nil, fmt.Errorf("scan dialogue for %s: %w", agentID, err)
-		}
-		d.IsEnd = isEnd != 0
-		out = append(out, d)
-	}
-	return out, rows.Err()
 }

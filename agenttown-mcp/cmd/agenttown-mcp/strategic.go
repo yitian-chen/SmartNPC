@@ -127,7 +127,7 @@ func (a *agentContext) generateDailyPlanCore(ctx context.Context, agentID string
 		TimeOfDay:        tod,
 		Zone:             zone,
 		Hint:             hint,
-		Context:          prompt.BuildStrategicUserContext(agentID, kb, profiles, snap.LatestPhysical, dayContext),
+		Context:          prompt.BuildStrategicUserContext(agentID, kb, profiles, snap.LatestPhysical, dayContext, a.loadRelationships(ctx, agentID, kb)),
 		YesterdaySummary: "昨日总结：" + yesterdaySummary,
 	})
 	logger.Info("[MCP→LLM/STRATEGIC-PROMPT]", "agent_id", agentID, "hint", hint, "text", promptText)

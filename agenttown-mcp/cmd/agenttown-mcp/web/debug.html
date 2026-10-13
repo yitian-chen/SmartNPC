@@ -63,6 +63,14 @@
   .status-badge.connected { background: rgba(76,175,80,0.15); color: var(--ok); }
   .status-badge.disconnected { background: rgba(244,67,54,0.15); color: var(--err); }
   .status-badge.loading { background: rgba(255,152,0,0.15); color: var(--warn); }
+  .auto-dispatch-toggle {
+    display: inline-flex; align-items: center; gap: 6px;
+    margin-left: 12px; padding: 4px 10px;
+    background: var(--panel-2); border: 1px solid var(--border);
+    border-radius: 12px; font-size: 12px; color: var(--text-muted);
+    cursor: pointer; user-select: none;
+  }
+  .auto-dispatch-toggle input { width: auto; margin: 0; accent-color: var(--ok); }
   main {
     display: grid;
     grid-template-columns: 1fr 1fr;
@@ -411,6 +419,10 @@
   <h1>AgentTown Debug Console</h1>
   <span class="subtitle">手动触发 action_command / 注入 schedule 联调</span>
   <span id="status-badge" class="status-badge loading">检查中…</span>
+  <label class="auto-dispatch-toggle" title="关闭后 NPC 不再自动下发 slot 安排 / 战术层分解 / action，仅保留事件反应（force/路由打断仍会下发反应动作）">
+    <input type="checkbox" id="auto-dispatch" checked onchange="toggleAutoDispatch()" />
+    自动下发
+  </label>
 </header>
 
 <main>
@@ -655,7 +667,7 @@ let registeredAgents = ['H-01']; // 已注册 agent 列表（来自 /debug/agent
 
 // ─── 初始化 ──────────────────────────────────────────────
 async function init() {
-  await Promise.all([loadStatus(), loadKB(), loadCap(), loadTactical(), loadLogs(), loadPlan(), loadAgents(), loadLLMMetrics()]);
+  await Promise.all([loadStatus(), loadKB(), loadCap(), loadTactical(), loadLogs(), loadPlan(), loadAgents(), loadLLMMetrics(), loadAutoDispatch()]);
   onCmdChange();
   updateSchedCurlPreview();
   initEventPresetDropdown();
@@ -668,6 +680,7 @@ async function init() {
   setInterval(loadPlan, 5000);
   setInterval(loadAgents, 5000);
   setInterval(loadLLMMetrics, 5000);
+  setInterval(loadAutoDispatch, 5000);
 }
 
 async function loadStatus() {
@@ -685,6 +698,33 @@ async function loadStatus() {
   } catch (e) {
     badge.textContent = 'MCP 不可达';
     badge.className = 'status-badge disconnected';
+  }
+}
+
+async function loadAutoDispatch() {
+  try {
+    const r = await fetch('/debug/auto-dispatch');
+    if (!r.ok) return;
+    const j = await r.json();
+    const cb = document.getElementById('auto-dispatch');
+    if (cb) cb.checked = !j.paused;
+  } catch (e) {
+    console.warn('loadAutoDispatch failed:', e);
+  }
+}
+
+async function toggleAutoDispatch() {
+  const cb = document.getElementById('auto-dispatch');
+  if (!cb) return;
+  try {
+    await fetch('/debug/auto-dispatch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ paused: !cb.checked }),
+    });
+  } catch (e) {
+    console.warn('toggleAutoDispatch failed:', e);
+    cb.checked = !cb.checked; // 失败回滚
   }
 }
 
