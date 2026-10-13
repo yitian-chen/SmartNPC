@@ -7,7 +7,7 @@ AgentTown 是一个让 AI NPC 在游戏世界里**长期自主生活**的模拟�
 - **同一事件，不同反应**——"K-03 故障"广播推给所有 NPC，胆小的立刻丢下手里的活，沉着的入队继续工作。事件判决的输入包含每个 NPC 的性格、人际关系、当前动作与持续处境，反应分化是设计出来的涌现
 - **日程自己规划**——每天 07:00 由 LLM 结合昨日记忆、今日星期属性（工作日/运动日/冥想日）和实时物理状态生成当天计划；被突发事件打断后还能修订剩余时段
 - **会犯错也会自我纠正**——MCP 侧校验拒绝的非法动作指令（如缺目标的移动），拒绝原因回注会话历史，下一轮规划自行改正
-- **有记忆、有关系**——日终 LLM 总结当日经历沉淀为结构化记忆；NPC 间交互累积双向关系数值，反过来影响后续决策
+- **有记忆、有关系、有亲疏**——日终 LLM 总结当日经历沉淀为结构化记忆；NPC 间交互累积熟悉度，整段对话结束后 LLM 评估一次好感度（0-10，默认 5），亲疏反过来影响后续决策
 - **被攻击真的会跑**——玩家攻击时 UE 战斗行为树接管 NPC 身体、agent 确定性让位（控制权毫秒级交接），脱战后 agent 带战后上下文（掉血/位移/战斗事件对）重新接管，自主决定先维修还是回岗
 
 | 维度 | 数据 |
@@ -134,6 +134,7 @@ graph TB
 | 战术层 | 每时段 1 次，队列耗尽时 refill | deepseek-v4.1-flash | 共享 system prompt + 时段目标/实时状态/事件队列/记忆/关系 | tool_calls（1-4 动作段 + time_to_stop） |
 | 事件判决 | 每条非 force 事件 | jev-1.13.0（Venus 判决 API） | 结构化 state（人设/关系/近期行为/当前动作/持续处境） | 三问：是否打断/动机/严重度 |
 | 关系判断 | 动作完成后异步 | Ollama qwen2.5:7b | cmd + params | 是否构成社交互动（yes/no） |
+| 好感度评估 | 对话结束后异步 | deepseek-v4-pro | 人设 + 对话 transcript + 当前好感 | 好感度 delta（-3~+3，夹紧 0-10） |
 
 ### 事件驱动反应体系
 
@@ -179,7 +180,7 @@ sequenceDiagram
 | world_kb 自动适配 | UE 推送新 KB → 重启即全链路适配（prompt/工具 schema/兜底日程全从 KB 派生），换地图零代码 |
 | NPC 人设注入 | profile.md（名字/职业/背景/性格/说话风格/属性分段）三层回退（profile > KB > 内置），贯穿所有决策层 |
 | 长期记忆 | 日终 LLM 总结 action_history → 结构化记忆 + 叙事，注入后续战略/战术 prompt |
-| 关系数值 | 交互后 Ollama 语义判断 → 双向 familiarity 累积 → 注入【人际关系】段 |
+| 关系与好感度 | 交互后 Ollama 语义判断累积熟悉度；对话后 LLM 评估好感度（0-10）→ 注入路由/战术/战略【人际关系】段（好感 x/10） |
 | LLM 可靠性兜底 | 坏 tools JSON 同请求重试（实测 100% 救回）、time_to_stop 兜底、失败兜底动作防呆站 |
 | 全链路可观测 | 统一 JSONL 日志（UE/MCP/LLM 三层）、decision_epoch 串联决策轮次、LLM 分位数指标 |
 
@@ -188,7 +189,7 @@ sequenceDiagram
 ## 通信协议
 
 - **传输**：WebSocket（UE5 → MCP `ws://<host>:9092/ws`），7 字段信封，时间戳毫秒、坐标厘米（UE5 单位）
-- **消息类型**（16 种）：`world_kb` / `agent_registered` / `capability_registry`（UE 连接首发三连）→ `perception_update` / `state_report`（感知）→ `action_command` / `action_started` / `action_completed` / `action_queued` / `stop_action`（动作生命周期）→ `world_event`（事件通道）→ `chat_invite_rsp` / `chat_turn`（对话）→ `heartbeat` / `error` / `resync` / `event_lost`（系统级）
+- **消息类型**（15 种）：`world_kb` / `agent_registered` / `capability_registry`（UE 连接首发三连）→ `perception_update` / `state_report`（感知）→ `action_command` / `action_started` / `action_completed` / `action_queued` / `stop_action`（动作生命周期）→ `world_event`（事件通道，含 `speech_heard` 定向话语）→ `heartbeat` / `error` / `resync` / `event_lost`（系统级）
 - **12 种 cmd**：原子 `GenericAct` / `MoveTo` / `Wait` / `TurnTo` / `Speak` / `InteractSmartObject` / `Emote`；复合 `WorkShift` / `ChargeAtStation` / `SelfMaintenance` / `RestAtResidence` / `SurfInternet`。语义目标（`semantic_group`）由 UE 解析，MCP 不做坐标换算
 
 完整协议（字段表/数值系统/时序图）见 `docs/AgentTown_CommProtocol_Values.md`；事件通道见 `docs/AgentTown_WorldEvent_Protocol.md`。
@@ -217,7 +218,7 @@ sequenceDiagram
 strategic:                      # 战略层（低频，可用大模型）
   base_url: "http://127.0.0.1:8000"   # 服务根地址，客户端自动拼 /v1/chat/completions
   model: "Qwen2.5-32B-Instruct"
-tactical:                       # 战术层 + 对话层（高频）
+tactical:                       # 战术层（高频）
   base_url: "http://127.0.0.1:8000"
   model: "Qwen2.5-7B-Instruct-GPTQ-Int4"
 ```
@@ -295,7 +296,7 @@ MCP 进程级 flag（`--venus-model` / `--jev-timeout` / `--tactical-stream` / `
 |----|------|
 | `agent_schedule_state` | 4 个调度字段 write-through（dailyPlan/天数/时段索引），热重启计划跨进程存活 |
 | `agent_memories` | 日终生成的结构化记忆（event/skill/relationship/daily_summary） |
-| `agent_relationships` | NPC 间关系数值（双向独立行，familiarity/interaction_count） |
+| `agent_relationships` | NPC 间关系数值（双向独立行，familiarity / affection 好感度 / interaction_count） |
 | `action_history` | 全量动作生命周期记录（cmd/params/起止），日终记忆与排障的数据源 |
 
 schema 由 `//go:embed migrations/*.sql` 启动时自动迁移，无需外部工具。DB 写失败仅降级告警，不阻塞决策。
@@ -318,6 +319,7 @@ grep '队列已填充' logs-dev/$(date +%F)/debug-mcp.log   # 原始 grep 也友
 | `POST /debug/action` | 直接下发单个 action（单步调试） |
 | `POST /debug/schedule` | 注入 schedule 触发战术层分解 |
 | `POST /debug/event` | 合成 world_event 走完整事件管道（15 预设 + 自定义，**无 UE 也能联调事件全链路**） |
+| `POST /debug/auto-dispatch` | 暂停/恢复 NPC 自动下发（slot 安排 / 战术分解 / action），仅保留事件反应 |
 | `GET /debug/tactical` | 各 NPC 当前时段 goal + 在途动作 + 待执行队列（含脱管状态） |
 | `GET /debug/plan` | 当日 dailyPlan 快照 |
 | `GET /debug/kb` / `GET /debug/cap` | world_kb / 能力注册表现状 |
@@ -354,7 +356,7 @@ assets/
   llm_backend.yaml              # 自部署 LLM 后端分层配置
   profiles/H-01.md ~ H-05.md    # NPC 人设档案
   weekly_schedule.yaml          # 每周日程（工作日/休息日/运动日/冥想日）
-docs/                           # 设计文档（协议/事件/架构/对话/KB，见下方索引）
+docs/                           # 设计文档（协议/事件/架构/KB，见下方索引）
 scripts/
   pretty_log.py                 # 日志可读化（HTML 报告 + 终端渲染）
   smoke_combat_detach.py        # combat-detach 无 UE 冒烟
@@ -381,7 +383,6 @@ CLAUDE.md                       # 工程手册（架构/机制/命令/文件地�
 | `docs/AgentTown_EventDrivenAgent_Design.html` | 事件驱动异步 Agent 设计 |
 | `docs/AgentTown_EventDriven_Implementation_Plan.md` | 事件驱动实施计划（P0-P5） |
 | `docs/AgentTown_Core_DeepDive.md` | 核心机制深潜 |
-| `docs/AgentTown_Dialogue_Design.md` | 对话系统设计 |
 | `docs/AgentTown_WorldKB_Design.md` | 世界 KB 设计 |
 | `docs/DebugAction_Tool.md` | Debug 工具使用文档 |
 | `docs/llm_metrics.md` | LLM 指标报告（运行时自动生成） |
