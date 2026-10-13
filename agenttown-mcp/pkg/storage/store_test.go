@@ -124,8 +124,8 @@ func TestEmbeddedMigrations_Listed(t *testing.T) {
 	if versions[0] != "0001_init" {
 		t.Errorf("first migration: got %q, want 0001_init", versions[0])
 	}
-	if versions[len(versions)-1] != "0002_dialogues" {
-		t.Errorf("last migration: got %q, want 0002_dialogues", versions[len(versions)-1])
+	if versions[len(versions)-1] != "0003_affection_default" {
+		t.Errorf("last migration: got %q, want 0003_affection_default", versions[len(versions)-1])
 	}
 }
 

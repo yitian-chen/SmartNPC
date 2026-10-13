@@ -152,7 +152,7 @@ func BuildStrategicUserPrompt(in StrategicPromptInput) string {
 // guided at the strategic layer). The strategic preamble (module role) also lives here:
 // the system prompt is shared verbatim across layers, so every
 // strategic-specific text belongs in the user message.
-func BuildStrategicUserContext(agentID string, kb *worldkb.KB, profiles map[string]*profile.Profile, physical *protocol.PhysicalState, dayContext string) string {
+func BuildStrategicUserContext(agentID string, kb *worldkb.KB, profiles map[string]*profile.Profile, physical *protocol.PhysicalState, dayContext, relationships string) string {
 	var sb strings.Builder
 	// 【今日日程】段：每周日程上下文（星期几 + 工作日/休息日 + 当日提示）。
 	// dayContext 由调用方通过 weeklyschedule.WeeklyLine(dayCount, sched) 预格式化，
@@ -172,6 +172,13 @@ func BuildStrategicUserContext(agentID string, kb *worldkb.KB, profiles map[stri
 		sb.WriteString("【物理状态】\n")
 		// PhysicalLine 自带"物理状态："前缀，段头已去重。
 		sb.WriteString(strings.TrimPrefix(line, "物理状态："))
+		sb.WriteString("\n")
+	}
+	// 【人际关系】段（好感度 x/10）：让战略层知道与各 NPC 的亲疏。空串
+	// （单 NPC 场景 / 无关系行）时整段省略。
+	if relationships != "" {
+		sb.WriteString("【人际关系】\n")
+		sb.WriteString(relationships)
 		sb.WriteString("\n")
 	}
 	// 【其他NPC】段已屏蔽（不引导主动社交）：原实现列出 KB 中除自己外的所有

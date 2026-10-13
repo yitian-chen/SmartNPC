@@ -205,14 +205,17 @@ func (s *MySQLStore) LoadActionHistory(ctx context.Context, agentID string, limi
 // affection are incremented by the supplied deltas, interaction_count is
 // bumped by 1, and last_interaction_at is refreshed. Callers update both
 // directions by invoking this twice with swapped arguments.
+//
+// affection 是 0-10 好感度（默认 5）：新建行不显式传 affection，靠列 DEFAULT 5
+// （见 0003 迁移）；重复键时按 delta 累加并夹紧到 [0,10]。
 func (s *MySQLStore) SaveRelationship(ctx context.Context, agentA, agentB string, familiarityDelta, affectionDelta int) error {
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO agent_relationships
-		   (agent_a, agent_b, familiarity, affection, interaction_count, last_interaction_at)
-		 VALUES (?, ?, ?, ?, 1, NOW())
+		   (agent_a, agent_b, familiarity, interaction_count, last_interaction_at)
+		 VALUES (?, ?, ?, 1, NOW())
 		 ON DUPLICATE KEY UPDATE
 		   familiarity = familiarity + VALUES(familiarity),
-		   affection   = affection   + VALUES(affection),
+		   affection   = GREATEST(0, LEAST(10, affection + ?)),
 		   interaction_count = interaction_count + 1,
 		   last_interaction_at = NOW()`,
 		agentA, agentB, familiarityDelta, affectionDelta,

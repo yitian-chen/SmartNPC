@@ -159,7 +159,7 @@ func TestBuildSharedSystemPrompt_Module3Details(t *testing.T) {
 // 断言随之过时。
 
 func TestBuildStrategicUserContext_EmptyDayContext(t *testing.T) {
-	got := BuildStrategicUserContext("H-01", nil, nil, nil, "")
+	got := BuildStrategicUserContext("H-01", nil, nil, nil, "", "")
 	if strings.Contains(got, "【今日日程】") {
 		t.Errorf("empty dayContext should not produce 【今日日程】 segment in:\n%s", got)
 	}
@@ -234,7 +234,7 @@ func TestOtherAgentsLine_OmitsProfessionWhenEmpty(t *testing.T) {
 // 不再注入【其他NPC】花名册段（规划阶段不引导主动社交）。
 func TestBuildStrategicUserContext_NoOtherNPCsSegment(t *testing.T) {
 	kb := strategicRosterKB()
-	got := BuildStrategicUserContext("H-01", kb, nil, nil, "")
+	got := BuildStrategicUserContext("H-01", kb, nil, nil, "", "")
 	if strings.Contains(got, "【其他NPC】") {
 		t.Errorf("strategic user context should NOT inject 【其他NPC】 roster:\n%s", got)
 	}
@@ -248,7 +248,7 @@ func TestStrategicSystemPrompt_NoSocialGuidance(t *testing.T) {
 	// 战略层不引导主动社交：规则集不再把聊天映射到动作工具，格式示例也不含
 	// 社交时段示范；多 agent KB 也不应产生【其他NPC】段（社交目标清单已整体移除）。
 	kb := strategicRosterKB()
-	if got := BuildStrategicUserContext("H-01", kb, nil, nil, ""); strings.Contains(got, "【其他NPC】") {
+	if got := BuildStrategicUserContext("H-01", kb, nil, nil, "", ""); strings.Contains(got, "【其他NPC】") {
 		t.Errorf("multi-agent KB should NOT produce 【其他NPC】 segment:\n%s", got)
 	}
 }
@@ -290,7 +290,7 @@ func buildTestStrategicPrompt() string {
 		TimeOfDay:        "07:00",
 		Zone:             "residential_quarters",
 		Hint:             "早晨例行制定每日日程安排",
-		Context:          BuildStrategicUserContext("H-01", nil, nil, nil, ""),
+		Context:          BuildStrategicUserContext("H-01", nil, nil, nil, "", ""),
 		YesterdaySummary: "昨日总结：昨天按计划完成了车间装配。",
 	})
 }

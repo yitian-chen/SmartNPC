@@ -169,6 +169,15 @@ type agentContext struct {
 	// day's remaining schedule must absorb.
 	combatYieldPhys *protocol.PhysicalState
 
+	// Conversation session state (affection evaluation): the in-progress
+	// NPC↔NPC conversation transcript. Turns accumulate from speak_to
+	// dispatches (recordActionStarted) and speech_heard events (handleWorldEvent);
+	// the worker closes the session once it idles past
+	// conversationIdleTimeoutGameSec and spawns the affection LLM evaluation.
+	convPeerID      string
+	convTurns       []conversationTurn
+	convLastGameSec float64
+
 	// LLM clients (immutable after construction, no lock needed)
 	strategicHc llmClient
 	tacticalHc  llmClient
@@ -774,6 +783,14 @@ func (a *agentContext) recordActionStarted(actionID, cmd string, params map[stri
 
 	a.as.RecordActionStarted(actionID, cmd, params, src, toolCallID)
 
+	// 对话会话累积：下发定向对话（speak_to，带 target_agent_id + content）时
+	// 把本句记进会话 transcript，供对话结束后的好感度评估。
+	if target, ok := params["target_agent_id"].(string); ok && target != "" {
+		if content, ok := params["content"].(string); ok && content != "" {
+			a.recordConversationTurn(a.as.AgentID(), target, content, a.as.LatestGameTimeSec())
+		}
+	}
+
 	// TOCTOU 兜底：completion 可能在上面检查和 RecordActionStarted 之间到达。
 	// 此时 currentActionID 刚被设置但 completion 已以 wasInFlight=false 跑过。
 	// 清掉陈旧的 currentActionID，留 completedBeforeArm 条目给 armActionTimeout。
@@ -867,6 +884,11 @@ func runPerceptionWorker(
 
 		// time_to_stop 检测：长动作设了执行时长且 game_time 到点 → 打断进入下一轮。
 		ac.checkTimeToStop(agentID, logger)
+
+		// 对话结束检测：会话空闲超时则关闭并后台评估好感度（best-effort）。
+		if peer, turns := ac.closeConversationIfIdle(ac.as.LatestGameTimeSec()); peer != "" {
+			go ac.evaluateConversationAffection(ctx, agentID, peer, turns, kb, profiles, logger)
+		}
 
 		// 多日循环：检测 day_count 递增（跨日），重新调用战略层生成新一天的 dailyPlan。
 		// 通常在 06:00-07:00 规划窗口内触发（selectCurrentGoal 已屏蔽战术层分解，

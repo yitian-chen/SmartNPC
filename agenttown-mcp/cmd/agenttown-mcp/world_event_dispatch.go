@@ -119,6 +119,16 @@ func (rt *Runtime) handleWorldEvent(agentID string, ev protocol.WorldEventPayloa
 		return false
 	}
 
+	// 对话会话累积：收到 speech_heard（有人对我说话）时把对方这一句记进
+	// 会话 transcript，供对话结束后的好感度评估。放在 force 分流之前——force
+	// 与非 force 的 speech_heard 都要记。
+	if ev.Category == protocol.CategorySocial && ev.EventType == protocol.EventTypeSpeechHeard {
+		var d protocol.SpeechHeardData
+		if err := json.Unmarshal(ev.Data, &d); err == nil && d.SpeakerID != "" {
+			ac.recordConversationTurn(d.SpeakerID, d.SpeakerID, d.Content, ac.as.LatestGameTimeSec())
+		}
+	}
+
 	// 修复 A：combat 类事件是持续状态的边沿——attacked/targeted 登记威胁
 	// 情境（直到 combat_exit 或 TTL），combat_exit 解除。放在 force 分流
 	// 之前：登记/解除对 force 与非 force 路径一视同仁。
@@ -323,6 +333,8 @@ func (rt *Runtime) handleCombatDetach(ac *agentContext, agentID string, ev proto
 		// 会被 processSlotSwitch 整队清掉——入口处就地解除（slot 边界迁移
 		// 已被让位吞并，归还后按时间重推）。
 		ac.as.ClearSlotSwitchPending()
+		// 战斗让位中断对话：丢弃在途会话 transcript（被战斗打断的对话不评估）。
+		ac.clearConversation()
 	}
 	// 属性基线（首入口时）：归还时对比战斗期间的属性变化（磨损/疲劳/电量
 	// before→after），作为战术层【战斗结束】hint 与战略层修订原因的事实依据。
