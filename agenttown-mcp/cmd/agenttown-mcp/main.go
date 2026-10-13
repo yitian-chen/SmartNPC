@@ -852,11 +852,15 @@ func runPerceptionWorker(
 			continue
 		}
 
+		// 暂停自动下发（debug web 开关）：本轮只做反应/护栏，跳过 slot 切换、
+		// 战术分解与队列下发。事件反应走 force/路由 replan 的独立路径，不受影响。
+		paused := autoDispatchPaused.Load()
+
 		// 时段切换检测：game_time 已超出 currentSlot 结束时间 → 打断长复合动作
 		// + 清队列 + 清 slot，让本轮后续走 tacticalRefill 选新 slot 重新分解。
 		// 这是长复合动作的唯一打断路径（它们不设超时）。切换发生在反应进行中
 		// 时返回 true → 时间轴被事件挤乱，评估战略层 replan（P3-9）。
-		if ac.advanceSlotIfNeeded(ws, agentID, logger) {
+		if !paused && ac.advanceSlotIfNeeded(ws, agentID, logger) {
 			go ac.maybeStrategicReplan(ctx, agentID, ws, kb, profiles, weeklySched, logger,
 				"紧急反应跨越时段边界被切断")
 		}
@@ -870,7 +874,7 @@ func runPerceptionWorker(
 		// 让 NPC 睡到睡眠段 time_to_stop 预算到点（P3-8 后 slot 过期只标记
 		// pending，不打断），安全点后走 tacticalRefill 选新计划 slot。手动模式
 		// （autoPlanEnabled=false）跳过。
-		if autoPlanEnabled {
+		if autoPlanEnabled && !paused {
 			if rollover, prevDay, newDay := ac.detectDayRollover(); rollover && !ac.combatYieldActive() {
 				// 战斗让位中跳过跨日处理（combat-detach）：跨日是电平检测
 				// （day > prev），归还后首个 wake 自然补上，不漏。让位中跑会
@@ -948,7 +952,9 @@ func runPerceptionWorker(
 		// P3-8：安全点处理延迟的 slot 切换（hasInFlightAction 之后 = 动作已
 		// 自然终止——所有长动作现在都有 duration，由 checkTimeToStop 到点打断
 		// 或自然完成，processSlotSwitch 只做 slot 边界清理 + 选新 slot）。
-		ac.processSlotSwitch(ws, agentID, logger)
+		if !paused {
+			ac.processSlotSwitch(ws, agentID, logger)
+		}
 
 		// debug 手动 action 期间暂停 dispatch：debug 端点刚发了 stop_action 清 UE
 		// busy，若此刻 worker 被唤醒会立刻补一个新 action 重新占用，导致手动
@@ -964,13 +970,20 @@ func runPerceptionWorker(
 			// 队列还有下一个：pop 并直发。
 			// 手动模式下 /debug/schedule 注入的 action 进队列后由 ac.signal() 唤醒
 			// worker 走这条路径下发，所以 popAndSendQueueAction 不受 autoPlanEnabled 限制。
+			// 暂停自动下发时，仅反应窗口（reactionActive）放行 pop——反应动作由
+			// force/路由打断的 replan 填队，需照常下发；否则跳过，不再主动下发。
+			if paused {
+				if active, _, _ := ac.reactionSnapshot(); !active {
+					continue
+				}
+			}
 			ac.popAndSendQueueAction(ctx, agentID, ws, kb, logger)
-		} else if autoPlanEnabled {
-			// 队列空 + 自动规划开启：尝试战术 refill。refill 返回 false（无 goal /
-			// redecomposeCount 达上限）时不主动发任何指令，阻塞等下一次感知唤醒——
-			// 感知推进 game_time 后会进入新 slot，redecomposeCount 重置即可重新分解。
-			// 不再发 idle wait：长复合动作应持续到时段切换，短动作队列空时让
-			// 战术层重新分解（tacticalRefill 内部会在重分解时注入"未安排长动作"hint）。
+		} else if autoPlanEnabled && !paused {
+			// 队列空 + 自动规划开启 + 未暂停：尝试战术 refill。refill 返回 false
+			// （无 goal / redecomposeCount 达上限）时不主动发任何指令，阻塞等下一次
+			// 感知唤醒——感知推进 game_time 后会进入新 slot，redecomposeCount 重置即可
+			// 重新分解。不再发 idle wait：长复合动作应持续到时段切换，短动作队列空时
+			// 让战术层重新分解（tacticalRefill 内部会在重分解时注入"未安排长动作"hint）。
 			ac.tacticalRefill(ctx, agentID, ws, kb, profiles, logger)
 		}
 		// 队列空 + 自动规划关闭：不主动下发，阻塞在 wake 等手动注入 signal。
@@ -1388,6 +1401,12 @@ var _ llmClient = (*venus.Client)(nil)
 // debug handler 引用，避免长串参数传递）。nil 表示未启用能力过滤（降级为全量
 // 内置工具）。main() 启动时赋值。
 var capabilityRegistryRef *CapabilityRegistry
+
+// autoDispatchPaused 是运行时可切换的"暂停自动下发"开关（debug web 控制）。
+// true 时 worker 跳过 slot 切换 / 战术层分解 / 队列下发（非反应路径），仅保留
+// 事件反应（force/路由打断 → 反应动作照常入队下发）。atomic.Bool：worker 多
+// goroutine 读、/debug handler 写。零值 false = 自动下发开启。
+var autoDispatchPaused atomic.Bool
 
 // kbRef 是当前生效的 world KB 指针（package-level 供 debug handler 引用）。
 // worldKBSwap 成功后同步更新；runHTTP 的 /debug/kb handler 读 kbRef 而不是
@@ -2129,6 +2148,12 @@ func runHTTP(ctx context.Context, logger *slog.Logger, server *mcp.Server, addr 
 	// debug 控制台"事件下发" tab；curl 直接 POST 完整事件。仅联调用，无认证。
 	mux.HandleFunc("/debug/event", func(w http.ResponseWriter, r *http.Request) {
 		handleDebugEvent(logger, lookupAgent, injectWorldEvent, w, r)
+	})
+	// /debug/auto-dispatch — 运行时可切换"暂停自动下发"开关：关闭后 worker
+	// 不再自动下发 slot 安排 / 战术分解 / action（但保留事件反应）。GET 读当前
+	// 状态，POST {"paused":bool} 设置。仅联调用，无认证。
+	mux.HandleFunc("/debug/auto-dispatch", func(w http.ResponseWriter, r *http.Request) {
+		handleDebugAutoDispatch(w, r, logger)
 	})
 	// /debug/ — 浏览器 debug 控制台 HTML 页面（无外部依赖，嵌入二进制）。
 	mux.HandleFunc("/debug/", func(w http.ResponseWriter, r *http.Request) {

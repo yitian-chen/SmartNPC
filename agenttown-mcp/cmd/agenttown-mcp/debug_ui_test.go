@@ -376,3 +376,42 @@ func TestHandleDebugLLMMetrics_Empty(t *testing.T) {
 		t.Error("empty snapshot should encode layers as {} not null")
 	}
 }
+
+// TestHandleDebugAutoDispatch verifies the runtime "pause auto dispatch" switch:
+// GET returns the current state, POST flips it, and the package-level flag
+// tracks the POST. The flag is reset at the end so other tests are unaffected.
+func TestHandleDebugAutoDispatch(t *testing.T) {
+	logger := slog.Default()
+	defer autoDispatchPaused.Store(false)
+
+	// GET 初始：未暂停。
+	req := httptest.NewRequest(http.MethodGet, "/debug/auto-dispatch", nil)
+	rec := httptest.NewRecorder()
+	handleDebugAutoDispatch(rec, req, logger)
+	var got map[string]bool
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got["paused"] != false {
+		t.Errorf("GET paused = %v, want false", got["paused"])
+	}
+
+	// POST paused=true：写入并回读。
+	req = httptest.NewRequest(http.MethodPost, "/debug/auto-dispatch", strings.NewReader(`{"paused":true}`))
+	rec = httptest.NewRecorder()
+	handleDebugAutoDispatch(rec, req, logger)
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got["paused"] != true || !autoDispatchPaused.Load() {
+		t.Errorf("POST paused = %v, flag = %v, want true", got["paused"], autoDispatchPaused.Load())
+	}
+
+	// POST 非法 JSON：400。
+	req = httptest.NewRequest(http.MethodPost, "/debug/auto-dispatch", strings.NewReader(`not-json`))
+	rec = httptest.NewRecorder()
+	handleDebugAutoDispatch(rec, req, logger)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("invalid JSON should be 400, got %d", rec.Code)
+	}
+}
