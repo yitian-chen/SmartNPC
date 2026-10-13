@@ -219,7 +219,7 @@ func TestReconcileTools_NewCmdRegistersGenericTool(t *testing.T) {
 	)
 	ex := &fakeExecutor{}
 	actions := []protocol.CapabilityAction{
-		// All 13 built-in cmds (so none get dropped).
+		// All 12 built-in cmds (so none get dropped).
 		{Cmd: protocol.CmdGenericAct, Kind: "atomic", Description: "generic"},
 		{Cmd: protocol.CmdMoveTo, Kind: "atomic", Description: "move"},
 		{Cmd: protocol.CmdTurnTo, Kind: "atomic", Description: "turn"},
@@ -232,7 +232,6 @@ func TestReconcileTools_NewCmdRegistersGenericTool(t *testing.T) {
 		{Cmd: protocol.CmdSelfMaintenance, Kind: "composite", Description: "maintenance"},
 		{Cmd: protocol.CmdRestAtResidence, Kind: "composite", Description: "rest"},
 		{Cmd: protocol.CmdSurfInternet, Kind: "composite", Description: "surf"},
-		{Cmd: protocol.CmdSocialChat, Kind: "composite", Description: "social chat"},
 		// New cmd not in BuiltinToolSpecs.
 		{
 			Cmd:         "WaveHand",
@@ -251,4 +250,3 @@ func TestReconcileTools_NewCmdRegistersGenericTool(t *testing.T) {
 		t.Errorf("dynamicToolNames=%v, want wave_hand", dynamicToolNames)
 	}
 }
-

@@ -148,8 +148,8 @@ func BuildStrategicUserPrompt(in StrategicPromptInput) string {
 // BuildStrategicUserContext constructs the strategic layer user message's
 // dynamic context segment: 【今日日程】 (weekly schedule context, skipped
 // when empty) + 【物理状态】 (nil physical → default fresh state). The
-// 【其他NPC】 roster segment was removed (social_chat is masked from the
-// strategic layer). The strategic preamble (module role) also lives here:
+// 【其他NPC】 roster segment was removed (active social initiation is not
+// guided at the strategic layer). The strategic preamble (module role) also lives here:
 // the system prompt is shared verbatim across layers, so every
 // strategic-specific text belongs in the user message.
 func BuildStrategicUserContext(agentID string, kb *worldkb.KB, profiles map[string]*profile.Profile, physical *protocol.PhysicalState, dayContext string) string {
@@ -174,13 +174,12 @@ func BuildStrategicUserContext(agentID string, kb *worldkb.KB, profiles map[stri
 		sb.WriteString(strings.TrimPrefix(line, "物理状态："))
 		sb.WriteString("\n")
 	}
-	// 【其他NPC】段已屏蔽（向 LLM 屏蔽 social_chat）：原实现列出 KB 中除自己
-	// 外的所有 NPC（id + 职业），让战略层 LLM 在 07:00 规划时看到可聊天的同伴
-	// ——social_chat 的 target_agent_id 需要具体 id。现在战略层不再引导主动
-	// 社交（规则 2 的 social_chat 映射、格式示例的社交时段已一并移除），该段
-	// 整体注释掉。战术层仍通过 OtherAgentsLine 作运行时回退（见 tactical.go）。
+	// 【其他NPC】段已屏蔽（不引导主动社交）：原实现列出 KB 中除自己外的所有
+	// NPC（id + 职业），让战略层 LLM 在 07:00 规划时看到可聊天的同伴。现在战略
+	// 层不再引导主动社交（规则 2 的社交映射、格式示例的社交时段已一并移除），
+	// 该段整体注释掉。战术层仍通过 OtherAgentsLine 作运行时回退（见 tactical.go）。
 	// if peers := OtherAgentsLine(kb, agentID); peers != "" {
-	// 	sb.WriteString("【其他NPC】（你可以主动找其中某位聊天 social_chat，维系人际关系）\n")
+	// 	sb.WriteString("【其他NPC】（你可以主动找其中某位聊天，维系人际关系）\n")
 	// 	sb.WriteString(peers)
 	// 	sb.WriteString("\n")
 	// }

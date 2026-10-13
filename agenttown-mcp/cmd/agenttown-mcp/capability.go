@@ -71,12 +71,6 @@ func (r *CapabilityRegistry) Register(agentID string, actions []protocol.Capabil
 		for _, a := range normalized {
 			r.global[a.Cmd] = a
 		}
-		// SocialChat is MCP-side (dialogue runner lives in MCP, not UE).
-		// Ensure it's always in the global set even when UE's
-		// capability_registry doesn't declare it.
-		if _, ok := r.global[protocol.CmdSocialChat]; !ok {
-			r.global[protocol.CmdSocialChat] = socialChatCapability()
-		}
 		return
 	}
 	// Per-agent override: replace this agent's map wholesale.
@@ -170,9 +164,8 @@ func (r *CapabilityRegistry) Snapshot() CapabilitySnapshot {
 
 // BuiltinCmdCapabilities is the default capability set seeded at startup
 // so the system works even if UE never sends a capability_registry
-// message. It lists the 13 cmds the real UE5 declares (2026-08-11 +
-// Phase 2 Module C SocialChat) with params schemas aligned to the
-// capability_registry push.
+// message. It lists the 12 cmds the real UE5 declares (2026-08-11) with
+// params schemas aligned to the capability_registry push.
 //
 // UE that implements every cmd is expected to send a capability_registry
 // message on connect that mirrors this list; doing so overwrites the seed
@@ -297,21 +290,4 @@ var BuiltinCmdCapabilities = []protocol.CapabilityAction{
 			{Name: "interaction", Type: "string", Description: "交互类型，固定为surf_internet", Required: true, DefaultValue: ""},
 		},
 	},
-	socialChatCapability(),
-}
-
-// socialChatCapability returns the CapabilityAction definition for SocialChat.
-// Extracted as a function so CapabilityRegistry.Register can inject it as a
-// fallback when UE doesn't declare SocialChat in its capability_registry.
-func socialChatCapability() protocol.CapabilityAction {
-	return protocol.CapabilityAction{
-		Cmd:         protocol.CmdSocialChat,
-		Kind:        "composite",
-		Description: "主动去找另一个 NPC 开始对话，包含走向对方、转向、对话挂起直到对话结束",
-		UsageHint:   "想跟某个 NPC 聊天时使用",
-		Params: []protocol.CapabilityParam{
-			{Name: "target_agent_id", Type: "string", Description: "要搭话的目标 NPC 的 id", Required: true, DefaultValue: ""},
-			{Name: "content", Type: "string", Description: "开场白内容", Required: true, DefaultValue: ""},
-		},
-	}
 }

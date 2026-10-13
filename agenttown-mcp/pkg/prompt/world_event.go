@@ -185,10 +185,6 @@ func worldEventDescription(ev protocol.WorldEventPayload) string {
 		var d protocol.SocialData
 		if err := json.Unmarshal(ev.Data, &d); err == nil {
 			switch ev.EventType {
-			case protocol.EventTypeChatInviteIncoming:
-				if d.From != "" {
-					return fmt.Sprintf("%s 向你发起对话：%s", d.From, d.Content)
-				}
 			case protocol.EventTypeBroadcastHeard:
 				if d.Source != "" {
 					return fmt.Sprintf("听到 %s 的广播：%s", d.Source, d.Content)

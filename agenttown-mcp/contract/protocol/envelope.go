@@ -72,14 +72,6 @@ const (
 	// agent_registered; later pushes are rejected with a warning.
 	TypeWorldKB = "world_kb"
 
-	// Phase 2 Module C: NPC-to-NPC dialogue protocol (§3.1 of
-	// AgentTown_Dialogue_Design.md). UE owns the session state machine
-	// (Inviting/Active/Closed) and conv_id generation; MCP handles
-	// accept/reject decisions and chat_turn content generation.
-	TypeChatInvite    = "chat_invite"     // UE → B: A wants to talk (carries conv_id + A's opening line)
-	TypeChatInviteRsp = "chat_invite_rsp" // B → UE (forwarded to A): accept/reject decision only
-	TypeChatTurn      = "chat_turn"       // speaker → UE (forwarded to peer): one utterance
-
 	// TypeWorldEvent is pushed by UE the moment something happens in the
 	// world (edge-triggered, never level-triggered): physical threshold
 	// crossings, zone changes, social signals, action anomalies, world
@@ -98,8 +90,8 @@ const (
 // representative cmds. Atomic = standalone minimal action; Composite =
 // pre-registered high-level behavior tree.
 //
-// 13 cmds total (7 atomic + 6 composite), aligned with the real UE5
-// capability_registry push (2026-08-11 + Phase 2 Module C SocialChat).
+// 12 cmds total (7 atomic + 5 composite), aligned with the real UE5
+// capability_registry push (2026-08-11).
 const (
 	// Atomic cmds (7).
 	CmdGenericAct          = "GenericAct"
@@ -109,13 +101,12 @@ const (
 	CmdSpeak               = "Speak"
 	CmdInteractSmartObject = "InteractSmartObject"
 	CmdEmote               = "Emote"
-	// Composite cmds (6).
+	// Composite cmds (5).
 	CmdWorkShift       = "WorkShift"
 	CmdChargeAtStation = "ChargeAtStation"
 	CmdSelfMaintenance = "SelfMaintenance"
 	CmdRestAtResidence = "RestAtResidence"
 	CmdSurfInternet    = "SurfInternet"
-	CmdSocialChat      = "SocialChat" // Phase 2 Module C: proactive NPC-to-NPC dialogue
 
 	// Combat-detach cmds (one per combat style — combat-detach, 2026-10-09).
 	// UE's combat AI takes over the body but no longer auto-runs a behavior
@@ -135,7 +126,7 @@ const (
 func IsCompositeCmd(cmd string) bool {
 	switch cmd {
 	case CmdWorkShift, CmdChargeAtStation, CmdSelfMaintenance,
-		CmdRestAtResidence, CmdSurfInternet, CmdSocialChat:
+		CmdRestAtResidence, CmdSurfInternet:
 		return true
 	}
 	return false

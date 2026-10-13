@@ -109,7 +109,7 @@ func BuildTactical(in TacticalInput) string {
 	nearbyLine := NearbyAgentsLine(in.VisibleAgents, in.KB)
 	if nearbyLine == "" && in.KB != nil {
 		// 附近无可见 NPC 时 fallback 到 KB 静态花名册，让 LLM 始终能看到
-		// NPC id 列表（social_chat 的 target_agent_id 需要 id 而非显示名）。
+		// NPC id 列表（定向对话需要 id 而非显示名）。
 		nearbyLine = OtherAgentsLine(in.KB, in.AgentID)
 	}
 	if nearbyLine != "" {

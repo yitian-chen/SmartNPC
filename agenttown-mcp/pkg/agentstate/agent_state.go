@@ -42,7 +42,7 @@ type AgentState struct {
 	// latestVisibleAgents is the visible-NPC list from the latest
 	// perception_update (Phase 2 Module C). UE pushes visible_agents on
 	// every perception; MCP injects this into the tactical prompt as
-	// 【附近NPC】 so the LLM can pick a social_chat target. Stored as a
+	// 【附近NPC】 so the LLM can pick a conversation target. Stored as a
 	// deep copy under mu; nil when no perception or no visible agents.
 	latestVisibleAgents []protocol.VisibleAgent
 	currentTask         *protocol.CurrentTaskProgress
@@ -1478,7 +1478,7 @@ func (a *AgentState) LatestNearbyObjects() []protocol.NearbyObject {
 // perception_update (Phase 2 Module C). Returns nil if no perception has
 // arrived or no agents are visible. The returned slice is a deep copy;
 // callers may mutate it freely. Used to inject 【附近NPC】 into the tactical
-// prompt so the LLM can pick a social_chat target.
+// prompt so the LLM can pick a conversation target.
 func (a *AgentState) LatestVisibleAgents() []protocol.VisibleAgent {
 	a.mu.Lock()
 	defer a.mu.Unlock()

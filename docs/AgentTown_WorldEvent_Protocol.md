@@ -135,11 +135,8 @@ Agent 侧正在从「轮询感知」演进为「**事件驱动**」：UE 主动�
 
 | event_type | 说明 | data |
 |------------|------|------|
-| `chat_invite_incoming` | 有人向该 NPC 发起对话（转发自 SocialChat 动作） | `{"conv_id": "conv_...", "from": "H-02", "content": "老陈，借个工具？"}` |
 | `broadcast_heard` | 听到广播/附近 NPC 的大声说话 | `{"source": "H-04", "content": "..."}` |
 | `mentioned` | 被点名/被提及 | `{"source": "H-02", "context": "..."}` |
-
-> **规定：UE 将对话邀请统一按 `world_event` 推送**（`event_type=chat_invite_incoming`，原 `chat_invite` payload 的 `conv_id`/`from`/`content` 三个字段原样并入 `data`，另补 `category`/`game_time` 等通用字段），**不再发送独立的 `chat_invite` 消息**——统一事件入口，Agent 侧对话链路改从事件队列消费。`chat_invite_rsp` / `chat_turn` 维持原消息类型不变。
 
 ### 3.4 action_anomaly（动作异常）
 
@@ -234,7 +231,6 @@ UE 按本协议推送后，Agent 侧保证：
 | payload | 新增可选字段 `detach`（combat-detach 战斗接管标记，见 §2.2/§3.6/§四） |
 | `event_notification` | 保持现状（Agent 内部路由用，Director 事件的 Agent→Agent 转发可后续并入本通道） |
 | `error` 消息 | 保留**仅协议级错误**（INVALID_MESSAGE / UNKNOWN_AGENT / INTERNAL_ERROR / STOP_ID_MISMATCH）；业务级动作异常一律走 `world_event.action_anomaly`，不再上报 ACTION_FAILED |
-| `chat_invite` | **停用**：UE 一律按 `world_event`（social.chat_invite_incoming）推对话邀请，原 payload 三字段并入 data（见 §3.3）；`chat_invite_rsp` / `chat_turn` 不变 |
 | 感知通道 | `perception_update` / `state_report` **不变**——心跳类连续量不迁入事件通道 |
 
 ## 八、完整示例

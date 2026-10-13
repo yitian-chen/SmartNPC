@@ -11,10 +11,10 @@ import (
 // NearbyAgentsLine formats the visible-NPC list as 【附近NPC】 for the
 // tactical prompt. Returns "" when empty (caller skips the segment). Each
 // line shows display name, id, distance (meters), and current action —
-// enough for the LLM to pick a social_chat target.
+// enough for the LLM to pick a conversation target.
 //
-// Phase 2 Module C: this segment pairs with the social_chat composite
-// tool so the LLM knows which NPC ids are valid target_agent_id values.
+// This segment pairs with the NPC-to-NPC conversation action so the LLM
+// knows which NPC ids are valid target values.
 // Distance is rounded to whole meters for readability; current_action
 // is omitted when empty (UE reports "" when the NPC is idle).
 //
@@ -52,8 +52,7 @@ func NearbyAgentsLine(agents []protocol.VisibleAgent, kb *worldkb.KB) string {
 }
 
 // OtherAgentsLine formats the KB's static NPC roster (excluding self) as the
-// 【其他NPC】 segment, used by both the strategic layer (social_chat target
-// roster at 07:00 planning) and the tactical layer (fallback when no runtime
+// 【其他NPC】 segment, used by the tactical layer (fallback when no runtime
 // visible agents). Each line shows display name, id, and profession.
 //
 // Differs from NearbyAgentsLine: the tactical fallback and strategic layer use

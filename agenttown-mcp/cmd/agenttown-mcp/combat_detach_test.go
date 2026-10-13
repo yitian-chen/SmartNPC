@@ -4,7 +4,7 @@ package main
 // 身体，agent 让位（不重规划、除战斗动作外不下发），直到 combat_exit 或
 // TTL 兜底归还。首次进入经 jev 路由下发战斗动作（ExecuteCombatBT_Default）。
 // 覆盖：入口（停动作+业务复位+置位、幂等、timer/pending 清理）、
-// 让位期间抑制面（worker 守卫语义、路由双守卫、chat_invite 拒绝、
+// 让位期间抑制面（worker 守卫语义、路由双守卫、
 // executor 门禁、/debug/schedule 409）、归还（combat_exit 确定性接收、
 // force 变体、TTL 到期与冷启动 inert、非让位回归）、跨断线存续、
 // /debug/event 与 /debug/tactical 的 detach 支持。
@@ -280,41 +280,6 @@ func TestRouterInterrupt_GatedDuringYield(t *testing.T) {
 	}
 	if got := ac.as.WorldEventQueueLen(); got != 1 {
 		t.Fatalf("event must stay queued (not removed by interrupt), got len=%d", got)
-	}
-}
-
-// TestChatInvite_DuringYieldRejected verifies a chat invite during the yield
-// is politely declined (rsp=false so UE frees the inviting peer) instead of
-// being forwarded to the dialogue runner.
-func TestChatInvite_DuringYieldRejected(t *testing.T) {
-	rt, ft, ac := newWorldEventTestRuntime(t)
-	ac.dialogue = &dialogueRunner{ac: ac, ws: ft, logger: testLogger()}
-	yieldViaDetach(t, rt, "evt_d1")
-
-	invite := protocol.WorldEventPayload{
-		EventID:   "evt_inv",
-		Category:  protocol.CategorySocial,
-		EventType: protocol.EventTypeChatInviteIncoming,
-		Severity:  5,
-		GameTime:  "D12 12:00:30",
-		Data:      json.RawMessage(`{"conv_id":"conv_1","from":"H-02","content":"借个工具？"}`),
-	}
-	dispatchTestEvent(t, rt, "H-01", invite)
-
-	ft.mu.Lock()
-	envelopes := append([]string(nil), ft.envelopes...)
-	ft.mu.Unlock()
-	declined := false
-	for _, e := range envelopes {
-		if strings.Contains(e, "chat_invite_rsp") && strings.Contains(e, `"accept":false`) {
-			declined = true
-		}
-	}
-	if !declined {
-		t.Fatalf("invite during yield must be declined via chat_invite_rsp(false), got %v", envelopes)
-	}
-	if got := ac.as.WorldEventQueueLen(); got != 0 {
-		t.Fatalf("declined invite must not enqueue, got len=%d", got)
 	}
 }
 

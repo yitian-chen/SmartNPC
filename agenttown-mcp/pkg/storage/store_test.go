@@ -109,27 +109,6 @@ func TestNoopStore_SeedRelationshipIsNoOp(t *testing.T) {
 	}
 }
 
-// TestNoopStore_SaveDialogueIsNoOp verifies SaveDialogue returns nil without panic.
-func TestNoopStore_SaveDialogueIsNoOp(t *testing.T) {
-	st := NoopStore{}
-	d := Dialogue{ConvID: "c1", SpeakerID: "H-01", ListenerID: "H-02", Content: "hi", TurnIndex: 0}
-	if err := st.SaveDialogue(context.Background(), d); err != nil {
-		t.Errorf("SaveDialogue: got err=%v, want nil", err)
-	}
-}
-
-// TestNoopStore_LoadRecentDialoguesIsNoOp verifies LoadRecentDialogues returns nil,nil.
-func TestNoopStore_LoadRecentDialoguesIsNoOp(t *testing.T) {
-	st := NoopStore{}
-	got, err := st.LoadRecentDialogues(context.Background(), "H-01", 10)
-	if err != nil {
-		t.Errorf("LoadRecentDialogues: got err=%v, want nil", err)
-	}
-	if got != nil {
-		t.Errorf("LoadRecentDialogues: got %v, want nil", got)
-	}
-}
-
 // ─── migration file embedding sanity ───
 
 // TestEmbeddedMigrations_Listed verifies the embed directive picked up

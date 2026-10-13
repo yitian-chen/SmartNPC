@@ -508,8 +508,7 @@ func noDurationTool(name string) bool {
 // 的 duration 从不被填——动作时长全靠 slot 切换兜底、队列频繁提前耗尽。
 // 必填后 LLM 被迫为每个非瞬时动作声明时长；"最后一段不设 duration 自然
 // 持续到 slot 切换"的旧约定改为"最后一段 duration = 时段剩余时长"，
-// TacticalRules 规则 7/8 已同步措辞）。例外：social_chat 是"挂起直到对话
-// 结束"的复合动作，duration 到点会打断对话；瞬时工具无时长概念。
+// TacticalRules 规则 7/8 已同步措辞）。瞬时工具无时长概念。
 func capabilityParamsSchema(params []protocol.CapabilityParam, name string) json.RawMessage {
 	props := map[string]any{}
 	required := make([]string, 0, len(params))
@@ -557,9 +556,8 @@ func capabilityParamsSchema(params []protocol.CapabilityParam, name string) json
 	// 时长档位（中间动作约 1800 秒、工作段 3600-7200 秒、末段=剩余时长）已迁到
 	// prompt 分解规则（TacticalRules 规则 7/8 + tacticalCoreRules 精简版），此处
 	// 只留执行语义，避免 10 个工具重复一份长描述。
-	// social_chat 不追加（对话挂起直到结束，duration 会打断对话）；
 	// 瞬时工具 + move_to 不追加（见 noDurationTool）。
-	if name != "social_chat" && !noDurationTool(name) {
+	if !noDurationTool(name) {
 		props["duration"] = map[string]any{
 			"type":        "number",
 			"description": "持续时长（秒）。到点后系统打断当前段并进入队列下一段；末段设为时段剩余时长。",
@@ -641,14 +639,6 @@ func mapTacticalAction(pa plannedAction, agentID string, kb *worldkb.KB, registr
 			"semantic_group": pa.Params["semantic_group"],
 			"interaction":    pa.Params["interaction"],
 			"auto_queue":     "true",
-		}, nil
-	case "social_chat":
-		// Phase 2 Module C: proactive dialogue. params are target_agent_id
-		// + content only — no semantic_group/interaction (target is an NPC,
-		// not a Smart Object) and no auto_queue (not queueable).
-		return protocol.CmdSocialChat, map[string]any{
-			"target_agent_id": pa.Params["target_agent_id"],
-			"content":         pa.Params["content"],
 		}, nil
 	// ─── Atomic tools ───
 	case "generic_act":
