@@ -908,6 +908,11 @@ func runPerceptionWorker(
 				// 失败/冷启动返回 ""，generateDailyPlan 内部回退到常量。
 				// （读 DB action_history，不依赖 conversation，先于清空执行无影响。）
 				narrative := generateDailyMemories(ctx, ac.strategicHc, ac.as.Store(), agentID, kb, profiles, logger)
+				// 社交需求：用今天的日程评估明天的社交需求，先于新一天计划生成，
+				// 使新计划的"找人聊天"安排反映更新后的值。无今天日程（异常冷启动）时跳过。
+				if todayPlan := ac.as.Snapshot().DailyPlan; todayPlan != "" {
+					ac.as.SetSocialNeed(generateDailySocialNeed(ctx, ac.strategicHc, agentID, kb, profiles, logger, todayPlan, ac.as.SocialNeed()))
+				}
 				// 跨日清空统一 loop 会话历史：每个游戏日一份独立 loop，
 				// 新日的战略轮是 loop 第一轮。跨日记忆走昨日总结（narrative）。
 				ac.as.ClearConversation()
@@ -1981,6 +1986,12 @@ func main() {
 		// store==nil（内存模式）时 SetIdentity 仍记录 agentID 但持久化调用跳过；
 		// LoadPersistent 在 NoopStore 下返回 ErrNotFound→保持默认值（cold start）。
 		ac.as.SetIdentity(id, store)
+		// 社交需求初始值：profile ## 社交需求（0-10，未声明回落 5）。
+		if p, ok := profiles[id]; ok && p != nil {
+			ac.as.SetSocialNeed(p.SocialNeed)
+		} else {
+			ac.as.SetSocialNeed(5)
+		}
 		// per-NPC 物理属性分段阈值（profile ## 属性分段）：反应层告警跨越检测、
 		// 强制 replan、战术层恢复约束共用，保证 LLM 文本与代码行为一致。
 		ac.physBands = prompt.BandThresholdsFor(profiles, id)

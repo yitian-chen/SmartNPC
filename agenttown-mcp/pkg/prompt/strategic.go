@@ -109,6 +109,7 @@ const StrategicRules = `1. 【硬性要求】每个时段的结束时间减去�
 6. 充电仅在规划时电量为"低"或"较低"时安排，规划时电量为"高"或"中"时严禁规划充电；维护仅在关节磨损达到"明显磨损"及以上时安排；睡眠只能在午间和晚上
 7. 综合用户信息中【物理状态】的四项状态调整安排侧重点：电量偏低→多充电少工作；疲劳偏高→提前休眠；磨损偏高→安排维护；余额低→多工作少花钱
 8. 整理内务、冥想等动作安排的时间不得超过一小时
+9. 综合【社交需求】调整社交安排：社交需求高（≥7）时，可在白天安排一个"找人聊天"的社交时段（goal 写"找人聊天"或"找XX聊天"，战术层会分解为 speak_to）；社交需求低（≤3）时尽量少安排社交活动。
 
 格式示例：[{"time":"07:00-09:00","goal":"xxx"},{"time":"09:00-12:00","goal":"xxx"},{"time":"12:00-14:00","goal":"xxx"},{"time":"14:00-18:00","goal":"xxx"},{"time":"18:00-22:00","goal":"xxx"},{"time":"22:00-07:00","goal":"xxx"}]`
 
@@ -152,7 +153,7 @@ func BuildStrategicUserPrompt(in StrategicPromptInput) string {
 // guided at the strategic layer). The strategic preamble (module role) also lives here:
 // the system prompt is shared verbatim across layers, so every
 // strategic-specific text belongs in the user message.
-func BuildStrategicUserContext(agentID string, kb *worldkb.KB, profiles map[string]*profile.Profile, physical *protocol.PhysicalState, dayContext, relationships string) string {
+func BuildStrategicUserContext(agentID string, kb *worldkb.KB, profiles map[string]*profile.Profile, physical *protocol.PhysicalState, dayContext, relationships string, socialNeed int) string {
 	var sb strings.Builder
 	// 【今日日程】段：每周日程上下文（星期几 + 工作日/休息日 + 当日提示）。
 	// dayContext 由调用方通过 weeklyschedule.WeeklyLine(dayCount, sched) 预格式化，
@@ -181,6 +182,9 @@ func BuildStrategicUserContext(agentID string, kb *worldkb.KB, profiles map[stri
 		sb.WriteString(relationships)
 		sb.WriteString("\n")
 	}
+	// 【社交需求】段：agent 侧维护的 0-10 值（越高越渴望主动找人聊天），
+	// 影响"找人聊天"日程的出现概率。始终注入（有默认值，不会为 0）。
+	sb.WriteString(fmt.Sprintf("【社交需求】%d/10。社交需求越高，你越渴望主动找其他 NPC 聊天、维系社交；越低则越倾向独处、专注自己的事。\n", socialNeed))
 	// 【其他NPC】段已屏蔽（不引导主动社交）：原实现列出 KB 中除自己外的所有
 	// NPC（id + 职业），让战略层 LLM 在 07:00 规划时看到可聊天的同伴。现在战略
 	// 层不再引导主动社交（规则 2 的社交映射、格式示例的社交时段已一并移除），
