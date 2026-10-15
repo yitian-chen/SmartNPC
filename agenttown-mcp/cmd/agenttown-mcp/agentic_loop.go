@@ -247,10 +247,17 @@ func isEmptyTacticalResult(resp *llmtypes.Response, toolChoice, agentID string) 
 	if toolChoice != "required" || resp == nil {
 		return false
 	}
-	if len(resp.ToolCalls) == 0 {
-		return true
+	tcs := resp.ToolCalls
+	if len(tcs) == 0 {
+		// 模型可能把工具调用以文本输出而 native 组装整体失败（Venus 流式
+		// 劣化）：文本里能解析出调用就不算空结果——不重试，交给
+		// parseToolCallsWithFallback 从文本恢复。
+		tcs = parseToolCallsFromText(resp.ExtractText())
+		if len(tcs) == 0 {
+			return true
+		}
 	}
-	for _, tc := range resp.ToolCalls {
+	for _, tc := range tcs {
 		if tc.Function.Name == "speak" {
 			continue // 首动作 speak 不算长动作
 		}

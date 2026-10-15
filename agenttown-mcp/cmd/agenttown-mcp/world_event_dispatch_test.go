@@ -198,6 +198,71 @@ func TestHandleWorldEvent_ForceWithoutInFlightNoStop(t *testing.T) {
 	waitFor(t, 2*time.Second, func() bool { return ac.as.QueueLen() == 0 && replanIdle(ac) })
 }
 
+// socialSpeechTestEvent builds a force speech_heard event mirroring UE's
+// NPC-to-NPC speech dispatch (category=social, force=true).
+func socialSpeechTestEvent(id string, category string) protocol.WorldEventPayload {
+	return protocol.WorldEventPayload{
+		EventID:   id,
+		Category:  category,
+		EventType: protocol.EventTypeSpeechHeard,
+		Force:     true,
+		Severity:  5,
+		Subject:   "H-02",
+		GameTime:  "D12 12:00:00",
+		Location:  "logistics_hub",
+		Data:      json.RawMessage(`{"speaker":"H-04","content":"老王，歇会儿不？长凳上坐坐。"}`),
+	}
+}
+
+// TestForceEventHint_SocialVsEmergency verifies the force-path hint flavor:
+// social speech events (UE's speech_heard always carries force:true) render
+// as 【社交回应】 (invitation-decision guidance), while combat/threat events
+// keep the 【强制打断】→【紧急事件】 treatment. 2026-10-15 sim: a chat line
+// rendered as an emergency pushed the invitee back to work and the inviter
+// answered an acceptance with a monologue.
+func TestForceEventHint_SocialVsEmergency(t *testing.T) {
+	if hint := forceEventHint(socialSpeechTestEvent("evt_s1", protocol.CategorySocial)); !strings.Contains(hint, "【社交回应】") {
+		t.Fatalf("social speech event must use the social hint, got %q", hint)
+	}
+	// speech_heard 的 event_type 容错：category 缺失时同样按社交处理
+	//（与 combat 短名别名同款容忍）。
+	if hint := forceEventHint(socialSpeechTestEvent("evt_s2", "")); !strings.Contains(hint, "【社交回应】") {
+		t.Fatalf("category-less speech_heard must use the social hint, got %q", hint)
+	}
+	if hint := forceEventHint(forceTestEvent("evt_f9")); !strings.Contains(hint, "【强制打断】") {
+		t.Fatalf("combat force event must keep the emergency hint, got %q", hint)
+	}
+}
+
+// TestHandleWorldEvent_ForceSocialUsesSocialHint drives the full force path
+// with a speech_heard event: the hint carries 【社交回应】 (not 【强制打断】)
+// and the interrupted-action bookkeeping labels it a social interruption.
+func TestHandleWorldEvent_ForceSocialUsesSocialHint(t *testing.T) {
+	rt, ft, ac := newWorldEventTestRuntime(t)
+	ac.as.RecordActionStarted("act-1", protocol.CmdWorkShift,
+		map[string]any{"semantic_group": "workbench"}, agentstate.SourceTactical, "")
+
+	dispatchTestEvent(t, rt, "H-01", socialSpeechTestEvent("evt_s3", protocol.CategorySocial))
+
+	if stops := stoppedActions(ft); len(stops) != 1 || stops[0] != "act-1" {
+		t.Fatalf("force speech must still stop the in-flight action, got %v", stops)
+	}
+	if hint := ac.as.ReplanHint(); !strings.Contains(hint, "【社交回应】") || strings.Contains(hint, "【强制打断】") {
+		t.Fatalf("force speech hint must be social-flavored, got %q", hint)
+	}
+	if _, why := interruptedRecord(ac); !strings.Contains(why, "被社交对话打断") {
+		t.Fatalf("interrupted bookkeeping must label it social, got %q", why)
+	}
+	waitFor(t, 2*time.Second, func() bool { return ac.as.QueueLen() == 0 && replanIdle(ac) })
+}
+
+// interruptedRecord returns the latest unfinished-task snapshot's end
+// bookkeeping (P4-10): unfinished task description + why it ended.
+func interruptedRecord(ac *agentContext) (string, string) {
+	snap := ac.as.Snapshot()
+	return snap.UnfinishedTask, snap.LastEndWhy
+}
+
 // TestHandleWorldEvent_UnregisteredAgentDropped verifies an event for an
 // unknown agent is dropped with a warning instead of panicking.
 func TestHandleWorldEvent_UnregisteredAgentDropped(t *testing.T) {

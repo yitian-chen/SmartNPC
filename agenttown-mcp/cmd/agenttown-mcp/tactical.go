@@ -226,13 +226,12 @@ func generateTacticalPlan(
 		"agent_id", agentID, "tokens", resp.Usage.TotalTokens, "raw_len", len(raw), "raw", raw,
 		"tool_calls", len(resp.ToolCalls))
 
-	if len(resp.ToolCalls) == 0 {
-		llmMetricsCollector.RecordJSON("tactical", false)
-		return nil, fmt.Errorf("tactical plan has no tool calls (raw=%s)", truncateText(raw, 200))
-	}
-	actions := parseToolCalls(resp.ToolCalls, registry, agentID)
+	actions := parseToolCallsWithFallback(raw, resp.ToolCalls, registry, agentID, logger)
 	if len(actions) == 0 {
 		llmMetricsCollector.RecordJSON("tactical", false)
+		if len(resp.ToolCalls) == 0 {
+			return nil, fmt.Errorf("tactical plan has no tool calls (raw=%s)", truncateText(raw, 200))
+		}
 		return nil, fmt.Errorf("tactical plan has no actions (raw=%s)", truncateText(raw, 200))
 	}
 	// 分解成功：安全点 drain 完成，消费事件队列（一次性交出）。
@@ -438,8 +437,11 @@ func insertRestBetweenDuplicateWork(actions []plannedAction) []plannedAction {
 
 // parseToolCalls 把 LLM 返回的 tool_calls 解析为 plannedAction 队列。
 // function.name → Action；function.arguments（JSON）→ Params。arguments
-// 解析失败或 name 为空时跳过该条；末尾过 filterValidActions。
-func parseToolCalls(tcs []llmtypes.ToolCall, registry *CapabilityRegistry, agentID string) []plannedAction {
+// 解析失败或 name 为空时跳过该条（logger 非空时打 warn——流式组装异常的
+// 现场：name 为空/arguments 非法 JSON，2026-10-15 仿真 3 次 "plan has no
+// actions" 均为此形态，丢弃时无日志无法定位 venus 发了什么）；末尾过
+// filterValidActions。
+func parseToolCalls(tcs []llmtypes.ToolCall, registry *CapabilityRegistry, agentID string, logger *slog.Logger) []plannedAction {
 	var actions []plannedAction
 	for _, tc := range tcs {
 		name := tc.Function.Name
@@ -447,17 +449,91 @@ func parseToolCalls(tcs []llmtypes.ToolCall, registry *CapabilityRegistry, agent
 			name = "InteractSmartObject"
 		}
 		if name == "" {
+			if logger != nil {
+				logger.Warn("[战术层] 工具调用被丢弃：function.name 为空（流式组装异常）",
+					"agent_id", agentID, "arguments", truncateText(tc.Function.Arguments, 200))
+			}
 			continue
 		}
 		params := map[string]any{}
 		if args := strings.TrimSpace(tc.Function.Arguments); args != "" {
 			if err := json.Unmarshal([]byte(args), &params); err != nil {
+				if logger != nil {
+					logger.Warn("[战术层] 工具调用被丢弃：arguments 非法 JSON（流式组装异常）",
+						"agent_id", agentID, "name", name,
+						"arguments", truncateText(tc.Function.Arguments, 200), "err", err)
+				}
 				continue // arguments 不是合法 JSON，跳过该工具调用
 			}
 		}
 		actions = append(actions, plannedAction{Action: name, Params: params, ToolCallID: tc.ID})
 	}
 	return filterValidActions(actions, registry, agentID)
+}
+
+// tacticalTextToolCall 是模型把工具调用以文本（content）输出时的形态：
+// [{"name": "speak", "parameters": {...}}]。deepseek-v4.1-flash 经 Venus
+// 的响应里文本数组与 native delta.tool_calls 并存——native 组装偶发劣化
+// （name 为空/arguments 非法 JSON），文本数组却始终完整。
+type tacticalTextToolCall struct {
+	Name       string         `json:"name"`
+	Parameters map[string]any `json:"parameters"`
+}
+
+// parseToolCallsFromText 从响应文本中提取工具调用 JSON 数组。容忍外围散文
+// 与 DeepSeek 尾部 <｜end▁of▁sentence｜> 标记：截取首个 '[' 到末个 ']'
+// （与 parseMemoryGenerationResult 同款容错）。无可解析数组时返回 nil。
+// 文本调用没有 id——后续 recordActionCompletion 不会为它们注入
+// [系统注入] 完成行（良性降级：状态栏与下轮 refill 仍携带最新状态）。
+func parseToolCallsFromText(raw string) []llmtypes.ToolCall {
+	start := strings.Index(raw, "[")
+	end := strings.LastIndex(raw, "]")
+	if start < 0 || end <= start {
+		return nil
+	}
+	var entries []tacticalTextToolCall
+	if err := json.Unmarshal([]byte(raw[start:end+1]), &entries); err != nil {
+		return nil
+	}
+	tcs := make([]llmtypes.ToolCall, 0, len(entries))
+	for _, e := range entries {
+		if e.Name == "" {
+			continue
+		}
+		args := []byte("{}")
+		if e.Parameters != nil {
+			if b, err := json.Marshal(e.Parameters); err == nil {
+				args = b
+			}
+		}
+		tcs = append(tcs, llmtypes.ToolCall{
+			Type:     "function",
+			Function: llmtypes.ToolFunction{Name: e.Name, Arguments: string(args)},
+		})
+	}
+	return tcs
+}
+
+// parseToolCallsWithFallback 先按 native tool_calls 解析；解析结果少于
+// tool_calls 数（有条目被丢弃：流式组装的 name 为空/arguments 非法 JSON）
+// 或 native 整体为空时，从响应文本兜底解析，取有效动作更多的一份。
+// 2026-10-15 仿真实测：Venus 过载窗口内 3 次 "plan has no actions" + 1 次
+// 4 个调用只剩 1 个动作，raw 文本四次全部完好——本兜底可全数救回。
+func parseToolCallsWithFallback(raw string, tcs []llmtypes.ToolCall, registry *CapabilityRegistry, agentID string, logger *slog.Logger) []plannedAction {
+	actions := parseToolCalls(tcs, registry, agentID, logger)
+	if len(tcs) > 0 && len(actions) >= len(tcs) {
+		return actions
+	}
+	fb := parseToolCalls(parseToolCallsFromText(raw), registry, agentID, logger)
+	if len(fb) <= len(actions) {
+		return actions // 文本没有更多有效动作（同样劣化或本就不是 JSON）
+	}
+	if logger != nil {
+		logger.Warn("[战术层] native tool_calls 组装异常，已从响应文本兜底恢复动作",
+			"agent_id", agentID, "tool_calls", len(tcs),
+			"native_parsed", len(actions), "text_parsed", len(fb))
+	}
+	return fb
 }
 
 // filterValidActions 过滤掉 scan_area/stop/未知工具，保留可排队工具。

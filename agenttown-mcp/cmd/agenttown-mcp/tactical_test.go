@@ -39,7 +39,7 @@ func TestParseToolCalls_Basic(t *testing.T) {
 		{Function: llmtypes.ToolFunction{Name: "move_to", Arguments: `{"target_type":"zone","target_id":"main_workshop"}`}},
 		{Function: llmtypes.ToolFunction{Name: "InteractSmartObject", Arguments: `{"semantic_group":"workbench","interaction":"assemble"}`}},
 	}
-	actions := parseToolCalls(tcs, nil, "")
+	actions := parseToolCalls(tcs, nil, "", nil)
 	if len(actions) != 3 {
 		t.Fatalf("got %d actions, want 3", len(actions))
 	}
@@ -52,7 +52,7 @@ func TestParseToolCalls_Basic(t *testing.T) {
 }
 
 func TestParseToolCalls_Empty(t *testing.T) {
-	if got := parseToolCalls(nil, nil, ""); len(got) != 0 {
+	if got := parseToolCalls(nil, nil, "", nil); len(got) != 0 {
 		t.Errorf("got %d actions, want 0", len(got))
 	}
 }
@@ -62,7 +62,7 @@ func TestParseToolCalls_EmptyName(t *testing.T) {
 		{Function: llmtypes.ToolFunction{Name: "", Arguments: `{}`}},
 		{Function: llmtypes.ToolFunction{Name: "speak", Arguments: `{"content":"hi"}`}},
 	}
-	actions := parseToolCalls(tcs, nil, "")
+	actions := parseToolCalls(tcs, nil, "", nil)
 	if len(actions) != 1 || actions[0].Action != "speak" {
 		t.Errorf("actions=%+v, want [speak] (empty name skipped)", actions)
 	}
@@ -73,7 +73,7 @@ func TestParseToolCalls_InvalidArgumentsSkipped(t *testing.T) {
 		{Function: llmtypes.ToolFunction{Name: "speak", Arguments: `not-json`}},
 		{Function: llmtypes.ToolFunction{Name: "move_to", Arguments: `{"target_type":"zone"}`}},
 	}
-	actions := parseToolCalls(tcs, nil, "")
+	actions := parseToolCalls(tcs, nil, "", nil)
 	if len(actions) != 1 || actions[0].Action != "move_to" {
 		t.Errorf("actions=%+v, want [move_to] (invalid arguments skipped)", actions)
 	}
@@ -84,7 +84,7 @@ func TestParseToolCalls_FiltersInvalidTool(t *testing.T) {
 		{Function: llmtypes.ToolFunction{Name: "scan_area", Arguments: `{}`}},
 		{Function: llmtypes.ToolFunction{Name: "move_to", Arguments: `{"target_type":"zone"}`}},
 	}
-	actions := parseToolCalls(tcs, nil, "")
+	actions := parseToolCalls(tcs, nil, "", nil)
 	if len(actions) != 1 || actions[0].Action != "move_to" {
 		t.Errorf("actions=%+v, want [move_to] (scan_area filtered)", actions)
 	}
@@ -94,9 +94,96 @@ func TestParseToolCalls_InteractAlias(t *testing.T) {
 	tcs := []llmtypes.ToolCall{
 		{Function: llmtypes.ToolFunction{Name: "interact", Arguments: `{"semantic_group":"sleep_pod","interaction":"meditate"}`}},
 	}
-	actions := parseToolCalls(tcs, nil, "")
+	actions := parseToolCalls(tcs, nil, "", nil)
 	if len(actions) != 1 || actions[0].Action != "InteractSmartObject" {
 		t.Errorf("actions=%+v, want [InteractSmartObject] (interact alias)", actions)
+	}
+}
+
+// ─── parseToolCallsFromText / parseToolCallsWithFallback ────
+// 2026-10-15 仿真：Venus 过载窗口内流式组装的 native tool_calls 偶发劣化
+// （name 为空 / arguments 非法 JSON），parseToolCalls 静默丢弃——3 次
+// "plan has no actions" + 1 次 4 调用只剩 1 动作，raw 文本四次全部完好。
+
+func TestParseToolCallsFromText_PlainArray(t *testing.T) {
+	raw := `[{"name":"speak","parameters":{"content":"老刘没接话"}},{"name":"InteractSmartObject","parameters":{"duration":4920,"interaction":"sort_cargo","semantic_group":"sorting_conveyor","zone":"logistics_hub"}}]`
+	tcs := parseToolCallsFromText(raw)
+	if len(tcs) != 2 {
+		t.Fatalf("got %d tool calls, want 2", len(tcs))
+	}
+	if tcs[0].Function.Name != "speak" || tcs[1].Function.Name != "InteractSmartObject" {
+		t.Fatalf("names=%q/%q", tcs[0].Function.Name, tcs[1].Function.Name)
+	}
+	var params map[string]any
+	if err := json.Unmarshal([]byte(tcs[1].Function.Arguments), &params); err != nil {
+		t.Fatalf("arguments must be valid JSON: %v", err)
+	}
+	if params["semantic_group"] != "sorting_conveyor" || params["duration"] != float64(4920) {
+		t.Fatalf("params=%+v", params)
+	}
+}
+
+func TestParseToolCallsFromText_ToleratesEOSAndProse(t *testing.T) {
+	// DeepSeek 尾部 <｜end▁of▁sentence｜> 标记 + 首尾散文。
+	raw := `好的，我来分解：[{"name":"speak_to","parameters":{"content":"老王，歇会儿不？","target_agent_id":"H-02"}}]<｜end▁of▁sentence｜>`
+	tcs := parseToolCallsFromText(raw)
+	if len(tcs) != 1 || tcs[0].Function.Name != "speak_to" {
+		t.Fatalf("got %+v, want 1 speak_to", tcs)
+	}
+	var params map[string]any
+	if err := json.Unmarshal([]byte(tcs[0].Function.Arguments), &params); err != nil {
+		t.Fatalf("arguments must be valid JSON: %v", err)
+	}
+	if params["target_agent_id"] != "H-02" {
+		t.Fatalf("params=%+v", params)
+	}
+}
+
+func TestParseToolCallsFromText_NotJSON(t *testing.T) {
+	for _, raw := range []string{"", "纯文本没有数组", "[]", "[{\"no_name\":1}]"} {
+		if tcs := parseToolCallsFromText(raw); len(tcs) != 0 {
+			t.Errorf("raw=%q should parse to nothing, got %+v", raw, tcs)
+		}
+	}
+}
+
+func TestParseToolCallsWithFallback_RecoversDroppedCalls(t *testing.T) {
+	// 15:00:05 形态：4 个 native 调用只有首个 speak 完好（1 个 name 为空、
+	// 2 个 arguments 非法 JSON），文本数组 4 条全完好 → 兜底恢复 4 个动作。
+	raw := `[{"name":"speak","parameters":{"content":"老王招呼歇口气"}},{"name":"InteractSmartObject","parameters":{"duration":1500,"interaction":"rest","semantic_group":"bench","zone":"logistics_hub"}},{"name":"speak","parameters":{"content":"歇够了"}},{"name":"InteractSmartObject","parameters":{"duration":6780,"interaction":"sort_cargo","semantic_group":"sorting_conveyor","zone":"logistics_hub"}}]`
+	tcs := []llmtypes.ToolCall{
+		{ID: "tc-1", Function: llmtypes.ToolFunction{Name: "speak", Arguments: `{"content":"老王招呼歇口气"}`}},
+		{ID: "tc-2", Function: llmtypes.ToolFunction{Arguments: `{"duration":1500}`}},                             // name 为空
+		{ID: "tc-3", Function: llmtypes.ToolFunction{Name: "speak", Arguments: `{"content":"歇够`}},                 // 非法 JSON
+		{ID: "tc-4", Function: llmtypes.ToolFunction{Name: "InteractSmartObject", Arguments: `{"duration":6780`}}, // 非法 JSON
+	}
+	actions := parseToolCallsWithFallback(raw, tcs, nil, "", nil)
+	if len(actions) != 4 {
+		t.Fatalf("got %d actions, want 4 (text fallback recovers the dropped 3):\n%+v", len(actions), actions)
+	}
+	if actions[1].Action != "InteractSmartObject" || actions[1].Params["semantic_group"] != "bench" {
+		t.Fatalf("actions[1]=%+v, want bench rest", actions[1])
+	}
+}
+
+func TestParseToolCallsWithFallback_KeepsNativeWhenTextWorse(t *testing.T) {
+	// native 完整时文本兜底不介入；文本劣化（乱码）时保留 native 结果。
+	tcs := []llmtypes.ToolCall{
+		{ID: "tc-1", Function: llmtypes.ToolFunction{Name: "speak", Arguments: `{"content":"hi"}`}},
+		{ID: "tc-2", Function: llmtypes.ToolFunction{Name: "InteractSmartObject", Arguments: `{"semantic_group":"bench","interaction":"rest"}`}},
+	}
+	actions := parseToolCallsWithFallback("无法解析的乱文本", tcs, nil, "", nil)
+	if len(actions) != 2 || actions[0].ToolCallID == "" || actions[1].ToolCallID == "" {
+		t.Fatalf("native-complete parse must be kept verbatim (with tool_call_id):\n%+v", actions)
+	}
+}
+
+func TestParseToolCallsWithFallback_ZeroNativeUsesText(t *testing.T) {
+	// native 组装整体失败（0 条）但文本完好 → 直接从文本恢复。
+	raw := `[{"name":"speak","parameters":{"content":"行啊"}},{"name":"InteractSmartObject","parameters":{"duration":1800,"interaction":"rest","semantic_group":"bench"}}]`
+	actions := parseToolCallsWithFallback(raw, nil, nil, "", nil)
+	if len(actions) != 2 || actions[1].Action != "InteractSmartObject" {
+		t.Fatalf("got %+v, want 2 actions from text", actions)
 	}
 }
 

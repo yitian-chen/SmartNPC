@@ -525,7 +525,7 @@ func TestRouterMotive_SituationResolvedBypassesGuardrail(t *testing.T) {
 	rt, ft, ac, _, _ := newRouterTestRuntime(t, notInterruptJudge())
 	ac.as.RecordActionStarted("act-1", "MoveTo", map[string]any{"target_id": "repair_bay"}, agentstate.SourceTactical, "")
 	// 武装一个 severity 9 的反应窗口（模拟被攻击后的逃跑反应）。
-	ac.beginReaction(9, ac.as.LatestGameTimeSec(), "")
+	ac.beginReaction(9, ac.as.LatestGameTimeSec(), "", false)
 	ac.as.EnqueueWorldEvent(reactionTestEvent("evt_g1"))
 
 	// combat_exit：severity 3 << 9，motive=situation_resolved → 应放行。
@@ -583,7 +583,7 @@ func TestRouter_ReactionDescInjectedIntoState(t *testing.T) {
 	ac.as.RecordActionStarted("act-1", "MoveTo",
 		map[string]any{"target_type": "zone", "target_id": "residential_quarters"}, agentstate.SourceTactical, "")
 	// 武装一个带描述的反应窗口（模拟被攻击后的逃跑反应）。
-	ac.beginReaction(9, ac.as.LatestGameTimeSec(), "玩家互动：被玩家 player_1 攻击（伤害 20，类型 physical）")
+	ac.beginReaction(9, ac.as.LatestGameTimeSec(), "玩家互动：被玩家 player_1 攻击（伤害 20，类型 physical）", false)
 
 	dispatchTestEvent(t, rt, "H-01", nonForceTestEvent("evt_desc_1"))
 	waitFor(t, 2*time.Second, func() bool { return strings.Contains(j.lastState(), "世界事件") })
@@ -605,7 +605,7 @@ func TestTacticalRefill_ReactionContextHint(t *testing.T) {
 	_, ft, ac, _, _ := newRouterTestRuntime(t, notInterruptJudge())
 	seedPerception(t, ac)
 	ac.as.SetDailyPlan("09:00-12:00: 车间装配作业", 11)
-	ac.beginReaction(9, ac.as.LatestGameTimeSec(), "被玩家攻击")
+	ac.beginReaction(9, ac.as.LatestGameTimeSec(), "被玩家攻击", false)
 
 	// fakeLoopLLM 捕获 prompt + speakToolCallResp 让分解成功（hint 被
 	// BeginTacticalRefill 消费后进 prompt，ReplanHint() 读回为空——需从

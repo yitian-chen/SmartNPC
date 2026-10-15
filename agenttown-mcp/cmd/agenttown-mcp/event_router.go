@@ -541,7 +541,12 @@ func (rt *Runtime) routerInterrupt(agentID string, ev protocol.WorldEventPayload
 			rt.logger.Warn("[事件路由] stop_action 发送失败（打断延后到 replan 完成后重试）",
 				"agent_id", agentID, "action_id", actionID, "err", err)
 		} else {
-			ac.recordInterrupted("被紧急事件打断（路由裁决：" + truncateRunes(dec.Reason, 40) + "）")
+			// 打断记账标签跟着 hint 口径走：社交打断不是"紧急事件"。
+			interruptedLabel := "被紧急事件打断（路由裁决：" + truncateRunes(dec.Reason, 40) + "）"
+			if dec.Motive == prompt.RouterMotiveSocial {
+				interruptedLabel = "被社交对话打断（路由裁决：" + truncateRunes(dec.Reason, 40) + "）"
+			}
+			ac.recordInterrupted(interruptedLabel)
 			ac.as.ClearInFlightKeepQueue()
 			rt.logger.Warn("[事件路由] 已打断在途动作（路由裁决紧急）",
 				"agent_id", agentID, "action_id", actionID, "event_id", ev.EventID,
@@ -555,8 +560,9 @@ func (rt *Runtime) routerInterrupt(agentID string, ev protocol.WorldEventPayload
 		hint = fmt.Sprintf("【情境解除】%s。当前动作因此不再必要，请停止当前动作并按当前时段目标正常规划。",
 			prompt.FormatWorldEvent(ev))
 	case prompt.RouterMotiveSocial:
-		hint = fmt.Sprintf("【社交回应】%s。请回应对方；若对方在邀请你一起做某事，结合当前时段安排、好感度与性格决定是否应邀（接受则加入对方的活动，婉拒则礼貌回应后继续原有工作），普通问候/闲聊简短回应即可。",
-			prompt.FormatWorldEvent(ev))
+		// 指引文案由 prompt.tacticalHintLine 的【社交回应】分支统一渲染
+		// （与 force 路径 forceEventHint 对称：hint 只带前缀+事件）。
+		hint = "【社交回应】" + prompt.FormatWorldEvent(ev)
 	default: // urgent 或空（向后兼容）
 		hint = fmt.Sprintf("【强制打断】%s（路由裁决：紧急，%s）",
 			prompt.FormatWorldEvent(ev), dec.Reason)
@@ -572,9 +578,9 @@ func (rt *Runtime) routerInterrupt(agentID string, ev protocol.WorldEventPayload
 	case prompt.RouterMotiveSituationResolved:
 		ac.clearReaction()
 	case prompt.RouterMotiveSocial:
-		ac.beginReaction(2, ac.as.LatestGameTimeSec(), prompt.FormatWorldEvent(ev))
+		ac.beginReaction(2, ac.as.LatestGameTimeSec(), prompt.FormatWorldEvent(ev), true)
 	default:
-		ac.beginReaction(dec.Severity, ac.as.LatestGameTimeSec(), prompt.FormatWorldEvent(ev))
+		ac.beginReaction(dec.Severity, ac.as.LatestGameTimeSec(), prompt.FormatWorldEvent(ev), false)
 	}
 	go ac.forceInterruptReplan(rt.ctx, agentID, rt.ws, *rt.kbPtr, rt.profiles, ev, hint, rt.logger)
 }

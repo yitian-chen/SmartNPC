@@ -483,9 +483,12 @@ func TestTacticalHintLine_SituationResolvedPrefix(t *testing.T) {
 }
 
 // TestTacticalHintLine_SocialResponsePrefix verifies the 【社交回应】
-// hint renders as 【社交回应请求】 with invitation-decides + resume guidance:
-// the receiver judges invitations (accept→join / decline→resume) instead of
-// being ordered back to work unconditionally.
+// hint renders as 【社交回应请求】 with reply-via-speak_to guidance and
+// invitation-decision in BOTH directions: the receiver judges invitations
+// (accept→reply+join, decline→reply+resume), and a reply to one's own
+// invitation drives the inviter's follow-up (acceptance→join, refusal→
+// resume). The accept branch is explicitly exempt from rule 10's
+// speak_to-only shape.
 func TestTacticalHintLine_SocialResponsePrefix(t *testing.T) {
 	in := TacticalInput{Hint: "【社交回应】玩家互动：玩家 player_1 向你发起交互（greet）", AgentID: "H-01"}
 	out := BuildTactical(in)
@@ -493,12 +496,16 @@ func TestTacticalHintLine_SocialResponsePrefix(t *testing.T) {
 		t.Fatalf("missing social-response header:\n%s", out)
 	}
 	for _, want := range []string{
+		"请用 speak_to 回应对方（target_agent_id 填对方 id）",
+		"不要只输出独白 speak",
 		"结合你当前时段的安排、对对方的好感度",
 		"接受则礼貌应下并调整本轮动作加入对方邀请的活动",
+		"不受规则 10\"只输出一条 speak_to\"的限制",
 		"婉拒则礼貌回应后继续当前时段的原有工作",
+		"若这是对你此前邀请或搭话的回应",
 	} {
 		if !strings.Contains(out, want) {
-			t.Fatalf("missing invitation-decision guidance %q:\n%s", want, out)
+			t.Fatalf("missing social-response guidance %q:\n%s", want, out)
 		}
 	}
 	if strings.Contains(out, "紧急事件") {
@@ -506,20 +513,15 @@ func TestTacticalHintLine_SocialResponsePrefix(t *testing.T) {
 	}
 }
 
-// TestTacticalRules_InviteGoalDecomposition pins rule 10's invitation branch:
-// invitation goals are speak_to (the ask) + the invited activity's long
-// actions — not the chat goal's speak_to-only shape.
+// TestTacticalRules_InviteGoalDecomposition pins the invitation digest in
+// the compact core rules. The full TacticalRules rule-10 invitation branch
+// was removed from the working tree on 2026-10-15 (user revert, uncommitted
+// at the time); the invitation semantics for the RECEIVER now ride on the
+// 【社交回应】 hint (see TestTacticalHintLine_SocialResponsePrefix), which
+// carries its own rule-10 exemption — the inviter's initial decomposition
+// still follows rule 10's speak_to-only shape.
 func TestTacticalRules_InviteGoalDecomposition(t *testing.T) {
-	for _, want := range []string{
-		"目标是\"邀请XX一起做XX\"时不同：先输出一条 speak_to",
-		"随后正常分解被邀请的活动",
-		"不要停在对话里",
-	} {
-		if !strings.Contains(TacticalRules, want) {
-			t.Errorf("TacticalRules missing %q:\n%s", want, TacticalRules)
-		}
-	}
-	// 精简速览同步露出邀请形态。
+	// 精简速览露出邀请形态。
 	if !strings.Contains(tacticalCoreRules, "邀请XX一起做XX") {
 		t.Errorf("tacticalCoreRules missing invitation digest:\n%s", tacticalCoreRules)
 	}

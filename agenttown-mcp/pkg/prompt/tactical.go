@@ -22,7 +22,7 @@ const TacticalRules = `1. 第一个工具调用必须是 speak（用一段话表
 7. 所有非瞬时动作（InteractSmartObject 设施互动、exercise 原地锻炼、speak_to 找人聊天等需要持续一段时间的）都必须填写 duration 参数（秒，schema 必填），包括最后一个动作也不例外——无 duration 的长动作无法被系统按计划终止；move_to 的移动时长由 UE 自动决定、无需填 duration；瞬时动作（speak 等立即完成的）也不填 duration。duration 要合理：冥想、整理床铺等单段设 1800 秒左右，不宜超过 1 小时；受伤后的维修/休息可设 3600-7200 秒，磨损/疲劳严重时更长（以【物理告警强制约束】中的建议为准）；工作段可设 3600-7200 秒。到点后系统会打断该段并继续执行后续动作段；只有全部动作执行完，系统才会再次询问。推荐模式：工作段（如 1.5 小时）→ 长椅小憩/原地拉伸段（不超过 30 分钟）→ 返回工作段（duration 设为时段剩余时长）。
 8. 每次生成的最后一个动作必须是长动作（InteractSmartObject 或 speak_to 等长动作），其 duration 设为当前时段的剩余时长（见上文"剩余约 X 分钟"提示）——到点后系统自动切入下一时段，NPC 不会呆站。所有长动作（包括最后一个）都必须设置 duration，不得省略。所有动作的 duration 总和应接近当前时段的剩余时长，避免过短导致队列提前耗尽触发重分解、或过长拖到下一时段。
 9. 如果是调用 InteractSmartObject 工具，若当前日程目标明确指定了区域（如"去中央广场长椅休息"），**必须**在该工具的 zone 参数中填写对应区域 id（如 central_plaza、logistics_hub）。
-10. 想找某位 NPC 聊天/对话时：**豁免规则 1 的"以 speak 开头"**，并且**只输出一条 speak_to**（不要先 speak 独白、也不要再补其他长动作）——target_agent_id 填对方 id（【附近NPC】/【其他NPC】中给出的 id），content 填你想说的内容，interrupt 填 true；speak_to 是长动作，按规则 7 填 duration。目标是"邀请XX一起做XX"时不同：先输出一条 speak_to（content 填邀请的话），随后正常分解被邀请的活动（InteractSmartObject 等长动作，按规则 7/8 填 duration）——邀请只是开场，活动才是主体，不要停在对话里。`
+10. 想找某位 NPC 聊天/对话时：**豁免规则 1 的"以 speak 开头"**，并且**只输出一条 speak_to**（不要先 speak 独白、也不要再补其他长动作）——target_agent_id 填对方 id（【附近NPC】/【其他NPC】中给出的 id），content 填你想说的内容，interrupt 填 true；speak_to 是长动作，按规则 7 填 duration。`
 
 // tacticalCoreRules 是精简模式（Compact=true）下替代完整 TacticalRules 的
 // 核心约束速览，覆盖实测高频失败模式（speak-only 队列、duration 漏填、
@@ -198,8 +198,11 @@ func tacticalHintLine(in TacticalInput, th BandThresholds) string {
 	if strings.HasPrefix(in.Hint, "【社交回应】") {
 		event := strings.TrimPrefix(in.Hint, "【社交回应】")
 		return "【社交回应请求】" + event + "\n" +
-			"请回应此社交事件。若对方在邀请你一起做某事，结合你当前时段的安排、对对方的好感度（见【人际关系】）与你的性格决定是否应邀——" +
-			"接受则礼貌应下并调整本轮动作加入对方邀请的活动，婉拒则礼貌回应后继续当前时段的原有工作。" +
+			"请用 speak_to 回应对方（target_agent_id 填对方 id），让对话有来有回；不要只输出独白 speak。\n" +
+			"若对方在邀请你一起做某事：结合你当前时段的安排、对对方的好感度（见【人际关系】）与你的性格决定是否应邀——" +
+			"接受则礼貌应下并调整本轮动作加入对方邀请的活动（此场景不受规则 10\"只输出一条 speak_to\"的限制：先一条 speak_to 回应，随后正常分解该活动的长动作，按规则 7/8 填 duration）；" +
+			"婉拒则礼貌回应后继续当前时段的原有工作。\n" +
+			"若这是对你此前邀请或搭话的回应：对方应下则先回话确认，再一起进行该活动；婉拒则礼貌收下并回到原有工作。\n" +
 			"普通问候/闲聊则简短回应，回应完毕后按原计划继续。"
 	}
 	if strings.HasPrefix(in.Hint, "【强制打断】") {

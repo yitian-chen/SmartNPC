@@ -123,6 +123,10 @@ type agentContext struct {
 	// 到达时路由判"未处于逃跑状态"，因为 MoveTo(residential_quarters)
 	// 看不出是逃跑）。
 	reactionDesc string
+	// reactionSocial 标记当前反应窗口由社交对话（speech_heard/【社交回应】
+	// hint）开启——armed 窗口内的 refill hint 按社交口径措辞（"对话仍有
+	// 来有回请继续回应"），而非紧急事件的"威胁仍未解除请继续应对"。
+	reactionSocial bool
 
 	// Combat-detach yield state (combat-detach, 2026-09-22): while combatYield
 	// is set, UE's combat AI owns the body — the worker loop skips slot
@@ -1504,8 +1508,17 @@ func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
 		// "工作台装配"，没有"刚在逃跑"的衔接信息。
 		if a.as.ReplanHint() == "" {
 			if reactionDesc := a.reactionDescSnapshot(); reactionDesc != "" {
-				a.as.SetReplanHint("正在应对紧急事件（" + reactionDesc +
-					"）。上一个反应动作已执行完，若威胁仍未解除请继续应对；若已收到解除信号（如脱离战斗），请回到当前时段目标的原有日程。")
+				if a.reactionSocialSnapshot() {
+					// 社交对话口径：对话是"有来有回"的交流而非待解除的威胁
+					// ——紧急口径的"若威胁仍未解除请继续应对"会把 LLM 推向
+					// "处理完事件回岗位"（2026-10-15 实测：受邀方应下后
+					// 被该 hint 推回分拣岗，得出"对方不搭理我"的结论）。
+					a.as.SetReplanHint("社交对话进行中（" + reactionDesc +
+						"）。上一个回应动作已执行完；若对话仍有来有回请继续用 speak_to 回应，若对方已无回音或对话已结束，请回到当前时段目标的原有日程。")
+				} else {
+					a.as.SetReplanHint("正在应对紧急事件（" + reactionDesc +
+						"）。上一个反应动作已执行完，若威胁仍未解除请继续应对；若已收到解除信号（如脱离战斗），请回到当前时段目标的原有日程。")
+				}
 			}
 		}
 	}
