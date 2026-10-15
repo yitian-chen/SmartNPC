@@ -555,7 +555,7 @@ func (rt *Runtime) routerInterrupt(agentID string, ev protocol.WorldEventPayload
 		hint = fmt.Sprintf("【情境解除】%s。当前动作因此不再必要，请停止当前动作并按当前时段目标正常规划。",
 			prompt.FormatWorldEvent(ev))
 	case prompt.RouterMotiveSocial:
-		hint = fmt.Sprintf("【社交回应】%s。请简短回应（如打招呼），然后继续当前时段的原有工作。",
+		hint = fmt.Sprintf("【社交回应】%s。请回应对方；若对方在邀请你一起做某事，结合当前时段安排、好感度与性格决定是否应邀（接受则加入对方的活动，婉拒则礼貌回应后继续原有工作），普通问候/闲聊简短回应即可。",
 			prompt.FormatWorldEvent(ev))
 	default: // urgent 或空（向后兼容）
 		hint = fmt.Sprintf("【强制打断】%s（路由裁决：紧急，%s）",

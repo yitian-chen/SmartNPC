@@ -483,18 +483,45 @@ func TestTacticalHintLine_SituationResolvedPrefix(t *testing.T) {
 }
 
 // TestTacticalHintLine_SocialResponsePrefix verifies the 【社交回应】
-// hint renders as 【社交回应请求】 with brief-response-then-resume guidance.
+// hint renders as 【社交回应请求】 with invitation-decides + resume guidance:
+// the receiver judges invitations (accept→join / decline→resume) instead of
+// being ordered back to work unconditionally.
 func TestTacticalHintLine_SocialResponsePrefix(t *testing.T) {
 	in := TacticalInput{Hint: "【社交回应】玩家互动：玩家 player_1 向你发起交互（greet）", AgentID: "H-01"}
 	out := BuildTactical(in)
 	if !strings.Contains(out, "【社交回应请求】玩家互动：玩家 player_1 向你发起交互（greet）") {
 		t.Fatalf("missing social-response header:\n%s", out)
 	}
-	if !strings.Contains(out, "然后继续当前时段的原有工作") {
-		t.Fatalf("missing resume guidance:\n%s", out)
+	for _, want := range []string{
+		"结合你当前时段的安排、对对方的好感度",
+		"接受则礼貌应下并调整本轮动作加入对方邀请的活动",
+		"婉拒则礼貌回应后继续当前时段的原有工作",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing invitation-decision guidance %q:\n%s", want, out)
+		}
 	}
 	if strings.Contains(out, "紧急事件") {
 		t.Fatalf("social must NOT get emergency treatment:\n%s", out)
+	}
+}
+
+// TestTacticalRules_InviteGoalDecomposition pins rule 10's invitation branch:
+// invitation goals are speak_to (the ask) + the invited activity's long
+// actions — not the chat goal's speak_to-only shape.
+func TestTacticalRules_InviteGoalDecomposition(t *testing.T) {
+	for _, want := range []string{
+		"目标是\"邀请XX一起做XX\"时不同：先输出一条 speak_to",
+		"随后正常分解被邀请的活动",
+		"不要停在对话里",
+	} {
+		if !strings.Contains(TacticalRules, want) {
+			t.Errorf("TacticalRules missing %q:\n%s", want, TacticalRules)
+		}
+	}
+	// 精简速览同步露出邀请形态。
+	if !strings.Contains(tacticalCoreRules, "邀请XX一起做XX") {
+		t.Errorf("tacticalCoreRules missing invitation digest:\n%s", tacticalCoreRules)
 	}
 }
 

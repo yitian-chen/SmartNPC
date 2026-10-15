@@ -426,11 +426,14 @@ func TestStrategicSystemPrompt_SocialGoalGate(t *testing.T) {
 		"由战术层分解为 speak_to 定向对话",
 		// 规则 3：【其他NPC】名单中的人物是合法引用。
 		"或用户信息【其他NPC】名单中列出的居民",
-		// 规则 9：分层阈值 + 对象指引。
+		// 规则 9：分层阈值 + 对象指引 + 邀请形式。
 		"≥8 时每天至少安排 1 个社交时段",
 		"≥9 可安排 2-3 段",
 		"≤5 时尽量少安排社交活动",
 		"优先好感度高的",
+		"纯聊天（\"找XX聊聊XX\"",
+		"或邀请（\"邀请XX一起去XX做XX\"",
+		"对方可能应邀加入",
 	} {
 		if !strings.Contains(StrategicRules, want) {
 			t.Errorf("rules missing %q:\n%s", want, StrategicRules)
