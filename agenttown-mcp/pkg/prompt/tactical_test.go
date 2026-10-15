@@ -510,7 +510,7 @@ func TestTacticalHintLine_CombatEndPrefix(t *testing.T) {
 	if !strings.Contains(out, "恢复自主控制") {
 		t.Fatalf("missing recovery-of-control guidance:\n%s", out)
 	}
-	if !strings.Contains(out, "维修、充电、返回岗位") {
+	if !strings.Contains(out, "维修(如果损伤严重)、休息(如果疲劳度高)、返回岗位") {
 		t.Fatalf("missing post-combat recovery options:\n%s", out)
 	}
 	if strings.Contains(out, "紧急事件") {

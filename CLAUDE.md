@@ -517,9 +517,10 @@ Stage 5 在 Stage 3/4 之上接入 NPC 间关系数值动态维护：动作完�
 
 - **双向独立行**：`agent_relationships` 表复合 PK (agent_a, agent_b) 有序，A→B 和 B→A 各一行。A 主动与 B 交互时两次调 `SaveRelationship`（A→B + B→A），各自 upsert。affection 初期不动，仅 familiarity += 1
 - **Ollama 语义判断**：每次动作完成时（`recordActionCompletion` 旁路异步 `go maybeUpdateRelationship`），仅当 `Params["target_agent_id"]` 非空才调 Ollama 判断该次 cmd+params 是否构成直接社交互动（yes/no）。5s 超时，失败/超时/无法解析 → false（保守，不触发更新）。不硬编码触发 cmd 列表，适配动态注册的新 cmd
-- **关系数据流**：动作完成 → Ollama 判断 → 双向 `SaveRelationship(A,B,1,0)` + `SaveRelationship(B,A,1,0)` → DB upsert（familiarity+=1, interaction_count+=1, last_interaction_at=NOW()）→ 战术层 refill 调 `loadRelationships` 取关系行 → `formatRelationshipsForPrompt` 格式化 → 注入 prompt【人际关系】段
+- **关系数据流**：动作完成 → Ollama 判断 → 双向 `SaveRelationship(A,B,1,0)` + `SaveRelationship(B,A,1,0)` → DB upsert（familiarity+=1, interaction_count+=1, last_interaction_at=NOW()）→ refill 调 `loadRelationships` 取关系行 → `formatRelationshipsForPrompt` 合并渲染 → 注入 prompt
+- **名单+好感度合并渲染（2026-10-15，三层共享）**：`formatRelationshipsForPrompt(rels, kb, profiles, agentID)` 以 KB peers 为骨架——每个其他 NPC 一行 `- 老王（H-02，物流分拣兼加工员）：好感 5/10（熟悉度 3、互动 2 次）`，存储行叠加其上，**无行默认好感 5**（冷启动/内存模式/未互动不再整段消失）；显示名/职业取 profile > KB（profile 职业的动作映射括注截掉）。同一份内容三层注入：战略层【其他NPC】段（恢复引导主动社交，`BuildStrategicUserContext` otherNPCs 参数）、战术层【人际关系】段（`TacticalInput.Relationships`，非空时跳过 OtherAgentsLine 花名册 fallback 防重复）、路由层 relationships 属性（`buildInput`）。单 agent 场景（KB ≤1）整段省略；`/debug/schedule` 路径保持空串（调试上下文不需关系注入）
 - **KB 种子导入**：`agent_registered` 时调 `seedRelationshipsFromKB`，遍历 `kb.Relationships` 对涉及 agentID 的关系用 `SeedRelationship` (INSERT IGNORE) 导入，不覆盖既有交互累积。重连走 else 分支提前 return，不会重复导入
-- **战术层注入条件**：仅 `len(kb.Agents) > 1` 且关系非空才注入【人际关系】段；单 agent 场景不污染 prompt。`/debug/schedule` 路径保持空串（调试上下文不需关系注入）
+- **战术层注入条件**：仅 `len(kb.Agents) > 1` 注入（名单+好感度合并段）；单 agent 场景不污染 prompt
 - **自指保护**：`target == agentID` 时跳过（避免 agent 与自己建立关系）
 - **异步非阻塞**：`go a.maybeUpdateRelationship(...)` 不阻塞 `recordActionCompletion` 主路径，best-effort 5s 超时 + slog.Warn
 

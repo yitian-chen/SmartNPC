@@ -35,13 +35,18 @@ type TacticalInput struct {
 	// (generateTacticalPlan) sets it only when that full header is already in
 	// the conversation history. Zero value false = full form (backward
 	// compatible).
-	Compact       bool
-	Physical      *protocol.PhysicalState
-	KB            *worldkb.KB
-	Profiles      map[string]*profile.Profile // NPC persona override; nil → AgentRole falls back to KB then hardcoded
-	Hint          string
-	Memories      string // Stage 4: formatted bullet list of recent memories; empty = skip segment
-	Relationships string // Stage 5: formatted relationship list for 【人际关系】段; empty = skip segment (single-NPC scenario)
+	Compact  bool
+	Physical *protocol.PhysicalState
+	KB       *worldkb.KB
+	Profiles map[string]*profile.Profile // NPC persona override; nil → AgentRole falls back to KB then hardcoded
+	Hint     string
+	Memories string // Stage 4: formatted bullet list of recent memories; empty = skip segment
+	// Relationships is the merged other-NPC roster + affection list
+	// (formatRelationshipsForPrompt: every KB peer with 好感度 x/10, stored
+	// rows overlay, default 5 when absent) for the 【人际关系】 segment;
+	// empty = skip segment (single-NPC scenario). Also suppresses the
+	// 【其他NPC】 KB-roster fallback in BuildTactical (redundant roster).
+	Relationships string
 	// Events is the safe-point drain of queued non-force world events
 	// (P3-7, §4.4/§5.1 第三输入), pre-rendered via FormatWorldEventList;
 	// empty = skip the 【发生的事件】 segment. Unlike 【全天日程】 it is

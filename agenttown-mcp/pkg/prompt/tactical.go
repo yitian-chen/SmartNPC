@@ -109,9 +109,10 @@ func BuildTactical(in TacticalInput) string {
 		}
 	}
 	nearbyLine := NearbyAgentsLine(in.VisibleAgents, in.KB)
-	if nearbyLine == "" && in.KB != nil {
+	if nearbyLine == "" && in.KB != nil && in.Relationships == "" {
 		// 附近无可见 NPC 时 fallback 到 KB 静态花名册，让 LLM 始终能看到
-		// NPC id 列表（定向对话需要 id 而非显示名）。
+		// NPC id 列表（定向对话需要 id 而非显示名）。【人际关系】非空时
+		// 跳过——那段已是完整名单（含 id、职业与好感度），重复罗列浪费 token。
 		nearbyLine = OtherAgentsLine(in.KB, in.AgentID)
 	}
 	if nearbyLine != "" {
@@ -183,8 +184,9 @@ func tacticalHintLine(in TacticalInput, th BandThresholds) string {
 		event := strings.TrimPrefix(in.Hint, "【战斗结束】")
 		line := "【战斗结束】" + event + "\n" +
 			"你刚经历一场战斗（期间由外部战斗系统接管你的身体，自主控制曾中断），现已脱离战斗、恢复自主控制。" +
-			"请结合当前物理状态与位置变化（可能受损、电量下降、不在原位置）决定后续行为——" +
-			"如维修、充电、返回岗位或继续当前时段目标；恢复要充分，可以安排较长的连续时长，不必急于返回岗位；" +
+			"请结合当前物理状态与位置变化（可能受损、电量下降）决定后续行为——" +
+			"如维修(如果损伤严重)、休息(如果疲劳度高)、返回岗位或继续当前时段目标；恢复要充分，可以安排较长的连续时长，不必急于返回岗位；" +
+			"也可以用 speak_to 告知身边的其他居民，让对方知晓攻击情况并保持警惕。" +
 			"除非收到新的威胁信号，不必继续逃跑或警戒。"
 		// 战斗最常见的后果正是属性恶化（磨损/疲劳暴涨）：越过警戒阈值时
 		// 追加与"物理状态告警" hint 同一套强制恢复约束——把上面泛化的

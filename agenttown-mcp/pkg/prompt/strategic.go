@@ -101,7 +101,7 @@ func zoneDisplayName(kb *worldkb.KB, zoneID string) string {
 // more reliably). References to 【世界背景】/【人物背景】/【世界详细信息】
 // point at the system message's modules; references to 【物理状态】 point at
 // the user message's dynamic segments.
-const StrategicRules = `1. 【硬性要求】每个时段的结束时间减去开始时间必须 ≥30 分钟（不足 30 分钟的活动要么并入相邻时段，要么不安排）；每段安排 1 - 2 项任务，连续两个时段不得任务完全相同
+const StrategicRules = `1. 【硬性要求】每个时段的结束时间减去开始时间必须 ≥30 分钟（不足 30 分钟的活动要么并入相邻时段，要么不安排）；每段安排 1 - 2 项任务，连续两个时段不得任务完全相同；可以邀请某个NPC一起去做某件事。
 2. 规划每个时段时，先想清楚这个时段的活动用什么实现：goal 应能映射到【世界详细信息】设施详情中列出的某个 (semantic_group, interaction) 组合——不限于工种设备，睡眠舱的 sleep/meditate/tidy_up、长椅的 rest 都是合法活动，战术层会据此分解为对应的移动与长时段互动；映射不上的抽象活动（如"准备工具""巡查"）→ 换一个。锻炼类活动（晨练拉伸等原地动作）不需要设施，属例外
 3. goal 中提到的地点、人物、设备必须是系统信息中【人物背景】和【世界详细信息】里存在的，不得编造未提及的人物或设施
 4. 第一个时段必须从当前仿真时间开始，且任何时段的开始时间不得早于当前时间（清晨规划时禁止输出 0:00-7:00 这类凌晨睡觉时段——凌晨睡眠已由前一晚的跨午夜末段覆盖，不要重复安排）。
@@ -109,7 +109,7 @@ const StrategicRules = `1. 【硬性要求】每个时段的结束时间减去�
 6. 充电仅在规划时电量为"低"或"较低"时安排，规划时电量为"高"或"中"时严禁规划充电；维护仅在关节磨损达到"明显磨损"及以上时安排；睡眠只能在午间和晚上
 7. 综合用户信息中【物理状态】的四项状态调整安排侧重点：电量偏低→多充电少工作；疲劳偏高→提前休眠；磨损偏高→安排维护；余额低→多工作少花钱
 8. 整理内务、冥想等动作安排的时间不得超过一小时
-9. 综合【社交需求】调整社交安排：社交需求高（≥7）时，可在白天安排一个"找人聊天"的社交时段（goal 写"找人聊天"或"找XX聊天"，战术层会分解为 speak_to）；社交需求低（≤3）时尽量少安排社交活动。
+9. 综合【社交需求】可以进行社交安排：社交需求高（≥5）时，可在安排一个社交时段，写明找谁聊什么/问什么，需求极高时可安排 2-3 段；社交需求低（<5）时尽量少安排社交活动。
 
 格式示例：[{"time":"07:00-09:00","goal":"xxx"},{"time":"09:00-12:00","goal":"xxx"},{"time":"12:00-14:00","goal":"xxx"},{"time":"14:00-18:00","goal":"xxx"},{"time":"18:00-22:00","goal":"xxx"},{"time":"22:00-07:00","goal":"xxx"}]`
 
@@ -148,12 +148,13 @@ func BuildStrategicUserPrompt(in StrategicPromptInput) string {
 
 // BuildStrategicUserContext constructs the strategic layer user message's
 // dynamic context segment: 【今日日程】 (weekly schedule context, skipped
-// when empty) + 【物理状态】 (nil physical → default fresh state). The
-// 【其他NPC】 roster segment was removed (active social initiation is not
-// guided at the strategic layer). The strategic preamble (module role) also lives here:
+// when empty) + 【物理状态】 (nil physical → default fresh state) +
+// 【其他NPC】 (roster + affection, restored now that the social-need
+// attribute drives proactive chat goals; empty = single-NPC scenario).
+// The strategic preamble (module role) also lives here:
 // the system prompt is shared verbatim across layers, so every
 // strategic-specific text belongs in the user message.
-func BuildStrategicUserContext(agentID string, kb *worldkb.KB, profiles map[string]*profile.Profile, physical *protocol.PhysicalState, dayContext, relationships string, socialNeed int) string {
+func BuildStrategicUserContext(agentID string, kb *worldkb.KB, profiles map[string]*profile.Profile, physical *protocol.PhysicalState, dayContext, otherNPCs string, socialNeed int) string {
 	var sb strings.Builder
 	// 【今日日程】段：每周日程上下文（星期几 + 工作日/休息日 + 当日提示）。
 	// dayContext 由调用方通过 weeklyschedule.WeeklyLine(dayCount, sched) 预格式化，
@@ -175,24 +176,20 @@ func BuildStrategicUserContext(agentID string, kb *worldkb.KB, profiles map[stri
 		sb.WriteString(strings.TrimPrefix(line, "物理状态："))
 		sb.WriteString("\n")
 	}
-	// 【人际关系】段（好感度 x/10）：让战略层知道与各 NPC 的亲疏。空串
-	// （单 NPC 场景 / 无关系行）时整段省略。
-	if relationships != "" {
-		sb.WriteString("【人际关系】\n")
-		sb.WriteString(relationships)
+	// 【其他NPC】段（名单 + 好感度）：战略层写"找XX聊天"类 goal 需要看到
+	// 同伴花名册（显示名/id/职业）与对各自的 好感度 x/10（存储行优先，
+	// 未互动过默认 5）。空串（单 NPC 场景）时整段省略。
+	if otherNPCs != "" {
+		sb.WriteString("【其他NPC】（你可以主动找其中某位聊天，维系人际关系）\n")
+		sb.WriteString(otherNPCs)
 		sb.WriteString("\n")
 	}
 	// 【社交需求】段：agent 侧维护的 0-10 值（越高越渴望主动找人聊天），
 	// 影响"找人聊天"日程的出现概率。始终注入（有默认值，不会为 0）。
 	sb.WriteString(fmt.Sprintf("【社交需求】%d/10。社交需求越高，你越渴望主动找其他 NPC 聊天、维系社交；越低则越倾向独处、专注自己的事。\n", socialNeed))
-	// 【其他NPC】段已屏蔽（不引导主动社交）：原实现列出 KB 中除自己外的所有
-	// NPC（id + 职业），让战略层 LLM 在 07:00 规划时看到可聊天的同伴。现在战略
-	// 层不再引导主动社交（规则 2 的社交映射、格式示例的社交时段已一并移除），
-	// 该段整体注释掉。战术层仍通过 OtherAgentsLine 作运行时回退（见 tactical.go）。
-	// if peers := OtherAgentsLine(kb, agentID); peers != "" {
-	// 	sb.WriteString("【其他NPC】（你可以主动找其中某位聊天，维系人际关系）\n")
-	// 	sb.WriteString(peers)
-	// 	sb.WriteString("\n")
-	// }
+	// 【其他NPC】段已恢复（引导主动社交）：社交需求属性上线后，战略层需要
+	// 同伴名单（显示名/id/职业）才能写"找XX聊天"类 goal；好感度 x/10 附在
+	// 名单行内（formatRelationshipsForPrompt 合并渲染），选聊天对象时可见。
+	// 战术层同样通过 OtherAgentsLine 作运行时回退（见 tactical.go）。
 	return sb.String()
 }

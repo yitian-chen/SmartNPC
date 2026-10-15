@@ -535,27 +535,23 @@ func (a *agentContext) maybeUpdateRelationship(completion protocol.ActionComplet
 	}
 }
 
-// loadRelationships fetches the agent's relationship rows and formats them
-// for the tactical prompt【人际关系】段. Returns "" when store is nil, no
-// relationships exist, or the KB has only one agent (single-NPC scenario
-// doesn't benefit from a relationship segment). Called once per tactical
-// refill; indexed query, no caching needed.
-func (a *agentContext) loadRelationships(ctx context.Context, agentID string, kb *worldkb.KB) string {
-	store := a.as.Store()
-	if store == nil {
-		return ""
+// loadRelationships renders the merged other-NPC roster + affection list
+// (formatRelationshipsForPrompt) for prompt injection: 战略层【其他NPC】段 /
+// 战术层【人际关系】段 / 路由层 relationships 属性共用。存储行加载失败或
+// 内存模式（无行）时仅损失互动历史——名单与默认好感度 5 仍渲染（KB 为骨架）。
+// 单 NPC 场景（KB ≤1 agent）返回空串，不污染 prompt。每次战术/战略 refill
+// 调用一次；索引查询，无需缓存。
+func (a *agentContext) loadRelationships(ctx context.Context, agentID string, kb *worldkb.KB, profiles map[string]*profile.Profile) string {
+	var rels []storage.Relationship
+	if store := a.as.Store(); store != nil {
+		var err error
+		rels, err = store.LoadRelationships(ctx, agentID, 10)
+		if err != nil {
+			slog.Default().Warn("[关系层] 加载关系列表失败",
+				"agent_id", agentID, "err", err)
+		}
 	}
-	// Single-NPC guard: skip when KB has ≤1 agent (no possible relationships).
-	if kb == nil || len(kb.Agents) <= 1 {
-		return ""
-	}
-	rels, err := store.LoadRelationships(ctx, agentID, 10)
-	if err != nil {
-		slog.Default().Warn("[关系层] 加载关系列表失败",
-			"agent_id", agentID, "err", err)
-		return ""
-	}
-	return formatRelationshipsForPrompt(rels, agentID)
+	return formatRelationshipsForPrompt(rels, kb, profiles, agentID)
 }
 
 // advanceSlotIfNeeded 检查当前 game_time 是否已超出 currentSlot 结束时间。
@@ -1531,9 +1527,9 @@ func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
 
 	// Stage 4: 加载近期记忆注入战术层 prompt（top-3 by created_at DESC）。
 	memories := a.loadTacticalMemories(ctx, agentID)
-	// Stage 5: 加载关系列表注入战术层 prompt【人际关系】段。
-	// 单 agent 场景（kb.Agents ≤ 1）返回空串，不污染 prompt。
-	relationships := a.loadRelationships(ctx, agentID, kbRef)
+	// Stage 5: 加载名单+好感度注入战术层 prompt【人际关系】段（KB 骨架，
+	// 存储行叠加，未互动默认好感 5）。单 agent 场景返回空串，不污染 prompt。
+	relationships := a.loadRelationships(ctx, agentID, kbRef, profiles)
 
 	// 战术层 LLM 调用统一 30s 硬超时：避免 Venus 后端排队时单次调用卡 120s
 	// 拖死整个游戏时段。超时后调用方发 idle wait，下一感知周期重试。
@@ -1643,9 +1639,9 @@ func (a *agentContext) tacticalRefillForReplan(
 
 	// Stage 4: 加载近期记忆注入战术层 prompt（top-3 by created_at DESC）。
 	memories := a.loadTacticalMemories(ctx, agentID)
-	// Stage 5: 加载关系列表注入战术层 prompt【人际关系】段。
-	// 单 agent 场景（kb.Agents ≤ 1）返回空串，不污染 prompt。
-	relationships := a.loadRelationships(ctx, agentID, kbRef)
+	// Stage 5: 加载名单+好感度注入战术层 prompt【人际关系】段（KB 骨架，
+	// 存储行叠加，未互动默认好感 5）。单 agent 场景返回空串，不污染 prompt。
+	relationships := a.loadRelationships(ctx, agentID, kbRef, profiles)
 
 	// 统一 agentic loop：replan 也走共享会话历史（含战略/对话轮）。
 	actions, err := generateTacticalPlan(tacticalCtx, a,

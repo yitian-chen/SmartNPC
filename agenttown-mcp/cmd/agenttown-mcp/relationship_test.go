@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/AgentTown/agenttown-mcp/pkg/profile"
 	"github.com/AgentTown/agenttown-mcp/pkg/storage"
 	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
 )
@@ -43,9 +44,67 @@ func TestParseRelationshipJudgeResponse_Garbage(t *testing.T) {
 
 // ─── formatRelationshipsForPrompt ────────────────────────────────
 
+// relRosterKB is the multi-agent KB fixture for formatRelationshipsForPrompt:
+// self H-01 老陈 + peers H-02 老王 / H-03 老李（无职业，职业来自 profile 时另建）。
+func relRosterKB() *worldkb.KB {
+	return &worldkb.KB{Agents: []worldkb.Agent{
+		{ID: "H-01", DisplayName: "老陈"},
+		{ID: "H-02", DisplayName: "老王"},
+		{ID: "H-03", DisplayName: "老李"},
+	}}
+}
+
 func TestFormatRelationshipsForPrompt_Empty(t *testing.T) {
-	if got := formatRelationshipsForPrompt(nil, "H-01"); got != "" {
-		t.Errorf("empty slice = %q, want empty", got)
+	if got := formatRelationshipsForPrompt(nil, nil, nil, "H-01"); got != "" {
+		t.Errorf("nil kb = %q, want empty", got)
+	}
+	single := &worldkb.KB{Agents: []worldkb.Agent{{ID: "H-01", DisplayName: "老陈"}}}
+	if got := formatRelationshipsForPrompt(nil, single, nil, "H-01"); got != "" {
+		t.Errorf("single-agent kb = %q, want empty", got)
+	}
+}
+
+// TestFormatRelationshipsForPrompt_DefaultRoster pins the merged rendering:
+// EVERY KB peer appears even with no stored rows (cold start / memory mode)
+// — default affection 5, no 熟悉度/互动 paren, self excluded. Before the
+// merged renderer an empty table silently hid the roster and affection from
+// every layer.
+func TestFormatRelationshipsForPrompt_DefaultRoster(t *testing.T) {
+	got := formatRelationshipsForPrompt(nil, relRosterKB(), nil, "H-01")
+	wantContains := []string{
+		"- 老王（H-02）：好感 5/10",
+		"- 老李（H-03）：好感 5/10",
+	}
+	for _, w := range wantContains {
+		if !contains(got, w) {
+			t.Errorf("output missing %q\ngot:\n%s", w, got)
+		}
+	}
+	if strings.Contains(got, "熟悉度") || strings.Contains(got, "互动") {
+		t.Errorf("default rows must not carry interaction history:\n%s", got)
+	}
+	if strings.Contains(got, "老陈") || strings.Contains(got, "（H-01") {
+		t.Errorf("self must not appear in the roster:\n%s", got)
+	}
+}
+
+// TestFormatRelationshipsForPrompt_ProfessionFromProfile pins the
+// profile > KB fallback order for display name / profession.
+func TestFormatRelationshipsForPrompt_ProfessionFromProfile(t *testing.T) {
+	kb := &worldkb.KB{Agents: []worldkb.Agent{
+		{ID: "H-01", DisplayName: "老陈"},
+		{ID: "H-02", DisplayName: "老王", Profession: "KB职业"},
+		{ID: "H-03", DisplayName: "老李"},
+	}}
+	profiles := map[string]*profile.Profile{
+		"H-02": {DisplayName: "老王", Profession: "物流分拣兼加工员"},
+	}
+	got := formatRelationshipsForPrompt(nil, kb, profiles, "H-01")
+	if !contains(got, "- 老王（H-02，物流分拣兼加工员）：好感 5/10") {
+		t.Errorf("H-02 should carry the profile profession (profile > KB):\n%s", got)
+	}
+	if !contains(got, "- 老李（H-03）：好感 5/10") {
+		t.Errorf("H-03 (no profession anywhere) should render name+id only:\n%s", got)
 	}
 }
 
@@ -54,12 +113,12 @@ func TestFormatRelationshipsForPrompt_WithRels(t *testing.T) {
 		{AgentA: "H-01", AgentB: "H-02", Familiarity: 5, Affection: 2, InteractionCount: 3},
 		{AgentA: "H-03", AgentB: "H-01", Familiarity: 1, Affection: 0, InteractionCount: 1},
 	}
-	got := formatRelationshipsForPrompt(rels, "H-01")
+	got := formatRelationshipsForPrompt(rels, relRosterKB(), nil, "H-01")
 	// First row: H-01 is agent_a, other side is H-02.
 	// Second row: H-01 is agent_b, other side is H-03.
 	wantContains := []string{
-		"与 H-02：熟悉度 5、好感 2/10（互动 3 次）",
-		"与 H-03：熟悉度 1、好感 0/10（互动 1 次）",
+		"- 老王（H-02）：好感 2/10（熟悉度 5、互动 3 次）",
+		"- 老李（H-03）：好感 0/10（熟悉度 1、互动 1 次）",
 	}
 	for _, w := range wantContains {
 		if !contains(got, w) {
@@ -315,15 +374,19 @@ var _ = time.Time{}
 // TestFormatRelationshipsForPrompt_DedupByOtherAgent pins fix #1: when
 // LoadRelationships returns both A→B and B→A rows for the same pair
 // (it queries WHERE agent_a=? OR agent_b=?), the prompt must show only
-// ONE line per other agent — not two identical "与 H-03" lines
+// ONE line per other agent — not two lines for the same peer
 // (2026-09-18 仿真实测 duplication).
 func TestFormatRelationshipsForPrompt_DedupByOtherAgent(t *testing.T) {
+	kb := &worldkb.KB{Agents: []worldkb.Agent{
+		{ID: "H-01", DisplayName: "老陈"},
+		{ID: "H-03", DisplayName: "老李"},
+	}}
 	rels := []storage.Relationship{
 		{AgentA: "H-01", AgentB: "H-03", Familiarity: 1, Affection: 0, InteractionCount: 1},
 		{AgentA: "H-03", AgentB: "H-01", Familiarity: 1, Affection: 0, InteractionCount: 1},
 	}
-	got := formatRelationshipsForPrompt(rels, "H-01")
-	if strings.Count(got, "与 H-03") != 1 {
+	got := formatRelationshipsForPrompt(rels, kb, nil, "H-01")
+	if strings.Count(got, "H-03") != 1 {
 		t.Fatalf("should show exactly one line per other agent, got:\n%s", got)
 	}
 	// 双向时取更高值。
@@ -331,8 +394,8 @@ func TestFormatRelationshipsForPrompt_DedupByOtherAgent(t *testing.T) {
 		{AgentA: "H-01", AgentB: "H-03", Familiarity: 1, Affection: 0, InteractionCount: 1},
 		{AgentA: "H-03", AgentB: "H-01", Familiarity: 3, Affection: 2, InteractionCount: 5},
 	}
-	got = formatRelationshipsForPrompt(rels, "H-01")
-	if !strings.Contains(got, "熟悉度 3、好感 2/10（互动 5 次）") {
+	got = formatRelationshipsForPrompt(rels, kb, nil, "H-01")
+	if !strings.Contains(got, "好感 2/10（熟悉度 3、互动 5 次）") {
 		t.Fatalf("should show the higher values, got:\n%s", got)
 	}
 	// 多个不同 agent 不误并。
@@ -340,7 +403,7 @@ func TestFormatRelationshipsForPrompt_DedupByOtherAgent(t *testing.T) {
 		{AgentA: "H-01", AgentB: "H-02", Familiarity: 2, Affection: 1, InteractionCount: 3},
 		{AgentA: "H-01", AgentB: "H-03", Familiarity: 1, Affection: 0, InteractionCount: 1},
 	}
-	got = formatRelationshipsForPrompt(rels, "H-01")
+	got = formatRelationshipsForPrompt(rels, relRosterKB(), nil, "H-01")
 	if strings.Count(got, "\n") != 1 {
 		t.Fatalf("two distinct agents → two lines, got:\n%s", got)
 	}

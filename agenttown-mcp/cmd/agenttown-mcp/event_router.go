@@ -461,12 +461,9 @@ func (r *eventRouter) buildInput(agentID string, ac *agentContext, ev protocol.W
 		}
 	}
 
-	relationships := ""
-	if store := ac.as.Store(); store != nil && kb != nil && len(kb.Agents) > 1 {
-		if rels, err := store.LoadRelationships(context.Background(), agentID, 10); err == nil {
-			relationships = formatRelationshipsForPrompt(rels, agentID)
-		}
-	}
+	// 名单 + 好感度（KB 骨架 + 存储行叠加，未互动默认 5）：紧急度裁决的
+	// 亲疏依据——同一事件对不同好感度的同伴应有不同判决。
+	relationships := ac.loadRelationships(context.Background(), agentID, kb, r.profiles)
 
 	return prompt.RouterInput{
 		AgentID:       agentID,

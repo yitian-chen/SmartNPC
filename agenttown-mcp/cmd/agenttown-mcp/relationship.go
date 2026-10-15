@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"sort"
 	"strings"
 	"time"
 
@@ -60,53 +59,99 @@ func parseRelationshipJudgeResponse(raw string) bool {
 	return strings.HasPrefix(answer, "yes")
 }
 
-// formatRelationshipsForPrompt renders the relationship rows as a bullet list
-// for the tactical prompt【人际关系】段. Only rows involving agentID are
-// passed in (from LoadRelationships); each line shows the other side and the
-// current familiarity/affection/interaction_count. Returns "" when the slice
-// is empty (caller skips the prompt segment).
-// formatRelationshipsForPrompt renders the relationship lines for the
-// prompt, deduplicated by the OTHER agent id: LoadRelationships queries
-// both A→B and B→A rows (WHERE agent_a=? OR agent_b=?), so an agent who
-// has interacted with H-03 gets two rows that both read "与 H-03" — that
-// duplication confused the LLM and wasted tokens (2026-09-18 仿真实测).
-// When both directions exist, the higher familiarity/interaction wins
-// (the direction with the latest update_at is already first per the query
-// ORDER BY, but dedup by max value is safer).
-func formatRelationshipsForPrompt(rels []storage.Relationship, agentID string) string {
-	if len(rels) == 0 {
+// defaultAffection is the affection shown for peers with no stored
+// relationship row (never interacted / memory mode). Matches migration
+// 0003's column default and seedRelationshipsFromKB's seed value.
+const defaultAffection = 5
+
+// formatRelationshipsForPrompt renders the merged other-NPC roster +
+// affection list, injected as 战略层【其他NPC】/ 战术层【人际关系】/ 路由层
+// relationships 属性（同一段内容，三种头部）。
+//
+// The KB's peers (excluding self) are the skeleton: EVERY peer gets a line —
+// its stored relationship row when one exists, else the affection default
+// (defaultAffection) — so the roster and affection stay visible from cold
+// start (no interactions yet) and in memory mode (no store rows at all);
+// before this, an empty table silently hid both from every layer.
+//
+// Each line reads "- 老王（H-02，物流分拣兼加工员）：好感 5/10（熟悉度 3、
+// 互动 2 次）"; the 熟悉度/互动 paren is appended only when the stored row
+// actually has interaction history. Display name / profession resolve
+// profile > KB > bare id (the AgentRole fallback order). Rows whose peer is
+// not in the KB are dropped (stale data must not resurrect deleted agents).
+//
+// Dedup: LoadRelationships queries both directions (agent_a=? OR agent_b=?),
+// so an agent who has interacted with H-03 gets two rows that both read as
+// "与 H-03" — that duplication confused the LLM and wasted tokens
+// (2026-09-18 仿真实测). When both directions exist, the row with the
+// higher familiarity / interaction count wins.
+//
+// Returns "" when kb == nil or the KB has ≤1 agent (single-NPC scenario
+// has no peers to list).
+func formatRelationshipsForPrompt(rels []storage.Relationship, kb *worldkb.KB, profiles map[string]*profile.Profile, agentID string) string {
+	if kb == nil || len(kb.Agents) <= 1 {
 		return ""
 	}
-	type relLine struct {
-		familiarity  int
-		affection    int
-		interactions int
-	}
-	best := make(map[string]*relLine)
+	// 存储行按对方聚合（双向取更高值）。
+	best := make(map[string]storage.Relationship, len(rels))
 	for _, r := range rels {
 		other := r.AgentB
 		if r.AgentA != agentID {
 			other = r.AgentA
 		}
-		cur := best[other]
-		if cur == nil || r.Familiarity > cur.familiarity || r.InteractionCount > cur.interactions {
-			best[other] = &relLine{
-				familiarity:  r.Familiarity,
-				affection:    r.Affection,
-				interactions: r.InteractionCount,
-			}
+		if other == "" || other == agentID {
+			continue
+		}
+		cur, ok := best[other]
+		if !ok || r.Familiarity > cur.Familiarity || r.InteractionCount > cur.InteractionCount {
+			best[other] = r
 		}
 	}
-	keys := make([]string, 0, len(best))
-	for k := range best {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
 	var sb strings.Builder
-	for _, other := range keys {
-		r := best[other]
-		fmt.Fprintf(&sb, "- 与 %s：熟悉度 %d、好感 %d/10（互动 %d 次）\n",
-			other, r.familiarity, r.affection, r.interactions)
+	for _, ag := range kb.Agents {
+		if ag.ID == agentID || ag.ID == "" {
+			continue
+		}
+		// 显示名 / 职业：profile > KB（与 AgentRole 同一回退序）。profile 的
+		// ## 职业 常带动作映射括注（"物流分拣兼加工员（分拣传送带分拣
+		// sort_cargo + …）"）——那是人设 prompt 的写法，名单行只要自然职业，
+		// 截掉首个全/半角括号起的尾注。
+		name, prof := ag.DisplayName, ag.Profession
+		if p := profiles[ag.ID]; p != nil {
+			if p.DisplayName != "" {
+				name = p.DisplayName
+			}
+			if p.Profession != "" {
+				prof = p.Profession
+			}
+		}
+		if i := strings.IndexAny(prof, "（("); i >= 0 {
+			prof = strings.TrimSpace(prof[:i])
+		}
+		var label string
+		switch {
+		case name != "" && name != ag.ID && prof != "":
+			label = fmt.Sprintf("%s（%s，%s）", name, ag.ID, prof)
+		case name != "" && name != ag.ID:
+			label = fmt.Sprintf("%s（%s）", name, ag.ID)
+		case prof != "":
+			label = fmt.Sprintf("%s（%s）", ag.ID, prof)
+		default:
+			label = ag.ID
+		}
+		// 好感度：存储行优先；无行（未互动过 / 内存模式）默认 5。
+		aff := defaultAffection
+		history := ""
+		if r, ok := best[ag.ID]; ok {
+			aff = r.Affection
+			if r.Familiarity > 0 || r.InteractionCount > 0 {
+				history = fmt.Sprintf("（熟悉度 %d、互动 %d 次）", r.Familiarity, r.InteractionCount)
+			}
+		}
+		fmt.Fprintf(&sb, "- %s：好感 %d/10%s\n", label, aff, history)
+	}
+	if sb.Len() == 0 {
+		return ""
 	}
 	return strings.TrimSuffix(sb.String(), "\n")
 }
