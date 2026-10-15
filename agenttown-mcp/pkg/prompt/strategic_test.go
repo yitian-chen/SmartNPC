@@ -414,6 +414,30 @@ func TestStrategicSystemPrompt_Rule3AtomicInteractionGate(t *testing.T) {
 // strategic.go 改动把 preamble（含"属性变动"引用）移到 user context 并
 // 改写 worldDetailCore 标题，本测试的"preamble 应引用属性变动"断言过时。
 
+// TestStrategicSystemPrompt_SocialGoalGate 验证社交类 goal 不再被规则 2
+// 的"必须映射 (semantic_group, interaction)"硬约束拦下：社交与锻炼同为
+// 明文例外，规则 3 承认【其他NPC】名单中的人物，规则 9 按社交需求分层
+// 给出硬性数量要求（修复 2026-10-14 实测：全员社交需求 9-10 却几乎不排
+// 社交时段——软引导"可安排"扛不过硬规则"换一个"）。
+func TestStrategicSystemPrompt_SocialGoalGate(t *testing.T) {
+	for _, want := range []string{
+		// 规则 2：社交例外（与锻炼例外并列，speak_to 由战术层分解）。
+		"社交类活动（如\"找XX聊聊XX\"）同样不映射设施，属例外",
+		"由战术层分解为 speak_to 定向对话",
+		// 规则 3：【其他NPC】名单中的人物是合法引用。
+		"或用户信息【其他NPC】名单中列出的居民",
+		// 规则 9：分层阈值 + 对象指引。
+		"≥8 时每天至少安排 1 个社交时段",
+		"≥9 可安排 2-3 段",
+		"≤5 时尽量少安排社交活动",
+		"优先好感度高的",
+	} {
+		if !strings.Contains(StrategicRules, want) {
+			t.Errorf("rules missing %q:\n%s", want, StrategicRules)
+		}
+	}
+}
+
 func TestBuildStrategicUserContext_SocialNeedSegment(t *testing.T) {
 	got := BuildStrategicUserContext("H-01", nil, nil, nil, "", "", 7)
 	if !strings.Contains(got, "【社交需求】7/10") {
