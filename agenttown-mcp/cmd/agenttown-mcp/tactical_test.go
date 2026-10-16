@@ -416,6 +416,60 @@ func TestSelectCurrentGoal_OvernightSlot(t *testing.T) {
 	}
 }
 
+// ─── resolveReplanGoal ───────────────────────────────────────
+
+// TestResolveReplanGoal_SocialExemptsDawnWindow 验证社交回应 replan 豁免
+// 06:00-07:00 屏蔽：游戏时间在规划窗口内、selectCurrentGoal 返回空时，回退
+// 到当天首个时段（idx=0）作 goal 上下文，让 NPC 仍能回应对方的搭话/邀请。
+func TestResolveReplanGoal_SocialExemptsDawnWindow(t *testing.T) {
+	plan := "07:00-08:00: 晨练拉伸\n08:00-12:00: 车间装配"
+	goal, slot, idx := resolveReplanGoal(plan, "06:33", "【社交回应】社交信号：老陈（H-01）对你说：一起去晨跑？")
+	if goal != "晨练拉伸" {
+		t.Errorf("goal=%q, want 晨练拉伸 (fallback to first slot)", goal)
+	}
+	if slot != "07:00-08:00" {
+		t.Errorf("slot=%q, want 07:00-08:00", slot)
+	}
+	if idx != 0 {
+		t.Errorf("idx=%d, want 0", idx)
+	}
+}
+
+// TestResolveReplanGoal_SocialEmptyPlan 验证计划为空（手动模式/冷启动）时，
+// 社交回应 replan 用中性 goal，而非直接失败。
+func TestResolveReplanGoal_SocialEmptyPlan(t *testing.T) {
+	goal, slot, idx := resolveReplanGoal("", "06:33", "【社交回应】社交信号：老陈（H-01）对你说：一起去晨跑？")
+	if goal != "回应对方的社交邀请" {
+		t.Errorf("goal=%q, want neutral social-response goal", goal)
+	}
+	if slot != "" || idx != -1 {
+		t.Errorf("slot=%q idx=%d, want empty/-1", slot, idx)
+	}
+}
+
+// TestResolveReplanGoal_NonSocialKeepsDawnBlock 验证非社交 replan（如威胁事件）
+// 在 06:00-07:00 仍被屏蔽（行为不变）。
+func TestResolveReplanGoal_NonSocialKeepsDawnBlock(t *testing.T) {
+	plan := "07:00-08:00: 晨练拉伸\n08:00-12:00: 车间装配"
+	goal, slot, idx := resolveReplanGoal(plan, "06:33", "【强制打断】玩家互动：被玩家瞄准")
+	if goal != "" || slot != "" || idx != -1 {
+		t.Errorf("non-social hint must keep the dawn block, got goal=%q slot=%q idx=%d", goal, slot, idx)
+	}
+}
+
+// TestResolveReplanGoal_SocialNormalMatch 验证社交回应在正常时段命中时，仍返回
+// 匹配的时段 goal（不做无谓回退）。
+func TestResolveReplanGoal_SocialNormalMatch(t *testing.T) {
+	plan := "07:00-08:00: 晨练拉伸\n08:00-12:00: 车间装配"
+	goal, slot, idx := resolveReplanGoal(plan, "09:00", "【社交回应】社交信号：老陈（H-01）对你说：一起去晨跑？")
+	if goal != "车间装配" {
+		t.Errorf("goal=%q, want 车间装配 (normal match, no fallback)", goal)
+	}
+	if slot != "08:00-12:00" || idx != 1 {
+		t.Errorf("slot=%q idx=%d, want 08:00-12:00 / 1", slot, idx)
+	}
+}
+
 func TestSelectCurrentGoal_OvernightSlotEarlyMorning(t *testing.T) {
 	plan := "17:30-06:00: 充电休息"
 	// 03:00 在跨日时段的 [0,360) 部分

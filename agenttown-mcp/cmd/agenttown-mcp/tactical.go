@@ -921,3 +921,21 @@ func selectCurrentGoal(dailyPlan, timeOfDay string) (goal, slot string, index in
 	}
 	return "", "", -1
 }
+
+// resolveReplanGoal 解析 replan 的当前时段 goal。selectCurrentGoal 返回空时
+// （06:00-07:00 战略规划窗口屏蔽 / 时段未匹配 / 计划为空），若 replanHint
+// 是【社交回应】，回退到当天首个时段（idx=0）作 goal 上下文——社交回应
+// 不依赖时段，NPC 收到对方搭话/邀请应当还能回应，不该被 06:00-07:00 屏蔽
+// 阻断；计划为空（手动模式/冷启动）时用中性 goal。具体回应方式仍由
+// 【社交回应】hint 引导。2026-10-16 实测：06:33 注入邀请命中屏蔽，H-02 的
+// 回应 replan 直接"无当前时段 goal"失败，H-01 收场 no_reply。
+func resolveReplanGoal(plan, tod, replanHint string) (goal, slot string, idx int) {
+	goal, slot, idx = selectCurrentGoal(plan, tod)
+	if goal != "" || !strings.HasPrefix(replanHint, "【社交回应】") {
+		return goal, slot, idx
+	}
+	if items := parseFormattedPlan(plan); len(items) > 0 {
+		return items[0].Goal, items[0].Time, 0
+	}
+	return "回应对方的社交邀请", "", -1
+}

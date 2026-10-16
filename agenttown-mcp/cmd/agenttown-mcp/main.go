@@ -1622,7 +1622,7 @@ func (a *agentContext) tacticalRefillForReplan(
 	}
 	plan, _, _ := a.as.SnapshotSchedule()
 	tod := a.as.LatestTimeOfDay()
-	goal, slot, idx := selectCurrentGoal(plan, tod)
+	goal, slot, idx := resolveReplanGoal(plan, tod, replanHint)
 	if goal == "" {
 		logger.Warn("[战术层/replan] 无当前时段 goal，无法 replan",
 			"agent_id", agentID)
