@@ -888,6 +888,15 @@ func runPerceptionWorker(
 		// 对话结束检测：会话空闲超时则关闭并后台评估好感度（best-effort）。
 		if peer, turns := ac.closeConversationIfIdle(ac.as.LatestGameTimeSec()); peer != "" {
 			go ac.evaluateConversationAffection(ctx, agentID, peer, turns, kb, profiles, logger)
+			// 对话结束 hint（2026-10-16 设计）：speak_to 单动作化后，约定
+			// 的执行不由对话 replan 携带——把完整对话记录 + 守约指令交给
+			// 下一次 refill。守约优先于当前时段目标，补上 slot goal 主导
+			// 下事件仅作弱参考的仲裁缺口。
+			if h := conversationEndedHint(agentID, peer, turns, kb); h != "" {
+				ac.as.SetReplanHint(h)
+				logger.Info("[对话层] 对话已结束，注入守约 hint",
+					"agent_id", agentID, "peer", peer, "turns", len(turns))
+			}
 		}
 
 		// 多日循环：检测 day_count 递增（跨日），重新调用战略层生成新一天的 dailyPlan。

@@ -269,6 +269,21 @@ func (rt *Runtime) handleForceEvent(ac *agentContext, agentID string, ev protoco
 	go ac.forceInterruptReplan(rt.ctx, agentID, rt.ws, *rt.kbPtr, rt.profiles, ev, hint, rt.logger)
 }
 
+// speechHeardSpeaker extracts the speaker id from a speech_heard event's
+// data block; "" when the event is not a speech_heard or the payload is
+// unparseable. Raw category check mirrors the transcript-recording site
+// (UE consistently sends category=social for NPC speech).
+func speechHeardSpeaker(ev protocol.WorldEventPayload) string {
+	if ev.Category != protocol.CategorySocial || ev.EventType != protocol.EventTypeSpeechHeard {
+		return ""
+	}
+	var d protocol.SpeechHeardData
+	if err := json.Unmarshal(ev.Data, &d); err != nil {
+		return ""
+	}
+	return d.SpeakerID
+}
+
 // forceEventHint formats the replan hint for a force event. The 【强制打断】
 // marker is the contract with prompt.tacticalHintLine: it renders the event
 // as a top-priority 【紧急事件】 directive (explicitly overriding the slot

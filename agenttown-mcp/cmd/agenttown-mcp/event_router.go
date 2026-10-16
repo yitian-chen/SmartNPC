@@ -273,6 +273,31 @@ func (r *eventRouter) route(ctx context.Context, agentID string, ev protocol.Wor
 		return
 	}
 
+	// 活跃会话回话：确定性社交打断，不判紧急度。判决模型不知道"这是
+	// 我在进行的对话的回话"，其紧急度判决对回话近似随机（2026-10-16
+	// 实测：应邀答复被判不紧急留队列，邀请方直到 slot 切走都没处理
+	// "应下"）；回话是预期轮转而非打断风暴，轮次上限
+	// （maxConversationTurns）已保证对话有界。判定口径：说话人 == 当前
+	// 会话对方且已记录 ≥2 轮——handleWorldEvent 的 transcript 记录会把
+	// 任何新说话人置为会话对方，轮数才是"回话"与"新对话第一句"的分界
+	// （新搭话仍走 judge 判紧急度）。severity 阶梯照常生效——更高优先级
+	// 的反应窗口（如威胁）进行中时回话仍留队列，由对话结束 hint
+	// （conversationEndedHint）承接守约。
+	if speaker := speechHeardSpeaker(ev); speaker != "" {
+		if peer, turns := ac.conversationPeerState(); speaker == peer && turns >= 2 {
+			dec := prompt.RouterDecision{
+				Interrupt: true,
+				Severity:  2,
+				Reason:    "活跃会话回话（对话轮转，不判紧急度）",
+				Motive:    prompt.RouterMotiveSocial,
+			}
+			r.logger.Info("[事件路由] 活跃会话回话，确定性社交打断",
+				"agent_id", agentID, "event_id", ev.EventID, "speaker", speaker)
+			r.processVerdict(agentID, ev, dec)
+			return
+		}
+	}
+
 	in := r.buildInput(agentID, ac, ev)
 
 	// 超时单源：jev.Config.Timeout（http.Client.Timeout，--jev-timeout）。

@@ -405,6 +405,24 @@ func formatConversationTurns(turns []conversationTurn, kb *worldkb.KB) string {
 // 无限互道"走吧"的 ping-pong，最终靠 severity 阶梯碰巧拦断收场）。
 const maxConversationTurns = 6
 
+// renderConversationTurnsFor renders turns from agentID's perspective: own
+// turns as "你", peer turns by KB display name (fall back to raw id).
+func renderConversationTurnsFor(agentID string, turns []conversationTurn, kb *worldkb.KB) string {
+	var sb strings.Builder
+	for _, t := range turns {
+		speaker := t.speakerID
+		if t.speakerID == agentID {
+			speaker = "你"
+		} else if kb != nil {
+			if ag := kb.GetAgent(t.speakerID); ag != nil && ag.DisplayName != "" {
+				speaker = ag.DisplayName
+			}
+		}
+		fmt.Fprintf(&sb, "%s：%s\n", speaker, t.content)
+	}
+	return strings.TrimSuffix(sb.String(), "\n")
+}
+
 // conversationContextForPrompt renders the in-progress conversation context
 // for the tactical prompt's 【社交回应】 hint: full transcript (own turns as
 // "你", peer turns by display name) + round count. capped reports whether the
@@ -430,16 +448,47 @@ func (a *agentContext) conversationContextForPrompt(agentID string, kb *worldkb.
 	if len(turns) > 12 {
 		start = len(turns) - 12
 	}
-	for _, t := range turns[start:] {
-		speaker := t.speakerID
-		if t.speakerID == agentID {
-			speaker = "你"
-		} else if kb != nil {
-			if ag := kb.GetAgent(t.speakerID); ag != nil && ag.DisplayName != "" {
-				speaker = ag.DisplayName
-			}
-		}
-		fmt.Fprintf(&sb, "%s：%s\n", speaker, t.content)
+	sb.WriteString(renderConversationTurnsFor(agentID, turns[start:], kb))
+	return sb.String(), len(turns) >= maxConversationTurns
+}
+
+// conversationPeerState returns the active conversation peer id and the
+// recorded turn count ("" = no session). route() uses it to distinguish an
+// in-conversation reply (peer match AND ≥2 turns — the recording in
+// handleWorldEvent makes ANY speaker the peer before routing, so the turn
+// count is what separates a reply from a fresh greeting's first utterance).
+func (a *agentContext) conversationPeerState() (peer string, turns int) {
+	a.coordMu.Lock()
+	defer a.coordMu.Unlock()
+	return a.convPeerID, len(a.convTurns)
+}
+
+// conversationEndedHint builds the post-conversation replan hint: the full
+// transcript plus a follow-through directive. speak_to decompositions are
+// single-action by design (rule 10) — the agreed activity is NOT carried by
+// the conversation replan; this hint, set when the idle-close ends the
+// session, is what drives the follow-through at the next refill (2026-10-16
+// 设计：约定事项由系统在对话结束后提示，NPC 届时再执行——优先于当前
+// 时段目标，补上 slot goal 主导下事件只作弱参考的仲裁缺口）。
+func conversationEndedHint(agentID, peer string, turns []conversationTurn, kb *worldkb.KB) string {
+	if peer == "" || len(turns) == 0 {
+		return ""
 	}
-	return strings.TrimSuffix(sb.String(), "\n"), len(turns) >= maxConversationTurns
+	peerName := peer
+	if kb != nil {
+		if ag := kb.GetAgent(peer); ag != nil && ag.DisplayName != "" {
+			peerName = ag.DisplayName
+		}
+	}
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "【对话结束】你与 %s（%s）的对话刚刚结束，完整对话记录：\n", peerName, peer)
+	// 会话轮次有上限，全量注入无负担；防御性截最近 12 条。
+	start := 0
+	if len(turns) > 12 {
+		start = len(turns) - 12
+	}
+	sb.WriteString(renderConversationTurnsFor(agentID, turns[start:], kb))
+	sb.WriteString("\n请结合对话内容决定下一步：若对话中你们约定了一起做某事（如一起去跑步机晨跑），立即去执行该约定——守约优先于当前时段目标，不要因为时段切换而弃约；" +
+		"若你的邀请被婉拒或双方只是寒暄/告别，回到当前时段目标的原有日程。")
+	return sb.String()
 }

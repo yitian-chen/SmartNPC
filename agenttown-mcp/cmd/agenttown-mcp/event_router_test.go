@@ -114,6 +114,15 @@ func (v *verdictRecorder) len() int {
 	return len(v.items)
 }
 
+// snapshot returns a copy of the collected verdicts.
+func (v *verdictRecorder) snapshot() []prompt.RouterDecision {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	out := make([]prompt.RouterDecision, len(v.items))
+	copy(out, v.items)
+	return out
+}
+
 // newRouterTestRuntime wires a Runtime whose eventRouter uses the scripted
 // judge. verdicts collects interrupt verdicts instead of executing them.
 func newRouterTestRuntime(t *testing.T, j *scriptedJudge) (*Runtime, *fakeTransport, *agentContext, *scriptedJudge, *verdictRecorder) {
@@ -620,5 +629,61 @@ func TestTacticalRefill_ReactionContextHint(t *testing.T) {
 	}
 	if !strings.Contains(user, "被玩家攻击") {
 		t.Fatalf("refill prompt must carry the reaction's origin event:\n%s", user)
+	}
+}
+
+// replySpeechTestEvent builds a NON-force speech_heard event from the given
+// speaker (mirrors UE's NPC-speech dispatch with force:false after the
+// 2026-10-16 UE change).
+func replySpeechTestEvent(id, speaker string) protocol.WorldEventPayload {
+	return protocol.WorldEventPayload{
+		EventID:   id,
+		Category:  protocol.CategorySocial,
+		EventType: protocol.EventTypeSpeechHeard,
+		Force:     false,
+		Severity:  5,
+		Subject:   "H-01",
+		GameTime:  "D12 07:19:37",
+		Location:  "residential_quarters",
+		Data:      json.RawMessage(`{"speaker_id":"` + speaker + `","speaker_name":"老王","addressee_id":"H-01","content":"行啊，一起去晨跑。"}`),
+	}
+}
+
+// TestEventRouter_ActiveConversationReplyDeterministicInterrupt verifies the
+// deterministic branch: a speech_heard from the ACTIVE conversation peer
+// interrupts as social WITHOUT consulting the judge (its urgency verdict on
+// conversational replies is effectively random — 2026-10-16 实测应邀答复被
+// 判不紧急留队列，邀请方直到 slot 切走都没处理"应下"). A reply from a
+// non-peer still goes through the judge.
+func TestEventRouter_ActiveConversationReplyDeterministicInterrupt(t *testing.T) {
+	// fixture 的 processVerdict 被 verdictRecorder 替换（不执行真打断），
+	// 本测试只验证 route() 的分支选择：活跃会话回话 → 确定性 social 打断
+	// 判决、不咨询 judge；非会话对方 → 照常走 judge。
+	rt, _, ac, j, verdicts := newRouterTestRuntime(t, notInterruptJudge())
+	// 活跃会话：H-01 与 H-02 对话中。
+	ac.recordConversationTurn("H-02", "H-02", "老王，一起去晨跑？", 100)
+
+	dispatchTestEvent(t, rt, "H-01", replySpeechTestEvent("evt_reply1", "H-02"))
+
+	// 确定性打断：即便 judge 是 notInterrupt 也必须给出打断判决（且不问 judge）。
+	waitFor(t, 2*time.Second, func() bool { return verdicts.len() > 0 })
+	if got := len(j.statesOf()); got != 0 {
+		t.Fatalf("active-peer reply must bypass the judge, got %d judge calls", got)
+	}
+	vs := verdicts.snapshot()
+	if len(vs) != 1 || !vs[0].Interrupt || vs[0].Motive != prompt.RouterMotiveSocial {
+		t.Fatalf("want one social interrupt verdict, got %+v", vs)
+	}
+
+	// 对照：非会话对方的 speech（陌生搭话）仍走 judge（notInterrupt → 不产生打断判决）。
+	dispatchTestEvent(t, rt, "H-01", replySpeechTestEvent("evt_reply2", "H-03"))
+	waitFor(t, 2*time.Second, func() bool { return len(j.statesOf()) > 0 })
+	if got := verdicts.len(); got != 1 {
+		t.Fatalf("non-peer speech must not add a verdict (judge said no), got %d", got)
+	}
+	// 队列里两条都在：evt_reply1 因 fixture 的 recorder 不执行真撤队（真
+	// processVerdict 会 RemoveQueuedWorldEvent），evt_reply2 因 not-urgent 留队。
+	if got := ac.as.WorldEventQueueLen(); got != 2 {
+		t.Fatalf("both events stay queued under the recorder fixture, got len=%d", got)
 	}
 }

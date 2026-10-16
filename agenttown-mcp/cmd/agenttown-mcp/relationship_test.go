@@ -559,3 +559,35 @@ func TestConversationContextForPrompt_PeerChangeResets(t *testing.T) {
 		t.Errorf("new peer transcript missing:\n%s", ctx)
 	}
 }
+
+// TestConversationEndedHint verifies the post-conversation hint: full
+// transcript (own turns as "你") + the follow-through directive that carries
+// the agreed activity past the conversation (single-action speak_to design:
+// the agreement rides this hint, not the conversation replan).
+func TestConversationEndedHint(t *testing.T) {
+	turns := []conversationTurn{
+		{speakerID: "H-01", content: "老王，一起去晨跑？"},
+		{speakerID: "H-02", content: "行啊，正好活动活动。"},
+	}
+	got := conversationEndedHint("H-02", "H-01", turns, convKB())
+	for _, want := range []string{
+		"【对话结束】你与 老陈（H-01）的对话刚刚结束",
+		"老陈：老王，一起去晨跑？",
+		"你：行啊，正好活动活动。",
+		"若对话中你们约定了一起做某事",
+		"守约优先于当前时段目标",
+		"不要因为时段切换而弃约",
+		"若你的邀请被婉拒或双方只是寒暄/告别",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
+	}
+	// 无轮次 → 空串（不注入）。
+	if got := conversationEndedHint("H-02", "H-01", nil, convKB()); got != "" {
+		t.Errorf("no turns = %q, want empty", got)
+	}
+	if got := conversationEndedHint("H-02", "", turns, convKB()); got != "" {
+		t.Errorf("no peer = %q, want empty", got)
+	}
+}
