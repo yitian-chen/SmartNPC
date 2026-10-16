@@ -929,16 +929,17 @@ func selectCurrentGoal(dailyPlan, timeOfDay string) (goal, slot string, index in
 }
 
 // resolveReplanGoal 解析 replan/refill 的当前时段 goal。selectCurrentGoal
-// 返回空时（06:00-07:00 战略规划窗口屏蔽 / 时段未匹配 / 计划为空），若
-// replanHint 是【社交回应】或【对话结束】，回退到当天首个时段（idx=0）作
-// goal 上下文——社交回应与守约执行不依赖时段（约定的事要立即去做），不该
-// 被规划窗口阻断；计划为空（手动模式/冷启动）时用中性 goal。2026-10-16
-// 实测：06:50 speak_to 完成后 worker refill 命中屏蔽静默跳过，守约 hint
-// 已注入却被窗口挡住 8 秒（直到 game_time 过 07:00 的下一次感知）。
-// 非社交/守约 hint（威胁/强制打断/普通 refill）在 06:00-07:00 保持屏蔽不变。
+// 返回空时（晨窗真缺口——首个时段 07:00 起、无跨午夜段覆盖当前时刻；
+// 06:00-07:00 硬屏蔽已随 3ad04bd 移除），若 replanHint 是【社交回应】或
+// 【对话结束】，回退到当天首个时段（idx=0）作 goal 上下文——社交回应与
+// 守约执行不依赖时段（约定的事要立即去做），不该因无匹配时段而静默阻塞；
+// 计划为空（手动模式/冷启动）时用中性 goal。2026-10-16 实测：06:50
+// speak_to 完成后 worker refill 因无匹配时段静默跳过，守约 hint 已注入
+// 却被挡 8 秒（直到 game_time 过 07:00 的下一次感知）。其他 hint（威胁/
+// 强制打断/普通 refill）无匹配时段时保持跳过不变。
 func resolveReplanGoal(plan, tod, replanHint string) (goal, slot string, idx int) {
 	goal, slot, idx = selectCurrentGoal(plan, tod)
-	if goal != "" || !hintExemptsDawnWindow(replanHint) {
+	if goal != "" || !hintWarrantsSlotFallback(replanHint) {
 		return goal, slot, idx
 	}
 	if items := parseFormattedPlan(plan); len(items) > 0 {
@@ -947,11 +948,11 @@ func resolveReplanGoal(plan, tod, replanHint string) (goal, slot string, idx int
 	return "回应对方的社交邀请", "", -1
 }
 
-// hintExemptsDawnWindow reports whether replanHint carries a social/
-// follow-through directive that must run regardless of the 06:00-07:00
-// planning window: 【社交回应】(conversation reply) or 【对话结束】
-// (post-conversation agreement follow-through).
-func hintExemptsDawnWindow(replanHint string) bool {
+// hintWarrantsSlotFallback reports whether replanHint carries a social/
+// follow-through directive that justifies falling back to the day's first
+// slot when no slot matches the current time: 【社交回应】(conversation
+// reply) or 【对话结束】(post-conversation agreement follow-through).
+func hintWarrantsSlotFallback(replanHint string) bool {
 	return strings.HasPrefix(replanHint, "【社交回应】") ||
 		strings.HasPrefix(replanHint, "【对话结束】")
 }

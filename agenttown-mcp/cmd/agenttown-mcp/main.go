@@ -1501,10 +1501,10 @@ func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
 	ws contract.Transport, kb *worldkb.KB, profiles map[string]*profile.Profile, logger *slog.Logger) bool {
 
 	// 1. 取当前时段 goal（先读快照，再原子守卫检查+清队列）。
-	// resolveReplanGoal（非裸 selectCurrentGoal）：06:00-07:00 规划窗口内，
-	// 带【社交回应】/【对话结束】（守约）hint 的 refill 回退首个时段 goal
-	// 放行——守约是即时行动（2026-10-16 实测：06:50 speak_to 完成后
-	// refill 命中屏蔽静默阻塞 8 秒，守约 hint 被窗口挡住）。
+	// resolveReplanGoal（非裸 selectCurrentGoal）：无匹配时段（晨窗真缺口）
+	// 时，带【社交回应】/【对话结束】（守约）hint 的 refill 回退首个时段
+	// goal 放行——守约是即时行动（2026-10-16 实测：06:50 speak_to 完成后
+	// refill 因无匹配时段静默阻塞 8 秒，守约 hint 被挡到下一次感知）。
 	plan, _, _ := a.as.SnapshotSchedule()
 	tod := a.as.LatestTimeOfDay()
 	goal, slot, idx := resolveReplanGoal(plan, tod, a.as.ReplanHint())
