@@ -180,27 +180,33 @@ func generateTacticalPlan(
 	// P3-9 修复 A：持续情境注入【当前处境】段（combat_exit/TTL 解除前
 	// 每轮可见——防"威胁解除了"幻觉）。
 	situations := formatActiveSituations(ac.as.Snapshot().ActiveSituations, ac.as.LatestGameTimeSec())
+	// 对话上下文（【社交回应】场景消费）：完整 transcript + 轮次，超上限
+	// 置 capped——渲染层追加硬收尾指令。无进行中会话为空串，非社交场景
+	// 不消费，零污染。
+	conversation, conversationCapped := ac.conversationContextForPrompt(agentID, kb)
 	headerPlan := ac.as.TacticalHeaderPlan()
 	compact := dailyPlan != "" && headerPlan == dailyPlan
 	promptText := prompt.BuildTactical(prompt.TacticalInput{
-		Goal:          goal,
-		Zone:          zone,
-		TimeOfDay:     timeOfDay,
-		Slot:          slot,
-		DailyPlan:     dailyPlan,
-		Compact:       compact,
-		Physical:      physical,
-		KB:            kb,
-		Profiles:      profiles,
-		Hint:          hint,
-		Memories:      memories,
-		Relationships: relationships,
-		Events:        prompt.FormatWorldEventList(worldEvents),
-		Situations:    situations,
-		AgentID:       agentID,
-		ObjectStatus:  objectStatus,
-		NearbyObjects: nearbyObjects,
-		VisibleAgents: visibleAgents,
+		Goal:               goal,
+		Zone:               zone,
+		TimeOfDay:          timeOfDay,
+		Slot:               slot,
+		DailyPlan:          dailyPlan,
+		Compact:            compact,
+		Physical:           physical,
+		KB:                 kb,
+		Profiles:           profiles,
+		Hint:               hint,
+		Memories:           memories,
+		Relationships:      relationships,
+		Events:             prompt.FormatWorldEventList(worldEvents),
+		Situations:         situations,
+		Conversation:       conversation,
+		ConversationCapped: conversationCapped,
+		AgentID:            agentID,
+		ObjectStatus:       objectStatus,
+		NearbyObjects:      nearbyObjects,
+		VisibleAgents:      visibleAgents,
 	})
 	logger.Info("[MCP→LLM/TACTICAL-PROMPT]",
 		"agent_id", agentID, "goal", goal, "game_time", timeOfDay, "compact", compact, "text", promptText,

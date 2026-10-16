@@ -58,7 +58,19 @@ type TacticalInput struct {
 	// actually resolved — the LLM must not declare it over on its own.
 	// Empty = skip.
 	Situations string
-	AgentID    string
+	// Conversation is the in-progress conversation transcript block (peer +
+	// turns + round count), rendered from the agent-side session state
+	// (recordConversationTurn: own utterances via speak_to dispatch, peer
+	// utterances via speech_heard). Consumed only by the 【社交回应】 branch
+	// of tacticalHintLine so the LLM can judge where the dialogue stands
+	// instead of seeing only the latest utterance; empty = omit.
+	Conversation string
+	// ConversationCapped marks the conversation having reached the
+	// turn cap (caller-side maxConversationTurns) — the 【社交回应】 branch
+	// appends a hard wrap-up directive (one farewell + next action, no new
+	// topics) so a conversation never loops forever regardless of sampling.
+	ConversationCapped bool
+	AgentID            string
 	// ObjectStatus is UE5's per-category smart object availability aggregate
 	// (cross-zone). Injected into the tactical prompt as 【物体实时占用】 so
 	// the LLM can avoid planning actions targeting occupied objects. nil =

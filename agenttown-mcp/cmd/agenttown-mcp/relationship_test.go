@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"testing"
@@ -464,5 +465,97 @@ func TestParseAffectionDelta(t *testing.T) {
 	}
 	if _, err := parseAffectionDelta(`not-json`); err == nil {
 		t.Fatal("parse invalid should error")
+	}
+}
+
+// ─── conversationContextForPrompt ─────────────────────────────
+
+// convKB 构建带索引的测试 KB（NewKB 会 buildIndex——struct 字面量直接
+// 构造不建索引，GetAgent 查不到）。
+func convKB() *worldkb.KB {
+	return worldkb.NewKB(nil, nil, []worldkb.Agent{
+		{ID: "H-01", DisplayName: "老陈"},
+		{ID: "H-02", DisplayName: "老王"},
+		{ID: "H-03", DisplayName: "老李"},
+	})
+}
+
+// TestConversationContextForPrompt_NoSession verifies no active conversation
+// yields an empty block and no cap.
+func TestConversationContextForPrompt_NoSession(t *testing.T) {
+	ac, _ := newAgentContext(context.Background())
+	if ctx, capped := ac.conversationContextForPrompt("H-01", convKB()); ctx != "" || capped {
+		t.Errorf("no session = (%q, %v), want empty/uncapped", ctx, capped)
+	}
+}
+
+// TestConversationContextForPrompt_Transcript verifies the block renders the
+// peer header with round count, own turns as "你", peer turns by KB display
+// name, and reports uncapped below the turn cap.
+func TestConversationContextForPrompt_Transcript(t *testing.T) {
+	ac, _ := newAgentContext(context.Background())
+	// H-02（老王）视角的会话：对方的话由 speech_heard 记录（speaker=peer），
+	// 自己的话由 speak_to 下发记录（speaker=self, peer=target）。
+	ac.recordConversationTurn("H-01", "H-01", "老王，一起去晨跑？", 100)
+	ac.recordConversationTurn("H-02", "H-01", "行啊，正好活动活动。", 200)
+	ac.recordConversationTurn("H-01", "H-01", "那走起？", 300)
+
+	ctx, capped := ac.conversationContextForPrompt("H-02", convKB())
+	if capped {
+		t.Errorf("3 turns must not be capped")
+	}
+	for _, want := range []string{
+		"【对话记录】（与 老陈（H-01）的当前对话，已 3 轮）",
+		"老陈：老王，一起去晨跑？",
+		"你：行啊，正好活动活动。",
+		"老陈：那走起？",
+	} {
+		if !strings.Contains(ctx, want) {
+			t.Errorf("missing %q in:\n%s", want, ctx)
+		}
+	}
+}
+
+// TestConversationContextForPrompt_CappedAtLimit verifies the cap fires at
+// maxConversationTurns (6 utterances = 3 full round-trips).
+func TestConversationContextForPrompt_CappedAtLimit(t *testing.T) {
+	ac, _ := newAgentContext(context.Background())
+	for i := 0; i < maxConversationTurns; i++ {
+		speaker := "H-01"
+		if i%2 == 1 {
+			speaker = "H-02"
+		}
+		ac.recordConversationTurn(speaker, "H-01", fmt.Sprintf("第 %d 句", i+1), float64(100+i))
+	}
+	if _, capped := ac.conversationContextForPrompt("H-02", convKB()); !capped {
+		t.Errorf("%d turns must be capped", maxConversationTurns)
+	}
+	// 上限前一轮不封顶。
+	ac2, _ := newAgentContext(context.Background())
+	for i := 0; i < maxConversationTurns-1; i++ {
+		speaker := "H-01"
+		if i%2 == 1 {
+			speaker = "H-02"
+		}
+		ac2.recordConversationTurn(speaker, "H-01", fmt.Sprintf("第 %d 句", i+1), float64(100+i))
+	}
+	if _, capped := ac2.conversationContextForPrompt("H-02", convKB()); capped {
+		t.Errorf("%d turns must not be capped", maxConversationTurns-1)
+	}
+}
+
+// TestConversationContextForPrompt_PeerChangeResets mirrors
+// recordConversationTurn's session semantics: switching peers drops the old
+// transcript (abandoned conversation, not evaluated).
+func TestConversationContextForPrompt_PeerChangeResets(t *testing.T) {
+	ac, _ := newAgentContext(context.Background())
+	ac.recordConversationTurn("H-02", "H-02", "老王，一起去晨跑？", 100)
+	ac.recordConversationTurn("H-03", "H-03", "老李，装配台那边见？", 200)
+	ctx, _ := ac.conversationContextForPrompt("H-01", convKB())
+	if strings.Contains(ctx, "一起去晨跑") {
+		t.Errorf("old peer transcript must be dropped on peer change:\n%s", ctx)
+	}
+	if !strings.Contains(ctx, "老李，装配台那边见？") {
+		t.Errorf("new peer transcript missing:\n%s", ctx)
 	}
 }

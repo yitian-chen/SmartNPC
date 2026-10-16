@@ -397,3 +397,49 @@ func formatConversationTurns(turns []conversationTurn, kb *worldkb.KB) string {
 	}
 	return strings.TrimSuffix(sb.String(), "\n")
 }
+
+// maxConversationTurns 是单次对话会话的轮次上限（一句 speak_to 计一轮，
+// 双方会话各自全量计数——own turn 由 speak_to 下发记录、对方的话由
+// speech_heard 记录）。超限后【社交回应】hint 追加硬收尾指令：对话的
+// 结束不再依赖 LLM 采样自觉或护栏运气（2026-10-16 前实测：应邀后双方
+// 无限互道"走吧"的 ping-pong，最终靠 severity 阶梯碰巧拦断收场）。
+const maxConversationTurns = 6
+
+// conversationContextForPrompt renders the in-progress conversation context
+// for the tactical prompt's 【社交回应】 hint: full transcript (own turns as
+// "你", peer turns by display name) + round count. capped reports whether the
+// session has reached maxConversationTurns. No active session → ("", false).
+func (a *agentContext) conversationContextForPrompt(agentID string, kb *worldkb.KB) (ctx string, capped bool) {
+	a.coordMu.Lock()
+	peer := a.convPeerID
+	turns := append([]conversationTurn(nil), a.convTurns...)
+	a.coordMu.Unlock()
+	if peer == "" || len(turns) == 0 {
+		return "", false
+	}
+	peerName := peer
+	if kb != nil {
+		if ag := kb.GetAgent(peer); ag != nil && ag.DisplayName != "" {
+			peerName = ag.DisplayName
+		}
+	}
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "【对话记录】（与 %s（%s）的当前对话，已 %d 轮）\n", peerName, peer, len(turns))
+	// 轮次有上限（超限即收尾），全量注入无负担；防御性截最近 12 条。
+	start := 0
+	if len(turns) > 12 {
+		start = len(turns) - 12
+	}
+	for _, t := range turns[start:] {
+		speaker := t.speakerID
+		if t.speakerID == agentID {
+			speaker = "你"
+		} else if kb != nil {
+			if ag := kb.GetAgent(t.speakerID); ag != nil && ag.DisplayName != "" {
+				speaker = ag.DisplayName
+			}
+		}
+		fmt.Fprintf(&sb, "%s：%s\n", speaker, t.content)
+	}
+	return strings.TrimSuffix(sb.String(), "\n"), len(turns) >= maxConversationTurns
+}

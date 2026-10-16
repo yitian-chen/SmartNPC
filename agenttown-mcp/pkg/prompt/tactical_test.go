@@ -483,12 +483,13 @@ func TestTacticalHintLine_SituationResolvedPrefix(t *testing.T) {
 }
 
 // TestTacticalHintLine_SocialResponsePrefix verifies the 【社交回应】
-// hint renders as 【社交回应请求】 with reply-via-speak_to guidance and
+// hint renders as 【社交回应请求】 with reply-via-speak_to guidance,
+// conversation-ending conditions (the LLM may stop replying once the
+// dialogue's purpose is served — no forced ping-pong), and
 // invitation-decision in BOTH directions: the receiver judges invitations
 // (accept→reply+join, decline→reply+resume), and a reply to one's own
-// invitation drives the inviter's follow-up (acceptance→join, refusal→
-// resume). The accept branch is explicitly exempt from rule 10's
-// speak_to-only shape.
+// invitation drives the inviter's follow-up. The accept branch is
+// explicitly exempt from rule 10's speak_to-only shape.
 func TestTacticalHintLine_SocialResponsePrefix(t *testing.T) {
 	in := TacticalInput{Hint: "【社交回应】玩家互动：玩家 player_1 向你发起交互（greet）", AgentID: "H-01"}
 	out := BuildTactical(in)
@@ -496,8 +497,12 @@ func TestTacticalHintLine_SocialResponsePrefix(t *testing.T) {
 		t.Fatalf("missing social-response header:\n%s", out)
 	}
 	for _, want := range []string{
-		"请用 speak_to 回应对方（target_agent_id 填对方 id）",
-		"不要只输出独白 speak",
+		"回话用 speak_to 向对方说（target_agent_id 填对方 id",
+		"不要用独白 speak 代替",
+		"也可以不再回话，直接收尾",
+		"对话结束条件",
+		"目的已达成",
+		"对方明显在收尾",
 		"结合你当前时段的安排、对对方的好感度",
 		"接受则礼貌应下并调整本轮动作加入对方邀请的活动",
 		"不受规则 10\"只输出一条 speak_to\"的限制",
@@ -508,8 +513,74 @@ func TestTacticalHintLine_SocialResponsePrefix(t *testing.T) {
 			t.Fatalf("missing social-response guidance %q:\n%s", want, out)
 		}
 	}
+	// 强制回话的旧文案（ping-pong 推手）不得残留。
+	if strings.Contains(out, "让对话有来有回") {
+		t.Fatalf("forced-reply phrasing must be gone:\n%s", out)
+	}
 	if strings.Contains(out, "紧急事件") {
 		t.Fatalf("social must NOT get emergency treatment:\n%s", out)
+	}
+}
+
+// TestTacticalHintLine_SocialConversationContext verifies the 【社交回应】
+// branch renders the conversation transcript block (injected by the caller
+// from the agent-side session state) ahead of the guidance — the LLM sees
+// the full dialogue, not just the latest utterance — and that the turn-cap
+// directive only appears when ConversationCapped is set.
+func TestTacticalHintLine_SocialConversationContext(t *testing.T) {
+	in := TacticalInput{
+		Hint: "【社交回应】社交信号：老陈（H-01）对你说：那走起？（主体 H-02，客观严重度 5）",
+		Conversation: "【对话记录】（与 老陈（H-01）的当前对话，已 3 轮）\n" +
+			"老陈：老王，一起去晨跑？\n你：行啊\n老陈：那走起？",
+		AgentID: "H-02",
+	}
+	out := BuildTactical(in)
+	if !strings.Contains(out, "【对话记录】（与 老陈（H-01）的当前对话，已 3 轮）") {
+		t.Fatalf("missing conversation transcript block:\n%s", out)
+	}
+	if !strings.Contains(out, "老陈：老王，一起去晨跑？\n你：行啊\n老陈：那走起？") {
+		t.Fatalf("missing transcript turns:\n%s", out)
+	}
+	// 记录块在指引之前（先读记录再判断）。
+	convIdx := strings.Index(out, "【对话记录】")
+	guideIdx := strings.Index(out, "请先读上方对话记录")
+	if convIdx < 0 || guideIdx < 0 || convIdx > guideIdx {
+		t.Fatalf("transcript must precede the guidance (conv=%d guide=%d):\n%s", convIdx, guideIdx, out)
+	}
+	// 未超限不得出现硬收尾指令。
+	if strings.Contains(out, "对话轮次已达上限") {
+		t.Fatalf("cap directive must not render below the cap:\n%s", out)
+	}
+	// Conversation 只被【社交回应】分支消费：非社交 hint 不得渲染记录块。
+	nonSocial := BuildTactical(TacticalInput{
+		Hint:         "【强制打断】玩家互动：被玩家瞄准",
+		Conversation: "【对话记录】（不应出现）",
+		AgentID:      "H-02",
+	})
+	if strings.Contains(nonSocial, "【对话记录】") {
+		t.Fatalf("non-social hint must not render the conversation block:\n%s", nonSocial)
+	}
+}
+
+// TestTacticalHintLine_SocialConversationCapped verifies the hard wrap-up
+// directive renders when ConversationCapped is set: one farewell + next
+// action, no new topics or re-invitations.
+func TestTacticalHintLine_SocialConversationCapped(t *testing.T) {
+	in := TacticalInput{
+		Hint:               "【社交回应】社交信号：老陈（H-01）对你说：那就走吧？",
+		Conversation:       "【对话记录】（与 老陈（H-01）的当前对话，已 6 轮）",
+		ConversationCapped: true,
+		AgentID:            "H-02",
+	}
+	out := BuildTactical(in)
+	for _, want := range []string{
+		"【对话轮次已达上限】",
+		"本轮必须收尾",
+		"禁止再开启新话题或再次邀请",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing cap directive %q:\n%s", want, out)
+		}
 	}
 }
 
