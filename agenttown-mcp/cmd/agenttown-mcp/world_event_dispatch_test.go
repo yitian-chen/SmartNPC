@@ -577,3 +577,54 @@ func TestNoSynthesisForTimeToStopAndUntracked(t *testing.T) {
 		t.Fatalf("genuine failed must still produce detail for synthesis")
 	}
 }
+
+// TestReleaseFarewellSpeaker_OnDelivery verifies the ends_conversation
+// release: dispatching a speech_heard to the addressee stops the SPEAKER's
+// in-flight farewell speak_to (delivery confirmed = its mission complete),
+// clears in-flight tracking, and wakes the speaker's worker — skipping the
+// UE no_reply window. Negative: a speak_to without the flag, or a non-speak_to
+// in-flight action, is left alone.
+func TestReleaseFarewellSpeaker_OnDelivery(t *testing.T) {
+	rt, ft, sp := newWorldEventTestRuntime(t)
+	seedPerception(t, sp)
+	// 注册接收方 H-02（fixture 默认只注册 H-01——说话人）。
+	recv, _ := newAgentContext(context.Background())
+	rt.agentsMu.Lock()
+	rt.agents["H-02"] = recv
+	rt.agentsMu.Unlock()
+
+	mkParams := func(ends bool) map[string]any {
+		p := map[string]any{"target_agent_id": "H-02", "content": "回头见，跑完各忙各的。", "interrupt": true}
+		if ends {
+			p["ends_conversation"] = true
+		}
+		return p
+	}
+
+	// 正例：带 ends_conversation 的在途 speak_to → speech_heard 送达即 stop。
+	sp.as.RecordActionStarted("act-fw1", "SpeakTo", mkParams(true), agentstate.SourceTactical, "")
+	dispatchTestEvent(t, rt, "H-02", replySpeechTestEvent("evt_fw1", "H-01"))
+	stops := stoppedActions(ft)
+	if len(stops) != 1 || stops[0] != "act-fw1" {
+		t.Fatalf("farewell speak_to must be stopped on delivery, got %v", stops)
+	}
+	if sp.as.CurrentActionID() != "" {
+		t.Fatalf("speaker in-flight must be cleared, got %q", sp.as.CurrentActionID())
+	}
+
+	// 反例 1：不带标记的 speak_to（普通对话轮）→ 不 stop（要等对方回话打断）。
+	sp.as.RecordActionStarted("act-fw2", "SpeakTo", mkParams(false), agentstate.SourceTactical, "")
+	dispatchTestEvent(t, rt, "H-02", replySpeechTestEvent("evt_fw2", "H-01"))
+	if stops := stoppedActions(ft); len(stops) != 1 {
+		t.Fatalf("unflagged speak_to must NOT be stopped, got %v", stops)
+	}
+
+	// 反例 2：非 speak_to 在途动作（即使带同名参数）→ 不 stop。
+	sp.as.ClearInFlightKeepQueue()
+	sp.as.RecordActionStarted("act-fw3", "InteractSmartObject", map[string]any{
+		"semantic_group": "treadmill", "ends_conversation": true}, agentstate.SourceTactical, "")
+	dispatchTestEvent(t, rt, "H-02", replySpeechTestEvent("evt_fw3", "H-01"))
+	if stops := stoppedActions(ft); len(stops) != 1 {
+		t.Fatalf("non-speak_to in-flight must NOT be stopped, got %v", stops)
+	}
+}

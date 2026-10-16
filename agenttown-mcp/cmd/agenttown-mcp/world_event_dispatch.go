@@ -126,6 +126,14 @@ func (rt *Runtime) handleWorldEvent(agentID string, ev protocol.WorldEventPayloa
 		var d protocol.SpeechHeardData
 		if err := json.Unmarshal(ev.Data, &d); err == nil && d.SpeakerID != "" {
 			ac.recordConversationTurn(d.SpeakerID, d.SpeakerID, d.Content, ac.as.LatestGameTimeSec())
+			// 对话收尾释放（ends_conversation，2026-10-16）：本事件到达即
+			// 话语送达的铁证——说话人若带着 ends_conversation 标记的
+			// speak_to 仍在途，立即结束它，不再等 UE 的 no_reply 窗（~10s
+			// 纯死时间）。说话人队列里跟在告别句后的动作（如约定活动）
+			// 随即 pop。见 releaseFarewellSpeaker。
+			if d.SpeakerID != agentID {
+				rt.releaseFarewellSpeaker(d.SpeakerID)
+			}
 		}
 	}
 
@@ -282,6 +290,61 @@ func speechHeardSpeaker(ev protocol.WorldEventPayload) string {
 		return ""
 	}
 	return d.SpeakerID
+}
+
+// releaseFarewellSpeaker ends the speaker's in-flight farewell speak_to now
+// that its utterance has been delivered (the speech_heard that triggered this
+// call IS the delivery confirmation — MCP relays every message, so the
+// receiver's speech_heard is visible the moment UE dispatches it). The
+// no_reply window (~10s real) is pure dead time for a farewell: the utterance
+// went out ~1.5-2s after dispatch, and the speaker's queue carries the
+// follow-up action right behind the farewell (allowed for ends_conversation
+// speak_tos) — ending the wait lets it pop immediately, skipping both the
+// window AND the post-completion refill LLM call.
+//
+// Bookkeeping mirrors the force-interrupt pattern (stop first, then preface +
+// clear on success): the late action_completed{interrupted} is matched against
+// the stash (action_history preserved) and the preface flag suppresses
+// action_failed synthesis. A racing natural completion yields
+// STOP_ID_MISMATCH — harmless. The ends_conversation flag is MCP-consumed
+// only (stripped before forwarding to UE).
+func (rt *Runtime) releaseFarewellSpeaker(speakerID string) {
+	sp := rt.lookupAgent(speakerID)
+	if sp == nil {
+		return
+	}
+	snap := sp.as.Snapshot()
+	if snap.CurrentActionID == "" {
+		return
+	}
+	// speak_to 签名与 recordActionStarted 的 own-turn 挂钩同款口径：
+	// target_agent_id 存在（cmd 名是 registry 动态的 "SpeakTo"，params
+	// 签名更稳）。非 speak_to 动作即使误带同名参数也不放行。
+	if _, ok := snap.CurrentActionParams["target_agent_id"].(string); !ok {
+		return
+	}
+	if b, _ := snap.CurrentActionParams["ends_conversation"].(bool); !b {
+		return
+	}
+	if err := rt.ws.SendStopAction(speakerID, snap.CurrentActionID); err != nil {
+		rt.logger.Warn("[对话层] 告别释放 stop 发送失败（等待将延续到 no_reply 窗自然结束）",
+			"agent_id", speakerID, "action_id", snap.CurrentActionID, "err", err)
+		return
+	}
+	// 告别语已送达 = 该 speak_to 的使命完成：按"正常结束"记账（区别于
+	// 被打断），preface 使迟到的 interrupted completion 不合成事件。
+	sp.recordScheduledEnd()
+	sp.as.ClearInFlightKeepQueue()
+	// 取消该 action 的超时 timer，避免迟到的 timer 误 stop 后续动作。
+	sp.coordMu.Lock()
+	if timer, ok := sp.pendingActionTimeouts[snap.CurrentActionID]; ok {
+		timer.Stop()
+		delete(sp.pendingActionTimeouts, snap.CurrentActionID)
+	}
+	sp.coordMu.Unlock()
+	sp.signal()
+	rt.logger.Info("[对话层] 告别语已送达，提前结束等待（跳过 no_reply 窗）",
+		"agent_id", speakerID, "action_id", snap.CurrentActionID)
 }
 
 // forceEventHint formats the replan hint for a force event. The 【强制打断】

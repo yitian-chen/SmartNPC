@@ -511,6 +511,8 @@ func TestTacticalHintLine_SocialResponsePrefix(t *testing.T) {
 		"婉拒则礼貌回应后继续当前时段的原有工作",
 		"若这是对你此前邀请或搭话的回应",
 		"对方应下则一句确认/告别收尾",
+		"给该 speak_to 填 ends_conversation: true",
+		"并可直接在其后安排后续动作",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("missing social-response guidance %q:\n%s", want, out)
@@ -596,6 +598,7 @@ func TestTacticalRules_InviteGoalDecomposition(t *testing.T) {
 		"邀请XX一起做XX",
 		"同样只输出一条 speak_to",
 		"约定的事项在对话结束后由系统提示驱动执行",
+		"告别/收尾句给 speak_to 填 ends_conversation: true",
 	} {
 		if !strings.Contains(tacticalCoreRules, want) {
 			t.Errorf("tacticalCoreRules missing %q:\n%s", want, tacticalCoreRules)

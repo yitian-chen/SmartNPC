@@ -2080,3 +2080,67 @@ func TestResolveReplanGoal_EndedConversationExemptsDawnWindow(t *testing.T) {
 		t.Errorf("auto hint must keep the dawn block, got goal=%q slot=%q idx=%d", goal, slot, idx)
 	}
 }
+
+// TestCapabilityParamsSchema_SpeakToEndsConversation 验证 speak_to 的
+// schema 追加可选 ends_conversation（告别/收尾标记，MCP 侧控制字段）。
+func TestCapabilityParamsSchema_SpeakToEndsConversation(t *testing.T) {
+	raw := capabilityParamsSchema(nil, "speak_to")
+	var schema struct {
+		Properties map[string]struct {
+			Type        string `json:"type"`
+			Description string `json:"description"`
+		} `json:"properties"`
+		Required []string `json:"required"`
+	}
+	if err := json.Unmarshal(raw, &schema); err != nil {
+		t.Fatalf("unmarshal schema: %v", err)
+	}
+	ec, ok := schema.Properties["ends_conversation"]
+	if !ok || ec.Type != "boolean" {
+		t.Fatalf("speak_to schema missing optional boolean ends_conversation: %s", raw)
+	}
+	if !strings.Contains(ec.Description, "告别") || !strings.Contains(ec.Description, "立即结束") {
+		t.Errorf("ends_conversation description must explain the farewell semantics: %s", ec.Description)
+	}
+	for _, r := range schema.Required {
+		if r == "ends_conversation" {
+			t.Errorf("ends_conversation must be optional, found in required: %v", schema.Required)
+		}
+	}
+	// 非 speak_to 工具不追加。
+	raw2 := capabilityParamsSchema(nil, "InteractSmartObject")
+	if strings.Contains(string(raw2), "ends_conversation") {
+		t.Errorf("non-speak_to tool must not carry ends_conversation: %s", raw2)
+	}
+}
+
+// TestMapTacticalAction_StripsEndsConversation 验证 ends_conversation 与
+// duration 一样是 MCP 侧控制字段，不透传 UE。
+func TestMapTacticalAction_StripsEndsConversation(t *testing.T) {
+	// speak_to 是 registry 动态注册的 cmd（UE push），registry=nil 时走不通
+	// passthrough——构造带 SpeakTo 的 registry。
+	reg := NewCapabilityRegistry(nil)
+	reg.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
+		{Cmd: "SpeakTo", Kind: "atomic"},
+	})
+	pa := plannedAction{Action: "speak_to", Params: map[string]any{
+		"target_agent_id": "H-02", "content": "回头见。", "interrupt": true,
+		"ends_conversation": true, "duration": 3600,
+	}}
+	cmd, params, err := mapTacticalAction(pa, "H-01", loadTestKB(t), reg)
+	if err != nil {
+		t.Fatalf("mapTacticalAction: %v", err)
+	}
+	if cmd != "SpeakTo" {
+		t.Fatalf("cmd=%q, want SpeakTo (registry passthrough)", cmd)
+	}
+	if _, ok := params["ends_conversation"]; ok {
+		t.Errorf("ends_conversation must be stripped before forwarding to UE: %v", params)
+	}
+	if _, ok := params["duration"]; ok {
+		t.Errorf("duration must be stripped before forwarding to UE: %v", params)
+	}
+	if params["target_agent_id"] != "H-02" || params["content"] != "回头见。" {
+		t.Errorf("speech params must pass through: %v", params)
+	}
+}
