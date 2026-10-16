@@ -899,17 +899,17 @@ func toFloat(v any) float64 {
 // 返回 goal 文本、所在时段 "HH:MM-HH:MM"、item 索引。
 // 无匹配时段（时间在所有时段之前/之后或计划为空）返回 ("", "", -1)。
 // 调用方用返回的 slot 与自身 currentSlot 比较来决定是否重复分解。
-//
-// 历史：曾有 06:00-07:00（战略规划窗口）硬屏蔽——防凌晨反复分解夜间
-// 睡眠段；但 P3-8 事件化 + time_to_stop 预算后该循环已不存在，而屏蔽
-// 本身拦住了晨窗内的一切 replan（实测：社交回应"无当前时段 goal"失败、
-// 威胁 replan 同款失败），2026-10-16 应用户要求移除。晨窗行为回归常规
-// 匹配：旧计划/新计划的跨午夜末段在 07:00 前可正常命中（NPC 睡到时段
-// 自然结束），matchPlanSlot 的 dayStartMinute 守卫继续保证 07:00 后今晚
-// 的跨午夜段不命中；真缺口（首个时段 07:00 起、无跨午夜段覆盖 06:xx）
-// 由 resolveReplanGoal 的社交回退兜住。
 func selectCurrentGoal(dailyPlan, timeOfDay string) (goal, slot string, index int) {
 	if dailyPlan == "" {
+		return "", "", -1
+	}
+	// 06:00-07:00 是战略规划时间（dayStartMinute=07:00），屏蔽战术层分解。
+	// 避免 LLM 生成的夜间 slot（如 "22:00-07:00"）在 06:00-07:00 仍被
+	// matchPlanSlot 的跨午夜分支命中（cur < end），导致战术层反复分解
+	// 夜间睡眠任务。活动从 07:00 开始，此窗口内 NPC 保持空闲——若在途
+	// composite 仍执行，由 advanceSlotIfNeeded 在 slot 过期时打断。
+	cur := prompt.ParsePlanMinute(timeOfDay)
+	if cur >= 0 && cur >= dayStartMinute-60 && cur < dayStartMinute {
 		return "", "", -1
 	}
 	items := parseFormattedPlan(dailyPlan)
@@ -928,21 +928,30 @@ func selectCurrentGoal(dailyPlan, timeOfDay string) (goal, slot string, index in
 	return "", "", -1
 }
 
-// resolveReplanGoal 解析 replan 的当前时段 goal。selectCurrentGoal 返回空时
-// （时段未匹配——如晨窗真缺口：首个时段 07:00 起、无跨午夜段覆盖 06:xx
-// ——或计划为空），若 replanHint 是【社交回应】，回退到当天首个时段
-// （idx=0）作 goal 上下文——社交回应不依赖时段，NPC 收到对方搭话/邀请
-// 应当还能回应；计划为空（手动模式/冷启动）时用中性 goal。具体回应方式
-// 仍由【社交回应】hint 引导。2026-10-16 实测：06:33 注入邀请命中旧
-// 06:00-07:00 屏蔽（现已移除），H-02 的回应 replan 直接"无当前时段
-// goal"失败，H-01 收场 no_reply。
+// resolveReplanGoal 解析 replan/refill 的当前时段 goal。selectCurrentGoal
+// 返回空时（06:00-07:00 战略规划窗口屏蔽 / 时段未匹配 / 计划为空），若
+// replanHint 是【社交回应】或【对话结束】，回退到当天首个时段（idx=0）作
+// goal 上下文——社交回应与守约执行不依赖时段（约定的事要立即去做），不该
+// 被规划窗口阻断；计划为空（手动模式/冷启动）时用中性 goal。2026-10-16
+// 实测：06:50 speak_to 完成后 worker refill 命中屏蔽静默跳过，守约 hint
+// 已注入却被窗口挡住 8 秒（直到 game_time 过 07:00 的下一次感知）。
+// 非社交/守约 hint（威胁/强制打断/普通 refill）在 06:00-07:00 保持屏蔽不变。
 func resolveReplanGoal(plan, tod, replanHint string) (goal, slot string, idx int) {
 	goal, slot, idx = selectCurrentGoal(plan, tod)
-	if goal != "" || !strings.HasPrefix(replanHint, "【社交回应】") {
+	if goal != "" || !hintExemptsDawnWindow(replanHint) {
 		return goal, slot, idx
 	}
 	if items := parseFormattedPlan(plan); len(items) > 0 {
 		return items[0].Goal, items[0].Time, 0
 	}
 	return "回应对方的社交邀请", "", -1
+}
+
+// hintExemptsDawnWindow reports whether replanHint carries a social/
+// follow-through directive that must run regardless of the 06:00-07:00
+// planning window: 【社交回应】(conversation reply) or 【对话结束】
+// (post-conversation agreement follow-through).
+func hintExemptsDawnWindow(replanHint string) bool {
+	return strings.HasPrefix(replanHint, "【社交回应】") ||
+		strings.HasPrefix(replanHint, "【对话结束】")
 }

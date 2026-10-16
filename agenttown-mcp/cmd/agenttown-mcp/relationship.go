@@ -236,8 +236,12 @@ type conversationTurn struct {
 
 // conversationIdleTimeoutGameSec bounds how long a conversation may sit idle
 // (no turn) before the worker closes it and triggers the affection evaluation.
-// 5 游戏分钟：对话冷掉即视为结束，既给多轮往返留足时间、也不无限挂起。
-const conversationIdleTimeoutGameSec = 5 * 60.0
+// 20 游戏分钟：必须覆盖一轮完整回话往返（UE 的 no_reply 窗 ~10 现实秒 ≈
+// 15 游戏分钟 @time_scale=90 + 对方回应 LLM 1-6s）。旧值 5 游戏分钟在
+// 90 倍速下只有 3.3 现实秒——比 venus 回应往返还短，会话在对方回话到达
+// 前就被关掉（2026-10-16 实测：H-01 的会话在应答到达前 0.12s 关闭，
+// turns 重置导致确定性打断失效、应答被判不紧急留队、邀请方永不确认）。
+const conversationIdleTimeoutGameSec = 20 * 60.0
 
 // recordConversationTurn appends a turn to the agent's in-progress conversation
 // session keyed by peerID. A peer change clears the old session (an abandoned

@@ -900,8 +900,7 @@ func runPerceptionWorker(
 		}
 
 		// 多日循环：检测 day_count 递增（跨日），重新调用战略层生成新一天的 dailyPlan。
-		// 通常在 06:00-07:00 规划窗口内触发（旧 06:00-07:00 战术屏蔽已于
-		// 2026-10-16 移除，此处仅指跨日重规划的惯常触发时机；
+		// 通常在 06:00-07:00 规划窗口内触发（selectCurrentGoal 已屏蔽战术层分解，
 		// NPC 仍在执行夜间睡眠 composite）。仅替换 dailyPlan，不打断在途睡眠——
 		// 让 NPC 睡到睡眠段 time_to_stop 预算到点（P3-8 后 slot 过期只标记
 		// pending，不打断），安全点后走 tacticalRefill 选新计划 slot。手动模式
@@ -1242,8 +1241,8 @@ func (a *agentContext) latestTimeOfDay() string {
 //   - rollover=true：真正的跨日（prev>=0 且 day>prev），调用方应重新调用
 //     generateDailyPlan 并替换 dailyPlan。
 //
-// 重新规划时机通常在 06:00-07:00 规划窗口内（旧 06:00-07:00 战术屏蔽已于
-// 2026-10-16 移除），此时 NPC 通常在执行夜间睡眠 composite。detectDayRollover 仅替换
+// 重新规划时机选在 06:00-07:00 规划窗口内（selectCurrentGoal 已屏蔽战术层
+// 分解），此时 NPC 通常在执行夜间睡眠 composite。detectDayRollover 仅替换
 // dailyPlan，**不打断**在途睡眠——让 NPC 睡到睡眠段 time_to_stop 预算到点
 // （P3-8 后 slot 过期只标记 pending），安全点后走 tacticalRefill 选新计划
 // slot。这样避免了"06:00 强制打断睡眠后 NPC 空等 1 小时"的尴尬。
@@ -1501,10 +1500,14 @@ func snapshotUEErrors() []ueErrorEntry {
 func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
 	ws contract.Transport, kb *worldkb.KB, profiles map[string]*profile.Profile, logger *slog.Logger) bool {
 
-	// 1. 取当前时段 goal（先读快照，再原子守卫检查+清队列）
+	// 1. 取当前时段 goal（先读快照，再原子守卫检查+清队列）。
+	// resolveReplanGoal（非裸 selectCurrentGoal）：06:00-07:00 规划窗口内，
+	// 带【社交回应】/【对话结束】（守约）hint 的 refill 回退首个时段 goal
+	// 放行——守约是即时行动（2026-10-16 实测：06:50 speak_to 完成后
+	// refill 命中屏蔽静默阻塞 8 秒，守约 hint 被窗口挡住）。
 	plan, _, _ := a.as.SnapshotSchedule()
 	tod := a.as.LatestTimeOfDay()
-	goal, slot, idx := selectCurrentGoal(plan, tod)
+	goal, slot, idx := resolveReplanGoal(plan, tod, a.as.ReplanHint())
 	// 修复 C：反应窗口仍 armed（打断以来没有过日程 refill）时，本次 refill
 	// 是"紧急反应刚结束"的衔接点——不发"长动作收尾"自动 hint（反向信号，
 	// 会把 LLM 推回填满时段），情境由 activeSituations 承载。
