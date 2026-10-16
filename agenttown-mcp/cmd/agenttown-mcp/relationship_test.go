@@ -577,6 +577,8 @@ func TestConversationEndedHint(t *testing.T) {
 		"若对话中你们约定了一起做某事",
 		"守约优先于当前时段目标",
 		"不要因为时段切换而弃约",
+		"不算执行",
+		"长动作不可省略",
 		"若你的邀请被婉拒或双方只是寒暄/告别",
 	} {
 		if !strings.Contains(got, want) {

@@ -488,7 +488,8 @@ func conversationEndedHint(agentID, peer string, turns []conversationTurn, kb *w
 		start = len(turns) - 12
 	}
 	sb.WriteString(renderConversationTurnsFor(agentID, turns[start:], kb))
-	sb.WriteString("\n请结合对话内容决定下一步：若对话中你们约定了一起做某事（如一起去跑步机晨跑），立即去执行该约定——守约优先于当前时段目标，不要因为时段切换而弃约；" +
+	sb.WriteString("\n请结合对话内容决定下一步：若对话中你们约定了一起做某事（如一起去跑步机晨跑），立即去执行该约定——守约优先于当前时段目标，不要因为时段切换而弃约。" +
+		"注意：只用一句独白宣告\"我要去了\"不算执行——本轮分解必须包含执行约定的长动作（如 InteractSmartObject 使用约定设施，按规则 7/8 填 duration），可以先一条 speak 表态，但长动作不可省略；" +
 		"若你的邀请被婉拒或双方只是寒暄/告别，回到当前时段目标的原有日程。")
 	return sb.String()
 }

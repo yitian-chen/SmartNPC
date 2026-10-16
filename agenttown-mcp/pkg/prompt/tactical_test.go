@@ -499,8 +499,9 @@ func TestTacticalHintLine_SocialResponsePrefix(t *testing.T) {
 	for _, want := range []string{
 		"回话用 speak_to 向对方说（target_agent_id 填对方 id",
 		"不要用独白 speak 代替",
-		"只输出这一条 speak_to、不要追加其他动作",
-		"对话中约定的事项会在对话结束后由系统提示",
+		"本轮对话回应只需要这一条 speak_to",
+		"此限定只针对对话回应这一轮",
+		"约定的事项会在对话结束后由系统提示",
 		"也可以不再回话，直接收尾",
 		"对话结束条件",
 		"目的已达成",

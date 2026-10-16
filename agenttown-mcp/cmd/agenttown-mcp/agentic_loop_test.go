@@ -22,8 +22,10 @@ type fakeLoopLLM struct {
 	resp         *llmtypes.Response
 	err          error
 	errs         []error
-	streamDeltas []string // SendLoopStreaming 时依次回调 onDelta（模拟 token 到达）
+	streamDeltas []string             // SendLoopStreaming 时依次回调 onDelta（模拟 token 到达）
+	resps        []*llmtypes.Response // 按次响应队列：非空时依次弹出（耗尽回落 resp/err）
 	capturedMsgs []llmtypes.Message
+	allMsgs      [][]llmtypes.Message // 每次调用的 messages 快照（按调用序）
 	capturedTool []venus.Tool
 	capturedTC   string
 	capturedSc   string
@@ -56,6 +58,7 @@ func (f *fakeLoopLLM) SendLoop(_ context.Context, msgs []llmtypes.Message, tools
 	}
 	f.calls.Add(1)
 	f.capturedMsgs = append([]llmtypes.Message(nil), msgs...)
+	f.allMsgs = append(f.allMsgs, append([]llmtypes.Message(nil), msgs...))
 	f.capturedTool = tools
 	f.capturedTC = toolChoice
 	f.capturedSc = schemaName
@@ -65,6 +68,12 @@ func (f *fakeLoopLLM) SendLoop(_ context.Context, msgs []llmtypes.Message, tools
 		e := f.errs[0]
 		f.errs = f.errs[1:]
 		return nil, e
+	}
+	// resps 队列：前 N 次调用依次返回预设响应（模拟空结果后恢复）。
+	if len(f.resps) > 0 {
+		r := f.resps[0]
+		f.resps = f.resps[1:]
+		return r, nil
 	}
 	return f.resp, f.err
 }
@@ -496,5 +505,98 @@ func TestAgenticTurn_FilteredToSpeakOnlyRetries(t *testing.T) {
 	lr := rep.Layers["tactical"]
 	if lr == nil || lr.ErrorDist[llmmetrics.ErrEmptyResult] != 1 {
 		t.Errorf("error_dist should record empty_result=1, got %+v", rep.Layers["tactical"])
+	}
+}
+
+// makeLoopToolCallsResponse 构造带 tool_calls 的战术层响应。
+func makeLoopToolCallsResponse(tcs ...llmtypes.ToolCall) *llmtypes.Response {
+	return &llmtypes.Response{
+		Status:    "completed",
+		ToolCalls: tcs,
+		Output: []llmtypes.Block{{Type: "message", Role: "assistant",
+			Content: []llmtypes.Content{{Type: "output_text", Text: "[]"}}}},
+	}
+}
+
+// TestAgenticTurn_EmptyResultCorrectiveRetry 验证空结果（speak-only）的
+// 纠正性重试：第 1 次重试同体；第 2 次重试起在请求尾部追加纠正指令
+// （瞬态 user 消息，不落历史）。背景：speak_to 单动作化后对话历史的
+// few-shot 把模型持续推向"只输出一条宣告独白"（2026-10-16 复现 6/6
+// speak-only，H-01 连续 6 轮 refill 失败呆站），同体重试救不回来。
+func TestAgenticTurn_EmptyResultCorrectiveRetry(t *testing.T) {
+	speakOnly := makeLoopToolCallsResponse(llmtypes.ToolCall{
+		Function: llmtypes.ToolFunction{Name: "speak", Arguments: `{"content":"说定了就动身。"}`},
+	})
+	valid := makeLoopToolCallsResponse(
+		llmtypes.ToolCall{Function: llmtypes.ToolFunction{Name: "speak", Arguments: `{"content":"走起。"}`}},
+		llmtypes.ToolCall{Function: llmtypes.ToolFunction{Name: "InteractSmartObject",
+			Arguments: `{"duration":1800,"interaction":"run","semantic_group":"treadmill"}`}},
+	)
+	as := agentstate.New()
+	as.SetIdentity("H-01", nil)
+	fake := &fakeLoopLLM{resps: []*llmtypes.Response{speakOnly, speakOnly, valid}}
+	ac := &agentContext{as: as, tacticalHc: fake}
+
+	resp, err := ac.agenticTurn(context.Background(), fake, nil, nil, slog.Default(), "H-01",
+		"tactical", "分解请求", "required", "", nil)
+	if err != nil {
+		t.Fatalf("agenticTurn should succeed after corrective retry: %v", err)
+	}
+	if len(resp.ToolCalls) != 2 {
+		t.Fatalf("final resp tool_calls = %d, want 2", len(resp.ToolCalls))
+	}
+	if got := fake.calls.Load(); got != 3 {
+		t.Fatalf("SendLoop calls = %d, want 3 (2 empty + 1 corrective success)", got)
+	}
+	if len(fake.allMsgs) != 3 {
+		t.Fatalf("captured %d calls, want 3", len(fake.allMsgs))
+	}
+	// 前两次（首发 + 同体重试）不带纠正指令。
+	for i := 0; i < 2; i++ {
+		last := fake.allMsgs[i][len(fake.allMsgs[i])-1]
+		if last.Content == emptyResultCorrection {
+			t.Errorf("call %d must not carry the correction (same-body retry)", i+1)
+		}
+	}
+	// 第三次（纠正性重试）末尾追加纠正指令。
+	last := fake.allMsgs[2][len(fake.allMsgs[2])-1]
+	if last.Role != "user" || last.Content != emptyResultCorrection {
+		t.Errorf("call 3 must append the correction as the last user message, got role=%q content=%.80s",
+			last.Role, last.Content)
+	}
+	// 成功后历史只有 user+assistant 两条——纠正指令是瞬态，不落历史。
+	if hist := as.Conversation(); len(hist) != 2 {
+		t.Errorf("history len = %d, want 2 (correction must not persist)", len(hist))
+	}
+}
+
+// TestAgenticTurn_EmptyResultCorrectiveRetriesExhausted 验证纠正性重试
+// 耗尽后返回错误、历史不变（失败不留半截），且最后两次请求都带纠正指令。
+func TestAgenticTurn_EmptyResultCorrectiveRetriesExhausted(t *testing.T) {
+	speakOnly := makeLoopToolCallsResponse(llmtypes.ToolCall{
+		Function: llmtypes.ToolFunction{Name: "speak", Arguments: `{"content":"宣告。"}`},
+	})
+	as := agentstate.New()
+	as.SetIdentity("H-01", nil)
+	fake := &fakeLoopLLM{resp: speakOnly}
+	ac := &agentContext{as: as, tacticalHc: fake}
+
+	_, err := ac.agenticTurn(context.Background(), fake, nil, nil, slog.Default(), "H-01",
+		"tactical", "分解请求", "required", "", nil)
+	if err == nil {
+		t.Fatal("expected error after corrective retries exhausted")
+	}
+	if got := fake.calls.Load(); got != 1+maxTacticalRetries {
+		t.Errorf("SendLoop calls = %d, want %d", got, 1+maxTacticalRetries)
+	}
+	// 第 2 次重试起（第 3、4 次调用）都带纠正指令。
+	for i := 2; i < len(fake.allMsgs); i++ {
+		last := fake.allMsgs[i][len(fake.allMsgs[i])-1]
+		if last.Content != emptyResultCorrection {
+			t.Errorf("call %d must carry the correction", i+1)
+		}
+	}
+	if hist := as.Conversation(); len(hist) != 0 {
+		t.Errorf("history len = %d, want 0 (failure leaves no half-turns)", len(hist))
 	}
 }

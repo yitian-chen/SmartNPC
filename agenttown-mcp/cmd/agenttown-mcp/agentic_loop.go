@@ -114,11 +114,22 @@ func (a *agentContext) agenticTurn(ctx context.Context, hc llmClient, kb *worldk
 		itls = append(itls, now.Sub(lastTok))
 		lastTok = now
 	}
+	// 纠正性重试载荷（2026-10-16）：空结果（speak-only）第 2 次重试起在
+	// 请求尾部追加纠正指令。同体重试对行为性偏差无效——历史里的单
+	// speak_to few-shot 会把模型持续推向"只输出一条"（实测复现：带对话
+	// 历史的请求 6/6 speak-only，同体重试全部复现，H-01 连续 6 轮 refill
+	// 失败呆站）。纠正指令是瞬态 user 消息：不落历史（成功后落历史的是
+	// userContent 本身），只改当次请求。
+	correction := ""
 	send := func() (*llmtypes.Response, error) {
-		if streaming {
-			return hc.SendLoopStreaming(ctx, messages, tools, toolChoice, schemaName, schema, onDelta, nil)
+		msgs := messages
+		if correction != "" {
+			msgs = append(append([]llmtypes.Message{}, messages...), llmtypes.Message{Role: "user", Content: correction})
 		}
-		return hc.SendLoop(ctx, messages, tools, toolChoice, schemaName, schema)
+		if streaming {
+			return hc.SendLoopStreaming(ctx, msgs, tools, toolChoice, schemaName, schema, onDelta, nil)
+		}
+		return hc.SendLoop(ctx, msgs, tools, toolChoice, schemaName, schema)
 	}
 
 	resp, err := send()
@@ -153,10 +164,18 @@ func (a *agentContext) agenticTurn(ctx context.Context, hc llmClient, kb *worldk
 			}
 		} else if isEmptyTacticalResult(resp, toolChoice, agentID) {
 			// 战术层空结果（tool_choice=required 但 0 tool_calls / 全是 speak）：
-			// 立即重试相同请求体，重采样通常能拿到正常分解。
-			logger.Warn("[agentic-loop] 战术层空结果，重试相同请求体",
-				"agent_id", agentID, "layer", layer, "retry", attempt, "max", maxTacticalRetries,
-				"tool_calls", len(resp.ToolCalls))
+			// 第 1 次重试同体（可能只是采样方差）；第 2 次起纠正性重试——
+			// few-shot 主导的行为性偏差同体重试救不回来。
+			if attempt >= 2 {
+				correction = emptyResultCorrection
+				logger.Warn("[agentic-loop] 战术层空结果，纠正性重试（追加纠正指令）",
+					"agent_id", agentID, "layer", layer, "retry", attempt, "max", maxTacticalRetries,
+					"tool_calls", len(resp.ToolCalls))
+			} else {
+				logger.Warn("[agentic-loop] 战术层空结果，重试相同请求体",
+					"agent_id", agentID, "layer", layer, "retry", attempt, "max", maxTacticalRetries,
+					"tool_calls", len(resp.ToolCalls))
+			}
 		} else {
 			// 成功且非空结果。
 			break
@@ -229,6 +248,15 @@ func (a *agentContext) agenticTurn(ctx context.Context, hc llmClient, kb *worldk
 // conversation 前缀稳定、Venus prefix cache 可复用。真实结果不覆盖它，
 // 而是以 user role 追加到末尾。
 const pendingToolResult = "result=pending"
+
+// emptyResultCorrection 是战术层空结果（speak-only / 无长动作）纠正性
+// 重试的追加指令。同体重试对行为性偏差无效——历史里的单 speak_to
+// few-shot 会把模型持续推向"只输出一条宣告独白"（2026-10-16 实测复现：
+// 带对话历史的请求 6/6 speak-only，模型把"宣告执行"当成"执行"），必须
+// 明确告知上一次输出无效及本次的输出形态要求。
+const emptyResultCorrection = "【系统纠正】上一次分解输出无效：没有包含任何带 duration 的长动作（只返回了 speak 独白或空结果）。" +
+	"宣告意图的独白不等于执行。本次必须按分解规则输出至少一个带 duration 的长动作" +
+	"（InteractSmartObject 设施互动、exercise 原地锻炼或 speak_to，按规则 7/8 填 duration）。"
 
 // rateLimitBackoffBase 是 429 限流重试的退避基础时长（实际退避 = base +
 // [0, 3/4·base) 随机抖动）。包级变量便于测试临时调小加速。
