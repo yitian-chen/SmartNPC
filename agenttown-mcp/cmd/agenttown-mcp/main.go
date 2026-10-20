@@ -367,18 +367,21 @@ func (a *agentContext) recordActionCompletion(completion protocol.ActionComplete
 		go a.maybeUpdateRelationship(completion, res)
 	}
 
-	// 对话终局即时判定（2026-10-20）：定向对话（speak_to）以 no_reply 完成 =
-	// 等待窗内对方没有回话——从本 agent 视角对话已终局。立即关会话 + 注入
-	// 守约 hint + 清社交反应窗口，不等 conversationIdleTimeoutGameSec 的
-	// idle 超时：本完成事件下方马上 signal 唤醒 worker refill，idle 等待期间
-	// 无对话上下文的 refill 会抢跑（实测：应邀方应下后 refill 被 armed
-	// hint 的"对方无回音则回日程"推回车间，守约 hint 晚 6s 注入才到场）。
-	// hint 必须在 signal() 之前落好，woken refill 的 prompt 才带得上守约
-	// 上下文。peer 不匹配（无会话或陈旧会话）时不动，走原 idle-close 兜底。
+	// 对话终局即时判定（2026-10-20）：定向对话（speak_to）以 speech 回执完成
+	// （UE 回 reason="speech:no_reply" = 等待窗内对方没回话；reason=
+	// "speech:replied" = 对方在窗内回了话——两者对称，本句都是说话人视角的
+	// 对话收尾，实测 17:58：replied 不触发即时终局，完成触发的 refill 带
+	// armed hint + 自己的时段目标抢跑，约定被稀释成"继续拉伸"）→ 立即关
+	// 会话 + 注入守约 hint + 清社交反应窗口，不等 conversationIdleTimeoutGameSec
+	// 的 idle 超时：本完成事件下方马上 signal 唤醒 worker refill，idle 等待
+	// 期间无对话上下文的 refill 会抢跑。hint 必须在 signal() 之前落好，
+	// woken refill 的 prompt 才带得上守约上下文。replied 的 transcript 自带
+	// 对方的告别语，守约 hint 的"寒暄/告别则回日程"分支自然接管语义。
+	// peer 不匹配（无会话或陈旧会话）时不动，走原 idle-close 兜底。
 	// speak_to 签名检查用 target_agent_id（与 recordActionStarted 的 own-turn
 	// 挂钩同口径，cmd 名是 registry 动态的）。
 	if res.WasInFlight && completion.Result == protocol.ResultSuccess &&
-		strings.Contains(completion.Reason, "no_reply") {
+		strings.Contains(completion.Reason, "speech:") {
 		if target, _ := res.Params["target_agent_id"].(string); target != "" {
 			if peer, turns := a.closeConversationByPeer(target); peer != "" && len(turns) > 0 {
 				// 社交反应窗口随对话终局一并结束：armed hint 的
@@ -392,8 +395,8 @@ func (a *agentContext) recordActionCompletion(completion protocol.ActionComplete
 				go a.evaluateConversationAffection(context.Background(), agentID, peer, turns, kb, profiles, lg)
 				if h := conversationEndedHint(agentID, peer, turns, kb); h != "" {
 					a.as.SetReplanHint(h)
-					lg.Info("[对话层] no_reply 对话终局，立即注入守约 hint",
-						"agent_id", agentID, "peer", peer, "turns", len(turns))
+					lg.Info("[对话层] speech 回执对话终局，立即注入守约 hint",
+						"agent_id", agentID, "peer", peer, "turns", len(turns), "reason", completion.Reason)
 				}
 			}
 		}
@@ -716,7 +719,11 @@ func (a *agentContext) checkTimeToStop(agentID string, logger *slog.Logger) {
 	}
 	// 队列非空时不消费 hint（BeginTacticalRefill 才消费）；队列空触发 refill
 	// 时注入，允许 LLM 继续本时段工作或安排休息，不再硬性禁止重复。
-	if info.ActionCmd != "" {
+	// 优先级保护（2026-10-20）：本提示是低优先级 advisory——pending hint 是
+	// 结构化高优先级提示（【对话结束】守约 /【战斗结束】/【强制打断】等，
+	// 均以"【"开头）时不得覆盖。实测：守约 hint 注入 6s 后撞上 time_to_stop
+	// 切段，被"已执行长动作"覆盖，随后的 refill 只见时段目标 → NPC 弃约。
+	if info.ActionCmd != "" && !strings.HasPrefix(a.as.ReplanHint(), "【") {
 		a.as.SetReplanHint(timeStopReplanHint(info.ActionCmd, info.Params, duration))
 	}
 	// 取消旧 action 超时 timer（若有）

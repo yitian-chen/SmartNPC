@@ -784,3 +784,31 @@ func TestConversationCarryover_ActiveSessionNotDisturbed(t *testing.T) {
 		t.Errorf("active H-05 session must stay at 2 turns, got peer=%q turns=%d", peer, turns)
 	}
 }
+
+// TestRecordActionCompletion_SpeechRepliedAlsoTerminal 验证 speech:replied
+// （对方在等待窗内回了话，如告别语送达）与 speech:no_reply 对称地触发对话
+// 终局即时判定（2026-10-20 17:58 实测：replied 不触发，完成触发的 refill 被
+// armed hint + 自己的时段目标带偏，约定被稀释成"继续拉伸"后弃约）。
+func TestRecordActionCompletion_SpeechRepliedAlsoTerminal(t *testing.T) {
+	ac, _ := newAgentContext(context.Background())
+	ac.as.SetIdentity("H-01", nil)
+	seedConversationSession(t, ac, "H-01", "H-05")
+	ac.beginReaction(2, 1010, "社交信号：老张邀请", true)
+	ac.as.RecordActionStarted("act-acc", "SpeakTo",
+		map[string]any{"target_agent_id": "H-05", "content": "行，跟你一起跑两步。", "interrupt": true},
+		agentstate.SourceTactical, "tc-1")
+
+	_, _ = ac.recordActionCompletion(protocol.ActionCompletedPayload{
+		ActionID: "act-acc", Result: "success", Reason: "speech:replied", DurationMs: 17000,
+	}, nil, nil, nil)
+
+	if peer, turns := ac.conversationPeerState(); peer != "" || turns != 0 {
+		t.Errorf("session should be closed on speech:replied, got peer=%q turns=%d", peer, turns)
+	}
+	if hint := ac.as.ReplanHint(); !strings.HasPrefix(hint, "【对话结束】") {
+		t.Errorf("replan hint = %q, want 【对话结束】 prefix", hint[:min(len(hint), 40)])
+	}
+	if d := ac.reactionDescSnapshot(); d != "" {
+		t.Errorf("reaction window should be cleared, got desc=%q", d)
+	}
+}

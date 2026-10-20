@@ -1542,3 +1542,41 @@ func TestCheckTimeToStop_KeepsQueue(t *testing.T) {
 		t.Errorf("slot = %q, want 09:00-12:00 preserved", slot)
 	}
 }
+
+// TestCheckTimeToStop_AdvisoryHintKeepsPriorityHint 验证 time_to_stop 的
+// advisory hint（"已执行长动作…"）不覆盖挂起的高优先级结构化 hint（【对话
+// 结束】守约/【战斗结束】等——均以"【"开头）。2026-10-20 17:58 实测：守约
+// hint 注入 6s 后撞上切段，被 advisory 覆盖，随后的 refill 只见时段目标，
+// NPC 弃约去上网。
+func TestCheckTimeToStop_AdvisoryHintKeepsPriorityHint(t *testing.T) {
+	// 用例 1：挂起守约 hint → 切段后 hint 保持不被覆盖。
+	ac, _ := newAgentContext(context.Background())
+	logger := slog.Default()
+	ac.as.RecordActionStarted("act-stretch", "Exercise",
+		map[string]any{"exercise_type": "stretch"}, agentstate.SourceTactical, "tc-1")
+	ac.as.ArmTimeStop("act-stretch", 40000, 720)
+	raw := []byte(`{"environment":{"game_time_sec":41000}}`)
+	if _, err := ac.as.SetPerception(raw); err != nil {
+		t.Fatalf("SetPerception: %v", err)
+	}
+	ac.as.SetReplanHint("【对话结束】你与老王（H-02）的对话刚刚结束，完整对话记录：…")
+
+	ac.checkTimeToStop("H-01", logger)
+
+	if got := ac.as.ReplanHint(); !strings.HasPrefix(got, "【对话结束】") {
+		t.Errorf("priority hint clobbered by advisory: %q", got[:min(len(got), 60)])
+	}
+
+	// 用例 2：无挂起 hint（或挂起的是无前缀 advisory）→ 照常注入切段提示。
+	ac2, _ := newAgentContext(context.Background())
+	ac2.as.RecordActionStarted("act-run", "InteractSmartObject",
+		map[string]any{"semantic_group": "treadmill", "interaction": "run"}, agentstate.SourceTactical, "tc-2")
+	ac2.as.ArmTimeStop("act-run", 40000, 720)
+	if _, err := ac2.as.SetPerception(raw); err != nil {
+		t.Fatalf("SetPerception: %v", err)
+	}
+	ac2.checkTimeToStop("H-01", logger)
+	if got := ac2.as.ReplanHint(); !strings.Contains(got, "已执行长动作") {
+		t.Errorf("advisory hint should be set when no priority hint pending, got %q", got)
+	}
+}
