@@ -1,0 +1,42 @@
+# LLM 推理服务分层配置模板（OpenAI Chat Completions 兼容）
+#
+# 使用方式：复制本文件为 assets/llm_backend.yaml（该文件已 gitignore，不入库），
+# 按实际环境修改后，带 --llm-config=assets/llm_backend.yaml 重启 MCP 生效。
+# 不传该 flag 时走 --venus-url 等原有 flag（战略/战术共用同一 Venus）。
+#
+# 三层决策（战略 / 战术 / 对话）可分别指向不同后端：
+#   - 战略层 → 每日计划生成，一天一次，可用较重模型
+#   - 战术层 + 对话层 → 高频调用；对话层复用战术层客户端
+#
+# 地址二选一：
+#   - 自建服务用 host + port；
+#   - 带路径的服务（如 Venus）用 base_url 覆盖 host+port。
+# 注意：地址是服务根地址，客户端会自动拼接 /v1/chat/completions，
+# 不要在这里带 /v1 后缀。
+
+# ─── 战略层（每日计划生成）───
+strategic:
+  base_url: "http://v2.open.venus.oa.com/llmproxy"
+  api_key: ""                    # 留空则读 VENUS_API_KEY 环境变量
+  model: "deepseek-v4-pro"
+  timeout_sec: 120
+
+# ─── 战术层 + 对话层（高频调用）───
+tactical:
+  base_url: "http://v2.open.venus.oa.com/llmproxy"
+  api_key: ""                    # 留空则读 VENUS_API_KEY 环境变量
+  model: "deepseek-v4.1-flash"
+  timeout_sec: 120
+
+# ─── 其他后端示例（取消注释并替换凭据使用；勿把真实 key 提交入库）───
+# tactical:
+#   base_url: "http://<自建 vLLM/sglang 服务 host>:<port>"
+#   api_key: ""                  # 自建服务无鉴权可留空
+#   model: "Qwen3-8B-AWQ"
+#   timeout_sec: 120
+#
+# tactical:
+#   base_url: "https://api.deepseek.com"
+#   api_key: "<your-api-key>"
+#   model: "deepseek-chat"
+#   timeout_sec: 120
