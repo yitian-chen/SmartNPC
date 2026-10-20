@@ -245,8 +245,11 @@ const conversationIdleTimeoutGameSec = 20 * 60.0
 
 // recordConversationTurn appends a turn to the agent's in-progress conversation
 // session keyed by peerID. A peer change clears the old session (an abandoned
-// conversation is discarded, not evaluated). nowGameSec is the authoritative
-// game time of the turn.
+// conversation is discarded, not evaluated)——unless the same peer's session was
+// closed just now (within conversationCarryoverWindow), in which case the closed
+// session's turns carry over first: the late-arriving reply lands in a session
+// that still holds the full transcript instead of a context-free orphan line.
+// nowGameSec is the authoritative game time of the turn.
 func (a *agentContext) recordConversationTurn(speakerID, peerID, content string, nowGameSec float64) {
 	a.coordMu.Lock()
 	defer a.coordMu.Unlock()
@@ -254,9 +257,23 @@ func (a *agentContext) recordConversationTurn(speakerID, peerID, content string,
 		a.convPeerID = peerID
 		a.convTurns = nil
 	}
+	// 会话续接（2026-10-20）：新会话起始（无轮次）且同 peer 的会话刚在宽限
+	// 窗内关闭时，旧轮次先行续接。实测 16:27 场景：邀请 no_reply 终局与
+	// 应答送达同秒，会话重开只剩应答 1 轮——社交 replan 看到孤立发言、
+	// 守约 hint 只有邀请半边，约定被劈成两个碎片，邀请方回了车间。
+	if len(a.convTurns) == 0 && a.lastClosedPeer == peerID && len(a.lastClosedTurns) > 0 &&
+		time.Since(a.lastClosedAt) <= conversationCarryoverWindow {
+		a.convTurns = append(a.convTurns, a.lastClosedTurns...)
+	}
 	a.convTurns = append(a.convTurns, conversationTurn{speakerID: speakerID, content: content})
 	a.convLastGameSec = nowGameSec
 }
+
+// conversationCarryoverWindow 是会话续接的现实时间宽限窗：同一 peer 的会话
+// 关闭后，peer 的新发言在窗内到达则旧轮次续接进新会话。覆盖应答方回话
+// 往返（收邀请 ~2s + 判决/LLM ~5s + 派发送达 ~1s ≈ 8s，与邀请方 no_reply 窗
+// 几乎等长）加一次 LLM 延迟的余量。包级变量便于测试临时调小/关掉。
+var conversationCarryoverWindow = 60 * time.Second
 
 // closeConversationIfIdle closes the in-progress conversation session once it
 // has idled past conversationIdleTimeoutGameSec, returning the captured peer +
@@ -291,10 +308,16 @@ func (a *agentContext) closeConversationByPeer(target string) (string, []convers
 }
 
 // closeConversationLocked clears the in-progress session and returns what it
-// held. Caller holds coordMu.
+// held, stashing it as the carryover snapshot — a same-peer utterance within
+// conversationCarryoverWindow re-opens from these turns. Caller holds coordMu.
 func (a *agentContext) closeConversationLocked() (string, []conversationTurn) {
 	peer := a.convPeerID
 	turns := a.convTurns
+	if peer != "" && len(turns) > 0 {
+		a.lastClosedPeer = peer
+		a.lastClosedTurns = turns
+		a.lastClosedAt = time.Now()
+	}
 	a.convPeerID = ""
 	a.convTurns = nil
 	a.convLastGameSec = 0
@@ -302,12 +325,12 @@ func (a *agentContext) closeConversationLocked() (string, []conversationTurn) {
 }
 
 // clearConversation discards the in-progress conversation session (combat-detach
-// entry). An interrupted conversation is not evaluated.
+// entry). An interrupted conversation is not evaluated — but it still lands in
+// the carryover snapshot: a peer reply arriving shortly after combat resumes
+// the pre-combat transcript rather than starting context-free.
 func (a *agentContext) clearConversation() {
 	a.coordMu.Lock()
-	a.convPeerID = ""
-	a.convTurns = nil
-	a.convLastGameSec = 0
+	a.closeConversationLocked()
 	a.coordMu.Unlock()
 }
 

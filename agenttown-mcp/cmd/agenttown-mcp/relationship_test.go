@@ -696,3 +696,86 @@ func TestRecordActionCompletion_NoReplyVariantsKeepSession(t *testing.T) {
 		})
 	}
 }
+
+// TestConversationCarryover_ReplyAfterCloseContinuesTurns 验证会话续接：no_reply
+// 终局关闭后同一 peer 的应答在宽限窗内到达，旧轮次续接进新会话——transcript
+// 保持完整（邀请 + 应答），社交 replan 不再看到一句没有前文的孤立发言
+// （2026-10-20 16:27 实测：邀请 no_reply 与应答送达同秒，会话重开只剩应答
+// 1 轮，约定上下文被劈碎、邀请方回了车间）。
+func TestConversationCarryover_ReplyAfterCloseContinuesTurns(t *testing.T) {
+	ac, _ := newAgentContext(context.Background())
+	ac.as.SetIdentity("H-01", nil)
+	ac.recordConversationTurn("H-01", "H-05", "老张，走，一起去跑步机晨跑？", 1000) // 己方邀请
+	if peer, turns := ac.closeConversationByPeer("H-05"); peer != "H-05" || len(turns) != 1 {
+		t.Fatalf("closeConversationByPeer = %q,%d turns", peer, len(turns))
+	}
+	// H-05 的应答到达（heard 记录）：同 peer、宽限窗内 → 续接。
+	ac.recordConversationTurn("H-05", "H-05", "好嘞，一起跑两圈。", 1010)
+	if peer, turns := ac.conversationPeerState(); peer != "H-05" || turns != 2 {
+		t.Fatalf("carried session should hold 2 turns, got peer=%q turns=%d", peer, turns)
+	}
+	ctx, _ := ac.conversationContextForPrompt("H-01", nil)
+	if !strings.Contains(ctx, "一起去跑步机晨跑") || !strings.Contains(ctx, "好嘞，一起跑两圈") {
+		t.Errorf("transcript must contain both invite and reply:\n%s", ctx)
+	}
+}
+
+// TestConversationCarryover_IdleClosePathAlsoCarries 验证 idle 关闭路径同样
+// 续接（与 no_reply 关闭共用 closeConversationLocked 快照）。
+func TestConversationCarryover_IdleClosePathAlsoCarries(t *testing.T) {
+	ac, _ := newAgentContext(context.Background())
+	ac.as.SetIdentity("H-01", nil)
+	ac.recordConversationTurn("H-01", "H-05", "邀请", 1000)
+	if peer, _ := ac.closeConversationIfIdle(1000 + conversationIdleTimeoutGameSec + 1); peer != "H-05" {
+		t.Fatalf("idle close failed: peer=%q", peer)
+	}
+	ac.recordConversationTurn("H-05", "H-05", "应答", 2000)
+	if _, turns := ac.conversationPeerState(); turns != 2 {
+		t.Errorf("idle-closed session should carry over on reply, turns=%d", turns)
+	}
+}
+
+// TestConversationCarryover_WindowExpiryNoCarry 验证宽限窗外的新发言不续接
+// （开新会话）。窗口临时置为负值模拟过期。
+func TestConversationCarryover_WindowExpiryNoCarry(t *testing.T) {
+	orig := conversationCarryoverWindow
+	conversationCarryoverWindow = -time.Second
+	defer func() { conversationCarryoverWindow = orig }()
+
+	ac, _ := newAgentContext(context.Background())
+	ac.as.SetIdentity("H-01", nil)
+	ac.recordConversationTurn("H-01", "H-05", "邀请", 1000)
+	ac.closeConversationByPeer("H-05")
+	ac.recordConversationTurn("H-05", "H-05", "迟到的应答", 2000)
+	if _, turns := ac.conversationPeerState(); turns != 1 {
+		t.Errorf("expired window must start a fresh session, turns=%d", turns)
+	}
+}
+
+// TestConversationCarryover_DifferentPeerFreshSession 验证不同 peer 的新发言
+// 不续接旧会话（新对话从零开始）。
+func TestConversationCarryover_DifferentPeerFreshSession(t *testing.T) {
+	ac, _ := newAgentContext(context.Background())
+	ac.as.SetIdentity("H-01", nil)
+	ac.recordConversationTurn("H-01", "H-05", "邀请", 1000)
+	ac.closeConversationByPeer("H-05")
+	ac.recordConversationTurn("H-03", "H-03", "老李搭话", 1010)
+	if peer, turns := ac.conversationPeerState(); peer != "H-03" || turns != 1 {
+		t.Errorf("different peer starts fresh, got peer=%q turns=%d", peer, turns)
+	}
+}
+
+// TestConversationCarryover_ActiveSessionNotDisturbed 验证会话进行中（同
+// peer、已有轮次）时记录不触发续接——快照只在会话重开（无轮次起始）时消费。
+func TestConversationCarryover_ActiveSessionNotDisturbed(t *testing.T) {
+	ac, _ := newAgentContext(context.Background())
+	ac.as.SetIdentity("H-01", nil)
+	ac.recordConversationTurn("H-01", "H-02", "旧对话", 1000)
+	ac.closeConversationByPeer("H-02") // 快照 = [旧对话]
+	// 新会话与 H-05（非快照 peer）进行中。
+	ac.recordConversationTurn("H-05", "H-05", "新对话第一句", 2000)
+	ac.recordConversationTurn("H-01", "H-05", "新对话第二句", 2010)
+	if peer, turns := ac.conversationPeerState(); peer != "H-05" || turns != 2 {
+		t.Errorf("active H-05 session must stay at 2 turns, got peer=%q turns=%d", peer, turns)
+	}
+}

@@ -192,6 +192,15 @@ type agentContext struct {
 	convTurns       []conversationTurn
 	convLastGameSec float64
 
+	// 会话续接快照（2026-10-20）：最近一次关闭的会话。同一 peer 的新发言在
+	// conversationCarryoverWindow 内到达时旧轮次续接进新会话——覆盖"no_reply
+	// 终局判定与回话送达同秒竞态"（应答方回话往返 ≈8s 与邀请方 no_reply 窗
+	// 几乎等长，卡窗边的应答让会话重开成一句没有前文的孤立发言，约定上下文
+	// 被劈碎）与"idle 关闭后回话迟到"两类场景。coordMu 保护。
+	lastClosedPeer  string
+	lastClosedTurns []conversationTurn
+	lastClosedAt    time.Time
+
 	// LLM clients (immutable after construction, no lock needed)
 	strategicHc llmClient
 	tacticalHc  llmClient
