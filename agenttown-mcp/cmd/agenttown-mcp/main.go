@@ -1000,11 +1000,22 @@ func runPerceptionWorker(
 			// pop，NPC 呆站，slot 过期后队列还被安全点清理丢弃）。slot 已
 			// 过期（pending）也照常 pop：旧队列动作有自身 time_to_stop 有界，
 			// 修订落地后安全点自然收敛到新计划——比呆站整个修订时长更优。
-			// refill 仍禁止：修订正在重写计划，refill 会用旧计划白烧一次
-			// LLM 并与写回竞态。战术 replan 在途不放行：其队列已被
-			// ClearForReplan 清空（pop 本就 no-op），保持全跳过让语义单一。
-			if replanKind == replanKindStrategic && ac.hasQueueNext() {
-				ac.popAndSendQueueAction(ctx, agentID, ws, kb, logger)
+			// 战术 replan 在途不放行：其队列已被 ClearForReplan 清空（pop 本就
+			// no-op），保持全跳过让语义单一。
+			if replanKind == replanKindStrategic {
+				if ac.hasQueueNext() {
+					ac.popAndSendQueueAction(ctx, agentID, ws, kb, logger)
+				} else if autoPlanEnabled && !paused && !ac.hasInFlightAction() {
+					// 空队列 + 无在途 + 自动规划：放行 refill（2026-10-20 实测：
+					// 战略修订的 venus 调用挂 67s，队列空的 NPC 呆满全程——
+					// 09-24 的放行只覆盖"队列非空可 pop"，空队列时禁止 refill
+					// 的"防白烧 LLM"保护没有旧队列可保，只剩呆站到修订超时
+					// 上限 120s）。refill 按游戏时间选旧计划当前时段分解，修订
+					// 落地后安全点照 P3-8 收敛到新计划；processSlotSwitch 仍
+					// 保持延迟（清队列语义与修订写回竞态，refill 已足够消除
+					// 呆站）。
+					ac.tacticalRefill(ctx, agentID, ws, kb, profiles, logger)
+				}
 			}
 			continue
 		}
