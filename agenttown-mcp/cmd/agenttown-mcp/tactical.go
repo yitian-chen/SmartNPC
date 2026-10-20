@@ -694,7 +694,7 @@ func capabilityParamsSchema(params []protocol.CapabilityParam, name string) json
 	if name == "speak_to" {
 		props["ends_conversation"] = map[string]any{
 			"type":        "boolean",
-			"description": "可选，默认 false。本句是告别/收尾语时填 true：说完对话结束、不期待回话，系统会在话语送达对方后立即结束本动作并执行后续动作。",
+			"description": "可选，默认 false。凡是收尾性质的话都填 true：告别语、对方应下你的邀请后你回的确认句（如\"好，那就这么定了\"）、礼貌性结束对话。填 true 后说完对话结束、不期待回话，系统会在话语送达对方后立即结束本动作并执行后续动作（不填则整窗空等回话约 10 秒）。",
 		}
 	}
 	schema := map[string]any{

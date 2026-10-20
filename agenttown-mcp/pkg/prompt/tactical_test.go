@@ -598,7 +598,7 @@ func TestTacticalRules_InviteGoalDecomposition(t *testing.T) {
 		"邀请XX一起做XX",
 		"同样只输出一条 speak_to",
 		"约定的事项在对话结束后由系统提示驱动执行",
-		"告别/收尾句给 speak_to 填 ends_conversation: true",
+		"告别/收尾句（含对方应下你的邀请后你回的确认句）给 speak_to 填 ends_conversation: true",
 	} {
 		if !strings.Contains(tacticalCoreRules, want) {
 			t.Errorf("tacticalCoreRules missing %q:\n%s", want, tacticalCoreRules)
