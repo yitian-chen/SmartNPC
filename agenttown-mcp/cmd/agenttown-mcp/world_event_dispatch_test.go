@@ -520,7 +520,7 @@ func TestNoSynthesisForSelfInterruptedCompletion(t *testing.T) {
 	// 被打断的动作回 interrupted completion——应返回空 detail（不合成事件）。
 	_, detail := ac.recordActionCompletion(protocol.ActionCompletedPayload{
 		ActionID: "act-1", Result: protocol.ResultInterrupted,
-	})
+	}, nil, nil, nil)
 	if detail != "" {
 		t.Fatalf("pre-recorded interrupted completion must NOT produce a detail, got %q", detail)
 	}
@@ -529,7 +529,7 @@ func TestNoSynthesisForSelfInterruptedCompletion(t *testing.T) {
 	ac.as.RecordActionStarted("act-2", "MoveTo", nil, agentstate.SourceTactical, "")
 	_, detail = ac.recordActionCompletion(protocol.ActionCompletedPayload{
 		ActionID: "act-2", Result: protocol.ResultInterrupted, Reason: "dialogue:abandoned by H-03",
-	})
+	}, nil, nil, nil)
 	if detail == "" {
 		t.Fatalf("non-pre-recorded interrupted must produce a detail for synthesis")
 	}
@@ -553,7 +553,7 @@ func TestNoSynthesisForTimeToStopAndUntracked(t *testing.T) {
 
 	_, detail := ac.recordActionCompletion(protocol.ActionCompletedPayload{
 		ActionID: "act-tts", Result: protocol.ResultInterrupted,
-	})
+	}, nil, nil, nil)
 	if detail != "" {
 		t.Fatalf("time_to_stop interrupted must NOT produce detail, got %q", detail)
 	}
@@ -563,7 +563,7 @@ func TestNoSynthesisForTimeToStopAndUntracked(t *testing.T) {
 	// 不调 recordActionStarted——模拟 start_asleep 从未被追踪。
 	_, detail = ac2.recordActionCompletion(protocol.ActionCompletedPayload{
 		ActionID: "start_asleep_H-04", Result: protocol.ResultInterrupted,
-	})
+	}, nil, nil, nil)
 	if detail != "" {
 		t.Fatalf("untracked interrupted must NOT produce detail, got %q", detail)
 	}
@@ -572,7 +572,7 @@ func TestNoSynthesisForTimeToStopAndUntracked(t *testing.T) {
 	ac2.as.RecordActionStarted("act-real", "MoveTo", nil, agentstate.SourceTactical, "")
 	_, detail = ac2.recordActionCompletion(protocol.ActionCompletedPayload{
 		ActionID: "act-real", Result: protocol.ResultFailed, Reason: "unreachable",
-	})
+	}, nil, nil, nil)
 	if detail == "" {
 		t.Fatalf("genuine failed must still produce detail for synthesis")
 	}

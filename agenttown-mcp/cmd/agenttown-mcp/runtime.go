@@ -159,7 +159,7 @@ func (rt *Runtime) HandleMessage(_ context.Context, msgType, agentID string, pay
 			rt.logger.Warn("action_completed dropped for unregistered agent", "agent_id", agentID)
 			return
 		}
-		queued, detail := ac.recordActionCompletion(completed)
+		queued, detail := ac.recordActionCompletion(completed, *rt.kbPtr, rt.profiles, rt.logger)
 		rt.logger.Info("action_completed", "agent_id", agentID,
 			"action_id", completed.ActionID, "result", completed.Result,
 			"reason", completed.Reason,

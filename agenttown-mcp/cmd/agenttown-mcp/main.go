@@ -321,7 +321,7 @@ func (a *agentContext) updateState(report protocol.StateReportPayload) string {
 // 完成（failed/interrupted/error）时触发评估——成功完成是常态，每次都问
 // "要不要打断"意义不大（模型看不到战术层整体规划，只能基于贫乏信息答 continue）。
 // 异常完成才是真正需要反应层介入的时机。
-func (a *agentContext) recordActionCompletion(completion protocol.ActionCompletedPayload) (bool, string) {
+func (a *agentContext) recordActionCompletion(completion protocol.ActionCompletedPayload, kb *worldkb.KB, profiles map[string]*profile.Profile, logger *slog.Logger) (bool, string) {
 	// 在 RecordActionCompletion 清除 preface 标志之前读取：自己 stop 导致的
 	// interrupted completion 是预期回包，不应合成 action_failed 事件。
 	wasPreRecorded := a.as.LastEndPrefaced()
@@ -356,6 +356,38 @@ func (a *agentContext) recordActionCompletion(completion protocol.ActionComplete
 			})
 		}
 		go a.maybeUpdateRelationship(completion, res)
+	}
+
+	// 对话终局即时判定（2026-10-20）：定向对话（speak_to）以 no_reply 完成 =
+	// 等待窗内对方没有回话——从本 agent 视角对话已终局。立即关会话 + 注入
+	// 守约 hint + 清社交反应窗口，不等 conversationIdleTimeoutGameSec 的
+	// idle 超时：本完成事件下方马上 signal 唤醒 worker refill，idle 等待期间
+	// 无对话上下文的 refill 会抢跑（实测：应邀方应下后 refill 被 armed
+	// hint 的"对方无回音则回日程"推回车间，守约 hint 晚 6s 注入才到场）。
+	// hint 必须在 signal() 之前落好，woken refill 的 prompt 才带得上守约
+	// 上下文。peer 不匹配（无会话或陈旧会话）时不动，走原 idle-close 兜底。
+	// speak_to 签名检查用 target_agent_id（与 recordActionStarted 的 own-turn
+	// 挂钩同口径，cmd 名是 registry 动态的）。
+	if res.WasInFlight && completion.Result == protocol.ResultSuccess &&
+		strings.Contains(completion.Reason, "no_reply") {
+		if target, _ := res.Params["target_agent_id"].(string); target != "" {
+			if peer, turns := a.closeConversationByPeer(target); peer != "" && len(turns) > 0 {
+				// 社交反应窗口随对话终局一并结束：armed hint 的
+				// "对方无回音则回日程"措辞与守约指令互斥。
+				a.clearReaction()
+				agentID := a.as.AgentID()
+				lg := logger
+				if lg == nil {
+					lg = slog.Default()
+				}
+				go a.evaluateConversationAffection(context.Background(), agentID, peer, turns, kb, profiles, lg)
+				if h := conversationEndedHint(agentID, peer, turns, kb); h != "" {
+					a.as.SetReplanHint(h)
+					lg.Info("[对话层] no_reply 对话终局，立即注入守约 hint",
+						"agent_id", agentID, "peer", peer, "turns", len(turns))
+				}
+			}
+		}
 	}
 	isSelfStop := res.WasSelfStop
 

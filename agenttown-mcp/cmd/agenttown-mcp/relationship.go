@@ -271,6 +271,28 @@ func (a *agentContext) closeConversationIfIdle(nowGameSec float64) (string, []co
 	if nowGameSec-a.convLastGameSec < conversationIdleTimeoutGameSec {
 		return "", nil
 	}
+	return a.closeConversationLocked()
+}
+
+// closeConversationByPeer closes the in-progress session immediately — but
+// only when its peer matches the given target (the no_reply speak_to's
+// addressee). Used by the "对话终局即时判定" path in recordActionCompletion:
+// a speak_to completing with no_reply means the peer never spoke back within
+// the wait window, which is a terminal state from this agent's perspective —
+// no need to wait out conversationIdleTimeoutGameSec. Mismatched peer (stale
+// session from another conversation) returns "" and leaves the session intact.
+func (a *agentContext) closeConversationByPeer(target string) (string, []conversationTurn) {
+	a.coordMu.Lock()
+	defer a.coordMu.Unlock()
+	if a.convPeerID == "" || a.convPeerID != target {
+		return "", nil
+	}
+	return a.closeConversationLocked()
+}
+
+// closeConversationLocked clears the in-progress session and returns what it
+// held. Caller holds coordMu.
+func (a *agentContext) closeConversationLocked() (string, []conversationTurn) {
 	peer := a.convPeerID
 	turns := a.convTurns
 	a.convPeerID = ""

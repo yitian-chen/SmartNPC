@@ -39,7 +39,7 @@ func TestRecordActionCompletion_SignalsWorkerAndClearsInFlight(t *testing.T) {
 
 	queued, _ := ac.recordActionCompletion(protocol.ActionCompletedPayload{
 		ActionID: "act_t1", Result: protocol.ResultSuccess,
-	})
+	}, nil, nil, nil)
 	if !queued {
 		t.Fatal("completion should return true (handled)")
 	}
@@ -66,7 +66,7 @@ func TestRecordActionCompletion_SuccessNoTrigger(t *testing.T) {
 	ac, _ := newAgentContext(context.Background())
 	queued, detail := ac.recordActionCompletion(protocol.ActionCompletedPayload{
 		ActionID: "act_ok_1", Result: protocol.ResultSuccess,
-	})
+	}, nil, nil, nil)
 	if !queued {
 		t.Fatal("queued should be true")
 	}
@@ -84,7 +84,7 @@ func TestRecordActionCompletion_FailureTriggers(t *testing.T) {
 	ac, _ := newAgentContext(context.Background())
 	queued, detail := ac.recordActionCompletion(protocol.ActionCompletedPayload{
 		ActionID: "act_fail_1", Result: protocol.ResultFailed,
-	})
+	}, nil, nil, nil)
 	if !queued {
 		t.Fatal("queued should be true")
 	}
@@ -103,7 +103,7 @@ func TestRecordActionCompletion_FailureDetailIncludesReason(t *testing.T) {
 	_, detail := ac.recordActionCompletion(protocol.ActionCompletedPayload{
 		ActionID: "act_fail_2", Result: protocol.ResultFailed,
 		Reason: "寻路不可达",
-	})
+	}, nil, nil, nil)
 	if !strings.Contains(detail, "reason=寻路不可达") {
 		t.Errorf("detail should contain UE reason: %q", detail)
 	}
@@ -127,7 +127,7 @@ func TestRecordActionCompletion_FailureSetsReplanHint(t *testing.T) {
 		ActionID: "act_workbench_fail",
 		Result:   protocol.ResultFailed,
 		Reason:   "claim_queue_not_supported",
-	})
+	}, nil, nil, nil)
 
 	snap := ac.as.Snapshot()
 	hint := snap.ReplanHint
@@ -168,7 +168,7 @@ func TestRecordActionCompletion_TooTiredHintGuidesRest(t *testing.T) {
 		ActionID: "act_too_tired",
 		Result:   protocol.ResultFailed,
 		Reason:   "too_tired",
-	})
+	}, nil, nil, nil)
 
 	snap := ac.as.Snapshot()
 	hint := snap.ReplanHint
@@ -193,7 +193,7 @@ func TestRecordActionCompletion_FailureNoHintForManualAction(t *testing.T) {
 		ActionID: "act_manual_fail",
 		Result:   protocol.ResultFailed,
 		Reason:   "manual test failure",
-	})
+	}, nil, nil, nil)
 	snap := ac.as.Snapshot()
 	if snap.ReplanHint != "" {
 		t.Errorf("ReplanHint should remain empty for manual /debug/action failures, got %q", snap.ReplanHint)
@@ -210,7 +210,7 @@ func TestRecordActionCompletion_SuccessNoReplanHint(t *testing.T) {
 	ac.recordActionCompletion(protocol.ActionCompletedPayload{
 		ActionID: "act_work_ok",
 		Result:   protocol.ResultSuccess,
-	})
+	}, nil, nil, nil)
 	snap := ac.as.Snapshot()
 	if snap.ReplanHint != "" {
 		t.Errorf("ReplanHint should remain empty on success, got %q", snap.ReplanHint)
@@ -372,7 +372,7 @@ func TestRecordActionStarted_CompletionAlreadyArrived(t *testing.T) {
 	// so wasInFlight=false, timer not armed so it goes to completedBeforeArm).
 	ac.recordActionCompletion(protocol.ActionCompletedPayload{
 		ActionID: "act_short", Result: protocol.ResultSuccess,
-	})
+	}, nil, nil, nil)
 
 	// Drain wake from the completion's signal().
 	select {
@@ -559,7 +559,7 @@ func TestRecordActionCompletion_ClearsPendingStop(t *testing.T) {
 
 	ac.recordActionCompletion(protocol.ActionCompletedPayload{
 		ActionID: "act_old_composite", Result: protocol.ResultSuccess,
-	})
+	}, nil, nil, nil)
 
 	if ac.as.PendingStopActionID() != "" {
 		t.Errorf("pendingStopActionID=%q, want empty (cleared when old action completes naturally)", ac.as.PendingStopActionID())
@@ -576,7 +576,7 @@ func TestRecordActionCompletion_SelfStopSuppressesReactive(t *testing.T) {
 	queued, detail := ac.recordActionCompletion(protocol.ActionCompletedPayload{
 		ActionID: "act_stopped_by_slot_switch",
 		Result:   protocol.ResultInterrupted, // stop 引发的完成
-	})
+	}, nil, nil, nil)
 
 	if !queued {
 		t.Error("queued should be true (worker signaled)")
@@ -599,7 +599,7 @@ func TestRecordActionCompletion_OtherFailureStillTriggers(t *testing.T) {
 	queued, _ := ac.recordActionCompletion(protocol.ActionCompletedPayload{
 		ActionID: "act_unexpected_fail",
 		Result:   protocol.ResultFailed,
-	})
+	}, nil, nil, nil)
 
 	if !queued {
 		t.Error("queued should be true")

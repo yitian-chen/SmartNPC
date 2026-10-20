@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/AgentTown/agenttown-mcp/contract/protocol"
+	"github.com/AgentTown/agenttown-mcp/pkg/agentstate"
 	"github.com/AgentTown/agenttown-mcp/pkg/profile"
 	"github.com/AgentTown/agenttown-mcp/pkg/storage"
 	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
@@ -591,5 +593,106 @@ func TestConversationEndedHint(t *testing.T) {
 	}
 	if got := conversationEndedHint("H-02", "", turns, convKB()); got != "" {
 		t.Errorf("no peer = %q, want empty", got)
+	}
+}
+
+// seedConversationSession 为 agentID 播种一个与 peer 的进行中会话
+// （invite heard + own acceptance 两轮），返回所用的游戏时间基准。
+func seedConversationSession(t *testing.T, ac *agentContext, agentID, peer string) {
+	t.Helper()
+	ac.recordConversationTurn(peer, peer, "走，一起去跑步机晨跑？", 1000)
+	ac.recordConversationTurn(agentID, peer, "行，跟你一起跑几步。", 1010)
+}
+
+// TestRecordActionCompletion_NoReplyClosesConversationAndSetsHint 验证对话终局
+// 即时判定：speak_to 以 no_reply（result=success + reason 含 no_reply）完成时
+// 立即关会话 + 注入守约 hint + 清社交反应窗口——不等 20 游戏分钟的 idle 超时
+// （2026-10-20 实测：应邀方应下后，立即 refill 被 armed hint 的"对方无回音
+// 则回日程"推回车间，守约 hint 晚 6s 才注入）。
+func TestRecordActionCompletion_NoReplyClosesConversationAndSetsHint(t *testing.T) {
+	ac, _ := newAgentContext(context.Background())
+	ac.as.SetIdentity("H-01", nil)
+	seedConversationSession(t, ac, "H-01", "H-05")
+	// 武装社交反应窗口（社交回应 replan 开启的 armed 窗口）。
+	ac.beginReaction(2, 1010, "社交信号：老张邀请", true)
+	if ac.reactionDescSnapshot() == "" {
+		t.Fatal("reaction window should be armed")
+	}
+	// 在途 speak_to（对会话 peer）。
+	ac.as.RecordActionStarted("act-acc", "SpeakTo",
+		map[string]any{"target_agent_id": "H-05", "content": "行，跟你一起跑几步。", "interrupt": true},
+		agentstate.SourceTactical, "tc-1")
+
+	_, _ = ac.recordActionCompletion(protocol.ActionCompletedPayload{
+		ActionID: "act-acc", Result: "success", Reason: "speech:no_reply", DurationMs: 10000,
+	}, nil, nil, nil)
+
+	// 会话已关、守约 hint 已落、社交窗口已清。
+	if peer, turns := ac.conversationPeerState(); peer != "" || turns != 0 {
+		t.Errorf("session should be closed, got peer=%q turns=%d", peer, turns)
+	}
+	hint := ac.as.ReplanHint()
+	if !strings.HasPrefix(hint, "【对话结束】") {
+		t.Fatalf("replan hint = %q, want 【对话结束】 prefix", hint[:min(len(hint), 40)])
+	}
+	if !strings.Contains(hint, "跑步机") || !strings.Contains(hint, "守约") {
+		t.Errorf("hint should carry the transcript + follow-through directive: %q", hint[:min(len(hint), 120)])
+	}
+	if d := ac.reactionDescSnapshot(); d != "" {
+		t.Errorf("reaction window should be cleared, got desc=%q", d)
+	}
+}
+
+// TestRecordActionCompletion_NoReplyPeerMismatchKeepsSession 验证 peer 不匹配
+// （speak_to 目标非当前会话对方，如陈旧会话残留）时不立即关闭——走原
+// idle-close 兜底路径。
+func TestRecordActionCompletion_NoReplyPeerMismatchKeepsSession(t *testing.T) {
+	ac, _ := newAgentContext(context.Background())
+	ac.as.SetIdentity("H-01", nil)
+	seedConversationSession(t, ac, "H-01", "H-05") // 会话对方 H-05
+	ac.as.RecordActionStarted("act-x", "SpeakTo",
+		map[string]any{"target_agent_id": "H-03", "content": "老李，聊两句？"},
+		agentstate.SourceTactical, "tc-1")
+
+	_, _ = ac.recordActionCompletion(protocol.ActionCompletedPayload{
+		ActionID: "act-x", Result: "success", Reason: "speech:no_reply", DurationMs: 10000,
+	}, nil, nil, nil)
+
+	if peer, turns := ac.conversationPeerState(); peer != "H-05" || turns != 2 {
+		t.Errorf("H-05 session must stay intact, got peer=%q turns=%d", peer, turns)
+	}
+	if hint := ac.as.ReplanHint(); strings.HasPrefix(hint, "【对话结束】") {
+		t.Errorf("no hint should be injected on peer mismatch")
+	}
+}
+
+// TestRecordActionCompletion_NoReplyVariantsKeepSession 验证非 no_reply 终局
+// （普通 success 无 reason、interrupted）不触发立即关闭——speak_to 被回话打断
+// 或被 stop 的路径交给 idle-close / 社交 replan 处理。
+func TestRecordActionCompletion_NoReplyVariantsKeepSession(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		result string
+		reason string
+	}{
+		{"普通 success 无 reason", "success", ""},
+		{"interrupted（被回话/stop 打断）", "interrupted", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ac, _ := newAgentContext(context.Background())
+			ac.as.SetIdentity("H-01", nil)
+			seedConversationSession(t, ac, "H-01", "H-05")
+			ac.as.RecordActionStarted("act-a", "SpeakTo",
+				map[string]any{"target_agent_id": "H-05", "content": "行。"},
+				agentstate.SourceTactical, "tc-1")
+
+			_, _ = ac.recordActionCompletion(protocol.ActionCompletedPayload{
+				ActionID: "act-a", Result: tc.result, Reason: tc.reason, DurationMs: 5000,
+			}, nil, nil, nil)
+
+			if peer, turns := ac.conversationPeerState(); peer != "H-05" || turns != 2 {
+				t.Errorf("session must stay intact (%s), got peer=%q turns=%d", tc.name, peer, turns)
+			}
+		})
 	}
 }
