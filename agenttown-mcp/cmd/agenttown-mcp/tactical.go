@@ -686,16 +686,21 @@ func capabilityParamsSchema(params []protocol.CapabilityParam, name string) json
 		}
 		required = append(required, "duration")
 	}
-	// ends_conversation（仅 speak_to，可选）：告别/收尾标记，MCP 侧控制
+	// ends_conversation（仅 speak_to，必填）：告别/收尾标记，MCP 侧控制
 	// 字段（不透传 UE）。话语送达（对方收到 speech_heard）后系统立即结束
 	// 该动作、跳过 UE 的 no_reply 等待窗——因此带此标记的 speak_to 之后
 	// 可以直接安排后续动作（如约定一起进行的活动），队列会在告别句送达后
 	// 立即执行，无需 refill（2026-10-16 设计：消灭对话收尾的 ~10s 死时间）。
+	// 必填 + 默认 false 语义（2026-10-20 晚）：实测 LLM 把"对方应下后的
+	// 确认句"不当告别、直接省略字段 → 整窗空等 10s；必填迫使模型对每一句
+	// speak_to 显式决策"是否收尾"。运行时容错：LLM 漏填时按 false 处理
+	// （releaseFarewellSpeaker 的类型断言不成立），行为回落到等窗路径。
 	if name == "speak_to" {
 		props["ends_conversation"] = map[string]any{
 			"type":        "boolean",
-			"description": "可选，默认 false。凡是收尾性质的话都填 true：告别语、对方应下你的邀请后你回的确认句（如\"好，那就这么定了\"）、礼貌性结束对话。填 true 后说完对话结束、不期待回话，系统会在话语送达对方后立即结束本动作并执行后续动作（不填则整窗空等回话约 10 秒）。",
+			"description": "必填。收尾性质的话填 true：告别语、对方应下你的邀请后你回的确认句（如\"好，那就这么定了\"）、礼貌性结束对话——填 true 后系统会在话语送达对方后立即结束本动作并执行后续动作，不等回话窗。普通对话轮（期待对方回话、对话还要继续）填 false。",
 		}
+		required = append(required, "ends_conversation")
 	}
 	schema := map[string]any{
 		"type":       "object",

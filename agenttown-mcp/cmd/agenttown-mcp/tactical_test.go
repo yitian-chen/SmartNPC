@@ -2083,7 +2083,9 @@ func TestResolveReplanGoal_EndedConversationExemptsDawnWindow(t *testing.T) {
 }
 
 // TestCapabilityParamsSchema_SpeakToEndsConversation 验证 speak_to 的
-// schema 追加可选 ends_conversation（告别/收尾标记，MCP 侧控制字段）。
+// schema 追加必填 ends_conversation（告别/收尾标记，MCP 侧控制字段；必填
+// 迫使 LLM 对每一句显式决策"是否收尾"，2026-10-20 实测可选时确认句被
+// 省略标记 → 整窗空等 10s）。
 func TestCapabilityParamsSchema_SpeakToEndsConversation(t *testing.T) {
 	raw := capabilityParamsSchema(nil, "speak_to")
 	var schema struct {
@@ -2098,15 +2100,22 @@ func TestCapabilityParamsSchema_SpeakToEndsConversation(t *testing.T) {
 	}
 	ec, ok := schema.Properties["ends_conversation"]
 	if !ok || ec.Type != "boolean" {
-		t.Fatalf("speak_to schema missing optional boolean ends_conversation: %s", raw)
+		t.Fatalf("speak_to schema missing boolean ends_conversation: %s", raw)
 	}
 	if !strings.Contains(ec.Description, "告别") || !strings.Contains(ec.Description, "立即结束") {
 		t.Errorf("ends_conversation description must explain the farewell semantics: %s", ec.Description)
 	}
+	if !strings.Contains(ec.Description, "必填") {
+		t.Errorf("ends_conversation description must state it is required: %s", ec.Description)
+	}
+	found := false
 	for _, r := range schema.Required {
 		if r == "ends_conversation" {
-			t.Errorf("ends_conversation must be optional, found in required: %v", schema.Required)
+			found = true
 		}
+	}
+	if !found {
+		t.Errorf("ends_conversation must be in required (default false): %v", schema.Required)
 	}
 	// 非 speak_to 工具不追加。
 	raw2 := capabilityParamsSchema(nil, "InteractSmartObject")
