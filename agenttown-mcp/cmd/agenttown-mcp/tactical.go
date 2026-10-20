@@ -37,6 +37,19 @@ func isVenusErrorCode(err error, code string) bool {
 	return strings.Contains(err.Error(), `"code":"`+code+`"`)
 }
 
+// isVenusHTTP400 判断 venus 网关以 HTTP 400 拒绝请求（客户端错误格式
+// "venus status 400: <body>"）。会话历史里 tool_calls 的 arguments 非法
+// JSON 时，venus 对 messages 的逐条校验即返回 400——这是"历史投毒"的
+// 确定性信号（同体请求永远无法通过）。排除 4001：那是 HTTP 500 + body
+// code 的 tools 校验失败（与本方历史无关，同体重试可救），不能计入
+// 400 连击。
+func isVenusHTTP400(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "venus status 400:") && !isVenusErrorCode(err, "4001")
+}
+
 // isRateLimited 判断 venus 网关限流错误：HTTP 429 或 venus 错误码 4029
 // （"当前使用的是公共模型服务, 并发有限; 当前的限流为: 30/min"）。
 // 此类错误退避等待后重试可恢复（限流窗口按分钟滚动）。

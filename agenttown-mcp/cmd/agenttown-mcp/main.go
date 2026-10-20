@@ -108,6 +108,16 @@ type agentContext struct {
 	// overwrite losing messages appended in between).
 	compacting atomic.Bool
 
+	// venus400Streak counts consecutive venus HTTP 400 rejections across
+	// agenticTurn calls (atomic; reset whenever a request is accepted).
+	// 历史里 tool_calls 的 arguments 非法 JSON 时 venus 对 messages 的逐条
+	// 校验必拒以 400——历史被污染的 agent 会 400 到跨游戏日
+	// ClearConversation 才恢复（2026-10-20 实测 H-03 报错一整天）。入口
+	// 消毒（sanitizeToolCallsForHistory）根治已知投毒路径；连击达
+	// venus400StreakThreshold 时 agenticTurn 主动清空历史自愈，兜住其余
+	// 投毒路径。
+	venus400Streak atomic.Int32
+
 	// Reaction-task guard state (P2-6, 设计文档 §4.5 护栏): while a reaction
 	// (interrupt-generated planning window) is active, a new ROUTER interrupt
 	// needs strictly higher severity to cut it (reactionSeverity), and the

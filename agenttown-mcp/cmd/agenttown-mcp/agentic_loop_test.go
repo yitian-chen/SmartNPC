@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -598,5 +599,176 @@ func TestAgenticTurn_EmptyResultCorrectiveRetriesExhausted(t *testing.T) {
 	}
 	if hist := as.Conversation(); len(hist) != 0 {
 		t.Errorf("history len = %d, want 0 (failure leaves no half-turns)", len(hist))
+	}
+}
+
+// TestSanitizeToolCallsForHistory_DropsCorruptedEntries 单测历史入口消毒：
+// 空 name / 空 id / arguments 非法 JSON（截断、残尾拼接）的条目被丢弃，
+// 合法条目原样保留。
+func TestSanitizeToolCallsForHistory_DropsCorruptedEntries(t *testing.T) {
+	tcs := []llmtypes.ToolCall{
+		{ID: "tc-ok", Type: "function", Function: llmtypes.ToolFunction{Name: "speak", Arguments: `{"content":"hi"}`}},
+		{ID: "tc-trunc", Type: "function", Function: llmtypes.ToolFunction{Name: "InteractSmartObject", Arguments: `{"duration":1200,"interaction":"run"`}},
+		{ID: "tc-splice", Type: "function", Function: llmtypes.ToolFunction{Name: "InteractSmartObject", Arguments: `}{"duration":1020}`}},
+		{ID: "tc-noname", Type: "function", Function: llmtypes.ToolFunction{Name: "", Arguments: `{}`}},
+		{ID: "", Type: "function", Function: llmtypes.ToolFunction{Name: "wait", Arguments: `{"duration_sec":30}`}},
+	}
+	clean := sanitizeToolCallsForHistory(tcs, "H-03", "tactical", slog.Default())
+	if len(clean) != 1 {
+		t.Fatalf("clean len = %d, want 1 (only the valid entry survives)", len(clean))
+	}
+	if clean[0].ID != "tc-ok" {
+		t.Errorf("surviving entry ID = %q, want tc-ok", clean[0].ID)
+	}
+	// 空列表原样返回。
+	if got := sanitizeToolCallsForHistory(nil, "H-03", "tactical", slog.Default()); len(got) != 0 {
+		t.Errorf("nil input should stay empty, got %d", len(got))
+	}
+}
+
+// TestAgenticTurn_CorruptedToolCallsSanitizedInHistory 复现 2026-10-20 H-03
+// 事故形态：响应里混着损坏条目（截断/残尾拼接/空 name/空 id）与合法条目。
+// 修复前损坏条目原样落历史 → 该 agent 之后每次请求 venus 400；修复后历史
+// 只留合法条目，占位 tool 与之一一对应。
+func TestAgenticTurn_CorruptedToolCallsSanitizedInHistory(t *testing.T) {
+	as := agentstate.New()
+	as.SetIdentity("H-03", nil)
+	resp := &llmtypes.Response{
+		Status: "completed",
+		ToolCalls: []llmtypes.ToolCall{
+			{ID: "tc-ok", Type: "function", Function: llmtypes.ToolFunction{Name: "speak", Arguments: `{"content":"晨光既现。"}`}},
+			{ID: "tc-trunc", Type: "function", Function: llmtypes.ToolFunction{Name: "InteractSmartObject", Arguments: `{"duration":1200,"interaction":"run"`}},
+			{ID: "tc-splice", Type: "function", Function: llmtypes.ToolFunction{Name: "InteractSmartObject", Arguments: `}{"duration":1020,"interaction":"rest"}`}},
+			{ID: "tc-noname", Type: "function", Function: llmtypes.ToolFunction{Name: "", Arguments: `{}`}},
+			{ID: "", Type: "function", Function: llmtypes.ToolFunction{Name: "wait", Arguments: `{"duration_sec":30}`}},
+		},
+	}
+	fake := &fakeLoopLLM{resp: resp}
+	ac := &agentContext{as: as, tacticalHc: fake}
+
+	if _, err := ac.agenticTurn(context.Background(), fake, nil, nil, slog.Default(), "H-03",
+		"tactical", "分解请求", "required", "", nil); err != nil {
+		t.Fatalf("agenticTurn: %v", err)
+	}
+
+	hist := as.Conversation()
+	// user + assistant(1 个消毒后的 tool_call) + 1 个占位 tool。
+	if len(hist) != 3 {
+		t.Fatalf("history len = %d, want 3 (user+assistant+1 pending tool)", len(hist))
+	}
+	if hist[1].Role != "assistant" || len(hist[1].ToolCalls) != 1 {
+		t.Fatalf("assistant tool_calls = %+v, want exactly 1 sanitized entry", hist[1].ToolCalls)
+	}
+	if hist[1].ToolCalls[0].ID != "tc-ok" {
+		t.Errorf("assistant tool_call ID = %q, want tc-ok", hist[1].ToolCalls[0].ID)
+	}
+	if hist[2].Role != "tool" || hist[2].ToolCallID != "tc-ok" {
+		t.Errorf("pending tool = %+v, want tool(tc-ok)", hist[2])
+	}
+	// 逐条校验历史里的 arguments 都是合法 JSON（venus 下次请求必过）。
+	for _, tc := range hist[1].ToolCalls {
+		if !json.Valid([]byte(tc.Function.Arguments)) {
+			t.Errorf("history tool_call %s arguments not valid JSON: %q", tc.ID, tc.Function.Arguments)
+		}
+	}
+}
+
+// TestAgenticTurn_Venus400StreakClearsConversation 验证 400 连击自愈：历史
+// 被污染（损坏 arguments 落库）后每次请求都 venus 400，连击达阈值即清空
+// 历史重建——原本要挂到跨游戏日 ClearConversation（实测 H-03 报错一整天）。
+func TestAgenticTurn_Venus400StreakClearsConversation(t *testing.T) {
+	as := agentstate.New()
+	as.SetIdentity("H-03", nil)
+	// 预置被污染的历史：assistant 携带一条截断 arguments 的 tool_call。
+	as.AppendConversationMessage(llmtypes.Message{Role: "user", Content: "旧请求"})
+	as.AppendConversationMessage(llmtypes.Message{Role: "assistant", ToolCalls: []llmtypes.ToolCall{
+		{ID: "tc-poison", Type: "function", Function: llmtypes.ToolFunction{Name: "exercise", Arguments: `{"duration":1200`}},
+	}})
+	err400 := errors.New("tactical llm: venus status 400: ")
+	fake := &fakeLoopLLM{err: err400}
+	ac := &agentContext{as: as, tacticalHc: fake}
+
+	for i := 1; i <= venus400StreakThreshold; i++ {
+		if _, err := ac.agenticTurn(context.Background(), fake, nil, nil, slog.Default(), "H-03",
+			"tactical", "分解请求", "required", "", nil); err == nil {
+			t.Fatalf("call %d: expected 400 error", i)
+		}
+		if i < venus400StreakThreshold {
+			if hist := as.Conversation(); len(hist) != 2 {
+				t.Fatalf("call %d: history should be intact before threshold, len = %d", i, len(hist))
+			}
+		}
+	}
+	if hist := as.Conversation(); len(hist) != 0 {
+		t.Errorf("history should be cleared after %d consecutive 400s, len = %d", venus400StreakThreshold, len(hist))
+	}
+	// 自愈后连击已清零：再一次 400 不再触发清空（历史保持空，验证不崩溃即可）。
+	if _, err := ac.agenticTurn(context.Background(), fake, nil, nil, slog.Default(), "H-03",
+		"tactical", "分解请求", "required", "", nil); err == nil {
+		t.Fatal("expected 400 error after self-heal")
+	}
+}
+
+// TestAgenticTurn_Venus400StreakResetOnSuccess 验证成功调用清零连击：
+// 2 次 400 后一次成功（venus 接受了请求体 = 历史没毒），再 1 次 400
+// 不应触发清空。
+func TestAgenticTurn_Venus400StreakResetOnSuccess(t *testing.T) {
+	as := agentstate.New()
+	as.SetIdentity("H-01", nil)
+	err400 := errors.New("venus status 400: ")
+	okResp := &llmtypes.Response{
+		Status: "completed",
+		ToolCalls: []llmtypes.ToolCall{
+			{ID: "tc-1", Type: "function", Function: llmtypes.ToolFunction{Name: "speak", Arguments: `{"content":"hi"}`}},
+			{ID: "tc-2", Type: "function", Function: llmtypes.ToolFunction{Name: "move_to", Arguments: `{"target_type":"zone"}`}},
+		},
+	}
+	fake := &fakeLoopLLM{errs: []error{err400, err400}, resp: okResp}
+	ac := &agentContext{as: as, tacticalHc: fake}
+
+	for i := 0; i < 2; i++ { // 两次 400
+		if _, err := ac.agenticTurn(context.Background(), fake, nil, nil, slog.Default(), "H-01",
+			"tactical", "分解请求", "required", "", nil); err == nil {
+			t.Fatalf("call %d: expected 400", i+1)
+		}
+	}
+	// 一次成功：历史追加 4 条（user+assistant+2 占位）。
+	if _, err := ac.agenticTurn(context.Background(), fake, nil, nil, slog.Default(), "H-01",
+		"tactical", "分解请求", "required", "", nil); err != nil {
+		t.Fatalf("success turn: %v", err)
+	}
+	if hist := as.Conversation(); len(hist) != 4 {
+		t.Fatalf("history len = %d, want 4 after success", len(hist))
+	}
+	// 再一次 400（连击重新从 1 计）：不触发清空。
+	fake.err = err400
+	if _, err := ac.agenticTurn(context.Background(), fake, nil, nil, slog.Default(), "H-01",
+		"tactical", "分解请求", "required", "", nil); err == nil {
+		t.Fatal("expected 400")
+	}
+	if hist := as.Conversation(); len(hist) != 4 {
+		t.Errorf("history must NOT be cleared (streak reset by success), len = %d", len(hist))
+	}
+}
+
+// TestAgenticTurn_Venus4001NotCountedAs400 验证 4001（HTTP 500 + body
+// code，tools 校验失败，同体重试可救）不计入 400 连击——连打 3 轮也不清空
+// 历史。
+func TestAgenticTurn_Venus4001NotCountedAs400(t *testing.T) {
+	as := agentstate.New()
+	as.SetIdentity("H-01", nil)
+	as.AppendConversationMessage(llmtypes.Message{Role: "user", Content: "旧请求"})
+	err4001 := errors.New(`venus status 500: {"error":{"message":"tools json 校验失败","type":"venus_error","code":"4001"}}`)
+	fake := &fakeLoopLLM{err: err4001}
+	ac := &agentContext{as: as, tacticalHc: fake}
+
+	for i := 0; i < venus400StreakThreshold; i++ {
+		if _, err := ac.agenticTurn(context.Background(), fake, nil, nil, slog.Default(), "H-01",
+			"tactical", "分解请求", "required", "", nil); err == nil {
+			t.Fatalf("call %d: expected 4001 error", i+1)
+		}
+	}
+	if hist := as.Conversation(); len(hist) != 1 {
+		t.Errorf("4001 must not trigger history clear, len = %d", len(hist))
 	}
 }

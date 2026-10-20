@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"path/filepath"
 	"strings"
@@ -2142,5 +2143,29 @@ func TestMapTacticalAction_StripsEndsConversation(t *testing.T) {
 	}
 	if params["target_agent_id"] != "H-02" || params["content"] != "回头见。" {
 		t.Errorf("speech params must pass through: %v", params)
+	}
+}
+
+// TestIsVenusHTTP400 验证 400 判据：匹配 "venus status 400:"，且排除
+// 4001（HTTP 500 + body code 的 tools 校验失败，同体重试可救、与历史
+// 投毒无关，不得计入 400 连击触发历史自愈）。
+func TestIsVenusHTTP400(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"空 body 400（历史投毒形态）", fmt.Errorf("tactical llm: venus status 400: "), true},
+		{"带 body 400", fmt.Errorf(`venus status 400: {"error":{"message":"bad request"}}`), true},
+		{"4001 走 HTTP 500", fmt.Errorf(`venus status 500: {"error":{"message":"tools json","code":"4001"}}`), false},
+		{"400 且 body 带 4001 码（防御性排除）", fmt.Errorf(`venus status 400: {"error":{"message":"tools json","code":"4001"}}`), false},
+		{"429 限流", fmt.Errorf("venus status 429: limited"), false},
+		{"网络错误", fmt.Errorf("http do: connection refused"), false},
+	}
+	for _, c := range cases {
+		if got := isVenusHTTP400(c.err); got != c.want {
+			t.Errorf("%s: isVenusHTTP400 = %v, want %v", c.name, got, c.want)
+		}
 	}
 }
