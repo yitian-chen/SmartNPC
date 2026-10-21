@@ -201,24 +201,21 @@ func (s *MySQLStore) LoadActionHistory(ctx context.Context, agentID string, limi
 }
 
 // SaveRelationship upserts one directional row (agentA→agentB). On duplicate
-// key (the row already exists from a prior interaction), familiarity and
-// affection are incremented by the supplied deltas, interaction_count is
-// bumped by 1, and last_interaction_at is refreshed. Callers update both
-// directions by invoking this twice with swapped arguments.
+// key (the row already exists from a prior interaction), affection is
+// incremented by the delta and last_interaction_at is refreshed. Callers
+// update both directions by invoking this twice with swapped arguments.
 //
-// affection 是 0-10 好感度（默认 5）：新建行不显式传 affection，靠列 DEFAULT 5
-// （见 0003 迁移）；重复键时按 delta 累加并夹紧到 [0,10]。
-func (s *MySQLStore) SaveRelationship(ctx context.Context, agentA, agentB string, familiarityDelta, affectionDelta int) error {
+// affection 是 0-10 好感度（默认 5 中性，见 0003 迁移）：新行 = 5 + delta、
+// 重复键 = affection + delta，均夹紧到 [0,10]。熟悉度/互动计数已移除。
+func (s *MySQLStore) SaveRelationship(ctx context.Context, agentA, agentB string, affectionDelta int) error {
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO agent_relationships
-		   (agent_a, agent_b, familiarity, interaction_count, last_interaction_at)
-		 VALUES (?, ?, ?, 1, NOW())
+		   (agent_a, agent_b, affection, last_interaction_at)
+		 VALUES (?, ?, GREATEST(0, LEAST(10, 5 + ?)), NOW())
 		 ON DUPLICATE KEY UPDATE
-		   familiarity = familiarity + VALUES(familiarity),
-		   affection   = GREATEST(0, LEAST(10, affection + ?)),
-		   interaction_count = interaction_count + 1,
+		   affection = GREATEST(0, LEAST(10, affection + ?)),
 		   last_interaction_at = NOW()`,
-		agentA, agentB, familiarityDelta, affectionDelta,
+		agentA, agentB, affectionDelta, affectionDelta,
 	)
 	if err != nil {
 		return fmt.Errorf("save relationship %s→%s: %w", agentA, agentB, err)
@@ -233,7 +230,7 @@ func (s *MySQLStore) SaveRelationship(ctx context.Context, agentA, agentB string
 // we scan via sql.NullTime and keep the zero value when NULL.
 func (s *MySQLStore) LoadRelationships(ctx context.Context, agentID string, limit int) ([]Relationship, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT agent_a, agent_b, familiarity, affection, interaction_count, last_interaction_at
+		`SELECT agent_a, agent_b, affection, last_interaction_at
 		 FROM agent_relationships
 		 WHERE agent_a = ? OR agent_b = ?
 		 ORDER BY updated_at DESC LIMIT ?`, agentID, agentID, limit)
@@ -245,8 +242,7 @@ func (s *MySQLStore) LoadRelationships(ctx context.Context, agentID string, limi
 	for rows.Next() {
 		var r Relationship
 		var lastAt sql.NullTime
-		if err := rows.Scan(&r.AgentA, &r.AgentB, &r.Familiarity, &r.Affection,
-			&r.InteractionCount, &lastAt); err != nil {
+		if err := rows.Scan(&r.AgentA, &r.AgentB, &r.Affection, &lastAt); err != nil {
 			return nil, fmt.Errorf("scan relationship for %s: %w", agentID, err)
 		}
 		if lastAt.Valid {
@@ -259,14 +255,14 @@ func (s *MySQLStore) LoadRelationships(ctx context.Context, agentID string, limi
 
 // SeedRelationship inserts a row only if no row yet exists for the pair
 // (INSERT IGNORE). Used at cold start to import KB seed values without
-// overwriting interaction counts accumulated in a previous run. Has no
+// overwriting affection accumulated in a previous run. Has no
 // last_interaction_at (stays NULL) — the first live interaction fills it in.
-func (s *MySQLStore) SeedRelationship(ctx context.Context, agentA, agentB string, familiarity, affection int) error {
+func (s *MySQLStore) SeedRelationship(ctx context.Context, agentA, agentB string, affection int) error {
 	_, err := s.db.ExecContext(ctx,
 		`INSERT IGNORE INTO agent_relationships
-		   (agent_a, agent_b, familiarity, affection, interaction_count)
-		 VALUES (?, ?, ?, ?, 0)`,
-		agentA, agentB, familiarity, affection,
+		   (agent_a, agent_b, affection)
+		 VALUES (?, ?, ?)`,
+		agentA, agentB, affection,
 	)
 	if err != nil {
 		return fmt.Errorf("seed relationship %s→%s: %w", agentA, agentB, err)

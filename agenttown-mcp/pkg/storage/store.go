@@ -67,14 +67,16 @@ type ActionRecord struct {
 
 // Relationship represents one directional row in agent_relationships.
 // A→B and B→A are independent rows (composite PK is ordered), allowing
-// asymmetric familiarity/affection in future. Stage 5 updates both
-// directions on each interaction (see maybeUpdateRelationship in main.go).
+// asymmetric affection in future. Stage 5 updates both directions on each
+// interaction (see maybeUpdateRelationship in main.go).
+//
+// 单一数值维度：affection（0-10 好感度，默认 5 中性）。familiarity /
+// interaction_count 已移除——对人认知用一个好感度值确定即可（2026-10-21
+// 简化，见 docs/AgentTown_LongTermMemory_SQLite_Design.md）。
 type Relationship struct {
 	AgentA            string
 	AgentB            string
-	Familiarity       int
 	Affection         int
-	InteractionCount  int
 	LastInteractionAt time.Time
 }
 
@@ -105,10 +107,10 @@ type Store interface {
 	LoadActionHistory(ctx context.Context, agentID string, limit int) ([]ActionRecord, error)
 
 	// SaveRelationship upserts one directional relationship row (agentA→agentB).
-	// On duplicate key, familiarity/affection are incremented by the deltas and
-	// interaction_count is bumped by 1. Caller updates both directions (A→B and
-	// B→A) by invoking this twice with swapped arguments.
-	SaveRelationship(ctx context.Context, agentA, agentB string, familiarityDelta, affectionDelta int) error
+	// On duplicate key, affection is incremented by the delta (clamped to
+	// [0,10]) and last_interaction_at is refreshed. Caller updates both
+	// directions (A→B and B→A) by invoking this twice with swapped arguments.
+	SaveRelationship(ctx context.Context, agentA, agentB string, affectionDelta int) error
 
 	// LoadRelationships returns rows where the agent is either side (agent_a OR
 	// agent_b), ordered by most recently updated first. Used to inject the
@@ -117,8 +119,8 @@ type Store interface {
 
 	// SeedRelationship inserts a relationship row only if no row yet exists
 	// (INSERT IGNORE). Used at cold start to import KB seed values without
-	// overwriting interaction counts accumulated in a previous run.
-	SeedRelationship(ctx context.Context, agentA, agentB string, familiarity, affection int) error
+	// overwriting affection accumulated in a previous run.
+	SeedRelationship(ctx context.Context, agentA, agentB string, affection int) error
 
 	// Close releases the underlying resources (DB connection pool).
 	// It must be idempotent and safe to call on a NoopStore.
@@ -162,7 +164,7 @@ func (NoopStore) LoadActionHistory(context.Context, string, int) ([]ActionRecord
 }
 
 // SaveRelationship is a no-op.
-func (NoopStore) SaveRelationship(context.Context, string, string, int, int) error {
+func (NoopStore) SaveRelationship(context.Context, string, string, int) error {
 	return nil
 }
 
@@ -172,7 +174,7 @@ func (NoopStore) LoadRelationships(context.Context, string, int) ([]Relationship
 }
 
 // SeedRelationship is a no-op.
-func (NoopStore) SeedRelationship(context.Context, string, string, int, int) error {
+func (NoopStore) SeedRelationship(context.Context, string, string, int) error {
 	return nil
 }
 

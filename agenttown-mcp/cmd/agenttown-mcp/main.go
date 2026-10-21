@@ -558,9 +558,10 @@ func (a *agentContext) loadTacticalMemories(ctx context.Context, agentID string)
 // nil store, Ollama timeout, save failure) logs a warning and gives up.
 //
 // Stage 5 design: Ollama judges whether the cmd+params constitute a direct
-// social interaction with the target agent (yes/no). On "yes", familiarity
-// is bumped by 1 in both directions (A→B and B→A); affection is unchanged
-// in the initial rule. Self-targeting (target == agentID) is skipped.
+// social interaction with the target agent (yes/no). On "yes", affection is
+// bumped by 1 in both directions (A→B and B→A) — the single 好感度 value
+// (familiarity/互动计数 removed, 2026-10-21). Self-targeting (target ==
+// agentID) is skipped.
 func (a *agentContext) maybeUpdateRelationship(completion protocol.ActionCompletedPayload, res agentstate.CompletionResult) {
 	if a.ollama == nil {
 		return // reactive layer explicitly disabled (--ollama-url="")
@@ -582,12 +583,12 @@ func (a *agentContext) maybeUpdateRelationship(completion protocol.ActionComplet
 	if !shouldUpdateRelationship(ctx, a.ollama, res.Cmd, res.Params, target) {
 		return
 	}
-	// 双向更新：A→B + B→A 各一行，各自独立 upsert。affection 初期不动（delta=0）。
-	if err := store.SaveRelationship(ctx, agentID, target, 1, 0); err != nil {
+	// 双向更新：A→B + B→A 各一行，各自独立 upsert（好感度 +1，存储层夹紧 [0,10]）。
+	if err := store.SaveRelationship(ctx, agentID, target, 1); err != nil {
 		slog.Default().Warn("[关系层] save A→B failed",
 			"agent_id", agentID, "target", target, "err", err)
 	}
-	if err := store.SaveRelationship(ctx, target, agentID, 1, 0); err != nil {
+	if err := store.SaveRelationship(ctx, target, agentID, 1); err != nil {
 		slog.Default().Warn("[关系层] save B→A failed",
 			"agent_id", target, "target", agentID, "err", err)
 	}

@@ -300,8 +300,8 @@ func TestMySQLStore_SaveRelationshipUpsert(t *testing.T) {
 	ctx := context.Background()
 	agentA, agentB := "test-rel-a", "test-rel-b"
 
-	// First save → INSERT (familiarity=1, interaction_count=1).
-	if err := store.SaveRelationship(ctx, agentA, agentB, 1, 0); err != nil {
+	// First save → INSERT (affection = 5 默认 + 1 = 6).
+	if err := store.SaveRelationship(ctx, agentA, agentB, 1); err != nil {
 		t.Fatalf("SaveRelationship #1: %v", err)
 	}
 	rels, err := store.LoadRelationships(ctx, agentA, 10)
@@ -311,13 +311,12 @@ func TestMySQLStore_SaveRelationshipUpsert(t *testing.T) {
 	if len(rels) != 1 {
 		t.Fatalf("got %d rows, want 1", len(rels))
 	}
-	if rels[0].Familiarity != 1 || rels[0].InteractionCount != 1 {
-		t.Errorf("after first save: got fam=%d count=%d, want fam=1 count=1",
-			rels[0].Familiarity, rels[0].InteractionCount)
+	if rels[0].Affection != 6 {
+		t.Errorf("after first save: got affection=%d, want 6 (5 默认 + 1)", rels[0].Affection)
 	}
 
-	// Second save → ON DUPLICATE KEY UPDATE (familiarity=2, interaction_count=2).
-	if err := store.SaveRelationship(ctx, agentA, agentB, 1, 0); err != nil {
+	// Second save → ON DUPLICATE KEY UPDATE (affection = 6 + 1 = 7).
+	if err := store.SaveRelationship(ctx, agentA, agentB, 1); err != nil {
 		t.Fatalf("SaveRelationship #2: %v", err)
 	}
 	rels, err = store.LoadRelationships(ctx, agentA, 10)
@@ -327,9 +326,8 @@ func TestMySQLStore_SaveRelationshipUpsert(t *testing.T) {
 	if len(rels) != 1 {
 		t.Fatalf("got %d rows, want 1 (upsert)", len(rels))
 	}
-	if rels[0].Familiarity != 2 || rels[0].InteractionCount != 2 {
-		t.Errorf("after second save: got fam=%d count=%d, want fam=2 count=2",
-			rels[0].Familiarity, rels[0].InteractionCount)
+	if rels[0].Affection != 7 {
+		t.Errorf("after second save: got affection=%d, want 7", rels[0].Affection)
 	}
 }
 
@@ -340,10 +338,10 @@ func TestMySQLStore_LoadRelationshipsBothSides(t *testing.T) {
 	defer store.Close()
 	ctx := context.Background()
 	// A→B and A→C; querying B should find the A→B row (B is agent_b side).
-	if err := store.SaveRelationship(ctx, "test-side-a", "test-side-b", 1, 0); err != nil {
+	if err := store.SaveRelationship(ctx, "test-side-a", "test-side-b", 1); err != nil {
 		t.Fatalf("SaveRelationship A→B: %v", err)
 	}
-	if err := store.SaveRelationship(ctx, "test-side-a", "test-side-c", 1, 0); err != nil {
+	if err := store.SaveRelationship(ctx, "test-side-a", "test-side-c", 1); err != nil {
 		t.Fatalf("SaveRelationship A→C: %v", err)
 	}
 	rels, err := store.LoadRelationships(ctx, "test-side-b", 10)
@@ -366,16 +364,16 @@ func TestMySQLStore_SeedRelationshipInsertIgnore(t *testing.T) {
 	ctx := context.Background()
 	agentA, agentB := "test-seed-a", "test-seed-b"
 
-	// First seed → inserts row with familiarity=5.
-	if err := store.SeedRelationship(ctx, agentA, agentB, 5, 0); err != nil {
+	// First seed → inserts row with affection=6.
+	if err := store.SeedRelationship(ctx, agentA, agentB, 6); err != nil {
 		t.Fatalf("SeedRelationship #1: %v", err)
 	}
-	// Live interaction bumps familiarity to 6 via SaveRelationship.
-	if err := store.SaveRelationship(ctx, agentA, agentB, 1, 0); err != nil {
+	// Live interaction bumps affection to 7 via SaveRelationship.
+	if err := store.SaveRelationship(ctx, agentA, agentB, 1); err != nil {
 		t.Fatalf("SaveRelationship: %v", err)
 	}
-	// Second seed → INSERT IGNORE should NOT reset familiarity back to 5.
-	if err := store.SeedRelationship(ctx, agentA, agentB, 5, 0); err != nil {
+	// Second seed → INSERT IGNORE should NOT reset affection back to 6.
+	if err := store.SeedRelationship(ctx, agentA, agentB, 6); err != nil {
 		t.Fatalf("SeedRelationship #2: %v", err)
 	}
 	rels, err := store.LoadRelationships(ctx, agentA, 10)
@@ -385,7 +383,7 @@ func TestMySQLStore_SeedRelationshipInsertIgnore(t *testing.T) {
 	if len(rels) != 1 {
 		t.Fatalf("got %d rows, want 1", len(rels))
 	}
-	if rels[0].Familiarity != 6 {
-		t.Errorf("after seed-ignore: got fam=%d, want 6 (seed should not overwrite)", rels[0].Familiarity)
+	if rels[0].Affection != 7 {
+		t.Errorf("after seed-ignore: got affection=%d, want 7 (seed should not overwrite)", rels[0].Affection)
 	}
 }

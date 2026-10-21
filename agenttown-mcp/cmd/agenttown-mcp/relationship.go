@@ -74,17 +74,17 @@ const defaultAffection = 5
 // start (no interactions yet) and in memory mode (no store rows at all);
 // before this, an empty table silently hid both from every layer.
 //
-// Each line reads "- 老王（H-02，物流分拣兼加工员）：好感 5/10（熟悉度 3、
-// 互动 2 次）"; the 熟悉度/互动 paren is appended only when the stored row
-// actually has interaction history. Display name / profession resolve
-// profile > KB > bare id (the AgentRole fallback order). Rows whose peer is
-// not in the KB are dropped (stale data must not resurrect deleted agents).
+// Each line reads "- 老王（H-02，物流分拣兼加工员）：好感 5/10" — the
+// relationship is a single affection value (familiarity/互动 removed,
+// 2026-10-21). Display name / profession resolve profile > KB > bare id
+// (the AgentRole fallback order). Rows whose peer is not in the KB are
+// dropped (stale data must not resurrect deleted agents).
 //
 // Dedup: LoadRelationships queries both directions (agent_a=? OR agent_b=?),
 // so an agent who has interacted with H-03 gets two rows that both read as
 // "与 H-03" — that duplication confused the LLM and wasted tokens
 // (2026-09-18 仿真实测). When both directions exist, the row with the
-// higher familiarity / interaction count wins.
+// higher affection wins.
 //
 // Returns "" when kb == nil or the KB has ≤1 agent (single-NPC scenario
 // has no peers to list).
@@ -103,7 +103,7 @@ func formatRelationshipsForPrompt(rels []storage.Relationship, kb *worldkb.KB, p
 			continue
 		}
 		cur, ok := best[other]
-		if !ok || r.Familiarity > cur.Familiarity || r.InteractionCount > cur.InteractionCount {
+		if !ok || r.Affection > cur.Affection {
 			best[other] = r
 		}
 	}
@@ -141,14 +141,10 @@ func formatRelationshipsForPrompt(rels []storage.Relationship, kb *worldkb.KB, p
 		}
 		// 好感度：存储行优先；无行（未互动过 / 内存模式）默认 5。
 		aff := defaultAffection
-		history := ""
 		if r, ok := best[ag.ID]; ok {
 			aff = r.Affection
-			if r.Familiarity > 0 || r.InteractionCount > 0 {
-				history = fmt.Sprintf("（熟悉度 %d、互动 %d 次）", r.Familiarity, r.InteractionCount)
-			}
 		}
-		fmt.Fprintf(&sb, "- %s：好感 %d/10%s\n", label, aff, history)
+		fmt.Fprintf(&sb, "- %s：好感 %d/10\n", label, aff)
 	}
 	if sb.Len() == 0 {
 		return ""
@@ -185,14 +181,14 @@ func seedRelationshipsFromKB(ctx context.Context, kb *worldkb.KB, store storage.
 		// so each agent owns its outgoing row; the other agent's registration
 		// will seed the reverse direction.
 		var other string
-		var fam, aff int
+		var aff int
 		switch {
 		case rel.From == agentID:
 			other = rel.To
-			fam, aff = rel.Familiarity, rel.Affection
+			aff = rel.Affection
 		case rel.To == agentID:
 			other = rel.From
-			fam, aff = rel.Familiarity, rel.Affection
+			aff = rel.Affection
 		default:
 			continue // relationship doesn't involve this agent
 		}
@@ -207,7 +203,7 @@ func seedRelationshipsFromKB(ctx context.Context, kb *worldkb.KB, store storage.
 			continue // already seeded agentID→other in this call (KB declared both directions)
 		}
 		seen[other] = true
-		if err := store.SeedRelationship(ctx, agentID, other, fam, aff); err != nil {
+		if err := store.SeedRelationship(ctx, agentID, other, aff); err != nil {
 			logger.Warn("[关系层] KB 种子导入单条失败（继续其余）",
 				"agent_id", agentID, "other", other, "err", err)
 			continue
@@ -413,7 +409,7 @@ func (a *agentContext) evaluateConversationAffection(ctx context.Context, agentI
 	if applied == 0 {
 		return
 	}
-	if err := store.SaveRelationship(evalCtx, agentID, peerID, 0, applied); err != nil {
+	if err := store.SaveRelationship(evalCtx, agentID, peerID, applied); err != nil {
 		logger.Warn("[关系层] 保存好感度 A→B 失败", "agent_id", agentID, "peer", peerID, "err", err)
 		return
 	}

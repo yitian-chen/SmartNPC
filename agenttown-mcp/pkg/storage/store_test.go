@@ -84,7 +84,7 @@ func TestNoopStore_LoadActionHistoryIsNoOp(t *testing.T) {
 // TestNoopStore_SaveRelationshipIsNoOp verifies SaveRelationship returns nil without panic.
 func TestNoopStore_SaveRelationshipIsNoOp(t *testing.T) {
 	st := NoopStore{}
-	if err := st.SaveRelationship(context.Background(), "H-01", "H-02", 1, 0); err != nil {
+	if err := st.SaveRelationship(context.Background(), "H-01", "H-02", 1); err != nil {
 		t.Errorf("SaveRelationship: got err=%v, want nil", err)
 	}
 }
@@ -104,7 +104,7 @@ func TestNoopStore_LoadRelationshipsIsNoOp(t *testing.T) {
 // TestNoopStore_SeedRelationshipIsNoOp verifies SeedRelationship returns nil without panic.
 func TestNoopStore_SeedRelationshipIsNoOp(t *testing.T) {
 	st := NoopStore{}
-	if err := st.SeedRelationship(context.Background(), "H-01", "H-02", 5, 0); err != nil {
+	if err := st.SeedRelationship(context.Background(), "H-01", "H-02", 5); err != nil {
 		t.Errorf("SeedRelationship: got err=%v, want nil", err)
 	}
 }
@@ -124,8 +124,8 @@ func TestEmbeddedMigrations_Listed(t *testing.T) {
 	if versions[0] != "0001_init" {
 		t.Errorf("first migration: got %q, want 0001_init", versions[0])
 	}
-	if versions[len(versions)-1] != "0003_affection_default" {
-		t.Errorf("last migration: got %q, want 0003_affection_default", versions[len(versions)-1])
+	if versions[len(versions)-1] != "0004_relationship_single_affection" {
+		t.Errorf("last migration: got %q, want 0004_relationship_single_affection", versions[len(versions)-1])
 	}
 }
 

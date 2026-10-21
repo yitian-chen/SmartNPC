@@ -113,15 +113,15 @@ func TestFormatRelationshipsForPrompt_ProfessionFromProfile(t *testing.T) {
 
 func TestFormatRelationshipsForPrompt_WithRels(t *testing.T) {
 	rels := []storage.Relationship{
-		{AgentA: "H-01", AgentB: "H-02", Familiarity: 5, Affection: 2, InteractionCount: 3},
-		{AgentA: "H-03", AgentB: "H-01", Familiarity: 1, Affection: 0, InteractionCount: 1},
+		{AgentA: "H-01", AgentB: "H-02", Affection: 2},
+		{AgentA: "H-03", AgentB: "H-01", Affection: 0},
 	}
 	got := formatRelationshipsForPrompt(rels, relRosterKB(), nil, "H-01")
 	// First row: H-01 is agent_a, other side is H-02.
 	// Second row: H-01 is agent_b, other side is H-03.
 	wantContains := []string{
-		"- 老王（H-02）：好感 2/10（熟悉度 5、互动 3 次）",
-		"- 老李（H-03）：好感 0/10（熟悉度 1、互动 1 次）",
+		"- 老王（H-02）：好感 2/10",
+		"- 老李（H-03）：好感 0/10",
 	}
 	for _, w := range wantContains {
 		if !contains(got, w) {
@@ -150,7 +150,7 @@ func indexOf(haystack, needle string) int {
 // relationshipFakeStore is a minimal Store for relationship.go tests. It
 // captures SeedRelationship calls so tests can assert which rows were seeded.
 type relationshipFakeStore struct {
-	seeded  []storage.Relationship // captured seed calls (agentA, agentB, fam, aff)
+	seeded  []storage.Relationship // captured seed calls (agentA, agentB, aff)
 	seedErr error
 }
 
@@ -172,18 +172,18 @@ func (s *relationshipFakeStore) SaveActionRecord(_ context.Context, _ string, _ 
 func (s *relationshipFakeStore) LoadActionHistory(_ context.Context, _ string, _ int) ([]storage.ActionRecord, error) {
 	return nil, nil
 }
-func (s *relationshipFakeStore) SaveRelationship(_ context.Context, _ string, _ string, _ int, _ int) error {
+func (s *relationshipFakeStore) SaveRelationship(_ context.Context, _ string, _ string, _ int) error {
 	return nil
 }
 func (s *relationshipFakeStore) LoadRelationships(_ context.Context, _ string, _ int) ([]storage.Relationship, error) {
 	return nil, nil
 }
-func (s *relationshipFakeStore) SeedRelationship(_ context.Context, agentA, agentB string, fam, aff int) error {
+func (s *relationshipFakeStore) SeedRelationship(_ context.Context, agentA, agentB string, aff int) error {
 	if s.seedErr != nil {
 		return s.seedErr
 	}
 	s.seeded = append(s.seeded, storage.Relationship{
-		AgentA: agentA, AgentB: agentB, Familiarity: fam, Affection: aff,
+		AgentA: agentA, AgentB: agentB, Affection: aff,
 	})
 	return nil
 }
@@ -238,8 +238,8 @@ func TestSeedRelationshipsFromKB_Success(t *testing.T) {
 	if got.AgentA != "H-01" || got.AgentB != "H-02" {
 		t.Errorf("seeded %s→%s, want H-01→H-02", got.AgentA, got.AgentB)
 	}
-	if got.Familiarity != 5 || got.Affection != 1 {
-		t.Errorf("seeded fam=%d aff=%d, want fam=5 aff=1", got.Familiarity, got.Affection)
+	if got.Affection != 1 {
+		t.Errorf("seeded aff=%d, want aff=1", got.Affection)
 	}
 }
 
@@ -263,8 +263,8 @@ func TestSeedRelationshipsFromKB_ReverseDirection(t *testing.T) {
 	if got.AgentA != "H-01" || got.AgentB != "H-02" {
 		t.Errorf("reverse: seeded %s→%s, want H-01→H-02 (agentID as agent_a)", got.AgentA, got.AgentB)
 	}
-	if got.Familiarity != 4 || got.Affection != 2 {
-		t.Errorf("reverse: seeded fam=%d aff=%d, want fam=4 aff=2", got.Familiarity, got.Affection)
+	if got.Affection != 2 {
+		t.Errorf("reverse: seeded aff=%d, want aff=2", got.Affection)
 	}
 }
 
@@ -323,22 +323,22 @@ func TestSeedRelationshipsFromKB_ThreeNPCColdStart(t *testing.T) {
 		{
 			registering: "H-01",
 			wantSeeded: []storage.Relationship{
-				{AgentA: "H-01", AgentB: "H-02", Familiarity: 60, Affection: 8},
-				{AgentA: "H-01", AgentB: "H-03", Familiarity: 55, Affection: 7},
+				{AgentA: "H-01", AgentB: "H-02", Affection: 8},
+				{AgentA: "H-01", AgentB: "H-03", Affection: 7},
 			},
 		},
 		{
 			registering: "H-02",
 			wantSeeded: []storage.Relationship{
-				{AgentA: "H-02", AgentB: "H-01", Familiarity: 60, Affection: 8},
-				{AgentA: "H-02", AgentB: "H-03", Familiarity: 30, Affection: 6},
+				{AgentA: "H-02", AgentB: "H-01", Affection: 8},
+				{AgentA: "H-02", AgentB: "H-03", Affection: 6},
 			},
 		},
 		{
 			registering: "H-03",
 			wantSeeded: []storage.Relationship{
-				{AgentA: "H-03", AgentB: "H-01", Familiarity: 55, Affection: 7},
-				{AgentA: "H-03", AgentB: "H-02", Familiarity: 30, Affection: 6},
+				{AgentA: "H-03", AgentB: "H-01", Affection: 7},
+				{AgentA: "H-03", AgentB: "H-02", Affection: 6},
 			},
 		},
 	}
@@ -361,9 +361,9 @@ func TestSeedRelationshipsFromKB_ThreeNPCColdStart(t *testing.T) {
 					t.Errorf("%s seeded[%d] = %s→%s, want %s→%s",
 						tc.registering, i, got.AgentA, got.AgentB, want.AgentA, want.AgentB)
 				}
-				if got.Familiarity != want.Familiarity || got.Affection != want.Affection {
-					t.Errorf("%s seeded[%d] fam/aff = %d/%d, want %d/%d",
-						tc.registering, i, got.Familiarity, got.Affection, want.Familiarity, want.Affection)
+				if got.Affection != want.Affection {
+					t.Errorf("%s seeded[%d] aff = %d, want %d",
+						tc.registering, i, got.Affection, want.Affection)
 				}
 			}
 		})
@@ -385,8 +385,8 @@ func TestFormatRelationshipsForPrompt_DedupByOtherAgent(t *testing.T) {
 		{ID: "H-03", DisplayName: "老李"},
 	}}
 	rels := []storage.Relationship{
-		{AgentA: "H-01", AgentB: "H-03", Familiarity: 1, Affection: 0, InteractionCount: 1},
-		{AgentA: "H-03", AgentB: "H-01", Familiarity: 1, Affection: 0, InteractionCount: 1},
+		{AgentA: "H-01", AgentB: "H-03", Affection: 0},
+		{AgentA: "H-03", AgentB: "H-01", Affection: 0},
 	}
 	got := formatRelationshipsForPrompt(rels, kb, nil, "H-01")
 	if strings.Count(got, "H-03") != 1 {
@@ -394,17 +394,17 @@ func TestFormatRelationshipsForPrompt_DedupByOtherAgent(t *testing.T) {
 	}
 	// 双向时取更高值。
 	rels = []storage.Relationship{
-		{AgentA: "H-01", AgentB: "H-03", Familiarity: 1, Affection: 0, InteractionCount: 1},
-		{AgentA: "H-03", AgentB: "H-01", Familiarity: 3, Affection: 2, InteractionCount: 5},
+		{AgentA: "H-01", AgentB: "H-03", Affection: 0},
+		{AgentA: "H-03", AgentB: "H-01", Affection: 2},
 	}
 	got = formatRelationshipsForPrompt(rels, kb, nil, "H-01")
-	if !strings.Contains(got, "好感 2/10（熟悉度 3、互动 5 次）") {
+	if !strings.Contains(got, "好感 2/10") {
 		t.Fatalf("should show the higher values, got:\n%s", got)
 	}
 	// 多个不同 agent 不误并。
 	rels = []storage.Relationship{
-		{AgentA: "H-01", AgentB: "H-02", Familiarity: 2, Affection: 1, InteractionCount: 3},
-		{AgentA: "H-01", AgentB: "H-03", Familiarity: 1, Affection: 0, InteractionCount: 1},
+		{AgentA: "H-01", AgentB: "H-02", Affection: 1},
+		{AgentA: "H-01", AgentB: "H-03", Affection: 0},
 	}
 	got = formatRelationshipsForPrompt(rels, relRosterKB(), nil, "H-01")
 	if strings.Count(got, "\n") != 1 {
