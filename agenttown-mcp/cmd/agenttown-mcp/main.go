@@ -660,6 +660,16 @@ func (a *agentContext) processSlotSwitch(ws contract.Transport, agentID string, 
 	if !a.as.SlotSwitchPending() {
 		return
 	}
+	// 反应窗口守卫（2026-10-21）：reactionActive 期间不处理切换，保持
+	// pending。安全点的定义是"无在途动作"，而刚提交还没 pop 的反应队列
+	// 恰好满足这一定义——09:42 实测：社交 replan 提交的应答 speak_to 在
+	// 同一毫秒被 ClearForSlotSwitch 清掉，应答从未下发（邀请方等满
+	// no_reply 窗）。反应窗口有界：checkReactionDeadline 的截止切回
+	// （60 游戏分钟）、反应动作完成后的日程 refill、speech 回执终局都会
+	// 清窗口，届时切换在下一个安全点自然进行，不会永久挂起。
+	if active, _, _ := a.reactionSnapshot(); active {
+		return
+	}
 	// P4-10：切时段前捕捉未完成任务槽（结束方式"计划内结束"）。
 	a.recordScheduledEnd()
 	info := a.as.ClearForSlotSwitch()

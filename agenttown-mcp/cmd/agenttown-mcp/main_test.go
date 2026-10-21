@@ -1580,3 +1580,40 @@ func TestCheckTimeToStop_AdvisoryHintKeepsPriorityHint(t *testing.T) {
 		t.Errorf("advisory hint should be set when no priority hint pending, got %q", got)
 	}
 }
+
+// TestProcessSlotSwitch_ReactionGuardKeepsPendingQueue 验证反应窗口守卫：
+// reactionActive 期间 processSlotSwitch 不处理挂起的切换——刚提交还没 pop
+// 的反应队列（如社交 replan 的应答 speak_to）不被 ClearForSlotSwitch 清掉
+// （2026-10-21 09:42 实测：应答在提交的同一毫秒被清，从未下发）；窗口
+// 解除后切换照常处理。
+func TestProcessSlotSwitch_ReactionGuardKeepsPendingQueue(t *testing.T) {
+	ac, _ := newAgentContext(context.Background())
+	logger := slog.Default()
+	// 挂起的 slot 切换（早于反应开始设置——实测竞态正是这个时序）。
+	ac.as.SetSlotSwitchPending()
+	// 社交 replan 刚提交的反应队列：应答 speak_to 还没 pop。
+	ac.as.RefillQueue([]plannedAction{
+		{Action: "speak_to", Params: map[string]any{"target_agent_id": "H-01", "content": "好啊，一起跑两圈。"}},
+	}, "07:04-08:00")
+	// 反应窗口 armed（社交打断开启）。
+	ac.beginReaction(2, 1000, "社交信号：老陈邀请", true)
+
+	// 反应进行中：切换保持挂起、队列原封不动。
+	ac.processSlotSwitch(nil, "H-02", logger)
+	if !ac.as.SlotSwitchPending() {
+		t.Fatal("slot switch must stay pending while reaction active")
+	}
+	if !ac.as.HasQueueNext() {
+		t.Fatal("reaction queue must survive processSlotSwitch while reaction active")
+	}
+
+	// 窗口解除（speech 回执终局/日程 refill/截止切回都会清）：切换照常处理。
+	ac.clearReaction()
+	ac.processSlotSwitch(nil, "H-02", logger)
+	if ac.as.SlotSwitchPending() {
+		t.Error("slot switch should process after reaction window cleared")
+	}
+	if ac.as.HasQueueNext() {
+		t.Error("queue should be cleared once the switch actually processes")
+	}
+}
