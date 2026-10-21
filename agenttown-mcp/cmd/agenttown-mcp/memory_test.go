@@ -157,7 +157,8 @@ func TestGenerateDailyMemories_LLMFail(t *testing.T) {
 }
 
 // TestGenerateDailyMemories_Success verifies successful generation returns
-// narrative and saves memories to store.
+// the narrative and no longer writes memories to the store (long-term memory
+// write moved to compact time via persistCompactMemory).
 func TestGenerateDailyMemories_Success(t *testing.T) {
 	raw := `{"narrative":"今天装配顺利","memories":[
 		{"type":"event","content":"完成装配","importance":70,"related_object_id":"workbench_01"},
@@ -173,31 +174,32 @@ func TestGenerateDailyMemories_Success(t *testing.T) {
 	if out != "今天装配顺利" {
 		t.Errorf("narrative = %q, want '今天装配顺利'", out)
 	}
-	if len(store.savedMemories) != 2 {
-		t.Fatalf("saved memories = %d, want 2", len(store.savedMemories))
-	}
-	if store.savedMemories[0].MemoryType != "event" || store.savedMemories[0].Importance != 70 {
-		t.Errorf("memory[0] = %+v", store.savedMemories[0])
-	}
-	// Importance 0 should default to 50.
-	if store.savedMemories[1].Importance != 45 {
-		t.Errorf("memory[1] importance = %d, want 45", store.savedMemories[1].Importance)
+	if len(store.savedMemories) != 0 {
+		t.Fatalf("saved memories = %d, want 0 (write moved to compact)", len(store.savedMemories))
 	}
 }
 
-// TestGenerateDailyMemories_ImportanceDefault verifies importance=0 defaults to 50.
-func TestGenerateDailyMemories_ImportanceDefault(t *testing.T) {
-	raw := `{"narrative":"总结","memories":[{"type":"event","content":"事件","importance":0}]}`
-	sc := &fakeStrategicCaller{resp: makeStrategicResponse(raw)}
-	store := &memoryFakeStore{
-		actions: []storage.ActionRecord{{Cmd: "MoveTo", Source: "tactical", Result: "success", StartedAt: time.Now()}},
+// TestPersistCompactMemory verifies the compact-time memory write: nil store /
+// empty summary are no-ops; a summary writes one daily_summary memory.
+func TestPersistCompactMemory(t *testing.T) {
+	// nil store → no-op（不 panic）。
+	persistCompactMemory(nil, "H-01", "今天下棋", slog.Default())
+
+	// empty summary → no-op。
+	store := &memoryFakeStore{}
+	persistCompactMemory(store, "H-01", "", slog.Default())
+	if len(store.savedMemories) != 0 {
+		t.Fatalf("empty summary: saved = %d, want 0", len(store.savedMemories))
 	}
-	_ = generateDailyMemories(context.Background(), sc, store, "H-01", nil, nil, slog.Default())
+
+	// summary → 写一条 daily_summary 记忆。
+	persistCompactMemory(store, "H-01", "在咖啡馆和老王下棋", slog.Default())
 	if len(store.savedMemories) != 1 {
 		t.Fatalf("saved = %d, want 1", len(store.savedMemories))
 	}
-	if store.savedMemories[0].Importance != 50 {
-		t.Errorf("importance = %d, want 50 (default)", store.savedMemories[0].Importance)
+	m := store.savedMemories[0]
+	if m.MemoryType != "daily_summary" || m.Content != "在咖啡馆和老王下棋" {
+		t.Errorf("memory = %+v, want daily_summary + summary content", m)
 	}
 }
 

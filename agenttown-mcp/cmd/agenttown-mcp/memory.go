@@ -61,9 +61,13 @@ const memoryUserTemplate = `[记忆层/日终总结] 你刚结束一天的活动
 
 请回顾今天的行动记录，总结经验。`
 
-// generateDailyMemories summarizes yesterday's action_history into 3-5
-// structured memories via a single LLM call. Returns the narrative string
-// (for strategic prompt injection). Saves structured memories to the store.
+// generateDailyMemories summarizes yesterday's action_history into a
+// first-person narrative (昨日总结) for the next strategic prompt.
+//
+// 它不再写 agent_memories——长期记忆的唯一写入时机已移到上下文 compact
+// （persistCompactMemory）：不 compact 时经历仍在上下文中，无需落盘。
+// 本函数只产出战略层一次性消费的昨日总结，不落持久化记忆。
+//
 // Returns "" on any failure or empty history — caller falls back to the
 // yesterdaySummaryForFirstDay constant. Never blocks the decision pipeline.
 func generateDailyMemories(
@@ -124,37 +128,45 @@ func generateDailyMemories(
 		return ""
 	}
 
-	// Save structured memories (best-effort: continue on per-row error).
-	now := time.Now()
-	saved := 0
-	for _, m := range result.Memories {
-		mem := storage.Memory{
-			AgentID:         agentID,
-			MemoryType:      m.Type,
-			Content:         m.Content,
-			Importance:      m.Importance,
-			RelatedAgentID:  m.RelatedAgentID,
-			RelatedObjectID: m.RelatedObjectID,
-			RelatedZoneID:   m.RelatedZoneID,
-			CreatedAt:       now,
-			LastAccessedAt:  now,
-			DecayScore:      1.0,
-		}
-		if mem.Importance == 0 {
-			mem.Importance = 50 // default
-		}
-		if _, err := store.SaveMemory(ctx, agentID, mem); err != nil {
-			logger.Warn("[记忆层] 保存单条记忆失败（继续保存其余）",
-				"agent_id", agentID, "type", m.Type, "err", err)
-			continue
-		}
-		saved++
-	}
-
-	logger.Info("[记忆层] 日终记忆生成成功",
-		"agent_id", agentID, "memories_saved", saved,
-		"narrative", result.Narrative)
+	// 只返回昨日总结 narrative；不写 agent_memories（长期记忆写入已移到
+	// compact 时点，见 persistCompactMemory）。LLM 响应里的 memories 字段
+	// 仍被解析（parseMemoryGenerationResult），但不再落盘。
+	logger.Info("[记忆层] 昨日总结生成成功",
+		"agent_id", agentID, "narrative", result.Narrative)
 	return result.Narrative
+}
+
+// persistCompactMemory 把上下文 compact 产生的回忆式摘要沉淀为一条长期
+// 记忆（agent_memories）。这是长期记忆的**唯一写入时机**——不 compact 时
+// 经历仍在上下文中，无需落盘；compact 把即将被逐出的内容抽成摘要，此时
+// 才落盘，供之后（上下文里已没有这些内容时）回顾。
+//
+// best-effort：写入失败仅告警，不阻断压缩主流程；store 为 nil（内存模式）
+// 或摘要为空时直接跳过。summary 是滚动合并的，逐次 compact 落盘的摘要会
+// 覆盖更早的内容——读路径取最近 N 条自然收敛到最新摘要（append-only 设计）。
+func persistCompactMemory(store storage.Store, agentID, summary string, logger *slog.Logger) {
+	if store == nil || summary == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	now := time.Now()
+	mem := storage.Memory{
+		AgentID:        agentID,
+		MemoryType:     "daily_summary",
+		Content:        summary,
+		Importance:     50,
+		CreatedAt:      now,
+		LastAccessedAt: now,
+		DecayScore:     1.0,
+	}
+	if _, err := store.SaveMemory(ctx, agentID, mem); err != nil {
+		logger.Warn("[记忆层] compact 记忆落盘失败",
+			"agent_id", agentID, "err", err)
+		return
+	}
+	logger.Debug("[记忆层] compact 记忆已落盘",
+		"agent_id", agentID, "summary_chars", len(summary))
 }
 
 // formatActionHistoryForPrompt renders action records as a numbered

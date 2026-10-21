@@ -106,6 +106,10 @@ func (a *agentContext) maybeCompactConversation(system string, tools []venus.Too
 		return
 	}
 	a.as.CompactConversation(newSummary, tail)
+	// 长期记忆唯一写入时机：compact 把即将逐出的内容抽成摘要，此时才落盘
+	// （不 compact 时内容仍在上下文中，无需写库）。best-effort，失败不阻断
+	// 压缩主流程（persistCompactMemory 内部 5s 超时 + 告警）。
+	persistCompactMemory(a.as.Store(), agentID, newSummary, logger)
 	logger.Info("[压缩层] 上下文压缩完成",
 		"agent_id", agentID,
 		"before_msgs", len(history), "after_msgs", len(tail),
