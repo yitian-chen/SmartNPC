@@ -1436,8 +1436,22 @@ func (a *agentContext) popAndSendQueueAction(ctx context.Context, agentID string
 		return
 	}
 	if ack != nil {
-		// 复用现有记账 + 超时机制；source=tactical 让 completion 走队列路径
-		a.recordActionStarted(ack.ActionID, cmd, params, 0 /*无 decision_epoch*/, sourceTactical, pa.ToolCallID)
+		// 复用现有记账 + 超时机制；source=tactical 让 completion 走队列路径。
+		// ends_conversation 是 MCP 侧控制字段，mapTacticalAction 已从透传 UE 的
+		// params 里剔除（UE 不认识它）——但 releaseFarewellSpeaker 要从在途
+		// 记账里读这个标志做"送达即释放"。这里用独立 clone 回填标记给记账
+		// （透传 UE 的 params 保持剔除后的干净形态不被污染）。
+		// 2026-10-21 实测：字段在 mapTacticalAction 丢失后，releaseFarewellSpeaker
+		// 的类型断言恒 false，告别句 ends_conversation=true 也等满 10s no_reply 窗。
+		acctParams := params
+		if ec, ok := pa.Params["ends_conversation"].(bool); ok && ec {
+			acctParams = make(map[string]any, len(params)+1)
+			for k, v := range params {
+				acctParams[k] = v
+			}
+			acctParams["ends_conversation"] = true
+		}
+		a.recordActionStarted(ack.ActionID, cmd, acctParams, 0 /*无 decision_epoch*/, sourceTactical, pa.ToolCallID)
 		// time_to_stop：长动作设了执行时长，记下目标 game_time 供 checkTimeToStop 轮询。
 		if hasTTS && tts > 0 {
 			if start := a.as.LatestGameTimeSec(); start > 0 {

@@ -1617,3 +1617,50 @@ func TestProcessSlotSwitch_ReactionGuardKeepsPendingQueue(t *testing.T) {
 		t.Error("queue should be cleared once the switch actually processes")
 	}
 }
+
+// TestPopAndSendQueueAction_EndsConversationBackfilledForAccounting 验证
+// ends_conversation 在 mapTacticalAction 剔除后回填进在途记账 params——供
+// releaseFarewellSpeaker 做"送达即释放"（2026-10-21 10:40 实测：字段丢失后
+// 类型断言恒 false，告别句 ends_conversation=true 也等满 10s no_reply 窗）。
+// 透传 UE 的 params 仍保持剔除后的干净形态（不含 ends_conversation）。
+func TestPopAndSendQueueAction_EndsConversationBackfilledForAccounting(t *testing.T) {
+	orig := capabilityRegistryRef
+	reg := NewCapabilityRegistry(nil)
+	reg.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
+		{Cmd: "SpeakTo", Kind: "atomic"},
+	})
+	capabilityRegistryRef = reg
+	defer func() { capabilityRegistryRef = orig }()
+
+	ac, _ := newAgentContext(context.Background())
+	ft := &fakeTransport{
+		sendActionAck: &protocol.ActionStartedPayload{ActionID: "act-farewell"},
+	}
+	logger := slog.Default()
+	kb := loadTestKB(t)
+
+	setQueueForTest(ac, []plannedAction{
+		{Action: "speak_to", Params: map[string]any{
+			"target_agent_id": "H-02", "content": "好，那就这么定了。", "interrupt": true,
+			"ends_conversation": true, "duration": 3600,
+		}},
+	})
+
+	ac.popAndSendQueueAction(context.Background(), "H-01", ft, kb, logger)
+
+	// 透传 UE 的 params 干净（不含控制字段）。
+	if len(ft.sentActions) != 1 {
+		t.Fatalf("expected 1 sent action, got %d", len(ft.sentActions))
+	}
+	if _, ok := ft.sentActions[0].params["ends_conversation"]; ok {
+		t.Errorf("ends_conversation must NOT be forwarded to UE: %v", ft.sentActions[0].params)
+	}
+	// 在途记账 params 回填了标记（releaseFarewellSpeaker 读取）。
+	snap := ac.as.Snapshot()
+	if snap.CurrentActionID != "act-farewell" {
+		t.Fatalf("in-flight action id = %q, want act-farewell", snap.CurrentActionID)
+	}
+	if b, _ := snap.CurrentActionParams["ends_conversation"].(bool); !b {
+		t.Errorf("ends_conversation must be backfilled into accounting params: %v", snap.CurrentActionParams)
+	}
+}
