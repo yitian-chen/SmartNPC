@@ -2083,9 +2083,9 @@ func TestResolveReplanGoal_EndedConversationExemptsDawnWindow(t *testing.T) {
 }
 
 // TestCapabilityParamsSchema_SpeakToEndsConversation 验证 speak_to 的
-// schema 追加必填 ends_conversation（告别/收尾标记，MCP 侧控制字段；必填
-// 迫使 LLM 对每一句显式决策"是否收尾"，2026-10-20 实测可选时确认句被
-// 省略标记 → 整窗空等 10s）。
+// schema 追加可选 ends_conversation（告别/收尾标记；2026-10-21 起透传 UE
+// 作双向收口信号，恢复可选 + 精确语义——此前必填导致 LLM 每句都填 true、
+// 接收方据此误收口、对话起不来）。
 func TestCapabilityParamsSchema_SpeakToEndsConversation(t *testing.T) {
 	raw := capabilityParamsSchema(nil, "speak_to")
 	var schema struct {
@@ -2105,17 +2105,13 @@ func TestCapabilityParamsSchema_SpeakToEndsConversation(t *testing.T) {
 	if !strings.Contains(ec.Description, "告别") || !strings.Contains(ec.Description, "立即结束") {
 		t.Errorf("ends_conversation description must explain the farewell semantics: %s", ec.Description)
 	}
-	if !strings.Contains(ec.Description, "必填") {
-		t.Errorf("ends_conversation description must state it is required: %s", ec.Description)
+	if !strings.Contains(ec.Description, "false") {
+		t.Errorf("ends_conversation description must explain the default false for continuing turns: %s", ec.Description)
 	}
-	found := false
 	for _, r := range schema.Required {
 		if r == "ends_conversation" {
-			found = true
+			t.Errorf("ends_conversation must be optional (LLM only sets it on the true last turn): %v", schema.Required)
 		}
-	}
-	if !found {
-		t.Errorf("ends_conversation must be in required (default false): %v", schema.Required)
 	}
 	// 非 speak_to 工具不追加。
 	raw2 := capabilityParamsSchema(nil, "InteractSmartObject")
@@ -2124,9 +2120,10 @@ func TestCapabilityParamsSchema_SpeakToEndsConversation(t *testing.T) {
 	}
 }
 
-// TestMapTacticalAction_StripsEndsConversation 验证 ends_conversation 与
-// duration 一样是 MCP 侧控制字段，不透传 UE。
-func TestMapTacticalAction_StripsEndsConversation(t *testing.T) {
+// TestMapTacticalAction_KeepsEndsConversation 验证 ends_conversation 自
+// 2026-10-21 起透传 UE（UE 会把它放进 speech_heard 传给收听者，双向收口），
+// 仅 duration 仍作为 MCP 侧控制字段剔除。
+func TestMapTacticalAction_KeepsEndsConversation(t *testing.T) {
 	// speak_to 是 registry 动态注册的 cmd（UE push），registry=nil 时走不通
 	// passthrough——构造带 SpeakTo 的 registry。
 	reg := NewCapabilityRegistry(nil)
@@ -2144,8 +2141,8 @@ func TestMapTacticalAction_StripsEndsConversation(t *testing.T) {
 	if cmd != "SpeakTo" {
 		t.Fatalf("cmd=%q, want SpeakTo (registry passthrough)", cmd)
 	}
-	if _, ok := params["ends_conversation"]; ok {
-		t.Errorf("ends_conversation must be stripped before forwarding to UE: %v", params)
+	if b, ok := params["ends_conversation"].(bool); !ok || !b {
+		t.Errorf("ends_conversation must be forwarded to UE (relayed to listener): %v", params)
 	}
 	if _, ok := params["duration"]; ok {
 		t.Errorf("duration must be stripped before forwarding to UE: %v", params)

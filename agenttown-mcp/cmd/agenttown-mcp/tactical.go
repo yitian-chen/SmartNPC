@@ -686,21 +686,20 @@ func capabilityParamsSchema(params []protocol.CapabilityParam, name string) json
 		}
 		required = append(required, "duration")
 	}
-	// ends_conversation（仅 speak_to，必填）：告别/收尾标记，MCP 侧控制
-	// 字段（不透传 UE）。话语送达（对方收到 speech_heard）后系统立即结束
-	// 该动作、跳过 UE 的 no_reply 等待窗——因此带此标记的 speak_to 之后
-	// 可以直接安排后续动作（如约定一起进行的活动），队列会在告别句送达后
-	// 立即执行，无需 refill（2026-10-16 设计：消灭对话收尾的 ~10s 死时间）。
-	// 必填 + 默认 false 语义（2026-10-20 晚）：实测 LLM 把"对方应下后的
-	// 确认句"不当告别、直接省略字段 → 整窗空等 10s；必填迫使模型对每一句
-	// speak_to 显式决策"是否收尾"。运行时容错：LLM 漏填时按 false 处理
-	// （releaseFarewellSpeaker 的类型断言不成立），行为回落到等窗路径。
+	// ends_conversation（仅 speak_to，可选）：告别/收尾标记。话语送达（对方
+	// 收到 speech_heard）后系统立即结束该动作、跳过 UE 的 no_reply 等待窗——
+	// 因此带此标记的 speak_to 之后可以直接安排后续动作（如约定一起进行的
+	// 活动），队列会在告别句送达后立即执行，无需 refill。自 2026-10-21 起
+	// 透传 UE：UE 把它放进 speech_heard 传给收听者，收听者据此确定性收口
+	// （route() 不再打断回话）——标记从"MCP 侧单向优化"升级为"双向收口
+	// 信号"。可选 + 精确语义（2026-10-21）：只有对话真正到此为止、说完后
+	// 不再有任何往返时才填 true；期待对方回应/继续行动的句子一律填 false
+	// （此前必填导致 LLM 每句都填 true，接收方据此误收口、对话起不来）。
 	if name == "speak_to" {
 		props["ends_conversation"] = map[string]any{
 			"type":        "boolean",
-			"description": "必填。收尾性质的话填 true：告别语、对方应下你的邀请后你回的确认句（如\"好，那就这么定了\"）、礼貌性结束对话——填 true 后系统会在话语送达对方后立即结束本动作并执行后续动作，不等回话窗。普通对话轮（期待对方回话、对话还要继续）填 false。",
+			"description": "可选，默认 false。仅当本句是对话真正的最后一句（说完后不再有任何往返）时填 true：告别语、对方应下你的邀请后你回的确认句（如\"好，那就这么定了\"）——填 true 会告知对方对话结束、对方不会再回话，系统也会在话语送达后立即结束等待。期待对方回应、对话还要继续的句子（如邀请、追问、\"走吧跑起来\"这类继续行动的话）一律填 false。",
 		}
-		required = append(required, "ends_conversation")
 	}
 	schema := map[string]any{
 		"type":       "object",
@@ -833,13 +832,14 @@ func mapTacticalAction(pa plannedAction, agentID string, kb *worldkb.KB, registr
 			if tools.CmdToToolName(act.Cmd) != pa.Action {
 				continue
 			}
-			// 复制 params 避免调用方误改原 map；剔除 duration 与
-			// ends_conversation——两者都是 MCP 侧控制字段（worker 按
-			// game_time 定时打断消费 / speech_heard 送达即释放消费），
-			// 不透传 UE。
+			// 复制 params 避免调用方误改原 map；剔除 duration（MCP 侧控制
+			// 字段，worker 按 game_time 定时打断消费）。ends_conversation
+			// 自 2026-10-21 起透传 UE：UE 会把它原样放进 speech_heard 传给
+			// 收听者——收尾标记从"MCP 侧单向优化"升级为"双向收口信号"，
+			// 收听者据此确定性收尾（见 route() 的 ends_conversation 收口）。
 			out := make(map[string]any, len(pa.Params))
 			for k, v := range pa.Params {
-				if k == "duration" || k == "ends_conversation" {
+				if k == "duration" {
 					continue
 				}
 				out[k] = v

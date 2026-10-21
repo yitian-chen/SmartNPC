@@ -292,6 +292,21 @@ func speechHeardSpeaker(ev protocol.WorldEventPayload) string {
 	return d.SpeakerID
 }
 
+// speechHeardEndsConversation reports whether a speech_heard event carries
+// ends_conversation=true — the speaker is closing the conversation and does
+// not expect a reply. UE relays the speak_to's flag to the listener since
+// 2026-10-21; false for non-speech_heard or when the flag is absent.
+func speechHeardEndsConversation(ev protocol.WorldEventPayload) bool {
+	if ev.Category != protocol.CategorySocial || ev.EventType != protocol.EventTypeSpeechHeard {
+		return false
+	}
+	var d protocol.SpeechHeardData
+	if err := json.Unmarshal(ev.Data, &d); err != nil {
+		return false
+	}
+	return d.EndsConversation
+}
+
 // releaseFarewellSpeaker ends the speaker's in-flight farewell speak_to now
 // that its utterance has been delivered (the speech_heard that triggered this
 // call IS the delivery confirmation — MCP relays every message, so the

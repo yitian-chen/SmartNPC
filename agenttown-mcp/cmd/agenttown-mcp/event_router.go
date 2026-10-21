@@ -283,7 +283,18 @@ func (r *eventRouter) route(ctx context.Context, agentID string, ev protocol.Wor
 	// （新搭话仍走 judge 判紧急度）。severity 阶梯照常生效——更高优先级
 	// 的反应窗口（如威胁）进行中时回话仍留队列，由对话结束 hint
 	// （conversationEndedHint）承接守约。
+	//
+	// 收口（2026-10-21）：speech_heard 带 ends_conversation=true = 说话人
+	// 已明确收尾、不期待回话（UE 透传 speak_to 的标记给收听者）。此时
+	// 不再触发确定性打断——接收方继续当前动作（如赴约），事件留队列等
+	// 安全点 drain，对话从代码层收敛。此前接收方看不到该标记，把"走吧
+	// 跑起来"当成对方还在说话反复回话，形成 ping-pong 死循环。
 	if speaker := speechHeardSpeaker(ev); speaker != "" {
+		if speechHeardEndsConversation(ev) {
+			r.logger.Info("[事件路由] 说话人已收尾（ends_conversation），不打断回话",
+				"agent_id", agentID, "event_id", ev.EventID, "speaker", speaker)
+			return // 事件留队列，安全点 drain；接收方继续当前动作
+		}
 		if peer, turns := ac.conversationPeerState(); speaker == peer && turns >= 2 {
 			dec := prompt.RouterDecision{
 				Interrupt: true,

@@ -687,3 +687,38 @@ func TestEventRouter_ActiveConversationReplyDeterministicInterrupt(t *testing.T)
 		t.Fatalf("both events stay queued under the recorder fixture, got len=%d", got)
 	}
 }
+
+// TestEventRouter_EndsConversationReplyNoInterrupt 验证收口：speech_heard
+// 带 ends_conversation=true（说话人已明确收尾）时不触发确定性社交打断、
+// 也不问 judge——事件留队列等安全点 drain，接收方继续当前动作，从代码层
+// 终止 ping-pong（2026-10-21 实测：接收方看不到该标记时反复回话，对话
+// 11 轮无了期且互相打断对方的跑步动作）。
+func TestEventRouter_EndsConversationReplyNoInterrupt(t *testing.T) {
+	rt, _, ac, j, verdicts := newRouterTestRuntime(t, notInterruptJudge())
+	// 活跃会话：H-01 与 H-02 对话中（≥2 轮，原本会命中确定性打断）。
+	ac.recordConversationTurn("H-02", "H-02", "老王，一起去晨跑？", 100)
+	ac.recordConversationTurn("H-01", "H-02", "行啊，一起跑。", 101)
+
+	// 带 ends_conversation=true 的告别回话。
+	ev := protocol.WorldEventPayload{
+		EventID:   "evt_farewell",
+		Category:  protocol.CategorySocial,
+		EventType: protocol.EventTypeSpeechHeard,
+		Force:     false,
+		Severity:  5,
+		Subject:   "H-01",
+		GameTime:  "D12 07:19:40",
+		Location:  "residential_quarters",
+		Data:      json.RawMessage(`{"speaker_id":"H-02","speaker_name":"老王","addressee_id":"H-01","content":"好，那就这么定了。","ends_conversation":true}`),
+	}
+	dispatchTestEvent(t, rt, "H-01", ev)
+
+	// 收口：不产生打断判决、不问 judge。
+	time.Sleep(50 * time.Millisecond)
+	if got := verdicts.len(); got != 0 {
+		t.Fatalf("ends_conversation reply must not interrupt, got %d verdicts", got)
+	}
+	if got := len(j.statesOf()); got != 0 {
+		t.Fatalf("ends_conversation reply must bypass the judge, got %d judge calls", got)
+	}
+}
