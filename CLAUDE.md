@@ -110,7 +110,7 @@ graph TB
 
 MCP 直连 Venus（OpenAI Chat Completions 协议），战略/战术层调用 Venus。事件路由走 Venus 判决 API（`pkg/jev`，`POST /v1/systemone`，模型 `jev-1.13.0`——state+questions 三型问题：noul/choice/score，与 chat completions 同网关同凭据，`/v1/models` 列表不含它）。Ollama（`pkg/ollama/client.go`）仅剩关系判断用，默认禁用。
 
-**function calling**：战术层经 `tools` 请求字段下发工具（由 `capability_registry` 派生），`tool_choice=required`，多轮 messages（system + 历史 + 最新 user）。战略层用 Structured Outputs（`response_format` json_schema strict）。
+**function calling**：战术层经 `tools` 请求字段下发工具（由 `capability_registry` 派生），`tool_choice=required`，多轮 messages（system + 历史 + 最新 user）。战略层用 Structured Outputs（`response_format` json_schema strict）。**DeepSeek 官方 thinking 模型降级（2026-10-21）**：`deepseek-flash`/`deepseek-reasoner` 是 thinking 模型，**拒绝 `tool_choice=required`**（实测返回 `Thinking mode does not support this tool_choice` 400）——`llmconfig.Backend.ToolChoice`（yaml `tool_choice`）设为 `"auto"` 时，`venus.Client.doSend` 把战术层的强制 required 降级为 auto（function calling 仍可用，只是不强制；战术层已有的 isEmptyTacticalResult 空结果重试 + parseToolCallsWithFallback 文本兜底承接"LLM 不调工具"的情况）。默认空串保持 forced-required（Venus / 非 thinking 后端行为不变）。
 
 **启动示例**：
 ```bash

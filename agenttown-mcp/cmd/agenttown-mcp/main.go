@@ -2171,12 +2171,20 @@ func main() {
 			Logger:  logger,
 			Timeout: strategicTimeout,
 		})
+		// 战术层 tool_choice：--llm-config 可按后端降级为 "auto"（DeepSeek
+		// 官方 thinking 模型拒绝 "required"）。llmCfg == nil（走 flag）时保持
+		// 空串 = 默认 forced-required。
+		var tacticalToolChoice string
+		if llmCfg != nil {
+			tacticalToolChoice = llmCfg.Tactical.ToolChoice
+		}
 		ac.tacticalHc = venus.New(venus.Config{
-			BaseURL: tacticalBaseURL,
-			APIKey:  tacticalKey,
-			Model:   tacticalModel,
-			Logger:  logger,
-			Timeout: tacticalTimeout,
+			BaseURL:    tacticalBaseURL,
+			APIKey:     tacticalKey,
+			Model:      tacticalModel,
+			Logger:     logger,
+			Timeout:    tacticalTimeout,
+			ToolChoice: tacticalToolChoice,
 		})
 		// P2-5 事件路由判决模型（jev）：每 agent 一个判决客户端。--jev-model
 		// 空串禁用（路由器 enqueue-only）。恒指 --venus-url + 已解析的 venus

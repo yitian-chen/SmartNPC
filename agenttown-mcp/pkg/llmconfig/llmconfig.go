@@ -25,6 +25,11 @@ type Backend struct {
 	APIKey     string `yaml:"api_key"`
 	Model      string `yaml:"model"`
 	TimeoutSec int    `yaml:"timeout_sec"`
+	// ToolChoice overrides the forced tool_choice="required" for tactical
+	// function calling. DeepSeek's official thinking models (deepseek-flash /
+	// deepseek-reasoner) reject "required" ("Thinking mode does not support
+	// this tool_choice") — set "auto" for such backends.
+	ToolChoice string `yaml:"tool_choice"`
 }
 
 // Timeout returns the per-call HTTP timeout, or 0 when unset (the client

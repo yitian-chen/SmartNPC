@@ -953,3 +953,44 @@ func TestSendWithSummary_EmptyCompletion(t *testing.T) {
 		t.Errorf("expected ErrEmptyCompletion, got: %v", err)
 	}
 }
+
+// TestToolChoice_DegradedToAutoForThinkingBackend verifies the DeepSeek
+// thinking-model workaround: Config.ToolChoice="auto" downgrades the tactical
+// layer's forced tool_choice="required" to "auto" (DeepSeek official rejects
+// "required" with "Thinking mode does not support this tool_choice"), while
+// the default (empty Config.ToolChoice) keeps "required".
+func TestToolChoice_DegradedToAutoForThinkingBackend(t *testing.T) {
+	tool := Tool{Function: ToolFunction{Name: "speak", Description: "speak", Parameters: json.RawMessage(`{"type":"object","properties":{"content":{"type":"string"}}}`)}}
+
+	// 用例 1：Config.ToolChoice="auto" → 请求体 tool_choice=auto。
+	var captured request
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&captured)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"id":"x","object":"chat.completion","created":0,"model":"deepseek-flash","choices":[{"index":0,"message":{"role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"speak","arguments":"{}"}}]},"finish_reason":"stop"}]}`))
+	}))
+	defer srv.Close()
+	c := New(Config{BaseURL: srv.URL, APIKey: "k", Model: "deepseek-flash", Logger: slog.New(slog.NewTextHandler(io.Discard, nil)), Timeout: 5 * time.Second, ToolChoice: "auto"})
+	if _, err := c.SendWithSummaryTools(context.Background(), "sys", "user", []Tool{tool}); err != nil {
+		t.Fatalf("SendWithSummaryTools: %v", err)
+	}
+	if captured.ToolChoice != "auto" {
+		t.Errorf("tool_choice = %v, want auto (thinking backend downgrade)", captured.ToolChoice)
+	}
+
+	// 用例 2：默认 Config（ToolChoice 空）→ 请求体 tool_choice=required。
+	var captured2 request
+	srv2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&captured2)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"id":"x","object":"chat.completion","created":0,"model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"","tool_calls":[{"id":"c","type":"function","function":{"name":"speak","arguments":"{}"}}]},"finish_reason":"stop"}]}`))
+	}))
+	defer srv2.Close()
+	c2 := New(Config{BaseURL: srv2.URL, APIKey: "k", Model: "m", Logger: slog.New(slog.NewTextHandler(io.Discard, nil)), Timeout: 5 * time.Second})
+	if _, err := c2.SendWithSummaryTools(context.Background(), "sys", "user", []Tool{tool}); err != nil {
+		t.Fatalf("SendWithSummaryTools (default): %v", err)
+	}
+	if captured2.ToolChoice != "required" {
+		t.Errorf("tool_choice = %v, want required (default forced)", captured2.ToolChoice)
+	}
+}
