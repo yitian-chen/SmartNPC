@@ -280,11 +280,15 @@ func (s *Server) readLoop(ctx context.Context, c *websocket.Conn) {
 			continue
 		}
 
-		// Log inbound messages from UE. Heartbeat is silent; all other
-		// types (including high-frequency perception_update / state_report)
-		// log the full payload so scan_area results and state deltas are
-		// fully visible in sim.log.
+		// Log inbound messages from UE. Heartbeat is silent (Debug); the
+		// high-frequency perception_update is also silent now — its full
+		// payload was flooding INFO logs every perception tick. To inspect
+		// a single perception on demand, use scan_area (still logs) or
+		// raise the log level to debug for the [UE→MCP] envelope line.
+		// All other types log the full payload.
 		switch env.Type {
+		case protocol.TypePerceptionUpdate:
+			// 静默：perception_update 高频（每 N 游戏分钟全量一次），刷屏。
 		case protocol.TypeHeartbeat:
 			// 解析 uptime_sec 用于日志诊断（协议 §2.3）。解析失败也不影响
 			// 心跳时间戳更新——心跳本质是 liveness 信号，payload 是辅助。

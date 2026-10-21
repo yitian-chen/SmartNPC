@@ -126,9 +126,9 @@ func TestEstimateInputTokens(t *testing.T) {
 // ─── 2026-09-18 修复测试：摘要累积 + 并发互斥 ────────────────────
 
 // mkFatRounds builds rounds whose user content is realistically sized
-// (战术层 user prompt ~2000+ 字符），so a few dozen rounds cross the 8k
-// estimate threshold — the tiny mkRound messages (est ~4.5/条) need
-// 1800+ messages to trigger.
+// (战术层 user prompt ~2000+ 字符），so a few dozen rounds cross the 10k
+// estimate threshold（每轮 400 宽字符 ≈ 200 token，60 轮 ≈ 12.8k）——
+// the tiny mkRound messages (est ~4.5/条) need 1800+ messages to trigger.
 func mkFatRounds(n int) []llmtypes.Message {
 	var out []llmtypes.Message
 	for i := 0; i < n; i++ {
@@ -200,11 +200,11 @@ func TestCompaction_SequentialCompactionsAccumulate(t *testing.T) {
 	ac.tacticalHc = fake
 	// 10 轮历史触发阈值（每轮 ~几十 token，10 轮 + 无 userContent 足够？用
 	// 显式大历史保证：mkRounds(40)）。
-	for _, m := range mkFatRounds(45) {
+	for _, m := range mkFatRounds(60) {
 		ac.as.AppendConversationMessage(m)
 	}
 	ac.maybeCompactConversation("sys", nil, "user", "H-01", nil, nil, testLogger())
-	if got := len(ac.as.Conversation()); got >= len(mkFatRounds(45)) {
+	if got := len(ac.as.Conversation()); got >= len(mkFatRounds(60)) {
 		t.Fatalf("first compaction should shrink history, got %d msgs", got)
 	}
 	firstSummary := ac.as.ConversationSummary()
@@ -214,7 +214,7 @@ func TestCompaction_SequentialCompactionsAccumulate(t *testing.T) {
 
 	// 攒出新历史后再压：prompt 必须携带第一段摘要。
 	fake.response = "合并后摘要"
-	for _, m := range mkFatRounds(45) {
+	for _, m := range mkFatRounds(60) {
 		ac.as.AppendConversationMessage(m)
 	}
 	ac.maybeCompactConversation("sys", nil, "user", "H-01", nil, nil, testLogger())
@@ -232,7 +232,7 @@ func TestCompaction_InFlightGuardSkips(t *testing.T) {
 	block := make(chan struct{})
 	fake := &compactFakeLLM{response: "摘要", block: block}
 	ac.tacticalHc = fake
-	for _, m := range mkFatRounds(45) {
+	for _, m := range mkFatRounds(60) {
 		ac.as.AppendConversationMessage(m)
 	}
 
@@ -271,7 +271,7 @@ func TestCompaction_InFlightGuardSkips(t *testing.T) {
 	}
 	// 复位后再攒历史可正常进入（上次压缩后 tail 在阈值下，不触发是正常的）。
 	fake.block = nil
-	for _, m := range mkFatRounds(45) {
+	for _, m := range mkFatRounds(60) {
 		ac.as.AppendConversationMessage(m)
 	}
 	ac.maybeCompactConversation("sys", nil, "user", "H-01", nil, nil, testLogger())

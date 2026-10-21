@@ -22,7 +22,7 @@ const TacticalRules = `1. 第一个工具调用必须是 speak（用一段话表
 7. 所有非瞬时动作（InteractSmartObject 设施互动、exercise 原地锻炼、speak_to 找人聊天等需要持续一段时间的）都必须填写 duration 参数（秒，schema 必填），包括最后一个动作也不例外——无 duration 的长动作无法被系统按计划终止；move_to 的移动时长由 UE 自动决定、无需填 duration；瞬时动作（speak 等立即完成的）也不填 duration。duration 要合理：冥想、整理床铺等单段设 1800 秒左右，不宜超过 1 小时；受伤后的维修/休息可设 3600-7200 秒，磨损/疲劳严重时更长（以【物理告警强制约束】中的建议为准）；工作段可设 3600-7200 秒。到点后系统会打断该段并继续执行后续动作段；只有全部动作执行完，系统才会再次询问。推荐模式：工作段（如 1.5 小时）→ 长椅小憩/原地拉伸段（不超过 30 分钟）→ 返回工作段（duration 设为时段剩余时长）。
 8. 每次生成的最后一个动作必须是长动作（InteractSmartObject 或 speak_to 等长动作），其 duration 设为当前时段的剩余时长（见上文"剩余约 X 分钟"提示）——到点后系统自动切入下一时段，NPC 不会呆站。所有长动作（包括最后一个）都必须设置 duration，不得省略。所有动作的 duration 总和应接近当前时段的剩余时长，避免过短导致队列提前耗尽触发重分解、或过长拖到下一时段。
 9. 如果是调用 InteractSmartObject 工具，若当前日程目标明确指定了区域（如"去中央广场长椅休息"），**必须**在该工具的 zone 参数中填写对应区域 id（如 central_plaza、logistics_hub）。
-10. 想找某位 NPC 聊天/对话时：**豁免规则 1 的"以 speak 开头"**，并且**只输出一条 speak_to**（不要先 speak 独白、也不要再补其他长动作）——target_agent_id 填对方 id（【附近NPC】/【其他NPC】中给出的 id），content 填你想说的内容，interrupt 填 true；speak_to 是长动作，按规则 7 填 duration。`
+10. 想找某位 NPC 聊天/对话时：**豁免规则 1 的"以 speak 开头"**，并且**只输出一条 speak_to**（不要先 speak 独白、也不要再补其他长动作）——target_agent_id 填对方 id（【附近NPC】/【其他NPC】中给出的 id），content 填你想说的内容，interrupt 填 true；speak_to 是长动作，按规则 7 填 duration。**收尾句才填 ends_conversation**：仅当本句是对话真正的最后一句（说完后不再有任何往返）才填 ends_conversation: true——告别语、对方应下你的邀请后你回的确认句（如"好，那就这么定了"）、礼貌性结束；填 true 会告知对方对话结束、对方不再回话，系统也会在话语送达后立即结束等待并执行后续动作（如约定一起进行的活动），不等回话窗口。期待对方回应、对话还要继续的句子（邀请、追问、以及"走吧跑起来"这类继续行动的话）一律填 false。`
 
 // tacticalCoreRules 是精简模式（Compact=true）下替代完整 TacticalRules 的
 // 核心约束速览，覆盖实测高频失败模式（speak-only 队列、duration 漏填、
@@ -31,6 +31,8 @@ const TacticalRules = `1. 第一个工具调用必须是 speak（用一段话表
 const tacticalCoreRules = `- 首个工具调用必须是 speak；随后必须返回至少一个带 duration 的长动作，禁止只返回 speak（找某位 NPC 聊天除外——只输出一条 speak_to，不需要 speak 开头）。
 - 除了speak和移动，其他必须填 duration（秒）：中间动作约 1800 秒、工作段 3600-7200 秒；恢复类动作（维修/充电/睡眠）按恢复需要设置，可以更长，不受这些档位限制。
 - 找人聊天/对话时只输出一条 speak_to 工具（target_agent_id 填对方 id，content 填内容，interrupt 填 true）。
+- 告别/收尾句（含对方应下你的邀请后你回的确认句）给 speak_to 填 ends_conversation: true，其后可直接跟后续动作（系统送达即执行，不等回话）；期待回话/继续行动的话一律填 false。
+- 目标是"邀请XX一起做XX"时同样只输出一条 speak_to（content 填邀请的话）——约定的事项在对话结束后由系统提示驱动执行，不在本轮分解。
 - 最后一个动作必须是长动作，duration 设为当前时段剩余时长。所有长动作（含末段）都必须设 duration。`
 
 // tacticalCompactRefLine 是精简模式的引用行：指向本日第一条战术消息的
@@ -109,9 +111,10 @@ func BuildTactical(in TacticalInput) string {
 		}
 	}
 	nearbyLine := NearbyAgentsLine(in.VisibleAgents, in.KB)
-	if nearbyLine == "" && in.KB != nil {
+	if nearbyLine == "" && in.KB != nil && in.Relationships == "" {
 		// 附近无可见 NPC 时 fallback 到 KB 静态花名册，让 LLM 始终能看到
-		// NPC id 列表（定向对话需要 id 而非显示名）。
+		// NPC id 列表（定向对话需要 id 而非显示名）。【人际关系】非空时
+		// 跳过——那段已是完整名单（含 id、职业与好感度），重复罗列浪费 token。
 		nearbyLine = OtherAgentsLine(in.KB, in.AgentID)
 	}
 	if nearbyLine != "" {
@@ -183,8 +186,9 @@ func tacticalHintLine(in TacticalInput, th BandThresholds) string {
 		event := strings.TrimPrefix(in.Hint, "【战斗结束】")
 		line := "【战斗结束】" + event + "\n" +
 			"你刚经历一场战斗（期间由外部战斗系统接管你的身体，自主控制曾中断），现已脱离战斗、恢复自主控制。" +
-			"请结合当前物理状态与位置变化（可能受损、电量下降、不在原位置）决定后续行为——" +
-			"如维修、充电、返回岗位或继续当前时段目标；恢复要充分，可以安排较长的连续时长，不必急于返回岗位；" +
+			"请结合当前物理状态与位置变化（可能受损、电量下降）决定后续行为——" +
+			"如维修(如果损伤严重)、休息(如果疲劳度高)、返回岗位或继续当前时段目标；恢复要充分，可以安排较长的连续时长，不必急于返回岗位；" +
+			"也可以用 speak_to 告知身边的其他居民，让对方知晓攻击情况并保持警惕。" +
 			"除非收到新的威胁信号，不必继续逃跑或警戒。"
 		// 战斗最常见的后果正是属性恶化（磨损/疲劳暴涨）：越过警戒阈值时
 		// 追加与"物理状态告警" hint 同一套强制恢复约束——把上面泛化的
@@ -194,9 +198,25 @@ func tacticalHintLine(in TacticalInput, th BandThresholds) string {
 	}
 	if strings.HasPrefix(in.Hint, "【社交回应】") {
 		event := strings.TrimPrefix(in.Hint, "【社交回应】")
-		return "【社交回应请求】" + event + "\n" +
-			"请简短回应此社交事件（如打招呼、回一句话），然后继续当前时段的原有工作。" +
-			"回应动作应简短，回应完毕后按原计划继续。"
+		out := "【社交回应请求】" + event + "\n"
+		if in.Conversation != "" {
+			out += in.Conversation + "\n"
+		}
+		out += "请先读上方对话记录（如有），判断对话进行到哪一步，再决定怎么回应。回话用 speak_to 向对方说（target_agent_id 填对方 id，不要用独白 speak 代替）；**本轮对话回应只需要这一条 speak_to**（约定的事项会在对话结束后由系统提示，届时再执行）——此限定只针对对话回应这一轮，其他轮次的分解仍须遵守规则 1（speak + 至少一个长动作）；判断对话已到终点时，也可以不再回话，直接收尾。\n" +
+			"对话结束条件——满足任一即应主动收尾，不再继续往返：" +
+			"① 目的已达成（邀请已得到明确答复：应下则一句确认收尾即可——**这句确认就是收尾句，必须填 ends_conversation: true**；婉拒则一句\"行，那回头见\"后各忙各的；要交换的信息已说完）；" +
+			"② 寒暄 2-3 轮无新信息、双方只是在重复确认——直接告别收尾；" +
+			"③ 对方明显在收尾（对方的话带 ends_conversation 标记、或内容是告别语/敷衍的简短回应）——**不要再回话**，直接结束对话回到当前动作或时段目标。\n" +
+			"凡收尾性质的 speak_to——对方应下你的邀请后你回的确认句（如\"好，那就这么定了\"）、告别语、礼貌性结束——都给该 speak_to 填 ends_conversation: true（该标记会告知对方对话结束、对方不再回话，系统也会在话语送达后立即结束等待，不再空等回话窗约 10 秒），并可直接在其后安排后续动作（如约定一起进行的活动、或回到岗位的动作）。\n"
+		if in.ConversationCapped {
+			out += "【对话轮次已达上限】当前对话往返轮次过多仍未结束，本轮必须收尾：只输出一句告别（speak_to），禁止再开启新话题或再次邀请——后续动作由对话结束后的系统提示驱动。\n"
+		}
+		out += "若对方在邀请你一起做某事且尚未答复：结合你当前时段的安排、对对方的好感度（见【人际关系】）与你的性格决定是否应邀——" +
+			"接受则礼貌应下（一条 speak_to 确认即可，约定在对话结束后由系统提示执行）；" +
+			"婉拒则礼貌回应后继续当前时段的原有工作。\n" +
+			"若这是对你此前邀请或搭话的回应：对方应下则一句确认/告别收尾；婉拒则礼貌收下并回到原有工作。\n" +
+			"普通问候/闲聊则简短回应，回应完毕后按原计划继续。"
+		return out
 	}
 	if strings.HasPrefix(in.Hint, "【强制打断】") {
 		event := strings.TrimPrefix(in.Hint, "【强制打断】")

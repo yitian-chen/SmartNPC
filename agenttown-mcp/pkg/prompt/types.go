@@ -35,13 +35,18 @@ type TacticalInput struct {
 	// (generateTacticalPlan) sets it only when that full header is already in
 	// the conversation history. Zero value false = full form (backward
 	// compatible).
-	Compact       bool
-	Physical      *protocol.PhysicalState
-	KB            *worldkb.KB
-	Profiles      map[string]*profile.Profile // NPC persona override; nil → AgentRole falls back to KB then hardcoded
-	Hint          string
-	Memories      string // Stage 4: formatted bullet list of recent memories; empty = skip segment
-	Relationships string // Stage 5: formatted relationship list for 【人际关系】段; empty = skip segment (single-NPC scenario)
+	Compact  bool
+	Physical *protocol.PhysicalState
+	KB       *worldkb.KB
+	Profiles map[string]*profile.Profile // NPC persona override; nil → AgentRole falls back to KB then hardcoded
+	Hint     string
+	Memories string // Stage 4: formatted bullet list of recent memories; empty = skip segment
+	// Relationships is the merged other-NPC roster + affection list
+	// (formatRelationshipsForPrompt: every KB peer with 好感度 x/10, stored
+	// rows overlay, default 5 when absent) for the 【人际关系】 segment;
+	// empty = skip segment (single-NPC scenario). Also suppresses the
+	// 【其他NPC】 KB-roster fallback in BuildTactical (redundant roster).
+	Relationships string
 	// Events is the safe-point drain of queued non-force world events
 	// (P3-7, §4.4/§5.1 第三输入), pre-rendered via FormatWorldEventList;
 	// empty = skip the 【发生的事件】 segment. Unlike 【全天日程】 it is
@@ -53,7 +58,19 @@ type TacticalInput struct {
 	// actually resolved — the LLM must not declare it over on its own.
 	// Empty = skip.
 	Situations string
-	AgentID    string
+	// Conversation is the in-progress conversation transcript block (peer +
+	// turns + round count), rendered from the agent-side session state
+	// (recordConversationTurn: own utterances via speak_to dispatch, peer
+	// utterances via speech_heard). Consumed only by the 【社交回应】 branch
+	// of tacticalHintLine so the LLM can judge where the dialogue stands
+	// instead of seeing only the latest utterance; empty = omit.
+	Conversation string
+	// ConversationCapped marks the conversation having reached the
+	// turn cap (caller-side maxConversationTurns) — the 【社交回应】 branch
+	// appends a hard wrap-up directive (one farewell + next action, no new
+	// topics) so a conversation never loops forever regardless of sampling.
+	ConversationCapped bool
+	AgentID            string
 	// ObjectStatus is UE5's per-category smart object availability aggregate
 	// (cross-zone). Injected into the tactical prompt as 【物体实时占用】 so
 	// the LLM can avoid planning actions targeting occupied objects. nil =

@@ -39,7 +39,7 @@ func TestRecordActionCompletion_SignalsWorkerAndClearsInFlight(t *testing.T) {
 
 	queued, _ := ac.recordActionCompletion(protocol.ActionCompletedPayload{
 		ActionID: "act_t1", Result: protocol.ResultSuccess,
-	})
+	}, nil, nil, nil)
 	if !queued {
 		t.Fatal("completion should return true (handled)")
 	}
@@ -66,7 +66,7 @@ func TestRecordActionCompletion_SuccessNoTrigger(t *testing.T) {
 	ac, _ := newAgentContext(context.Background())
 	queued, detail := ac.recordActionCompletion(protocol.ActionCompletedPayload{
 		ActionID: "act_ok_1", Result: protocol.ResultSuccess,
-	})
+	}, nil, nil, nil)
 	if !queued {
 		t.Fatal("queued should be true")
 	}
@@ -84,7 +84,7 @@ func TestRecordActionCompletion_FailureTriggers(t *testing.T) {
 	ac, _ := newAgentContext(context.Background())
 	queued, detail := ac.recordActionCompletion(protocol.ActionCompletedPayload{
 		ActionID: "act_fail_1", Result: protocol.ResultFailed,
-	})
+	}, nil, nil, nil)
 	if !queued {
 		t.Fatal("queued should be true")
 	}
@@ -103,7 +103,7 @@ func TestRecordActionCompletion_FailureDetailIncludesReason(t *testing.T) {
 	_, detail := ac.recordActionCompletion(protocol.ActionCompletedPayload{
 		ActionID: "act_fail_2", Result: protocol.ResultFailed,
 		Reason: "寻路不可达",
-	})
+	}, nil, nil, nil)
 	if !strings.Contains(detail, "reason=寻路不可达") {
 		t.Errorf("detail should contain UE reason: %q", detail)
 	}
@@ -127,7 +127,7 @@ func TestRecordActionCompletion_FailureSetsReplanHint(t *testing.T) {
 		ActionID: "act_workbench_fail",
 		Result:   protocol.ResultFailed,
 		Reason:   "claim_queue_not_supported",
-	})
+	}, nil, nil, nil)
 
 	snap := ac.as.Snapshot()
 	hint := snap.ReplanHint
@@ -168,7 +168,7 @@ func TestRecordActionCompletion_TooTiredHintGuidesRest(t *testing.T) {
 		ActionID: "act_too_tired",
 		Result:   protocol.ResultFailed,
 		Reason:   "too_tired",
-	})
+	}, nil, nil, nil)
 
 	snap := ac.as.Snapshot()
 	hint := snap.ReplanHint
@@ -193,7 +193,7 @@ func TestRecordActionCompletion_FailureNoHintForManualAction(t *testing.T) {
 		ActionID: "act_manual_fail",
 		Result:   protocol.ResultFailed,
 		Reason:   "manual test failure",
-	})
+	}, nil, nil, nil)
 	snap := ac.as.Snapshot()
 	if snap.ReplanHint != "" {
 		t.Errorf("ReplanHint should remain empty for manual /debug/action failures, got %q", snap.ReplanHint)
@@ -210,7 +210,7 @@ func TestRecordActionCompletion_SuccessNoReplanHint(t *testing.T) {
 	ac.recordActionCompletion(protocol.ActionCompletedPayload{
 		ActionID: "act_work_ok",
 		Result:   protocol.ResultSuccess,
-	})
+	}, nil, nil, nil)
 	snap := ac.as.Snapshot()
 	if snap.ReplanHint != "" {
 		t.Errorf("ReplanHint should remain empty on success, got %q", snap.ReplanHint)
@@ -372,7 +372,7 @@ func TestRecordActionStarted_CompletionAlreadyArrived(t *testing.T) {
 	// so wasInFlight=false, timer not armed so it goes to completedBeforeArm).
 	ac.recordActionCompletion(protocol.ActionCompletedPayload{
 		ActionID: "act_short", Result: protocol.ResultSuccess,
-	})
+	}, nil, nil, nil)
 
 	// Drain wake from the completion's signal().
 	select {
@@ -559,7 +559,7 @@ func TestRecordActionCompletion_ClearsPendingStop(t *testing.T) {
 
 	ac.recordActionCompletion(protocol.ActionCompletedPayload{
 		ActionID: "act_old_composite", Result: protocol.ResultSuccess,
-	})
+	}, nil, nil, nil)
 
 	if ac.as.PendingStopActionID() != "" {
 		t.Errorf("pendingStopActionID=%q, want empty (cleared when old action completes naturally)", ac.as.PendingStopActionID())
@@ -576,7 +576,7 @@ func TestRecordActionCompletion_SelfStopSuppressesReactive(t *testing.T) {
 	queued, detail := ac.recordActionCompletion(protocol.ActionCompletedPayload{
 		ActionID: "act_stopped_by_slot_switch",
 		Result:   protocol.ResultInterrupted, // stop 引发的完成
-	})
+	}, nil, nil, nil)
 
 	if !queued {
 		t.Error("queued should be true (worker signaled)")
@@ -599,7 +599,7 @@ func TestRecordActionCompletion_OtherFailureStillTriggers(t *testing.T) {
 	queued, _ := ac.recordActionCompletion(protocol.ActionCompletedPayload{
 		ActionID: "act_unexpected_fail",
 		Result:   protocol.ResultFailed,
-	})
+	}, nil, nil, nil)
 
 	if !queued {
 		t.Error("queued should be true")
@@ -1540,5 +1540,130 @@ func TestCheckTimeToStop_KeepsQueue(t *testing.T) {
 	_, slot, _ := ac.as.SnapshotSchedule()
 	if slot != "09:00-12:00" {
 		t.Errorf("slot = %q, want 09:00-12:00 preserved", slot)
+	}
+}
+
+// TestCheckTimeToStop_AdvisoryHintKeepsPriorityHint 验证 time_to_stop 的
+// advisory hint（"已执行长动作…"）不覆盖挂起的高优先级结构化 hint（【对话
+// 结束】守约/【战斗结束】等——均以"【"开头）。2026-10-20 17:58 实测：守约
+// hint 注入 6s 后撞上切段，被 advisory 覆盖，随后的 refill 只见时段目标，
+// NPC 弃约去上网。
+func TestCheckTimeToStop_AdvisoryHintKeepsPriorityHint(t *testing.T) {
+	// 用例 1：挂起守约 hint → 切段后 hint 保持不被覆盖。
+	ac, _ := newAgentContext(context.Background())
+	logger := slog.Default()
+	ac.as.RecordActionStarted("act-stretch", "Exercise",
+		map[string]any{"exercise_type": "stretch"}, agentstate.SourceTactical, "tc-1")
+	ac.as.ArmTimeStop("act-stretch", 40000, 720)
+	raw := []byte(`{"environment":{"game_time_sec":41000}}`)
+	if _, err := ac.as.SetPerception(raw); err != nil {
+		t.Fatalf("SetPerception: %v", err)
+	}
+	ac.as.SetReplanHint("【对话结束】你与老王（H-02）的对话刚刚结束，完整对话记录：…")
+
+	ac.checkTimeToStop("H-01", logger)
+
+	if got := ac.as.ReplanHint(); !strings.HasPrefix(got, "【对话结束】") {
+		t.Errorf("priority hint clobbered by advisory: %q", got[:min(len(got), 60)])
+	}
+
+	// 用例 2：无挂起 hint（或挂起的是无前缀 advisory）→ 照常注入切段提示。
+	ac2, _ := newAgentContext(context.Background())
+	ac2.as.RecordActionStarted("act-run", "InteractSmartObject",
+		map[string]any{"semantic_group": "treadmill", "interaction": "run"}, agentstate.SourceTactical, "tc-2")
+	ac2.as.ArmTimeStop("act-run", 40000, 720)
+	if _, err := ac2.as.SetPerception(raw); err != nil {
+		t.Fatalf("SetPerception: %v", err)
+	}
+	ac2.checkTimeToStop("H-01", logger)
+	if got := ac2.as.ReplanHint(); !strings.Contains(got, "已执行长动作") {
+		t.Errorf("advisory hint should be set when no priority hint pending, got %q", got)
+	}
+}
+
+// TestProcessSlotSwitch_ReactionGuardKeepsPendingQueue 验证反应窗口守卫：
+// reactionActive 期间 processSlotSwitch 不处理挂起的切换——刚提交还没 pop
+// 的反应队列（如社交 replan 的应答 speak_to）不被 ClearForSlotSwitch 清掉
+// （2026-10-21 09:42 实测：应答在提交的同一毫秒被清，从未下发）；窗口
+// 解除后切换照常处理。
+func TestProcessSlotSwitch_ReactionGuardKeepsPendingQueue(t *testing.T) {
+	ac, _ := newAgentContext(context.Background())
+	logger := slog.Default()
+	// 挂起的 slot 切换（早于反应开始设置——实测竞态正是这个时序）。
+	ac.as.SetSlotSwitchPending()
+	// 社交 replan 刚提交的反应队列：应答 speak_to 还没 pop。
+	ac.as.RefillQueue([]plannedAction{
+		{Action: "speak_to", Params: map[string]any{"target_agent_id": "H-01", "content": "好啊，一起跑两圈。"}},
+	}, "07:04-08:00")
+	// 反应窗口 armed（社交打断开启）。
+	ac.beginReaction(2, 1000, "社交信号：老陈邀请", true)
+
+	// 反应进行中：切换保持挂起、队列原封不动。
+	ac.processSlotSwitch(nil, "H-02", logger)
+	if !ac.as.SlotSwitchPending() {
+		t.Fatal("slot switch must stay pending while reaction active")
+	}
+	if !ac.as.HasQueueNext() {
+		t.Fatal("reaction queue must survive processSlotSwitch while reaction active")
+	}
+
+	// 窗口解除（speech 回执终局/日程 refill/截止切回都会清）：切换照常处理。
+	ac.clearReaction()
+	ac.processSlotSwitch(nil, "H-02", logger)
+	if ac.as.SlotSwitchPending() {
+		t.Error("slot switch should process after reaction window cleared")
+	}
+	if ac.as.HasQueueNext() {
+		t.Error("queue should be cleared once the switch actually processes")
+	}
+}
+
+// TestPopAndSendQueueAction_EndsConversationForwardedToUE 验证
+// ends_conversation 自 2026-10-21 起透传 UE（mapTacticalAction 不再剔除）：
+// 透传 params 带标记（UE 据此放进 speech_heard 给收听者）、在途记账 params
+// 也带标记（releaseFarewellSpeaker 做"送达即释放"）。此前字段被剔除导致
+// 记账读不到、告别句 ends_conversation=true 也等满 10s no_reply 窗。
+func TestPopAndSendQueueAction_EndsConversationForwardedToUE(t *testing.T) {
+	orig := capabilityRegistryRef
+	reg := NewCapabilityRegistry(nil)
+	reg.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
+		{Cmd: "SpeakTo", Kind: "atomic"},
+	})
+	capabilityRegistryRef = reg
+	defer func() { capabilityRegistryRef = orig }()
+
+	ac, _ := newAgentContext(context.Background())
+	ft := &fakeTransport{
+		sendActionAck: &protocol.ActionStartedPayload{ActionID: "act-farewell"},
+	}
+	logger := slog.Default()
+	kb := loadTestKB(t)
+
+	setQueueForTest(ac, []plannedAction{
+		{Action: "speak_to", Params: map[string]any{
+			"target_agent_id": "H-02", "content": "好，那就这么定了。", "interrupt": true,
+			"ends_conversation": true, "duration": 3600,
+		}},
+	})
+
+	ac.popAndSendQueueAction(context.Background(), "H-01", ft, kb, logger)
+
+	// 透传 UE 的 params 带标记（UE 转给收听者）；duration 仍被剔除。
+	if len(ft.sentActions) != 1 {
+		t.Fatalf("expected 1 sent action, got %d", len(ft.sentActions))
+	}
+	if b, ok := ft.sentActions[0].params["ends_conversation"].(bool); !ok || !b {
+		t.Errorf("ends_conversation must be forwarded to UE: %v", ft.sentActions[0].params)
+	}
+	if _, ok := ft.sentActions[0].params["duration"]; ok {
+		t.Errorf("duration must be stripped: %v", ft.sentActions[0].params)
+	}
+	// 在途记账 params 也带标记（releaseFarewellSpeaker 读取）。
+	snap := ac.as.Snapshot()
+	if snap.CurrentActionID != "act-farewell" {
+		t.Fatalf("in-flight action id = %q, want act-farewell", snap.CurrentActionID)
+	}
+	if b, _ := snap.CurrentActionParams["ends_conversation"].(bool); !b {
+		t.Errorf("ends_conversation must be in accounting params: %v", snap.CurrentActionParams)
 	}
 }

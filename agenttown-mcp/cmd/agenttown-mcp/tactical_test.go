@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"path/filepath"
 	"strings"
@@ -39,7 +40,7 @@ func TestParseToolCalls_Basic(t *testing.T) {
 		{Function: llmtypes.ToolFunction{Name: "move_to", Arguments: `{"target_type":"zone","target_id":"main_workshop"}`}},
 		{Function: llmtypes.ToolFunction{Name: "InteractSmartObject", Arguments: `{"semantic_group":"workbench","interaction":"assemble"}`}},
 	}
-	actions := parseToolCalls(tcs, nil, "")
+	actions := parseToolCalls(tcs, nil, "", nil)
 	if len(actions) != 3 {
 		t.Fatalf("got %d actions, want 3", len(actions))
 	}
@@ -52,7 +53,7 @@ func TestParseToolCalls_Basic(t *testing.T) {
 }
 
 func TestParseToolCalls_Empty(t *testing.T) {
-	if got := parseToolCalls(nil, nil, ""); len(got) != 0 {
+	if got := parseToolCalls(nil, nil, "", nil); len(got) != 0 {
 		t.Errorf("got %d actions, want 0", len(got))
 	}
 }
@@ -62,7 +63,7 @@ func TestParseToolCalls_EmptyName(t *testing.T) {
 		{Function: llmtypes.ToolFunction{Name: "", Arguments: `{}`}},
 		{Function: llmtypes.ToolFunction{Name: "speak", Arguments: `{"content":"hi"}`}},
 	}
-	actions := parseToolCalls(tcs, nil, "")
+	actions := parseToolCalls(tcs, nil, "", nil)
 	if len(actions) != 1 || actions[0].Action != "speak" {
 		t.Errorf("actions=%+v, want [speak] (empty name skipped)", actions)
 	}
@@ -73,7 +74,7 @@ func TestParseToolCalls_InvalidArgumentsSkipped(t *testing.T) {
 		{Function: llmtypes.ToolFunction{Name: "speak", Arguments: `not-json`}},
 		{Function: llmtypes.ToolFunction{Name: "move_to", Arguments: `{"target_type":"zone"}`}},
 	}
-	actions := parseToolCalls(tcs, nil, "")
+	actions := parseToolCalls(tcs, nil, "", nil)
 	if len(actions) != 1 || actions[0].Action != "move_to" {
 		t.Errorf("actions=%+v, want [move_to] (invalid arguments skipped)", actions)
 	}
@@ -84,7 +85,7 @@ func TestParseToolCalls_FiltersInvalidTool(t *testing.T) {
 		{Function: llmtypes.ToolFunction{Name: "scan_area", Arguments: `{}`}},
 		{Function: llmtypes.ToolFunction{Name: "move_to", Arguments: `{"target_type":"zone"}`}},
 	}
-	actions := parseToolCalls(tcs, nil, "")
+	actions := parseToolCalls(tcs, nil, "", nil)
 	if len(actions) != 1 || actions[0].Action != "move_to" {
 		t.Errorf("actions=%+v, want [move_to] (scan_area filtered)", actions)
 	}
@@ -94,9 +95,96 @@ func TestParseToolCalls_InteractAlias(t *testing.T) {
 	tcs := []llmtypes.ToolCall{
 		{Function: llmtypes.ToolFunction{Name: "interact", Arguments: `{"semantic_group":"sleep_pod","interaction":"meditate"}`}},
 	}
-	actions := parseToolCalls(tcs, nil, "")
+	actions := parseToolCalls(tcs, nil, "", nil)
 	if len(actions) != 1 || actions[0].Action != "InteractSmartObject" {
 		t.Errorf("actions=%+v, want [InteractSmartObject] (interact alias)", actions)
+	}
+}
+
+// ─── parseToolCallsFromText / parseToolCallsWithFallback ────
+// 2026-10-15 仿真：Venus 过载窗口内流式组装的 native tool_calls 偶发劣化
+// （name 为空 / arguments 非法 JSON），parseToolCalls 静默丢弃——3 次
+// "plan has no actions" + 1 次 4 调用只剩 1 动作，raw 文本四次全部完好。
+
+func TestParseToolCallsFromText_PlainArray(t *testing.T) {
+	raw := `[{"name":"speak","parameters":{"content":"老刘没接话"}},{"name":"InteractSmartObject","parameters":{"duration":4920,"interaction":"sort_cargo","semantic_group":"sorting_conveyor","zone":"logistics_hub"}}]`
+	tcs := parseToolCallsFromText(raw)
+	if len(tcs) != 2 {
+		t.Fatalf("got %d tool calls, want 2", len(tcs))
+	}
+	if tcs[0].Function.Name != "speak" || tcs[1].Function.Name != "InteractSmartObject" {
+		t.Fatalf("names=%q/%q", tcs[0].Function.Name, tcs[1].Function.Name)
+	}
+	var params map[string]any
+	if err := json.Unmarshal([]byte(tcs[1].Function.Arguments), &params); err != nil {
+		t.Fatalf("arguments must be valid JSON: %v", err)
+	}
+	if params["semantic_group"] != "sorting_conveyor" || params["duration"] != float64(4920) {
+		t.Fatalf("params=%+v", params)
+	}
+}
+
+func TestParseToolCallsFromText_ToleratesEOSAndProse(t *testing.T) {
+	// DeepSeek 尾部 <｜end▁of▁sentence｜> 标记 + 首尾散文。
+	raw := `好的，我来分解：[{"name":"speak_to","parameters":{"content":"老王，歇会儿不？","target_agent_id":"H-02"}}]<｜end▁of▁sentence｜>`
+	tcs := parseToolCallsFromText(raw)
+	if len(tcs) != 1 || tcs[0].Function.Name != "speak_to" {
+		t.Fatalf("got %+v, want 1 speak_to", tcs)
+	}
+	var params map[string]any
+	if err := json.Unmarshal([]byte(tcs[0].Function.Arguments), &params); err != nil {
+		t.Fatalf("arguments must be valid JSON: %v", err)
+	}
+	if params["target_agent_id"] != "H-02" {
+		t.Fatalf("params=%+v", params)
+	}
+}
+
+func TestParseToolCallsFromText_NotJSON(t *testing.T) {
+	for _, raw := range []string{"", "纯文本没有数组", "[]", "[{\"no_name\":1}]"} {
+		if tcs := parseToolCallsFromText(raw); len(tcs) != 0 {
+			t.Errorf("raw=%q should parse to nothing, got %+v", raw, tcs)
+		}
+	}
+}
+
+func TestParseToolCallsWithFallback_RecoversDroppedCalls(t *testing.T) {
+	// 15:00:05 形态：4 个 native 调用只有首个 speak 完好（1 个 name 为空、
+	// 2 个 arguments 非法 JSON），文本数组 4 条全完好 → 兜底恢复 4 个动作。
+	raw := `[{"name":"speak","parameters":{"content":"老王招呼歇口气"}},{"name":"InteractSmartObject","parameters":{"duration":1500,"interaction":"rest","semantic_group":"bench","zone":"logistics_hub"}},{"name":"speak","parameters":{"content":"歇够了"}},{"name":"InteractSmartObject","parameters":{"duration":6780,"interaction":"sort_cargo","semantic_group":"sorting_conveyor","zone":"logistics_hub"}}]`
+	tcs := []llmtypes.ToolCall{
+		{ID: "tc-1", Function: llmtypes.ToolFunction{Name: "speak", Arguments: `{"content":"老王招呼歇口气"}`}},
+		{ID: "tc-2", Function: llmtypes.ToolFunction{Arguments: `{"duration":1500}`}},                             // name 为空
+		{ID: "tc-3", Function: llmtypes.ToolFunction{Name: "speak", Arguments: `{"content":"歇够`}},                 // 非法 JSON
+		{ID: "tc-4", Function: llmtypes.ToolFunction{Name: "InteractSmartObject", Arguments: `{"duration":6780`}}, // 非法 JSON
+	}
+	actions := parseToolCallsWithFallback(raw, tcs, nil, "", nil)
+	if len(actions) != 4 {
+		t.Fatalf("got %d actions, want 4 (text fallback recovers the dropped 3):\n%+v", len(actions), actions)
+	}
+	if actions[1].Action != "InteractSmartObject" || actions[1].Params["semantic_group"] != "bench" {
+		t.Fatalf("actions[1]=%+v, want bench rest", actions[1])
+	}
+}
+
+func TestParseToolCallsWithFallback_KeepsNativeWhenTextWorse(t *testing.T) {
+	// native 完整时文本兜底不介入；文本劣化（乱码）时保留 native 结果。
+	tcs := []llmtypes.ToolCall{
+		{ID: "tc-1", Function: llmtypes.ToolFunction{Name: "speak", Arguments: `{"content":"hi"}`}},
+		{ID: "tc-2", Function: llmtypes.ToolFunction{Name: "InteractSmartObject", Arguments: `{"semantic_group":"bench","interaction":"rest"}`}},
+	}
+	actions := parseToolCallsWithFallback("无法解析的乱文本", tcs, nil, "", nil)
+	if len(actions) != 2 || actions[0].ToolCallID == "" || actions[1].ToolCallID == "" {
+		t.Fatalf("native-complete parse must be kept verbatim (with tool_call_id):\n%+v", actions)
+	}
+}
+
+func TestParseToolCallsWithFallback_ZeroNativeUsesText(t *testing.T) {
+	// native 组装整体失败（0 条）但文本完好 → 直接从文本恢复。
+	raw := `[{"name":"speak","parameters":{"content":"行啊"}},{"name":"InteractSmartObject","parameters":{"duration":1800,"interaction":"rest","semantic_group":"bench"}}]`
+	actions := parseToolCallsWithFallback(raw, nil, nil, "", nil)
+	if len(actions) != 2 || actions[1].Action != "InteractSmartObject" {
+		t.Fatalf("got %+v, want 2 actions from text", actions)
 	}
 }
 
@@ -326,6 +414,60 @@ func TestSelectCurrentGoal_OvernightSlot(t *testing.T) {
 	}
 	if idx != 2 {
 		t.Errorf("idx=%d, want 2", idx)
+	}
+}
+
+// ─── resolveReplanGoal ───────────────────────────────────────
+
+// TestResolveReplanGoal_SocialExemptsDawnWindow 验证社交回应 replan 豁免
+// 06:00-07:00 屏蔽：游戏时间在规划窗口内、selectCurrentGoal 返回空时，回退
+// 到当天首个时段（idx=0）作 goal 上下文，让 NPC 仍能回应对方的搭话/邀请。
+func TestResolveReplanGoal_SocialExemptsDawnWindow(t *testing.T) {
+	plan := "07:00-08:00: 晨练拉伸\n08:00-12:00: 车间装配"
+	goal, slot, idx := resolveReplanGoal(plan, "06:33", "【社交回应】社交信号：老陈（H-01）对你说：一起去晨跑？")
+	if goal != "晨练拉伸" {
+		t.Errorf("goal=%q, want 晨练拉伸 (fallback to first slot)", goal)
+	}
+	if slot != "07:00-08:00" {
+		t.Errorf("slot=%q, want 07:00-08:00", slot)
+	}
+	if idx != 0 {
+		t.Errorf("idx=%d, want 0", idx)
+	}
+}
+
+// TestResolveReplanGoal_SocialEmptyPlan 验证计划为空（手动模式/冷启动）时，
+// 社交回应 replan 用中性 goal，而非直接失败。
+func TestResolveReplanGoal_SocialEmptyPlan(t *testing.T) {
+	goal, slot, idx := resolveReplanGoal("", "06:33", "【社交回应】社交信号：老陈（H-01）对你说：一起去晨跑？")
+	if goal != "回应对方的社交邀请" {
+		t.Errorf("goal=%q, want neutral social-response goal", goal)
+	}
+	if slot != "" || idx != -1 {
+		t.Errorf("slot=%q idx=%d, want empty/-1", slot, idx)
+	}
+}
+
+// TestResolveReplanGoal_NonSocialKeepsDawnBlock 验证非社交 replan（如威胁事件）
+// 在 06:00-07:00 仍被屏蔽（行为不变）。
+func TestResolveReplanGoal_NonSocialKeepsDawnBlock(t *testing.T) {
+	plan := "07:00-08:00: 晨练拉伸\n08:00-12:00: 车间装配"
+	goal, slot, idx := resolveReplanGoal(plan, "06:33", "【强制打断】玩家互动：被玩家瞄准")
+	if goal != "" || slot != "" || idx != -1 {
+		t.Errorf("non-social hint must keep the dawn block, got goal=%q slot=%q idx=%d", goal, slot, idx)
+	}
+}
+
+// TestResolveReplanGoal_SocialNormalMatch 验证社交回应在正常时段命中时，仍返回
+// 匹配的时段 goal（不做无谓回退）。
+func TestResolveReplanGoal_SocialNormalMatch(t *testing.T) {
+	plan := "07:00-08:00: 晨练拉伸\n08:00-12:00: 车间装配"
+	goal, slot, idx := resolveReplanGoal(plan, "09:00", "【社交回应】社交信号：老陈（H-01）对你说：一起去晨跑？")
+	if goal != "车间装配" {
+		t.Errorf("goal=%q, want 车间装配 (normal match, no fallback)", goal)
+	}
+	if slot != "08:00-12:00" || idx != 1 {
+		t.Errorf("slot=%q idx=%d, want 08:00-12:00 / 1", slot, idx)
 	}
 }
 
@@ -1920,5 +2062,116 @@ func TestInsertRestBetweenDuplicateWork_NoDuplicate(t *testing.T) {
 	// 单个 work_shift 不插。
 	if len(insertRestBetweenDuplicateWork([]plannedAction{mk("workbench")})) != 1 {
 		t.Error("single work_shift should not insert")
+	}
+}
+
+// TestResolveReplanGoal_EndedConversationExemptsDawnWindow 验证守约 hint
+// （【对话结束】）同样豁免 06:00-07:00 屏蔽：对话结束后约定的事要立即
+// 执行，worker refill 不因规划窗口静默阻塞（2026-10-16 实测 06:50
+// speak_to 完成后被窗口挡 8 秒）。
+func TestResolveReplanGoal_EndedConversationExemptsDawnWindow(t *testing.T) {
+	plan := "07:00-08:00: 晨练拉伸\n08:00-12:00: 车间装配"
+	goal, slot, idx := resolveReplanGoal(plan, "06:50", "【对话结束】你与 老王（H-02）的对话刚刚结束，完整对话记录：……守约优先于当前时段目标……")
+	if goal != "晨练拉伸" || slot != "07:00-08:00" || idx != 0 {
+		t.Errorf("got goal=%q slot=%q idx=%d, want first-slot fallback", goal, slot, idx)
+	}
+	// 普通自动 hint（队列提前耗尽）不豁免——仍被窗口屏蔽。
+	goal, slot, idx = resolveReplanGoal(plan, "06:50", "上次队列提前耗尽，未安排长动作收尾——本次请确保……")
+	if goal != "" || slot != "" || idx != -1 {
+		t.Errorf("auto hint must keep the dawn block, got goal=%q slot=%q idx=%d", goal, slot, idx)
+	}
+}
+
+// TestCapabilityParamsSchema_SpeakToEndsConversation 验证 speak_to 的
+// schema 追加可选 ends_conversation（告别/收尾标记；2026-10-21 起透传 UE
+// 作双向收口信号，恢复可选 + 精确语义——此前必填导致 LLM 每句都填 true、
+// 接收方据此误收口、对话起不来）。
+func TestCapabilityParamsSchema_SpeakToEndsConversation(t *testing.T) {
+	raw := capabilityParamsSchema(nil, "speak_to")
+	var schema struct {
+		Properties map[string]struct {
+			Type        string `json:"type"`
+			Description string `json:"description"`
+		} `json:"properties"`
+		Required []string `json:"required"`
+	}
+	if err := json.Unmarshal(raw, &schema); err != nil {
+		t.Fatalf("unmarshal schema: %v", err)
+	}
+	ec, ok := schema.Properties["ends_conversation"]
+	if !ok || ec.Type != "boolean" {
+		t.Fatalf("speak_to schema missing boolean ends_conversation: %s", raw)
+	}
+	if !strings.Contains(ec.Description, "告别") || !strings.Contains(ec.Description, "立即结束") {
+		t.Errorf("ends_conversation description must explain the farewell semantics: %s", ec.Description)
+	}
+	if !strings.Contains(ec.Description, "false") {
+		t.Errorf("ends_conversation description must explain the default false for continuing turns: %s", ec.Description)
+	}
+	for _, r := range schema.Required {
+		if r == "ends_conversation" {
+			t.Errorf("ends_conversation must be optional (LLM only sets it on the true last turn): %v", schema.Required)
+		}
+	}
+	// 非 speak_to 工具不追加。
+	raw2 := capabilityParamsSchema(nil, "InteractSmartObject")
+	if strings.Contains(string(raw2), "ends_conversation") {
+		t.Errorf("non-speak_to tool must not carry ends_conversation: %s", raw2)
+	}
+}
+
+// TestMapTacticalAction_KeepsEndsConversation 验证 ends_conversation 自
+// 2026-10-21 起透传 UE（UE 会把它放进 speech_heard 传给收听者，双向收口），
+// 仅 duration 仍作为 MCP 侧控制字段剔除。
+func TestMapTacticalAction_KeepsEndsConversation(t *testing.T) {
+	// speak_to 是 registry 动态注册的 cmd（UE push），registry=nil 时走不通
+	// passthrough——构造带 SpeakTo 的 registry。
+	reg := NewCapabilityRegistry(nil)
+	reg.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
+		{Cmd: "SpeakTo", Kind: "atomic"},
+	})
+	pa := plannedAction{Action: "speak_to", Params: map[string]any{
+		"target_agent_id": "H-02", "content": "回头见。", "interrupt": true,
+		"ends_conversation": true, "duration": 3600,
+	}}
+	cmd, params, err := mapTacticalAction(pa, "H-01", loadTestKB(t), reg)
+	if err != nil {
+		t.Fatalf("mapTacticalAction: %v", err)
+	}
+	if cmd != "SpeakTo" {
+		t.Fatalf("cmd=%q, want SpeakTo (registry passthrough)", cmd)
+	}
+	if b, ok := params["ends_conversation"].(bool); !ok || !b {
+		t.Errorf("ends_conversation must be forwarded to UE (relayed to listener): %v", params)
+	}
+	if _, ok := params["duration"]; ok {
+		t.Errorf("duration must be stripped before forwarding to UE: %v", params)
+	}
+	if params["target_agent_id"] != "H-02" || params["content"] != "回头见。" {
+		t.Errorf("speech params must pass through: %v", params)
+	}
+}
+
+// TestIsVenusHTTP400 验证 400 判据：匹配 "venus status 400:"，且排除
+// 4001（HTTP 500 + body code 的 tools 校验失败，同体重试可救、与历史
+// 投毒无关，不得计入 400 连击触发历史自愈）。
+func TestIsVenusHTTP400(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"空 body 400（历史投毒形态）", fmt.Errorf("tactical llm: venus status 400: "), true},
+		{"带 body 400", fmt.Errorf(`venus status 400: {"error":{"message":"bad request"}}`), true},
+		{"4001 走 HTTP 500", fmt.Errorf(`venus status 500: {"error":{"message":"tools json","code":"4001"}}`), false},
+		{"400 且 body 带 4001 码（防御性排除）", fmt.Errorf(`venus status 400: {"error":{"message":"tools json","code":"4001"}}`), false},
+		{"429 限流", fmt.Errorf("venus status 429: limited"), false},
+		{"网络错误", fmt.Errorf("http do: connection refused"), false},
+	}
+	for _, c := range cases {
+		if got := isVenusHTTP400(c.err); got != c.want {
+			t.Errorf("%s: isVenusHTTP400 = %v, want %v", c.name, got, c.want)
+		}
 	}
 }

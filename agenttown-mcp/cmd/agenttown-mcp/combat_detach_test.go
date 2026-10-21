@@ -528,7 +528,7 @@ func TestCombatExit_BridgeNaturalCompletionClearsPendingStop(t *testing.T) {
 	// UE 自然完成桥接（untracked completion，不合成事件）。
 	ac.recordActionCompletion(protocol.ActionCompletedPayload{
 		ActionID: "act_bridge", Result: protocol.ResultSuccess,
-	})
+	}, nil, nil, nil)
 	if ps := ac.as.PendingStopActionID(); ps != "" {
 		t.Fatalf("natural completion must clear pendingStop, got %q", ps)
 	}
@@ -852,7 +852,7 @@ func TestCombatYield_GraceStopCancelledByCompletion(t *testing.T) {
 	// UE 接管停掉旧动作 → interrupted completion（stash 记账 + 挂钩清 prev）。
 	ac.recordActionCompletion(protocol.ActionCompletedPayload{
 		ActionID: "act-1", Result: "interrupted", DurationMs: 1200,
-	})
+	}, nil, nil, nil)
 	time.Sleep(20 * time.Millisecond)
 	ac.checkCombatYieldTakeoverStop("H-01", ft, testLogger())
 	if stops := stoppedActions(ft); len(stops) != 0 {

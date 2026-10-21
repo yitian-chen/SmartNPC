@@ -37,6 +37,19 @@ func isVenusErrorCode(err error, code string) bool {
 	return strings.Contains(err.Error(), `"code":"`+code+`"`)
 }
 
+// isVenusHTTP400 判断 venus 网关以 HTTP 400 拒绝请求（客户端错误格式
+// "venus status 400: <body>"）。会话历史里 tool_calls 的 arguments 非法
+// JSON 时，venus 对 messages 的逐条校验即返回 400——这是"历史投毒"的
+// 确定性信号（同体请求永远无法通过）。排除 4001：那是 HTTP 500 + body
+// code 的 tools 校验失败（与本方历史无关，同体重试可救），不能计入
+// 400 连击。
+func isVenusHTTP400(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "venus status 400:") && !isVenusErrorCode(err, "4001")
+}
+
 // isRateLimited 判断 venus 网关限流错误：HTTP 429 或 venus 错误码 4029
 // （"当前使用的是公共模型服务, 并发有限; 当前的限流为: 30/min"）。
 // 此类错误退避等待后重试可恢复（限流窗口按分钟滚动）。
@@ -180,27 +193,33 @@ func generateTacticalPlan(
 	// P3-9 修复 A：持续情境注入【当前处境】段（combat_exit/TTL 解除前
 	// 每轮可见——防"威胁解除了"幻觉）。
 	situations := formatActiveSituations(ac.as.Snapshot().ActiveSituations, ac.as.LatestGameTimeSec())
+	// 对话上下文（【社交回应】场景消费）：完整 transcript + 轮次，超上限
+	// 置 capped——渲染层追加硬收尾指令。无进行中会话为空串，非社交场景
+	// 不消费，零污染。
+	conversation, conversationCapped := ac.conversationContextForPrompt(agentID, kb)
 	headerPlan := ac.as.TacticalHeaderPlan()
 	compact := dailyPlan != "" && headerPlan == dailyPlan
 	promptText := prompt.BuildTactical(prompt.TacticalInput{
-		Goal:          goal,
-		Zone:          zone,
-		TimeOfDay:     timeOfDay,
-		Slot:          slot,
-		DailyPlan:     dailyPlan,
-		Compact:       compact,
-		Physical:      physical,
-		KB:            kb,
-		Profiles:      profiles,
-		Hint:          hint,
-		Memories:      memories,
-		Relationships: relationships,
-		Events:        prompt.FormatWorldEventList(worldEvents),
-		Situations:    situations,
-		AgentID:       agentID,
-		ObjectStatus:  objectStatus,
-		NearbyObjects: nearbyObjects,
-		VisibleAgents: visibleAgents,
+		Goal:               goal,
+		Zone:               zone,
+		TimeOfDay:          timeOfDay,
+		Slot:               slot,
+		DailyPlan:          dailyPlan,
+		Compact:            compact,
+		Physical:           physical,
+		KB:                 kb,
+		Profiles:           profiles,
+		Hint:               hint,
+		Memories:           memories,
+		Relationships:      relationships,
+		Events:             prompt.FormatWorldEventList(worldEvents),
+		Situations:         situations,
+		Conversation:       conversation,
+		ConversationCapped: conversationCapped,
+		AgentID:            agentID,
+		ObjectStatus:       objectStatus,
+		NearbyObjects:      nearbyObjects,
+		VisibleAgents:      visibleAgents,
 	})
 	logger.Info("[MCP→LLM/TACTICAL-PROMPT]",
 		"agent_id", agentID, "goal", goal, "game_time", timeOfDay, "compact", compact, "text", promptText,
@@ -226,13 +245,12 @@ func generateTacticalPlan(
 		"agent_id", agentID, "tokens", resp.Usage.TotalTokens, "raw_len", len(raw), "raw", raw,
 		"tool_calls", len(resp.ToolCalls))
 
-	if len(resp.ToolCalls) == 0 {
-		llmMetricsCollector.RecordJSON("tactical", false)
-		return nil, fmt.Errorf("tactical plan has no tool calls (raw=%s)", truncateText(raw, 200))
-	}
-	actions := parseToolCalls(resp.ToolCalls, registry, agentID)
+	actions := parseToolCallsWithFallback(raw, resp.ToolCalls, registry, agentID, logger)
 	if len(actions) == 0 {
 		llmMetricsCollector.RecordJSON("tactical", false)
+		if len(resp.ToolCalls) == 0 {
+			return nil, fmt.Errorf("tactical plan has no tool calls (raw=%s)", truncateText(raw, 200))
+		}
 		return nil, fmt.Errorf("tactical plan has no actions (raw=%s)", truncateText(raw, 200))
 	}
 	// 分解成功：安全点 drain 完成，消费事件队列（一次性交出）。
@@ -438,8 +456,11 @@ func insertRestBetweenDuplicateWork(actions []plannedAction) []plannedAction {
 
 // parseToolCalls 把 LLM 返回的 tool_calls 解析为 plannedAction 队列。
 // function.name → Action；function.arguments（JSON）→ Params。arguments
-// 解析失败或 name 为空时跳过该条；末尾过 filterValidActions。
-func parseToolCalls(tcs []llmtypes.ToolCall, registry *CapabilityRegistry, agentID string) []plannedAction {
+// 解析失败或 name 为空时跳过该条（logger 非空时打 warn——流式组装异常的
+// 现场：name 为空/arguments 非法 JSON，2026-10-15 仿真 3 次 "plan has no
+// actions" 均为此形态，丢弃时无日志无法定位 venus 发了什么）；末尾过
+// filterValidActions。
+func parseToolCalls(tcs []llmtypes.ToolCall, registry *CapabilityRegistry, agentID string, logger *slog.Logger) []plannedAction {
 	var actions []plannedAction
 	for _, tc := range tcs {
 		name := tc.Function.Name
@@ -447,17 +468,91 @@ func parseToolCalls(tcs []llmtypes.ToolCall, registry *CapabilityRegistry, agent
 			name = "InteractSmartObject"
 		}
 		if name == "" {
+			if logger != nil {
+				logger.Warn("[战术层] 工具调用被丢弃：function.name 为空（流式组装异常）",
+					"agent_id", agentID, "arguments", truncateText(tc.Function.Arguments, 200))
+			}
 			continue
 		}
 		params := map[string]any{}
 		if args := strings.TrimSpace(tc.Function.Arguments); args != "" {
 			if err := json.Unmarshal([]byte(args), &params); err != nil {
+				if logger != nil {
+					logger.Warn("[战术层] 工具调用被丢弃：arguments 非法 JSON（流式组装异常）",
+						"agent_id", agentID, "name", name,
+						"arguments", truncateText(tc.Function.Arguments, 200), "err", err)
+				}
 				continue // arguments 不是合法 JSON，跳过该工具调用
 			}
 		}
 		actions = append(actions, plannedAction{Action: name, Params: params, ToolCallID: tc.ID})
 	}
 	return filterValidActions(actions, registry, agentID)
+}
+
+// tacticalTextToolCall 是模型把工具调用以文本（content）输出时的形态：
+// [{"name": "speak", "parameters": {...}}]。deepseek-v4.1-flash 经 Venus
+// 的响应里文本数组与 native delta.tool_calls 并存——native 组装偶发劣化
+// （name 为空/arguments 非法 JSON），文本数组却始终完整。
+type tacticalTextToolCall struct {
+	Name       string         `json:"name"`
+	Parameters map[string]any `json:"parameters"`
+}
+
+// parseToolCallsFromText 从响应文本中提取工具调用 JSON 数组。容忍外围散文
+// 与 DeepSeek 尾部 <｜end▁of▁sentence｜> 标记：截取首个 '[' 到末个 ']'
+// （与 parseMemoryGenerationResult 同款容错）。无可解析数组时返回 nil。
+// 文本调用没有 id——后续 recordActionCompletion 不会为它们注入
+// [系统注入] 完成行（良性降级：状态栏与下轮 refill 仍携带最新状态）。
+func parseToolCallsFromText(raw string) []llmtypes.ToolCall {
+	start := strings.Index(raw, "[")
+	end := strings.LastIndex(raw, "]")
+	if start < 0 || end <= start {
+		return nil
+	}
+	var entries []tacticalTextToolCall
+	if err := json.Unmarshal([]byte(raw[start:end+1]), &entries); err != nil {
+		return nil
+	}
+	tcs := make([]llmtypes.ToolCall, 0, len(entries))
+	for _, e := range entries {
+		if e.Name == "" {
+			continue
+		}
+		args := []byte("{}")
+		if e.Parameters != nil {
+			if b, err := json.Marshal(e.Parameters); err == nil {
+				args = b
+			}
+		}
+		tcs = append(tcs, llmtypes.ToolCall{
+			Type:     "function",
+			Function: llmtypes.ToolFunction{Name: e.Name, Arguments: string(args)},
+		})
+	}
+	return tcs
+}
+
+// parseToolCallsWithFallback 先按 native tool_calls 解析；解析结果少于
+// tool_calls 数（有条目被丢弃：流式组装的 name 为空/arguments 非法 JSON）
+// 或 native 整体为空时，从响应文本兜底解析，取有效动作更多的一份。
+// 2026-10-15 仿真实测：Venus 过载窗口内 3 次 "plan has no actions" + 1 次
+// 4 个调用只剩 1 个动作，raw 文本四次全部完好——本兜底可全数救回。
+func parseToolCallsWithFallback(raw string, tcs []llmtypes.ToolCall, registry *CapabilityRegistry, agentID string, logger *slog.Logger) []plannedAction {
+	actions := parseToolCalls(tcs, registry, agentID, logger)
+	if len(tcs) > 0 && len(actions) >= len(tcs) {
+		return actions
+	}
+	fb := parseToolCalls(parseToolCallsFromText(raw), registry, agentID, logger)
+	if len(fb) <= len(actions) {
+		return actions // 文本没有更多有效动作（同样劣化或本就不是 JSON）
+	}
+	if logger != nil {
+		logger.Warn("[战术层] native tool_calls 组装异常，已从响应文本兜底恢复动作",
+			"agent_id", agentID, "tool_calls", len(tcs),
+			"native_parsed", len(actions), "text_parsed", len(fb))
+	}
+	return fb
 }
 
 // filterValidActions 过滤掉 scan_area/stop/未知工具，保留可排队工具。
@@ -591,6 +686,21 @@ func capabilityParamsSchema(params []protocol.CapabilityParam, name string) json
 		}
 		required = append(required, "duration")
 	}
+	// ends_conversation（仅 speak_to，可选）：告别/收尾标记。话语送达（对方
+	// 收到 speech_heard）后系统立即结束该动作、跳过 UE 的 no_reply 等待窗——
+	// 因此带此标记的 speak_to 之后可以直接安排后续动作（如约定一起进行的
+	// 活动），队列会在告别句送达后立即执行，无需 refill。自 2026-10-21 起
+	// 透传 UE：UE 把它放进 speech_heard 传给收听者，收听者据此确定性收口
+	// （route() 不再打断回话）——标记从"MCP 侧单向优化"升级为"双向收口
+	// 信号"。可选 + 精确语义（2026-10-21）：只有对话真正到此为止、说完后
+	// 不再有任何往返时才填 true；期待对方回应/继续行动的句子一律填 false
+	// （此前必填导致 LLM 每句都填 true，接收方据此误收口、对话起不来）。
+	if name == "speak_to" {
+		props["ends_conversation"] = map[string]any{
+			"type":        "boolean",
+			"description": "可选，默认 false。仅当本句是对话真正的最后一句（说完后不再有任何往返）时填 true：告别语、对方应下你的邀请后你回的确认句（如\"好，那就这么定了\"）——填 true 会告知对方对话结束、对方不会再回话，系统也会在话语送达后立即结束等待。期待对方回应、对话还要继续的句子（如邀请、追问、\"走吧跑起来\"这类继续行动的话）一律填 false。",
+		}
+	}
 	schema := map[string]any{
 		"type":       "object",
 		"properties": props,
@@ -722,8 +832,11 @@ func mapTacticalAction(pa plannedAction, agentID string, kb *worldkb.KB, registr
 			if tools.CmdToToolName(act.Cmd) != pa.Action {
 				continue
 			}
-			// 复制 params 避免调用方误改原 map；剔除 duration——它是 MCP 侧
-			// 控制字段（worker 按 game_time 定时打断消费），不透传 UE。
+			// 复制 params 避免调用方误改原 map；剔除 duration（MCP 侧控制
+			// 字段，worker 按 game_time 定时打断消费）。ends_conversation
+			// 自 2026-10-21 起透传 UE：UE 会把它原样放进 speech_heard 传给
+			// 收听者——收尾标记从"MCP 侧单向优化"升级为"双向收口信号"，
+			// 收听者据此确定性收尾（见 route() 的 ends_conversation 收口）。
 			out := make(map[string]any, len(pa.Params))
 			for k, v := range pa.Params {
 				if k == "duration" {
@@ -844,4 +957,33 @@ func selectCurrentGoal(dailyPlan, timeOfDay string) (goal, slot string, index in
 		}
 	}
 	return "", "", -1
+}
+
+// resolveReplanGoal 解析 replan/refill 的当前时段 goal。selectCurrentGoal
+// 返回空时（晨窗真缺口——首个时段 07:00 起、无跨午夜段覆盖当前时刻；
+// 06:00-07:00 硬屏蔽已随 3ad04bd 移除），若 replanHint 是【社交回应】或
+// 【对话结束】，回退到当天首个时段（idx=0）作 goal 上下文——社交回应与
+// 守约执行不依赖时段（约定的事要立即去做），不该因无匹配时段而静默阻塞；
+// 计划为空（手动模式/冷启动）时用中性 goal。2026-10-16 实测：06:50
+// speak_to 完成后 worker refill 因无匹配时段静默跳过，守约 hint 已注入
+// 却被挡 8 秒（直到 game_time 过 07:00 的下一次感知）。其他 hint（威胁/
+// 强制打断/普通 refill）无匹配时段时保持跳过不变。
+func resolveReplanGoal(plan, tod, replanHint string) (goal, slot string, idx int) {
+	goal, slot, idx = selectCurrentGoal(plan, tod)
+	if goal != "" || !hintWarrantsSlotFallback(replanHint) {
+		return goal, slot, idx
+	}
+	if items := parseFormattedPlan(plan); len(items) > 0 {
+		return items[0].Goal, items[0].Time, 0
+	}
+	return "回应对方的社交邀请", "", -1
+}
+
+// hintWarrantsSlotFallback reports whether replanHint carries a social/
+// follow-through directive that justifies falling back to the day's first
+// slot when no slot matches the current time: 【社交回应】(conversation
+// reply) or 【对话结束】(post-conversation agreement follow-through).
+func hintWarrantsSlotFallback(replanHint string) bool {
+	return strings.HasPrefix(replanHint, "【社交回应】") ||
+		strings.HasPrefix(replanHint, "【对话结束】")
 }

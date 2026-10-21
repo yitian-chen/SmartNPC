@@ -108,6 +108,16 @@ type agentContext struct {
 	// overwrite losing messages appended in between).
 	compacting atomic.Bool
 
+	// venus400Streak counts consecutive venus HTTP 400 rejections across
+	// agenticTurn calls (atomic; reset whenever a request is accepted).
+	// 历史里 tool_calls 的 arguments 非法 JSON 时 venus 对 messages 的逐条
+	// 校验必拒以 400——历史被污染的 agent 会 400 到跨游戏日
+	// ClearConversation 才恢复（2026-10-20 实测 H-03 报错一整天）。入口
+	// 消毒（sanitizeToolCallsForHistory）根治已知投毒路径；连击达
+	// venus400StreakThreshold 时 agenticTurn 主动清空历史自愈，兜住其余
+	// 投毒路径。
+	venus400Streak atomic.Int32
+
 	// Reaction-task guard state (P2-6, 设计文档 §4.5 护栏): while a reaction
 	// (interrupt-generated planning window) is active, a new ROUTER interrupt
 	// needs strictly higher severity to cut it (reactionSeverity), and the
@@ -123,6 +133,10 @@ type agentContext struct {
 	// 到达时路由判"未处于逃跑状态"，因为 MoveTo(residential_quarters)
 	// 看不出是逃跑）。
 	reactionDesc string
+	// reactionSocial 标记当前反应窗口由社交对话（speech_heard/【社交回应】
+	// hint）开启——armed 窗口内的 refill hint 按社交口径措辞（"对话仍有
+	// 来有回请继续回应"），而非紧急事件的"威胁仍未解除请继续应对"。
+	reactionSocial bool
 
 	// Combat-detach yield state (combat-detach, 2026-09-22): while combatYield
 	// is set, UE's combat AI owns the body — the worker loop skips slot
@@ -177,6 +191,15 @@ type agentContext struct {
 	convPeerID      string
 	convTurns       []conversationTurn
 	convLastGameSec float64
+
+	// 会话续接快照（2026-10-20）：最近一次关闭的会话。同一 peer 的新发言在
+	// conversationCarryoverWindow 内到达时旧轮次续接进新会话——覆盖"no_reply
+	// 终局判定与回话送达同秒竞态"（应答方回话往返 ≈8s 与邀请方 no_reply 窗
+	// 几乎等长，卡窗边的应答让会话重开成一句没有前文的孤立发言，约定上下文
+	// 被劈碎）与"idle 关闭后回话迟到"两类场景。coordMu 保护。
+	lastClosedPeer  string
+	lastClosedTurns []conversationTurn
+	lastClosedAt    time.Time
 
 	// LLM clients (immutable after construction, no lock needed)
 	strategicHc llmClient
@@ -307,7 +330,7 @@ func (a *agentContext) updateState(report protocol.StateReportPayload) string {
 // 完成（failed/interrupted/error）时触发评估——成功完成是常态，每次都问
 // "要不要打断"意义不大（模型看不到战术层整体规划，只能基于贫乏信息答 continue）。
 // 异常完成才是真正需要反应层介入的时机。
-func (a *agentContext) recordActionCompletion(completion protocol.ActionCompletedPayload) (bool, string) {
+func (a *agentContext) recordActionCompletion(completion protocol.ActionCompletedPayload, kb *worldkb.KB, profiles map[string]*profile.Profile, logger *slog.Logger) (bool, string) {
 	// 在 RecordActionCompletion 清除 preface 标志之前读取：自己 stop 导致的
 	// interrupted completion 是预期回包，不应合成 action_failed 事件。
 	wasPreRecorded := a.as.LastEndPrefaced()
@@ -342,6 +365,41 @@ func (a *agentContext) recordActionCompletion(completion protocol.ActionComplete
 			})
 		}
 		go a.maybeUpdateRelationship(completion, res)
+	}
+
+	// 对话终局即时判定（2026-10-20）：定向对话（speak_to）以 speech 回执完成
+	// （UE 回 reason="speech:no_reply" = 等待窗内对方没回话；reason=
+	// "speech:replied" = 对方在窗内回了话——两者对称，本句都是说话人视角的
+	// 对话收尾，实测 17:58：replied 不触发即时终局，完成触发的 refill 带
+	// armed hint + 自己的时段目标抢跑，约定被稀释成"继续拉伸"）→ 立即关
+	// 会话 + 注入守约 hint + 清社交反应窗口，不等 conversationIdleTimeoutGameSec
+	// 的 idle 超时：本完成事件下方马上 signal 唤醒 worker refill，idle 等待
+	// 期间无对话上下文的 refill 会抢跑。hint 必须在 signal() 之前落好，
+	// woken refill 的 prompt 才带得上守约上下文。replied 的 transcript 自带
+	// 对方的告别语，守约 hint 的"寒暄/告别则回日程"分支自然接管语义。
+	// peer 不匹配（无会话或陈旧会话）时不动，走原 idle-close 兜底。
+	// speak_to 签名检查用 target_agent_id（与 recordActionStarted 的 own-turn
+	// 挂钩同口径，cmd 名是 registry 动态的）。
+	if res.WasInFlight && completion.Result == protocol.ResultSuccess &&
+		strings.Contains(completion.Reason, "speech:") {
+		if target, _ := res.Params["target_agent_id"].(string); target != "" {
+			if peer, turns := a.closeConversationByPeer(target); peer != "" && len(turns) > 0 {
+				// 社交反应窗口随对话终局一并结束：armed hint 的
+				// "对方无回音则回日程"措辞与守约指令互斥。
+				a.clearReaction()
+				agentID := a.as.AgentID()
+				lg := logger
+				if lg == nil {
+					lg = slog.Default()
+				}
+				go a.evaluateConversationAffection(context.Background(), agentID, peer, turns, kb, profiles, lg)
+				if h := conversationEndedHint(agentID, peer, turns, kb); h != "" {
+					a.as.SetReplanHint(h)
+					lg.Info("[对话层] speech 回执对话终局，立即注入守约 hint",
+						"agent_id", agentID, "peer", peer, "turns", len(turns), "reason", completion.Reason)
+				}
+			}
+		}
 	}
 	isSelfStop := res.WasSelfStop
 
@@ -535,27 +593,23 @@ func (a *agentContext) maybeUpdateRelationship(completion protocol.ActionComplet
 	}
 }
 
-// loadRelationships fetches the agent's relationship rows and formats them
-// for the tactical prompt【人际关系】段. Returns "" when store is nil, no
-// relationships exist, or the KB has only one agent (single-NPC scenario
-// doesn't benefit from a relationship segment). Called once per tactical
-// refill; indexed query, no caching needed.
-func (a *agentContext) loadRelationships(ctx context.Context, agentID string, kb *worldkb.KB) string {
-	store := a.as.Store()
-	if store == nil {
-		return ""
+// loadRelationships renders the merged other-NPC roster + affection list
+// (formatRelationshipsForPrompt) for prompt injection: 战略层【其他NPC】段 /
+// 战术层【人际关系】段 / 路由层 relationships 属性共用。存储行加载失败或
+// 内存模式（无行）时仅损失互动历史——名单与默认好感度 5 仍渲染（KB 为骨架）。
+// 单 NPC 场景（KB ≤1 agent）返回空串，不污染 prompt。每次战术/战略 refill
+// 调用一次；索引查询，无需缓存。
+func (a *agentContext) loadRelationships(ctx context.Context, agentID string, kb *worldkb.KB, profiles map[string]*profile.Profile) string {
+	var rels []storage.Relationship
+	if store := a.as.Store(); store != nil {
+		var err error
+		rels, err = store.LoadRelationships(ctx, agentID, 10)
+		if err != nil {
+			slog.Default().Warn("[关系层] 加载关系列表失败",
+				"agent_id", agentID, "err", err)
+		}
 	}
-	// Single-NPC guard: skip when KB has ≤1 agent (no possible relationships).
-	if kb == nil || len(kb.Agents) <= 1 {
-		return ""
-	}
-	rels, err := store.LoadRelationships(ctx, agentID, 10)
-	if err != nil {
-		slog.Default().Warn("[关系层] 加载关系列表失败",
-			"agent_id", agentID, "err", err)
-		return ""
-	}
-	return formatRelationshipsForPrompt(rels, agentID)
+	return formatRelationshipsForPrompt(rels, kb, profiles, agentID)
 }
 
 // advanceSlotIfNeeded 检查当前 game_time 是否已超出 currentSlot 结束时间。
@@ -604,6 +658,16 @@ func (a *agentContext) advanceSlotIfNeeded(ws contract.Transport, agentID string
 // 清反应窗口（P2-6）。由 worker 在 hasInFlightAction 守卫之后调用。
 func (a *agentContext) processSlotSwitch(ws contract.Transport, agentID string, logger *slog.Logger) {
 	if !a.as.SlotSwitchPending() {
+		return
+	}
+	// 反应窗口守卫（2026-10-21）：reactionActive 期间不处理切换，保持
+	// pending。安全点的定义是"无在途动作"，而刚提交还没 pop 的反应队列
+	// 恰好满足这一定义——09:42 实测：社交 replan 提交的应答 speak_to 在
+	// 同一毫秒被 ClearForSlotSwitch 清掉，应答从未下发（邀请方等满
+	// no_reply 窗）。反应窗口有界：checkReactionDeadline 的截止切回
+	// （60 游戏分钟）、反应动作完成后的日程 refill、speech 回执终局都会
+	// 清窗口，届时切换在下一个安全点自然进行，不会永久挂起。
+	if active, _, _ := a.reactionSnapshot(); active {
 		return
 	}
 	// P4-10：切时段前捕捉未完成任务槽（结束方式"计划内结束"）。
@@ -665,7 +729,11 @@ func (a *agentContext) checkTimeToStop(agentID string, logger *slog.Logger) {
 	}
 	// 队列非空时不消费 hint（BeginTacticalRefill 才消费）；队列空触发 refill
 	// 时注入，允许 LLM 继续本时段工作或安排休息，不再硬性禁止重复。
-	if info.ActionCmd != "" {
+	// 优先级保护（2026-10-20）：本提示是低优先级 advisory——pending hint 是
+	// 结构化高优先级提示（【对话结束】守约 /【战斗结束】/【强制打断】等，
+	// 均以"【"开头）时不得覆盖。实测：守约 hint 注入 6s 后撞上 time_to_stop
+	// 切段，被"已执行长动作"覆盖，随后的 refill 只见时段目标 → NPC 弃约。
+	if info.ActionCmd != "" && !strings.HasPrefix(a.as.ReplanHint(), "【") {
 		a.as.SetReplanHint(timeStopReplanHint(info.ActionCmd, info.Params, duration))
 	}
 	// 取消旧 action 超时 timer（若有）
@@ -888,6 +956,15 @@ func runPerceptionWorker(
 		// 对话结束检测：会话空闲超时则关闭并后台评估好感度（best-effort）。
 		if peer, turns := ac.closeConversationIfIdle(ac.as.LatestGameTimeSec()); peer != "" {
 			go ac.evaluateConversationAffection(ctx, agentID, peer, turns, kb, profiles, logger)
+			// 对话结束 hint（2026-10-16 设计）：speak_to 单动作化后，约定
+			// 的执行不由对话 replan 携带——把完整对话记录 + 守约指令交给
+			// 下一次 refill。守约优先于当前时段目标，补上 slot goal 主导
+			// 下事件仅作弱参考的仲裁缺口。
+			if h := conversationEndedHint(agentID, peer, turns, kb); h != "" {
+				ac.as.SetReplanHint(h)
+				logger.Info("[对话层] 对话已结束，注入守约 hint",
+					"agent_id", agentID, "peer", peer, "turns", len(turns))
+			}
 		}
 
 		// 多日循环：检测 day_count 递增（跨日），重新调用战略层生成新一天的 dailyPlan。
@@ -908,6 +985,11 @@ func runPerceptionWorker(
 				// 失败/冷启动返回 ""，generateDailyPlan 内部回退到常量。
 				// （读 DB action_history，不依赖 conversation，先于清空执行无影响。）
 				narrative := generateDailyMemories(ctx, ac.strategicHc, ac.as.Store(), agentID, kb, profiles, logger)
+				// 社交需求：用今天的日程评估明天的社交需求，先于新一天计划生成，
+				// 使新计划的"找人聊天"安排反映更新后的值。无今天日程（异常冷启动）时跳过。
+				if todayPlan := ac.as.Snapshot().DailyPlan; todayPlan != "" {
+					ac.as.SetSocialNeed(generateDailySocialNeed(ctx, ac.strategicHc, agentID, kb, profiles, logger, todayPlan, ac.as.SocialNeed()))
+				}
 				// 跨日清空统一 loop 会话历史：每个游戏日一份独立 loop，
 				// 新日的战略轮是 loop 第一轮。跨日记忆走昨日总结（narrative）。
 				ac.as.ClearConversation()
@@ -935,11 +1017,22 @@ func runPerceptionWorker(
 			// pop，NPC 呆站，slot 过期后队列还被安全点清理丢弃）。slot 已
 			// 过期（pending）也照常 pop：旧队列动作有自身 time_to_stop 有界，
 			// 修订落地后安全点自然收敛到新计划——比呆站整个修订时长更优。
-			// refill 仍禁止：修订正在重写计划，refill 会用旧计划白烧一次
-			// LLM 并与写回竞态。战术 replan 在途不放行：其队列已被
-			// ClearForReplan 清空（pop 本就 no-op），保持全跳过让语义单一。
-			if replanKind == replanKindStrategic && ac.hasQueueNext() {
-				ac.popAndSendQueueAction(ctx, agentID, ws, kb, logger)
+			// 战术 replan 在途不放行：其队列已被 ClearForReplan 清空（pop 本就
+			// no-op），保持全跳过让语义单一。
+			if replanKind == replanKindStrategic {
+				if ac.hasQueueNext() {
+					ac.popAndSendQueueAction(ctx, agentID, ws, kb, logger)
+				} else if autoPlanEnabled && !paused && !ac.hasInFlightAction() {
+					// 空队列 + 无在途 + 自动规划：放行 refill（2026-10-20 实测：
+					// 战略修订的 venus 调用挂 67s，队列空的 NPC 呆满全程——
+					// 09-24 的放行只覆盖"队列非空可 pop"，空队列时禁止 refill
+					// 的"防白烧 LLM"保护没有旧队列可保，只剩呆站到修订超时
+					// 上限 120s）。refill 按游戏时间选旧计划当前时段分解，修订
+					// 落地后安全点照 P3-8 收敛到新计划；processSlotSwitch 仍
+					// 保持延迟（清队列语义与修订写回竞态，refill 已足够消除
+					// 呆站）。
+					ac.tacticalRefill(ctx, agentID, ws, kb, profiles, logger)
+				}
 			}
 			continue
 		}
@@ -1343,7 +1436,10 @@ func (a *agentContext) popAndSendQueueAction(ctx context.Context, agentID string
 		return
 	}
 	if ack != nil {
-		// 复用现有记账 + 超时机制；source=tactical 让 completion 走队列路径
+		// 复用现有记账 + 超时机制；source=tactical 让 completion 走队列路径。
+		// ends_conversation 自 2026-10-21 起透传 UE（mapTacticalAction 不再
+		// 剔除），记账 params 直接携带该标记——releaseFarewellSpeaker 读
+		// CurrentActionParams["ends_conversation"] 做"送达即释放"。
 		a.recordActionStarted(ack.ActionID, cmd, params, 0 /*无 decision_epoch*/, sourceTactical, pa.ToolCallID)
 		// time_to_stop：长动作设了执行时长，记下目标 game_time 供 checkTimeToStop 轮询。
 		if hasTTS && tts > 0 {
@@ -1486,10 +1582,14 @@ func snapshotUEErrors() []ueErrorEntry {
 func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
 	ws contract.Transport, kb *worldkb.KB, profiles map[string]*profile.Profile, logger *slog.Logger) bool {
 
-	// 1. 取当前时段 goal（先读快照，再原子守卫检查+清队列）
+	// 1. 取当前时段 goal（先读快照，再原子守卫检查+清队列）。
+	// resolveReplanGoal（非裸 selectCurrentGoal）：无匹配时段（晨窗真缺口）
+	// 时，带【社交回应】/【对话结束】（守约）hint 的 refill 回退首个时段
+	// goal 放行——守约是即时行动（2026-10-16 实测：06:50 speak_to 完成后
+	// refill 因无匹配时段静默阻塞 8 秒，守约 hint 被挡到下一次感知）。
 	plan, _, _ := a.as.SnapshotSchedule()
 	tod := a.as.LatestTimeOfDay()
-	goal, slot, idx := selectCurrentGoal(plan, tod)
+	goal, slot, idx := resolveReplanGoal(plan, tod, a.as.ReplanHint())
 	// 修复 C：反应窗口仍 armed（打断以来没有过日程 refill）时，本次 refill
 	// 是"紧急反应刚结束"的衔接点——不发"长动作收尾"自动 hint（反向信号，
 	// 会把 LLM 推回填满时段），情境由 activeSituations 承载。
@@ -1503,8 +1603,17 @@ func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
 		// "工作台装配"，没有"刚在逃跑"的衔接信息。
 		if a.as.ReplanHint() == "" {
 			if reactionDesc := a.reactionDescSnapshot(); reactionDesc != "" {
-				a.as.SetReplanHint("正在应对紧急事件（" + reactionDesc +
-					"）。上一个反应动作已执行完，若威胁仍未解除请继续应对；若已收到解除信号（如脱离战斗），请回到当前时段目标的原有日程。")
+				if a.reactionSocialSnapshot() {
+					// 社交对话口径：对话是"有来有回"的交流而非待解除的威胁
+					// ——紧急口径的"若威胁仍未解除请继续应对"会把 LLM 推向
+					// "处理完事件回岗位"（2026-10-15 实测：受邀方应下后
+					// 被该 hint 推回分拣岗，得出"对方不搭理我"的结论）。
+					a.as.SetReplanHint("社交对话进行中（" + reactionDesc +
+						"）。上一个回应动作已执行完；若对话仍有来有回请继续用 speak_to 回应，若对方已无回音或对话已结束，请回到当前时段目标的原有日程。")
+				} else {
+					a.as.SetReplanHint("正在应对紧急事件（" + reactionDesc +
+						"）。上一个反应动作已执行完，若威胁仍未解除请继续应对；若已收到解除信号（如脱离战斗），请回到当前时段目标的原有日程。")
+				}
 			}
 		}
 	}
@@ -1526,9 +1635,9 @@ func (a *agentContext) tacticalRefill(ctx context.Context, agentID string,
 
 	// Stage 4: 加载近期记忆注入战术层 prompt（top-3 by created_at DESC）。
 	memories := a.loadTacticalMemories(ctx, agentID)
-	// Stage 5: 加载关系列表注入战术层 prompt【人际关系】段。
-	// 单 agent 场景（kb.Agents ≤ 1）返回空串，不污染 prompt。
-	relationships := a.loadRelationships(ctx, agentID, kbRef)
+	// Stage 5: 加载名单+好感度注入战术层 prompt【人际关系】段（KB 骨架，
+	// 存储行叠加，未互动默认好感 5）。单 agent 场景返回空串，不污染 prompt。
+	relationships := a.loadRelationships(ctx, agentID, kbRef, profiles)
 
 	// 战术层 LLM 调用统一 30s 硬超时：避免 Venus 后端排队时单次调用卡 120s
 	// 拖死整个游戏时段。超时后调用方发 idle wait，下一感知周期重试。
@@ -1608,7 +1717,7 @@ func (a *agentContext) tacticalRefillForReplan(
 	}
 	plan, _, _ := a.as.SnapshotSchedule()
 	tod := a.as.LatestTimeOfDay()
-	goal, slot, idx := selectCurrentGoal(plan, tod)
+	goal, slot, idx := resolveReplanGoal(plan, tod, replanHint)
 	if goal == "" {
 		logger.Warn("[战术层/replan] 无当前时段 goal，无法 replan",
 			"agent_id", agentID)
@@ -1638,9 +1747,9 @@ func (a *agentContext) tacticalRefillForReplan(
 
 	// Stage 4: 加载近期记忆注入战术层 prompt（top-3 by created_at DESC）。
 	memories := a.loadTacticalMemories(ctx, agentID)
-	// Stage 5: 加载关系列表注入战术层 prompt【人际关系】段。
-	// 单 agent 场景（kb.Agents ≤ 1）返回空串，不污染 prompt。
-	relationships := a.loadRelationships(ctx, agentID, kbRef)
+	// Stage 5: 加载名单+好感度注入战术层 prompt【人际关系】段（KB 骨架，
+	// 存储行叠加，未互动默认好感 5）。单 agent 场景返回空串，不污染 prompt。
+	relationships := a.loadRelationships(ctx, agentID, kbRef, profiles)
 
 	// 统一 agentic loop：replan 也走共享会话历史（含战略/对话轮）。
 	actions, err := generateTacticalPlan(tacticalCtx, a,
@@ -1981,6 +2090,12 @@ func main() {
 		// store==nil（内存模式）时 SetIdentity 仍记录 agentID 但持久化调用跳过；
 		// LoadPersistent 在 NoopStore 下返回 ErrNotFound→保持默认值（cold start）。
 		ac.as.SetIdentity(id, store)
+		// 社交需求初始值：profile ## 社交需求（0-10，未声明回落 5）。
+		if p, ok := profiles[id]; ok && p != nil {
+			ac.as.SetSocialNeed(p.SocialNeed)
+		} else {
+			ac.as.SetSocialNeed(5)
+		}
 		// per-NPC 物理属性分段阈值（profile ## 属性分段）：反应层告警跨越检测、
 		// 强制 replan、战术层恢复约束共用，保证 LLM 文本与代码行为一致。
 		ac.physBands = prompt.BandThresholdsFor(profiles, id)
@@ -2045,12 +2160,20 @@ func main() {
 			Logger:  logger,
 			Timeout: strategicTimeout,
 		})
+		// 战术层 tool_choice：--llm-config 可按后端降级为 "auto"（DeepSeek
+		// 官方 thinking 模型拒绝 "required"）。llmCfg == nil（走 flag）时保持
+		// 空串 = 默认 forced-required。
+		var tacticalToolChoice string
+		if llmCfg != nil {
+			tacticalToolChoice = llmCfg.Tactical.ToolChoice
+		}
 		ac.tacticalHc = venus.New(venus.Config{
-			BaseURL: tacticalBaseURL,
-			APIKey:  tacticalKey,
-			Model:   tacticalModel,
-			Logger:  logger,
-			Timeout: tacticalTimeout,
+			BaseURL:    tacticalBaseURL,
+			APIKey:     tacticalKey,
+			Model:      tacticalModel,
+			Logger:     logger,
+			Timeout:    tacticalTimeout,
+			ToolChoice: tacticalToolChoice,
 		})
 		// P2-5 事件路由判决模型（jev）：每 agent 一个判决客户端。--jev-model
 		// 空串禁用（路由器 enqueue-only）。恒指 --venus-url + 已解析的 venus

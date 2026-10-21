@@ -198,6 +198,71 @@ func TestHandleWorldEvent_ForceWithoutInFlightNoStop(t *testing.T) {
 	waitFor(t, 2*time.Second, func() bool { return ac.as.QueueLen() == 0 && replanIdle(ac) })
 }
 
+// socialSpeechTestEvent builds a force speech_heard event mirroring UE's
+// NPC-to-NPC speech dispatch (category=social, force=true).
+func socialSpeechTestEvent(id string, category string) protocol.WorldEventPayload {
+	return protocol.WorldEventPayload{
+		EventID:   id,
+		Category:  category,
+		EventType: protocol.EventTypeSpeechHeard,
+		Force:     true,
+		Severity:  5,
+		Subject:   "H-02",
+		GameTime:  "D12 12:00:00",
+		Location:  "logistics_hub",
+		Data:      json.RawMessage(`{"speaker":"H-04","content":"老王，歇会儿不？长凳上坐坐。"}`),
+	}
+}
+
+// TestForceEventHint_SocialVsEmergency verifies the force-path hint flavor:
+// social speech events (UE's speech_heard always carries force:true) render
+// as 【社交回应】 (invitation-decision guidance), while combat/threat events
+// keep the 【强制打断】→【紧急事件】 treatment. 2026-10-15 sim: a chat line
+// rendered as an emergency pushed the invitee back to work and the inviter
+// answered an acceptance with a monologue.
+func TestForceEventHint_SocialVsEmergency(t *testing.T) {
+	if hint := forceEventHint(socialSpeechTestEvent("evt_s1", protocol.CategorySocial)); !strings.Contains(hint, "【社交回应】") {
+		t.Fatalf("social speech event must use the social hint, got %q", hint)
+	}
+	// speech_heard 的 event_type 容错：category 缺失时同样按社交处理
+	//（与 combat 短名别名同款容忍）。
+	if hint := forceEventHint(socialSpeechTestEvent("evt_s2", "")); !strings.Contains(hint, "【社交回应】") {
+		t.Fatalf("category-less speech_heard must use the social hint, got %q", hint)
+	}
+	if hint := forceEventHint(forceTestEvent("evt_f9")); !strings.Contains(hint, "【强制打断】") {
+		t.Fatalf("combat force event must keep the emergency hint, got %q", hint)
+	}
+}
+
+// TestHandleWorldEvent_ForceSocialUsesSocialHint drives the full force path
+// with a speech_heard event: the hint carries 【社交回应】 (not 【强制打断】)
+// and the interrupted-action bookkeeping labels it a social interruption.
+func TestHandleWorldEvent_ForceSocialUsesSocialHint(t *testing.T) {
+	rt, ft, ac := newWorldEventTestRuntime(t)
+	ac.as.RecordActionStarted("act-1", protocol.CmdWorkShift,
+		map[string]any{"semantic_group": "workbench"}, agentstate.SourceTactical, "")
+
+	dispatchTestEvent(t, rt, "H-01", socialSpeechTestEvent("evt_s3", protocol.CategorySocial))
+
+	if stops := stoppedActions(ft); len(stops) != 1 || stops[0] != "act-1" {
+		t.Fatalf("force speech must still stop the in-flight action, got %v", stops)
+	}
+	if hint := ac.as.ReplanHint(); !strings.Contains(hint, "【社交回应】") || strings.Contains(hint, "【强制打断】") {
+		t.Fatalf("force speech hint must be social-flavored, got %q", hint)
+	}
+	if _, why := interruptedRecord(ac); !strings.Contains(why, "被社交对话打断") {
+		t.Fatalf("interrupted bookkeeping must label it social, got %q", why)
+	}
+	waitFor(t, 2*time.Second, func() bool { return ac.as.QueueLen() == 0 && replanIdle(ac) })
+}
+
+// interruptedRecord returns the latest unfinished-task snapshot's end
+// bookkeeping (P4-10): unfinished task description + why it ended.
+func interruptedRecord(ac *agentContext) (string, string) {
+	snap := ac.as.Snapshot()
+	return snap.UnfinishedTask, snap.LastEndWhy
+}
+
 // TestHandleWorldEvent_UnregisteredAgentDropped verifies an event for an
 // unknown agent is dropped with a warning instead of panicking.
 func TestHandleWorldEvent_UnregisteredAgentDropped(t *testing.T) {
@@ -455,7 +520,7 @@ func TestNoSynthesisForSelfInterruptedCompletion(t *testing.T) {
 	// 被打断的动作回 interrupted completion——应返回空 detail（不合成事件）。
 	_, detail := ac.recordActionCompletion(protocol.ActionCompletedPayload{
 		ActionID: "act-1", Result: protocol.ResultInterrupted,
-	})
+	}, nil, nil, nil)
 	if detail != "" {
 		t.Fatalf("pre-recorded interrupted completion must NOT produce a detail, got %q", detail)
 	}
@@ -464,7 +529,7 @@ func TestNoSynthesisForSelfInterruptedCompletion(t *testing.T) {
 	ac.as.RecordActionStarted("act-2", "MoveTo", nil, agentstate.SourceTactical, "")
 	_, detail = ac.recordActionCompletion(protocol.ActionCompletedPayload{
 		ActionID: "act-2", Result: protocol.ResultInterrupted, Reason: "dialogue:abandoned by H-03",
-	})
+	}, nil, nil, nil)
 	if detail == "" {
 		t.Fatalf("non-pre-recorded interrupted must produce a detail for synthesis")
 	}
@@ -488,7 +553,7 @@ func TestNoSynthesisForTimeToStopAndUntracked(t *testing.T) {
 
 	_, detail := ac.recordActionCompletion(protocol.ActionCompletedPayload{
 		ActionID: "act-tts", Result: protocol.ResultInterrupted,
-	})
+	}, nil, nil, nil)
 	if detail != "" {
 		t.Fatalf("time_to_stop interrupted must NOT produce detail, got %q", detail)
 	}
@@ -498,7 +563,7 @@ func TestNoSynthesisForTimeToStopAndUntracked(t *testing.T) {
 	// 不调 recordActionStarted——模拟 start_asleep 从未被追踪。
 	_, detail = ac2.recordActionCompletion(protocol.ActionCompletedPayload{
 		ActionID: "start_asleep_H-04", Result: protocol.ResultInterrupted,
-	})
+	}, nil, nil, nil)
 	if detail != "" {
 		t.Fatalf("untracked interrupted must NOT produce detail, got %q", detail)
 	}
@@ -507,8 +572,59 @@ func TestNoSynthesisForTimeToStopAndUntracked(t *testing.T) {
 	ac2.as.RecordActionStarted("act-real", "MoveTo", nil, agentstate.SourceTactical, "")
 	_, detail = ac2.recordActionCompletion(protocol.ActionCompletedPayload{
 		ActionID: "act-real", Result: protocol.ResultFailed, Reason: "unreachable",
-	})
+	}, nil, nil, nil)
 	if detail == "" {
 		t.Fatalf("genuine failed must still produce detail for synthesis")
+	}
+}
+
+// TestReleaseFarewellSpeaker_OnDelivery verifies the ends_conversation
+// release: dispatching a speech_heard to the addressee stops the SPEAKER's
+// in-flight farewell speak_to (delivery confirmed = its mission complete),
+// clears in-flight tracking, and wakes the speaker's worker — skipping the
+// UE no_reply window. Negative: a speak_to without the flag, or a non-speak_to
+// in-flight action, is left alone.
+func TestReleaseFarewellSpeaker_OnDelivery(t *testing.T) {
+	rt, ft, sp := newWorldEventTestRuntime(t)
+	seedPerception(t, sp)
+	// 注册接收方 H-02（fixture 默认只注册 H-01——说话人）。
+	recv, _ := newAgentContext(context.Background())
+	rt.agentsMu.Lock()
+	rt.agents["H-02"] = recv
+	rt.agentsMu.Unlock()
+
+	mkParams := func(ends bool) map[string]any {
+		p := map[string]any{"target_agent_id": "H-02", "content": "回头见，跑完各忙各的。", "interrupt": true}
+		if ends {
+			p["ends_conversation"] = true
+		}
+		return p
+	}
+
+	// 正例：带 ends_conversation 的在途 speak_to → speech_heard 送达即 stop。
+	sp.as.RecordActionStarted("act-fw1", "SpeakTo", mkParams(true), agentstate.SourceTactical, "")
+	dispatchTestEvent(t, rt, "H-02", replySpeechTestEvent("evt_fw1", "H-01"))
+	stops := stoppedActions(ft)
+	if len(stops) != 1 || stops[0] != "act-fw1" {
+		t.Fatalf("farewell speak_to must be stopped on delivery, got %v", stops)
+	}
+	if sp.as.CurrentActionID() != "" {
+		t.Fatalf("speaker in-flight must be cleared, got %q", sp.as.CurrentActionID())
+	}
+
+	// 反例 1：不带标记的 speak_to（普通对话轮）→ 不 stop（要等对方回话打断）。
+	sp.as.RecordActionStarted("act-fw2", "SpeakTo", mkParams(false), agentstate.SourceTactical, "")
+	dispatchTestEvent(t, rt, "H-02", replySpeechTestEvent("evt_fw2", "H-01"))
+	if stops := stoppedActions(ft); len(stops) != 1 {
+		t.Fatalf("unflagged speak_to must NOT be stopped, got %v", stops)
+	}
+
+	// 反例 2：非 speak_to 在途动作（即使带同名参数）→ 不 stop。
+	sp.as.ClearInFlightKeepQueue()
+	sp.as.RecordActionStarted("act-fw3", "InteractSmartObject", map[string]any{
+		"semantic_group": "treadmill", "ends_conversation": true}, agentstate.SourceTactical, "")
+	dispatchTestEvent(t, rt, "H-02", replySpeechTestEvent("evt_fw3", "H-01"))
+	if stops := stoppedActions(ft); len(stops) != 1 {
+		t.Fatalf("non-speak_to in-flight must NOT be stopped, got %v", stops)
 	}
 }

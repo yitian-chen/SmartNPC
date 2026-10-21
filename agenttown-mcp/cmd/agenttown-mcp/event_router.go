@@ -273,6 +273,42 @@ func (r *eventRouter) route(ctx context.Context, agentID string, ev protocol.Wor
 		return
 	}
 
+	// 活跃会话回话：确定性社交打断，不判紧急度。判决模型不知道"这是
+	// 我在进行的对话的回话"，其紧急度判决对回话近似随机（2026-10-16
+	// 实测：应邀答复被判不紧急留队列，邀请方直到 slot 切走都没处理
+	// "应下"）；回话是预期轮转而非打断风暴，轮次上限
+	// （maxConversationTurns）已保证对话有界。判定口径：说话人 == 当前
+	// 会话对方且已记录 ≥2 轮——handleWorldEvent 的 transcript 记录会把
+	// 任何新说话人置为会话对方，轮数才是"回话"与"新对话第一句"的分界
+	// （新搭话仍走 judge 判紧急度）。severity 阶梯照常生效——更高优先级
+	// 的反应窗口（如威胁）进行中时回话仍留队列，由对话结束 hint
+	// （conversationEndedHint）承接守约。
+	//
+	// 收口（2026-10-21）：speech_heard 带 ends_conversation=true = 说话人
+	// 已明确收尾、不期待回话（UE 透传 speak_to 的标记给收听者）。此时
+	// 不再触发确定性打断——接收方继续当前动作（如赴约），事件留队列等
+	// 安全点 drain，对话从代码层收敛。此前接收方看不到该标记，把"走吧
+	// 跑起来"当成对方还在说话反复回话，形成 ping-pong 死循环。
+	if speaker := speechHeardSpeaker(ev); speaker != "" {
+		if speechHeardEndsConversation(ev) {
+			r.logger.Info("[事件路由] 说话人已收尾（ends_conversation），不打断回话",
+				"agent_id", agentID, "event_id", ev.EventID, "speaker", speaker)
+			return // 事件留队列，安全点 drain；接收方继续当前动作
+		}
+		if peer, turns := ac.conversationPeerState(); speaker == peer && turns >= 2 {
+			dec := prompt.RouterDecision{
+				Interrupt: true,
+				Severity:  2,
+				Reason:    "活跃会话回话（对话轮转，不判紧急度）",
+				Motive:    prompt.RouterMotiveSocial,
+			}
+			r.logger.Info("[事件路由] 活跃会话回话，确定性社交打断",
+				"agent_id", agentID, "event_id", ev.EventID, "speaker", speaker)
+			r.processVerdict(agentID, ev, dec)
+			return
+		}
+	}
+
 	in := r.buildInput(agentID, ac, ev)
 
 	// 超时单源：jev.Config.Timeout（http.Client.Timeout，--jev-timeout）。
@@ -461,12 +497,9 @@ func (r *eventRouter) buildInput(agentID string, ac *agentContext, ev protocol.W
 		}
 	}
 
-	relationships := ""
-	if store := ac.as.Store(); store != nil && kb != nil && len(kb.Agents) > 1 {
-		if rels, err := store.LoadRelationships(context.Background(), agentID, 10); err == nil {
-			relationships = formatRelationshipsForPrompt(rels, agentID)
-		}
-	}
+	// 名单 + 好感度（KB 骨架 + 存储行叠加，未互动默认 5）：紧急度裁决的
+	// 亲疏依据——同一事件对不同好感度的同伴应有不同判决。
+	relationships := ac.loadRelationships(context.Background(), agentID, kb, r.profiles)
 
 	return prompt.RouterInput{
 		AgentID:       agentID,
@@ -544,7 +577,12 @@ func (rt *Runtime) routerInterrupt(agentID string, ev protocol.WorldEventPayload
 			rt.logger.Warn("[事件路由] stop_action 发送失败（打断延后到 replan 完成后重试）",
 				"agent_id", agentID, "action_id", actionID, "err", err)
 		} else {
-			ac.recordInterrupted("被紧急事件打断（路由裁决：" + truncateRunes(dec.Reason, 40) + "）")
+			// 打断记账标签跟着 hint 口径走：社交打断不是"紧急事件"。
+			interruptedLabel := "被紧急事件打断（路由裁决：" + truncateRunes(dec.Reason, 40) + "）"
+			if dec.Motive == prompt.RouterMotiveSocial {
+				interruptedLabel = "被社交对话打断（路由裁决：" + truncateRunes(dec.Reason, 40) + "）"
+			}
+			ac.recordInterrupted(interruptedLabel)
 			ac.as.ClearInFlightKeepQueue()
 			rt.logger.Warn("[事件路由] 已打断在途动作（路由裁决紧急）",
 				"agent_id", agentID, "action_id", actionID, "event_id", ev.EventID,
@@ -558,8 +596,9 @@ func (rt *Runtime) routerInterrupt(agentID string, ev protocol.WorldEventPayload
 		hint = fmt.Sprintf("【情境解除】%s。当前动作因此不再必要，请停止当前动作并按当前时段目标正常规划。",
 			prompt.FormatWorldEvent(ev))
 	case prompt.RouterMotiveSocial:
-		hint = fmt.Sprintf("【社交回应】%s。请简短回应（如打招呼），然后继续当前时段的原有工作。",
-			prompt.FormatWorldEvent(ev))
+		// 指引文案由 prompt.tacticalHintLine 的【社交回应】分支统一渲染
+		// （与 force 路径 forceEventHint 对称：hint 只带前缀+事件）。
+		hint = "【社交回应】" + prompt.FormatWorldEvent(ev)
 	default: // urgent 或空（向后兼容）
 		hint = fmt.Sprintf("【强制打断】%s（路由裁决：紧急，%s）",
 			prompt.FormatWorldEvent(ev), dec.Reason)
@@ -575,9 +614,9 @@ func (rt *Runtime) routerInterrupt(agentID string, ev protocol.WorldEventPayload
 	case prompt.RouterMotiveSituationResolved:
 		ac.clearReaction()
 	case prompt.RouterMotiveSocial:
-		ac.beginReaction(2, ac.as.LatestGameTimeSec(), prompt.FormatWorldEvent(ev))
+		ac.beginReaction(2, ac.as.LatestGameTimeSec(), prompt.FormatWorldEvent(ev), true)
 	default:
-		ac.beginReaction(dec.Severity, ac.as.LatestGameTimeSec(), prompt.FormatWorldEvent(ev))
+		ac.beginReaction(dec.Severity, ac.as.LatestGameTimeSec(), prompt.FormatWorldEvent(ev), false)
 	}
 	go ac.forceInterruptReplan(rt.ctx, agentID, rt.ws, *rt.kbPtr, rt.profiles, ev, hint, rt.logger)
 }

@@ -408,12 +408,17 @@ type SocialData struct {
 // (the addressee). UE fills the speaker identity, the spoken content, and
 // the distance at which it was delivered. SpeakerName is a display
 // convenience (falls back to SpeakerID when empty).
+// EndsConversation mirrors the speak_to's ends_conversation flag (UE relays
+// it to the listener since 2026-10-21): true = the speaker is closing the
+// conversation and does not expect a reply — the listener should not keep
+// pinging back.
 type SpeechHeardData struct {
-	SpeakerID   string  `json:"speaker_id"`
-	SpeakerName string  `json:"speaker_name,omitempty"`
-	AddresseeID string  `json:"addressee_id,omitempty"`
-	Content     string  `json:"content,omitempty"`
-	DistanceCm  float64 `json:"distance,omitempty"`
+	SpeakerID        string  `json:"speaker_id"`
+	SpeakerName      string  `json:"speaker_name,omitempty"`
+	AddresseeID      string  `json:"addressee_id,omitempty"`
+	Content          string  `json:"content,omitempty"`
+	DistanceCm       float64 `json:"distance,omitempty"`
+	EndsConversation bool    `json:"ends_conversation,omitempty"`
 }
 
 // ActionAnomalyData is the data block of category action_anomaly (§3.4).

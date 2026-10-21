@@ -159,7 +159,7 @@ func TestBuildSharedSystemPrompt_Module3Details(t *testing.T) {
 // 断言随之过时。
 
 func TestBuildStrategicUserContext_EmptyDayContext(t *testing.T) {
-	got := BuildStrategicUserContext("H-01", nil, nil, nil, "", "")
+	got := BuildStrategicUserContext("H-01", nil, nil, nil, "", "", 5)
 	if strings.Contains(got, "【今日日程】") {
 		t.Errorf("empty dayContext should not produce 【今日日程】 segment in:\n%s", got)
 	}
@@ -230,26 +230,28 @@ func TestOtherAgentsLine_OmitsProfessionWhenEmpty(t *testing.T) {
 	}
 }
 
-// TestBuildStrategicUserContext_NoOtherNPCsSegment 验证战略层 user prompt
-// 不再注入【其他NPC】花名册段（规划阶段不引导主动社交）。
-func TestBuildStrategicUserContext_NoOtherNPCsSegment(t *testing.T) {
+// TestBuildStrategicUserContext_OtherNPCsSegment 验证战略层 user prompt
+// 注入【其他NPC】段（名单 + 好感度，社交需求属性驱动主动社交 goal 后恢复）：
+// 非空 otherNPCs 渲染段头与邀请行 + 内容；空串（单 NPC 场景）整段省略。
+func TestBuildStrategicUserContext_OtherNPCsSegment(t *testing.T) {
 	kb := strategicRosterKB()
-	got := BuildStrategicUserContext("H-01", kb, nil, nil, "", "")
-	if strings.Contains(got, "【其他NPC】") {
-		t.Errorf("strategic user context should NOT inject 【其他NPC】 roster:\n%s", got)
+	got := BuildStrategicUserContext("H-01", kb, nil, nil, "",
+		"- 老王（H-02，物流分拣兼加工员）：好感 5/10", 5)
+	for _, w := range []string{
+		"【其他NPC】（你可以主动找其中某位聊天，维系人际关系）",
+		"- 老王（H-02，物流分拣兼加工员）：好感 5/10",
+	} {
+		if !strings.Contains(got, w) {
+			t.Errorf("strategic user context missing %q:\n%s", w, got)
+		}
+	}
+	// 空串整段省略。
+	if got := BuildStrategicUserContext("H-01", kb, nil, nil, "", "", 5); strings.Contains(got, "【其他NPC】") {
+		t.Errorf("empty otherNPCs should omit the segment:\n%s", got)
 	}
 	// system prompt 不得含【其他NPC】（三层严格统一，层专属内容在 user）。
 	if sys := BuildSharedSystemPrompt(kb, nil, "H-01"); strings.Contains(sys, "【其他NPC】") {
 		t.Errorf("shared system prompt should not contain 【其他NPC】 roster:\n%s", sys)
-	}
-}
-
-func TestStrategicSystemPrompt_NoSocialGuidance(t *testing.T) {
-	// 战略层不引导主动社交：规则集不再把聊天映射到动作工具，格式示例也不含
-	// 社交时段示范；多 agent KB 也不应产生【其他NPC】段（社交目标清单已整体移除）。
-	kb := strategicRosterKB()
-	if got := BuildStrategicUserContext("H-01", kb, nil, nil, "", ""); strings.Contains(got, "【其他NPC】") {
-		t.Errorf("multi-agent KB should NOT produce 【其他NPC】 segment:\n%s", got)
 	}
 }
 
@@ -290,7 +292,7 @@ func buildTestStrategicPrompt() string {
 		TimeOfDay:        "07:00",
 		Zone:             "residential_quarters",
 		Hint:             "早晨例行制定每日日程安排",
-		Context:          BuildStrategicUserContext("H-01", nil, nil, nil, "", ""),
+		Context:          BuildStrategicUserContext("H-01", nil, nil, nil, "", "", 5),
 		YesterdaySummary: "昨日总结：昨天按计划完成了车间装配。",
 	})
 }
@@ -411,3 +413,40 @@ func TestStrategicSystemPrompt_Rule3AtomicInteractionGate(t *testing.T) {
 // TestStrategicSystemPrompt_NoHardcodedEffects 已移除：用户未提交的
 // strategic.go 改动把 preamble（含"属性变动"引用）移到 user context 并
 // 改写 worldDetailCore 标题，本测试的"preamble 应引用属性变动"断言过时。
+
+// TestStrategicSystemPrompt_SocialGoalGate 验证社交类 goal 不再被规则 2
+// 的"必须映射 (semantic_group, interaction)"硬约束拦下：社交与锻炼同为
+// 明文例外，规则 3 承认【其他NPC】名单中的人物，规则 9 按社交需求分层
+// 给出硬性数量要求（修复 2026-10-14 实测：全员社交需求 9-10 却几乎不排
+// 社交时段——软引导"可安排"扛不过硬规则"换一个"）。
+func TestStrategicSystemPrompt_SocialGoalGate(t *testing.T) {
+	for _, want := range []string{
+		// 规则 2：社交例外（与锻炼例外并列，speak_to 由战术层分解）。
+		"社交类活动（如\"找XX聊聊XX\"）同样不映射设施，属例外",
+		"由战术层分解为 speak_to 定向对话",
+		// 规则 3：【其他NPC】名单中的人物是合法引用。
+		"或用户信息【其他NPC】名单中列出的居民",
+		// 规则 9：分层阈值 + 对象指引 + 邀请形式。
+		"≥8 时每天至少安排 1 个社交时段",
+		"≥9 可安排 2-3 段",
+		"≤5 时尽量少安排社交活动",
+		"优先好感度高的",
+		"纯聊天（\"找XX聊聊XX\"",
+		"或邀请（\"邀请XX一起去XX做XX\"",
+		"对方可能应邀加入",
+	} {
+		if !strings.Contains(StrategicRules, want) {
+			t.Errorf("rules missing %q:\n%s", want, StrategicRules)
+		}
+	}
+}
+
+func TestBuildStrategicUserContext_SocialNeedSegment(t *testing.T) {
+	got := BuildStrategicUserContext("H-01", nil, nil, nil, "", "", 7)
+	if !strings.Contains(got, "【社交需求】7/10") {
+		t.Errorf("strategic user context should contain 【社交需求】7/10:\n%s", got)
+	}
+	if !strings.Contains(got, "渴望主动找其他 NPC 聊天") {
+		t.Errorf("strategic user context should explain 社交需求:\n%s", got)
+	}
+}

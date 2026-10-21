@@ -240,3 +240,29 @@ func (m *memoryFakeStore) SeedRelationship(_ context.Context, _ string, _ string
 	return nil
 }
 func (m *memoryFakeStore) Close() error { return nil }
+
+func TestGenerateDailySocialNeed(t *testing.T) {
+	// 正常解析 + schema 名。
+	sc := &fakeStrategicCaller{resp: makeStrategicResponse(`{"social_need": 8}`)}
+	if got := generateDailySocialNeed(context.Background(), sc, "H-01", nil, nil, slog.Default(), "今天的日程", 5); got != 8 {
+		t.Fatalf("social need = %d, want 8", got)
+	}
+	if sc.capturedSchemaName != "social_need" {
+		t.Errorf("schema name = %q, want social_need", sc.capturedSchemaName)
+	}
+	// LLM 失败 → 保持当前值。
+	sc2 := &fakeStrategicCaller{err: errors.New("llm down")}
+	if got := generateDailySocialNeed(context.Background(), sc2, "H-01", nil, nil, slog.Default(), "今天的日程", 5); got != 5 {
+		t.Fatalf("social need on failure = %d, want 5 (unchanged)", got)
+	}
+	// 越界 → clamp 到 [0,10]。
+	sc3 := &fakeStrategicCaller{resp: makeStrategicResponse(`{"social_need": 99}`)}
+	if got := generateDailySocialNeed(context.Background(), sc3, "H-01", nil, nil, slog.Default(), "今天的日程", 5); got != 10 {
+		t.Fatalf("social need after clamp-high = %d, want 10", got)
+	}
+	// 解析失败 → 保持当前值。
+	sc4 := &fakeStrategicCaller{resp: makeStrategicResponse(`not-json`)}
+	if got := generateDailySocialNeed(context.Background(), sc4, "H-01", nil, nil, slog.Default(), "今天的日程", 5); got != 5 {
+		t.Fatalf("social need on parse failure = %d, want 5 (unchanged)", got)
+	}
+}

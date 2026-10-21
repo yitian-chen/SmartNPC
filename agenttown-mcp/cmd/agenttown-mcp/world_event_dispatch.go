@@ -126,6 +126,14 @@ func (rt *Runtime) handleWorldEvent(agentID string, ev protocol.WorldEventPayloa
 		var d protocol.SpeechHeardData
 		if err := json.Unmarshal(ev.Data, &d); err == nil && d.SpeakerID != "" {
 			ac.recordConversationTurn(d.SpeakerID, d.SpeakerID, d.Content, ac.as.LatestGameTimeSec())
+			// 对话收尾释放（ends_conversation，2026-10-16）：本事件到达即
+			// 话语送达的铁证——说话人若带着 ends_conversation 标记的
+			// speak_to 仍在途，立即结束它，不再等 UE 的 no_reply 窗（~10s
+			// 纯死时间）。说话人队列里跟在告别句后的动作（如约定活动）
+			// 随即 pop。见 releaseFarewellSpeaker。
+			if d.SpeakerID != agentID {
+				rt.releaseFarewellSpeaker(d.SpeakerID)
+			}
 		}
 	}
 
@@ -238,7 +246,12 @@ func (rt *Runtime) handleForceEvent(ac *agentContext, agentID string, ev protoco
 				"agent_id", agentID, "action_id", actionID, "err", err)
 		} else {
 			// P4-10：先捕捉未完成任务槽（含已执行时长），再清在途追踪。
-			ac.recordInterrupted("被紧急事件强制打断：" + truncateRunes(prompt.FormatWorldEvent(ev), 60))
+			// 社交 speech 事件的打断不是"紧急事件"——标签跟着 hint 口径走。
+			interruptedLabel := "被紧急事件强制打断："
+			if isSocialSpeechEvent(ev) {
+				interruptedLabel = "被社交对话打断："
+			}
+			ac.recordInterrupted(interruptedLabel + truncateRunes(prompt.FormatWorldEvent(ev), 60))
 			// 清在途追踪，交给延迟到达的 action_completed{interrupted}：
 			// stash 保住 action_history 记账（与 checkTimeToStop 同模式）。
 			ac.as.ClearInFlightKeepQueue()
@@ -260,16 +273,118 @@ func (rt *Runtime) handleForceEvent(ac *agentContext, agentID string, ev protoco
 	ac.as.SetReplanHint(hint)
 	// 护栏（§4.5）：force 反应同样是一个反应任务——带截止时间，后续路由
 	// 裁决需严格更高 severity 才能再打断（force 自身不受限，§4.2）。
-	ac.beginReaction(ev.Severity, ac.as.LatestGameTimeSec(), prompt.FormatWorldEvent(ev))
+	ac.beginReaction(ev.Severity, ac.as.LatestGameTimeSec(), prompt.FormatWorldEvent(ev), isSocialSpeechEvent(ev))
 	go ac.forceInterruptReplan(rt.ctx, agentID, rt.ws, *rt.kbPtr, rt.profiles, ev, hint, rt.logger)
+}
+
+// speechHeardSpeaker extracts the speaker id from a speech_heard event's
+// data block; "" when the event is not a speech_heard or the payload is
+// unparseable. Raw category check mirrors the transcript-recording site
+// (UE consistently sends category=social for NPC speech).
+func speechHeardSpeaker(ev protocol.WorldEventPayload) string {
+	if ev.Category != protocol.CategorySocial || ev.EventType != protocol.EventTypeSpeechHeard {
+		return ""
+	}
+	var d protocol.SpeechHeardData
+	if err := json.Unmarshal(ev.Data, &d); err != nil {
+		return ""
+	}
+	return d.SpeakerID
+}
+
+// speechHeardEndsConversation reports whether a speech_heard event carries
+// ends_conversation=true — the speaker is closing the conversation and does
+// not expect a reply. UE relays the speak_to's flag to the listener since
+// 2026-10-21; false for non-speech_heard or when the flag is absent.
+func speechHeardEndsConversation(ev protocol.WorldEventPayload) bool {
+	if ev.Category != protocol.CategorySocial || ev.EventType != protocol.EventTypeSpeechHeard {
+		return false
+	}
+	var d protocol.SpeechHeardData
+	if err := json.Unmarshal(ev.Data, &d); err != nil {
+		return false
+	}
+	return d.EndsConversation
+}
+
+// releaseFarewellSpeaker ends the speaker's in-flight farewell speak_to now
+// that its utterance has been delivered (the speech_heard that triggered this
+// call IS the delivery confirmation — MCP relays every message, so the
+// receiver's speech_heard is visible the moment UE dispatches it). The
+// no_reply window (~10s real) is pure dead time for a farewell: the utterance
+// went out ~1.5-2s after dispatch, and the speaker's queue carries the
+// follow-up action right behind the farewell (allowed for ends_conversation
+// speak_tos) — ending the wait lets it pop immediately, skipping both the
+// window AND the post-completion refill LLM call.
+//
+// Bookkeeping mirrors the force-interrupt pattern (stop first, then preface +
+// clear on success): the late action_completed{interrupted} is matched against
+// the stash (action_history preserved) and the preface flag suppresses
+// action_failed synthesis. A racing natural completion yields
+// STOP_ID_MISMATCH — harmless. The ends_conversation flag is MCP-consumed
+// only (stripped before forwarding to UE).
+func (rt *Runtime) releaseFarewellSpeaker(speakerID string) {
+	sp := rt.lookupAgent(speakerID)
+	if sp == nil {
+		return
+	}
+	snap := sp.as.Snapshot()
+	if snap.CurrentActionID == "" {
+		return
+	}
+	// speak_to 签名与 recordActionStarted 的 own-turn 挂钩同款口径：
+	// target_agent_id 存在（cmd 名是 registry 动态的 "SpeakTo"，params
+	// 签名更稳）。非 speak_to 动作即使误带同名参数也不放行。
+	if _, ok := snap.CurrentActionParams["target_agent_id"].(string); !ok {
+		return
+	}
+	if b, _ := snap.CurrentActionParams["ends_conversation"].(bool); !b {
+		return
+	}
+	if err := rt.ws.SendStopAction(speakerID, snap.CurrentActionID); err != nil {
+		rt.logger.Warn("[对话层] 告别释放 stop 发送失败（等待将延续到 no_reply 窗自然结束）",
+			"agent_id", speakerID, "action_id", snap.CurrentActionID, "err", err)
+		return
+	}
+	// 告别语已送达 = 该 speak_to 的使命完成：按"正常结束"记账（区别于
+	// 被打断），preface 使迟到的 interrupted completion 不合成事件。
+	sp.recordScheduledEnd()
+	sp.as.ClearInFlightKeepQueue()
+	// 取消该 action 的超时 timer，避免迟到的 timer 误 stop 后续动作。
+	sp.coordMu.Lock()
+	if timer, ok := sp.pendingActionTimeouts[snap.CurrentActionID]; ok {
+		timer.Stop()
+		delete(sp.pendingActionTimeouts, snap.CurrentActionID)
+	}
+	sp.coordMu.Unlock()
+	sp.signal()
+	rt.logger.Info("[对话层] 告别语已送达，提前结束等待（跳过 no_reply 窗）",
+		"agent_id", speakerID, "action_id", snap.CurrentActionID)
 }
 
 // forceEventHint formats the replan hint for a force event. The 【强制打断】
 // marker is the contract with prompt.tacticalHintLine: it renders the event
 // as a top-priority 【紧急事件】 directive (explicitly overriding the slot
 // goal and the duration-filling rules) instead of a mere interruption note.
+// Social speech events (UE's speech_heard always carries force:true) use the
+// 【社交回应】 marker instead — rendering a chat line as an emergency
+// misframes the replan: 2026-10-15 sim showed the invitee pushed to "handle
+// the event then return to work" and the inviter acknowledging the acceptance
+// with a monologue speak instead of a speak_to reply.
 func forceEventHint(ev protocol.WorldEventPayload) string {
+	if isSocialSpeechEvent(ev) {
+		return "【社交回应】" + prompt.FormatWorldEvent(ev)
+	}
 	return "【强制打断】" + prompt.FormatWorldEvent(ev)
+}
+
+// isSocialSpeechEvent reports whether ev is an NPC-to-NPC social speech
+// event: social category, or a speech_heard event_type under any category
+// (UE currently sends it as category=social; the event_type check adds the
+// same tolerance the combat aliases enjoy if the category ever goes missing).
+func isSocialSpeechEvent(ev protocol.WorldEventPayload) bool {
+	return prompt.EffectiveCategory(ev) == protocol.CategorySocial ||
+		prompt.EffectiveEventType(ev) == protocol.EventTypeSpeechHeard
 }
 
 // handleCombatDetach executes the combat-detach handover, synchronously in
@@ -958,8 +1073,11 @@ var reactionDeadlineGameSec = 3600.0
 // beginReaction arms the guard for a newly started reaction task with its
 // severity ladder bar and absolute deadline. nowGameSec is the current
 // authoritative game time (<= 0 = no perception yet; the deadline check
-// stays inert until perception arrives).
-func (a *agentContext) beginReaction(severity int, nowGameSec float64, desc string) {
+// stays inert until perception arrives). social marks the reaction as a
+// social exchange rather than an emergency — the armed-window refill hint
+// (tacticalRefill) phrases its continuation guidance accordingly ("对话仍
+// 有来有回请继续回应" vs "威胁仍未解除请继续应对").
+func (a *agentContext) beginReaction(severity int, nowGameSec float64, desc string, social bool) {
 	if severity < 0 {
 		severity = 0
 	}
@@ -971,6 +1089,7 @@ func (a *agentContext) beginReaction(severity int, nowGameSec float64, desc stri
 	a.reactionActive = true
 	a.reactionSeverity = severity
 	a.reactionDesc = desc
+	a.reactionSocial = social
 	if nowGameSec > 0 {
 		a.reactionDeadlineGameSec = nowGameSec + reactionDeadlineGameSec
 	} else {
@@ -985,6 +1104,15 @@ func (a *agentContext) reactionSnapshot() (active bool, severity int, deadlineGa
 	return a.reactionActive, a.reactionSeverity, a.reactionDeadlineGameSec
 }
 
+// reactionSocialSnapshot reports whether the armed reaction window was
+// opened by a social exchange (drives the armed-window refill hint's
+// continuation phrasing).
+func (a *agentContext) reactionSocialSnapshot() bool {
+	a.coordMu.Lock()
+	defer a.coordMu.Unlock()
+	return a.reactionSocial
+}
+
 // clearReaction lifts the guard. Callers: schedule refill (tacticalRefill —
 // the NPC has returned to schedule-driven planning), slot switch, agent
 // stop, and deadline expiry.
@@ -994,6 +1122,7 @@ func (a *agentContext) clearReaction() {
 	a.reactionSeverity = 0
 	a.reactionDeadlineGameSec = 0
 	a.reactionDesc = ""
+	a.reactionSocial = false
 	a.coordMu.Unlock()
 }
 

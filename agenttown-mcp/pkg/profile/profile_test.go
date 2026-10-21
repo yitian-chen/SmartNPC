@@ -285,3 +285,41 @@ func TestLoadDir_AttrBandsChineseColon(t *testing.T) {
 		t.Errorf("疲劳 bands (Chinese colon) = %v, want [40 70 90]", got)
 	}
 }
+
+func TestParseSocialNeed(t *testing.T) {
+	cases := []struct {
+		in   string
+		want int
+	}{
+		{"8", 8},
+		{" 3 ", 3},
+		{"10", 10},
+		{"0", 0},
+		{"", 5},    // 未声明 → 默认 5
+		{"abc", 5}, // 非数字 → 默认 5
+		{"11", 5},  // 越界 → 默认 5
+		{"-1", 5},  // 负数 → 默认 5
+		{"7\n", 7}, // 尾随换行
+	}
+	for _, c := range cases {
+		if got := parseSocialNeed(c.in); got != c.want {
+			t.Errorf("parseSocialNeed(%q) = %d, want %d", c.in, got, c.want)
+		}
+	}
+}
+
+func TestLoadDir_SocialNeed(t *testing.T) {
+	dir := t.TempDir()
+	writeProfile(t, dir, "H-01.md", "## 社交需求\n8\n")
+	writeProfile(t, dir, "H-02.md", "## 名字\n老王\n") // 未声明 → 默认 5
+	profiles, err := LoadDir(dir)
+	if err != nil {
+		t.Fatalf("LoadDir: %v", err)
+	}
+	if got := profiles["H-01"].SocialNeed; got != 8 {
+		t.Errorf("H-01 SocialNeed = %d, want 8", got)
+	}
+	if got := profiles["H-02"].SocialNeed; got != 5 {
+		t.Errorf("H-02 SocialNeed = %d, want 5 (default)", got)
+	}
+}

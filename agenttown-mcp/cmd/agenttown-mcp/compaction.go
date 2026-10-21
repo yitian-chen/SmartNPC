@@ -19,8 +19,11 @@ import (
 // 最近 compactTailRounds 轮原始尾，保护 [system + tools + 摘要块] 前缀的
 // KV cache（摘要块两次压缩之间字节不变）。
 const (
-	// compactTriggerTokens：估算输入 token 超过此值触发压缩（8k 封顶）。
-	compactTriggerTokens = 8000
+	// compactTriggerTokens：估算输入 token 超过此值触发压缩（10k 封顶；
+	// 2026-10-20 由 8k 上调——实测 8k 下当天首条全量头（含全天日程 ~2-3k
+	// 字符）在早上第一轮对话期间就会被逐出压缩，摘要把日程叙述成过去式
+	// 回忆、误导 LLM 认为晨练等计划事项已发生；10k 让全量头多留几轮）。
+	compactTriggerTokens = 10000
 	// compactTailRounds：压缩时保留的最近完整轮数（每轮=一个 assistant 及其
 	// 紧跟的 tool 占位与后续注入的 [系统注入] 结果）。
 	compactTailRounds = 4

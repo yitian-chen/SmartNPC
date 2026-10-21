@@ -1224,3 +1224,27 @@ func TestTimeStop_ArmClear(t *testing.T) {
 		t.Fatal("TimeStop after ClearTimeStop should not be armed")
 	}
 }
+
+func TestSocialNeed_SetClamped(t *testing.T) {
+	as := New()
+	if got := as.SocialNeed(); got != 0 {
+		t.Fatalf("zero-value SocialNeed = %d, want 0", got)
+	}
+	as.SetSocialNeed(8)
+	if got := as.SocialNeed(); got != 8 {
+		t.Fatalf("SocialNeed = %d, want 8", got)
+	}
+	as.SetSocialNeed(99)
+	if got := as.SocialNeed(); got != 10 {
+		t.Fatalf("SocialNeed after clamp-high = %d, want 10", got)
+	}
+	as.SetSocialNeed(-5)
+	if got := as.SocialNeed(); got != 0 {
+		t.Fatalf("SocialNeed after clamp-low = %d, want 0", got)
+	}
+	// Snapshot 透出。
+	snap := as.Snapshot()
+	if snap.SocialNeed != 0 {
+		t.Fatalf("Snapshot.SocialNeed = %d, want 0", snap.SocialNeed)
+	}
+}

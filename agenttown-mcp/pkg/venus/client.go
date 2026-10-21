@@ -60,6 +60,13 @@ type Config struct {
 	Logger    *slog.Logger
 	Timeout   time.Duration // 0 = defaultHTTPTimeout
 	MaxTokens int           // 0 = defaultMaxTokens
+	// ToolChoice overrides the forced tool_choice="required" that tactical
+	// layers default to. DeepSeek's official thinking models (deepseek-flash /
+	// deepseek-reasoner) reject tool_choice="required" with "Thinking mode
+	// does not support this tool_choice" — they only accept "auto". Set to
+	// "auto" for such backends; leave empty to keep the forced-required
+	// behavior (Venus and OpenAI-compatible non-thinking models).
+	ToolChoice string
 }
 
 // Client POSTs prompts to the Venus /v1/chat/completions endpoint.
@@ -328,6 +335,14 @@ func (c *Client) doSend(ctx context.Context, msgs []message, stream bool, onDelt
 	// 而不强制调用。
 	if toolChoice == "" && len(tools) > 0 {
 		toolChoice = "required"
+	}
+	// 后端降级：DeepSeek 官方 thinking 模型拒绝 tool_choice="required"
+	// （"Thinking mode does not support this tool_choice"），仅接受 "auto"。
+	// Config.ToolChoice="auto" 时把强制 required 降级为 auto——function
+	// calling 仍可用，只是不再强制调用（战术层已有 isEmptyTacticalResult
+	// 空结果重试 + parseToolCallsWithFallback 文本兜底承接）。
+	if toolChoice == "required" && c.cfg.ToolChoice == "auto" {
+		toolChoice = "auto"
 	}
 	if toolChoice != "" {
 		body.ToolChoice = toolChoice

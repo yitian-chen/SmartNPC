@@ -22,6 +22,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -114,11 +115,22 @@ func (a *agentContext) agenticTurn(ctx context.Context, hc llmClient, kb *worldk
 		itls = append(itls, now.Sub(lastTok))
 		lastTok = now
 	}
+	// 纠正性重试载荷（2026-10-16）：空结果（speak-only）第 2 次重试起在
+	// 请求尾部追加纠正指令。同体重试对行为性偏差无效——历史里的单
+	// speak_to few-shot 会把模型持续推向"只输出一条"（实测复现：带对话
+	// 历史的请求 6/6 speak-only，同体重试全部复现，H-01 连续 6 轮 refill
+	// 失败呆站）。纠正指令是瞬态 user 消息：不落历史（成功后落历史的是
+	// userContent 本身），只改当次请求。
+	correction := ""
 	send := func() (*llmtypes.Response, error) {
-		if streaming {
-			return hc.SendLoopStreaming(ctx, messages, tools, toolChoice, schemaName, schema, onDelta, nil)
+		msgs := messages
+		if correction != "" {
+			msgs = append(append([]llmtypes.Message{}, messages...), llmtypes.Message{Role: "user", Content: correction})
 		}
-		return hc.SendLoop(ctx, messages, tools, toolChoice, schemaName, schema)
+		if streaming {
+			return hc.SendLoopStreaming(ctx, msgs, tools, toolChoice, schemaName, schema, onDelta, nil)
+		}
+		return hc.SendLoop(ctx, msgs, tools, toolChoice, schemaName, schema)
 	}
 
 	resp, err := send()
@@ -153,10 +165,18 @@ func (a *agentContext) agenticTurn(ctx context.Context, hc llmClient, kb *worldk
 			}
 		} else if isEmptyTacticalResult(resp, toolChoice, agentID) {
 			// 战术层空结果（tool_choice=required 但 0 tool_calls / 全是 speak）：
-			// 立即重试相同请求体，重采样通常能拿到正常分解。
-			logger.Warn("[agentic-loop] 战术层空结果，重试相同请求体",
-				"agent_id", agentID, "layer", layer, "retry", attempt, "max", maxTacticalRetries,
-				"tool_calls", len(resp.ToolCalls))
+			// 第 1 次重试同体（可能只是采样方差）；第 2 次起纠正性重试——
+			// few-shot 主导的行为性偏差同体重试救不回来。
+			if attempt >= 2 {
+				correction = emptyResultCorrection
+				logger.Warn("[agentic-loop] 战术层空结果，纠正性重试（追加纠正指令）",
+					"agent_id", agentID, "layer", layer, "retry", attempt, "max", maxTacticalRetries,
+					"tool_calls", len(resp.ToolCalls))
+			} else {
+				logger.Warn("[agentic-loop] 战术层空结果，重试相同请求体",
+					"agent_id", agentID, "layer", layer, "retry", attempt, "max", maxTacticalRetries,
+					"tool_calls", len(resp.ToolCalls))
+			}
 		} else {
 			// 成功且非空结果。
 			break
@@ -195,8 +215,29 @@ func (a *agentContext) agenticTurn(ctx context.Context, hc llmClient, kb *worldk
 	dumpLLMMetrics(logger)
 
 	if err != nil {
+		// 400 连击自愈（2026-10-20）：venus HTTP 400 = 请求体本身被拒
+		// （messages 校验失败），同体重试永远无解。历史一旦被污染（损坏
+		// tool_calls 落库等），该 agent 每次 agenticTurn 都 400，原本要
+		// 挂到跨游戏日 ClearConversation 才恢复（实测 H-03 报错一整天）。
+		// 入口消毒挡住了已知投毒路径；这里兜底其余路径：连续
+		// venus400StreakThreshold 次即判定历史被污染，整体清空重建——
+		// 毒消息无法定位修复，重置是唯一恢复路径，丢一天上下文的代价
+		// 远好于 400 到日切。4001（HTTP 500 + body code，tools 校验失败）
+		// 已在 isVenusHTTP400 排除，不会误触发。
+		if isVenusHTTP400(err) {
+			if a.venus400Streak.Add(1) >= venus400StreakThreshold {
+				a.venus400Streak.Store(0)
+				a.as.ClearConversation()
+				logger.Warn("[agentic-loop] venus 连续 400，判定会话历史被污染，已清空重建",
+					"agent_id", agentID, "layer", layer,
+					"streak", venus400StreakThreshold)
+			}
+		}
 		return nil, err
 	}
+	// 请求被 venus 接受（空结果错误也发生在 venus 成功返回之后）——历史
+	// 未被污染，400 连击清零。
+	a.venus400Streak.Store(0)
 	if isEmptyTacticalResult(resp, toolChoice, agentID) {
 		// 重试耗尽后仍是空结果：返回错误，不追加空历史（避免 pending tool 占位残留）。
 		return nil, fmt.Errorf("tactical empty result: %d tool_calls", len(resp.ToolCalls))
@@ -207,19 +248,27 @@ func (a *agentContext) agenticTurn(ctx context.Context, hc llmClient, kb *worldk
 	// 满足 "assistant(tool_calls) 后必须紧跟 tool 消息" 的协议硬约束，且占位
 	// 字节稳定不变以吃 prefix cache。真实结果由 recordActionCompletion 以
 	// user role 注入到末尾（见 systemInjectedToolResult）。
-	assistant := llmtypes.Message{Role: "assistant", Content: resp.ExtractText(), ToolCalls: resp.ToolCalls}
+	//
+	// 历史入口消毒（2026-10-20）：assistant 的 tool_calls 只落 venus 下次
+	// 会接受的条目。此前 resp.ToolCalls 原样落历史——venus 流式装配损坏的
+	// 条目（arguments 截断/跨条目拼接、name 为空）一并入库后，venus 对
+	// messages 逐条校验 arguments JSON，该 agent 之后每一次请求都被拒以
+	// HTTP 400，直到跨游戏日 ClearConversation 才恢复（实测 H-03 持续 400
+	// 一整天）。动作队列不受影响：解析层（parseToolCallsWithFallback）对
+	// 损坏条目的丢弃与文本兜底恢复照旧，这里只保证历史干净。
+	historyCalls := sanitizeToolCallsForHistory(resp.ToolCalls, agentID, layer, logger)
+	assistant := llmtypes.Message{Role: "assistant", Content: resp.ExtractText(), ToolCalls: historyCalls}
 	// 落历史的是 userContent 本身，不是 messages 末条——末条是瞬态状态栏，
 	// 不得进历史（下一轮重新现拼）。
 	a.as.AppendConversationMessage(llmtypes.Message{Role: "user", Content: userContent})
 	a.as.AppendConversationMessage(assistant)
-	for _, tc := range resp.ToolCalls {
-		if tc.ID != "" {
-			a.as.AppendConversationMessage(llmtypes.Message{
-				Role:       "tool",
-				Content:    pendingToolResult,
-				ToolCallID: tc.ID,
-			})
-		}
+	// 占位 tool 与消毒后的 tool_calls 一一对应（sanitize 已保证 ID 非空）。
+	for _, tc := range historyCalls {
+		a.as.AppendConversationMessage(llmtypes.Message{
+			Role:       "tool",
+			Content:    pendingToolResult,
+			ToolCallID: tc.ID,
+		})
 	}
 	hc.ResetSession() // no-op（Venus 无状态），保留接口语义
 	return resp, nil
@@ -230,9 +279,48 @@ func (a *agentContext) agenticTurn(ctx context.Context, hc llmClient, kb *worldk
 // 而是以 user role 追加到末尾。
 const pendingToolResult = "result=pending"
 
+// sanitizeToolCallsForHistory 过滤不能进会话历史的 tool_calls 条目：name
+// 为空、id 为空或 arguments 非法 JSON（venus 流式装配损坏的三种形态）。
+// venus 对请求 messages 里的每个 tool_call 逐条校验 arguments JSON——任何
+// 损坏条目落历史都会让该 agent 之后每一次请求 400（2026-10-20 实测：H-03
+// 的毒消息进历史后连续 400 到跨游戏日才恢复）。被丢弃的条目打 warn 日志
+// 留现场（name + id + arguments 原文），与解析层 parseToolCallsWithFallback
+// 的丢弃日志同口径。
+func sanitizeToolCallsForHistory(tcs []llmtypes.ToolCall, agentID, layer string, logger *slog.Logger) []llmtypes.ToolCall {
+	if len(tcs) == 0 {
+		return tcs
+	}
+	clean := make([]llmtypes.ToolCall, 0, len(tcs))
+	for _, tc := range tcs {
+		if tc.Function.Name == "" || tc.ID == "" || !json.Valid([]byte(tc.Function.Arguments)) {
+			logger.Warn("[agentic-loop] 损坏 tool_call 不落历史（venus 流式组装异常）",
+				"agent_id", agentID, "layer", layer,
+				"name", tc.Function.Name, "id", tc.ID,
+				"arguments", tc.Function.Arguments)
+			continue
+		}
+		clean = append(clean, tc)
+	}
+	return clean
+}
+
+// emptyResultCorrection 是战术层空结果（speak-only / 无长动作）纠正性
+// 重试的追加指令。同体重试对行为性偏差无效——历史里的单 speak_to
+// few-shot 会把模型持续推向"只输出一条宣告独白"（2026-10-16 实测复现：
+// 带对话历史的请求 6/6 speak-only，模型把"宣告执行"当成"执行"），必须
+// 明确告知上一次输出无效及本次的输出形态要求。
+const emptyResultCorrection = "【系统纠正】上一次分解输出无效：没有包含任何带 duration 的长动作（只返回了 speak 独白或空结果）。" +
+	"宣告意图的独白不等于执行。本次必须按分解规则输出至少一个带 duration 的长动作" +
+	"（InteractSmartObject 设施互动、exercise 原地锻炼或 speak_to，按规则 7/8 填 duration）。"
+
 // rateLimitBackoffBase 是 429 限流重试的退避基础时长（实际退避 = base +
 // [0, 3/4·base) 随机抖动）。包级变量便于测试临时调小加速。
 var rateLimitBackoffBase = 2 * time.Second
+
+// venus400StreakThreshold 是触发会话历史自愈的 venus HTTP 400 连击阈值。
+// 3 次：毒历史的 400 是确定性拒绝（每次 refill ~3s 一轮），3 次足以与
+// 偶发 400（如瞬时网关异常）区分开。
+const venus400StreakThreshold = 3
 
 // isEmptyTacticalResult 判断 tool_choice=required 的响应是否为"空结果"：
 //   - 0 个 tool_calls（LLM 无视 required 返回文本/空体）；
@@ -247,10 +335,17 @@ func isEmptyTacticalResult(resp *llmtypes.Response, toolChoice, agentID string) 
 	if toolChoice != "required" || resp == nil {
 		return false
 	}
-	if len(resp.ToolCalls) == 0 {
-		return true
+	tcs := resp.ToolCalls
+	if len(tcs) == 0 {
+		// 模型可能把工具调用以文本输出而 native 组装整体失败（Venus 流式
+		// 劣化）：文本里能解析出调用就不算空结果——不重试，交给
+		// parseToolCallsWithFallback 从文本恢复。
+		tcs = parseToolCallsFromText(resp.ExtractText())
+		if len(tcs) == 0 {
+			return true
+		}
 	}
-	for _, tc := range resp.ToolCalls {
+	for _, tc := range tcs {
 		if tc.Function.Name == "speak" {
 			continue // 首动作 speak 不算长动作
 		}

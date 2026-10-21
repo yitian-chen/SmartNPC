@@ -216,3 +216,74 @@ func parseMemoryGenerationResult(raw string) (memoryGenerationResult, error) {
 	}
 	return result, nil
 }
+
+// ─── 社交需求（social need）日终评估 ─────────────────────────
+
+// socialNeedSystemPrompt is the social-need evaluation's system text.
+const socialNeedSystemPrompt = `你是 NPC 社交需求评估模块。用户信息给出该 NPC 的人设、今天的日程安排、以及当前的社交需求值。请结合今天做了什么、有没有社交互动、以及人设的性格倾向，评估明天该 NPC 的社交需求值（0-10 整数，越高越渴望主动找人聊天）。只输出 JSON。`
+
+// socialNeedSchema is the structured-output schema for the social-need
+// evaluation: a single 0-10 integer.
+const socialNeedSchema = `{"type":"object","properties":{"social_need":{"type":"integer","description":"明天的社交需求值 0-10"}},"required":["social_need"],"additionalProperties":false}`
+
+// socialNeedUserTemplate is the social-need evaluation's user message template.
+// Placeholders: %s = display name, %s = agent id, %s = persona, %s = today's
+// daily plan, %d = current social need.
+const socialNeedUserTemplate = `你是 %s（id=%s）。
+%s
+
+【今天的日程】%s
+
+【当前社交需求】%d/10
+
+请评估明天你的社交需求值（0-10 整数）。`
+
+// generateDailySocialNeed evaluates the NEXT day's 社交需求 from today's
+// schedule via a single LLM call (pro model, structured output). Returns the
+// new value (clamped to [0,10]); on any failure it returns the current value
+// unchanged so the strategic plan still has a sane number.
+func generateDailySocialNeed(
+	ctx context.Context,
+	sc strategicCaller,
+	agentID string,
+	kb *worldkb.KB,
+	profiles map[string]*profile.Profile,
+	logger *slog.Logger,
+	dailyPlan string,
+	current int,
+) int {
+	if sc == nil {
+		return current
+	}
+	agentName := agentID
+	if kb != nil {
+		if ag := kb.GetAgent(agentID); ag != nil && ag.DisplayName != "" {
+			agentName = ag.DisplayName
+		}
+	}
+	user := fmt.Sprintf(socialNeedUserTemplate, agentName, agentID,
+		prompt.AgentRole(kb, profiles, agentID), dailyPlan, current)
+
+	resp, err := sc.SendWithSchema(ctx, socialNeedSystemPrompt, user, "social_need", []byte(socialNeedSchema))
+	if err != nil {
+		logger.Warn("[社交需求] LLM 调用失败，保持当前值", "agent_id", agentID, "err", err)
+		return current
+	}
+	var out struct {
+		SocialNeed int `json:"social_need"`
+	}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(resp.ExtractText())), &out); err != nil {
+		logger.Warn("[社交需求] 响应解析失败，保持当前值", "agent_id", agentID,
+			"raw", truncateText(resp.ExtractText(), 120), "err", err)
+		return current
+	}
+	if out.SocialNeed < 0 {
+		out.SocialNeed = 0
+	}
+	if out.SocialNeed > 10 {
+		out.SocialNeed = 10
+	}
+	logger.Info("[社交需求] 新一天社交需求已生成", "agent_id", agentID,
+		"prev", current, "social_need", out.SocialNeed)
+	return out.SocialNeed
+}

@@ -483,18 +483,126 @@ func TestTacticalHintLine_SituationResolvedPrefix(t *testing.T) {
 }
 
 // TestTacticalHintLine_SocialResponsePrefix verifies the 【社交回应】
-// hint renders as 【社交回应请求】 with brief-response-then-resume guidance.
+// hint renders as 【社交回应请求】 with reply-via-speak_to guidance,
+// conversation-ending conditions (the LLM may stop replying once the
+// dialogue's purpose is served — no forced ping-pong), and
+// invitation-decision in BOTH directions: the receiver judges invitations
+// (accept→reply+join, decline→reply+resume), and a reply to one's own
+// invitation drives the inviter's follow-up. The accept branch is
+// explicitly exempt from rule 10's speak_to-only shape.
 func TestTacticalHintLine_SocialResponsePrefix(t *testing.T) {
 	in := TacticalInput{Hint: "【社交回应】玩家互动：玩家 player_1 向你发起交互（greet）", AgentID: "H-01"}
 	out := BuildTactical(in)
 	if !strings.Contains(out, "【社交回应请求】玩家互动：玩家 player_1 向你发起交互（greet）") {
 		t.Fatalf("missing social-response header:\n%s", out)
 	}
-	if !strings.Contains(out, "然后继续当前时段的原有工作") {
-		t.Fatalf("missing resume guidance:\n%s", out)
+	for _, want := range []string{
+		"回话用 speak_to 向对方说（target_agent_id 填对方 id",
+		"不要用独白 speak 代替",
+		"本轮对话回应只需要这一条 speak_to",
+		"此限定只针对对话回应这一轮",
+		"约定的事项会在对话结束后由系统提示",
+		"也可以不再回话，直接收尾",
+		"对话结束条件",
+		"目的已达成",
+		"对方明显在收尾",
+		"结合你当前时段的安排、对对方的好感度",
+		"接受则礼貌应下（一条 speak_to 确认即可",
+		"婉拒则礼貌回应后继续当前时段的原有工作",
+		"若这是对你此前邀请或搭话的回应",
+		"对方应下则一句确认/告别收尾",
+		"给该 speak_to 填 ends_conversation: true",
+		"并可直接在其后安排后续动作",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing social-response guidance %q:\n%s", want, out)
+		}
+	}
+	// 强制回话的旧文案（ping-pong 推手）不得残留。
+	if strings.Contains(out, "让对话有来有回") {
+		t.Fatalf("forced-reply phrasing must be gone:\n%s", out)
 	}
 	if strings.Contains(out, "紧急事件") {
 		t.Fatalf("social must NOT get emergency treatment:\n%s", out)
+	}
+}
+
+// TestTacticalHintLine_SocialConversationContext verifies the 【社交回应】
+// branch renders the conversation transcript block (injected by the caller
+// from the agent-side session state) ahead of the guidance — the LLM sees
+// the full dialogue, not just the latest utterance — and that the turn-cap
+// directive only appears when ConversationCapped is set.
+func TestTacticalHintLine_SocialConversationContext(t *testing.T) {
+	in := TacticalInput{
+		Hint: "【社交回应】社交信号：老陈（H-01）对你说：那走起？（主体 H-02，客观严重度 5）",
+		Conversation: "【对话记录】（与 老陈（H-01）的当前对话，已 3 轮）\n" +
+			"老陈：老王，一起去晨跑？\n你：行啊\n老陈：那走起？",
+		AgentID: "H-02",
+	}
+	out := BuildTactical(in)
+	if !strings.Contains(out, "【对话记录】（与 老陈（H-01）的当前对话，已 3 轮）") {
+		t.Fatalf("missing conversation transcript block:\n%s", out)
+	}
+	if !strings.Contains(out, "老陈：老王，一起去晨跑？\n你：行啊\n老陈：那走起？") {
+		t.Fatalf("missing transcript turns:\n%s", out)
+	}
+	// 记录块在指引之前（先读记录再判断）。
+	convIdx := strings.Index(out, "【对话记录】")
+	guideIdx := strings.Index(out, "请先读上方对话记录")
+	if convIdx < 0 || guideIdx < 0 || convIdx > guideIdx {
+		t.Fatalf("transcript must precede the guidance (conv=%d guide=%d):\n%s", convIdx, guideIdx, out)
+	}
+	// 未超限不得出现硬收尾指令。
+	if strings.Contains(out, "对话轮次已达上限") {
+		t.Fatalf("cap directive must not render below the cap:\n%s", out)
+	}
+	// Conversation 只被【社交回应】分支消费：非社交 hint 不得渲染记录块。
+	nonSocial := BuildTactical(TacticalInput{
+		Hint:         "【强制打断】玩家互动：被玩家瞄准",
+		Conversation: "【对话记录】（不应出现）",
+		AgentID:      "H-02",
+	})
+	if strings.Contains(nonSocial, "【对话记录】") {
+		t.Fatalf("non-social hint must not render the conversation block:\n%s", nonSocial)
+	}
+}
+
+// TestTacticalHintLine_SocialConversationCapped verifies the hard wrap-up
+// directive renders when ConversationCapped is set: one farewell + next
+// action, no new topics or re-invitations.
+func TestTacticalHintLine_SocialConversationCapped(t *testing.T) {
+	in := TacticalInput{
+		Hint:               "【社交回应】社交信号：老陈（H-01）对你说：那就走吧？",
+		Conversation:       "【对话记录】（与 老陈（H-01）的当前对话，已 6 轮）",
+		ConversationCapped: true,
+		AgentID:            "H-02",
+	}
+	out := BuildTactical(in)
+	for _, want := range []string{
+		"【对话轮次已达上限】",
+		"本轮必须收尾",
+		"禁止再开启新话题或再次邀请",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing cap directive %q:\n%s", want, out)
+		}
+	}
+}
+
+// TestTacticalRules_InviteGoalDecomposition pins the invitation digest in
+// the compact core rules: invitation goals decompose to a single speak_to
+// (the agreed activity is NOT carried by this replan — it rides the
+// post-conversation system hint, per the 2026-10-16 single-action design).
+func TestTacticalRules_InviteGoalDecomposition(t *testing.T) {
+	for _, want := range []string{
+		"邀请XX一起做XX",
+		"同样只输出一条 speak_to",
+		"约定的事项在对话结束后由系统提示驱动执行",
+		"告别/收尾句（含对方应下你的邀请后你回的确认句）给 speak_to 填 ends_conversation: true",
+	} {
+		if !strings.Contains(tacticalCoreRules, want) {
+			t.Errorf("tacticalCoreRules missing %q:\n%s", want, tacticalCoreRules)
+		}
 	}
 }
 
@@ -510,7 +618,7 @@ func TestTacticalHintLine_CombatEndPrefix(t *testing.T) {
 	if !strings.Contains(out, "恢复自主控制") {
 		t.Fatalf("missing recovery-of-control guidance:\n%s", out)
 	}
-	if !strings.Contains(out, "维修、充电、返回岗位") {
+	if !strings.Contains(out, "维修(如果损伤严重)、休息(如果疲劳度高)、返回岗位") {
 		t.Fatalf("missing post-combat recovery options:\n%s", out)
 	}
 	if strings.Contains(out, "紧急事件") {

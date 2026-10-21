@@ -37,6 +37,10 @@ type Profile struct {
 	Description string   // ## 背景
 	Traits      []string // ## 性格特质 (split by 、 or newline)
 	SpeechStyle string   // ## 说话风格
+	// SocialNeed is the per-NPC default 社交需求 (0-10, higher = more eager to
+	// proactively seek conversation). Parsed from the optional ## 社交需求
+	// section (single integer); defaults to 5 when absent.
+	SocialNeed int
 	// AttrBands holds per-attribute band boundaries from ## 属性分段, keyed
 	// by attribute name (电量/疲劳/关节磨损; 旧名"能量"兼容读取). Each value
 	// is 3 ascending thresholds splitting the 0-100 range into 4 bands.
@@ -54,6 +58,7 @@ const (
 	sectionTraits      = "性格特质"
 	sectionSpeechStyle = "说话风格"
 	sectionAttrBands   = "属性分段"
+	sectionSocialNeed  = "社交需求"
 )
 
 // bandAttrNames are the attribute names allowed in ## 属性分段.
@@ -95,6 +100,7 @@ func LoadDir(dir string) (map[string]*Profile, error) {
 		p.Traits = parseTraits(sections[sectionTraits])
 		p.SpeechStyle = strings.TrimSpace(sections[sectionSpeechStyle])
 		p.AttrBands = parseAttrBands(sections[sectionAttrBands])
+		p.SocialNeed = parseSocialNeed(sections[sectionSocialNeed])
 		out[agentID] = p
 	}
 	return out, nil
@@ -199,4 +205,18 @@ func parseTraits(body string) []string {
 		}
 	}
 	return out
+}
+
+// parseSocialNeed parses the optional ## 社交需求 section into a 0-10 integer.
+// Empty / malformed / out-of-range values fall back to the default 5.
+func parseSocialNeed(body string) int {
+	v := strings.TrimSpace(body)
+	if v == "" {
+		return 5
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 0 || n > 10 {
+		return 5
+	}
+	return n
 }
