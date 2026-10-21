@@ -525,30 +525,10 @@ func (a *agentContext) recordActionHistory(completion protocol.ActionCompletedPa
 	}
 }
 
-// loadTacticalMemories fetches top-3 recent memories from the store and
-// formats them as a bullet list for the tactical prompt 【过往经验】段.
-// Returns "" when store is nil (in-memory mode) or no memories exist.
-// Called once per tactical refill (~7 times/game day); indexed query, no
-// caching needed.
+// loadTacticalMemories 委托给读记忆内部工具（memoryReader.recentMemories）。
+// 保留为 agentContext 的薄封装，避免改动战术 refill 的调用点。
 func (a *agentContext) loadTacticalMemories(ctx context.Context, agentID string) string {
-	store := a.as.Store()
-	if store == nil {
-		return ""
-	}
-	memories, err := store.LoadRecentMemories(ctx, agentID, 3)
-	if err != nil {
-		slog.Default().Warn("[记忆层] 加载近期记忆失败",
-			"agent_id", agentID, "err", err)
-		return ""
-	}
-	if len(memories) == 0 {
-		return ""
-	}
-	var sb strings.Builder
-	for _, m := range memories {
-		fmt.Fprintf(&sb, "- %s（%s）\n", m.Content, m.MemoryType)
-	}
-	return strings.TrimSuffix(sb.String(), "\n")
+	return newMemoryReader(a.as.Store()).recentMemories(ctx, agentID)
 }
 
 // maybeUpdateRelationship judges whether a completed action warrants a
@@ -594,23 +574,10 @@ func (a *agentContext) maybeUpdateRelationship(completion protocol.ActionComplet
 	}
 }
 
-// loadRelationships renders the merged other-NPC roster + affection list
-// (formatRelationshipsForPrompt) for prompt injection: 战略层【其他NPC】段 /
-// 战术层【人际关系】段 / 路由层 relationships 属性共用。存储行加载失败或
-// 内存模式（无行）时仅损失互动历史——名单与默认好感度 5 仍渲染（KB 为骨架）。
-// 单 NPC 场景（KB ≤1 agent）返回空串，不污染 prompt。每次战术/战略 refill
-// 调用一次；索引查询，无需缓存。
+// loadRelationships 委托给读记忆内部工具（memoryReader.relationships）。
+// 保留为 agentContext 的薄封装，避免改动战略/战术/路由三层的调用点。
 func (a *agentContext) loadRelationships(ctx context.Context, agentID string, kb *worldkb.KB, profiles map[string]*profile.Profile) string {
-	var rels []storage.Relationship
-	if store := a.as.Store(); store != nil {
-		var err error
-		rels, err = store.LoadRelationships(ctx, agentID, 10)
-		if err != nil {
-			slog.Default().Warn("[关系层] 加载关系列表失败",
-				"agent_id", agentID, "err", err)
-		}
-	}
-	return formatRelationshipsForPrompt(rels, kb, profiles, agentID)
+	return newMemoryReader(a.as.Store()).relationships(ctx, agentID, kb, profiles)
 }
 
 // advanceSlotIfNeeded 检查当前 game_time 是否已超出 currentSlot 结束时间。
