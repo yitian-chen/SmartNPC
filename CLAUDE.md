@@ -407,7 +407,7 @@ sequenceDiagram
 |----------|------|----------|---------|----------|
 | Agent 内部状态（mood/social_need/emotion） | Agent | LLM 反思 / 交互判断 | ❌ | 不同步 |
 | 物理状态（energy/fatigue/joint_wear） | UE | 行为消耗 / 充电恢复 | ✅ 主人 | perception_update 全量上报（state_report 兜底） |
-| 关系数值（familiarity/affection） | Agent | 交互后 LLM 更新 | ❌ | 不同步 |
+| 关系数值（affection 好感度） | Agent | 交互后更新 | ❌ | 不同步 |
 | 空间状态（position/rotation/zone） | UE | 每帧 / Overlap 触发 | ✅ 主人 | perception_update 上报 |
 | 任务状态（plan/queue/stack） | Agent | 分层思考产出 | ❌ | 不同步 |
 
@@ -505,24 +505,25 @@ DSN 必须含 `parseTime=true` 以正确扫描 `DATETIME` 列。示例：`user:p
 
 ### 长期经历记忆（Stage 4）
 
-Stage 4 在 Stage 3 的存储层之上接入 NPC 长期记忆：日终批量生成结构化记忆 + 战术层注入近期记忆 + 完整动作历史落盘。仅 `--mysql-dsn` 非空时启用，内存模式（`NoopStore`）全程 no-op。
+Stage 4 在 Stage 3 的存储层之上接入 NPC 长期记忆：**上下文 compact 时写入记忆** + 战术层注入近期记忆 + 完整动作历史落盘。仅 `--mysql-dsn` 非空时启用，内存模式（`NoopStore`）全程 no-op。
 
 - **action_history 记录**：`recordActionCompletion` 钩子在 `WasInFlight=true` 时单条 INSERT（`SaveActionRecord`）。`CompletionResult` 在 in-flight 清空前捕获 `Cmd`/`Params`/`Start` 三字段（Step 3 预埋），完整还原动作生命周期。`/debug/action` 路径不经 `recordActionStarted`，`WasInFlight=false`，自然不写历史。best-effort：5s 超时 + `slog.Warn`，不阻塞决策管线
-- **日终记忆生成**：`detectDayRollover` 命中后先调 `generateDailyMemories`（`memory.go`），从昨日 `action_history(500)` 倒序转正序后格式化为编号列表，1 次 LLM 调用（复用战略层 Venus 客户端）产出 `{narrative, memories[]}` JSON：narrative 注入战略层 prompt 替代硬编码常量，memories 数组（每项含 type/content/importance/related_*_id）逐条 best-effort 写入 `agent_memories` 表。失败/冷启动返回空串，`generateDailyPlan` 内部回退到 `yesterdaySummaryForFirstDay` 常量
-- **战术层记忆注入**：`tacticalRefill` + `tacticalRefillForReplan` 每次 refill 调 `loadTacticalMemories` 取 top-3 recent memories（`LoadRecentMemories` 按 `created_at DESC LIMIT 3`），格式化为 `- content（type）` bullet 列表注入战术层 prompt 新增的【过往经验】段（`TacticalInput.Memories`，Step 4 预埋）。流式 + 非流式两条路径都注入；`/debug/schedule` 调用路径保持空串（调试上下文不需记忆）
+- **昨日总结（narrative）**：`detectDayRollover` 命中后先调 `generateDailyMemories`（`memory.go`），从昨日 `action_history(500)` 倒序转正序后格式化为编号列表，1 次 LLM 调用（复用战略层 Venus 客户端）产出 narrative（昨日总结）注入战略层 prompt 替代硬编码常量。**不再写 `agent_memories`**（长期记忆写入已移到 compact，见下条）。失败/冷启动返回空串，`generateDailyPlan` 内部回退到 `yesterdaySummaryForFirstDay` 常量
+- **记忆写入仅在 compact（2026-10-21）**：`maybeCompactConversation` 压缩上下文后调 `persistCompactMemory`（`memory.go`），把 compact 产生的回忆式摘要落盘为一条 `daily_summary` 记忆（best-effort，5s 超时，失败不阻断压缩主流程）。这是长期记忆的**唯一写入时机**——不 compact 时经历仍在上下文中，无需落盘。摘要滚动合并，逐次落盘的摘要覆盖更早内容，读路径取最近 N 条自然收敛到最新
+- **战术层记忆注入**：读记忆走内部工具 `memoryReader.recentMemories`（`memory_reader.go`，`loadTacticalMemories` 薄封装），取 top-3 recent memories（`LoadRecentMemories` 按 `created_at DESC LIMIT 3`），格式化为 `- content（type）` bullet 列表注入战术层 prompt 的【过往经验】段（`TacticalInput.Memories`，Step 4 预埋）。流式 + 非流式两条路径都注入；`/debug/schedule` 调用路径保持空串（调试上下文不需记忆）。**该工具不注册进 MCP 工具列表、不进 function calling，仅供程序调用、读路径零 LLM**
 - **反应层不注入**：反应层决策（continue/observe/replan）是即时短路判断，不应被历史记忆拖慢，故 Stage 4 仅在战略/战术层注入
 - **检索策略**：仅按 `created_at DESC` 取最近 N 条，`decay_score` 字段持久化但当前始终 1.0（Stage 4 不实现衰减/召回算法，预留 Stage 6+）
-- **memory_type 取值**：`event` / `skill` / `relationship` / `daily_summary`，由 LLM 在生成时指定
+- **memory_type 取值**：`daily_summary`（compact 落盘固定用）；schema 保留历史 `event` / `skill` / `relationship` 取值，现无写入方
 - **JSON 解析容错**：`parseMemoryGenerationResult` 容忍 markdown 围栏 ```json ... ``` 和尾随散文，定位首个 `{` 到末个 `}` 后 `json.Unmarshal`
 
 ### 关系数值动态维护（Stage 5）
 
-Stage 5 在 Stage 3/4 之上接入 NPC 间关系数值动态维护：动作完成时 Ollama 语义判断是否触发关系更新 → 双向 familiarity += 1 → 战术层 prompt 注入【人际关系】段。仅 `--mysql-dsn` 非空时启用，内存模式全程 no-op。
+Stage 5 在 Stage 3/4 之上接入 NPC 间关系数值动态维护：动作完成时 Ollama 语义判断是否触发关系更新 → 双向 affection（好感度）+1 → 战术层 prompt 注入【人际关系】段。**单一数值维度**——familiarity / interaction_count 已移除（2026-10-21 简化，见 docs/AgentTown_LongTermMemory_SQLite_Design.md）。仅 `--mysql-dsn` 非空时启用，内存模式全程 no-op。
 
-- **双向独立行**：`agent_relationships` 表复合 PK (agent_a, agent_b) 有序，A→B 和 B→A 各一行。A 主动与 B 交互时两次调 `SaveRelationship`（A→B + B→A），各自 upsert。affection 初期不动，仅 familiarity += 1
+- **双向独立行**：`agent_relationships` 表复合 PK (agent_a, agent_b) 有序，A→B 和 B→A 各一行。A 主动与 B 交互时两次调 `SaveRelationship`（A→B + B→A），各自 upsert，affection += 1（新行 = 5 + delta、重复键累加，均夹紧 [0,10]）
 - **Ollama 语义判断**：每次动作完成时（`recordActionCompletion` 旁路异步 `go maybeUpdateRelationship`），仅当 `Params["target_agent_id"]` 非空才调 Ollama 判断该次 cmd+params 是否构成直接社交互动（yes/no）。5s 超时，失败/超时/无法解析 → false（保守，不触发更新）。不硬编码触发 cmd 列表，适配动态注册的新 cmd
-- **关系数据流**：动作完成 → Ollama 判断 → 双向 `SaveRelationship(A,B,1,0)` + `SaveRelationship(B,A,1,0)` → DB upsert（familiarity+=1, interaction_count+=1, last_interaction_at=NOW()）→ refill 调 `loadRelationships` 取关系行 → `formatRelationshipsForPrompt` 合并渲染 → 注入 prompt
-- **名单+好感度合并渲染（2026-10-15，三层共享）**：`formatRelationshipsForPrompt(rels, kb, profiles, agentID)` 以 KB peers 为骨架——每个其他 NPC 一行 `- 老王（H-02，物流分拣兼加工员）：好感 5/10（熟悉度 3、互动 2 次）`，存储行叠加其上，**无行默认好感 5**（冷启动/内存模式/未互动不再整段消失）；显示名/职业取 profile > KB（profile 职业的动作映射括注截掉）。同一份内容三层注入：战略层【其他NPC】段（恢复引导主动社交，`BuildStrategicUserContext` otherNPCs 参数）、战术层【人际关系】段（`TacticalInput.Relationships`，非空时跳过 OtherAgentsLine 花名册 fallback 防重复）、路由层 relationships 属性（`buildInput`）。单 agent 场景（KB ≤1）整段省略；`/debug/schedule` 路径保持空串（调试上下文不需关系注入）
+- **关系数据流**：动作完成 → Ollama 判断 → 双向 `SaveRelationship(A,B,1)` + `SaveRelationship(B,A,1)` → DB upsert（affection+=1, last_interaction_at=NOW()）→ refill 调 `memoryReader.relationships`（`loadRelationships` 薄封装）取关系行 → `formatRelationshipsForPrompt` 合并渲染 → 注入 prompt
+- **名单+好感度合并渲染（2026-10-15，三层共享）**：`formatRelationshipsForPrompt(rels, kb, profiles, agentID)` 以 KB peers 为骨架——每个其他 NPC 一行 `- 老王（H-02，物流分拣兼加工员）：好感 5/10`，存储行叠加其上，**无行默认好感 5**（冷启动/内存模式/未互动不再整段消失）；显示名/职业取 profile > KB（profile 职业的动作映射括注截掉）。同一份内容三层注入：战略层【其他NPC】段（恢复引导主动社交，`BuildStrategicUserContext` otherNPCs 参数）、战术层【人际关系】段（`TacticalInput.Relationships`，非空时跳过 OtherAgentsLine 花名册 fallback 防重复）、路由层 relationships 属性（`buildInput`）。单 agent 场景（KB ≤1）整段省略；`/debug/schedule` 路径保持空串（调试上下文不需关系注入）
 - **KB 种子导入**：`agent_registered` 时调 `seedRelationshipsFromKB`，遍历 `kb.Relationships` 对涉及 agentID 的关系用 `SeedRelationship` (INSERT IGNORE) 导入，不覆盖既有交互累积。重连走 else 分支提前 return，不会重复导入
 - **战术层注入条件**：仅 `len(kb.Agents) > 1` 注入（名单+好感度合并段）；单 agent 场景不污染 prompt
 - **自指保护**：`target == agentID` 时跳过（避免 agent 与自己建立关系）
@@ -549,7 +550,7 @@ NPC 性格、背景、说话风格等 persona 字段从 `assets/profiles/<agentI
 - **文件格式**：纯 markdown 固定标题分段，5 个字段：`## 名字` / `## 职业` / `## 背景` / `## 性格特质` / `## 说话风格`。性格特质按 `、` 或换行分隔为 trait 列表。
 - **加载机制**：`pkg/profile.LoadDir(dir)` 启动时扫描 `*.md`，文件名（去 `.md`）= agentID → `*Profile` map。空目录或 `--profiles-dir=""` → `profiles=nil`，三层决策仅走 KB → fallback，行为与改动前完全一致。
 - **进程级只读**：启动加载后不热重载（与 KB 启动时适配一致）。UE 推 `world_kb` 不触发 profile 重载。作为函数参数传递（与 kb 同级），不入 `agentContext`。
-- **三层决策注入**：战略层（`BuildStrategic`）、战术层（`BuildTactical` via `TacticalInput.Profiles`）、反应层（`reactiveRunner.profiles` → `AgentRole`）、日终记忆层（`generateDailyMemories`）均接收 profiles 参数并透传到 `AgentRole`。`/debug/schedule` 路径传 nil（调试上下文不需 persona 注入）。
+- **三层决策注入**：战略层（`BuildStrategic`）、战术层（`BuildTactical` via `TacticalInput.Profiles`）、反应层（`reactiveRunner.profiles` → `AgentRole`）、昨日总结层（`generateDailyMemories`）均接收 profiles 参数并透传到 `AgentRole`。`/debug/schedule` 路径传 nil（调试上下文不需 persona 注入）。
 - **字段优先级示例**：H-01 的 `description` 和 `speech_style` 在 KB 中为空，profile.md 填充后三层决策可读到完整角色段；H-02/H-03 的 `display_name`/`profession`/`traits` 在 KB 已有值，profile.md 以更自然的中文表述覆盖（如 `supervisor、worker、maintainer` → `车间主管、装配工人、维护技师`）。
 
 ### 每周日程配置
@@ -768,7 +769,8 @@ bash start-dev.sh       # 偏移端口 8770/9093 + logs-dev/ 日志目录
 | `agenttown-mcp/cmd/agenttown-mcp/reactive.go` | 反应层纯函数：prompt 构建 + 决策解析 |
 | `agenttown-mcp/cmd/agenttown-mcp/reactive_runner.go` | 反应层运行时：Ollama 调用 + WS 副作用 |
 | `agenttown-mcp/cmd/agenttown-mcp/event_router.go` | 事件路由器运行时：jev 判决调用（routerQuestions 三问 + routerDecisionFromJev 映射）+ routerInterrupt |
-| `agenttown-mcp/cmd/agenttown-mcp/memory.go` | Stage 4 记忆层：日终 LLM 总结 action_history → 结构化 memories + narrative |
+| `agenttown-mcp/cmd/agenttown-mcp/memory.go` | Stage 4 记忆层：昨日总结 narrative（`generateDailyMemories`）+ compact 记忆落盘（`persistCompactMemory`） |
+| `agenttown-mcp/cmd/agenttown-mcp/memory_reader.go` | 读记忆内部工具 `memoryReader`（`recentMemories`/`relationships`）——不开放给 LLM、程序调用、零 LLM |
 | `agenttown-mcp/cmd/agenttown-mcp/relationship.go` | Stage 5 关系层：Ollama 判断 + 关系格式化 + KB 种子导入 |
 | `agenttown-mcp/cmd/agenttown-mcp/capability.go` | NPC 能力注册表：per-agent cmd 能力声明（system 全局默认 + 具体 agent 覆盖） |
 | `agenttown-mcp/cmd/agenttown-mcp/debug_ui.go` | `/debug/` 浏览器控制台 + `/debug/{kb,cap,agents,logs,plan,tactical,ue-errors,llm-metrics}` JSON 端点 |
@@ -846,8 +848,8 @@ bash start-dev.sh       # 偏移端口 8770/9093 + logs-dev/ 日志目录
 | Debug 工具升级 | ✅ | `/debug/action` + `/debug/schedule`（注入 schedule 调试战术层） |
 | 战术层流式输出 | ✅ | `--tactical-stream` flag（默认关，DeepSeek 高峰排队时回退） |
 | 状态访问与业务逻辑分离 Stage 3 | ✅ | MySQL 持久化层：4 调度字段 write-through + `LoadPersistent` 热重启 + `//go:embed` SQL 迁移 |
-| 状态访问与业务逻辑分离 Stage 4 | ✅ | 长期经历记忆：日终 LLM 批量生成 memories + 战略层注入昨日总结 + 战术层注入 top-3 近期记忆 + action_history 完整落盘 |
-| 状态访问与业务逻辑分离 Stage 5 | ✅ | 关系数值动态维护：动作完成 Ollama 判断 + 双向 familiarity+=1 + 战术层注入【人际关系】段 + KB 种子导入 |
+| 状态访问与业务逻辑分离 Stage 4 | ✅ | 长期经历记忆：compact 时写入记忆（`persistCompactMemory`）+ 战略层注入昨日总结 + 战术层注入 top-3 近期记忆（`memoryReader` 内部工具）+ action_history 完整落盘 |
+| 状态访问与业务逻辑分离 Stage 5 | ✅ | 关系数值动态维护：动作完成 Ollama 判断 + 双向 affection（好感度）+1 + 战术层注入【人际关系】段 + KB 种子导入 |
 | 12 cmd 体系迁移 | ✅ | 旧 14 cmd（8 原子+6 复合）→ 新 12 cmd（7 原子+5 复合）对齐真实 UE5；统一 MoveTo（target_type+target_id/target_position）；复合动作共享 semantic_group+interaction schema（按真实 UE5 capability_registry 参数名）；GenericAct 兜底；MCP 不再做 KB 坐标解析 |
 | NPC profile.md 人设档案 | ✅ | `pkg/profile` 加载 `assets/profiles/<agentID>.md`；三层 per-field 回退（profile > KB > hardcoded）；战略/战术/反应/记忆层透传 profiles 参数到 `AgentRole` |
 | 每周日程配置 | ✅ | `pkg/weeklyschedule` 加载 `assets/weekly_schedule.yaml`；7 天周期（工作日/休息日/运动日/冥想日）；战略层注入【今日日程】段；`WeeklyLine` 预格式化解耦 pkg/prompt |
