@@ -9,7 +9,7 @@ AgentTown_v3 — AI NPC 模拟系统。5 个 NPC（H-01~H-05，各自独立 prof
 **三层决策架构**：
 - **战略层**（`pkg/prompt/strategic.go` + `cmd/agenttown-mcp/strategic.go`）：每日 07:00 生成当天计划（`dailyPlan`，6-8 个时段 goal）。system/user prompt 拆分、规则迁 user prompt、注入生产工作流概述与物理状态分档
 - **战术层**（`pkg/prompt/tactical.go` + `cmd/agenttown-mcp/tactical.go`）：每个时段把 goal 分解为 1-4 个动作段，走 **OpenAI 原生 function calling**（`tools` 字段、`tool_choice=required`、多轮 agentic loop），段间用 `time_to_stop` 控制时长
-- **反应层**（~~已退役 P4-12~~）：打断判定全部由事件系统（world_event + 路由器 + force 通道）承担；Ollama 客户端 2026-10-22 起无活跃消费者（关系判断已迁到 compact 的 people_updates，待清理）
+- **反应层**（~~已退役 P4-12~~）：打断判定全部由事件系统（world_event + 路由器 + force 通道）承担；Ollama 客户端已随 2026-10-22 长期记忆重建彻底移除（关系判断迁到 compact 的 people_updates）
 
 **模块化架构**（2026-08-27 拆分，多 module 仓库）：
 - **contract/**（契约 module，无依赖）：`protocol/`（7 字段信封+消息类型）+ `Transport` 接口（决策侧与连接侧的边界）
@@ -17,7 +17,7 @@ AgentTown_v3 — AI NPC 模拟系统。5 个 NPC（H-01~H-05，各自独立 prof
 - **根 module**（`agenttown-mcp/`）：agent 决策 + 装配壳 + `pkg/` 领域库，经根 `go.mod` 的 `replace => ./contract` / `=> ./wsserver` 引用本地 module
 - 依赖倒置：agent 决策侧（`guardedExecutor`/`reactiveRunner`/worker 循环）只依赖 `contract.Transport` 接口，不依赖 wsserver 实现；入站消息经 `Runtime.HandleMessage`（`cmd/agenttown-mcp/runtime.go`）单入口分发，运输层只注册 `HandleMessage`/`OnDisconnect` 两个回调
 
-**LLM 后端**：MCP 直连 Venus（OpenAI Chat Completions 协议），战略层用 `deepseek-v4-pro`、战术层用 `deepseek-v4.1-flash`（`--venus-strategic-model`/`--venus-model`）。反应层直连本地 Ollama（`qwen2.5:7b`），不走 Venus。
+**LLM 后端**：MCP 直连 Venus（OpenAI Chat Completions 协议），战略层用 `deepseek-v4-pro`、战术层用 `deepseek-v4.1-flash`（`--venus-strategic-model`/`--venus-model`）。事件路由走 Venus 判决 API（`pkg/jev`）。旧反应层（Ollama `qwen2.5:7b`）已随 P4-12 退役并移除（2026-10-22）。
 
 ## 架构总览
 
@@ -27,15 +27,13 @@ graph LR
         UE5["真实 UE5<br/>AgentTown 地图<br/>5 个 NPC (H-01~H-05)"]
     end
     subgraph MCP["Linux 云环境"]
-        MCP["agenttown-mcp (Go)<br/>MCP Server + WS Server<br/>:8760 HTTP / :9092 WS (stable)<br/>三层决策：战略+战术+反应"]
+        MCP["agenttown-mcp (Go)<br/>MCP Server + WS Server<br/>:8760 HTTP / :9092 WS (stable)<br/>战略+战术决策 + 事件路由"]
     end
     subgraph LLM["LLM 后端"]
         VENUS["Venus<br/>战略 deepseek-v4-pro<br/>战术 deepseek-v4.1-flash<br/>(OpenAI 兼容)"]
-        OLLAMA["Ollama 本地<br/>qwen2.5:7b<br/>(反应层专用，默认禁用)"]
     end
     UE5 <-->|"WebSocket :9092<br/>7-field Envelope"| MCP
     MCP -->|"HTTP POST<br/>/v1/chat/completions<br/>(战略/战术层 function calling)"| VENUS
-    MCP -->|"HTTP POST<br/>/api/chat<br/>(反应层)"| OLLAMA
 ```
 
 ### 组件职责
@@ -45,9 +43,8 @@ graph LR
 | 真实 UE5 | C++/蓝图 | UE 侧 AgentTown 地图 | — | 游戏世界：物理状态、空间状态、动作执行、感知推送、world_kb/capability_registry 下发 |
 | contract module | Go | `agenttown-mcp/contract/` | — | 契约：protocol（信封/消息类型）+ Transport 接口（两侧边界） |
 | wsserver module | Go | `agenttown-mcp/wsserver/` | — | WS 连接：收发、seq 重放、ACK 等待，实现 contract.Transport |
-| agenttown-mcp 根 module | Go 1.25+ | `agenttown-mcp/` | HTTP `:8760`, WS `:9092`（stable，脚本默认） | 协议适配、感知语义化、工具暴露、三层决策、LLM 桥接 |
+| agenttown-mcp 根 module | Go 1.25+ | `agenttown-mcp/` | HTTP `:8760`, WS `:9092`（stable，脚本默认） | 协议适配、感知语义化、工具暴露、战略/战术决策、LLM 桥接 |
 | Venus | 远程 | `--venus-url` | — | OpenAI 兼容 LLM 服务（战略/战术层后端） |
-| Ollama | 本地 | `--ollama-url` | `:11434`（默认禁用，需显式启用） | 反应层本地 LLM（qwen2.5:7b） |
 
 ### 三层决策架构
 
@@ -108,7 +105,7 @@ graph TB
 
 ### LLM 后端
 
-MCP 直连 Venus（OpenAI Chat Completions 协议），战略/战术层调用 Venus。事件路由走 Venus 判决 API（`pkg/jev`，`POST /v1/systemone`，模型 `jev-1.13.0`——state+questions 三型问题：noul/choice/score，与 chat completions 同网关同凭据，`/v1/models` 列表不含它）。Ollama（`pkg/ollama/client.go`）2026-10-22 起无活跃消费者（关系判断已迁到 compact），默认禁用。
+MCP 直连 Venus（OpenAI Chat Completions 协议），战略/战术层调用 Venus。事件路由走 Venus 判决 API（`pkg/jev`，`POST /v1/systemone`，模型 `jev-1.13.0`——state+questions 三型问题：noul/choice/score，与 chat completions 同网关同凭据，`/v1/models` 列表不含它）。
 
 **function calling**：战术层经 `tools` 请求字段下发工具（由 `capability_registry` 派生），`tool_choice=required`，多轮 messages（system + 历史 + 最新 user）。战略层用 Structured Outputs（`response_format` json_schema strict）。**DeepSeek 官方 thinking 模型降级（2026-10-21）**：`deepseek-flash`/`deepseek-reasoner` 是 thinking 模型，**拒绝 `tool_choice=required`**（实测返回 `Thinking mode does not support this tool_choice` 400）——`llmconfig.Backend.ToolChoice`（yaml `tool_choice`）设为 `"auto"` 时，`venus.Client.doSend` 把战术层的强制 required 降级为 auto（function calling 仍可用，只是不强制；战术层已有的 isEmptyTacticalResult 空结果重试 + parseToolCallsWithFallback 文本兜底承接"LLM 不调工具"的情况）。默认空串保持 forced-required（Venus / 非 thinking 后端行为不变）。
 
@@ -462,7 +459,7 @@ energy / fatigue / joint_wear，通过 `perception_update` 全量上传（`physi
 
 ### 启动顺序（硬约束）
 
-MCP 是唯一的 LLM 调用入口，启动后即可接收感知事件、调用 Venus/Ollama、下发工具调用。
+MCP 是唯一的 LLM 调用入口，启动后即可接收感知事件、调用 Venus、下发工具调用。
 
 正确顺序（`start-debug.sh`/`start-dev.sh` 已保证）：
 1. 停掉所有旧进程
@@ -523,7 +520,7 @@ game_time 锚定）+ `episodic_commitments`（未来待办）+ `semantic_people`
 
 Stage 5 是 NPC 间对人认知，2026-10-22 重建为 `semantic_people` 单表：**单一数值维度 affinity（0-100，50 中性）+ 一句话 impression**（替代旧 `agent_relationships`，familiarity / interaction_count 已删）。
 
-- **更新仅在 compact**：affinity/impression 由 compact LLM 的 `people_updates` 一次性产出（affinity_delta + impression），`UpsertPerson` 落库（新行 = 50 + delta、重复键累加，夹紧 [0,100]）。**删除旧实时关系写** `maybeUpdateRelationship`（Ollama 判断）+ `evaluateConversationAffection`（对话结束 LLM delta）——Ollama 客户端因此失去唯一消费者（死代码待后续清理）
+- **更新仅在 compact**：affinity/impression 由 compact LLM 的 `people_updates` 一次性产出（affinity_delta + impression），`UpsertPerson` 落库（新行 = 50 + delta、重复键累加，夹紧 [0,100]）。**删除旧实时关系写** `maybeUpdateRelationship`（Ollama 判断）+ `evaluateConversationAffection`（对话结束 LLM delta）——Ollama 客户端随之彻底移除
 - **规则直写**：被攻击 → 攻击者 `UpsertPerson(delta=-50)`
 - **KB 种子导入**：`agent_registered` 时调 `seedRelationshipsFromKB`，把 KB 关系用 `SeedPerson`（INSERT IGNORE，KB affection 0-10 ×10 → affinity 0-100）导入，不覆盖既有累积。重连提前 return，不重复导入
 - **名单+好感度合并渲染（三层共享）**：`formatRelationshipsForPrompt(people, kb, profiles, agentID)` 以 KB peers 为骨架——每个其他 NPC 一行 `- 老王（H-02，物流分拣兼加工员）：好感 65/100，印象：…`，存储行叠加其上，**无行默认好感 50**（冷启动/内存模式/未互动不再整段消失）；显示名/职业取 profile > KB（profile 职业的动作映射括注截掉）。同一份内容三层注入：战略层【其他NPC】段（`BuildStrategicUserContext` otherNPCs 参数）、战术层【人际关系】段（`TacticalInput.Relationships`，非空时跳过 OtherAgentsLine 花名册 fallback 防重复）、路由层 relationships 属性（`buildInput`）。单 agent 场景（KB ≤1）整段省略；`/debug/schedule` 路径保持空串
@@ -630,7 +627,7 @@ UE5 推送 `perception_update` → MCP 的 `pkg/agentstate` 语义化（zone 判
 
 ### 网络拓扑
 
-MCP 监听 `0.0.0.0:8760`（HTTP）+ `0.0.0.0:9092`（WS，stable 脚本默认）。UE5 通过 `ws://<host>:9092/ws` 连接（dev 实例为 `:9093`）。Venus 远程服务通过 HTTPS 调用。Ollama 本地服务通过 `http://localhost:11434` 调用。
+MCP 监听 `0.0.0.0:8760`（HTTP）+ `0.0.0.0:9092`（WS，stable 脚本默认）。UE5 通过 `ws://<host>:9092/ws` 连接（dev 实例为 `:9093`）。Venus 远程服务通过 HTTPS 调用。
 
 ## 代码规范
 
@@ -657,7 +654,6 @@ cp .env.example .env
 - `AGENTTOWN_MCP_AUTO_PLAN` — 自动规划总开关（默认 `true`）
 - `HTTP_PORT` / `WS_PORT` — MCP 监听端口（start-debug.sh 读取，默认 `8760`/`9092`）
 - `MYSQL_DSN` / `MYSQL_DB` / `SKIP_MYSQL` — 持久化存储（默认内存模式）
-- `OLLAMA_URL` / `OLLAMA_MODEL` / `OLLAMA_NUM_THREAD` — 反应层（默认禁用）
 
 ### MCP 启动 flag 速查
 
@@ -677,9 +673,6 @@ cp .env.example .env
 | `--llm-metrics-doc` | `docs/llm_metrics.md` | LLM 指标 markdown 报告落盘路径（每次 LLM 调用后 best-effort 覆盖写入；空串关闭） |
 | `--auto-plan` | `true` | 自动规划总开关（false=手动模式，跳过战略/战术/反应层自动决策，仅响应 /debug/schedule 注入和 /debug/action 手动下发） |
 | `--mysql-dsn` | `""` | MySQL DSN（空=内存模式无持久化；非空启用 Stage 3 存储层，DSN 需含 `parseTime=true`）。env 回退 `MYSQL_DSN` |
-| `--ollama-url` | `""` | Ollama URL（**默认空串=禁用反应层**；设为 `http://localhost:11434` 启用） |
-| `--ollama-model` | `qwen2.5:7b-instruct-q4_K_M` | 反应层模型 |
-| `--ollama-num-thread` | `16` | Ollama CPU 推理线程数（0=默认 16，-1=让 Ollama 自决）。高核数 CPU 上默认用满所有核反而劣化，实测 96 vCPU EPYC 限制到 16 线程可获得 3x 加速 |
 | `--world-kb` | `assets/world_kb.yaml` | 世界 KB 路径（fail-fast 启动加载；UE 推送 world_kb 时也写入此路径） |
 | `--world-kb-manifest` | `assets/world_kb.manifest.json` | manifest.json 输出路径（UE 推送 world_kb 时写入；空串=跳过 manifest） |
 | `--profiles-dir` | `assets/profiles` | NPC profile.md 目录（文件名 = `<agentID>.md`；空串=禁用 profile override，仅走 KB → fallback） |
@@ -701,11 +694,6 @@ cp .env.example .env  # 填入 VENUS_API_KEY
 bash start-debug.sh    # stable 实例（或 bash start-dev.sh 起 dev 实例）
 
 # 4. UE5 端启动 AgentTown 地图，连接 MCP 的 WS 端点（:9092 stable / :9093 dev）
-
-# 5.（可选）启用反应层需在 MCP 启动时加 --ollama-url http://localhost:11434，
-#    并启动本地 Ollama：
-ollama serve &  # 或用 systemd
-ollama pull qwen2.5:7b-instruct-q4_K_M
 ```
 
 **云环境限制**：
@@ -766,8 +754,6 @@ bash start-dev.sh       # 偏移端口 8770/9093 + logs-dev/ 日志目录
 | `agenttown-mcp/cmd/agenttown-mcp/fake_transport_test.go` | fakeTransport：contract.Transport 测试替身（记录出站调用、可切换连接状态） |
 | `agenttown-mcp/cmd/agenttown-mcp/strategic.go` | 战略层：每日计划生成 |
 | `agenttown-mcp/cmd/agenttown-mcp/tactical.go` | 战术层：goal → action 分解 |
-| `agenttown-mcp/cmd/agenttown-mcp/reactive.go` | 反应层纯函数：prompt 构建 + 决策解析 |
-| `agenttown-mcp/cmd/agenttown-mcp/reactive_runner.go` | 反应层运行时：Ollama 调用 + WS 副作用 |
 | `agenttown-mcp/cmd/agenttown-mcp/event_router.go` | 事件路由器运行时：jev 判决调用（routerQuestions 三问 + routerDecisionFromJev 映射）+ routerInterrupt |
 | `agenttown-mcp/cmd/agenttown-mcp/memory.go` | Stage 4 记忆层：昨日总结 narrative（`generateDailyMemories`）+ compact 结构化落盘（`persistExtractedMemory`）+ 规则直写（combat/action_failed） |
 | `agenttown-mcp/cmd/agenttown-mcp/memory_reader.go` | 读记忆内部工具 `memoryReader`（recentEpisodes/commitmentsNearby/commitmentsUpcoming/people）——不开放给 LLM、程序调用、零 LLM |
@@ -784,7 +770,6 @@ bash start-dev.sh       # 偏移端口 8770/9093 + logs-dev/ 日志目录
 | `agenttown-mcp/pkg/llmmetrics/` | LLM 指标聚合（E2E/TTFT/TPOT/ITL 分位数 + 错误分布 + 重试率 + JSON 正确率），手写最近秩分位数，无第三方依赖 |
 | `agenttown-mcp/pkg/venus/client.go` | Venus 客户端：OpenAI Chat Completions 协议直连（唯一战略/战术层后端） |
 | `agenttown-mcp/pkg/jev/client.go` | jev 判决模型客户端：事件路由专用（POST /v1/systemone，state+三型 questions：noul/choice/score） |
-| `agenttown-mcp/pkg/ollama/client.go` | Ollama 客户端：反应层专用，非流式 |
 | `agenttown-mcp/pkg/storage/store.go` | 持久化 Store 接口 + NoopStore（内存模式）+ ScheduleState |
 | `agenttown-mcp/pkg/storage/mysql.go` | MySQLStore：write-through 持久化 + upsert |
 | `agenttown-mcp/pkg/storage/migrations.go` | `//go:embed` 原生 SQL 迁移 runner |
@@ -814,7 +799,6 @@ bash start-dev.sh       # 偏移端口 8770/9093 + logs-dev/ 日志目录
 | `assets/weekly_schedule.yaml` | 每周日程配置：7 天周期（工作日/休息日/运动日/冥想日），战略层注入【今日日程】段 |
 | `start-debug.sh` | 云环境启动脚本：拉起 MySQL + MCP + 读取 .env（stable 实例，端口 8760/9092，日志 logs/） |
 | `start-dev.sh` | dev 实例启动 wrapper（偏移端口 8770/9093，日志 logs-dev/） |
-| `start-tunnel.sh` | Windows 端 SSH 反向隧道脚本（云端 11435 → 本地 Ollama 11434，反应层用） |
 | `scripts/pretty_log.py` | 日志可读化工具（HTML 报告 + 终端渲染；--hermes 系列参数 DEPRECATED 仅供历史日志） |
 | `scripts/smoke_combat_detach.py` | combat-detach 冒烟脚本：模拟最小 UE 客户端（心跳 + perception 推进游戏时钟），经 `/debug/event` 注入 detach 攻击 → 断言宽限 stop/静默期零下发/脱管徽标 → combat_exit 归还重规划，无 UE 单侧验证全闭环 |
 | `.env` | 环境变量（VENUS_API_KEY 等，不入库） |

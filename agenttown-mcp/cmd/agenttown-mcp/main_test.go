@@ -226,8 +226,8 @@ func TestRecordEventNotification_ReturnsTrigger(t *testing.T) {
 	}, "08:00-12:00")
 	ac.as.IncrementRedecomposeCount()
 
-	// 反应层 P0：recordEventNotification 返回 (TriggerEventNotify, detail)
-	// 供 WS handler 异步触发 reactiveRunner。本测试验证签名 + 队列不被改动。
+	// recordEventNotification 返回 detail 供事件合成/日志；本测试验证签名 +
+	// 队列不被改动。
 	detail := ac.recordEventNotification(protocol.EventNotificationPayload{
 		EventID:         "evt_001",
 		PerceptionLevel: "audible",

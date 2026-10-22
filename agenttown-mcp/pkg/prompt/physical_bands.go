@@ -28,6 +28,41 @@ type BandThresholds struct {
 	JointWear [3]float64 // 良好 <t1 | 轻微磨损 | 明显磨损 | 严重磨损 ≥t3
 }
 
+// Physical alert thresholds（原反应层常量，反应层退役后保留给物理告警/战术
+// 恢复约束用）。default band thresholds 与告警访问器共用此三值，保证 LLM 可见
+// 的分档标签与代码层告警行为一致。
+const (
+	EnergyAlertThreshold    = 40.0 // energy below this → 低电量告警 → 优先充电
+	FatigueAlertThreshold   = 80.0 // fatigue above this → 疲劳告警 → 优先充电/休息
+	JointWearAlertThreshold = 70.0 // joint_wear above this → 磨损告警 → 优先维修
+)
+
+// PhysicalAlertDetail detects the physical alert boundary crossing: returns a
+// human-readable detail string when prev→cur crosses an alert threshold
+// (normal→alert), else "". This is the surviving fragment of the retired
+// reactive layer's ShouldTriggerReactive — only the physical-alert branch is
+// still used (zone/object triggers went with the reactive layer). The caller
+// (observePerception / updateState) feeds the detail to the event synthesizer.
+func PhysicalAlertDetail(prev, cur *protocol.PhysicalState, th BandThresholds) string {
+	if prev == nil || cur == nil || prev.IsZero() || cur.IsZero() {
+		return ""
+	}
+	th = th.OrDefault()
+	if !belowThreshold(prev.Energy, th.EnergyAlert()) && belowThreshold(cur.Energy, th.EnergyAlert()) {
+		return fmt.Sprintf("energy %.0f→%.0f 跌破警戒带 %.0f", prev.Energy, cur.Energy, th.EnergyAlert())
+	}
+	if !aboveThreshold(prev.Fatigue, th.FatigueAlert()) && aboveThreshold(cur.Fatigue, th.FatigueAlert()) {
+		return fmt.Sprintf("fatigue %.0f→%.0f 突破警戒带 %.0f", prev.Fatigue, cur.Fatigue, th.FatigueAlert())
+	}
+	if !aboveThreshold(prev.JointWear, th.JointWearAlert()) && aboveThreshold(cur.JointWear, th.JointWearAlert()) {
+		return fmt.Sprintf("joint_wear %.0f→%.0f 突破警戒带 %.0f", prev.JointWear, cur.JointWear, th.JointWearAlert())
+	}
+	return ""
+}
+
+func belowThreshold(v, threshold float64) bool { return v < threshold }
+func aboveThreshold(v, threshold float64) bool { return v > threshold }
+
 // DefaultBandThresholds returns the global default band boundaries.
 // Aligned with the code-level alert constants so default behavior is
 // unchanged: energy alert at <40 (低电量), fatigue alert at ≥80 (非常疲劳),
