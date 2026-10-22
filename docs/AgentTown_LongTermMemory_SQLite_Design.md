@@ -27,7 +27,7 @@ flowchart TB
 
     subgraph Write["写入（只在 compact）"]
         W1["compact 触发<br/>(输入 token 超过阈值)"]
-        W2["① 规则直写（0 LLM）<br/>攻击 / 动作失败"]
+        W2["① 规则直写（0 LLM）<br/>攻击"]
         W3["② compact 摘要调用扩展<br/>(1 次 LLM) 抽经历 + 维护待办 + 更新好感度印象"]
     end
 
@@ -58,7 +58,7 @@ flowchart TB
 已经发生过的具体事件，只追加。第一人称一句话摘要，直接进 prompt。
 - **例 1（对话经历）**：`D3 15:00 在咖啡馆和老王聊下棋，约好明天下午两点在公园棋桌下一盘。`
 - **例 2（战斗受袭）**：`D3 17:00 在废品站被 player_01 开枪袭击，机身受损严重后逃离。`
-- **例 3（动作受挫）**：`D3 20:10 去网吧上网失败，机器全部被占满。`
+- **例 3（日常活动）**：`D3 20:10 晚上去网吧上网，机器全被占满，改去公园散步。`
 
 ### 2.2 情景记忆 · 未来待办 `episodic_commitments`
 前瞻性子表，目标只有一个——**让 NPC 知道未来某时某地有这件事要做**。状态机极简（`pending → done / expired / cancelled`）。
@@ -90,7 +90,7 @@ CREATE TABLE IF NOT EXISTS episodic_memories (
     game_time         INTEGER NOT NULL,               -- 发生时的游戏时间秒
     game_day          INTEGER NOT NULL,               -- 第几个游戏日
     location          TEXT NOT NULL DEFAULT '',       -- zone_id 或 object_id
-    category          TEXT NOT NULL,                  -- conversation / combat / action_failed / daily_summary
+    category          TEXT NOT NULL,                  -- conversation / combat / daily_summary
     summary           TEXT NOT NULL,                  -- 第一人称一句话摘要（直接进 prompt）
     participants_json TEXT NOT NULL DEFAULT '[]',     -- 涉及 agent_id 数组，如 '["npc_wang"]'
     importance        INTEGER NOT NULL DEFAULT 5,     -- 1 ~ 10
@@ -108,7 +108,7 @@ CREATE INDEX IF NOT EXISTS idx_ep_owner_day  ON episodic_memories(owner_id, game
 |---|---|---|---|---|---|---|---|
 | `ep_001` | `H-01` | 226800 (D3 15:00) | `conversation` | 在咖啡馆和老王聊下棋，约好明天下午两点在公园棋桌下一盘，还答应帮他给小李带句话。 | `["npc_wang"]` | 7 | `self` |
 | `ep_002` | `H-01` | 234000 (D3 17:00) | `combat` | 在废品站被 player_01 开枪袭击，机身受损严重后逃离。 | `["player_01"]` | 9 | `self` |
-| `ep_003` | `H-01` | 244800 (D3 20:00) | `action_failed` | 晚上去网吧想上网，但所有机器都被占满了。 | `[]` | 4 | `self` |
+| `ep_003` | `H-01` | 244800 (D3 20:00) | `conversation` | 晚上去网吧上网，机器全被占满，改去公园散步。 | `[]` | 4 | `self` |
 
 ---
 
@@ -187,7 +187,8 @@ SQLite 的 `fts5` trigram 全文检索在 MySQL 无对应（MySQL FULLTEXT 需 n
 | 内容 | 写哪张表 | 操作 |
 |---|---|---|
 | 被攻击（`player_attacked` / `attacked`） | `episodic_memories` + `semantic_people` | 插一条 `category='combat', importance=9, emotion=-0.9` 的情景；对 attacker `UPSERT semantic_people`：`affinity = MAX(0, affinity - 50)` |
-| 动作失败（`action_completed{failed}` / `smartobject_occupied`） | `episodic_memories` | 插一条 `category='action_failed', importance=4` 的情景 |
+
+> 动作失败**不再单独写 memory episode**——`action_history` 已完整落盘可审计，且失败多为 UE 侧 bug（no_smartobject_in_zone / too_tired），记忆价值有限。
 
 ### 4.2 compact 摘要调用扩展（1 次 LLM）
 compact 本就调用一次摘要 LLM（`summarizeConversation` → `compactSystemPrompt`「记忆压缩模块」）。把这次调用的输出从「纯文本摘要串」扩展为「摘要串 + 结构化记忆 JSON」，一次调用同时产出：

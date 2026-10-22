@@ -511,7 +511,7 @@ game_time 锚定）+ `episodic_commitments`（未来待办）+ `semantic_people`
 - **action_history 记录**：`recordActionCompletion` 钩子在 `WasInFlight=true` 时单条 INSERT（`SaveActionRecord`）。`CompletionResult` 在 in-flight 清空前捕获 `Cmd`/`Params`/`Start` 三字段，完整还原动作生命周期。`/debug/action` 路径不经 `recordActionStarted`，`WasInFlight=false`，自然不写历史。best-effort：5s 超时 + `slog.Warn`，不阻塞决策管线
 - **昨日总结（narrative）**：`detectDayRollover` 命中后先调 `generateDailyMemories`（`memory.go`），从昨日 `action_history(500)` 倒序转正序后格式化为编号列表，1 次 LLM 调用产出 narrative（昨日总结）注入战略层 prompt，并落盘为一条 `daily_summary` episode。失败/冷启动返回空串，`generateDailyPlan` 内部回退到 `yesterdaySummaryForFirstDay` 常量
 - **记忆写入仅在 compact（2026-10-22 重建）**：`maybeCompactConversation` 压缩上下文后调 `summarizeConversation`（结构化输出 `SendWithSchema`，一次产出 `summary` + `episodes` + `new_commitments` + `commitment_changes` + `people_updates`），再 `persistExtractedMemory` 落三表。**不 compact 时经历仍在上下文中，无需落盘**；摘要滚动合并，读路径取最近 N 条收敛到最新
-- **规则直写（0 LLM，事件时点）**：被攻击（combat-detach 入口）→ combat episode + 攻击者好感度 -50；动作失败（`recordActionCompletion`）→ action_failed episode。攻击/失败是边沿触发的关键事实、等不到 compact（combat-detach 直接清上下文不 compact），故在事件时点直写
+- **规则直写（0 LLM，事件时点）**：被攻击（combat-detach 入口）→ combat episode + 攻击者好感度 -50。攻击是边沿触发的关键事实、等不到 compact（combat-detach 直接清上下文不 compact），故在事件时点直写。动作失败不再单独立 memory episode（`action_history` 已完整落盘，且失败多为 UE 侧 bug，记忆价值有限）
 - **战术层记忆注入**：读记忆走内部工具 `memoryReader`（`memory_reader.go`）——`recentEpisodes`（【过往经验】top-3 经历）、`commitmentsNearby`（【当前需兑现的约定】临近 1h/眼前人）、`people`（【人际关系】）。**不注册进 MCP 工具列表、不进 function calling，仅供程序调用、读路径零 LLM**
 - **待办闭环**：`episodic_commitments` 读时 SQL 动态过滤过期（`due_end < now` 的 pending 视为 expired、不回写）；compact 的 `commitment_changes` 核销 done / 改期 / 取消
 - **JSON 解析容错**：`parseMemoryGenerationResult` 容忍 markdown 围栏 ```json ... ``` 和尾随散文，定位首个 `{` 到末个 `}` 后 `json.Unmarshal`
@@ -755,7 +755,7 @@ bash start-dev.sh       # 偏移端口 8770/9093 + logs-dev/ 日志目录
 | `agenttown-mcp/cmd/agenttown-mcp/strategic.go` | 战略层：每日计划生成 |
 | `agenttown-mcp/cmd/agenttown-mcp/tactical.go` | 战术层：goal → action 分解 |
 | `agenttown-mcp/cmd/agenttown-mcp/event_router.go` | 事件路由器运行时：jev 判决调用（routerQuestions 三问 + routerDecisionFromJev 映射）+ routerInterrupt |
-| `agenttown-mcp/cmd/agenttown-mcp/memory.go` | Stage 4 记忆层：昨日总结 narrative（`generateDailyMemories`）+ compact 结构化落盘（`persistExtractedMemory`）+ 规则直写（combat/action_failed） |
+| `agenttown-mcp/cmd/agenttown-mcp/memory.go` | Stage 4 记忆层：昨日总结 narrative（`generateDailyMemories`）+ compact 结构化落盘（`persistExtractedMemory`）+ 规则直写（combat） |
 | `agenttown-mcp/cmd/agenttown-mcp/memory_reader.go` | 读记忆内部工具 `memoryReader`（recentEpisodes/commitmentsNearby/commitmentsUpcoming/people）——不开放给 LLM、程序调用、零 LLM |
 | `agenttown-mcp/cmd/agenttown-mcp/relationship.go` | Stage 5 对人认知：好感度合并渲染 + KB 种子导入（semantic_people） |
 | `agenttown-mcp/cmd/agenttown-mcp/capability.go` | NPC 能力注册表：per-agent cmd 能力声明（system 全局默认 + 具体 agent 覆盖） |

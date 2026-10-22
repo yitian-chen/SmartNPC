@@ -377,30 +377,6 @@ func recordCombatEpisode(store storage.Store, agentID, attacker, location string
 	}
 }
 
-// recordActionFailedEpisode 规则直写（0 LLM）：动作失败 → action_failed episode。
-func recordActionFailedEpisode(store storage.Store, agentID, location, summary string, gameTime int64, gameDay int, logger *slog.Logger) {
-	if store == nil || summary == "" {
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	ep := storage.Episode{
-		ID:         newEpisodeID(),
-		OwnerID:    agentID,
-		GameTime:   gameTime,
-		GameDay:    gameDay,
-		Location:   location,
-		Category:   "action_failed",
-		Summary:    summary,
-		Importance: 4,
-		Source:     "self",
-		Status:     "active",
-	}
-	if err := store.SaveEpisode(ctx, ep); err != nil {
-		logger.Warn("[记忆层] action_failed episode 落盘失败", "agent_id", agentID, "err", err)
-	}
-}
-
 // formatActionHistoryForPrompt renders action records as a numbered
 // chronological list for the LLM. Each line: "N. HH:MM Cmd(params) [src] -> result".
 func formatActionHistoryForPrompt(records []storage.ActionRecord) string {

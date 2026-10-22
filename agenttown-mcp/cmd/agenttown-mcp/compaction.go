@@ -44,7 +44,7 @@ const compactSystemPrompt = `你是小镇居民 NPC 的记忆压缩模块。请�
 
 {
   "summary": "不超过200字的回忆式摘要",
-  "episodes": [{"summary":"一句话经历","category":"conversation/combat/action_failed","importance":1-10,"emotion":-1.0~1.0,"participants":["对方id"]}],
+  "episodes": [{"summary":"一句话经历","category":"conversation/combat","importance":1-10,"emotion":-1.0~1.0,"participants":["对方id"]}],
   "new_commitments": [{"kind":"appointment/relay/invitation","counterpart_id":"对方id","counterpart_name":"对方名","content":"待办内容","due_start":游戏秒,"due_end":游戏秒,"due_location":"地点"}],
   "commitment_changes": [{"id":"已有待办id","action":"done/reschedule/cancel","due_start":游戏秒,"due_end":游戏秒}],
   "people_updates": [{"target_id":"对方id","affinity_delta":-5~5,"impression":"对他的一句话印象"}]
@@ -52,7 +52,7 @@ const compactSystemPrompt = `你是小镇居民 NPC 的记忆压缩模块。请�
 
 要求：
 1. summary：不超过 200 字，纯散文口语化，只写三类内容（干了什么事 / 有什么感想经验 / 与谁有过什么互动），不含物理状态数字、日程计划文本、系统提示语、分解规则原文。
-2. episodes：只从【新一段历史原文】里抽取新发生的事（0~3 条），不要把旧摘要里已有的经历重复抽出。
+2. episodes：只从【新一段历史原文】里抽取新发生的事（0~3 条），不要把旧摘要里已有的经历重复抽出。category 只用 conversation（普通日常活动/对话经历）或 combat（受袭），工作/休息/运动等日常经历一律 conversation。
 3. new_commitments：只抽取对话里新约定的「未来某时某地要做的事」（约好明天几点下棋、答应帮谁传话、受邀参加活动）。没有新约定就填空数组。时间换算成绝对游戏秒（一天 86400 秒）。
 4. commitment_changes：对话里取消 / 改期 / 履行了某个已有待办时，填对应 id + action（done=已履约、reschedule=改期并给新 due_start/due_end、cancel=取消）。没有就填空数组。
 5. people_updates：对对话中互动的对方，给好感度变化 affinity_delta（-5~+5）与更新后的一句话印象 impression。没有明显变化就填空数组。

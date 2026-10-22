@@ -338,8 +338,7 @@ func (a *agentContext) recordActionCompletion(completion protocol.ActionComplete
 	a.coordMu.Unlock()
 	// Stage 4: best-effort action_history recording — only for tracked in-flight
 	// actions (debug /debug/action path doesn't call recordActionStarted, so its
-	// completions have WasInFlight=false and aren't recorded). Also rule-writes
-	// an action_failed episode (0 LLM) via recordActionHistory.
+	// completions have WasInFlight=false and aren't recorded).
 	if res.WasInFlight {
 		a.recordActionHistory(completion, res)
 		// 多轮对话：动作执行结果以 user role 注入会话历史末尾，标记
@@ -507,19 +506,6 @@ func (a *agentContext) recordActionHistory(completion protocol.ActionCompletedPa
 	if err := store.SaveActionRecord(ctx, agentID, rec); err != nil {
 		slog.Default().Warn("[action_history] save failed",
 			"agent_id", agentID, "action_id", completion.ActionID, "err", err)
-	}
-
-	// 规则直写（0 LLM）：有意义的动作失败 → action_failed episode（长期记忆）。
-	// 失败/被占用是边沿触发的关键事实，在事件时点直写（见长期记忆设计文档
-	// "特殊说明"）；interrupted 是预期回包，不记。
-	if completion.Result == protocol.ResultFailed || completion.Result == protocol.ResultError ||
-		strings.Contains(completion.Reason, "occupied") {
-		summary := fmt.Sprintf("%s 执行失败", res.Cmd)
-		if completion.Reason != "" {
-			summary = fmt.Sprintf("%s 执行失败（%s）", res.Cmd, completion.Reason)
-		}
-		recordActionFailedEpisode(store, agentID, "", summary,
-			int64(a.as.LatestGameTimeSec()), a.as.LatestDayCount()+1, slog.Default())
 	}
 }
 
