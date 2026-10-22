@@ -1,14 +1,14 @@
-# AgentTown NPC 长期记忆系统设计方案（简化版）
+# AgentTown NPC 长期记忆系统设计方案（MySQL 版）
 
 > **定位**：每个 NPC 一个独立的长期记忆库。记忆不是「每发生一件事就写一次」，而是**上下文压缩（compact）时的沉淀**——平时发生过的事就住在 NPC 的会话上下文里，NPC 天然「记得」；只有当上下文太长需要压缩、某些内容即将被逐出时，才把它们抽成结构化记忆落盘，供之后（上下文里已经没有这些内容时）回顾。
 >
 > **核心原则**：
 > 1. **写只在 compact**：记忆写入仅发生在上下文压缩时；不 compact 不写库（此时内容仍在上下文中，写库是重复）。
-> 2. **读零 LLM**：读记忆全程纯程序（SQLite 索引 + FTS5 关键词 + 内存打分），包装成一个内部工具 `read_memory`，**暂不开放给 LLM 调用**，由程序在需要时调用并把结果拼进对应层 prompt。
+> 2. **读零 LLM**：读记忆全程纯程序（MySQL 索引 + LIKE 关键词 + 内存打分），包装成一个内部工具 `read_memory`，**暂不开放给 LLM 调用**，由程序在需要时调用并把结果拼进对应层 prompt。
 > 3. **对人认知只用一个好感度值**：不拆熟悉度/信任度等多维度，一个 0–100 的好感度 + 一句话印象即可。
 > 4. **时间统一**：一切时间戳用 UE 游戏时间秒（`game_time_sec`），不依赖现实时钟。
 > 5. **信息隔离**：所有表以 `owner_id` 为第一分区键；A 的记忆 B 绝对查不到，信息只能通过说话（`speech_heard`）或旁听传播。
-> 6. **存储**：SQLite 单文件（`worlds/<world_id>/memory.db`，开启 WAL）。
+> 6. **存储**：MySQL（复用现有持久化层 `pkg/storage`，`owner_id` 分区；原 SQLite 方案改 MySQL——FTS5 trigram 无对应，联想召回降级为 `LIKE`）。
 
 ---
 
@@ -31,7 +31,7 @@ flowchart TB
         W3["② compact 摘要调用扩展<br/>(1 次 LLM) 抽经历 + 维护待办 + 更新好感度印象"]
     end
 
-    subgraph DB["SQLite（worlds/world_id/memory.db）"]
+    subgraph DB["MySQL（agenttown 库三表）"]
         T1[("episodic_memories<br/>过去经历")]
         T2[("episodic_commitments<br/>未来待办")]
         T3[("semantic_people<br/>好感度 + 印象")]
@@ -75,14 +75,12 @@ flowchart TB
 
 ---
 
-## 3. 怎么存？（SQLite 表结构与样例）
+## 3. 怎么存？（MySQL 表结构与样例）
 
-每个世界存档一个 SQLite 文件：`worlds/<world_id>/memory.db`。初始化统一设置：
-```sql
-PRAGMA journal_mode = WAL;
-PRAGMA synchronous = NORMAL;
-PRAGMA foreign_keys = ON;
-```
+复用现有 MySQL 持久化层（`pkg/storage`，`--mysql-dsn`）。实际 DDL 见迁移
+`agenttown-mcp/pkg/storage/migrations/0005_memory_architecture.sql`。下方 DDL
+为概念示意：SQLite 的 `TEXT PRIMARY KEY` 在 MySQL 用 `VARCHAR(64)`、`REAL`
+用 `DOUBLE`、`INTEGER` 用 `BIGINT`、`participants_json` 用 JSON 列。
 
 ### 3.1 表 1：`episodic_memories`（过去经历）
 ```sql
@@ -166,16 +164,11 @@ CREATE TABLE IF NOT EXISTS semantic_people (
 
 ---
 
-### 3.4 全文检索虚表 `memory_fts`（联想召回用）
-利用 SQLite 内置 `fts5`（`tokenize='trigram'` 对中文天然支持），对情景摘要做关键词匹配，支撑「读记忆不用 LLM」的程序化召回：
-```sql
-CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
-    owner_id UNINDEXED,
-    mem_id   UNINDEXED,
-    text_body,            -- 写入 summary 或 "target_name impression"
-    tokenize = 'trigram'
-);
-```
+### 3.4 联想召回（MySQL 无 FTS5，降级 LIKE）
+
+SQLite 的 `fts5` trigram 全文检索在 MySQL 无对应（MySQL FULLTEXT 需 ngram
+解析器且匹配语义不同）。数据量小，联想召回直接对 `summary` 做 `LIKE '%kw%'`
+关键词匹配（`LoadEpisodes` 的 `Keywords` 过滤），不建 FULLTEXT 索引。
 
 ---
 
@@ -184,7 +177,7 @@ CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
 记忆不是「每发生一件事就写一次」，而是**上下文太长、需要压缩时才沉淀**。这与现有 `compaction.go` 的压缩机制完全对齐：
 
 - **不 compact 不写**：一段对话、一次攻击、一个约定刚发生时，它们就在 NPC 的会话上下文（多轮决策历史）里，NPC 已经「记得」，无需落盘。
-- **compact 时一次性沉淀**：当该 NPC 的战术层输入 token 超过阈值（`compactTriggerTokens`，现 10000）触发 `maybeCompactConversation` 时，把即将被逐出的历史抽成结构化记忆写入 SQLite。写完之后，上下文里即使没有了这些内容，记忆库仍能让 NPC 回想起来。
+- **compact 时一次性沉淀**：当该 NPC 的战术层输入 token 超过阈值（`compactTriggerTokens`，现 10000）触发 `maybeCompactConversation` 时，把即将被逐出的历史抽成结构化记忆写入 MySQL（三张新表）。写完之后，上下文里即使没有了这些内容，记忆库仍能让 NPC 回想起来。
 
 在 compact 的落点上做两件事：
 
@@ -228,7 +221,7 @@ compact 本就调用一次摘要 LLM（`summarizeConversation` → `compactSyste
 
 ## 5. 什么时候读？怎么读？——内部工具 `read_memory`，纯程序
 
-读记忆**全程不调 LLM**，全部是毫秒级 SQL 查询 + FTS5 关键词匹配 + 内存打分。封装成一个内部工具：
+读记忆**全程不调 LLM**，全部是毫秒级 SQL 查询 + LIKE 关键词匹配 + 内存打分。封装成一个内部工具：
 
 ```
 read_memory(agentID, context) → 格式化记忆文本
@@ -291,7 +284,7 @@ read_memory(agentID, context) → 格式化记忆文本
        );
      ```
      > 效果：13:45 时条件 1 命中，提醒「还有 15 分钟就和老王下棋了，立刻前往 `zone_park`」；哪怕没到点，只要路上看到小李，条件 2 命中，把「转告小李拿扳手」塞进 prompt，驱动 NPC 走过去 `speak_to`。
-2. **联想层（FTS5 召回 Top 3~5 条过往回忆）**
+2. **联想层（LIKE 召回 Top 3~5 条过往回忆）**
    - 召回涉及当前人物的最近 20 条情景 + 用当前对话关键词查 `memory_fts`；
    - 按 `0.40 * 相关度 + 0.30 * (importance/10) + 0.30 * 时间新鲜度` 打分取前 4 条。
 
