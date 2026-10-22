@@ -178,6 +178,7 @@ SQLite 的 `fts5` trigram 全文检索在 MySQL 无对应（MySQL FULLTEXT 需 n
 
 - **不 compact 不写**：一段对话、一次攻击、一个约定刚发生时，它们就在 NPC 的会话上下文（多轮决策历史）里，NPC 已经「记得」，无需落盘。
 - **compact 时一次性沉淀**：当该 NPC 的战术层输入 token 超过阈值（`compactTriggerTokens`，现 10000）触发 `maybeCompactConversation` 时，把即将被逐出的历史抽成结构化记忆写入 MySQL（三张新表）。写完之后，上下文里即使没有了这些内容，记忆库仍能让 NPC 回想起来。
+- **日切强制 compact**：跨日 `detectDayRollover` 清空会话历史前，`compactAtDayRollover` 把当天整段对话历史也做一次 compact 抽取落盘——兜住低活动日（中途历史不足阈值、未触发 compact）的经历丢失窗口。日切清空上下文本身即当天内容的「compact」，与「写只在 compact」一脉相承。
 
 在 compact 的落点上做两件事：
 

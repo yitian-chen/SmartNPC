@@ -119,6 +119,37 @@ const compactMergeUserTemplate = `[压缩层/上下文压缩] 此前已有一份
 【新一段历史原文】（按时间顺序）
 %s`
 
+// compactAtDayRollover 在日切清空会话历史前，把当天对话历史做一次 compact
+// 抽取（episodes/commitments/people）并落盘。解决「写只在 compact」在低活动日
+// 不落盘的问题：中途历史不足 compactTriggerTokens 未触发 compact 时，当天
+// 经历与约定会随 ClearConversation 一起丢失——日切强制抽取一次，兜住这个窗口。
+//
+// 复用 summarizeConversation：prevSummary（滚动摘要）非空时走合并式模板，
+// episodes 只从「新历史」抽取；此时 history 是自上次 compact 以来的尾巴，
+// 更早内容已由中途 compact 落盘，不会重复。不调用 CompactConversation——
+// 摘要随即被 ClearConversation 清空，无需更新滚动摘要。
+func (a *agentContext) compactAtDayRollover(agentID string, kb *worldkb.KB, profiles map[string]*profile.Profile, logger *slog.Logger) {
+	if a.tacticalHc == nil || a.as.Store() == nil {
+		return
+	}
+	history := a.as.Conversation()
+	if len(history) == 0 {
+		return
+	}
+	summary := a.as.ConversationSummary()
+	ex, err := a.summarizeConversation(history, summary, agentID, kb, profiles, logger)
+	if err != nil {
+		logger.Warn("[压缩层] 日切 compact 抽取失败，经历随历史清空丢失",
+			"agent_id", agentID, "history_msgs", len(history), "err", err)
+		return
+	}
+	persistExtractedMemory(a.as.Store(), agentID, ex,
+		int64(a.as.LatestGameTimeSec()), a.as.LatestDayCount()+1, logger)
+	logger.Info("[压缩层] 日切 compact 抽取完成",
+		"agent_id", agentID, "history_msgs", len(history),
+		"episodes", len(ex.Episodes), "commitments", len(ex.NewCommitments), "people", len(ex.PeopleUpdates))
+}
+
 // maybeCompactConversation 估算本次请求输入 token，超阈值时把旧历史摘要
 // 成稳定 digest、只保留最近 compactTailRounds 轮。摘要失败时跳过本轮压缩
 // （带全量历史继续、下轮再试），绝不无摘要地丢弃历史（那正是滚动窗口的

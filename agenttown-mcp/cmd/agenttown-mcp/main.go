@@ -909,6 +909,11 @@ func runPerceptionWorker(
 				if todayPlan := ac.as.Snapshot().DailyPlan; todayPlan != "" {
 					ac.as.SetSocialNeed(generateDailySocialNeed(ctx, ac.strategicHc, agentID, kb, profiles, logger, todayPlan, ac.as.SocialNeed()))
 				}
+				// 日切 compact 抽取：把当天对话历史（清空前）抽成 episodes/
+				// commitments/people 落盘。兜住低活动日（中途未触发 compact）的
+				// 经历丢失窗口——「写只在 compact」在历史不足阈值时不落盘，日切
+				// 强制抽一次，当天经历与约定不会随 ClearConversation 丢掉。
+				ac.compactAtDayRollover(agentID, kb, profiles, logger)
 				// 跨日清空统一 loop 会话历史：每个游戏日一份独立 loop，
 				// 新日的战略轮是 loop 第一轮。跨日记忆走昨日总结（narrative）。
 				ac.as.ClearConversation()

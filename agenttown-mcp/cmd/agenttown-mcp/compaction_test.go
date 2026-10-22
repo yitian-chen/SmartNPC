@@ -282,3 +282,32 @@ func TestCompaction_InFlightGuardSkips(t *testing.T) {
 		t.Fatalf("post-release call should be allowed to compact again, prompts=%d", prompts)
 	}
 }
+
+// TestCompactAtDayRollover pins the day-rollover forced-compaction glue: nil
+// store / empty history are no-ops; with history it runs the summarizer and
+// persists the extraction (episodes/commitments/people) before the caller
+// clears the conversation.
+func TestCompactAtDayRollover(t *testing.T) {
+	ac := tacticalCtxForTest(nil)
+	ac.tacticalHc = &compactFakeLLM{response: "日切摘要"}
+
+	// nil store → no-op（不 panic）。
+	ac.compactAtDayRollover("H-01", nil, nil, testLogger())
+
+	// 有 store 但历史为空 → no-op。
+	store := &memoryFakeStore{}
+	ac.as.SetIdentity("H-01", store)
+	ac.compactAtDayRollover("H-01", nil, nil, testLogger())
+	if len(store.episodes) != 0 {
+		t.Fatalf("empty history should write 0 episodes, got %d", len(store.episodes))
+	}
+
+	// 有历史 → 走抽取（fake 只回 summary、无 episodes，验证不 panic + 落盘路径可达）。
+	for _, m := range mkRounds(3) {
+		ac.as.AppendConversationMessage(m)
+	}
+	ac.compactAtDayRollover("H-01", nil, nil, testLogger())
+	if len(store.episodes) != 0 {
+		t.Errorf("summary-only fake should write 0 episodes, got %d", len(store.episodes))
+	}
+}
