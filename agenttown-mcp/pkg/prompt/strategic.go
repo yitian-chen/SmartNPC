@@ -154,7 +154,7 @@ func BuildStrategicUserPrompt(in StrategicPromptInput) string {
 // The strategic preamble (module role) also lives here:
 // the system prompt is shared verbatim across layers, so every
 // strategic-specific text belongs in the user message.
-func BuildStrategicUserContext(agentID string, kb *worldkb.KB, profiles map[string]*profile.Profile, physical *protocol.PhysicalState, dayContext, otherNPCs string, socialNeed int) string {
+func BuildStrategicUserContext(agentID string, kb *worldkb.KB, profiles map[string]*profile.Profile, physical *protocol.PhysicalState, dayContext, otherNPCs, commitments string, socialNeed int) string {
 	var sb strings.Builder
 	// 【今日日程】段：每周日程上下文（星期几 + 工作日/休息日 + 当日提示）。
 	// dayContext 由调用方通过 weeklyschedule.WeeklyLine(dayCount, sched) 预格式化，
@@ -168,6 +168,11 @@ func BuildStrategicUserContext(agentID string, kb *worldkb.KB, profiles map[stri
 	if dayContext != "" {
 		sb.WriteString("【今日日程】\n")
 		sb.WriteString(dayContext)
+		sb.WriteString("\n")
+	}
+	if commitments != "" {
+		sb.WriteString("【今日约定与待办】（排日程时必须优先预留时段）\n")
+		sb.WriteString(commitments)
 		sb.WriteString("\n")
 	}
 	if line := PhysicalLine(physical, BandThresholdsFor(profiles, agentID)); line != "" {

@@ -15,8 +15,9 @@ import (
 )
 
 // memoryGenerationResult is the JSON schema returned by the memory-generation
-// LLM call. narrative is injected into the next strategic prompt; memories
-// are saved as individual agent_memories rows.
+// LLM call. narrative is injected into the next strategic prompt; the
+// memories array is parsed but no longer persisted (long-term memory is now
+// written via persistExtractedMemory / daily_summary episode).
 type memoryGenerationResult struct {
 	Narrative string `json:"narrative"`
 	Memories  []struct {
@@ -62,11 +63,9 @@ const memoryUserTemplate = `[记忆层/日终总结] 你刚结束一天的活动
 请回顾今天的行动记录，总结经验。`
 
 // generateDailyMemories summarizes yesterday's action_history into a
-// first-person narrative (昨日总结) for the next strategic prompt.
-//
-// 它不再写 agent_memories——长期记忆的唯一写入时机已移到上下文 compact
-// （persistCompactMemory）：不 compact 时经历仍在上下文中，无需落盘。
-// 本函数只产出战略层一次性消费的昨日总结，不落持久化记忆。
+// first-person narrative (昨日总结) for the next strategic prompt, and
+// persists that narrative as a daily_summary episode (game_time 锚定) so it
+// survives context clearing (day rollover = 该日上下文的 compact)。
 //
 // Returns "" on any failure or empty history — caller falls back to the
 // yesterdaySummaryForFirstDay constant. Never blocks the decision pipeline.
@@ -78,6 +77,8 @@ func generateDailyMemories(
 	kb *worldkb.KB,
 	profiles map[string]*profile.Profile,
 	logger *slog.Logger,
+	gameTime int64,
+	gameDay int,
 ) string {
 	if store == nil {
 		return "" // in-memory mode, no history
@@ -128,45 +129,276 @@ func generateDailyMemories(
 		return ""
 	}
 
-	// 只返回昨日总结 narrative；不写 agent_memories（长期记忆写入已移到
-	// compact 时点，见 persistCompactMemory）。LLM 响应里的 memories 字段
-	// 仍被解析（parseMemoryGenerationResult），但不再落盘。
+	// 写 daily_summary episode（昨日总结 → 长期记忆，日切即该日上下文的
+	// compact）。best-effort，失败不影响 narrative 返回。
+	if store != nil && result.Narrative != "" {
+		ep := storage.Episode{
+			ID:         newEpisodeID(),
+			OwnerID:    agentID,
+			GameTime:   gameTime,
+			GameDay:    gameDay,
+			Category:   "daily_summary",
+			Summary:    result.Narrative,
+			Importance: 5,
+			Source:     "self",
+			Status:     "active",
+		}
+		if err := store.SaveEpisode(ctx, ep); err != nil {
+			logger.Warn("[记忆层] 昨日总结 episode 落盘失败",
+				"agent_id", agentID, "err", err)
+		}
+	}
+
 	logger.Info("[记忆层] 昨日总结生成成功",
 		"agent_id", agentID, "narrative", result.Narrative)
 	return result.Narrative
 }
 
-// persistCompactMemory 把上下文 compact 产生的回忆式摘要沉淀为一条长期
-// 记忆（agent_memories）。这是长期记忆的**唯一写入时机**——不 compact 时
-// 经历仍在上下文中，无需落盘；compact 把即将被逐出的内容抽成摘要，此时
-// 才落盘，供之后（上下文里已没有这些内容时）回顾。
+// ─── compact 结构化记忆抽取 ─────────────────────────────
+
+// compactExtract 是 compact 摘要 LLM 的结构化输出：滚动摘要串 + 结构化记忆
+// （经历 / 待办 / 对人认知），一次调用同时产出，写路径据此落三张表。
+type compactExtract struct {
+	Summary           string             `json:"summary"`
+	Episodes          []compactEpisode    `json:"episodes"`
+	NewCommitments    []compactCommitment `json:"new_commitments"`
+	CommitmentChanges []compactCmChange   `json:"commitment_changes"`
+	PeopleUpdates     []compactPersonUpd  `json:"people_updates"`
+}
+
+type compactEpisode struct {
+	Summary      string   `json:"summary"`
+	Category     string   `json:"category"` // 空 → conversation
+	Importance   int      `json:"importance"`
+	Emotion      float64  `json:"emotion"`
+	Participants []string `json:"participants"`
+}
+
+type compactCommitment struct {
+	Kind            string `json:"kind"`
+	CounterpartID   string `json:"counterpart_id"`
+	CounterpartName string `json:"counterpart_name"`
+	Content         string `json:"content"`
+	DueStart        int64  `json:"due_start"`
+	DueEnd          int64  `json:"due_end"`
+	DueLocation     string `json:"due_location"`
+}
+
+type compactCmChange struct {
+	ID       string `json:"id"`
+	Action   string `json:"action"` // done / reschedule / cancel
+	DueStart int64  `json:"due_start"`
+	DueEnd   int64  `json:"due_end"`
+}
+
+type compactPersonUpd struct {
+	TargetID      string `json:"target_id"`
+	AffinityDelta int    `json:"affinity_delta"`
+	Impression    string `json:"impression"`
+}
+
+// newEpisodeID / newCommitmentID 生成主键。唯一性靠纳秒时间戳，单进程内足够。
+func newEpisodeID() string    { return fmt.Sprintf("ep_%d", time.Now().UnixNano()) }
+func newCommitmentID() string { return fmt.Sprintf("cm_%d", time.Now().UnixNano()) }
+
+// persistExtractedMemory 把 compact LLM 的结构化抽取落盘为长期记忆三表
+// （episodic_memories / episodic_commitments / semantic_people）。这是长期
+// 记忆的唯一 LLM 写入时机——不 compact 时经历仍在上下文中，无需落盘。
 //
-// best-effort：写入失败仅告警，不阻断压缩主流程；store 为 nil（内存模式）
-// 或摘要为空时直接跳过。summary 是滚动合并的，逐次 compact 落盘的摘要会
-// 覆盖更早的内容——读路径取最近 N 条自然收敛到最新摘要（append-only 设计）。
-func persistCompactMemory(store storage.Store, agentID, summary string, logger *slog.Logger) {
+// best-effort：任一条写失败仅告警继续，不阻断压缩主流程；store 为 nil
+// （内存模式）时直接跳过。
+func persistExtractedMemory(store storage.Store, agentID string, ex compactExtract, gameTime int64, gameDay int, logger *slog.Logger) {
+	if store == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	for _, ep := range ex.Episodes {
+		if ep.Summary == "" {
+			continue
+		}
+		cat := ep.Category
+		if cat == "" {
+			cat = "conversation"
+		}
+		clampInt(&ep.Importance, 1, 10)
+		clampFloat(&ep.Emotion, -1, 1)
+		e := storage.Episode{
+			ID:           newEpisodeID(),
+			OwnerID:      agentID,
+			GameTime:     gameTime,
+			GameDay:      gameDay,
+			Category:     cat,
+			Summary:      ep.Summary,
+			Participants: ep.Participants,
+			Importance:   ep.Importance,
+			Emotion:      ep.Emotion,
+			Source:       "self",
+			Status:       "active",
+		}
+		if err := store.SaveEpisode(ctx, e); err != nil {
+			logger.Warn("[记忆层] compact episode 落盘失败", "agent_id", agentID, "err", err)
+		}
+	}
+
+	for _, cm := range ex.NewCommitments {
+		if cm.Content == "" {
+			continue
+		}
+		kind := cm.Kind
+		if kind == "" {
+			kind = "appointment"
+		}
+		c := storage.Commitment{
+			ID:              newCommitmentID(),
+			OwnerID:         agentID,
+			Kind:            kind,
+			CounterpartID:   cm.CounterpartID,
+			CounterpartName: cm.CounterpartName,
+			Content:         cm.Content,
+			DueStart:        cm.DueStart,
+			DueEnd:          cm.DueEnd,
+			DueLocation:     cm.DueLocation,
+			Status:          "pending",
+			CreatedTime:     gameTime,
+		}
+		if err := store.SaveCommitment(ctx, c); err != nil {
+			logger.Warn("[记忆层] compact 待办落盘失败", "agent_id", agentID, "err", err)
+		}
+	}
+
+	for _, ch := range ex.CommitmentChanges {
+		if ch.ID == "" {
+			continue
+		}
+		status := ""
+		dueStart, dueEnd := int64(-1), int64(-1)
+		switch ch.Action {
+		case "done":
+			status = "done"
+		case "cancel", "cancelled":
+			status = "cancelled"
+		case "reschedule":
+			status = "pending"
+			dueStart, dueEnd = ch.DueStart, ch.DueEnd
+		default:
+			continue
+		}
+		if err := store.UpdateCommitment(ctx, ch.ID, status, dueStart, dueEnd); err != nil {
+			logger.Warn("[记忆层] compact 待办核销失败", "agent_id", agentID, "id", ch.ID, "err", err)
+		}
+	}
+
+	for _, pu := range ex.PeopleUpdates {
+		if pu.TargetID == "" {
+			continue
+		}
+		p := storage.Person{
+			OwnerID:          agentID,
+			TargetID:         pu.TargetID,
+			Impression:       pu.Impression,
+			LastInteractTime: gameTime,
+		}
+		if err := store.UpsertPerson(ctx, p, pu.AffinityDelta); err != nil {
+			logger.Warn("[记忆层] compact 好感度更新失败", "agent_id", agentID, "target", pu.TargetID, "err", err)
+		}
+	}
+
+	if len(ex.Episodes)+len(ex.NewCommitments)+len(ex.PeopleUpdates) > 0 {
+		logger.Debug("[记忆层] compact 结构化记忆已落盘",
+			"agent_id", agentID, "episodes", len(ex.Episodes),
+			"commitments", len(ex.NewCommitments), "people", len(ex.PeopleUpdates))
+	}
+}
+
+// clampInt / clampFloat 夹紧数值到 [lo, hi]。
+func clampInt(v *int, lo, hi int) {
+	if *v < lo {
+		*v = lo
+	}
+	if *v > hi {
+		*v = hi
+	}
+}
+
+func clampFloat(v *float64, lo, hi float64) {
+	if *v < lo {
+		*v = lo
+	}
+	if *v > hi {
+		*v = hi
+	}
+}
+
+// recordCombatEpisode 规则直写（0 LLM，事件时点）：被攻击 → combat episode +
+// 攻击者好感度 -50。攻击是边沿触发的关键事实，等不到 compact（combat-detach
+// 直接清上下文、不 compact），故在事件时点直写（见设计文档"特殊说明"）。
+func recordCombatEpisode(store storage.Store, agentID, attacker, location string, gameTime int64, gameDay int, logger *slog.Logger) {
+	if store == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	summary := "遭到攻击"
+	if attacker != "" && location != "" {
+		summary = fmt.Sprintf("在 %s 被 %s 攻击", location, attacker)
+	} else if attacker != "" {
+		summary = fmt.Sprintf("被 %s 攻击", attacker)
+	}
+	ep := storage.Episode{
+		ID:         newEpisodeID(),
+		OwnerID:    agentID,
+		GameTime:   gameTime,
+		GameDay:    gameDay,
+		Location:   location,
+		Category:   "combat",
+		Summary:    summary,
+		Importance: 9,
+		Emotion:    -0.9,
+		Source:     "self",
+		Status:     "active",
+	}
+	if err := store.SaveEpisode(ctx, ep); err != nil {
+		logger.Warn("[记忆层] combat episode 落盘失败", "agent_id", agentID, "err", err)
+	}
+	if attacker != "" {
+		p := storage.Person{
+			OwnerID:          agentID,
+			TargetID:         attacker,
+			TargetName:       attacker,
+			Impression:       "危险的袭击者",
+			LastInteractTime: gameTime,
+		}
+		if err := store.UpsertPerson(ctx, p, -50); err != nil {
+			logger.Warn("[记忆层] 攻击者好感度下降失败",
+				"agent_id", agentID, "attacker", attacker, "err", err)
+		}
+	}
+}
+
+// recordActionFailedEpisode 规则直写（0 LLM）：动作失败 → action_failed episode。
+func recordActionFailedEpisode(store storage.Store, agentID, location, summary string, gameTime int64, gameDay int, logger *slog.Logger) {
 	if store == nil || summary == "" {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	now := time.Now()
-	mem := storage.Memory{
-		AgentID:        agentID,
-		MemoryType:     "daily_summary",
-		Content:        summary,
-		Importance:     50,
-		CreatedAt:      now,
-		LastAccessedAt: now,
-		DecayScore:     1.0,
+	ep := storage.Episode{
+		ID:         newEpisodeID(),
+		OwnerID:    agentID,
+		GameTime:   gameTime,
+		GameDay:    gameDay,
+		Location:   location,
+		Category:   "action_failed",
+		Summary:    summary,
+		Importance: 4,
+		Source:     "self",
+		Status:     "active",
 	}
-	if _, err := store.SaveMemory(ctx, agentID, mem); err != nil {
-		logger.Warn("[记忆层] compact 记忆落盘失败",
-			"agent_id", agentID, "err", err)
-		return
+	if err := store.SaveEpisode(ctx, ep); err != nil {
+		logger.Warn("[记忆层] action_failed episode 落盘失败", "agent_id", agentID, "err", err)
 	}
-	logger.Debug("[记忆层] compact 记忆已落盘",
-		"agent_id", agentID, "summary_chars", len(summary))
 }
 
 // formatActionHistoryForPrompt renders action records as a numbered

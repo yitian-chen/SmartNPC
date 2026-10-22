@@ -139,8 +139,8 @@ func mkFatRounds(n int) []llmtypes.Message {
 	return out
 }
 
-// compactFakeLLM captures SendWithSummary calls (first-call semantics for the
-// summarizer) and returns a scripted summary body.
+// compactFakeLLM captures SendWithSchema calls (first-call semantics for the
+// summarizer) and returns a scripted summary body wrapped as structured JSON.
 type compactFakeLLM struct {
 	fakeStrategicCaller
 	mu       sync.Mutex
@@ -149,14 +149,14 @@ type compactFakeLLM struct {
 	block    chan struct{} // 非 nil 时阻塞直至 close
 }
 
-func (f *compactFakeLLM) SendWithSummary(_ context.Context, _, user string, _ ...[]venus.Tool) (*llmtypes.Response, error) {
+func (f *compactFakeLLM) SendWithSchema(_ context.Context, _, user, _ string, _ []byte, _ ...[]venus.Tool) (*llmtypes.Response, error) {
 	f.mu.Lock()
 	f.prompts = append(f.prompts, user)
 	f.mu.Unlock()
 	if f.block != nil {
 		<-f.block
 	}
-	return makeStrategicResponse(f.response), nil
+	return makeStrategicResponse(`{"summary": "` + f.response + `"}`), nil
 }
 
 // TestCompaction_MergeTemplateCarriesPrevSummary pins fix 1: a second

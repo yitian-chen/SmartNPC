@@ -35,29 +35,68 @@ func TestNoopStore_CloseIsNoOp(t *testing.T) {
 	}
 }
 
-// ─── Stage 4: memory + action_history no-op stubs ───
+// ─── 三表 + action_history no-op stubs ───
 
-// TestNoopStore_SaveMemoryIsNoOp verifies SaveMemory returns 0,nil without panic.
-func TestNoopStore_SaveMemoryIsNoOp(t *testing.T) {
+func TestNoopStore_SaveEpisodeIsNoOp(t *testing.T) {
 	st := NoopStore{}
-	id, err := st.SaveMemory(context.Background(), "H-01", Memory{Content: "x"})
-	if err != nil {
-		t.Errorf("SaveMemory: got err=%v, want nil", err)
-	}
-	if id != 0 {
-		t.Errorf("SaveMemory id: got %d, want 0", id)
+	if err := st.SaveEpisode(context.Background(), Episode{ID: "ep_1", Summary: "x"}); err != nil {
+		t.Errorf("SaveEpisode: got err=%v, want nil", err)
 	}
 }
 
-// TestNoopStore_LoadRecentMemoriesIsNoOp verifies LoadRecentMemories returns nil,nil.
-func TestNoopStore_LoadRecentMemoriesIsNoOp(t *testing.T) {
+func TestNoopStore_LoadEpisodesIsNoOp(t *testing.T) {
 	st := NoopStore{}
-	got, err := st.LoadRecentMemories(context.Background(), "H-01", 10)
-	if err != nil {
-		t.Errorf("LoadRecentMemories: got err=%v, want nil", err)
+	if got, err := st.LoadEpisodes(context.Background(), "H-01", EpisodeQuery{}); err != nil || got != nil {
+		t.Errorf("LoadEpisodes: got %v,%v want nil,nil", got, err)
 	}
-	if got != nil {
-		t.Errorf("LoadRecentMemories: got %v, want nil", got)
+}
+
+func TestNoopStore_LoadLatestDailySummaryIsNotFound(t *testing.T) {
+	st := NoopStore{}
+	if _, err := st.LoadLatestDailySummary(context.Background(), "H-01"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("LoadLatestDailySummary: got err=%v, want ErrNotFound", err)
+	}
+}
+
+func TestNoopStore_SaveCommitmentIsNoOp(t *testing.T) {
+	st := NoopStore{}
+	if err := st.SaveCommitment(context.Background(), Commitment{ID: "cm_1"}); err != nil {
+		t.Errorf("SaveCommitment: got err=%v, want nil", err)
+	}
+}
+
+func TestNoopStore_UpdateCommitmentIsNoOp(t *testing.T) {
+	st := NoopStore{}
+	if err := st.UpdateCommitment(context.Background(), "cm_1", "done", -1, -1); err != nil {
+		t.Errorf("UpdateCommitment: got err=%v, want nil", err)
+	}
+}
+
+func TestNoopStore_LoadCommitmentsIsNoOp(t *testing.T) {
+	st := NoopStore{}
+	if got, err := st.LoadCommitments(context.Background(), "H-01", CommitmentQuery{}); err != nil || got != nil {
+		t.Errorf("LoadCommitments: got %v,%v want nil,nil", got, err)
+	}
+}
+
+func TestNoopStore_UpsertPersonIsNoOp(t *testing.T) {
+	st := NoopStore{}
+	if err := st.UpsertPerson(context.Background(), Person{OwnerID: "H-01", TargetID: "H-02"}, 5); err != nil {
+		t.Errorf("UpsertPerson: got err=%v, want nil", err)
+	}
+}
+
+func TestNoopStore_SeedPersonIsNoOp(t *testing.T) {
+	st := NoopStore{}
+	if err := st.SeedPerson(context.Background(), Person{OwnerID: "H-01", TargetID: "H-02", Affinity: 80}); err != nil {
+		t.Errorf("SeedPerson: got err=%v, want nil", err)
+	}
+}
+
+func TestNoopStore_LoadPeopleIsNoOp(t *testing.T) {
+	st := NoopStore{}
+	if got, err := st.LoadPeople(context.Background(), "H-01"); err != nil || got != nil {
+		t.Errorf("LoadPeople: got %v,%v want nil,nil", got, err)
 	}
 }
 
@@ -81,34 +120,6 @@ func TestNoopStore_LoadActionHistoryIsNoOp(t *testing.T) {
 	}
 }
 
-// TestNoopStore_SaveRelationshipIsNoOp verifies SaveRelationship returns nil without panic.
-func TestNoopStore_SaveRelationshipIsNoOp(t *testing.T) {
-	st := NoopStore{}
-	if err := st.SaveRelationship(context.Background(), "H-01", "H-02", 1); err != nil {
-		t.Errorf("SaveRelationship: got err=%v, want nil", err)
-	}
-}
-
-// TestNoopStore_LoadRelationshipsIsNoOp verifies LoadRelationships returns nil,nil.
-func TestNoopStore_LoadRelationshipsIsNoOp(t *testing.T) {
-	st := NoopStore{}
-	got, err := st.LoadRelationships(context.Background(), "H-01", 10)
-	if err != nil {
-		t.Errorf("LoadRelationships: got err=%v, want nil", err)
-	}
-	if got != nil {
-		t.Errorf("LoadRelationships: got %v, want nil", got)
-	}
-}
-
-// TestNoopStore_SeedRelationshipIsNoOp verifies SeedRelationship returns nil without panic.
-func TestNoopStore_SeedRelationshipIsNoOp(t *testing.T) {
-	st := NoopStore{}
-	if err := st.SeedRelationship(context.Background(), "H-01", "H-02", 5); err != nil {
-		t.Errorf("SeedRelationship: got err=%v, want nil", err)
-	}
-}
-
 // ─── migration file embedding sanity ───
 
 // TestEmbeddedMigrations_Listed verifies the embed directive picked up
@@ -124,8 +135,8 @@ func TestEmbeddedMigrations_Listed(t *testing.T) {
 	if versions[0] != "0001_init" {
 		t.Errorf("first migration: got %q, want 0001_init", versions[0])
 	}
-	if versions[len(versions)-1] != "0004_relationship_single_affection" {
-		t.Errorf("last migration: got %q, want 0004_relationship_single_affection", versions[len(versions)-1])
+	if versions[len(versions)-1] != "0005_memory_architecture" {
+		t.Errorf("last migration: got %q, want 0005_memory_architecture", versions[len(versions)-1])
 	}
 }
 

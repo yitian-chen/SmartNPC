@@ -450,6 +450,16 @@ func (rt *Runtime) handleCombatDetach(ac *agentContext, agentID string, ev proto
 		ac.as.ClearSlotSwitchPending()
 		// 战斗让位中断对话：丢弃在途会话 transcript（被战斗打断的对话不评估）。
 		ac.clearConversation()
+		// 规则直写（0 LLM）：被攻击 → combat episode + 攻击者好感度 -50。
+		// 攻击是边沿触发的关键事实，等不到 compact（让位清上下文不 compact），
+		// 故在事件时点直写（见长期记忆设计文档"特殊说明"）。
+		var attacker string
+		var pd protocol.PlayerInteractionData
+		if json.Unmarshal(ev.Data, &pd) == nil {
+			attacker = pd.Attacker
+		}
+		recordCombatEpisode(ac.as.Store(), agentID, attacker, ev.Location,
+			int64(ac.as.LatestGameTimeSec()), ac.as.LatestDayCount()+1, rt.logger)
 	}
 	// 属性基线（首入口时）：归还时对比战斗期间的属性变化（磨损/疲劳/电量
 	// before→after），作为战术层【战斗结束】hint 与战略层修订原因的事实依据。

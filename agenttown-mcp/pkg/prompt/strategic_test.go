@@ -159,7 +159,7 @@ func TestBuildSharedSystemPrompt_Module3Details(t *testing.T) {
 // 断言随之过时。
 
 func TestBuildStrategicUserContext_EmptyDayContext(t *testing.T) {
-	got := BuildStrategicUserContext("H-01", nil, nil, nil, "", "", 5)
+	got := BuildStrategicUserContext("H-01", nil, nil, nil, "", "", "", 5)
 	if strings.Contains(got, "【今日日程】") {
 		t.Errorf("empty dayContext should not produce 【今日日程】 segment in:\n%s", got)
 	}
@@ -236,7 +236,7 @@ func TestOtherAgentsLine_OmitsProfessionWhenEmpty(t *testing.T) {
 func TestBuildStrategicUserContext_OtherNPCsSegment(t *testing.T) {
 	kb := strategicRosterKB()
 	got := BuildStrategicUserContext("H-01", kb, nil, nil, "",
-		"- 老王（H-02，物流分拣兼加工员）：好感 5/10", 5)
+		"- 老王（H-02，物流分拣兼加工员）：好感 5/10", "", 5)
 	for _, w := range []string{
 		"【其他NPC】（你可以主动找其中某位聊天，维系人际关系）",
 		"- 老王（H-02，物流分拣兼加工员）：好感 5/10",
@@ -246,7 +246,7 @@ func TestBuildStrategicUserContext_OtherNPCsSegment(t *testing.T) {
 		}
 	}
 	// 空串整段省略。
-	if got := BuildStrategicUserContext("H-01", kb, nil, nil, "", "", 5); strings.Contains(got, "【其他NPC】") {
+	if got := BuildStrategicUserContext("H-01", kb, nil, nil, "", "", "", 5); strings.Contains(got, "【其他NPC】") {
 		t.Errorf("empty otherNPCs should omit the segment:\n%s", got)
 	}
 	// system prompt 不得含【其他NPC】（三层严格统一，层专属内容在 user）。
@@ -292,7 +292,7 @@ func buildTestStrategicPrompt() string {
 		TimeOfDay:        "07:00",
 		Zone:             "residential_quarters",
 		Hint:             "早晨例行制定每日日程安排",
-		Context:          BuildStrategicUserContext("H-01", nil, nil, nil, "", "", 5),
+		Context:          BuildStrategicUserContext("H-01", nil, nil, nil, "", "", "", 5),
 		YesterdaySummary: "昨日总结：昨天按计划完成了车间装配。",
 	})
 }
@@ -442,7 +442,7 @@ func TestStrategicSystemPrompt_SocialGoalGate(t *testing.T) {
 }
 
 func TestBuildStrategicUserContext_SocialNeedSegment(t *testing.T) {
-	got := BuildStrategicUserContext("H-01", nil, nil, nil, "", "", 7)
+	got := BuildStrategicUserContext("H-01", nil, nil, nil, "", "", "", 7)
 	if !strings.Contains(got, "【社交需求】7/10") {
 		t.Errorf("strategic user context should contain 【社交需求】7/10:\n%s", got)
 	}

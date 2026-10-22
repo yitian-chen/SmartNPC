@@ -110,6 +110,12 @@ func BuildTactical(in TacticalInput) string {
 			sb.WriteString("\n")
 		}
 	}
+	if in.Commitments != "" {
+		sb.WriteString("【当前需兑现的约定】\n" + in.Commitments)
+		if !strings.HasSuffix(in.Commitments, "\n") {
+			sb.WriteString("\n")
+		}
+	}
 	nearbyLine := NearbyAgentsLine(in.VisibleAgents, in.KB)
 	if nearbyLine == "" && in.KB != nil && in.Relationships == "" {
 		// 附近无可见 NPC 时 fallback 到 KB 静态花名册，让 LLM 始终能看到

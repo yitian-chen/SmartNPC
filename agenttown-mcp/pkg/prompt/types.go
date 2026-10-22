@@ -47,6 +47,9 @@ type TacticalInput struct {
 	// empty = skip segment (single-NPC scenario). Also suppresses the
 	// 【其他NPC】 KB-roster fallback in BuildTactical (redundant roster).
 	Relationships string
+	// Commitments is the formatted pending-commitment list（临近到期/命中眼前人）
+	// for the 【当前需兑现的约定】 segment; empty = skip segment.
+	Commitments string
 	// Events is the safe-point drain of queued non-force world events
 	// (P3-7, §4.4/§5.1 第三输入), pre-rendered via FormatWorldEventList;
 	// empty = skip the 【发生的事件】 segment. Unlike 【全天日程】 it is

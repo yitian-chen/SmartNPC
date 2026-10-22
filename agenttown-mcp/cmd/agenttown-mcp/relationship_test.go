@@ -16,35 +16,6 @@ import (
 	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
 )
 
-// ─── parseRelationshipJudgeResponse ──────────────────────────────
-
-func TestParseRelationshipJudgeResponse_Yes(t *testing.T) {
-	cases := []string{"yes", "Yes", "YES", "yes.", "yes\n", "  yes  "}
-	for _, in := range cases {
-		if got := parseRelationshipJudgeResponse(in); !got {
-			t.Errorf("parseRelationshipJudgeResponse(%q) = false, want true", in)
-		}
-	}
-}
-
-func TestParseRelationshipJudgeResponse_No(t *testing.T) {
-	cases := []string{"no", "No", "n", "negative", "否"}
-	for _, in := range cases {
-		if got := parseRelationshipJudgeResponse(in); got {
-			t.Errorf("parseRelationshipJudgeResponse(%q) = true, want false", in)
-		}
-	}
-}
-
-func TestParseRelationshipJudgeResponse_Garbage(t *testing.T) {
-	cases := []string{"", "   ", "the action is social", "123", "{}"}
-	for _, in := range cases {
-		if got := parseRelationshipJudgeResponse(in); got {
-			t.Errorf("parseRelationshipJudgeResponse(%q) = true, want false (garbage)", in)
-		}
-	}
-}
-
 // ─── formatRelationshipsForPrompt ────────────────────────────────
 
 // relRosterKB is the multi-agent KB fixture for formatRelationshipsForPrompt:
@@ -69,14 +40,14 @@ func TestFormatRelationshipsForPrompt_Empty(t *testing.T) {
 
 // TestFormatRelationshipsForPrompt_DefaultRoster pins the merged rendering:
 // EVERY KB peer appears even with no stored rows (cold start / memory mode)
-// — default affection 5, no 熟悉度/互动 paren, self excluded. Before the
+// — default affinity 50, no 熟悉度/互动 paren, self excluded. Before the
 // merged renderer an empty table silently hid the roster and affection from
 // every layer.
 func TestFormatRelationshipsForPrompt_DefaultRoster(t *testing.T) {
 	got := formatRelationshipsForPrompt(nil, relRosterKB(), nil, "H-01")
 	wantContains := []string{
-		"- 老王（H-02）：好感 5/10",
-		"- 老李（H-03）：好感 5/10",
+		"- 老王（H-02）：好感 50/100",
+		"- 老李（H-03）：好感 50/100",
 	}
 	for _, w := range wantContains {
 		if !contains(got, w) {
@@ -103,25 +74,23 @@ func TestFormatRelationshipsForPrompt_ProfessionFromProfile(t *testing.T) {
 		"H-02": {DisplayName: "老王", Profession: "物流分拣兼加工员"},
 	}
 	got := formatRelationshipsForPrompt(nil, kb, profiles, "H-01")
-	if !contains(got, "- 老王（H-02，物流分拣兼加工员）：好感 5/10") {
+	if !contains(got, "- 老王（H-02，物流分拣兼加工员）：好感 50/100") {
 		t.Errorf("H-02 should carry the profile profession (profile > KB):\n%s", got)
 	}
-	if !contains(got, "- 老李（H-03）：好感 5/10") {
+	if !contains(got, "- 老李（H-03）：好感 50/100") {
 		t.Errorf("H-03 (no profession anywhere) should render name+id only:\n%s", got)
 	}
 }
 
-func TestFormatRelationshipsForPrompt_WithRels(t *testing.T) {
-	rels := []storage.Relationship{
-		{AgentA: "H-01", AgentB: "H-02", Affection: 2},
-		{AgentA: "H-03", AgentB: "H-01", Affection: 0},
+func TestFormatRelationshipsForPrompt_WithPeople(t *testing.T) {
+	people := []storage.Person{
+		{OwnerID: "H-01", TargetID: "H-02", Affinity: 20, Impression: "爱下棋的老邻居"},
+		{OwnerID: "H-01", TargetID: "H-03", Affinity: 0},
 	}
-	got := formatRelationshipsForPrompt(rels, relRosterKB(), nil, "H-01")
-	// First row: H-01 is agent_a, other side is H-02.
-	// Second row: H-01 is agent_b, other side is H-03.
+	got := formatRelationshipsForPrompt(people, relRosterKB(), nil, "H-01")
 	wantContains := []string{
-		"- 老王（H-02）：好感 2/10",
-		"- 老李（H-03）：好感 0/10",
+		"- 老王（H-02）：好感 20/100，印象：爱下棋的老邻居",
+		"- 老李（H-03）：好感 0/100",
 	}
 	for _, w := range wantContains {
 		if !contains(got, w) {
@@ -148,9 +117,9 @@ func indexOf(haystack, needle string) int {
 // ─── seedRelationshipsFromKB ─────────────────────────────────────
 
 // relationshipFakeStore is a minimal Store for relationship.go tests. It
-// captures SeedRelationship calls so tests can assert which rows were seeded.
+// captures SeedPerson calls so tests can assert which people were seeded.
 type relationshipFakeStore struct {
-	seeded  []storage.Relationship // captured seed calls (agentA, agentB, aff)
+	seeded  []storage.Person // captured seed calls (owner, target, affinity)
 	seedErr error
 }
 
@@ -160,10 +129,35 @@ func (s *relationshipFakeStore) LoadScheduleState(_ context.Context, _ string) (
 func (s *relationshipFakeStore) SaveScheduleState(_ context.Context, _ string, _ storage.ScheduleState) error {
 	return nil
 }
-func (s *relationshipFakeStore) SaveMemory(_ context.Context, _ string, _ storage.Memory) (int64, error) {
-	return 0, nil
+func (s *relationshipFakeStore) SaveEpisode(_ context.Context, _ storage.Episode) error {
+	return nil
 }
-func (s *relationshipFakeStore) LoadRecentMemories(_ context.Context, _ string, _ int) ([]storage.Memory, error) {
+func (s *relationshipFakeStore) LoadEpisodes(_ context.Context, _ string, _ storage.EpisodeQuery) ([]storage.Episode, error) {
+	return nil, nil
+}
+func (s *relationshipFakeStore) LoadLatestDailySummary(_ context.Context, _ string) (storage.Episode, error) {
+	return storage.Episode{}, storage.ErrNotFound
+}
+func (s *relationshipFakeStore) SaveCommitment(_ context.Context, _ storage.Commitment) error {
+	return nil
+}
+func (s *relationshipFakeStore) UpdateCommitment(_ context.Context, _ string, _ string, _ int64, _ int64) error {
+	return nil
+}
+func (s *relationshipFakeStore) LoadCommitments(_ context.Context, _ string, _ storage.CommitmentQuery) ([]storage.Commitment, error) {
+	return nil, nil
+}
+func (s *relationshipFakeStore) UpsertPerson(_ context.Context, _ storage.Person, _ int) error {
+	return nil
+}
+func (s *relationshipFakeStore) SeedPerson(_ context.Context, p storage.Person) error {
+	if s.seedErr != nil {
+		return s.seedErr
+	}
+	s.seeded = append(s.seeded, p)
+	return nil
+}
+func (s *relationshipFakeStore) LoadPeople(_ context.Context, _ string) ([]storage.Person, error) {
 	return nil, nil
 }
 func (s *relationshipFakeStore) SaveActionRecord(_ context.Context, _ string, _ storage.ActionRecord) error {
@@ -171,21 +165,6 @@ func (s *relationshipFakeStore) SaveActionRecord(_ context.Context, _ string, _ 
 }
 func (s *relationshipFakeStore) LoadActionHistory(_ context.Context, _ string, _ int) ([]storage.ActionRecord, error) {
 	return nil, nil
-}
-func (s *relationshipFakeStore) SaveRelationship(_ context.Context, _ string, _ string, _ int) error {
-	return nil
-}
-func (s *relationshipFakeStore) LoadRelationships(_ context.Context, _ string, _ int) ([]storage.Relationship, error) {
-	return nil, nil
-}
-func (s *relationshipFakeStore) SeedRelationship(_ context.Context, agentA, agentB string, aff int) error {
-	if s.seedErr != nil {
-		return s.seedErr
-	}
-	s.seeded = append(s.seeded, storage.Relationship{
-		AgentA: agentA, AgentB: agentB, Affection: aff,
-	})
-	return nil
 }
 func (s *relationshipFakeStore) Close() error { return nil }
 
@@ -235,11 +214,11 @@ func TestSeedRelationshipsFromKB_Success(t *testing.T) {
 		t.Fatalf("got %d seeded, want 1", len(store.seeded))
 	}
 	got := store.seeded[0]
-	if got.AgentA != "H-01" || got.AgentB != "H-02" {
-		t.Errorf("seeded %s→%s, want H-01→H-02", got.AgentA, got.AgentB)
+	if got.OwnerID != "H-01" || got.TargetID != "H-02" {
+		t.Errorf("seeded %s→%s, want H-01→H-02", got.OwnerID, got.TargetID)
 	}
-	if got.Affection != 1 {
-		t.Errorf("seeded aff=%d, want aff=1", got.Affection)
+	if got.Affinity != 10 {
+		t.Errorf("seeded affinity=%d, want affinity=10 (KB affection 1 ×10)", got.Affinity)
 	}
 }
 
@@ -260,11 +239,11 @@ func TestSeedRelationshipsFromKB_ReverseDirection(t *testing.T) {
 		t.Fatalf("got %d seeded, want 1", len(store.seeded))
 	}
 	got := store.seeded[0]
-	if got.AgentA != "H-01" || got.AgentB != "H-02" {
-		t.Errorf("reverse: seeded %s→%s, want H-01→H-02 (agentID as agent_a)", got.AgentA, got.AgentB)
+	if got.OwnerID != "H-01" || got.TargetID != "H-02" {
+		t.Errorf("reverse: seeded %s→%s, want H-01→H-02 (agentID as owner)", got.OwnerID, got.TargetID)
 	}
-	if got.Affection != 2 {
-		t.Errorf("reverse: seeded aff=%d, want aff=2", got.Affection)
+	if got.Affinity != 20 {
+		t.Errorf("reverse: seeded affinity=%d, want affinity=20 (KB affection 2 ×10)", got.Affinity)
 	}
 }
 
@@ -286,15 +265,6 @@ func TestSeedRelationshipsFromKB_PartialError(t *testing.T) {
 }
 
 // ─── shouldUpdateRelationship nil-client guard ───────────────────
-
-func TestShouldUpdateRelationship_NilClient(t *testing.T) {
-	// nil Ollama client → false, no panic.
-	got := shouldUpdateRelationship(context.Background(), nil, "ChatWith",
-		map[string]any{"target_agent_id": "H-02"}, "H-02")
-	if got {
-		t.Errorf("nil client = true, want false")
-	}
-}
 
 // TestSeedRelationshipsFromKB_ThreeNPCColdStart 验证 3 NPC 冷启动场景下，
 // 每个 agent 注册时都正确种子涉及自己的所有 KB 关系行。
@@ -318,27 +288,27 @@ func TestSeedRelationshipsFromKB_ThreeNPCColdStart(t *testing.T) {
 
 	cases := []struct {
 		registering string
-		wantSeeded  []storage.Relationship
+		wantSeeded  []storage.Person
 	}{
 		{
 			registering: "H-01",
-			wantSeeded: []storage.Relationship{
-				{AgentA: "H-01", AgentB: "H-02", Affection: 8},
-				{AgentA: "H-01", AgentB: "H-03", Affection: 7},
+			wantSeeded: []storage.Person{
+				{OwnerID: "H-01", TargetID: "H-02", Affinity: 80},
+				{OwnerID: "H-01", TargetID: "H-03", Affinity: 70},
 			},
 		},
 		{
 			registering: "H-02",
-			wantSeeded: []storage.Relationship{
-				{AgentA: "H-02", AgentB: "H-01", Affection: 8},
-				{AgentA: "H-02", AgentB: "H-03", Affection: 6},
+			wantSeeded: []storage.Person{
+				{OwnerID: "H-02", TargetID: "H-01", Affinity: 80},
+				{OwnerID: "H-02", TargetID: "H-03", Affinity: 60},
 			},
 		},
 		{
 			registering: "H-03",
-			wantSeeded: []storage.Relationship{
-				{AgentA: "H-03", AgentB: "H-01", Affection: 7},
-				{AgentA: "H-03", AgentB: "H-02", Affection: 6},
+			wantSeeded: []storage.Person{
+				{OwnerID: "H-03", TargetID: "H-01", Affinity: 70},
+				{OwnerID: "H-03", TargetID: "H-02", Affinity: 60},
 			},
 		},
 	}
@@ -357,58 +327,16 @@ func TestSeedRelationshipsFromKB_ThreeNPCColdStart(t *testing.T) {
 			// 所以 wantSeeded 的顺序应与 KB 中涉及该 agent 的关系出现顺序一致。
 			for i, want := range tc.wantSeeded {
 				got := store.seeded[i]
-				if got.AgentA != want.AgentA || got.AgentB != want.AgentB {
+				if got.OwnerID != want.OwnerID || got.TargetID != want.TargetID {
 					t.Errorf("%s seeded[%d] = %s→%s, want %s→%s",
-						tc.registering, i, got.AgentA, got.AgentB, want.AgentA, want.AgentB)
+						tc.registering, i, got.OwnerID, got.TargetID, want.OwnerID, want.TargetID)
 				}
-				if got.Affection != want.Affection {
-					t.Errorf("%s seeded[%d] aff = %d, want %d",
-						tc.registering, i, got.Affection, want.Affection)
+				if got.Affinity != want.Affinity {
+					t.Errorf("%s seeded[%d] affinity = %d, want %d",
+						tc.registering, i, got.Affinity, want.Affinity)
 				}
 			}
 		})
-	}
-}
-
-// ensure time package is referenced (seedRelationshipsFromKB tests use time
-// only indirectly via storage.Relationship, but keep the import active).
-var _ = time.Time{}
-
-// TestFormatRelationshipsForPrompt_DedupByOtherAgent pins fix #1: when
-// LoadRelationships returns both A→B and B→A rows for the same pair
-// (it queries WHERE agent_a=? OR agent_b=?), the prompt must show only
-// ONE line per other agent — not two lines for the same peer
-// (2026-09-18 仿真实测 duplication).
-func TestFormatRelationshipsForPrompt_DedupByOtherAgent(t *testing.T) {
-	kb := &worldkb.KB{Agents: []worldkb.Agent{
-		{ID: "H-01", DisplayName: "老陈"},
-		{ID: "H-03", DisplayName: "老李"},
-	}}
-	rels := []storage.Relationship{
-		{AgentA: "H-01", AgentB: "H-03", Affection: 0},
-		{AgentA: "H-03", AgentB: "H-01", Affection: 0},
-	}
-	got := formatRelationshipsForPrompt(rels, kb, nil, "H-01")
-	if strings.Count(got, "H-03") != 1 {
-		t.Fatalf("should show exactly one line per other agent, got:\n%s", got)
-	}
-	// 双向时取更高值。
-	rels = []storage.Relationship{
-		{AgentA: "H-01", AgentB: "H-03", Affection: 0},
-		{AgentA: "H-03", AgentB: "H-01", Affection: 2},
-	}
-	got = formatRelationshipsForPrompt(rels, kb, nil, "H-01")
-	if !strings.Contains(got, "好感 2/10") {
-		t.Fatalf("should show the higher values, got:\n%s", got)
-	}
-	// 多个不同 agent 不误并。
-	rels = []storage.Relationship{
-		{AgentA: "H-01", AgentB: "H-02", Affection: 1},
-		{AgentA: "H-01", AgentB: "H-03", Affection: 0},
-	}
-	got = formatRelationshipsForPrompt(rels, relRosterKB(), nil, "H-01")
-	if strings.Count(got, "\n") != 1 {
-		t.Fatalf("two distinct agents → two lines, got:\n%s", got)
 	}
 }
 
@@ -455,18 +383,6 @@ func TestConversationSession_Clear(t *testing.T) {
 	ac.clearConversation()
 	if peer, _ := ac.closeConversationIfIdle(9999); peer != "" {
 		t.Fatalf("cleared session should be empty, got peer=%q", peer)
-	}
-}
-
-func TestParseAffectionDelta(t *testing.T) {
-	if d, err := parseAffectionDelta(`{"delta": 2}`); err != nil || d != 2 {
-		t.Fatalf("parse delta=2: got %d err=%v", d, err)
-	}
-	if d, err := parseAffectionDelta(`{"delta": -3}`); err != nil || d != -3 {
-		t.Fatalf("parse delta=-3: got %d err=%v", d, err)
-	}
-	if _, err := parseAffectionDelta(`not-json`); err == nil {
-		t.Fatal("parse invalid should error")
 	}
 }
 

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -37,15 +38,62 @@ const (
 )
 
 // compactSystemPrompt 是上下文压缩的 system 消息：机制文本，静态可缓存。
-const compactSystemPrompt = `你是小镇居民 NPC 的记忆压缩模块。请把下方多轮决策历史压缩成一段简短的回忆式摘要——写 NPC 亲身经历的事，不是系统日志。
+// 输出从纯文本摘要扩展为「摘要串 + 结构化记忆 JSON」（对齐长期记忆设计
+// 文档 §4.2：一次调用同时产出经历 / 待办 / 对人认知）。
+const compactSystemPrompt = `你是小镇居民 NPC 的记忆压缩模块。请把下方多轮决策历史压缩并抽取，输出一个 JSON 对象（不要 markdown 围栏，不要其他文字）。
+
+{
+  "summary": "不超过200字的回忆式摘要",
+  "episodes": [{"summary":"一句话经历","category":"conversation/combat/action_failed","importance":1-10,"emotion":-1.0~1.0,"participants":["对方id"]}],
+  "new_commitments": [{"kind":"appointment/relay/invitation","counterpart_id":"对方id","counterpart_name":"对方名","content":"待办内容","due_start":游戏秒,"due_end":游戏秒,"due_location":"地点"}],
+  "commitment_changes": [{"id":"已有待办id","action":"done/reschedule/cancel","due_start":游戏秒,"due_end":游戏秒}],
+  "people_updates": [{"target_id":"对方id","affinity_delta":-5~5,"impression":"对他的一句话印象"}]
+}
 
 要求：
-1. 不超过 200 字，纯散文、口语化
-2. 只写三类内容：
-   - 干了什么事（一两句话概括，不要列举每个动作的参数和规则）
-   - 有什么感想或经验（如"老是被玩家骚扰很烦"、"老李这人不错"）
-   - 与谁有过什么互动（人际关系变化）
-3. 不要包含：物理状态数字、日程计划文本、系统提示语（如"路由裁决"、"时段切换"）、分解规则原文`
+1. summary：不超过 200 字，纯散文口语化，只写三类内容（干了什么事 / 有什么感想经验 / 与谁有过什么互动），不含物理状态数字、日程计划文本、系统提示语、分解规则原文。
+2. episodes：只从【新一段历史原文】里抽取新发生的事（0~3 条），不要把旧摘要里已有的经历重复抽出。
+3. new_commitments：只抽取对话里新约定的「未来某时某地要做的事」（约好明天几点下棋、答应帮谁传话、受邀参加活动）。没有新约定就填空数组。时间换算成绝对游戏秒（一天 86400 秒）。
+4. commitment_changes：对话里取消 / 改期 / 履行了某个已有待办时，填对应 id + action（done=已履约、reschedule=改期并给新 due_start/due_end、cancel=取消）。没有就填空数组。
+5. people_updates：对对话中互动的对方，给好感度变化 affinity_delta（-5~+5）与更新后的一句话印象 impression。没有明显变化就填空数组。
+6. 没有的字段填空数组 / 空字符串，不要编造。`
+
+// compactSchema 是 compact 结构化输出的 JSON Schema（Structured Outputs）。
+const compactSchema = `{
+  "type": "object",
+  "properties": {
+    "summary": {"type": "string"},
+    "episodes": {"type": "array", "items": {"type": "object", "properties": {
+      "summary": {"type": "string"},
+      "category": {"type": "string"},
+      "importance": {"type": "integer"},
+      "emotion": {"type": "number"},
+      "participants": {"type": "array", "items": {"type": "string"}}
+    }, "required": ["summary"], "additionalProperties": false}},
+    "new_commitments": {"type": "array", "items": {"type": "object", "properties": {
+      "kind": {"type": "string"},
+      "counterpart_id": {"type": "string"},
+      "counterpart_name": {"type": "string"},
+      "content": {"type": "string"},
+      "due_start": {"type": "integer"},
+      "due_end": {"type": "integer"},
+      "due_location": {"type": "string"}
+    }, "required": ["content"], "additionalProperties": false}},
+    "commitment_changes": {"type": "array", "items": {"type": "object", "properties": {
+      "id": {"type": "string"},
+      "action": {"type": "string"},
+      "due_start": {"type": "integer"},
+      "due_end": {"type": "integer"}
+    }, "required": ["id", "action"], "additionalProperties": false}},
+    "people_updates": {"type": "array", "items": {"type": "object", "properties": {
+      "target_id": {"type": "string"},
+      "affinity_delta": {"type": "integer"},
+      "impression": {"type": "string"}
+    }, "required": ["target_id"], "additionalProperties": false}}
+  },
+  "required": ["summary"],
+  "additionalProperties": false
+}`
 
 // compactUserTemplate 是上下文压缩的首轮 user 消息模板（无历史摘要时）。
 // 占位符：%s = 角色上下文，%s = 按时间顺序渲染的对话历史。
@@ -99,28 +147,29 @@ func (a *agentContext) maybeCompactConversation(system string, tools []venus.Too
 	}
 	defer a.compacting.Store(false)
 
-	newSummary, err := a.summarizeConversation(evict, summary, agentID, kb, profiles, logger)
+	ex, err := a.summarizeConversation(evict, summary, agentID, kb, profiles, logger)
 	if err != nil {
 		logger.Warn("[压缩层] 摘要生成失败，跳过本次压缩（下轮重试）",
 			"agent_id", agentID, "evict_msgs", len(evict), "err", err)
 		return
 	}
-	a.as.CompactConversation(newSummary, tail)
-	// 长期记忆唯一写入时机：compact 把即将逐出的内容抽成摘要，此时才落盘
-	// （不 compact 时内容仍在上下文中，无需写库）。best-effort，失败不阻断
-	// 压缩主流程（persistCompactMemory 内部 5s 超时 + 告警）。
-	persistCompactMemory(a.as.Store(), agentID, newSummary, logger)
+	a.as.CompactConversation(ex.Summary, tail)
+	// 长期记忆唯一写入时机：compact 把即将逐出的内容抽成结构化记忆，此时才
+	// 落盘（不 compact 时内容仍在上下文中，无需写库）。best-effort，失败不
+	// 阻断压缩主流程（persistExtractedMemory 内部 10s 超时 + 告警）。
+	persistExtractedMemory(a.as.Store(), agentID, ex, int64(a.as.LatestGameTimeSec()), a.as.LatestDayCount()+1, logger)
 	logger.Info("[压缩层] 上下文压缩完成",
 		"agent_id", agentID,
 		"before_msgs", len(history), "after_msgs", len(tail),
-		"summary_chars", len(newSummary), "merged", summary != "",
-		"est_tokens", estimateInputTokens(system, tools, newSummary, tail, userContent))
+		"summary_chars", len(ex.Summary), "merged", summary != "",
+		"episodes", len(ex.Episodes), "commitments", len(ex.NewCommitments), "people", len(ex.PeopleUpdates),
+		"est_tokens", estimateInputTokens(system, tools, ex.Summary, tail, userContent))
 }
 
-// summarizeConversation 用战术层模型把 evict 历史压缩成一份摘要串（best-effort，
-// 不 JSON 解析，直接取文本）。prevSummary 非空时走合并式模板——旧摘要与新
-// 历史合并成更新后的摘要，连续压缩不丢更早的内容。
-func (a *agentContext) summarizeConversation(evict []llmtypes.Message, prevSummary, agentID string, kb *worldkb.KB, profiles map[string]*profile.Profile, logger *slog.Logger) (string, error) {
+// summarizeConversation 用战术层模型把 evict 历史压缩 + 抽取为 compactExtract
+// （best-effort）。prevSummary 非空时走合并式模板——旧摘要与新历史合并成更新
+// 后的摘要，连续压缩不丢更早的内容；episodes/commitments/people 只从新历史抽取。
+func (a *agentContext) summarizeConversation(evict []llmtypes.Message, prevSummary, agentID string, kb *worldkb.KB, profiles map[string]*profile.Profile, logger *slog.Logger) (compactExtract, error) {
 	roleCtx := ""
 	if role := prompt.AgentRole(kb, profiles, agentID); role != "" {
 		roleCtx = "【你的角色】\n" + role
@@ -139,7 +188,7 @@ func (a *agentContext) summarizeConversation(evict []llmtypes.Message, prevSumma
 	// 摘要被过早取消。best-effort，失败只是跳过本次压缩。
 	summaryCtx, cancel := context.WithTimeout(context.Background(), compactSummaryTimeout)
 	defer cancel()
-	resp, err := a.tacticalHc.SendWithSummary(summaryCtx, compactSystemPrompt, promptText)
+	resp, err := a.tacticalHc.SendWithSchema(summaryCtx, compactSystemPrompt, promptText, "compact_extract", []byte(compactSchema))
 	// 清掉压缩调用留下的 lastRequestBody——防 dumpLastRequestBody 把
 	// 压缩请求体误记为战术层请求（压缩 user prompt 含完整历史原文，
 	// 在 actual_prompts.md 里会显示为大量重复段）。
@@ -147,20 +196,26 @@ func (a *agentContext) summarizeConversation(evict []llmtypes.Message, prevSumma
 		c.ClearLastRequestBody()
 	}
 	if err != nil {
-		return "", fmt.Errorf("compact llm: %w", err)
+		return compactExtract{}, fmt.Errorf("compact llm: %w", err)
 	}
 	a.tacticalHc.ResetSession()
 
-	summary := strings.TrimSpace(resp.ExtractText())
-	if summary == "" {
-		return "", fmt.Errorf("compact llm: empty summary")
+	raw := strings.TrimSpace(resp.ExtractText())
+	var ex compactExtract
+	if err := json.Unmarshal([]byte(raw), &ex); err != nil {
+		return compactExtract{}, fmt.Errorf("compact parse: %w", err)
 	}
-	if n := len([]rune(summary)); n > compactSummaryMaxChars {
-		summary = string([]rune(summary)[:compactSummaryMaxChars])
+	ex.Summary = strings.TrimSpace(ex.Summary)
+	if ex.Summary == "" {
+		return compactExtract{}, fmt.Errorf("compact llm: empty summary")
+	}
+	if n := len([]rune(ex.Summary)); n > compactSummaryMaxChars {
+		ex.Summary = string([]rune(ex.Summary)[:compactSummaryMaxChars])
 	}
 	logger.Info("[LLM→MCP/COMPACT-RESPONSE]", "agent_id", agentID,
-		"tokens", resp.Usage.TotalTokens, "summary", summary)
-	return summary, nil
+		"tokens", resp.Usage.TotalTokens, "summary", ex.Summary,
+		"episodes", len(ex.Episodes), "commitments", len(ex.NewCommitments), "people", len(ex.PeopleUpdates))
+	return ex, nil
 }
 
 // splitTailRounds 把历史切成 (evict, tail)：保留最后 rounds 轮（以 assistant

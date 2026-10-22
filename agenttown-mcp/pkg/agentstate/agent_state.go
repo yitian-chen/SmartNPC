@@ -201,7 +201,7 @@ func (a *AgentState) SetIdentity(agentID string, store storage.Store) {
 }
 
 // AgentID returns the bound agent identity (empty before SetIdentity).
-// Callers use this to scope store calls (SaveMemory, SaveActionRecord, etc.)
+// Callers use this to scope store calls (SaveEpisode, SaveActionRecord, etc.)
 // without having to thread the agent ID separately.
 func (a *AgentState) AgentID() string {
 	a.mu.Lock()
