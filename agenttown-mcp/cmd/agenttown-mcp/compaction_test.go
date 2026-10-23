@@ -311,3 +311,21 @@ func TestCompactAtDayRollover(t *testing.T) {
 		t.Errorf("summary-only fake should write 0 episodes, got %d", len(store.episodes))
 	}
 }
+
+// TestExtractJSONObject pins the tolerant JSON extraction: markdown fence and
+// leading/trailing prose are stripped, the first {..last } wins; no JSON → the
+// original string is returned (so json.Unmarshal produces the error).
+func TestExtractJSONObject(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{`{"a":1}`, `{"a":1}`},
+		{`{"a":1} : 多余尾巴`, `{"a":1}`},
+		{"```json\n{\"a\":1}\n```", `{"a":1}`},
+		{`前面的散文 {"a":1} 后面的散文`, `{"a":1}`},
+		{`no json here`, `no json here`},
+	}
+	for _, c := range cases {
+		if got := extractJSONObject(c.in); got != c.want {
+			t.Errorf("extractJSONObject(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}

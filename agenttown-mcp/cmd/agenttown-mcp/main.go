@@ -916,8 +916,11 @@ func runPerceptionWorker(
 				ac.compactAtDayRollover(agentID, kb, profiles, logger)
 				// 跨日清空统一 loop 会话历史：每个游戏日一份独立 loop，
 				// 新日的战略轮是 loop 第一轮。跨日记忆走昨日总结（narrative）。
+				// 注意：不清 time_to_stop——在途睡眠动作的 time_to_stop 目标
+				// （game_time_sec 累计秒，次日 07:00）仍有效，必须保持武装，
+				// 否则睡眠动作永不被打断、NPC 冻住在途、战术层从此停摆
+				// （2026-10-23 实测：跨日 ClearTimeStop 后第 2-5 天分解/下发全 0）。
 				ac.as.ClearConversation()
-				ac.as.ClearTimeStop()
 				dayCtx := weeklyschedule.WeeklyLine(newDay, weeklySched)
 				plan := ac.triggerStrategicPlanning(ctx, agentID, kb, profiles, logger, narrative, dayCtx, "早晨例行制定每日日程安排", "07:00")
 				// 不清 currentSlot/actionQueue/currentActionID：让 NPC 睡到睡眠段

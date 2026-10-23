@@ -232,8 +232,11 @@ func (a *agentContext) summarizeConversation(evict []llmtypes.Message, prevSumma
 	a.tacticalHc.ResetSession()
 
 	raw := strings.TrimSpace(resp.ExtractText())
+	// 容忍 markdown 围栏 / 尾随散文：取首个 { 到末个 }（与
+	// parseMemoryGenerationResult 同口径）——venus 偶发在 JSON 后附加散文，
+	// 直接 json.Unmarshal 会报 "invalid character after top-level value"。
 	var ex compactExtract
-	if err := json.Unmarshal([]byte(raw), &ex); err != nil {
+	if err := json.Unmarshal([]byte(extractJSONObject(raw)), &ex); err != nil {
 		return compactExtract{}, fmt.Errorf("compact parse: %w", err)
 	}
 	ex.Summary = strings.TrimSpace(ex.Summary)
@@ -247,6 +250,22 @@ func (a *agentContext) summarizeConversation(evict []llmtypes.Message, prevSumma
 		"tokens", resp.Usage.TotalTokens, "summary", ex.Summary,
 		"episodes", len(ex.Episodes), "commitments", len(ex.NewCommitments), "people", len(ex.PeopleUpdates))
 	return ex, nil
+}
+
+// extractJSONObject 从 LLM 原始输出里取出 JSON 对象子串：容忍 markdown 围栏
+// 与前后散文，定位首个 { 到末个 }。找不到时返回原串（由 json.Unmarshal 报错）。
+func extractJSONObject(raw string) string {
+	s := strings.TrimSpace(raw)
+	s = strings.TrimPrefix(s, "```json")
+	s = strings.TrimPrefix(s, "```")
+	s = strings.TrimSuffix(s, "```")
+	s = strings.TrimSpace(s)
+	start := strings.Index(s, "{")
+	end := strings.LastIndex(s, "}")
+	if start < 0 || end <= start {
+		return raw
+	}
+	return s[start : end+1]
 }
 
 // splitTailRounds 把历史切成 (evict, tail)：保留最后 rounds 轮（以 assistant
