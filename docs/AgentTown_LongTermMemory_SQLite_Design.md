@@ -195,8 +195,7 @@ SQLite 的 `fts5` trigram 全文检索在 MySQL 无对应（MySQL FULLTEXT 需 n
 compact 本就调用一次摘要 LLM（`summarizeConversation` → `compactSystemPrompt`「记忆压缩模块」）。把这次调用的输出从「纯文本摘要串」扩展为「摘要串 + 结构化记忆 JSON」，一次调用同时产出：
 
 1. **抽经历**：把逐出的历史总结成 1~3 条 `episodic_memories`；
-2. **维护待办**：提取新建的约定、改期或取消（`episodic_commitments` 的 insert/update）；
-3. **更新好感度与印象**：对互动涉及的对方给出好感度增量与新的 `impression`。
+2. **更新好感度与印象**：对互动涉及的对方给出好感度增量与新的 `impression`。
 
 **扩展输出 JSON 示例（H-01 与老王对话被 compact 时）**：
 ```json
@@ -204,18 +203,17 @@ compact 本就调用一次摘要 LLM（`summarizeConversation` → `compactSyste
   "episodes": [
     {"summary": "在咖啡馆和老王聊下棋，约好明天（D4）14:00在公园棋桌下棋，并答应帮他转告小李明天去拿扳手。", "importance": 7, "emotion": 0.6, "participants": ["npc_wang"]}
   ],
-  "new_commitments": [
-    {"kind": "appointment", "counterpart_id": "npc_wang", "content": "在公园棋桌和老王下棋", "due_start": 309600, "due_end": 313200, "due_location": "zone_park"},
-    {"kind": "relay", "counterpart_id": "npc_li", "content": "转告小李：老王让他明天去拿扳手", "due_start": 226800, "due_end": 345600, "due_location": ""}
-  ],
-  "commitment_changes": [
-    {"id": "cm_old_01", "action": "reschedule", "due_start": 316800, "due_end": 320400}
-  ],
   "people_updates": [
     {"target_id": "npc_wang", "affinity_delta": 2, "impression": "爱下棋的老邻居，说话算话，最近搬到了B区3号楼，腰不太好。"}
   ]
 }
 ```
+
+### 4.3 对话结束抽取待办（1 次轻量 LLM，及时）
+待办（`episodic_commitments`）**不在 compact 抽取**——compact 要等上下文够长才触发，当天上午的"帮我传话"会拖到日切才落盘，来不及。改为**对话结束时**（speech 回执终局 / idle 超时关会话）调 `extractConversationCommitments` 一次轻量 LLM，把 transcript 抽成 `new_commitments` + `commitment_changes` 落盘。
+
+- **及时**：当天约定当场落盘，不必等日切。
+- **触发重规划**：抽取后若某条新待办的 `due_start` 落在 ≤12 游戏小时内（当天要做），代码调 `maybeStrategicReplan` 重规划剩余时段预留时间（战术层 LLM 不感知 replan）。
 
 > **待办状态不做后台定时扫描，也不在每次战术规划时回写**：读的时候用 SQL 动态过滤——`due_end < now` 且仍 `pending` 的待办，读查询直接忽略（等于已过期）；「已履约」的核销在下次 compact 时由 LLM 抽取完成（这段对话/动作里做了，就标 `done`）。所有写都收敛到 compact 一个入口。
 

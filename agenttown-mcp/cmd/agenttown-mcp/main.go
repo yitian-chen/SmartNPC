@@ -215,6 +215,11 @@ type agentContext struct {
 	// Immutable after construction.
 	physBands prompt.BandThresholds
 
+	// weeklySched is the process-level weekly schedule (7-day cycle), needed
+	// by the strategic replan trigger (extractAndReplanCommitments) to build
+	// the 【今日日程】 day context. nil = disabled. Immutable after construction.
+	weeklySched *weeklyschedule.Schedule
+
 	// Lifecycle (no lock needed — single writer: worker goroutine for cancel,
 	// stop() for stopped flag under coordMu)
 	wake   chan struct{}
@@ -387,6 +392,8 @@ func (a *agentContext) recordActionCompletion(completion protocol.ActionComplete
 					lg.Info("[对话层] speech 回执对话终局，立即注入守约 hint",
 						"agent_id", agentID, "peer", peer, "turns", len(turns), "reason", completion.Reason)
 				}
+				// 对话结束时抽取待办（当天约定及时落盘），临近到期的触发战略重规划。
+				go a.extractAndReplanCommitments(context.Background(), agentID, peer, turns, kb, profiles, lg)
 			}
 		}
 	}
@@ -888,6 +895,8 @@ func runPerceptionWorker(
 				logger.Info("[对话层] 对话已结束，注入守约 hint",
 					"agent_id", agentID, "peer", peer, "turns", len(turns))
 			}
+			// 对话结束时抽取待办，临近到期的触发战略重规划（当天约定预留时间）。
+			go ac.extractAndReplanCommitments(ctx, agentID, peer, turns, kb, profiles, logger)
 		}
 
 		// 多日循环：检测 day_count 递增（跨日），重新调用战略层生成新一天的 dailyPlan。
@@ -1990,6 +1999,7 @@ func main() {
 		// per-NPC 物理属性分段阈值（profile ## 属性分段）：反应层告警跨越检测、
 		// 强制 replan、战术层恢复约束共用，保证 LLM 文本与代码行为一致。
 		ac.physBands = prompt.BandThresholdsFor(profiles, id)
+		ac.weeklySched = weeklySched
 		if err := ac.as.LoadPersistent(ctx); err != nil {
 			logger.Warn("[main] load persistent state failed, continuing with cold start",
 				"agent_id", id, "err", err)

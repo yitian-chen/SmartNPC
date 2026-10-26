@@ -38,25 +38,22 @@ const (
 )
 
 // compactSystemPrompt 是上下文压缩的 system 消息：机制文本，静态可缓存。
-// 输出从纯文本摘要扩展为「摘要串 + 结构化记忆 JSON」（对齐长期记忆设计
-// 文档 §4.2：一次调用同时产出经历 / 待办 / 对人认知）。
+// 输出为「摘要串 + 结构化记忆 JSON」——经历（episodes）+ 对人认知
+// （people_updates）。待办（commitments）不在 compact 抽取（由对话结束时
+// extractConversationCommitments 及时抽取）。
 const compactSystemPrompt = `你是小镇居民 NPC 的记忆压缩模块。请把下方多轮决策历史压缩并抽取，输出一个 JSON 对象（不要 markdown 围栏，不要其他文字）。
 
 {
   "summary": "不超过200字的回忆式摘要",
   "episodes": [{"summary":"一句话经历","category":"conversation/combat","importance":1-10,"emotion":-1.0~1.0,"participants":["对方id"]}],
-  "new_commitments": [{"kind":"appointment/relay/invitation","counterpart_id":"对方id","counterpart_name":"对方名","content":"待办内容","due_start":游戏秒,"due_end":游戏秒,"due_location":"地点"}],
-  "commitment_changes": [{"id":"已有待办id","action":"done/reschedule/cancel","due_start":游戏秒,"due_end":游戏秒}],
   "people_updates": [{"target_id":"对方id","affinity_delta":-5~5,"impression":"对他的一句话印象"}]
 }
 
 要求：
 1. summary：不超过 200 字，纯散文口语化，只写三类内容（干了什么事 / 有什么感想经验 / 与谁有过什么互动），不含物理状态数字、日程计划文本、系统提示语、分解规则原文。
 2. episodes：只从【新一段历史原文】里抽取新发生的事（0~3 条），不要把旧摘要里已有的经历重复抽出。category 只用 conversation（普通日常活动/对话经历）或 combat（受袭），工作/休息/运动等日常经历一律 conversation。
-3. new_commitments：只抽取对话里新约定的「未来某时某地要做的事」（约好明天几点下棋、答应帮谁传话、受邀参加活动）。没有新约定就填空数组。时间换算成绝对游戏秒（一天 86400 秒）：以【当前游戏时间】为基准，如"3天后下午4点" = 当前 + 3×86400 并调整到当天 16:00；"明天上午" = 当前 + 86400 并调整到当天 08:00。相对时间必须换算成绝对秒，不要直接填 0 或当天时刻。
-4. commitment_changes：对话里取消 / 改期 / 履行了某个已有待办时，填对应 id + action（done=已履约、reschedule=改期并给新 due_start/due_end、cancel=取消）。没有就填空数组。
-5. people_updates：对对话中互动的对方，给好感度变化 affinity_delta（-5~+5）与更新后的一句话印象 impression。没有明显变化就填空数组。
-6. 没有的字段填空数组 / 空字符串，不要编造。`
+3. people_updates：对对话中互动的对方，给好感度变化 affinity_delta（-5~+5）与更新后的一句话印象 impression。没有明显变化就填空数组。
+4. 没有的字段填空数组 / 空字符串，不要编造。`
 
 // compactSchema 是 compact 结构化输出的 JSON Schema（Structured Outputs）。
 const compactSchema = `{
@@ -70,21 +67,6 @@ const compactSchema = `{
       "emotion": {"type": "number"},
       "participants": {"type": "array", "items": {"type": "string"}}
     }, "required": ["summary"], "additionalProperties": false}},
-    "new_commitments": {"type": "array", "items": {"type": "object", "properties": {
-      "kind": {"type": "string"},
-      "counterpart_id": {"type": "string"},
-      "counterpart_name": {"type": "string"},
-      "content": {"type": "string"},
-      "due_start": {"type": "integer"},
-      "due_end": {"type": "integer"},
-      "due_location": {"type": "string"}
-    }, "required": ["content"], "additionalProperties": false}},
-    "commitment_changes": {"type": "array", "items": {"type": "object", "properties": {
-      "id": {"type": "string"},
-      "action": {"type": "string"},
-      "due_start": {"type": "integer"},
-      "due_end": {"type": "integer"}
-    }, "required": ["id", "action"], "additionalProperties": false}},
     "people_updates": {"type": "array", "items": {"type": "object", "properties": {
       "target_id": {"type": "string"},
       "affinity_delta": {"type": "integer"},
@@ -120,7 +102,7 @@ const compactMergeUserTemplate = `[压缩层/上下文压缩] 此前已有一份
 %s`
 
 // compactAtDayRollover 在日切清空会话历史前，把当天对话历史做一次 compact
-// 抽取（episodes/commitments/people）并落盘。解决「写只在 compact」在低活动日
+// 抽取（episodes/people）并落盘。解决「写只在 compact」在低活动日
 // 不落盘的问题：中途历史不足 compactTriggerTokens 未触发 compact 时，当天
 // 经历与约定会随 ClearConversation 一起丢失——日切强制抽取一次，兜住这个窗口。
 //
@@ -147,7 +129,7 @@ func (a *agentContext) compactAtDayRollover(agentID string, kb *worldkb.KB, prof
 		int64(a.as.LatestGameTimeSec()), a.as.LatestDayCount()+1, logger)
 	logger.Info("[压缩层] 日切 compact 抽取完成",
 		"agent_id", agentID, "history_msgs", len(history),
-		"episodes", len(ex.Episodes), "commitments", len(ex.NewCommitments), "people", len(ex.PeopleUpdates))
+		"episodes", len(ex.Episodes), "people", len(ex.PeopleUpdates))
 }
 
 // maybeCompactConversation 估算本次请求输入 token，超阈值时把旧历史摘要
@@ -193,13 +175,13 @@ func (a *agentContext) maybeCompactConversation(system string, tools []venus.Too
 		"agent_id", agentID,
 		"before_msgs", len(history), "after_msgs", len(tail),
 		"summary_chars", len(ex.Summary), "merged", summary != "",
-		"episodes", len(ex.Episodes), "commitments", len(ex.NewCommitments), "people", len(ex.PeopleUpdates),
+		"episodes", len(ex.Episodes), "people", len(ex.PeopleUpdates),
 		"est_tokens", estimateInputTokens(system, tools, ex.Summary, tail, userContent))
 }
 
 // summarizeConversation 用战术层模型把 evict 历史压缩 + 抽取为 compactExtract
 // （best-effort）。prevSummary 非空时走合并式模板——旧摘要与新历史合并成更新
-// 后的摘要，连续压缩不丢更早的内容；episodes/commitments/people 只从新历史抽取。
+// 后的摘要，连续压缩不丢更早的内容；episodes/people 只从新历史抽取。
 func (a *agentContext) summarizeConversation(evict []llmtypes.Message, prevSummary, agentID string, kb *worldkb.KB, profiles map[string]*profile.Profile, logger *slog.Logger) (compactExtract, error) {
 	roleCtx := ""
 	if role := prompt.AgentRole(kb, profiles, agentID); role != "" {
@@ -255,7 +237,7 @@ func (a *agentContext) summarizeConversation(evict []llmtypes.Message, prevSumma
 	}
 	logger.Info("[LLM→MCP/COMPACT-RESPONSE]", "agent_id", agentID,
 		"tokens", resp.Usage.TotalTokens, "summary", ex.Summary,
-		"episodes", len(ex.Episodes), "commitments", len(ex.NewCommitments), "people", len(ex.PeopleUpdates))
+		"episodes", len(ex.Episodes), "people", len(ex.PeopleUpdates))
 	return ex, nil
 }
 

@@ -157,13 +157,13 @@ func generateDailyMemories(
 // ─── compact 结构化记忆抽取 ─────────────────────────────
 
 // compactExtract 是 compact 摘要 LLM 的结构化输出：滚动摘要串 + 结构化记忆
-// （经历 / 待办 / 对人认知），一次调用同时产出，写路径据此落三张表。
+// （经历 / 对人认知），一次调用同时产出，写路径据此落 episodic_memories /
+// semantic_people。待办（commitments）不再在 compact 抽取——它们由对话结束时
+// 的 extractConversationCommitments 及时抽取（见下）。
 type compactExtract struct {
-	Summary           string             `json:"summary"`
-	Episodes          []compactEpisode    `json:"episodes"`
-	NewCommitments    []compactCommitment `json:"new_commitments"`
-	CommitmentChanges []compactCmChange   `json:"commitment_changes"`
-	PeopleUpdates     []compactPersonUpd  `json:"people_updates"`
+	Summary       string            `json:"summary"`
+	Episodes      []compactEpisode   `json:"episodes"`
+	PeopleUpdates []compactPersonUpd `json:"people_updates"`
 }
 
 type compactEpisode struct {
@@ -174,6 +174,8 @@ type compactEpisode struct {
 	Participants []string `json:"participants"`
 }
 
+// compactCommitment / compactCmChange 供对话结束的 commitment 抽取复用（原为
+// compact 的 new_commitments / commitment_changes，现已移到对话结束路径）。
 type compactCommitment struct {
 	Kind            string `json:"kind"`
 	CounterpartID   string `json:"counterpart_id"`
@@ -242,7 +244,40 @@ func persistExtractedMemory(store storage.Store, agentID string, ex compactExtra
 		}
 	}
 
-	for _, cm := range ex.NewCommitments {
+	for _, pu := range ex.PeopleUpdates {
+		if pu.TargetID == "" {
+			continue
+		}
+		p := storage.Person{
+			OwnerID:          agentID,
+			TargetID:         pu.TargetID,
+			Impression:       pu.Impression,
+			LastInteractTime: gameTime,
+		}
+		if err := store.UpsertPerson(ctx, p, pu.AffinityDelta); err != nil {
+			logger.Warn("[记忆层] compact 好感度更新失败", "agent_id", agentID, "target", pu.TargetID, "err", err)
+		}
+	}
+
+	if len(ex.Episodes)+len(ex.PeopleUpdates) > 0 {
+		logger.Debug("[记忆层] compact 结构化记忆已落盘",
+			"agent_id", agentID, "episodes", len(ex.Episodes),
+			"people", len(ex.PeopleUpdates))
+	}
+}
+
+// persistCommitments 把对话结束抽取的待办落盘（新建 + 核销/改期/取消）。返回
+// 新建的 commitment（供调用方判断是否触发战略层重规划）。best-effort，store
+// 为 nil 时返回 nil。
+func persistCommitments(store storage.Store, agentID string, news []compactCommitment, changes []compactCmChange, gameTime int64, logger *slog.Logger) []storage.Commitment {
+	if store == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var created []storage.Commitment
+	for _, cm := range news {
 		if cm.Content == "" {
 			continue
 		}
@@ -264,11 +299,13 @@ func persistExtractedMemory(store storage.Store, agentID string, ex compactExtra
 			CreatedTime:     gameTime,
 		}
 		if err := store.SaveCommitment(ctx, c); err != nil {
-			logger.Warn("[记忆层] compact 待办落盘失败", "agent_id", agentID, "err", err)
+			logger.Warn("[记忆层] 对话结束待办落盘失败", "agent_id", agentID, "err", err)
+			continue
 		}
+		created = append(created, c)
 	}
 
-	for _, ch := range ex.CommitmentChanges {
+	for _, ch := range changes {
 		if ch.ID == "" {
 			continue
 		}
@@ -286,30 +323,92 @@ func persistExtractedMemory(store storage.Store, agentID string, ex compactExtra
 			continue
 		}
 		if err := store.UpdateCommitment(ctx, ch.ID, status, dueStart, dueEnd); err != nil {
-			logger.Warn("[记忆层] compact 待办核销失败", "agent_id", agentID, "id", ch.ID, "err", err)
+			logger.Warn("[记忆层] 对话结束待办核销失败", "agent_id", agentID, "id", ch.ID, "err", err)
 		}
 	}
+	return created
+}
 
-	for _, pu := range ex.PeopleUpdates {
-		if pu.TargetID == "" {
-			continue
-		}
-		p := storage.Person{
-			OwnerID:          agentID,
-			TargetID:         pu.TargetID,
-			Impression:       pu.Impression,
-			LastInteractTime: gameTime,
-		}
-		if err := store.UpsertPerson(ctx, p, pu.AffinityDelta); err != nil {
-			logger.Warn("[记忆层] compact 好感度更新失败", "agent_id", agentID, "target", pu.TargetID, "err", err)
-		}
-	}
+// conversationCommitmentSystemPrompt / Schema 是对话结束待办抽取的 system 与
+// 结构化输出 schema。只抽「未来要做的具体事」，即时寒暄不抽。
+const conversationCommitmentSystemPrompt = `你是 NPC 待办抽取模块。用户信息给出 NPC 的人设、当前游戏时间、以及刚结束的一段对话记录。请从中抽取「未来某时某地要做的事」（约好做某事 / 答应帮谁传话 / 受邀参加活动），以及对话中对已有待办的核销/改期/取消。
 
-	if len(ex.Episodes)+len(ex.NewCommitments)+len(ex.PeopleUpdates) > 0 {
-		logger.Debug("[记忆层] compact 结构化记忆已落盘",
-			"agent_id", agentID, "episodes", len(ex.Episodes),
-			"commitments", len(ex.NewCommitments), "people", len(ex.PeopleUpdates))
+输出一个 JSON 对象（不要 markdown 围栏，不要其他文字）：
+{
+  "new_commitments": [{"kind":"appointment/relay/invitation","counterpart_id":"对方id","counterpart_name":"对方名","content":"待办内容","due_start":游戏秒,"due_end":游戏秒,"due_location":"地点"}],
+  "commitment_changes": [{"id":"已有待办id","action":"done/reschedule/cancel","due_start":游戏秒,"due_end":游戏秒}]
+}
+
+要求：
+1. 只抽取「未来要做的具体事」，即时性寒暄/闲聊/情绪表达不抽。
+2. due_start/due_end 是绝对游戏秒（一天 86400 秒）。以【当前游戏时间】为基准换算："3天后下午4点" = 当前 + 3×86400 并调整到 16:00；"明天上午" = 当前 + 86400 并调整到 08:00。相对时间必须换算成绝对秒，不要填 0。
+3. 只有对话里明确取消/改期/履行了某个已有待办，才填 commitment_changes（id 是已有待办的 id）；否则空数组。
+4. 没有就填空数组，不要编造。`
+
+const conversationCommitmentSchema = `{
+  "type": "object",
+  "properties": {
+    "new_commitments": {"type": "array", "items": {"type": "object", "properties": {
+      "kind": {"type": "string"},
+      "counterpart_id": {"type": "string"},
+      "counterpart_name": {"type": "string"},
+      "content": {"type": "string"},
+      "due_start": {"type": "integer"},
+      "due_end": {"type": "integer"},
+      "due_location": {"type": "string"}
+    }, "required": ["content"], "additionalProperties": false}},
+    "commitment_changes": {"type": "array", "items": {"type": "object", "properties": {
+      "id": {"type": "string"},
+      "action": {"type": "string"},
+      "due_start": {"type": "integer"},
+      "due_end": {"type": "integer"}
+    }, "required": ["id", "action"], "additionalProperties": false}}
+  },
+  "required": ["new_commitments", "commitment_changes"],
+  "additionalProperties": false
+}`
+
+// conversationCommitmentExtract 是对话结束待办抽取的结果。
+type conversationCommitmentExtract struct {
+	NewCommitments    []compactCommitment `json:"new_commitments"`
+	CommitmentChanges []compactCmChange   `json:"commitment_changes"`
+}
+
+// extractConversationCommitments 在对话结束时把 transcript 抽成待办（新建 +
+// 核销/改期/取消）落盘，返回新建的 commitment。这是待办的唯一及时写入时机——
+// 当天约定（如"下午帮我传话"）不必等到日切 compact 才被抽到。失败/无对话时
+// 返回 nil。
+func (a *agentContext) extractConversationCommitments(ctx context.Context, agentID, peerID string, turns []conversationTurn, kb *worldkb.KB, profiles map[string]*profile.Profile, logger *slog.Logger) []storage.Commitment {
+	if a.strategicHc == nil || a.as.Store() == nil || len(turns) == 0 {
+		return nil
 	}
+	gameTime := int64(a.as.LatestGameTimeSec())
+	gameDay := a.as.LatestDayCount() + 1
+	tod := gameTime % 86400
+
+	roleCtx := prompt.AgentRole(kb, profiles, agentID)
+	transcript := renderConversationTurnsFor(agentID, turns, kb)
+	user := fmt.Sprintf("【你的角色】\n%s\n\n【当前游戏时间】D%d %02d:%02d\n\n【刚结束的对话记录】\n%s\n\n请抽取这段对话中的未来待办（约定/传话/受邀）与待办核销。",
+		roleCtx, gameDay, tod/3600, (tod%3600)/60, transcript)
+
+	exCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	resp, err := a.strategicHc.SendWithSchema(exCtx, conversationCommitmentSystemPrompt, user, "conversation_commitments", []byte(conversationCommitmentSchema))
+	if err != nil {
+		logger.Warn("[记忆层] 对话结束待办抽取调用失败", "agent_id", agentID, "peer", peerID, "err", err)
+		return nil
+	}
+	raw := strings.TrimSpace(resp.ExtractText())
+	var ex conversationCommitmentExtract
+	if err := json.Unmarshal([]byte(extractJSONObject(raw)), &ex); err != nil {
+		logger.Warn("[记忆层] 对话结束待办解析失败", "agent_id", agentID, "peer", peerID, "raw", truncateText(raw, 120), "err", err)
+		return nil
+	}
+	created := persistCommitments(a.as.Store(), agentID, ex.NewCommitments, ex.CommitmentChanges, gameTime, logger)
+	if len(created) > 0 {
+		logger.Info("[记忆层] 对话结束待办已落盘", "agent_id", agentID, "peer", peerID, "commitments", len(created))
+	}
+	return created
 }
 
 // clampInt / clampFloat 夹紧数值到 [lo, hi]。

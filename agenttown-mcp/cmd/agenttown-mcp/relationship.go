@@ -363,3 +363,26 @@ func conversationEndedHint(agentID, peer string, turns []conversationTurn, kb *w
 		"若你的邀请被婉拒或双方只是寒暄/告别，回到当前时段目标的原有日程。")
 	return sb.String()
 }
+
+// extractAndReplanCommitments 在对话结束时异步抽取待办，若其中有待办临近到期
+// （≤12 游戏小时，即"当天"要做）则触发战略层重规划预留时间。这是"当天传话/
+// 当天约定"的代码触发口——commitment 由对话结束及时抽出（不必等日切 compact），
+// 临近到期的由代码裁决触发 replan，战术层 LLM 无需感知 replan。
+func (a *agentContext) extractAndReplanCommitments(ctx context.Context, agentID, peerID string, turns []conversationTurn, kb *worldkb.KB, profiles map[string]*profile.Profile, logger *slog.Logger) {
+	if len(turns) == 0 {
+		return
+	}
+	created := a.extractConversationCommitments(ctx, agentID, peerID, turns, kb, profiles, logger)
+	if len(created) == 0 {
+		return
+	}
+	gameTime := int64(a.as.LatestGameTimeSec())
+	for _, c := range created {
+		if c.DueStart > 0 && c.DueStart <= gameTime+12*3600 {
+			// ws 是 maybeStrategicReplan 的遗留参数（内部从未使用），传 nil。
+			a.maybeStrategicReplan(ctx, agentID, nil, kb, profiles, a.weeklySched, logger,
+				"新约定需要预留时间："+c.Content)
+			return
+		}
+	}
+}

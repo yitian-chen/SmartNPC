@@ -182,16 +182,14 @@ func TestGenerateDailyMemories_Success(t *testing.T) {
 }
 
 // TestPersistExtractedMemory verifies the compact structured-extraction write:
-// episodes + new_commitments + people_updates land in the three tables.
+// episodes + people_updates land in the two tables (commitments are now
+// extracted at conversation close via persistCommitments, not compact).
 func TestPersistExtractedMemory(t *testing.T) {
 	store := &memoryFakeStore{}
 	ex := compactExtract{
 		Summary: "在咖啡馆和老王下棋",
 		Episodes: []compactEpisode{
 			{Summary: "在咖啡馆和老王聊下棋", Category: "conversation", Importance: 7, Emotion: 0.6, Participants: []string{"npc_wang"}},
-		},
-		NewCommitments: []compactCommitment{
-			{Kind: "appointment", CounterpartID: "npc_wang", Content: "在公园棋桌和老王下棋", DueStart: 309600, DueEnd: 313200, DueLocation: "zone_park"},
 		},
 		PeopleUpdates: []compactPersonUpd{
 			{TargetID: "npc_wang", AffinityDelta: 2, Impression: "爱下棋的老邻居"},
@@ -201,14 +199,33 @@ func TestPersistExtractedMemory(t *testing.T) {
 	if len(store.episodes) != 1 || store.episodes[0].Category != "conversation" {
 		t.Errorf("episodes = %+v, want 1 conversation", store.episodes)
 	}
-	if len(store.commitments) != 1 || store.commitments[0].Kind != "appointment" {
-		t.Errorf("commitments = %+v, want 1 appointment", store.commitments)
-	}
 	if len(store.people) != 1 || store.people[0].TargetID != "npc_wang" {
 		t.Errorf("people = %+v, want npc_wang", store.people)
 	}
 	// nil store → no-op。
 	persistExtractedMemory(nil, "H-01", ex, 226800, 3, slog.Default())
+}
+
+// TestPersistCommitments verifies the conversation-close commitment write:
+// new commitments land in episodic_commitments, and the created list is returned.
+func TestPersistCommitments(t *testing.T) {
+	store := &memoryFakeStore{}
+	created := persistCommitments(store, "H-01",
+		[]compactCommitment{
+			{Kind: "appointment", CounterpartID: "npc_wang", Content: "在公园棋桌和老王下棋", DueStart: 309600, DueEnd: 313200, DueLocation: "zone_park"},
+		},
+		[]compactCmChange{{ID: "cm_old", Action: "done"}},
+		226800, slog.Default())
+	if len(created) != 1 || created[0].Kind != "appointment" {
+		t.Errorf("created = %+v, want 1 appointment", created)
+	}
+	if len(store.commitments) != 1 || store.commitments[0].Content != "在公园棋桌和老王下棋" {
+		t.Errorf("commitments = %+v, want the appointment", store.commitments)
+	}
+	// nil store → nil。
+	if got := persistCommitments(nil, "H-01", nil, nil, 0, slog.Default()); got != nil {
+		t.Errorf("nil store = %v, want nil", got)
+	}
 }
 
 // ─── memoryFakeStore: in-memory Store for memory tests ────────────────
