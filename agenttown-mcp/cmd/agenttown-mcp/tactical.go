@@ -205,6 +205,8 @@ func generateTacticalPlan(
 		counterpartIDs = append(counterpartIDs, v.ID)
 	}
 	commitments := ac.loadCommitmentsNearby(ctx, agentID, counterpartIDs)
+	// 可分享的公开消息（【可分享的消息】）：pending invitation 待办，供口口相传。
+	shareable := ac.loadShareableCommitments(ctx, agentID)
 	promptText := prompt.BuildTactical(prompt.TacticalInput{
 		Goal:               goal,
 		Zone:               zone,
@@ -219,6 +221,7 @@ func generateTacticalPlan(
 		Memories:           memories,
 		Relationships:      relationships,
 		Commitments:        commitments,
+		Shareable:          shareable,
 		Events:             prompt.FormatWorldEventList(worldEvents),
 		Situations:         situations,
 		Conversation:       conversation,

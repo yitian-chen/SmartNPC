@@ -531,6 +531,11 @@ func (a *agentContext) loadCommitmentsUpcoming(ctx context.Context, agentID stri
 	return newMemoryReader(a.as.Store()).commitmentsUpcoming(ctx, agentID, int64(a.as.LatestGameTimeSec()), 24*3600)
 }
 
+// loadShareableCommitments 返回战术层【可分享的消息】（pending invitation 待办）。
+func (a *agentContext) loadShareableCommitments(ctx context.Context, agentID string) string {
+	return newMemoryReader(a.as.Store()).shareableCommitments(ctx, agentID, int64(a.as.LatestGameTimeSec()))
+}
+
 // advanceSlotIfNeeded 检查当前 game_time 是否已超出 currentSlot 结束时间。
 // P3-8 入队化：检测到 slot 过期时**不强切**——只标记 slotSwitchPending +
 // 清 currentSlot（让 selectCurrentGoal 选新 slot），不打断当前动作、不清队列。

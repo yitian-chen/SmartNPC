@@ -134,6 +134,38 @@ func (r *memoryReader) commitmentsUpcoming(ctx context.Context, ownerID string, 
 	return strings.TrimSuffix(sb.String(), "\n")
 }
 
+// shareableCommitments 返回可分享的公开消息（pending 的 invitation 类待办，
+// 如生日会/聚会），供战术层【可分享的消息】注入——NPC 与人聊天时可主动告知
+// 对方，实现口口相传。读时按 due_end >= gameTime 过滤过期，无此类待办返回空串。
+func (r *memoryReader) shareableCommitments(ctx context.Context, ownerID string, gameTime int64) string {
+	if r.store == nil {
+		return ""
+	}
+	cms, err := r.store.LoadCommitments(ctx, ownerID, storage.CommitmentQuery{
+		Status:    "pending",
+		DueEndMin: gameTime, // 不过期
+	})
+	if err != nil {
+		slog.Default().Warn("[记忆层] 加载可分享消息失败", "agent_id", ownerID, "err", err)
+		return ""
+	}
+	var out []storage.Commitment
+	for _, c := range cms {
+		if c.Kind == "invitation" {
+			out = append(out, c)
+		}
+	}
+	if len(out) == 0 {
+		return ""
+	}
+	var sb strings.Builder
+	for _, c := range out {
+		sb.WriteString(commitmentLine(c, gameTime))
+		sb.WriteString("\n")
+	}
+	return strings.TrimSuffix(sb.String(), "\n")
+}
+
 // commitmentLine 渲染一条待办："- [kind] content（D3 14:00~15:00 @地点）"。
 func commitmentLine(c storage.Commitment, gameTime int64) string {
 	kindLabel := map[string]string{

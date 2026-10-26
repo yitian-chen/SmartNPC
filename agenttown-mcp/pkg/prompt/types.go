@@ -50,6 +50,10 @@ type TacticalInput struct {
 	// Commitments is the formatted pending-commitment list（临近到期/命中眼前人）
 	// for the 【当前需兑现的约定】 segment; empty = skip segment.
 	Commitments string
+	// Shareable is the formatted shareable-public-event list（pending invitation
+	// 待办，如生日会/聚会）for the 【可分享的消息】 segment——NPC 与人聊天时可
+	// 主动告知对方，实现口口相传; empty = skip segment.
+	Shareable string
 	// Events is the safe-point drain of queued non-force world events
 	// (P3-7, §4.4/§5.1 第三输入), pre-rendered via FormatWorldEventList;
 	// empty = skip the 【发生的事件】 segment. Unlike 【全天日程】 it is

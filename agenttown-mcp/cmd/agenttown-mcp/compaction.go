@@ -53,7 +53,7 @@ const compactSystemPrompt = `你是小镇居民 NPC 的记忆压缩模块。请�
 要求：
 1. summary：不超过 200 字，纯散文口语化，只写三类内容（干了什么事 / 有什么感想经验 / 与谁有过什么互动），不含物理状态数字、日程计划文本、系统提示语、分解规则原文。
 2. episodes：只从【新一段历史原文】里抽取新发生的事（0~3 条），不要把旧摘要里已有的经历重复抽出。category 只用 conversation（普通日常活动/对话经历）或 combat（受袭），工作/休息/运动等日常经历一律 conversation。
-3. new_commitments：只抽取对话里新约定的「未来某时某地要做的事」（约好明天几点下棋、答应帮谁传话、受邀参加活动）。没有新约定就填空数组。时间换算成绝对游戏秒（一天 86400 秒）。
+3. new_commitments：只抽取对话里新约定的「未来某时某地要做的事」（约好明天几点下棋、答应帮谁传话、受邀参加活动）。没有新约定就填空数组。时间换算成绝对游戏秒（一天 86400 秒）：以【当前游戏时间】为基准，如"3天后下午4点" = 当前 + 3×86400 并调整到当天 16:00；"明天上午" = 当前 + 86400 并调整到当天 08:00。相对时间必须换算成绝对秒，不要直接填 0 或当天时刻。
 4. commitment_changes：对话里取消 / 改期 / 履行了某个已有待办时，填对应 id + action（done=已履约、reschedule=改期并给新 due_start/due_end、cancel=取消）。没有就填空数组。
 5. people_updates：对对话中互动的对方，给好感度变化 affinity_delta（-5~+5）与更新后的一句话印象 impression。没有明显变化就填空数组。
 6. 没有的字段填空数组 / 空字符串，不要编造。`
@@ -204,6 +204,13 @@ func (a *agentContext) summarizeConversation(evict []llmtypes.Message, prevSumma
 	roleCtx := ""
 	if role := prompt.AgentRole(kb, profiles, agentID); role != "" {
 		roleCtx = "【你的角色】\n" + role
+	}
+	// 注入当前游戏时间：让 LLM 把「3天后下午4点」这类相对时间可靠换算成
+	// 绝对游戏秒（due_start/due_end），而不是从散落的历史里自己推。
+	if gs := a.as.LatestGameTimeSec(); gs > 0 {
+		day := a.as.LatestDayCount() + 1 // 1-based 游戏日
+		tod := int64(gs) % 86400
+		roleCtx += fmt.Sprintf("\n【当前游戏时间】D%d %02d:%02d", day, tod/3600, (tod%3600)/60)
 	}
 	var promptText string
 	if prevSummary != "" {
