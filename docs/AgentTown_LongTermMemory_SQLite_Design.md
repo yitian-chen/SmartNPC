@@ -214,6 +214,13 @@ compact 本就调用一次摘要 LLM（`summarizeConversation` → `compactSyste
 
 - **及时**：当天约定当场落盘，不必等日切。
 - **触发重规划**：抽取后若某条新待办的 `due_start` 落在 ≤12 游戏小时内（当天要做），代码调 `maybeStrategicReplan` 重规划剩余时段预留时间（战术层 LLM 不感知 replan）。
+- **时间用「日 + HH:MM」抽取，不用绝对秒**（2026-10-26 生日派对实测修正）：LLM 输出
+  `due_start_day` / `due_start_time`（如 `"明天下午四点"` → `day=2, time="16:00"`），
+  由 `dayTimeToGameSec` 换算成累计游戏秒存 `due_start`。让 LLM 算「一天 86400 秒」的
+  累计秒不可靠——实测会输出 Unix 墙钟秒或瞎猜整数，导致约定时间全错、没人赴约。
+- **kind 语义区分**（避免寿星身份混淆）：`invitation`=别人办的公开活动、你受邀参加
+  （`counterpart_id` 填寿星）；`todo`=你自己主持的活动；`appointment`=约好一起做某事；
+  `relay`=答应帮谁传话。
 
 > **待办状态不做后台定时扫描，也不在每次战术规划时回写**：读的时候用 SQL 动态过滤——`due_end < now` 且仍 `pending` 的待办，读查询直接忽略（等于已过期）；「已履约」的核销在下次 compact 时由 LLM 抽取完成（这段对话/动作里做了，就标 `done`）。所有写都收敛到 compact 一个入口。
 

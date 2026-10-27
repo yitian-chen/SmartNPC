@@ -212,12 +212,16 @@ func TestPersistCommitments(t *testing.T) {
 	store := &memoryFakeStore{}
 	created := persistCommitments(store, "H-01",
 		[]compactCommitment{
-			{Kind: "appointment", CounterpartID: "npc_wang", Content: "在公园棋桌和老王下棋", DueStart: 309600, DueEnd: 313200, DueLocation: "zone_park"},
+			{Kind: "appointment", CounterpartID: "npc_wang", Content: "在公园棋桌和老王下棋", DueStartDay: 4, DueStartTime: "14:00", DueEndDay: 4, DueEndTime: "15:00", DueLocation: "zone_park"},
 		},
 		[]compactCmChange{{ID: "cm_old", Action: "done"}},
 		226800, slog.Default())
 	if len(created) != 1 || created[0].Kind != "appointment" {
 		t.Errorf("created = %+v, want 1 appointment", created)
+	}
+	// D4 14:00 = (4-1)*86400 + 14*3600 = 259200 + 50400 = 309600。
+	if created[0].DueStart != 309600 || created[0].DueEnd != 313200 {
+		t.Errorf("due = %d~%d, want 309600~313200 (D4 14:00~15:00)", created[0].DueStart, created[0].DueEnd)
 	}
 	if len(store.commitments) != 1 || store.commitments[0].Content != "在公园棋桌和老王下棋" {
 		t.Errorf("commitments = %+v, want the appointment", store.commitments)
@@ -225,6 +229,23 @@ func TestPersistCommitments(t *testing.T) {
 	// nil store → nil。
 	if got := persistCommitments(nil, "H-01", nil, nil, 0, slog.Default()); got != nil {
 		t.Errorf("nil store = %v, want nil", got)
+	}
+}
+
+// TestDayTimeToGameSec pins the day+time → game-seconds conversion used by the
+// commitment extraction (LLM outputs day+HH:MM, code computes seconds).
+func TestDayTimeToGameSec(t *testing.T) {
+	if got := dayTimeToGameSec(2, "16:00"); got != 144000 {
+		t.Errorf("D2 16:00 = %d, want 144000", got)
+	}
+	if got := dayTimeToGameSec(1, "08:45"); got != 31500 {
+		t.Errorf("D1 08:45 = %d, want 31500", got)
+	}
+	if got := dayTimeToGameSec(0, "16:00"); got != 0 {
+		t.Errorf("day 0 = %d, want 0", got)
+	}
+	if got := dayTimeToGameSec(2, ""); got != 0 {
+		t.Errorf("empty time = %d, want 0", got)
 	}
 }
 

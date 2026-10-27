@@ -176,21 +176,29 @@ type compactEpisode struct {
 
 // compactCommitment / compactCmChange 供对话结束的 commitment 抽取复用（原为
 // compact 的 new_commitments / commitment_changes，现已移到对话结束路径）。
+// due 用「绝对游戏日 + HH:MM」而非绝对游戏秒——LLM 把"明天下午四点"抄成
+// day=当前日+1/time="16:00" 可靠，但要它算累计秒（"一天 86400 秒"）不可靠，
+// 实测会输出 Unix 墙钟秒或瞎猜整数（2026-10-26 生日派对仿真）。代码侧
+// dayTimeToGameSec 负责换算。
 type compactCommitment struct {
 	Kind            string `json:"kind"`
 	CounterpartID   string `json:"counterpart_id"`
 	CounterpartName string `json:"counterpart_name"`
 	Content         string `json:"content"`
-	DueStart        int64  `json:"due_start"`
-	DueEnd          int64  `json:"due_end"`
+	DueStartDay     int    `json:"due_start_day"`
+	DueStartTime    string `json:"due_start_time"` // "HH:MM"
+	DueEndDay       int    `json:"due_end_day"`
+	DueEndTime      string `json:"due_end_time"`
 	DueLocation     string `json:"due_location"`
 }
 
 type compactCmChange struct {
-	ID       string `json:"id"`
-	Action   string `json:"action"` // done / reschedule / cancel
-	DueStart int64  `json:"due_start"`
-	DueEnd   int64  `json:"due_end"`
+	ID           string `json:"id"`
+	Action       string `json:"action"` // done / reschedule / cancel
+	DueStartDay  int    `json:"due_start_day"`
+	DueStartTime string `json:"due_start_time"`
+	DueEndDay    int    `json:"due_end_day"`
+	DueEndTime   string `json:"due_end_time"`
 }
 
 type compactPersonUpd struct {
@@ -202,6 +210,20 @@ type compactPersonUpd struct {
 // newEpisodeID / newCommitmentID 生成主键。唯一性靠纳秒时间戳，单进程内足够。
 func newEpisodeID() string    { return fmt.Sprintf("ep_%d", time.Now().UnixNano()) }
 func newCommitmentID() string { return fmt.Sprintf("cm_%d", time.Now().UnixNano()) }
+
+// dayTimeToGameSec 把「绝对游戏日（1-based）+ HH:MM」换算成累计游戏秒。游戏日
+// 界为午夜：第 1 天 = 0~86399、第 2 天 = 86400~172799（与 episodic_memories
+// 的 game_day 口径一致）。day<=0 或时间解析失败返回 0。
+func dayTimeToGameSec(day int, timeStr string) int64 {
+	if day <= 0 || timeStr == "" {
+		return 0
+	}
+	var hh, mm int
+	if _, err := fmt.Sscanf(strings.TrimSpace(timeStr), "%d:%d", &hh, &mm); err != nil {
+		return 0
+	}
+	return int64((day-1)*86400 + hh*3600 + mm*60)
+}
 
 // persistExtractedMemory 把 compact LLM 的结构化抽取落盘为长期记忆三表
 // （episodic_memories / episodic_commitments / semantic_people）。这是长期
@@ -292,8 +314,8 @@ func persistCommitments(store storage.Store, agentID string, news []compactCommi
 			CounterpartID:   cm.CounterpartID,
 			CounterpartName: cm.CounterpartName,
 			Content:         cm.Content,
-			DueStart:        cm.DueStart,
-			DueEnd:          cm.DueEnd,
+			DueStart:        dayTimeToGameSec(cm.DueStartDay, cm.DueStartTime),
+			DueEnd:          dayTimeToGameSec(cm.DueEndDay, cm.DueEndTime),
 			DueLocation:     cm.DueLocation,
 			Status:          "pending",
 			CreatedTime:     gameTime,
@@ -318,7 +340,8 @@ func persistCommitments(store storage.Store, agentID string, news []compactCommi
 			status = "cancelled"
 		case "reschedule":
 			status = "pending"
-			dueStart, dueEnd = ch.DueStart, ch.DueEnd
+			dueStart = dayTimeToGameSec(ch.DueStartDay, ch.DueStartTime)
+			dueEnd = dayTimeToGameSec(ch.DueEndDay, ch.DueEndTime)
 		default:
 			continue
 		}
@@ -335,15 +358,20 @@ const conversationCommitmentSystemPrompt = `你是 NPC 待办抽取模块。用�
 
 输出一个 JSON 对象（不要 markdown 围栏，不要其他文字）：
 {
-  "new_commitments": [{"kind":"appointment/relay/invitation","counterpart_id":"对方id","counterpart_name":"对方名","content":"待办内容","due_start":游戏秒,"due_end":游戏秒,"due_location":"地点"}],
-  "commitment_changes": [{"id":"已有待办id","action":"done/reschedule/cancel","due_start":游戏秒,"due_end":游戏秒}]
+  "new_commitments": [{"kind":"appointment/relay/invitation/todo","counterpart_id":"对方id","counterpart_name":"对方名","content":"待办内容","due_start_day":游戏日,"due_start_time":"HH:MM","due_end_day":游戏日,"due_end_time":"HH:MM","due_location":"地点"}],
+  "commitment_changes": [{"id":"已有待办id","action":"done/reschedule/cancel","due_start_day":游戏日,"due_start_time":"HH:MM","due_end_day":游戏日,"due_end_time":"HH:MM"}]
 }
 
 要求：
 1. 只抽取「未来要做的具体事」，即时性寒暄/闲聊/情绪表达不抽。
-2. due_start/due_end 是绝对游戏秒（一天 86400 秒）。以【当前游戏时间】为基准换算："3天后下午4点" = 当前 + 3×86400 并调整到 16:00；"明天上午" = 当前 + 86400 并调整到 08:00。相对时间必须换算成绝对秒，不要填 0。
-3. 只有对话里明确取消/改期/履行了某个已有待办，才填 commitment_changes（id 是已有待办的 id）；否则空数组。
-4. 没有就填空数组，不要编造。`
+2. 时间用「绝对游戏日 + HH:MM」两个字段（不要算成累计秒）：游戏日以【当前游戏时间】的"D1"为基准——"明天下午四点" = due_start_day 填 2、due_start_time 填 "16:00"；"今天晚饭后" = due_start_day 填 1、due_start_time 填 "19:00"。把相对时间原样抄成"第几天 + 几点"，不要做任何秒的换算。
+3. 区分「谁办的活动」：
+   - 别人办的公开活动（生日会/聚会），你受邀参加 → kind 填 invitation，counterpart_id 填活动主角（寿星）的 id。
+   - 你自己要办/主持的活动 → kind 填 todo，counterpart_id 留空。
+   - 约好和某人一起做某事 → kind 填 appointment，counterpart_id 填对方 id。
+   - 答应帮某人传话 → kind 填 relay，counterpart_id 填要传话的对象 id。
+4. 只有对话里明确取消/改期/履行了某个已有待办，才填 commitment_changes（id 是已有待办的 id）；否则空数组。
+5. 没有就填空数组，不要编造。`
 
 const conversationCommitmentSchema = `{
   "type": "object",
@@ -353,15 +381,19 @@ const conversationCommitmentSchema = `{
       "counterpart_id": {"type": "string"},
       "counterpart_name": {"type": "string"},
       "content": {"type": "string"},
-      "due_start": {"type": "integer"},
-      "due_end": {"type": "integer"},
+      "due_start_day": {"type": "integer"},
+      "due_start_time": {"type": "string"},
+      "due_end_day": {"type": "integer"},
+      "due_end_time": {"type": "string"},
       "due_location": {"type": "string"}
     }, "required": ["content"], "additionalProperties": false}},
     "commitment_changes": {"type": "array", "items": {"type": "object", "properties": {
       "id": {"type": "string"},
       "action": {"type": "string"},
-      "due_start": {"type": "integer"},
-      "due_end": {"type": "integer"}
+      "due_start_day": {"type": "integer"},
+      "due_start_time": {"type": "string"},
+      "due_end_day": {"type": "integer"},
+      "due_end_time": {"type": "string"}
     }, "required": ["id", "action"], "additionalProperties": false}}
   },
   "required": ["new_commitments", "commitment_changes"],
