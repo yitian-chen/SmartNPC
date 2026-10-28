@@ -47,6 +47,13 @@ type TacticalInput struct {
 	// empty = skip segment (single-NPC scenario). Also suppresses the
 	// 【其他NPC】 KB-roster fallback in BuildTactical (redundant roster).
 	Relationships string
+	// Commitments is the formatted pending-commitment list（临近到期/命中眼前人）
+	// for the 【当前需兑现的约定】 segment; empty = skip segment.
+	Commitments string
+	// Shareable is the formatted shareable-public-event list（pending invitation
+	// 待办，如生日会/聚会）for the 【可分享的消息】 segment——NPC 与人聊天时可
+	// 主动告知对方，实现口口相传; empty = skip segment.
+	Shareable string
 	// Events is the safe-point drain of queued non-force world events
 	// (P3-7, §4.4/§5.1 第三输入), pre-rendered via FormatWorldEventList;
 	// empty = skip the 【发生的事件】 segment. Unlike 【全天日程】 it is
@@ -86,45 +93,4 @@ type TacticalInput struct {
 	// LLM can pick a conversation target. nil/empty = no nearby
 	// NPCs → skip the segment.
 	VisibleAgents []protocol.VisibleAgent
-}
-
-// ReactiveTrigger identifies what triggered a reactive evaluation.
-// Used for dedupe, logging, and as part of ReactiveInput.
-type ReactiveTrigger string
-
-const (
-	TriggerZoneChange    ReactiveTrigger = "zone_change"    // NPC entered a new zone
-	TriggerNewObject     ReactiveTrigger = "new_object"     // nearby_objects gained a new object
-	TriggerEventNotify   ReactiveTrigger = "event_notify"   // received event_notification
-	TriggerPhysicalAlert ReactiveTrigger = "physical_alert" // physical state crossed alert threshold
-	TriggerActionDone    ReactiveTrigger = "action_done"    // action_completed, natural evaluation point
-	TriggerPeriodic      ReactiveTrigger = "periodic"       // periodic trigger: force evaluation every N perceptions
-)
-
-// ReactiveInput aggregates all inputs needed by BuildReactive.
-// Moved verbatim from reactive.go (field types unchanged).
-type ReactiveInput struct {
-	AgentID           string
-	AgentName         string // agent display name (e.g. "老陈"), used in prompt salutation; empty → fall back to AgentID
-	AgentRole         string // 【你的角色】段 (name/profession/background/personality/speech style), from AgentRole(); empty → kb unavailable or agent missing
-	TimeOfDay         string // "HH:MM" game time
-	Zone              string // current zone id
-	Energy            float64
-	Fatigue           float64
-	JointWear         float64 // joint wear (0-100, higher = more worn); triggers maintenance alert above JointWearAlertThreshold
-	Money             float64 // NPC economic balance (working earns, charging/repair/sleep spends); injected into prompt alongside physical state
-	PhysicalAvailable bool    // whether physical state is usable (perception_update all-0 → false, skip physical segment)
-	// Bands is the per-NPC band thresholds (from profile ## 属性分段, else
-	// defaults) used to render the physical segment as range labels and to
-	// evaluate physical alerts in UpgradeIfPhysicalAlert. Zero value →
-	// DefaultBandThresholds (see BandThresholds.OrDefault).
-	Bands         BandThresholds
-	CurrentAction string // readable description of in-flight action (e.g. "WorkShift(smart_object=workbench_01)"), empty = no in-flight
-	ElapsedSec    int    // seconds the current action has been running
-	ActionSrc     string // in-flight action source: tactical / mcp_tool / empty
-	QueuedFor     string // 排队状态描述（约定21，如 "正在排队等待 workbench（位置 2，预计等待 30 秒）"），空 = 不在排队
-	CurrentSlot   string // current tactical slot "HH:MM-HH:MM", empty = not decomposed
-	DailyPlan     string // strategic daily plan summary (formatted string), empty = not generated
-	Trigger       ReactiveTrigger
-	TriggerDetail string // trigger reason detail
 }

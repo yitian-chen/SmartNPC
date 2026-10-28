@@ -139,8 +139,8 @@ func mkFatRounds(n int) []llmtypes.Message {
 	return out
 }
 
-// compactFakeLLM captures SendWithSummary calls (first-call semantics for the
-// summarizer) and returns a scripted summary body.
+// compactFakeLLM captures SendWithSchema calls (first-call semantics for the
+// summarizer) and returns a scripted summary body wrapped as structured JSON.
 type compactFakeLLM struct {
 	fakeStrategicCaller
 	mu       sync.Mutex
@@ -149,14 +149,14 @@ type compactFakeLLM struct {
 	block    chan struct{} // 非 nil 时阻塞直至 close
 }
 
-func (f *compactFakeLLM) SendWithSummary(_ context.Context, _, user string, _ ...[]venus.Tool) (*llmtypes.Response, error) {
+func (f *compactFakeLLM) SendWithSchema(_ context.Context, _, user, _ string, _ []byte, _ ...[]venus.Tool) (*llmtypes.Response, error) {
 	f.mu.Lock()
 	f.prompts = append(f.prompts, user)
 	f.mu.Unlock()
 	if f.block != nil {
 		<-f.block
 	}
-	return makeStrategicResponse(f.response), nil
+	return makeStrategicResponse(`{"summary": "` + f.response + `"}`), nil
 }
 
 // TestCompaction_MergeTemplateCarriesPrevSummary pins fix 1: a second
@@ -280,5 +280,52 @@ func TestCompaction_InFlightGuardSkips(t *testing.T) {
 	fake.mu.Unlock()
 	if prompts < 2 {
 		t.Fatalf("post-release call should be allowed to compact again, prompts=%d", prompts)
+	}
+}
+
+// TestCompactAtDayRollover pins the day-rollover forced-compaction glue: nil
+// store / empty history are no-ops; with history it runs the summarizer and
+// persists the extraction (episodes/commitments/people) before the caller
+// clears the conversation.
+func TestCompactAtDayRollover(t *testing.T) {
+	ac := tacticalCtxForTest(nil)
+	ac.tacticalHc = &compactFakeLLM{response: "日切摘要"}
+
+	// nil store → no-op（不 panic）。
+	ac.compactAtDayRollover("H-01", nil, nil, testLogger())
+
+	// 有 store 但历史为空 → no-op。
+	store := &memoryFakeStore{}
+	ac.as.SetIdentity("H-01", store)
+	ac.compactAtDayRollover("H-01", nil, nil, testLogger())
+	if len(store.episodes) != 0 {
+		t.Fatalf("empty history should write 0 episodes, got %d", len(store.episodes))
+	}
+
+	// 有历史 → 走抽取（fake 只回 summary、无 episodes，验证不 panic + 落盘路径可达）。
+	for _, m := range mkRounds(3) {
+		ac.as.AppendConversationMessage(m)
+	}
+	ac.compactAtDayRollover("H-01", nil, nil, testLogger())
+	if len(store.episodes) != 0 {
+		t.Errorf("summary-only fake should write 0 episodes, got %d", len(store.episodes))
+	}
+}
+
+// TestExtractJSONObject pins the tolerant JSON extraction: markdown fence and
+// leading/trailing prose are stripped, the first {..last } wins; no JSON → the
+// original string is returned (so json.Unmarshal produces the error).
+func TestExtractJSONObject(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{`{"a":1}`, `{"a":1}`},
+		{`{"a":1} : 多余尾巴`, `{"a":1}`},
+		{"```json\n{\"a\":1}\n```", `{"a":1}`},
+		{`前面的散文 {"a":1} 后面的散文`, `{"a":1}`},
+		{`no json here`, `no json here`},
+	}
+	for _, c := range cases {
+		if got := extractJSONObject(c.in); got != c.want {
+			t.Errorf("extractJSONObject(%q) = %q, want %q", c.in, got, c.want)
+		}
 	}
 }

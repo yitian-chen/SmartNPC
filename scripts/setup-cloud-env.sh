@@ -7,8 +7,7 @@
 #   2. Node.js 22 + npm（/usr/local/node-v22.x）— CodeBuddy CLI
 #   3. CodeBuddy CLI（npm 全局 + symlink）
 #   4. Python 依赖（websockets, pyyaml, httpx, fastapi, uvicorn）— Mock UE + Adapter
-#   5. Ollama（反应层本地模型）
-#   6. PATH 配置到 /root/.bashrc（漫游保留，环境重建不丢）
+#   5. PATH 配置到 /root/.bashrc（漫游保留，环境重建不丢）
 #
 # 用法：
 #   bash scripts/setup-cloud-env.sh
@@ -18,7 +17,6 @@
 #   - 环境销毁后 /usr/local/ 丢失，重新跑此脚本即可恢复
 #   - /root/.bashrc 漫游保留，PATH 配置不会丢
 #   - pip 缓存走 /root/.cache/pip，漫游保留，二次安装快
-#   - Ollama 模型放 /usr/share/ollama/.ollama，环境销毁会丢，需重新 pull
 
 set -euo pipefail
 
@@ -43,7 +41,6 @@ NODE_URL="https://nodejs.org/dist/${NODE_VERSION}/${NODE_TAR}"
 GO_URL="https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz"
 PYTHON_DEPS="websockets pyyaml httpx fastapi uvicorn"
 NPM_GLOBAL_PREFIX="/root/.npm/node_modules"
-OLLAMA_MODEL="qwen2.5:7b-instruct-q4_K_M"
 
 # ─── 1. Go ─────────────────────────────────────────────────────
 install_go() {
@@ -123,27 +120,9 @@ install_python_deps() {
     ok "Python deps installed"
 }
 
-# ─── 5. Ollama ────────────────────────────────────────────────
-install_ollama() {
-    info "=== Step 5: Ollama (reactive layer) ==="
-    if command -v ollama &>/dev/null; then
-        ok "Ollama already installed: $(ollama --version 2>/dev/null || echo 'version unknown')"
-    else
-        info "Installing Ollama..."
-        curl -fsSL https://ollama.com/install.sh | sh
-        ok "Ollama installed"
-    fi
-
-    # 拉取反应层模型（~4GB，环境销毁后需重新 pull）
-    info "Pulling reactive layer model ${OLLAMA_MODEL}..."
-    info "This may take a while (~4GB). If it fails, run manually:"
-    info "  ollama pull ${OLLAMA_MODEL}"
-    ollama pull "${OLLAMA_MODEL}" || warn "Ollama pull failed — run manually when ready"
-}
-
-# ─── 6. PATH 配置 ──────────────────────────────────────────────
+# ─── 5. PATH 配置 ──────────────────────────────────────────────
 setup_path() {
-    info "=== Step 6: PATH configuration (.bashrc) ==="
+    info "=== Step 5: PATH configuration (.bashrc) ==="
 
     local bashrc="/root/.bashrc"
     local path_line='export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/usr/local/go/bin:/root/go/bin'
@@ -180,8 +159,6 @@ install_codebuddy
 echo ""
 install_python_deps
 echo ""
-install_ollama
-echo ""
 setup_path
 echo ""
 
@@ -195,4 +172,3 @@ echo "  4. Start UE: python3 src/run_day.py"
 echo ""
 warn "注意：环境销毁后 /usr/local/ 下的安装会丢失，重新跑此脚本即可恢复"
 warn "      /root/.bashrc 漫游保留，PATH 配置不会丢"
-warn "      Ollama 模型在 /usr/share/ollama，环境销毁需重新 pull"

@@ -44,7 +44,6 @@ import (
 	"github.com/AgentTown/agenttown-mcp/pkg/jev"
 	"github.com/AgentTown/agenttown-mcp/pkg/llmconfig"
 	"github.com/AgentTown/agenttown-mcp/pkg/llmtypes"
-	"github.com/AgentTown/agenttown-mcp/pkg/ollama"
 	"github.com/AgentTown/agenttown-mcp/pkg/profile"
 	"github.com/AgentTown/agenttown-mcp/pkg/prompt"
 	"github.com/AgentTown/agenttown-mcp/pkg/storage"
@@ -210,18 +209,16 @@ type agentContext struct {
 	// Immutable after construction.
 	jevHc routerJudge
 
-	// ollama is the local Ollama client for relationship-update judgments
-	// (Stage 5). nil when --ollama-url="" explicitly disables the reactive
-	// layer (default is http://localhost:11434 — cloud dev env's local
-	// Ollama), in which case maybeUpdateRelationship short-circuits.
-	// Immutable after construction.
-	ollama *ollama.Client
-
 	// physBands is the per-NPC physical band thresholds resolved from
 	// profile ## 属性分段 at registration (defaults when unconfigured).
 	// Used by observePerception/updateState physical alert detection.
 	// Immutable after construction.
 	physBands prompt.BandThresholds
+
+	// weeklySched is the process-level weekly schedule (7-day cycle), needed
+	// by the strategic replan trigger (extractAndReplanCommitments) to build
+	// the 【今日日程】 day context. nil = disabled. Immutable after construction.
+	weeklySched *weeklyschedule.Schedule
 
 	// Lifecycle (no lock needed — single writer: worker goroutine for cancel,
 	// stop() for stopped flag under coordMu)
@@ -296,7 +293,7 @@ func (a *agentContext) observePerception(payload json.RawMessage) (string, error
 
 	// 物理警戒带突破检测（边沿：从正常跨入警戒那一刻才触发）。物理状态由
 	// perception_update 携带全量 3 项，SetPerception 返回 prev/cur 供检测。
-	_, detail := prompt.ShouldTriggerReactive("", "", nil, nil, upd.PrevPhysical, upd.CurPhysical, a.physBands)
+	detail := prompt.PhysicalAlertDetail(upd.PrevPhysical, upd.CurPhysical, a.physBands)
 
 	// 感知是 worker 的主驱动源：每次感知到达都唤醒它检查战术队列
 	// （pop 下一个 / refill 新时段）。tacticalRefill 内部的守卫避免重复 LLM 调用。
@@ -321,7 +318,7 @@ func (a *agentContext) updateState(report protocol.StateReportPayload) string {
 	prevPhysical := a.as.SetPhysicalState(&physical, cloneTask(report.CurrentTaskProgress))
 
 	// 物理警戒带突破检测（P4-12：唯一保留的触发，供事件合成）。
-	_, detail := prompt.ShouldTriggerReactive("", "", nil, nil, prevPhysical, &physical, a.physBands)
+	detail := prompt.PhysicalAlertDetail(prevPhysical, &physical, a.physBands)
 	return detail
 }
 
@@ -347,7 +344,6 @@ func (a *agentContext) recordActionCompletion(completion protocol.ActionComplete
 	// Stage 4: best-effort action_history recording — only for tracked in-flight
 	// actions (debug /debug/action path doesn't call recordActionStarted, so its
 	// completions have WasInFlight=false and aren't recorded).
-	// Stage 5: 异步触发关系更新判断（Ollama 5s 超时，不阻塞主路径）。
 	if res.WasInFlight {
 		a.recordActionHistory(completion, res)
 		// 多轮对话：动作执行结果以 user role 注入会话历史末尾，标记
@@ -364,7 +360,6 @@ func (a *agentContext) recordActionCompletion(completion protocol.ActionComplete
 				Content: fmt.Sprintf("[系统注入] 任务 tool_call_id=%s 已完成，结果如下：%s", res.ToolCallID, content),
 			})
 		}
-		go a.maybeUpdateRelationship(completion, res)
 	}
 
 	// 对话终局即时判定（2026-10-20）：定向对话（speak_to）以 speech 回执完成
@@ -392,12 +387,13 @@ func (a *agentContext) recordActionCompletion(completion protocol.ActionComplete
 				if lg == nil {
 					lg = slog.Default()
 				}
-				go a.evaluateConversationAffection(context.Background(), agentID, peer, turns, kb, profiles, lg)
 				if h := conversationEndedHint(agentID, peer, turns, kb); h != "" {
 					a.as.SetReplanHint(h)
 					lg.Info("[对话层] speech 回执对话终局，立即注入守约 hint",
 						"agent_id", agentID, "peer", peer, "turns", len(turns), "reason", completion.Reason)
 				}
+				// 对话结束时抽取待办（当天约定及时落盘），临近到期的触发战略重规划。
+				go a.extractAndReplanCommitments(context.Background(), agentID, peer, turns, kb, profiles, lg)
 			}
 		}
 	}
@@ -444,19 +440,14 @@ func (a *agentContext) recordActionCompletion(completion protocol.ActionComplete
 	if !res.WasInFlight && completion.Result == protocol.ResultInterrupted {
 		return true, ""
 	}
-	// 异常完成：detail 注入 reaction 层 TriggerDetail，含 UE 给出的 reason
-	// （如"寻路不可达"），让 Ollama 看到 UE 侧的具体失败原因再决策。
+	// 异常完成：detail 注入下一轮分解上下文，含 UE 给出的 reason（如"寻路不可达"）。
 	detail := fmt.Sprintf("result=%s reason=%s",
 		completion.Result, completion.Reason)
 
 	// Fix A: 失败上下文注入战术层 replanHint。让下一轮战术层 LLM 知道上次
 	// 为什么失败、避免盲重试同一动作（如工作台被占用后无限重试 work_shift）。
 	// 仅对 in-flight action（来自战术层/工具调用）写入，跳过 /debug/action
-	// 手动调试路径（WasInFlight=false，避免污染下次规划）。反应层启用时，
-	// reactive_runner 的 SetReplanHint(dec.Reason) 会覆盖此值——但 Ollama
-	// 输入的 detail 已含失败 reason，覆盖合理。反应层禁用时，这是唯一的
-	// 失败上下文注入路径：worker 唤醒 → 队列空 → tacticalRefill →
-	// BeginTacticalRefill 消费 replanHint 注入 prompt。
+	// 手动调试路径（WasInFlight=false，避免污染下次规划）。
 	if res.WasInFlight && res.Cmd != "" {
 		sg := ""
 		if res.Params != nil {
@@ -525,91 +516,31 @@ func (a *agentContext) recordActionHistory(completion protocol.ActionCompletedPa
 	}
 }
 
-// loadTacticalMemories fetches top-3 recent memories from the store and
-// formats them as a bullet list for the tactical prompt 【过往经验】段.
-// Returns "" when store is nil (in-memory mode) or no memories exist.
-// Called once per tactical refill (~7 times/game day); indexed query, no
-// caching needed.
+// loadTacticalMemories 委托给读记忆内部工具（memoryReader.recentEpisodes）。
+// 保留为 agentContext 的薄封装，避免改动战术 refill 的调用点。
 func (a *agentContext) loadTacticalMemories(ctx context.Context, agentID string) string {
-	store := a.as.Store()
-	if store == nil {
-		return ""
-	}
-	memories, err := store.LoadRecentMemories(ctx, agentID, 3)
-	if err != nil {
-		slog.Default().Warn("[记忆层] 加载近期记忆失败",
-			"agent_id", agentID, "err", err)
-		return ""
-	}
-	if len(memories) == 0 {
-		return ""
-	}
-	var sb strings.Builder
-	for _, m := range memories {
-		fmt.Fprintf(&sb, "- %s（%s）\n", m.Content, m.MemoryType)
-	}
-	return strings.TrimSuffix(sb.String(), "\n")
+	return newMemoryReader(a.as.Store()).recentEpisodes(ctx, agentID, 3)
 }
 
-// maybeUpdateRelationship judges whether a completed action warrants a
-// relationship bump and, if so, updates both directional rows (A→B and B→A).
-// Called asynchronously from recordActionCompletion so the 5s Ollama call
-// never blocks the main completion path. Best-effort: any error (nil client,
-// nil store, Ollama timeout, save failure) logs a warning and gives up.
-//
-// Stage 5 design: Ollama judges whether the cmd+params constitute a direct
-// social interaction with the target agent (yes/no). On "yes", familiarity
-// is bumped by 1 in both directions (A→B and B→A); affection is unchanged
-// in the initial rule. Self-targeting (target == agentID) is skipped.
-func (a *agentContext) maybeUpdateRelationship(completion protocol.ActionCompletedPayload, res agentstate.CompletionResult) {
-	if a.ollama == nil {
-		return // reactive layer explicitly disabled (--ollama-url="")
-	}
-	store := a.as.Store()
-	if store == nil {
-		return // in-memory mode
-	}
-	target, _ := res.Params["target_agent_id"].(string)
-	if target == "" {
-		return // not an agent-directed action
-	}
-	agentID := a.as.AgentID()
-	if target == agentID {
-		return // self-targeting guard
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), relationshipJudgeTimeout)
-	defer cancel()
-	if !shouldUpdateRelationship(ctx, a.ollama, res.Cmd, res.Params, target) {
-		return
-	}
-	// 双向更新：A→B + B→A 各一行，各自独立 upsert。affection 初期不动（delta=0）。
-	if err := store.SaveRelationship(ctx, agentID, target, 1, 0); err != nil {
-		slog.Default().Warn("[关系层] save A→B failed",
-			"agent_id", agentID, "target", target, "err", err)
-	}
-	if err := store.SaveRelationship(ctx, target, agentID, 1, 0); err != nil {
-		slog.Default().Warn("[关系层] save B→A failed",
-			"agent_id", target, "target", agentID, "err", err)
-	}
-}
-
-// loadRelationships renders the merged other-NPC roster + affection list
-// (formatRelationshipsForPrompt) for prompt injection: 战略层【其他NPC】段 /
-// 战术层【人际关系】段 / 路由层 relationships 属性共用。存储行加载失败或
-// 内存模式（无行）时仅损失互动历史——名单与默认好感度 5 仍渲染（KB 为骨架）。
-// 单 NPC 场景（KB ≤1 agent）返回空串，不污染 prompt。每次战术/战略 refill
-// 调用一次；索引查询，无需缓存。
+// loadRelationships 委托给读记忆内部工具（memoryReader.people）。
+// 保留为 agentContext 的薄封装，避免改动战略/战术/路由三层的调用点。
 func (a *agentContext) loadRelationships(ctx context.Context, agentID string, kb *worldkb.KB, profiles map[string]*profile.Profile) string {
-	var rels []storage.Relationship
-	if store := a.as.Store(); store != nil {
-		var err error
-		rels, err = store.LoadRelationships(ctx, agentID, 10)
-		if err != nil {
-			slog.Default().Warn("[关系层] 加载关系列表失败",
-				"agent_id", agentID, "err", err)
-		}
-	}
-	return formatRelationshipsForPrompt(rels, kb, profiles, agentID)
+	return newMemoryReader(a.as.Store()).people(ctx, agentID, kb, profiles)
+}
+
+// loadCommitmentsNearby 返回战术层【当前需兑现的约定】（临近 1h + 眼前人）。
+func (a *agentContext) loadCommitmentsNearby(ctx context.Context, agentID string, counterpartIDs []string) string {
+	return newMemoryReader(a.as.Store()).commitmentsNearby(ctx, agentID, int64(a.as.LatestGameTimeSec()), counterpartIDs)
+}
+
+// loadCommitmentsUpcoming 返回战略层【今日约定与待办】（未来 24h）。
+func (a *agentContext) loadCommitmentsUpcoming(ctx context.Context, agentID string) string {
+	return newMemoryReader(a.as.Store()).commitmentsUpcoming(ctx, agentID, int64(a.as.LatestGameTimeSec()), 24*3600)
+}
+
+// loadShareableCommitments 返回战术层【可分享的消息】（pending invitation 待办）。
+func (a *agentContext) loadShareableCommitments(ctx context.Context, agentID string) string {
+	return newMemoryReader(a.as.Store()).shareableCommitments(ctx, agentID, int64(a.as.LatestGameTimeSec()))
 }
 
 // advanceSlotIfNeeded 检查当前 game_time 是否已超出 currentSlot 结束时间。
@@ -953,9 +884,8 @@ func runPerceptionWorker(
 		// time_to_stop 检测：长动作设了执行时长且 game_time 到点 → 打断进入下一轮。
 		ac.checkTimeToStop(agentID, logger)
 
-		// 对话结束检测：会话空闲超时则关闭并后台评估好感度（best-effort）。
+		// 对话结束检测：会话空闲超时则关闭并注入守约 hint（best-effort）。
 		if peer, turns := ac.closeConversationIfIdle(ac.as.LatestGameTimeSec()); peer != "" {
-			go ac.evaluateConversationAffection(ctx, agentID, peer, turns, kb, profiles, logger)
 			// 对话结束 hint（2026-10-16 设计）：speak_to 单动作化后，约定
 			// 的执行不由对话 replan 携带——把完整对话记录 + 守约指令交给
 			// 下一次 refill。守约优先于当前时段目标，补上 slot goal 主导
@@ -965,6 +895,8 @@ func runPerceptionWorker(
 				logger.Info("[对话层] 对话已结束，注入守约 hint",
 					"agent_id", agentID, "peer", peer, "turns", len(turns))
 			}
+			// 对话结束时抽取待办，临近到期的触发战略重规划（当天约定预留时间）。
+			go ac.extractAndReplanCommitments(ctx, agentID, peer, turns, kb, profiles, logger)
 		}
 
 		// 多日循环：检测 day_count 递增（跨日），重新调用战略层生成新一天的 dailyPlan。
@@ -981,19 +913,28 @@ func runPerceptionWorker(
 				logger.Info("[战略层] 检测到跨日，重新生成当日计划",
 					"agent_id", agentID, "prev_day", prevDay, "new_day", newDay)
 				// Stage 4: 日终记忆生成——从昨日 action_history 总结出
-				// narrative（注入战略层 prompt）+ 结构化 memories（存 DB）。
+				// narrative（注入战略层 prompt）+ daily_summary episode（存 DB）。
 				// 失败/冷启动返回 ""，generateDailyPlan 内部回退到常量。
 				// （读 DB action_history，不依赖 conversation，先于清空执行无影响。）
-				narrative := generateDailyMemories(ctx, ac.strategicHc, ac.as.Store(), agentID, kb, profiles, logger)
+				narrative := generateDailyMemories(ctx, ac.strategicHc, ac.as.Store(), agentID, kb, profiles, logger,
+					int64(ac.as.LatestGameTimeSec()), ac.as.LatestDayCount()+1)
 				// 社交需求：用今天的日程评估明天的社交需求，先于新一天计划生成，
 				// 使新计划的"找人聊天"安排反映更新后的值。无今天日程（异常冷启动）时跳过。
 				if todayPlan := ac.as.Snapshot().DailyPlan; todayPlan != "" {
 					ac.as.SetSocialNeed(generateDailySocialNeed(ctx, ac.strategicHc, agentID, kb, profiles, logger, todayPlan, ac.as.SocialNeed()))
 				}
+				// 日切 compact 抽取：把当天对话历史（清空前）抽成 episodes/
+				// commitments/people 落盘。兜住低活动日（中途未触发 compact）的
+				// 经历丢失窗口——「写只在 compact」在历史不足阈值时不落盘，日切
+				// 强制抽一次，当天经历与约定不会随 ClearConversation 丢掉。
+				ac.compactAtDayRollover(agentID, kb, profiles, logger)
 				// 跨日清空统一 loop 会话历史：每个游戏日一份独立 loop，
 				// 新日的战略轮是 loop 第一轮。跨日记忆走昨日总结（narrative）。
+				// 注意：不清 time_to_stop——在途睡眠动作的 time_to_stop 目标
+				// （game_time_sec 累计秒，次日 07:00）仍有效，必须保持武装，
+				// 否则睡眠动作永不被打断、NPC 冻住在途、战术层从此停摆
+				// （2026-10-23 实测：跨日 ClearTimeStop 后第 2-5 天分解/下发全 0）。
 				ac.as.ClearConversation()
-				ac.as.ClearTimeStop()
 				dayCtx := weeklyschedule.WeeklyLine(newDay, weeklySched)
 				plan := ac.triggerStrategicPlanning(ctx, agentID, kb, profiles, logger, narrative, dayCtx, "早晨例行制定每日日程安排", "07:00")
 				// 不清 currentSlot/actionQueue/currentActionID：让 NPC 睡到睡眠段
@@ -1818,14 +1759,6 @@ func main() {
 			"LLM metrics markdown report path (empty disables; written by dumpLLMMetrics each LLM call)")
 		tacticalStream = flag.Bool("tactical-stream", false,
 			"enable streaming for tactical layer LLM calls (also enables TTFT/TPOT/ITL measurement; non-streaming only yields E2E)")
-		ollamaURL = flag.String("ollama-url", "",
-			"Ollama base URL for reactive layer (default empty disables reactive layer — reactive layer is opt-in due to high misjudgment rate and latency cost; set to http://localhost:11434 to enable via cloud dev env's local Ollama, or http://localhost:11435 for SSH reverse tunnel to a remote Windows host)")
-		ollamaModel = flag.String("ollama-model", "qwen2.5:7b-instruct-q4_K_M",
-			"Ollama model name for reactive layer decisions")
-		ollamaNumThread = flag.Int("ollama-num-thread", 16,
-			"CPU threads for Ollama inference (0=use default 16, -1=let Ollama decide). "+
-				"CPU inference on high-core-count machines often regresses past ~16 threads; "+
-				"benchmark to find the optimum for your host.")
 		// ─── 战略层/战术层 LLM backend ───────────────────────────────
 		// Venus 直连（OpenAI Chat Completions API），是唯一的战略/战术层后端。
 		venusURL = flag.String("venus-url", "http://v2.open.venus.oa.com/llmproxy",
@@ -1851,8 +1784,8 @@ func main() {
 		jevTimeout = flag.Duration("jev-timeout", 5*time.Second,
 			"Venus judgment API timeout per event-router call")
 		// autoPlanFlag 是自动规划总开关。关闭（false）时 MCP 进入手动模式：
-		// 不调战略层 generateDailyPlan、不调战术层 tacticalRefill、不主动发 idle wait、
-		// 不触发反应层 Ollama 决策。仅 /debug/schedule 注入和 /debug/action 手动下发
+		// 不调战略层 generateDailyPlan、不调战术层 tacticalRefill、不主动发 idle wait。
+		// 仅 /debug/schedule 注入和 /debug/action 手动下发
 		// 才会驱动 action。适合联调时隔离 UE 端、单独验证 MCP 行为。
 		// 解引用后赋给 package-level autoPlanEnabled（worker / WS handler 读此变量）。
 		autoPlanFlag = flag.Bool("auto-plan", true,
@@ -1920,8 +1853,6 @@ func main() {
 		"jev_timeout", *jevTimeout,
 		"tactical_stream", tacticalStreamingEnabled,
 		"tactical_timeout", tacticalCallTimeout,
-		"ollama_url", *ollamaURL,
-		"ollama_model", *ollamaModel,
 		"auto_plan", autoPlanEnabled,
 		"mysql_persistence", dsn != "",
 	)
@@ -2009,37 +1940,6 @@ func main() {
 	// 【动作对属性的影响】段。启动时加载的持久化 yaml 不含速率字段，
 	// 摘要等待 UE 连接后的首次 world_kb 推送（每次连接都会推送）。
 
-	// ─── 反应层 Ollama 客户端 ────────────────────────────────────
-	// --ollama-url 默认空串（反应层默认禁用——当前误判率高、延迟成本大，
-	// 待优化后再默认启用）。显式传 URL 启用反应层。否则初始化客户端（即使
-	// Ollama 进程不在跑也不报错——Chat 调用失败时反应层静默降级为 continue）。
-	// ollamaClient 提升到外层作用域，供 registerAgent 闭包捕获注入
-	// agentContext.ollama（Stage 5 关系层判断用）。nil 表示禁用。
-	var ollamaClient *ollama.Client
-	if *ollamaURL != "" {
-		ollamaClient = ollama.New(ollama.Options{
-			BaseURL: *ollamaURL,
-			Model:   *ollamaModel,
-			// HTTP client timeout as backstop（P4-12：旧反应层退役后
-			// Ollama 仅供 Stage 5 关系判断，5s ctx + 10s HTTP backstop）。
-			Timeout: 10 * time.Second,
-			// CPU 推理线程数。云开发环境（EPYC 96 vCPU）实测默认 96 线程
-			// 反而劣化到 ~8 tok/s，限制到 16 线程可恢复到 ~24 tok/s。
-			// -1 表示不传 num_thread，让 Ollama 自决（本地 GPU 场景用）。
-			NumThread: *ollamaNumThread,
-			Logger:    logger,
-		})
-		// P4-12：旧反应层（Ollama continue/observe/replan）已退役。
-		// Ollama 客户端仅供 Stage 5 关系判断（maybeUpdateRelationship）使用。
-		logger.Info("ollama enabled for relationship judgments (reactive layer retired, P4-12)",
-			"ollama_url", ollamaClient.BaseURL(),
-			"ollama_model", ollamaClient.Model(),
-			"ollama_num_thread", ollamaClient.NumThread(),
-		)
-	} else {
-		logger.Info("ollama disabled (relationship judgments off; reactive layer retired, P4-12)")
-	}
-
 	// Per-agent context (Phase 1: single agent, but keyed for multi-NPC).
 	var agentsMu sync.Mutex
 	var nextAgentEpoch int64
@@ -2099,6 +1999,7 @@ func main() {
 		// per-NPC 物理属性分段阈值（profile ## 属性分段）：反应层告警跨越检测、
 		// 强制 replan、战术层恢复约束共用，保证 LLM 文本与代码行为一致。
 		ac.physBands = prompt.BandThresholdsFor(profiles, id)
+		ac.weeklySched = weeklySched
 		if err := ac.as.LoadPersistent(ctx); err != nil {
 			logger.Warn("[main] load persistent state failed, continuing with cold start",
 				"agent_id", id, "err", err)
@@ -2188,9 +2089,6 @@ func main() {
 				Timeout: *jevTimeout,
 			})
 		}
-		// Stage 5: 注入 Ollama 客户端供关系层判断。nil 表示 --ollama-url=""
-		// 显式禁用反应层时，maybeUpdateRelationship 会早返回不调用 Ollama。
-		ac.ollama = ollamaClient
 		agents[id] = ac
 		go runPerceptionWorker(workerCtx, id, ac, ws, kb, profiles, weeklySched, logger)
 		return ac, true
@@ -2350,6 +2248,16 @@ func runHTTP(ctx context.Context, logger *slog.Logger, server *mcp.Server, addr 
 		// 分位数、错误分布、重试率、JSON 正确率），供更换服务端前后对比。
 		if r.URL.Path == "/debug/llm-metrics" {
 			handleDebugLLMMetrics(w, r, logger)
+			return
+		}
+		// /debug/memory — 返回某 NPC 的长期记忆三表快照（JSON）。
+		if r.URL.Path == "/debug/memory" {
+			handleDebugMemory(w, r, lookupAgent, listAgentIDs, logger)
+			return
+		}
+		// /debug/memory/export — 三表渲染为 Markdown 快照。
+		if r.URL.Path == "/debug/memory/export" {
+			handleDebugMemoryExport(w, r, lookupAgent, listAgentIDs, logger)
 			return
 		}
 		http.NotFound(w, r)

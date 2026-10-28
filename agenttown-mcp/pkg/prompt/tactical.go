@@ -22,7 +22,8 @@ const TacticalRules = `1. 第一个工具调用必须是 speak（用一段话表
 7. 所有非瞬时动作（InteractSmartObject 设施互动、exercise 原地锻炼、speak_to 找人聊天等需要持续一段时间的）都必须填写 duration 参数（秒，schema 必填），包括最后一个动作也不例外——无 duration 的长动作无法被系统按计划终止；move_to 的移动时长由 UE 自动决定、无需填 duration；瞬时动作（speak 等立即完成的）也不填 duration。duration 要合理：冥想、整理床铺等单段设 1800 秒左右，不宜超过 1 小时；受伤后的维修/休息可设 3600-7200 秒，磨损/疲劳严重时更长（以【物理告警强制约束】中的建议为准）；工作段可设 3600-7200 秒。到点后系统会打断该段并继续执行后续动作段；只有全部动作执行完，系统才会再次询问。推荐模式：工作段（如 1.5 小时）→ 长椅小憩/原地拉伸段（不超过 30 分钟）→ 返回工作段（duration 设为时段剩余时长）。
 8. 每次生成的最后一个动作必须是长动作（InteractSmartObject 或 speak_to 等长动作），其 duration 设为当前时段的剩余时长（见上文"剩余约 X 分钟"提示）——到点后系统自动切入下一时段，NPC 不会呆站。所有长动作（包括最后一个）都必须设置 duration，不得省略。所有动作的 duration 总和应接近当前时段的剩余时长，避免过短导致队列提前耗尽触发重分解、或过长拖到下一时段。
 9. 如果是调用 InteractSmartObject 工具，若当前日程目标明确指定了区域（如"去中央广场长椅休息"），**必须**在该工具的 zone 参数中填写对应区域 id（如 central_plaza、logistics_hub）。
-10. 想找某位 NPC 聊天/对话时：**豁免规则 1 的"以 speak 开头"**，并且**只输出一条 speak_to**（不要先 speak 独白、也不要再补其他长动作）——target_agent_id 填对方 id（【附近NPC】/【其他NPC】中给出的 id），content 填你想说的内容，interrupt 填 true；speak_to 是长动作，按规则 7 填 duration。**收尾句才填 ends_conversation**：仅当本句是对话真正的最后一句（说完后不再有任何往返）才填 ends_conversation: true——告别语、对方应下你的邀请后你回的确认句（如"好，那就这么定了"）、礼貌性结束；填 true 会告知对方对话结束、对方不再回话，系统也会在话语送达后立即结束等待并执行后续动作（如约定一起进行的活动），不等回话窗口。期待对方回应、对话还要继续的句子（邀请、追问、以及"走吧跑起来"这类继续行动的话）一律填 false。`
+10. 想找某位 NPC 聊天/对话时：**豁免规则 1 的"以 speak 开头"**，并且**只输出一条 speak_to**（不要先 speak 独白、也不要再补其他长动作）——target_agent_id 填对方 id（【附近NPC】/【其他NPC】中给出的 id），content 填你想说的内容，interrupt 填 true；speak_to 是长动作，按规则 7 填 duration。**收尾句才填 ends_conversation**：仅当本句是对话真正的最后一句（说完后不再有任何往返）才填 ends_conversation: true——告别语、对方应下你的邀请后你回的确认句（如"好，那就这么定了"）、礼貌性结束；填 true 会告知对方对话结束、对方不再回话，系统也会在话语送达后立即结束等待并执行后续动作（如约定一起进行的活动），不等回话窗口。期待对方回应、对话还要继续的句子（邀请、追问、以及"走吧跑起来"这类继续行动的话）一律填 false。
+11. 口口相传：若上方【可分享的消息】里有公开事件（生日会/聚会/重要通知），在找 NPC 聊天、或对方主动搭话时，主动把这条消息告诉对方；对方若告诉你新的公开消息，也认真记下（会在对话结束后由系统沉淀）。这是消息在镇上传播的主要方式。`
 
 // tacticalCoreRules 是精简模式（Compact=true）下替代完整 TacticalRules 的
 // 核心约束速览，覆盖实测高频失败模式（speak-only 队列、duration 漏填、
@@ -31,6 +32,7 @@ const TacticalRules = `1. 第一个工具调用必须是 speak（用一段话表
 const tacticalCoreRules = `- 首个工具调用必须是 speak；随后必须返回至少一个带 duration 的长动作，禁止只返回 speak（找某位 NPC 聊天除外——只输出一条 speak_to，不需要 speak 开头）。
 - 除了speak和移动，其他必须填 duration（秒）：中间动作约 1800 秒、工作段 3600-7200 秒；恢复类动作（维修/充电/睡眠）按恢复需要设置，可以更长，不受这些档位限制。
 - 找人聊天/对话时只输出一条 speak_to 工具（target_agent_id 填对方 id，content 填内容，interrupt 填 true）。
+- 若【可分享的消息】里有公开事件（生日会/聚会），找人聊天或对方搭话时主动告知对方（口口相传）。
 - 告别/收尾句（含对方应下你的邀请后你回的确认句）给 speak_to 填 ends_conversation: true，其后可直接跟后续动作（系统送达即执行，不等回话）；期待回话/继续行动的话一律填 false。
 - 目标是"邀请XX一起做XX"时同样只输出一条 speak_to（content 填邀请的话）——约定的事项在对话结束后由系统提示驱动执行，不在本轮分解。
 - 最后一个动作必须是长动作，duration 设为当前时段剩余时长。所有长动作（含末段）都必须设 duration。`
@@ -107,6 +109,18 @@ func BuildTactical(in TacticalInput) string {
 	if in.Relationships != "" {
 		sb.WriteString("【人际关系】\n" + in.Relationships)
 		if !strings.HasSuffix(in.Relationships, "\n") {
+			sb.WriteString("\n")
+		}
+	}
+	if in.Commitments != "" {
+		sb.WriteString("【当前需兑现的约定】\n" + in.Commitments)
+		if !strings.HasSuffix(in.Commitments, "\n") {
+			sb.WriteString("\n")
+		}
+	}
+	if in.Shareable != "" {
+		sb.WriteString("【可分享的消息】（这些是你知道的公开消息，与人聊天时请主动告知对方，让消息在镇上传播开来）\n" + in.Shareable)
+		if !strings.HasSuffix(in.Shareable, "\n") {
 			sb.WriteString("\n")
 		}
 	}

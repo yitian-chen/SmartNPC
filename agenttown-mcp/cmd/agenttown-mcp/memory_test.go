@@ -128,7 +128,7 @@ func TestFormatParamsShort(t *testing.T) {
 // TestGenerateDailyMemories_NilStore verifies nil store returns "" without panic.
 func TestGenerateDailyMemories_NilStore(t *testing.T) {
 	sc := &fakeStrategicCaller{}
-	out := generateDailyMemories(context.Background(), sc, nil, "H-01", nil, nil, slog.Default())
+	out := generateDailyMemories(context.Background(), sc, nil, "H-01", nil, nil, slog.Default(), 1000, 1)
 	if out != "" {
 		t.Errorf("nil store = %q, want empty", out)
 	}
@@ -137,8 +137,8 @@ func TestGenerateDailyMemories_NilStore(t *testing.T) {
 // TestGenerateDailyMemories_EmptyHistory verifies store with no history returns "".
 func TestGenerateDailyMemories_EmptyHistory(t *testing.T) {
 	sc := &fakeStrategicCaller{}
-	store := &memoryFakeStore{} // returns empty for LoadActionHistory
-	out := generateDailyMemories(context.Background(), sc, store, "H-01", nil, nil, slog.Default())
+	store := &memoryFakeStore{}
+	out := generateDailyMemories(context.Background(), sc, store, "H-01", nil, nil, slog.Default(), 1000, 1)
 	if out != "" {
 		t.Errorf("empty history = %q, want empty", out)
 	}
@@ -150,18 +150,17 @@ func TestGenerateDailyMemories_LLMFail(t *testing.T) {
 	store := &memoryFakeStore{
 		actions: []storage.ActionRecord{{Cmd: "MoveTo", Source: "tactical", Result: "success", StartedAt: time.Now()}},
 	}
-	out := generateDailyMemories(context.Background(), sc, store, "H-01", nil, nil, slog.Default())
+	out := generateDailyMemories(context.Background(), sc, store, "H-01", nil, nil, slog.Default(), 1000, 1)
 	if out != "" {
 		t.Errorf("llm fail = %q, want empty", out)
 	}
 }
 
-// TestGenerateDailyMemories_Success verifies successful generation returns
-// narrative and saves memories to store.
+// TestGenerateDailyMemories_Success verifies the narrative is returned AND
+// persisted as a daily_summary episode (game_time anchored).
 func TestGenerateDailyMemories_Success(t *testing.T) {
 	raw := `{"narrative":"今天装配顺利","memories":[
-		{"type":"event","content":"完成装配","importance":70,"related_object_id":"workbench_01"},
-		{"type":"skill","content":"熟练使用工具","importance":45}
+		{"type":"event","content":"完成装配","importance":70,"related_object_id":"workbench_01"}
 	]}`
 	sc := &fakeStrategicCaller{resp: makeStrategicResponse(raw)}
 	store := &memoryFakeStore{
@@ -169,46 +168,96 @@ func TestGenerateDailyMemories_Success(t *testing.T) {
 			{Cmd: "WorkAtWorkbench", Source: "tactical", Result: "success", StartedAt: time.Now()},
 		},
 	}
-	out := generateDailyMemories(context.Background(), sc, store, "H-01", nil, nil, slog.Default())
+	out := generateDailyMemories(context.Background(), sc, store, "H-01", nil, nil, slog.Default(), 226800, 3)
 	if out != "今天装配顺利" {
 		t.Errorf("narrative = %q, want '今天装配顺利'", out)
 	}
-	if len(store.savedMemories) != 2 {
-		t.Fatalf("saved memories = %d, want 2", len(store.savedMemories))
+	if len(store.episodes) != 1 {
+		t.Fatalf("episodes = %d, want 1 (daily_summary)", len(store.episodes))
 	}
-	if store.savedMemories[0].MemoryType != "event" || store.savedMemories[0].Importance != 70 {
-		t.Errorf("memory[0] = %+v", store.savedMemories[0])
-	}
-	// Importance 0 should default to 50.
-	if store.savedMemories[1].Importance != 45 {
-		t.Errorf("memory[1] importance = %d, want 45", store.savedMemories[1].Importance)
+	ep := store.episodes[0]
+	if ep.Category != "daily_summary" || ep.Summary != "今天装配顺利" || ep.GameTime != 226800 || ep.GameDay != 3 {
+		t.Errorf("episode = %+v, want daily_summary + summary + game_time 226800 + day 3", ep)
 	}
 }
 
-// TestGenerateDailyMemories_ImportanceDefault verifies importance=0 defaults to 50.
-func TestGenerateDailyMemories_ImportanceDefault(t *testing.T) {
-	raw := `{"narrative":"总结","memories":[{"type":"event","content":"事件","importance":0}]}`
-	sc := &fakeStrategicCaller{resp: makeStrategicResponse(raw)}
-	store := &memoryFakeStore{
-		actions: []storage.ActionRecord{{Cmd: "MoveTo", Source: "tactical", Result: "success", StartedAt: time.Now()}},
+// TestPersistExtractedMemory verifies the compact structured-extraction write:
+// episodes + people_updates land in the two tables (commitments are now
+// extracted at conversation close via persistCommitments, not compact).
+func TestPersistExtractedMemory(t *testing.T) {
+	store := &memoryFakeStore{}
+	ex := compactExtract{
+		Summary: "在咖啡馆和老王下棋",
+		Episodes: []compactEpisode{
+			{Summary: "在咖啡馆和老王聊下棋", Category: "conversation", Importance: 7, Emotion: 0.6, Participants: []string{"npc_wang"}},
+		},
+		PeopleUpdates: []compactPersonUpd{
+			{TargetID: "npc_wang", AffinityDelta: 2, Impression: "爱下棋的老邻居"},
+		},
 	}
-	_ = generateDailyMemories(context.Background(), sc, store, "H-01", nil, nil, slog.Default())
-	if len(store.savedMemories) != 1 {
-		t.Fatalf("saved = %d, want 1", len(store.savedMemories))
+	persistExtractedMemory(store, "H-01", ex, 226800, 3, slog.Default())
+	if len(store.episodes) != 1 || store.episodes[0].Category != "conversation" {
+		t.Errorf("episodes = %+v, want 1 conversation", store.episodes)
 	}
-	if store.savedMemories[0].Importance != 50 {
-		t.Errorf("importance = %d, want 50 (default)", store.savedMemories[0].Importance)
+	if len(store.people) != 1 || store.people[0].TargetID != "npc_wang" {
+		t.Errorf("people = %+v, want npc_wang", store.people)
+	}
+	// nil store → no-op。
+	persistExtractedMemory(nil, "H-01", ex, 226800, 3, slog.Default())
+}
+
+// TestPersistCommitments verifies the conversation-close commitment write:
+// new commitments land in episodic_commitments, and the created list is returned.
+func TestPersistCommitments(t *testing.T) {
+	store := &memoryFakeStore{}
+	created := persistCommitments(store, "H-01",
+		[]compactCommitment{
+			{Kind: "appointment", CounterpartID: "npc_wang", Content: "在公园棋桌和老王下棋", DueStartDay: 4, DueStartTime: "14:00", DueEndDay: 4, DueEndTime: "15:00", DueLocation: "zone_park"},
+		},
+		[]compactCmChange{{ID: "cm_old", Action: "done"}},
+		226800, slog.Default())
+	if len(created) != 1 || created[0].Kind != "appointment" {
+		t.Errorf("created = %+v, want 1 appointment", created)
+	}
+	// D4 14:00 = (4-1)*86400 + 14*3600 = 259200 + 50400 = 309600。
+	if created[0].DueStart != 309600 || created[0].DueEnd != 313200 {
+		t.Errorf("due = %d~%d, want 309600~313200 (D4 14:00~15:00)", created[0].DueStart, created[0].DueEnd)
+	}
+	if len(store.commitments) != 1 || store.commitments[0].Content != "在公园棋桌和老王下棋" {
+		t.Errorf("commitments = %+v, want the appointment", store.commitments)
+	}
+	// nil store → nil。
+	if got := persistCommitments(nil, "H-01", nil, nil, 0, slog.Default()); got != nil {
+		t.Errorf("nil store = %v, want nil", got)
+	}
+}
+
+// TestDayTimeToGameSec pins the day+time → game-seconds conversion used by the
+// commitment extraction (LLM outputs day+HH:MM, code computes seconds).
+func TestDayTimeToGameSec(t *testing.T) {
+	if got := dayTimeToGameSec(2, "16:00"); got != 144000 {
+		t.Errorf("D2 16:00 = %d, want 144000", got)
+	}
+	if got := dayTimeToGameSec(1, "08:45"); got != 31500 {
+		t.Errorf("D1 08:45 = %d, want 31500", got)
+	}
+	if got := dayTimeToGameSec(0, "16:00"); got != 0 {
+		t.Errorf("day 0 = %d, want 0", got)
+	}
+	if got := dayTimeToGameSec(2, ""); got != 0 {
+		t.Errorf("empty time = %d, want 0", got)
 	}
 }
 
 // ─── memoryFakeStore: in-memory Store for memory tests ────────────────
 
-// memoryFakeStore is a minimal Store for memory.go tests. It only implements
-// the memory/action_history methods; schedule-state methods are inherited from
-// the agentstate fakeStore via embedding.
+// memoryFakeStore is a minimal Store for memory.go tests. It captures the
+// three-table writes (episodes / commitments / people) + action_history.
 type memoryFakeStore struct {
-	savedMemories []storage.Memory
-	actions       []storage.ActionRecord
+	episodes    []storage.Episode
+	commitments []storage.Commitment
+	people      []storage.Person
+	actions     []storage.ActionRecord
 }
 
 func (m *memoryFakeStore) LoadScheduleState(_ context.Context, _ string) (storage.ScheduleState, error) {
@@ -217,27 +266,47 @@ func (m *memoryFakeStore) LoadScheduleState(_ context.Context, _ string) (storag
 func (m *memoryFakeStore) SaveScheduleState(_ context.Context, _ string, _ storage.ScheduleState) error {
 	return nil
 }
-func (m *memoryFakeStore) SaveMemory(_ context.Context, _ string, mem storage.Memory) (int64, error) {
-	m.savedMemories = append(m.savedMemories, mem)
-	return int64(len(m.savedMemories)), nil
+func (m *memoryFakeStore) SaveEpisode(_ context.Context, ep storage.Episode) error {
+	m.episodes = append(m.episodes, ep)
+	return nil
 }
-func (m *memoryFakeStore) LoadRecentMemories(_ context.Context, _ string, _ int) ([]storage.Memory, error) {
-	return m.savedMemories, nil
+func (m *memoryFakeStore) LoadEpisodes(_ context.Context, _ string, _ storage.EpisodeQuery) ([]storage.Episode, error) {
+	return m.episodes, nil
+}
+func (m *memoryFakeStore) LoadLatestDailySummary(_ context.Context, _ string) (storage.Episode, error) {
+	for i := len(m.episodes) - 1; i >= 0; i-- {
+		if m.episodes[i].Category == "daily_summary" {
+			return m.episodes[i], nil
+		}
+	}
+	return storage.Episode{}, storage.ErrNotFound
+}
+func (m *memoryFakeStore) SaveCommitment(_ context.Context, cm storage.Commitment) error {
+	m.commitments = append(m.commitments, cm)
+	return nil
+}
+func (m *memoryFakeStore) UpdateCommitment(_ context.Context, _ string, _ string, _ int64, _ int64) error {
+	return nil
+}
+func (m *memoryFakeStore) LoadCommitments(_ context.Context, _ string, _ storage.CommitmentQuery) ([]storage.Commitment, error) {
+	return m.commitments, nil
+}
+func (m *memoryFakeStore) UpsertPerson(_ context.Context, p storage.Person, _ int) error {
+	m.people = append(m.people, p)
+	return nil
+}
+func (m *memoryFakeStore) SeedPerson(_ context.Context, p storage.Person) error {
+	m.people = append(m.people, p)
+	return nil
+}
+func (m *memoryFakeStore) LoadPeople(_ context.Context, _ string) ([]storage.Person, error) {
+	return m.people, nil
 }
 func (m *memoryFakeStore) SaveActionRecord(_ context.Context, _ string, _ storage.ActionRecord) error {
 	return nil
 }
 func (m *memoryFakeStore) LoadActionHistory(_ context.Context, _ string, _ int) ([]storage.ActionRecord, error) {
 	return m.actions, nil
-}
-func (m *memoryFakeStore) SaveRelationship(_ context.Context, _ string, _ string, _ int, _ int) error {
-	return nil
-}
-func (m *memoryFakeStore) LoadRelationships(_ context.Context, _ string, _ int) ([]storage.Relationship, error) {
-	return nil, nil
-}
-func (m *memoryFakeStore) SeedRelationship(_ context.Context, _ string, _ string, _ int, _ int) error {
-	return nil
 }
 func (m *memoryFakeStore) Close() error { return nil }
 

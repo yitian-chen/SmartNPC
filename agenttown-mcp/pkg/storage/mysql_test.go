@@ -2,7 +2,6 @@ package storage
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"testing"
 	"time"
@@ -127,85 +126,68 @@ func TestMySQLStore_MigrationsIdempotent(t *testing.T) {
 	_ = store2.Close()
 }
 
-// ─── Stage 4: memory + action_history round-trip tests ───
+// ─── episodic_memories round-trip tests ───
 
-// TestMySQLStore_SaveLoadMemoryRoundTrip verifies a SaveMemory followed by
-// LoadRecentMemories returns the same memory with fields intact.
-func TestMySQLStore_SaveLoadMemoryRoundTrip(t *testing.T) {
+// TestMySQLStore_SaveLoadEpisodeRoundTrip verifies a SaveEpisode followed by
+// LoadEpisodes returns the same episode with fields intact (incl. participants).
+func TestMySQLStore_SaveLoadEpisodeRoundTrip(t *testing.T) {
 	store, _ := skipIfNoMySQL(t)
 	defer store.Close()
 	ctx := context.Background()
-	agentID := "test-mem-roundtrip"
-	now := time.Now().Truncate(time.Second)
+	ownerID := "test-ep-roundtrip"
 
-	want := Memory{
-		AgentID:         agentID,
-		MemoryType:      "event",
-		Content:         "完成车间装配任务",
-		Importance:      60,
-		RelatedObjectID: "workbench_01",
-		RelatedZoneID:   "main_workshop",
-		CreatedAt:       now,
-		LastAccessedAt:  now,
-		DecayScore:      1.0,
+	want := Episode{
+		ID:           "ep_test_001",
+		OwnerID:      ownerID,
+		GameTime:     226800,
+		GameDay:      3,
+		Location:     "central_plaza",
+		Category:     "conversation",
+		Summary:      "在咖啡馆和老王聊下棋",
+		Participants: []string{"npc_wang"},
+		Importance:   7,
+		Emotion:      0.6,
+		Source:       "self",
+		Status:       "active",
 	}
-	if _, err := store.SaveMemory(ctx, agentID, want); err != nil {
-		t.Fatalf("SaveMemory: %v", err)
+	if err := store.SaveEpisode(ctx, want); err != nil {
+		t.Fatalf("SaveEpisode: %v", err)
 	}
-	got, err := store.LoadRecentMemories(ctx, agentID, 10)
+	got, err := store.LoadEpisodes(ctx, ownerID, EpisodeQuery{Limit: 10})
 	if err != nil {
-		t.Fatalf("LoadRecentMemories: %v", err)
+		t.Fatalf("LoadEpisodes: %v", err)
 	}
 	if len(got) == 0 {
-		t.Fatal("LoadRecentMemories: got 0 rows, want at least 1")
+		t.Fatal("LoadEpisodes: got 0 rows, want at least 1")
 	}
-	// DESC order — most recent first. Our just-inserted row should be first.
-	m := got[0]
-	if m.Content != want.Content || m.MemoryType != want.MemoryType ||
-		m.Importance != want.Importance || m.RelatedObjectID != want.RelatedObjectID ||
-		m.RelatedZoneID != want.RelatedZoneID || m.RelatedAgentID != "" ||
-		m.DecayScore != want.DecayScore {
-		t.Errorf("roundtrip: got %+v, want %+v", m, want)
-	}
-	if m.ID == 0 {
-		t.Error("roundtrip: ID should be non-zero after insert")
+	e := got[0]
+	if e.Summary != want.Summary || e.Category != want.Category ||
+		e.GameTime != want.GameTime || e.GameDay != want.GameDay ||
+		len(e.Participants) != 1 || e.Participants[0] != "npc_wang" {
+		t.Errorf("roundtrip: got %+v, want %+v", e, want)
 	}
 }
 
-// TestMySQLStore_LoadRecentMemoriesDESC verifies retrieval is created_at DESC.
-func TestMySQLStore_LoadRecentMemoriesDESC(t *testing.T) {
+// TestMySQLStore_LoadLatestDailySummary verifies the daily_summary lookup
+// returns ErrNotFound when absent and the latest row when present.
+func TestMySQLStore_LoadLatestDailySummary(t *testing.T) {
 	store, _ := skipIfNoMySQL(t)
 	defer store.Close()
 	ctx := context.Background()
-	agentID := "test-mem-desc"
-	base := time.Now().Truncate(time.Second)
+	ownerID := "test-ep-daily"
 
-	// Insert 3 memories with increasing created_at.
-	for i := 0; i < 3; i++ {
-		m := Memory{
-			AgentID:        agentID,
-			MemoryType:     "event",
-			Content:        fmt.Sprintf("event-%d", i),
-			Importance:     50,
-			CreatedAt:      base.Add(time.Duration(i) * time.Minute),
-			LastAccessedAt: base,
-			DecayScore:     1.0,
-		}
-		if _, err := store.SaveMemory(ctx, agentID, m); err != nil {
-			t.Fatalf("SaveMemory[%d]: %v", i, err)
-		}
+	if _, err := store.LoadLatestDailySummary(ctx, ownerID); err != ErrNotFound {
+		t.Fatalf("empty: got err=%v, want ErrNotFound", err)
 	}
-	got, err := store.LoadRecentMemories(ctx, agentID, 3)
+	if err := store.SaveEpisode(ctx, Episode{ID: "ep_d1", OwnerID: ownerID, GameTime: 100, GameDay: 1, Category: "daily_summary", Summary: "昨天总结"}); err != nil {
+		t.Fatalf("SaveEpisode daily: %v", err)
+	}
+	got, err := store.LoadLatestDailySummary(ctx, ownerID)
 	if err != nil {
-		t.Fatalf("LoadRecentMemories: %v", err)
+		t.Fatalf("LoadLatestDailySummary: %v", err)
 	}
-	if len(got) != 3 {
-		t.Fatalf("got %d rows, want 3", len(got))
-	}
-	// DESC — newest first.
-	if got[0].Content != "event-2" || got[2].Content != "event-0" {
-		t.Errorf("DESC order: got [%s, %s, %s], want [event-2, event-1, event-0]",
-			got[0].Content, got[1].Content, got[2].Content)
+	if got.Summary != "昨天总结" {
+		t.Errorf("summary = %q, want 昨天总结", got.Summary)
 	}
 }
 
@@ -290,102 +272,116 @@ func TestMySQLStore_SaveActionRecordEmptyNullableFields(t *testing.T) {
 	}
 }
 
-// ─── Stage 5: agent_relationships ───
+// ─── semantic_people + episodic_commitments ───
 
-// TestMySQLStore_SaveRelationshipUpsert verifies SaveRelationship inserts on
-// first call and increments on subsequent calls (ON DUPLICATE KEY UPDATE).
-func TestMySQLStore_SaveRelationshipUpsert(t *testing.T) {
+// TestMySQLStore_UpsertPersonAffinityClamp verifies UpsertPerson inserts on
+// first call (50 + delta) and clamps on subsequent calls.
+func TestMySQLStore_UpsertPersonAffinityClamp(t *testing.T) {
 	store, _ := skipIfNoMySQL(t)
 	defer store.Close()
 	ctx := context.Background()
-	agentA, agentB := "test-rel-a", "test-rel-b"
+	owner, target := "test-person-a", "test-person-b"
 
-	// First save → INSERT (familiarity=1, interaction_count=1).
-	if err := store.SaveRelationship(ctx, agentA, agentB, 1, 0); err != nil {
-		t.Fatalf("SaveRelationship #1: %v", err)
+	// First upsert → new row affinity = 50 + 20 = 70.
+	if err := store.UpsertPerson(ctx, Person{OwnerID: owner, TargetID: target, Impression: "初次"}, 20); err != nil {
+		t.Fatalf("UpsertPerson #1: %v", err)
 	}
-	rels, err := store.LoadRelationships(ctx, agentA, 10)
+	people, err := store.LoadPeople(ctx, owner)
 	if err != nil {
-		t.Fatalf("LoadRelationships #1: %v", err)
+		t.Fatalf("LoadPeople #1: %v", err)
 	}
-	if len(rels) != 1 {
-		t.Fatalf("got %d rows, want 1", len(rels))
-	}
-	if rels[0].Familiarity != 1 || rels[0].InteractionCount != 1 {
-		t.Errorf("after first save: got fam=%d count=%d, want fam=1 count=1",
-			rels[0].Familiarity, rels[0].InteractionCount)
+	if len(people) != 1 || people[0].Affinity != 70 {
+		t.Fatalf("after first: got %+v, want affinity 70", people)
 	}
 
-	// Second save → ON DUPLICATE KEY UPDATE (familiarity=2, interaction_count=2).
-	if err := store.SaveRelationship(ctx, agentA, agentB, 1, 0); err != nil {
-		t.Fatalf("SaveRelationship #2: %v", err)
+	// Second upsert → affinity = 70 + 100 → clamp 100.
+	if err := store.UpsertPerson(ctx, Person{OwnerID: owner, TargetID: target, Impression: "二次"}, 100); err != nil {
+		t.Fatalf("UpsertPerson #2: %v", err)
 	}
-	rels, err = store.LoadRelationships(ctx, agentA, 10)
+	people, err = store.LoadPeople(ctx, owner)
 	if err != nil {
-		t.Fatalf("LoadRelationships #2: %v", err)
+		t.Fatalf("LoadPeople #2: %v", err)
 	}
-	if len(rels) != 1 {
-		t.Fatalf("got %d rows, want 1 (upsert)", len(rels))
+	if people[0].Affinity != 100 {
+		t.Errorf("after clamp-high: affinity=%d, want 100", people[0].Affinity)
 	}
-	if rels[0].Familiarity != 2 || rels[0].InteractionCount != 2 {
-		t.Errorf("after second save: got fam=%d count=%d, want fam=2 count=2",
-			rels[0].Familiarity, rels[0].InteractionCount)
+	if people[0].Impression != "二次" {
+		t.Errorf("impression=%q, want 二次 (overwritten)", people[0].Impression)
 	}
 }
 
-// TestMySQLStore_LoadRelationshipsBothSides verifies LoadRelationships returns
-// rows where agentID is either agent_a or agent_b.
-func TestMySQLStore_LoadRelationshipsBothSides(t *testing.T) {
+// TestMySQLStore_CommitmentRoundTrip verifies SaveCommitment / LoadCommitments
+// round-trip + read-time expiry filtering + UpdateCommitment status change.
+func TestMySQLStore_CommitmentRoundTrip(t *testing.T) {
 	store, _ := skipIfNoMySQL(t)
 	defer store.Close()
 	ctx := context.Background()
-	// A→B and A→C; querying B should find the A→B row (B is agent_b side).
-	if err := store.SaveRelationship(ctx, "test-side-a", "test-side-b", 1, 0); err != nil {
-		t.Fatalf("SaveRelationship A→B: %v", err)
+	ownerID := "test-cm-roundtrip"
+
+	cm := Commitment{
+		ID: "cm_test_001", OwnerID: ownerID, Kind: "appointment",
+		CounterpartID: "npc_wang", CounterpartName: "老王",
+		Content: "在公园棋桌和老王下棋", DueStart: 309600, DueEnd: 313200,
+		DueLocation: "zone_park", Status: "pending", CreatedTime: 226800,
 	}
-	if err := store.SaveRelationship(ctx, "test-side-a", "test-side-c", 1, 0); err != nil {
-		t.Fatalf("SaveRelationship A→C: %v", err)
+	if err := store.SaveCommitment(ctx, cm); err != nil {
+		t.Fatalf("SaveCommitment: %v", err)
 	}
-	rels, err := store.LoadRelationships(ctx, "test-side-b", 10)
+	got, err := store.LoadCommitments(ctx, ownerID, CommitmentQuery{Status: "pending", DueEndMin: 300000})
 	if err != nil {
-		t.Fatalf("LoadRelationships B: %v", err)
+		t.Fatalf("LoadCommitments: %v", err)
 	}
-	if len(rels) != 1 {
-		t.Fatalf("querying B: got %d rows, want 1", len(rels))
+	if len(got) != 1 || got[0].Content != cm.Content || got[0].DueLocation != "zone_park" {
+		t.Errorf("roundtrip: got %+v, want %+v", got, cm)
 	}
-	if rels[0].AgentA != "test-side-a" || rels[0].AgentB != "test-side-b" {
-		t.Errorf("got %s→%s, want test-side-a→test-side-b", rels[0].AgentA, rels[0].AgentB)
+
+	// 读时过期过滤：DueEndMin 抬高后，due_end < min 的 pending 不返回。
+	got, err = store.LoadCommitments(ctx, ownerID, CommitmentQuery{Status: "pending", DueEndMin: 320000})
+	if err != nil {
+		t.Fatalf("LoadCommitments expired: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("expired filter: got %d rows, want 0", len(got))
+	}
+
+	// Update → done。
+	if err := store.UpdateCommitment(ctx, cm.ID, "done", -1, -1); err != nil {
+		t.Fatalf("UpdateCommitment: %v", err)
+	}
+	got, err = store.LoadCommitments(ctx, ownerID, CommitmentQuery{Status: "done"})
+	if err != nil {
+		t.Fatalf("LoadCommitments done: %v", err)
+	}
+	if len(got) != 1 || got[0].Status != "done" {
+		t.Errorf("after update: got %+v, want status done", got)
 	}
 }
 
-// TestMySQLStore_SeedRelationshipInsertIgnore verifies SeedRelationship does
-// not overwrite an existing row (INSERT IGNORE semantics).
-func TestMySQLStore_SeedRelationshipInsertIgnore(t *testing.T) {
+// TestMySQLStore_SeedPersonInsertIgnore verifies SeedPerson does not overwrite
+// an existing row (INSERT IGNORE semantics).
+func TestMySQLStore_SeedPersonInsertIgnore(t *testing.T) {
 	store, _ := skipIfNoMySQL(t)
 	defer store.Close()
 	ctx := context.Background()
-	agentA, agentB := "test-seed-a", "test-seed-b"
+	owner, target := "test-seed-p-a", "test-seed-p-b"
 
-	// First seed → inserts row with familiarity=5.
-	if err := store.SeedRelationship(ctx, agentA, agentB, 5, 0); err != nil {
-		t.Fatalf("SeedRelationship #1: %v", err)
+	// First seed → affinity 80.
+	if err := store.SeedPerson(ctx, Person{OwnerID: owner, TargetID: target, Affinity: 80}); err != nil {
+		t.Fatalf("SeedPerson #1: %v", err)
 	}
-	// Live interaction bumps familiarity to 6 via SaveRelationship.
-	if err := store.SaveRelationship(ctx, agentA, agentB, 1, 0); err != nil {
-		t.Fatalf("SaveRelationship: %v", err)
+	// Live upsert bumps to 80+10=90.
+	if err := store.UpsertPerson(ctx, Person{OwnerID: owner, TargetID: target}, 10); err != nil {
+		t.Fatalf("UpsertPerson: %v", err)
 	}
-	// Second seed → INSERT IGNORE should NOT reset familiarity back to 5.
-	if err := store.SeedRelationship(ctx, agentA, agentB, 5, 0); err != nil {
-		t.Fatalf("SeedRelationship #2: %v", err)
+	// Second seed → INSERT IGNORE should NOT reset affinity back to 80.
+	if err := store.SeedPerson(ctx, Person{OwnerID: owner, TargetID: target, Affinity: 80}); err != nil {
+		t.Fatalf("SeedPerson #2: %v", err)
 	}
-	rels, err := store.LoadRelationships(ctx, agentA, 10)
+	people, err := store.LoadPeople(ctx, owner)
 	if err != nil {
-		t.Fatalf("LoadRelationships: %v", err)
+		t.Fatalf("LoadPeople: %v", err)
 	}
-	if len(rels) != 1 {
-		t.Fatalf("got %d rows, want 1", len(rels))
-	}
-	if rels[0].Familiarity != 6 {
-		t.Errorf("after seed-ignore: got fam=%d, want 6 (seed should not overwrite)", rels[0].Familiarity)
+	if len(people) != 1 || people[0].Affinity != 90 {
+		t.Errorf("after seed-ignore: affinity=%d, want 90", people[0].Affinity)
 	}
 }

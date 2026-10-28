@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	_ "github.com/go-sql-driver/mysql" // MySQL driver; registered via blank import.
@@ -107,50 +108,98 @@ func nullableString(s string) any {
 	return s
 }
 
-// SaveMemory inserts a memory row. importance defaults to 50 in schema;
-// related_* fields are NULL when empty string. Returns the auto-increment ID.
-func (s *MySQLStore) SaveMemory(ctx context.Context, agentID string, m Memory) (int64, error) {
-	res, err := s.db.ExecContext(ctx,
-		`INSERT INTO agent_memories
-		   (agent_id, memory_type, content, importance,
-		    related_agent_id, related_object_id, related_zone_id,
-		    created_at, last_accessed_at, decay_score)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		agentID, m.MemoryType, m.Content, m.Importance,
-		nullableString(m.RelatedAgentID), nullableString(m.RelatedObjectID), nullableString(m.RelatedZoneID),
-		m.CreatedAt, m.LastAccessedAt, m.DecayScore,
+// SaveEpisode inserts one episodic_memories row. participants is marshaled
+// to JSON (empty slice → "[]", never NULL).
+func (s *MySQLStore) SaveEpisode(ctx context.Context, ep Episode) error {
+	if ep.Participants == nil {
+		ep.Participants = []string{}
+	}
+	participants, _ := json.Marshal(ep.Participants)
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO episodic_memories
+		   (id, owner_id, game_time, game_day, location, category, summary,
+		    participants_json, importance, emotion, source, status)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		ep.ID, ep.OwnerID, ep.GameTime, ep.GameDay, ep.Location, ep.Category,
+		ep.Summary, string(participants), ep.Importance, ep.Emotion, ep.Source, ep.Status,
 	)
 	if err != nil {
-		return 0, fmt.Errorf("save memory for %s: %w", agentID, err)
+		return fmt.Errorf("save episode %s for %s: %w", ep.ID, ep.OwnerID, err)
 	}
-	id, _ := res.LastInsertId()
-	return id, nil
+	return nil
 }
 
-// LoadRecentMemories returns the top-N memories for agentID by created_at DESC.
-// Empty related_* columns (NULL) are coerced to "" via COALESCE.
-func (s *MySQLStore) LoadRecentMemories(ctx context.Context, agentID string, limit int) ([]Memory, error) {
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, agent_id, memory_type, content, importance,
-		        COALESCE(related_agent_id,''), COALESCE(related_object_id,''), COALESCE(related_zone_id,''),
-		        created_at, last_accessed_at, decay_score
-		 FROM agent_memories WHERE agent_id = ?
-		 ORDER BY created_at DESC LIMIT ?`, agentID, limit)
+// LoadEpisodes returns episodes matching the query, ordered by game_time DESC.
+// Participant filtering is NOT done in SQL (JSON matching is awkward in MySQL);
+// callers filter in Go. Keywords use LIKE '%kw%' (no FTS — MySQL has no FTS5
+// trigram; data volume is small enough for a scan).
+func (s *MySQLStore) LoadEpisodes(ctx context.Context, ownerID string, q EpisodeQuery) ([]Episode, error) {
+	var sb strings.Builder
+	sb.WriteString(`SELECT id, owner_id, game_time, game_day, location, category, summary,
+	                participants_json, importance, emotion, source, status
+	                FROM episodic_memories WHERE owner_id = ?`)
+	args := []any{ownerID}
+	if q.Category != "" {
+		sb.WriteString(" AND category = ?")
+		args = append(args, q.Category)
+	}
+	if q.GameTimeMin > 0 {
+		sb.WriteString(" AND game_time >= ?")
+		args = append(args, q.GameTimeMin)
+	}
+	if q.GameTimeMax > 0 {
+		sb.WriteString(" AND game_time <= ?")
+		args = append(args, q.GameTimeMax)
+	}
+	for _, kw := range q.Keywords {
+		sb.WriteString(" AND summary LIKE ?")
+		args = append(args, "%"+kw+"%")
+	}
+	sb.WriteString(" ORDER BY game_time DESC")
+	if q.Limit > 0 {
+		sb.WriteString(" LIMIT ?")
+		args = append(args, q.Limit)
+	}
+	rows, err := s.db.QueryContext(ctx, sb.String(), args...)
 	if err != nil {
-		return nil, fmt.Errorf("load recent memories for %s: %w", agentID, err)
+		return nil, fmt.Errorf("load episodes for %s: %w", ownerID, err)
 	}
 	defer rows.Close()
-	var out []Memory
+	var out []Episode
 	for rows.Next() {
-		var m Memory
-		if err := rows.Scan(&m.ID, &m.AgentID, &m.MemoryType, &m.Content, &m.Importance,
-			&m.RelatedAgentID, &m.RelatedObjectID, &m.RelatedZoneID,
-			&m.CreatedAt, &m.LastAccessedAt, &m.DecayScore); err != nil {
-			return nil, fmt.Errorf("scan memory for %s: %w", agentID, err)
+		var ep Episode
+		var participants []byte
+		if err := rows.Scan(&ep.ID, &ep.OwnerID, &ep.GameTime, &ep.GameDay, &ep.Location,
+			&ep.Category, &ep.Summary, &participants, &ep.Importance, &ep.Emotion,
+			&ep.Source, &ep.Status); err != nil {
+			return nil, fmt.Errorf("scan episode for %s: %w", ownerID, err)
 		}
-		out = append(out, m)
+		_ = json.Unmarshal(participants, &ep.Participants)
+		out = append(out, ep)
 	}
 	return out, rows.Err()
+}
+
+// LoadLatestDailySummary returns the most recent daily_summary episode for
+// ownerID. Returns ErrNotFound when none exists.
+func (s *MySQLStore) LoadLatestDailySummary(ctx context.Context, ownerID string) (Episode, error) {
+	var ep Episode
+	var participants []byte
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id, owner_id, game_time, game_day, location, category, summary,
+		        participants_json, importance, emotion, source, status
+		 FROM episodic_memories WHERE owner_id = ? AND category = 'daily_summary'
+		 ORDER BY game_time DESC LIMIT 1`, ownerID,
+	).Scan(&ep.ID, &ep.OwnerID, &ep.GameTime, &ep.GameDay, &ep.Location, &ep.Category,
+		&ep.Summary, &participants, &ep.Importance, &ep.Emotion, &ep.Source, &ep.Status)
+	if err == sql.ErrNoRows {
+		return Episode{}, ErrNotFound
+	}
+	if err != nil {
+		return Episode{}, fmt.Errorf("load latest daily summary for %s: %w", ownerID, err)
+	}
+	_ = json.Unmarshal(participants, &ep.Participants)
+	return ep, nil
 }
 
 // SaveActionRecord inserts one action_history row at action completion.
@@ -200,76 +249,156 @@ func (s *MySQLStore) LoadActionHistory(ctx context.Context, agentID string, limi
 	return out, rows.Err()
 }
 
-// SaveRelationship upserts one directional row (agentA→agentB). On duplicate
-// key (the row already exists from a prior interaction), familiarity and
-// affection are incremented by the supplied deltas, interaction_count is
-// bumped by 1, and last_interaction_at is refreshed. Callers update both
-// directions by invoking this twice with swapped arguments.
-//
-// affection 是 0-10 好感度（默认 5）：新建行不显式传 affection，靠列 DEFAULT 5
-// （见 0003 迁移）；重复键时按 delta 累加并夹紧到 [0,10]。
-func (s *MySQLStore) SaveRelationship(ctx context.Context, agentA, agentB string, familiarityDelta, affectionDelta int) error {
+// SaveCommitment inserts one episodic_commitments row.
+func (s *MySQLStore) SaveCommitment(ctx context.Context, cm Commitment) error {
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO agent_relationships
-		   (agent_a, agent_b, familiarity, interaction_count, last_interaction_at)
-		 VALUES (?, ?, ?, 1, NOW())
-		 ON DUPLICATE KEY UPDATE
-		   familiarity = familiarity + VALUES(familiarity),
-		   affection   = GREATEST(0, LEAST(10, affection + ?)),
-		   interaction_count = interaction_count + 1,
-		   last_interaction_at = NOW()`,
-		agentA, agentB, familiarityDelta, affectionDelta,
+		`INSERT INTO episodic_commitments
+		   (id, owner_id, origin_ep_id, kind, counterpart_id, counterpart_name,
+		    content, due_start, due_end, due_location, status, created_time, updated_time)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		cm.ID, cm.OwnerID, cm.OriginEpID, cm.Kind, cm.CounterpartID, cm.CounterpartName,
+		cm.Content, cm.DueStart, cm.DueEnd, cm.DueLocation, cm.Status, cm.CreatedTime, cm.UpdatedTime,
 	)
 	if err != nil {
-		return fmt.Errorf("save relationship %s→%s: %w", agentA, agentB, err)
+		return fmt.Errorf("save commitment %s for %s: %w", cm.ID, cm.OwnerID, err)
 	}
 	return nil
 }
 
-// LoadRelationships returns rows where agentID is either side (agent_a OR
-// agent_b), ordered by most recently updated first. Used to inject the
-// 【人际关系】段 in the tactical prompt. last_interaction_at may be NULL
-// (seed rows that have never been interacted through SaveRelationship);
-// we scan via sql.NullTime and keep the zero value when NULL.
-func (s *MySQLStore) LoadRelationships(ctx context.Context, agentID string, limit int) ([]Relationship, error) {
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT agent_a, agent_b, familiarity, affection, interaction_count, last_interaction_at
-		 FROM agent_relationships
-		 WHERE agent_a = ? OR agent_b = ?
-		 ORDER BY updated_at DESC LIMIT ?`, agentID, agentID, limit)
+// UpdateCommitment updates a commitment's status and (optionally) its due
+// window. Empty status = leave unchanged; dueStart/dueEnd < 0 = leave
+// unchanged (sentinel). updated_time is set to the current wall clock (a
+// bookkeeping stamp — semantic timestamps are the caller's game seconds).
+func (s *MySQLStore) UpdateCommitment(ctx context.Context, id string, status string, dueStart, dueEnd int64) error {
+	var sets []string
+	var args []any
+	if status != "" {
+		sets = append(sets, "status = ?")
+		args = append(args, status)
+	}
+	if dueStart >= 0 {
+		sets = append(sets, "due_start = ?")
+		args = append(args, dueStart)
+	}
+	if dueEnd >= 0 {
+		sets = append(sets, "due_end = ?")
+		args = append(args, dueEnd)
+	}
+	if len(sets) == 0 {
+		return nil
+	}
+	sets = append(sets, "updated_time = ?")
+	args = append(args, time.Now().Unix())
+	args = append(args, id)
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE episodic_commitments SET `+strings.Join(sets, ", ")+` WHERE id = ?`, args...)
 	if err != nil {
-		return nil, fmt.Errorf("load relationships for %s: %w", agentID, err)
+		return fmt.Errorf("update commitment %s: %w", id, err)
+	}
+	return nil
+}
+
+// LoadCommitments returns commitments matching the query, ordered by due_start ASC.
+func (s *MySQLStore) LoadCommitments(ctx context.Context, ownerID string, q CommitmentQuery) ([]Commitment, error) {
+	var sb strings.Builder
+	sb.WriteString(`SELECT id, owner_id, origin_ep_id, kind, counterpart_id, counterpart_name,
+	                content, due_start, due_end, due_location, status, created_time, updated_time
+	                FROM episodic_commitments WHERE owner_id = ?`)
+	args := []any{ownerID}
+	if q.Status != "" {
+		sb.WriteString(" AND status = ?")
+		args = append(args, q.Status)
+	}
+	if q.CounterpartID != "" {
+		sb.WriteString(" AND counterpart_id = ?")
+		args = append(args, q.CounterpartID)
+	}
+	if q.DueStartMax > 0 {
+		sb.WriteString(" AND due_start <= ?")
+		args = append(args, q.DueStartMax)
+	}
+	if q.DueEndMin > 0 {
+		sb.WriteString(" AND due_end >= ?")
+		args = append(args, q.DueEndMin)
+	}
+	sb.WriteString(" ORDER BY due_start ASC")
+	if q.Limit > 0 {
+		sb.WriteString(" LIMIT ?")
+		args = append(args, q.Limit)
+	}
+	rows, err := s.db.QueryContext(ctx, sb.String(), args...)
+	if err != nil {
+		return nil, fmt.Errorf("load commitments for %s: %w", ownerID, err)
 	}
 	defer rows.Close()
-	var out []Relationship
+	var out []Commitment
 	for rows.Next() {
-		var r Relationship
-		var lastAt sql.NullTime
-		if err := rows.Scan(&r.AgentA, &r.AgentB, &r.Familiarity, &r.Affection,
-			&r.InteractionCount, &lastAt); err != nil {
-			return nil, fmt.Errorf("scan relationship for %s: %w", agentID, err)
+		var cm Commitment
+		if err := rows.Scan(&cm.ID, &cm.OwnerID, &cm.OriginEpID, &cm.Kind, &cm.CounterpartID,
+			&cm.CounterpartName, &cm.Content, &cm.DueStart, &cm.DueEnd, &cm.DueLocation,
+			&cm.Status, &cm.CreatedTime, &cm.UpdatedTime); err != nil {
+			return nil, fmt.Errorf("scan commitment for %s: %w", ownerID, err)
 		}
-		if lastAt.Valid {
-			r.LastInteractionAt = lastAt.Time
-		}
-		out = append(out, r)
+		out = append(out, cm)
 	}
 	return out, rows.Err()
 }
 
-// SeedRelationship inserts a row only if no row yet exists for the pair
-// (INSERT IGNORE). Used at cold start to import KB seed values without
-// overwriting interaction counts accumulated in a previous run. Has no
-// last_interaction_at (stays NULL) — the first live interaction fills it in.
-func (s *MySQLStore) SeedRelationship(ctx context.Context, agentA, agentB string, familiarity, affection int) error {
+// UpsertPerson upserts one semantic_people row. affinity is incremented by the
+// delta (clamped [0,100]); target_name/impression/last_interact_time are
+// overwritten by the supplied values. New row affinity = 50 + delta (50 neutral).
+func (s *MySQLStore) UpsertPerson(ctx context.Context, p Person, affinityDelta int) error {
 	_, err := s.db.ExecContext(ctx,
-		`INSERT IGNORE INTO agent_relationships
-		   (agent_a, agent_b, familiarity, affection, interaction_count)
-		 VALUES (?, ?, ?, ?, 0)`,
-		agentA, agentB, familiarity, affection,
+		`INSERT INTO semantic_people
+		   (owner_id, target_id, target_name, affinity, impression, last_interact_time)
+		 VALUES (?, ?, ?, GREATEST(0, LEAST(100, 50 + ?)), ?, ?)
+		 ON DUPLICATE KEY UPDATE
+		   affinity = GREATEST(0, LEAST(100, affinity + ?)),
+		   target_name = VALUES(target_name),
+		   impression = VALUES(impression),
+		   last_interact_time = VALUES(last_interact_time)`,
+		p.OwnerID, p.TargetID, p.TargetName, affinityDelta, p.Impression, p.LastInteractTime,
+		affinityDelta,
 	)
 	if err != nil {
-		return fmt.Errorf("seed relationship %s→%s: %w", agentA, agentB, err)
+		return fmt.Errorf("upsert person %s→%s: %w", p.OwnerID, p.TargetID, err)
 	}
 	return nil
+}
+
+// SeedPerson inserts a person row only if none exists (INSERT IGNORE) with an
+// explicit affinity. Used at cold start to import KB seed values without
+// overwriting affinity accumulated in a previous run.
+func (s *MySQLStore) SeedPerson(ctx context.Context, p Person) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT IGNORE INTO semantic_people
+		   (owner_id, target_id, target_name, affinity, impression, last_interact_time)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		p.OwnerID, p.TargetID, p.TargetName, p.Affinity, p.Impression, p.LastInteractTime,
+	)
+	if err != nil {
+		return fmt.Errorf("seed person %s→%s: %w", p.OwnerID, p.TargetID, err)
+	}
+	return nil
+}
+
+// LoadPeople returns all person rows for ownerID, ordered by affinity DESC.
+func (s *MySQLStore) LoadPeople(ctx context.Context, ownerID string) ([]Person, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT owner_id, target_id, target_name, affinity, impression, last_interact_time
+		 FROM semantic_people WHERE owner_id = ? ORDER BY affinity DESC`, ownerID)
+	if err != nil {
+		return nil, fmt.Errorf("load people for %s: %w", ownerID, err)
+	}
+	defer rows.Close()
+	var out []Person
+	for rows.Next() {
+		var p Person
+		if err := rows.Scan(&p.OwnerID, &p.TargetID, &p.TargetName, &p.Affinity,
+			&p.Impression, &p.LastInteractTime); err != nil {
+			return nil, fmt.Errorf("scan person for %s: %w", ownerID, err)
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
 }

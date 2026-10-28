@@ -199,6 +199,14 @@ func generateTacticalPlan(
 	conversation, conversationCapped := ac.conversationContextForPrompt(agentID, kb)
 	headerPlan := ac.as.TacticalHeaderPlan()
 	compact := dailyPlan != "" && headerPlan == dailyPlan
+	// 待办（【当前需兑现的约定】）：临近 1h 或命中眼前人的 pending 待办。
+	var counterpartIDs []string
+	for _, v := range visibleAgents {
+		counterpartIDs = append(counterpartIDs, v.ID)
+	}
+	commitments := ac.loadCommitmentsNearby(ctx, agentID, counterpartIDs)
+	// 可分享的公开消息（【可分享的消息】）：pending invitation 待办，供口口相传。
+	shareable := ac.loadShareableCommitments(ctx, agentID)
 	promptText := prompt.BuildTactical(prompt.TacticalInput{
 		Goal:               goal,
 		Zone:               zone,
@@ -212,6 +220,8 @@ func generateTacticalPlan(
 		Hint:               hint,
 		Memories:           memories,
 		Relationships:      relationships,
+		Commitments:        commitments,
+		Shareable:          shareable,
 		Events:             prompt.FormatWorldEventList(worldEvents),
 		Situations:         situations,
 		Conversation:       conversation,

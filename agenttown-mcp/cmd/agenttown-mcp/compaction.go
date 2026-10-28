@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -37,15 +38,44 @@ const (
 )
 
 // compactSystemPrompt 是上下文压缩的 system 消息：机制文本，静态可缓存。
-const compactSystemPrompt = `你是小镇居民 NPC 的记忆压缩模块。请把下方多轮决策历史压缩成一段简短的回忆式摘要——写 NPC 亲身经历的事，不是系统日志。
+// 输出为「摘要串 + 结构化记忆 JSON」——经历（episodes）+ 对人认知
+// （people_updates）。待办（commitments）不在 compact 抽取（由对话结束时
+// extractConversationCommitments 及时抽取）。
+const compactSystemPrompt = `你是小镇居民 NPC 的记忆压缩模块。请把下方多轮决策历史压缩并抽取，输出一个 JSON 对象（不要 markdown 围栏，不要其他文字）。
+
+{
+  "summary": "不超过200字的回忆式摘要",
+  "episodes": [{"summary":"一句话经历","category":"conversation/combat","importance":1-10,"emotion":-1.0~1.0,"participants":["对方id"]}],
+  "people_updates": [{"target_id":"对方id","affinity_delta":-5~5,"impression":"对他的一句话印象"}]
+}
 
 要求：
-1. 不超过 200 字，纯散文、口语化
-2. 只写三类内容：
-   - 干了什么事（一两句话概括，不要列举每个动作的参数和规则）
-   - 有什么感想或经验（如"老是被玩家骚扰很烦"、"老李这人不错"）
-   - 与谁有过什么互动（人际关系变化）
-3. 不要包含：物理状态数字、日程计划文本、系统提示语（如"路由裁决"、"时段切换"）、分解规则原文`
+1. summary：不超过 200 字，纯散文口语化，只写三类内容（干了什么事 / 有什么感想经验 / 与谁有过什么互动），不含物理状态数字、日程计划文本、系统提示语、分解规则原文。
+2. episodes：只从【新一段历史原文】里抽取新发生的事（0~3 条），不要把旧摘要里已有的经历重复抽出。category 只用 conversation（普通日常活动/对话经历）或 combat（受袭），工作/休息/运动等日常经历一律 conversation。
+3. people_updates：对对话中互动的对方，给好感度变化 affinity_delta（-5~+5）与更新后的一句话印象 impression。没有明显变化就填空数组。
+4. 没有的字段填空数组 / 空字符串，不要编造。`
+
+// compactSchema 是 compact 结构化输出的 JSON Schema（Structured Outputs）。
+const compactSchema = `{
+  "type": "object",
+  "properties": {
+    "summary": {"type": "string"},
+    "episodes": {"type": "array", "items": {"type": "object", "properties": {
+      "summary": {"type": "string"},
+      "category": {"type": "string"},
+      "importance": {"type": "integer"},
+      "emotion": {"type": "number"},
+      "participants": {"type": "array", "items": {"type": "string"}}
+    }, "required": ["summary"], "additionalProperties": false}},
+    "people_updates": {"type": "array", "items": {"type": "object", "properties": {
+      "target_id": {"type": "string"},
+      "affinity_delta": {"type": "integer"},
+      "impression": {"type": "string"}
+    }, "required": ["target_id"], "additionalProperties": false}}
+  },
+  "required": ["summary"],
+  "additionalProperties": false
+}`
 
 // compactUserTemplate 是上下文压缩的首轮 user 消息模板（无历史摘要时）。
 // 占位符：%s = 角色上下文，%s = 按时间顺序渲染的对话历史。
@@ -70,6 +100,37 @@ const compactMergeUserTemplate = `[压缩层/上下文压缩] 此前已有一份
 
 【新一段历史原文】（按时间顺序）
 %s`
+
+// compactAtDayRollover 在日切清空会话历史前，把当天对话历史做一次 compact
+// 抽取（episodes/people）并落盘。解决「写只在 compact」在低活动日
+// 不落盘的问题：中途历史不足 compactTriggerTokens 未触发 compact 时，当天
+// 经历与约定会随 ClearConversation 一起丢失——日切强制抽取一次，兜住这个窗口。
+//
+// 复用 summarizeConversation：prevSummary（滚动摘要）非空时走合并式模板，
+// episodes 只从「新历史」抽取；此时 history 是自上次 compact 以来的尾巴，
+// 更早内容已由中途 compact 落盘，不会重复。不调用 CompactConversation——
+// 摘要随即被 ClearConversation 清空，无需更新滚动摘要。
+func (a *agentContext) compactAtDayRollover(agentID string, kb *worldkb.KB, profiles map[string]*profile.Profile, logger *slog.Logger) {
+	if a.tacticalHc == nil || a.as.Store() == nil {
+		return
+	}
+	history := a.as.Conversation()
+	if len(history) == 0 {
+		return
+	}
+	summary := a.as.ConversationSummary()
+	ex, err := a.summarizeConversation(history, summary, agentID, kb, profiles, logger)
+	if err != nil {
+		logger.Warn("[压缩层] 日切 compact 抽取失败，经历随历史清空丢失",
+			"agent_id", agentID, "history_msgs", len(history), "err", err)
+		return
+	}
+	persistExtractedMemory(a.as.Store(), agentID, ex,
+		int64(a.as.LatestGameTimeSec()), a.as.LatestDayCount()+1, logger)
+	logger.Info("[压缩层] 日切 compact 抽取完成",
+		"agent_id", agentID, "history_msgs", len(history),
+		"episodes", len(ex.Episodes), "people", len(ex.PeopleUpdates))
+}
 
 // maybeCompactConversation 估算本次请求输入 token，超阈值时把旧历史摘要
 // 成稳定 digest、只保留最近 compactTailRounds 轮。摘要失败时跳过本轮压缩
@@ -99,27 +160,39 @@ func (a *agentContext) maybeCompactConversation(system string, tools []venus.Too
 	}
 	defer a.compacting.Store(false)
 
-	newSummary, err := a.summarizeConversation(evict, summary, agentID, kb, profiles, logger)
+	ex, err := a.summarizeConversation(evict, summary, agentID, kb, profiles, logger)
 	if err != nil {
 		logger.Warn("[压缩层] 摘要生成失败，跳过本次压缩（下轮重试）",
 			"agent_id", agentID, "evict_msgs", len(evict), "err", err)
 		return
 	}
-	a.as.CompactConversation(newSummary, tail)
+	a.as.CompactConversation(ex.Summary, tail)
+	// 长期记忆唯一写入时机：compact 把即将逐出的内容抽成结构化记忆，此时才
+	// 落盘（不 compact 时内容仍在上下文中，无需写库）。best-effort，失败不
+	// 阻断压缩主流程（persistExtractedMemory 内部 10s 超时 + 告警）。
+	persistExtractedMemory(a.as.Store(), agentID, ex, int64(a.as.LatestGameTimeSec()), a.as.LatestDayCount()+1, logger)
 	logger.Info("[压缩层] 上下文压缩完成",
 		"agent_id", agentID,
 		"before_msgs", len(history), "after_msgs", len(tail),
-		"summary_chars", len(newSummary), "merged", summary != "",
-		"est_tokens", estimateInputTokens(system, tools, newSummary, tail, userContent))
+		"summary_chars", len(ex.Summary), "merged", summary != "",
+		"episodes", len(ex.Episodes), "people", len(ex.PeopleUpdates),
+		"est_tokens", estimateInputTokens(system, tools, ex.Summary, tail, userContent))
 }
 
-// summarizeConversation 用战术层模型把 evict 历史压缩成一份摘要串（best-effort，
-// 不 JSON 解析，直接取文本）。prevSummary 非空时走合并式模板——旧摘要与新
-// 历史合并成更新后的摘要，连续压缩不丢更早的内容。
-func (a *agentContext) summarizeConversation(evict []llmtypes.Message, prevSummary, agentID string, kb *worldkb.KB, profiles map[string]*profile.Profile, logger *slog.Logger) (string, error) {
+// summarizeConversation 用战术层模型把 evict 历史压缩 + 抽取为 compactExtract
+// （best-effort）。prevSummary 非空时走合并式模板——旧摘要与新历史合并成更新
+// 后的摘要，连续压缩不丢更早的内容；episodes/people 只从新历史抽取。
+func (a *agentContext) summarizeConversation(evict []llmtypes.Message, prevSummary, agentID string, kb *worldkb.KB, profiles map[string]*profile.Profile, logger *slog.Logger) (compactExtract, error) {
 	roleCtx := ""
 	if role := prompt.AgentRole(kb, profiles, agentID); role != "" {
 		roleCtx = "【你的角色】\n" + role
+	}
+	// 注入当前游戏时间：让 LLM 把「3天后下午4点」这类相对时间可靠换算成
+	// 绝对游戏秒（due_start/due_end），而不是从散落的历史里自己推。
+	if gs := a.as.LatestGameTimeSec(); gs > 0 {
+		day := a.as.LatestDayCount() + 1 // 1-based 游戏日
+		tod := int64(gs) % 86400
+		roleCtx += fmt.Sprintf("\n【当前游戏时间】D%d %02d:%02d", day, tod/3600, (tod%3600)/60)
 	}
 	var promptText string
 	if prevSummary != "" {
@@ -135,7 +208,7 @@ func (a *agentContext) summarizeConversation(evict []llmtypes.Message, prevSumma
 	// 摘要被过早取消。best-effort，失败只是跳过本次压缩。
 	summaryCtx, cancel := context.WithTimeout(context.Background(), compactSummaryTimeout)
 	defer cancel()
-	resp, err := a.tacticalHc.SendWithSummary(summaryCtx, compactSystemPrompt, promptText)
+	resp, err := a.tacticalHc.SendWithSchema(summaryCtx, compactSystemPrompt, promptText, "compact_extract", []byte(compactSchema))
 	// 清掉压缩调用留下的 lastRequestBody——防 dumpLastRequestBody 把
 	// 压缩请求体误记为战术层请求（压缩 user prompt 含完整历史原文，
 	// 在 actual_prompts.md 里会显示为大量重复段）。
@@ -143,20 +216,45 @@ func (a *agentContext) summarizeConversation(evict []llmtypes.Message, prevSumma
 		c.ClearLastRequestBody()
 	}
 	if err != nil {
-		return "", fmt.Errorf("compact llm: %w", err)
+		return compactExtract{}, fmt.Errorf("compact llm: %w", err)
 	}
 	a.tacticalHc.ResetSession()
 
-	summary := strings.TrimSpace(resp.ExtractText())
-	if summary == "" {
-		return "", fmt.Errorf("compact llm: empty summary")
+	raw := strings.TrimSpace(resp.ExtractText())
+	// 容忍 markdown 围栏 / 尾随散文：取首个 { 到末个 }（与
+	// parseMemoryGenerationResult 同口径）——venus 偶发在 JSON 后附加散文，
+	// 直接 json.Unmarshal 会报 "invalid character after top-level value"。
+	var ex compactExtract
+	if err := json.Unmarshal([]byte(extractJSONObject(raw)), &ex); err != nil {
+		return compactExtract{}, fmt.Errorf("compact parse: %w", err)
 	}
-	if n := len([]rune(summary)); n > compactSummaryMaxChars {
-		summary = string([]rune(summary)[:compactSummaryMaxChars])
+	ex.Summary = strings.TrimSpace(ex.Summary)
+	if ex.Summary == "" {
+		return compactExtract{}, fmt.Errorf("compact llm: empty summary")
+	}
+	if n := len([]rune(ex.Summary)); n > compactSummaryMaxChars {
+		ex.Summary = string([]rune(ex.Summary)[:compactSummaryMaxChars])
 	}
 	logger.Info("[LLM→MCP/COMPACT-RESPONSE]", "agent_id", agentID,
-		"tokens", resp.Usage.TotalTokens, "summary", summary)
-	return summary, nil
+		"tokens", resp.Usage.TotalTokens, "summary", ex.Summary,
+		"episodes", len(ex.Episodes), "people", len(ex.PeopleUpdates))
+	return ex, nil
+}
+
+// extractJSONObject 从 LLM 原始输出里取出 JSON 对象子串：容忍 markdown 围栏
+// 与前后散文，定位首个 { 到末个 }。找不到时返回原串（由 json.Unmarshal 报错）。
+func extractJSONObject(raw string) string {
+	s := strings.TrimSpace(raw)
+	s = strings.TrimPrefix(s, "```json")
+	s = strings.TrimPrefix(s, "```")
+	s = strings.TrimSuffix(s, "```")
+	s = strings.TrimSpace(s)
+	start := strings.Index(s, "{")
+	end := strings.LastIndex(s, "}")
+	if start < 0 || end <= start {
+		return raw
+	}
+	return s[start : end+1]
 }
 
 // splitTailRounds 把历史切成 (evict, tail)：保留最后 rounds 轮（以 assistant

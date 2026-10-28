@@ -16,6 +16,7 @@ package main
 import (
 	"embed"
 	"encoding/json"
+	"fmt"
 	"io/fs"
 	"log/slog"
 	"net/http"
@@ -25,6 +26,7 @@ import (
 	"github.com/AgentTown/agenttown-mcp/contract/protocol"
 	"github.com/AgentTown/agenttown-mcp/internal/log"
 	"github.com/AgentTown/agenttown-mcp/pkg/llmmetrics"
+	"github.com/AgentTown/agenttown-mcp/pkg/storage"
 	"github.com/AgentTown/agenttown-mcp/pkg/worldkb"
 )
 
@@ -428,4 +430,88 @@ func handleDebugPlan(w http.ResponseWriter, r *http.Request, lookupAgent func(st
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
 		logger.Warn("[debug/plan] encode failed", "err", err)
 	}
+}
+
+// handleDebugMemory returns the agent's long-term-memory three-table snapshot
+// (episodic_memories / episodic_commitments / semantic_people) as JSON.
+func handleDebugMemory(w http.ResponseWriter, r *http.Request, lookupAgent func(string) *agentContext, listAgentIDs func() []string, logger *slog.Logger) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+	agentID := r.URL.Query().Get("agent_id")
+	if agentID == "" {
+		if ids := listAgentIDs(); len(ids) > 0 {
+			agentID = ids[0]
+		}
+	}
+	ac := lookupAgent(agentID)
+	if ac == nil {
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": "agent not found", "agent_id": agentID})
+		return
+	}
+	store := ac.as.Store()
+	if store == nil {
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": "in-memory mode (no MySQL)", "agent_id": agentID})
+		return
+	}
+	ctx := r.Context()
+	episodes, _ := store.LoadEpisodes(ctx, agentID, storage.EpisodeQuery{Limit: 200})
+	commitments, _ := store.LoadCommitments(ctx, agentID, storage.CommitmentQuery{Limit: 200})
+	people, _ := store.LoadPeople(ctx, agentID)
+	if episodes == nil {
+		episodes = []storage.Episode{}
+	}
+	if commitments == nil {
+		commitments = []storage.Commitment{}
+	}
+	if people == nil {
+		people = []storage.Person{}
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"agent_id":    agentID,
+		"episodes":    episodes,
+		"commitments": commitments,
+		"people":      people,
+	})
+}
+
+// handleDebugMemoryExport renders the three-table snapshot as Markdown
+// (便于测试比对 / 一键导出).
+func handleDebugMemoryExport(w http.ResponseWriter, r *http.Request, lookupAgent func(string) *agentContext, listAgentIDs func() []string, logger *slog.Logger) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	agentID := r.URL.Query().Get("agent_id")
+	if agentID == "" {
+		if ids := listAgentIDs(); len(ids) > 0 {
+			agentID = ids[0]
+		}
+	}
+	ac := lookupAgent(agentID)
+	if ac == nil {
+		fmt.Fprintf(w, "agent not found: %s\n", agentID)
+		return
+	}
+	store := ac.as.Store()
+	if store == nil {
+		fmt.Fprintln(w, "in-memory mode (no MySQL)")
+		return
+	}
+	ctx := r.Context()
+	episodes, _ := store.LoadEpisodes(ctx, agentID, storage.EpisodeQuery{Limit: 200})
+	commitments, _ := store.LoadCommitments(ctx, agentID, storage.CommitmentQuery{Limit: 200})
+	people, _ := store.LoadPeople(ctx, agentID)
+
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "# 长期记忆快照：%s\n\n", agentID)
+	sb.WriteString("## 过去经历（episodic_memories）\n")
+	for _, e := range episodes {
+		fmt.Fprintf(&sb, "- [D%d %s] (%s) %s\n", e.GameDay, formatGameClock(e.GameTime), e.Category, e.Summary)
+	}
+	sb.WriteString("\n## 未来待办（episodic_commitments）\n")
+	for _, c := range commitments {
+		fmt.Fprintf(&sb, "- [%s|%s] %s\n", c.Kind, c.Status, c.Content)
+	}
+	sb.WriteString("\n## 对人认知（semantic_people）\n")
+	for _, p := range people {
+		fmt.Fprintf(&sb, "- %s（%s）：好感 %d/100，印象：%s\n", p.TargetID, p.TargetName, p.Affinity, p.Impression)
+	}
+	fmt.Fprint(w, sb.String())
 }

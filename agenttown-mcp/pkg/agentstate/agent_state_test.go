@@ -708,15 +708,43 @@ func (f *fakeStore) SaveScheduleState(_ context.Context, agentID string, s stora
 	return nil
 }
 
-// Stage 4 stubs — fakeStore focuses on schedule-state write-through; memory
+// Stage 4/5 stubs — fakeStore focuses on schedule-state write-through; memory
 // and action_history methods are no-ops so tests compile against the extended
 // Store interface. Memory-specific behavior is tested in pkg/storage.
 
-func (f *fakeStore) SaveMemory(_ context.Context, _ string, _ storage.Memory) (int64, error) {
-	return 0, nil
+func (f *fakeStore) SaveEpisode(_ context.Context, _ storage.Episode) error {
+	return nil
 }
 
-func (f *fakeStore) LoadRecentMemories(_ context.Context, _ string, _ int) ([]storage.Memory, error) {
+func (f *fakeStore) LoadEpisodes(_ context.Context, _ string, _ storage.EpisodeQuery) ([]storage.Episode, error) {
+	return nil, nil
+}
+
+func (f *fakeStore) LoadLatestDailySummary(_ context.Context, _ string) (storage.Episode, error) {
+	return storage.Episode{}, storage.ErrNotFound
+}
+
+func (f *fakeStore) SaveCommitment(_ context.Context, _ storage.Commitment) error {
+	return nil
+}
+
+func (f *fakeStore) UpdateCommitment(_ context.Context, _ string, _ string, _ int64, _ int64) error {
+	return nil
+}
+
+func (f *fakeStore) LoadCommitments(_ context.Context, _ string, _ storage.CommitmentQuery) ([]storage.Commitment, error) {
+	return nil, nil
+}
+
+func (f *fakeStore) UpsertPerson(_ context.Context, _ storage.Person, _ int) error {
+	return nil
+}
+
+func (f *fakeStore) SeedPerson(_ context.Context, _ storage.Person) error {
+	return nil
+}
+
+func (f *fakeStore) LoadPeople(_ context.Context, _ string) ([]storage.Person, error) {
 	return nil, nil
 }
 
@@ -726,21 +754,6 @@ func (f *fakeStore) SaveActionRecord(_ context.Context, _ string, _ storage.Acti
 
 func (f *fakeStore) LoadActionHistory(_ context.Context, _ string, _ int) ([]storage.ActionRecord, error) {
 	return nil, nil
-}
-
-// Stage 5 stubs — relationship methods are no-ops; relationship-specific
-// behavior is tested in pkg/storage and cmd/agenttown-mcp/relationship_test.go.
-
-func (f *fakeStore) SaveRelationship(_ context.Context, _ string, _ string, _ int, _ int) error {
-	return nil
-}
-
-func (f *fakeStore) LoadRelationships(_ context.Context, _ string, _ int) ([]storage.Relationship, error) {
-	return nil, nil
-}
-
-func (f *fakeStore) SeedRelationship(_ context.Context, _ string, _ string, _ int, _ int) error {
-	return nil
 }
 
 func (f *fakeStore) Close() error { return nil }
