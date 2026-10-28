@@ -208,3 +208,18 @@ func TestBenchReport_NoCredentialsAndExplicitOffline(t *testing.T) {
 		t.Fatal("missing live configuration accepted")
 	}
 }
+func TestBenchConfig_MatchesProductionKeyFallback(t *testing.T) {
+	t.Setenv("VENUS_API_KEY", "UNIT_TEST_SECRET")
+	p := filepath.Join(t.TempDir(), "backend.yaml")
+	data := "strategic:\n  base_url: http://offline.invalid\n  model: test\ntactical:\n  base_url: http://offline.invalid\n  model: test\n"
+	if err := os.WriteFile(p, []byte(data), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := benchBackends(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Strategic.APIKey != "UNIT_TEST_SECRET" || cfg.Tactical.APIKey != "UNIT_TEST_SECRET" || cfg.Tactical.TimeoutSec != 60 {
+		t.Fatal("configuration fallback differs from production")
+	}
+}

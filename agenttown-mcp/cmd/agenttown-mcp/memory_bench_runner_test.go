@@ -74,6 +74,14 @@ func benchBackends(path string) (llmconfig.Config, error) {
 		if err != nil {
 			return llmconfig.Config{}, fmt.Errorf("cannot load model configuration (check path and schema)")
 		}
+		for _, b := range []*llmconfig.Backend{&cfg.Strategic, &cfg.Tactical} {
+			if b.APIKey == "" {
+				b.APIKey = os.Getenv("VENUS_API_KEY")
+			}
+			if b.TimeoutSec <= 0 {
+				b.TimeoutSec = 60
+			}
+		}
 		return *cfg, nil
 	}
 	env := func(k, def string) string {
@@ -125,6 +133,7 @@ func benchRunOne(ctx context.Context, c benchCase, group string, repeat int, liv
 			stop("invalid_fixture", e.Error())
 			return
 		}
+		a.tacticalHc = tactical
 		agents[id] = a
 	}
 	for i, step := range c.Steps {
@@ -163,6 +172,7 @@ func benchRunOne(ctx context.Context, c benchCase, group string, repeat int, liv
 					stop("invalid_fixture", e.Error())
 					return
 				}
+				rebuilt.tacticalHc = tactical
 				agents[step.Agent] = rebuilt
 			}
 		}
@@ -392,6 +402,9 @@ func TestMemoryBench_Run(t *testing.T) {
 	}
 	if *benchRepeatsFlag < 1 || *benchConcurrencyFlag < 1 || *benchMaxCallsFlag < 1 {
 		t.Fatal("repeats, concurrency and max-calls must be positive")
+	}
+	if *benchLiveFlag && *benchMaxCallsFlag > 30 {
+		t.Fatal("live HTTP hard limit is 30; --max-calls may only lower it")
 	}
 	suite, err := benchLoadSuite(*benchSuiteFlag)
 	if err != nil {
