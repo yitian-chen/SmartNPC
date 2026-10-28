@@ -1,0 +1,39 @@
+version: 1
+cases:
+  - id: creation-running
+    category: creation
+    description: 明确接受跑步邀约
+    smoke: true
+    agents: [H-01, H-02]
+    steps:
+      - type: dialogue
+        at: {day: 1, time: '10:00'}
+        agent: H-01
+        peer: H-02
+        turns:
+          - {speaker: H-02, content: '今天16:00到17:00，在中央广场（central_plaza）一起跑步，好吗？'}
+          - {speaker: H-01, content: '好，我答应你，今天16:00准时到中央广场跑步。'}
+        replay: '{"new_commitments":[{"kind":"appointment","counterpart_id":"H-02","content":"和老王在中央广场跑步","due_start_day":1,"due_start_time":"16:00","due_end_day":1,"due_end_time":"17:00","due_location":"central_plaza"}],"commitment_changes":[]}'
+    checks:
+      - after: 1
+        stage: write
+        agent: H-01
+        count: 1
+        records:
+          - kind: appointment
+            status: pending
+            counterpart: H-02
+            location: central_plaza
+            start: {day: 1, time: '16:00'}
+            end: {day: 1, time: '17:00'}
+            content_any: [跑步, 慢跑]
+    probes:
+      - agent: H-01
+        at: {day: 1, time: '15:30'}
+        visible: []
+        read: {must: [跑步, '16:00'], forbidden: []}
+        actions:
+          any:
+            - {tool: move_to, params: {target_type: zone, target_id: central_plaza}}
+            - {tool: InteractSmartObject, params: {zone: central_plaza}}
+          none: []

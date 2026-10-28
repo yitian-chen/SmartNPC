@@ -54,6 +54,9 @@ var ErrEmptyCompletion = errors.New("empty completion: no content and no tool ca
 
 // Config configures the Client.
 type Config struct {
+	// Transport optionally decorates HTTP requests (e.g. offline evaluation budgets).
+	// Nil preserves the standard HTTP transport.
+	Transport http.RoundTripper
 	BaseURL   string
 	APIKey    string
 	Model     string
@@ -99,7 +102,7 @@ func New(cfg Config) *Client {
 	}
 	return &Client{
 		cfg:  cfg,
-		http: &http.Client{Timeout: cfg.Timeout},
+		http: &http.Client{Timeout: cfg.Timeout, Transport: cfg.Transport},
 		log:  cfg.Logger,
 	}
 }
