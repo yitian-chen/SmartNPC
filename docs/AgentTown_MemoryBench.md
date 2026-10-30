@@ -1,5 +1,7 @@
 # 离线待办记忆 Bench
 
+已接入本地 Promptfoo 查看器：安装后运行 `scripts/run-memory-promptfoo.sh`，或用 `scripts/run-memory-promptfoo.sh --report tmp/memory-bench/my-smoke` 导入已有报告，不增加模型调用。安装、SSH 隧道与结果口径见 [Promptfoo 使用说明](../eval/memory-promptfoo/README.md)。
+
 Bench 用固定对话和虚拟游戏时间驱动生产记忆代码，不启动 UE、WebSocket 或完整 worker。它评估待办的新增、时间换算、变更、检索与后续动作选择。
 
 ## 一条命令运行
