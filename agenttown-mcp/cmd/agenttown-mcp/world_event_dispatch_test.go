@@ -662,3 +662,87 @@ func TestCorrectUnansweredHint_OnLateReply(t *testing.T) {
 		t.Fatalf("non-unanswered hint must be left alone, got %q", ac.as.ReplanHint())
 	}
 }
+
+// farewellReplyTestEvent is replySpeechTestEvent with ends_conversation=true:
+// the speaker's utterance closes the conversation and expects no reply.
+func farewellReplyTestEvent(id, speaker string) protocol.WorldEventPayload {
+	ev := replySpeechTestEvent(id, speaker)
+	ev.Data = json.RawMessage(`{"speaker_id":"` + speaker + `","speaker_name":"老陈","addressee_id":"H-02","content":"好，就这么定了，下午见！","ends_conversation":true}`)
+	return ev
+}
+
+// TestReleaseFarewellListener_OnFarewellReply verifies the receiver-side
+// mirror of releaseFarewellSpeaker: a reply carrying ends_conversation=true
+// arriving at an agent whose in-flight speak_to targets the speaker (it is
+// standing there waiting for that very reply) releases the wait immediately —
+// stop + in-flight cleared + conversation closed + follow-through hint
+// injected + social reaction window lifted — instead of standing through UE's
+// late speech:replied completion (one full no-reply window after the reply,
+// 2026-11-02 sim). Negatives: a reply without the flag, a speak_to waiting on
+// a third party, and a non-speak_to in-flight action are all left alone.
+func TestReleaseFarewellListener_OnFarewellReply(t *testing.T) {
+	rt, ft, _ := newWorldEventTestRuntime(t)
+	// 注册接收方 H-02（fixture 默认只注册 H-01）。H-02 在途的 speak_to
+	// 指向 H-01 —— 它就是那位站着等回话的邀请方。
+	recv, _ := newAgentContext(context.Background())
+	rt.agentsMu.Lock()
+	rt.agents["H-02"] = recv
+	rt.agentsMu.Unlock()
+
+	// 会话已有自己的邀请轮（recordActionStarted 的 own-turn 挂钩产物）。
+	recv.recordConversationTurn("H-02", "H-01", "老陈，下午四点广场生日派对记得来！", 38823)
+	// 社交反应窗口 armed（对话开启）——释放时应随对话终局一并清除。
+	recv.beginReaction(2, 38823, "社交对话", true)
+
+	waitParams := func(target string) map[string]any {
+		return map[string]any{
+			"target_agent_id": target, "content": "老陈，下午四点广场生日派对记得来！",
+			"ends_conversation": false, "interrupt": true,
+		}
+	}
+
+	// 正例：等待 H-01 回话的 speak_to + 带收尾标记的回话到达 → 立即释放。
+	recv.as.RecordActionStarted("act-wait1", "SpeakTo", waitParams("H-01"), agentstate.SourceTactical, "")
+	dispatchTestEvent(t, rt, "H-02", farewellReplyTestEvent("evt_fl1", "H-01"))
+	stops := stoppedActions(ft)
+	if len(stops) != 1 || stops[0] != "act-wait1" {
+		t.Fatalf("waiting speak_to must be stopped on farewell reply, got %v", stops)
+	}
+	if recv.as.CurrentActionID() != "" {
+		t.Fatalf("receiver in-flight must be cleared, got %q", recv.as.CurrentActionID())
+	}
+	if peer, turns := recv.conversationPeerState(); peer != "" || turns != 0 {
+		t.Fatalf("conversation must be closed, got peer=%q turns=%d", peer, turns)
+	}
+	if hint := recv.as.ReplanHint(); !strings.Contains(hint, "【对话结束】") {
+		t.Fatalf("follow-through hint must be injected, got %q", hint)
+	}
+	if active, _, _ := recv.reactionSnapshot(); active {
+		t.Fatal("social reaction window must be lifted with the conversation end")
+	}
+
+	// 反例 1：不带收尾标记的普通回话 → 不释放（对话可能继续，等待合法）。
+	recv.recordConversationTurn("H-02", "H-01", "那我先去忙了。", 39000)
+	recv.as.RecordActionStarted("act-wait2", "SpeakTo", waitParams("H-01"), agentstate.SourceTactical, "")
+	dispatchTestEvent(t, rt, "H-02", replySpeechTestEvent("evt_fl2", "H-01"))
+	if stops := stoppedActions(ft); len(stops) != 1 {
+		t.Fatalf("unflagged reply must NOT release the waiter, got %v", stops)
+	}
+
+	// 反例 2：在途 speak_to 等的是第三方（H-03）→ 说话人的收尾不释放它。
+	recv.as.ClearInFlightKeepQueue()
+	recv.as.RecordActionStarted("act-wait3", "SpeakTo", waitParams("H-03"), agentstate.SourceTactical, "")
+	dispatchTestEvent(t, rt, "H-02", farewellReplyTestEvent("evt_fl3", "H-01"))
+	if stops := stoppedActions(ft); len(stops) != 1 {
+		t.Fatalf("third-party wait must NOT be released, got %v", stops)
+	}
+
+	// 反例 3：非 speak_to 在途动作 → 不释放。
+	recv.as.ClearInFlightKeepQueue()
+	recv.as.RecordActionStarted("act-wait4", "InteractSmartObject", map[string]any{
+		"semantic_group": "treadmill"}, agentstate.SourceTactical, "")
+	dispatchTestEvent(t, rt, "H-02", farewellReplyTestEvent("evt_fl4", "H-01"))
+	if stops := stoppedActions(ft); len(stops) != 1 {
+		t.Fatalf("non-speak_to in-flight must NOT be released, got %v", stops)
+	}
+}
