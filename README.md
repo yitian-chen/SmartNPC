@@ -1,13 +1,14 @@
 # AgentTown — LLM 驱动的 AI NPC 模拟系统
 
-AgentTown 是一个让 AI NPC 在游戏世界里**长期自主生活**的模拟系统：在 UE5 构建的机器人小镇中，5 个拟人 NPC（H-01~H-05）各自拥有独立的性格人设与工种，白天上班装配、累了充电、闲时社交上网、被攻击了逃跑、受损了维修——所有行为由 LLM 实时决策，经 MCP 协议驱动真实 UE5 世界，形成完整的"感知 → 决策 → 行动 → 反应"闭环。
+AgentTown 是一个让 AI NPC 在游戏世界里**长期自主生活**的模拟系统：在 UE5 构建的机器人小镇中，5 个拟人 NPC（H-01~H-05）各自拥有独立的性格人设与工种，白天上班装配、累了充电、闲时社交上网、被攻击了逃跑、受损了维修，约好的聚会也会真的赴约——所有行为由 LLM 实时决策，经 MCP 协议驱动真实 UE5 世界，形成完整的"感知 → 决策 → 行动 → 反应"闭环。
 
 它不是脚本 NPC：
 
 - **同一事件，不同反应**——"K-03 故障"广播推给所有 NPC，胆小的立刻丢下手里的活，沉着的入队继续工作。事件判决的输入包含每个 NPC 的性格、人际关系、当前动作与持续处境，反应分化是设计出来的涌现
 - **日程自己规划**——每天 07:00 由 LLM 结合昨日记忆、今日星期属性（工作日/运动日/冥想日）和实时物理状态生成当天计划；被突发事件打断后还能修订剩余时段
 - **会犯错也会自我纠正**——MCP 侧校验拒绝的非法动作指令（如缺目标的移动），拒绝原因回注会话历史，下一轮规划自行改正
-- **有记忆、有关系、有亲疏**——日终 LLM 总结当日经历沉淀为结构化记忆；NPC 间交互累积熟悉度，整段对话结束后 LLM 评估一次好感度（0-10，默认 5），亲疏反过来影响后续决策
+- **有记忆、有关系、有亲疏**——上下文压缩时把即将逐出的经历沉淀为三张长期记忆表（过去经历 / 未来待办 / 对人认知），被攻击等关键事实规则直写（0 LLM）；对人认知收敛为单一好感度（0-100，50 中性）+ 一句印象，亲疏反过来影响事件裁决与行为决策
+- **会约定也会守约**——对话中达成的约定当场抽取为结构化待办（绝对游戏日 + 时刻 + 地点），临近到期由代码触发战略层重排预留时间、战术层收到动身提示；受邀的消息还能作为「可分享的消息」在 NPC 间口口相传
 - **被攻击真的会跑**——玩家攻击时 UE 战斗行为树接管 NPC 身体、agent 确定性让位（控制权毫秒级交接），脱战后 agent 带战后上下文（掉血/位移/战斗事件对）重新接管，自主决定先维修还是回岗
 
 | 维度 | 数据 |
@@ -16,6 +17,7 @@ AgentTown 是一个让 AI NPC 在游戏世界里**长期自主生活**的模拟�
 | 世界 | 7 区域 / 57 可交互设施（UE5 AgentTown 地图，world_kb 数据驱动） |
 | 动作 | 12 种 cmd（7 原子 + 5 复合）+ 2 特殊工具，UE `capability_registry` 动态派生 |
 | 决策延迟 | 强制事件微秒级（零 LLM 硬保证通道）；事件判决 ~0.5s；战术分解秒级 |
+| 长期记忆 | 三表（episodic_memories 经历 / episodic_commitments 待办 / semantic_people 对人认知），compact 时沉淀，MySQL 持久化 |
 | 仿真规模 | time_scale 90（1 现实秒 ≈ 90 游戏秒），多游戏日无人值守连续运行 |
 | 技术栈 | Go 1.25（三 module）· UE5 C++/蓝图 · Venus LLM（OpenAI 兼容）· MySQL · WebSocket |
 
@@ -33,15 +35,14 @@ graph LR
     subgraph MCP["agenttown-mcp（Go · 三 module）"]
         WS["wsserver 连接 module<br/>收发 / seq 重放 / ACK"]
         RT["Runtime<br/>入站消息单入口分发"]
-        AG["agent 决策核心<br/>战略 / 战术 / 事件路由 / 记忆 / 关系"]
+        AG["agent 决策核心<br/>战略 / 战术 / 事件路由 /<br/>记忆 / 对话"]
         DBG["debug 控制台<br/>10+ HTTP 端点"]
     end
     subgraph LLM["LLM 后端（可切换）"]
         VENUS["Venus 网关（默认）<br/>战略 deepseek-v4-pro<br/>战术 deepseek-v4.1-flash<br/>事件判决 jev-1.13.0"]
-        SELF["自部署 vLLM / SGLang<br/>（LLM_CONFIG 分层切换）"]
-        OLLAMA["Ollama qwen2.5:7b<br/>（仅关系语义判断，异步）"]
+        SELF["自部署 vLLM / SGLang<br/>（--llm-config 分层切换）"]
     end
-    MYSQL[("MySQL<br/>调度状态 / 记忆 /<br/>关系 / 动作历史")]
+    MYSQL[("MySQL<br/>调度状态 / 记忆三表 /<br/>动作历史")]
 
     UE5 <-->|"WebSocket :9092<br/>7 字段信封"| WS
     WS --> RT --> AG
@@ -49,7 +50,6 @@ graph LR
     AG -->|"function calling"| VENUS
     AG -->|"判决 API 三问"| VENUS
     AG -.->|可选| SELF
-    AG -->|异步 best-effort| OLLAMA
     AG -->|"write-through"| MYSQL
     DBG --> AG
 ```
@@ -61,7 +61,7 @@ graph LR
 | wsserver module | Go | 连接：WS 收发、seq 重放补偿、ACK 等待，实现 `contract.Transport` |
 | 根 module | Go | agent 决策 + 装配壳 + `pkg/` 领域库（prompt / worldkb / storage / jev / …） |
 | Venus / 自部署推理 | 远程/本地 | OpenAI 兼容 LLM 服务：战略（每日 1 次）、战术（每时段 1 次）、事件判决（按需） |
-| MySQL | 本地 | 持久化（可选）：调度状态、长期记忆、关系数值、动作历史 |
+| MySQL | 本地 | 持久化（可选）：调度状态、长期记忆三表（经历/待办/对人认知）、动作历史 |
 
 ### 三 module 模块化设计
 
@@ -78,7 +78,6 @@ agenttown-mcp/                  # 根 module：agent 决策 + 装配壳 + 领域
     llmconfig/                  # --llm-config 分层后端配置（战略/战术各自 URL+模型）
     llmmetrics/                 # LLM 指标聚合（E2E/TTFT/TPOT/ITL 分位数 + 错误分布）
     llmtokens/ llmtypes/        # token 计数 / 共享响应类型
-    ollama/                     # 本地 Ollama 客户端（关系语义判断）
     transport/                  # Streamable HTTP（MCP /mcp 端点）
     worldkb/                    # 世界 KB 加载/合并/校验/查询
     profile/                    # NPC 人设档案（assets/profiles/*.md）
@@ -130,11 +129,11 @@ graph TB
 
 | 层 | 频率 | 模型 | 输入 | 输出 |
 |----|------|------|------|------|
-| 战略层 | 每日 07:00 一次 + 事件触发 replan | deepseek-v4-pro | 共享 system prompt + 物理/昨日总结/星期属性/其他 NPC | dailyPlan（6-8 时段 JSON，Structured Outputs） |
-| 战术层 | 每时段 1 次，队列耗尽时 refill | deepseek-v4.1-flash | 共享 system prompt + 时段目标/实时状态/事件队列/记忆/关系 | tool_calls（1-4 动作段 + time_to_stop） |
+| 战略层 | 每日 07:00 一次 + 事件触发 replan | deepseek-v4-pro | 共享 system prompt + 物理/昨日总结/星期属性/其他 NPC/今日待办 | dailyPlan（6-8 时段 JSON，Structured Outputs） |
+| 战术层 | 每时段 1 次，队列耗尽时 refill | deepseek-v4.1-flash | 共享 system prompt + 时段目标/实时状态/事件队列/记忆/待办/人际关系 | tool_calls（1-4 动作段 + time_to_stop） |
 | 事件判决 | 每条非 force 事件 | jev-1.13.0（Venus 判决 API） | 结构化 state（人设/关系/近期行为/当前动作/持续处境） | 三问：是否打断/动机/严重度 |
-| 关系判断 | 动作完成后异步 | Ollama qwen2.5:7b | cmd + params | 是否构成社交互动（yes/no） |
-| 好感度评估 | 对话结束后异步 | deepseek-v4-pro | 人设 + 对话 transcript + 当前好感 | 好感度 delta（-3~+3，夹紧 0-10） |
+| 记忆压缩 | 上下文超 10k token 或日切强制 | deepseek-v4.1-flash（复用战术层客户端） | 滚动摘要 + 待逐出历史 | 摘要 + 经历 episodes + 好感度/印象更新 |
+| 对话待办抽取 | 每次定向对话结束 | deepseek-v4-pro | 人设 + 对话 transcript + 当前游戏时间 | 未来待办（游戏日 + HH:MM）+ 核销/改期 |
 
 ### 事件驱动反应体系
 
@@ -167,7 +166,26 @@ sequenceDiagram
     A->>UE: 战后新动作（维修/充电/回岗）
 ```
 
-每个方向都有兜底：UE 忘发 `combat_exit` → 30 游戏分钟 TTL 租约自动收回；UE 接管未生效 → 2s 宽限期后代为停动作（宽限期内不 stop，避免杀掉刚启动的接管）；断线重连让位状态存续；重复攻击幂等。2026-09-22 联调跑通：UE 抢占与打断回执同毫秒完成，宽限期保险丝零触发。
+每个方向都有兜底：UE 忘发 `combat_exit` → 120 游戏分钟 TTL 租约自动收回；UE 接管未生效 → 2s 宽限期后代为停动作（宽限期内不 stop，避免杀掉刚启动的接管）；断线重连让位状态存续；重复攻击幂等。2026-09-22 联调跑通：UE 抢占与打断回执同毫秒完成，宽限期保险丝零触发。
+
+### 长期记忆与社交对话
+
+**三表记忆模型**（设计文档 `docs/AgentTown_LongTermMemory_SQLite_Design.md`，MySQL 持久化，`owner_id` 第一分区键实现信息隔离——A 的记忆 B 绝对查不到，信息只能靠说话传播）：
+
+| 表 | 内容 |
+|----|------|
+| `episodic_memories` | 过去经历：game_time 锚定的第一人称一句话摘要 + 参与者 + 重要性/情绪 |
+| `episodic_commitments` | 未来待办：约定（appointment）/ 传话（relay）/ 活动邀请（invitation）/ 自办事项（todo），状态机 pending → done / expired / cancelled |
+| `semantic_people` | 对人认知：单一好感度（0-100，50 中性）+ 一句印象（住址/喜好等零散事实并入印象，不拆多维） |
+
+读写各有纪律：
+
+- **写只在 compact**：平时发生的事就住在会话上下文里（NPC 天然"记得"），只有上下文压缩、内容即将被逐出时才抽成结构化记忆落盘——不重复写。跨日清空历史前强制 compact 一次，兜住低活动日的经历丢失；被攻击等关键事实**规则直写**（0 LLM：combat episode + 攻击者好感度 -50）
+- **读零 LLM**：`memoryReader` 内部工具纯程序查询（索引 + LIKE + 内存打分），不注册进 function calling、LLM 不可见；三层决策按需取用——战略层排日程看未来 24h 待办 + 昨日总结，战术层看眼前人的好感/印象、临近 1h 的约定与【可分享的消息】
+- **待办闭环**：对话结束当场抽取约定，时间用「绝对游戏日 + HH:MM」让 LLM 抄写、代码换算秒数（实测让 LLM 算累计秒会输出墙钟秒等垃圾值）；临近到期（≤12 游戏小时）由代码触发战略层重排预留时段；过期在读时 SQL 动态过滤，不回写
+- **口口相传**：受邀类待办进入【可分享的消息】，战术层被要求与人聊天时主动告知——消息不靠系统广播，靠 NPC 一张嘴一张嘴传开
+
+**对话收尾与守约**：定向对话（`speak_to`）一律单动作；LLM 判断本句是收尾时标 `ends_conversation`，话语送达即释放等待（不等满 ~10s no_reply 窗）；对话终局即时关会话并注入守约 hint——完整对话记录 + "约定了就立即去执行，守约优先于当前时段目标"；轮次上限 6 + 会话续接窗口（60s 内同对象再开口自动接上旧轮次）防 ping-pong 与失忆重开。
 
 ### 关键机制速览
 
@@ -179,8 +197,9 @@ sequenceDiagram
 | 智能设施排队 | 目标被占用时自动排队（auto_queue），queued/advanced/timeout 状态推送，超时回退重决策 |
 | world_kb 自动适配 | UE 推送新 KB → 重启即全链路适配（prompt/工具 schema/兜底日程全从 KB 派生），换地图零代码 |
 | NPC 人设注入 | profile.md（名字/职业/背景/性格/说话风格/属性分段）三层回退（profile > KB > 内置），贯穿所有决策层 |
-| 长期记忆 | 日终 LLM 总结 action_history → 结构化记忆 + 叙事，注入后续战略/战术 prompt |
-| 关系与好感度 | 交互后 Ollama 语义判断累积熟悉度；对话后 LLM 评估好感度（0-10）→ 注入路由/战术/战略【人际关系】段（好感 x/10） |
+| 长期记忆 | 三表模型（经历/待办/对人认知）；写只在 compact（日切强制兜底）+ 攻击规则直写；读走 memoryReader 内部工具，零 LLM |
+| 对话与守约 | speak_to 单动作 + ends_conversation 送达即释放；对话终局即时注入守约 hint（守约优先于时段目标）；轮次上限 6 防对话 ping-pong |
+| 关系与好感度 | semantic_people 单表：好感度 0-100 + 一句印象，compact 时 people_updates 更新（夹紧 0-100）→ 注入路由/战术/战略【人际关系】段（好感 x/100） |
 | LLM 可靠性兜底 | 坏 tools JSON 同请求重试（实测 100% 救回）、time_to_stop 兜底、失败兜底动作防呆站 |
 | 全链路可观测 | 统一 JSONL 日志（UE/MCP/LLM 三层）、decision_epoch 串联决策轮次、LLM 分位数指标 |
 
@@ -212,13 +231,13 @@ sequenceDiagram
 
 **模式一：Venus（默认）**——OpenAI 兼容网关，战略 `deepseek-v4-pro` / 战术 `deepseek-v4.1-flash` / 事件判决 `jev-1.13.0`。只需在 `.env` 填 `VENUS_API_KEY`。
 
-**模式二：自部署推理服务（vLLM / SGLang）**——`assets/llm_backend.yaml` 分层配置战略/战术各自的后端地址与模型，`.env` 设 `LLM_CONFIG=assets/llm_backend.yaml` 即切换（不再要求 VENUS_API_KEY）：
+**模式二：自部署推理服务（vLLM / SGLang）**——复制 `assets/llm_backend.example.yaml` 为 `assets/llm_backend.yaml`（该文件已 gitignore，可安全填入自建地址与 key），启动时带 `--llm-config=assets/llm_backend.yaml`（或 `.env` 设 `LLM_CONFIG`）即切换，战略/战术可分别指向不同后端：
 
 ```yaml
 strategic:                      # 战略层（低频，可用大模型）
   base_url: "http://127.0.0.1:8000"   # 服务根地址，客户端自动拼 /v1/chat/completions
   model: "Qwen2.5-32B-Instruct"
-tactical:                       # 战术层（高频）
+tactical:                       # 战术层（高频；记忆压缩复用）
   base_url: "http://127.0.0.1:8000"
   model: "Qwen2.5-7B-Instruct-GPTQ-Int4"
 ```
@@ -262,12 +281,11 @@ bash start-dev.sh --drop-tables    # 清空该实例 MySQL 库后重启（migrat
                                    # 用于清掉累积的调度/记忆/关系做"干净日"重跑
 ```
 
-手动编译（脚本已内置，一般不需要）：
+手动编译（启动脚本已内置，一般不需要）：
 
 ```bash
 cd agenttown-mcp
-go build -o agenttown-mcp      ./cmd/agenttown-mcp   # stable
-go build -o agenttown-mcp-dev  ./cmd/agenttown-mcp   # dev
+go build -o ../mcp ./cmd/agenttown-mcp   # 产出仓库根目录 mcp 二进制
 ```
 
 ### 环境变量速查（`.env`）
@@ -282,9 +300,6 @@ go build -o agenttown-mcp-dev  ./cmd/agenttown-mcp   # dev
 | `MYSQL_DB` | | 按实例 | MySQL 库名（脚本据此建库 + 拼默认 DSN） |
 | `MYSQL_DSN` | | 空=内存模式 | 完整 DSN（优先级高于 MYSQL_DB，须含 `parseTime=true`） |
 | `SKIP_MYSQL` | | 空 | =1 跳过 MySQL 启动，MCP 降级内存模式 |
-| `OLLAMA_URL` | | 空=禁用 | 关系判断本地推理地址（如 `http://localhost:11434`） |
-| `OLLAMA_MODEL` | | qwen2.5:7b-instruct-q4_K_M | 关系判断模型 |
-| `OLLAMA_NUM_THREAD` | | 16 | CPU 推理线程数（高核数机器限线程反而更快，实测 96 vCPU 限 16 线程 3x 加速） |
 
 MCP 进程级 flag（`--venus-model` / `--jev-timeout` / `--tactical-stream` / `--world-kb` / `--profiles-dir` 等）完整清单见 `CLAUDE.md` 的 flag 速查表。
 
@@ -295,9 +310,10 @@ MCP 进程级 flag（`--venus-model` / `--jev-timeout` / `--tactical-stream` / `
 | 表 | 内容 |
 |----|------|
 | `agent_schedule_state` | 4 个调度字段 write-through（dailyPlan/天数/时段索引），热重启计划跨进程存活 |
-| `agent_memories` | 日终生成的结构化记忆（event/skill/relationship/daily_summary） |
-| `agent_relationships` | NPC 间关系数值（双向独立行，familiarity / affection 好感度 / interaction_count） |
-| `action_history` | 全量动作生命周期记录（cmd/params/起止），日终记忆与排障的数据源 |
+| `episodic_memories` | 过去经历（game_time 锚定摘要 + 参与者 + 重要性/情绪） |
+| `episodic_commitments` | 未来待办（约定/传话/邀请/自办，pending → done/expired/cancelled） |
+| `semantic_people` | 对人认知（好感度 0-100 + 印象，owner × target 主键） |
+| `action_history` | 全量动作生命周期记录（cmd/params/起止），排障与日终总结的数据源 |
 
 schema 由 `//go:embed migrations/*.sql` 启动时自动迁移，无需外部工具。DB 写失败仅降级告警，不阻塞决策。
 
@@ -325,6 +341,7 @@ grep '队列已填充' logs-dev/$(date +%F)/debug-mcp.log   # 原始 grep 也友
 | `GET /debug/kb` / `GET /debug/cap` | world_kb / 能力注册表现状 |
 | `GET /debug/agents` / `GET /debug/logs` / `GET /debug/ue-errors` | agent 列表 / 环形日志 / UE 错误 |
 | `GET /debug/llm-metrics` | LLM 调用指标（各层 E2E/TTFT/TPOT/ITL 分位数 + 错误分布 + 重试率） |
+| `GET /debug/memory` / `GET /debug/memory/export` | 任意 NPC 长期记忆三表快照（JSON / Markdown 导出，记忆检视器） |
 
 **无 UE 冒烟**：`scripts/smoke_combat_detach.py` 模拟最小 UE 客户端（心跳 + perception 推进），单侧验证战斗让位→归还全闭环；`scripts/` 下另有 Venus 延迟压测、world_kb E2E、断线重连（phase7）等脚本。
 
@@ -353,20 +370,20 @@ agenttown-mcp/                  # Go 三 module 仓库主体（见"三 module �
 assets/
   world_kb.yaml                 # 世界 KB：7 zones / 57 objects / 5 agents
   world.generated.json / world.authored.json   # UE 推送的世界数据（merge 输入）
-  llm_backend.yaml              # 自部署 LLM 后端分层配置
+  llm_backend.example.yaml      # 自部署 LLM 后端分层配置模板（复制为 llm_backend.yaml 使用，后者已 gitignore）
   profiles/H-01.md ~ H-05.md    # NPC 人设档案
   weekly_schedule.yaml          # 每周日程（工作日/休息日/运动日/冥想日）
-docs/                           # 设计文档（协议/事件/架构/KB，见下方索引）
+docs/                           # 设计文档（协议/事件/架构/KB/记忆，见下方索引）
 scripts/
   pretty_log.py                 # 日志可读化（HTML 报告 + 终端渲染）
   smoke_combat_detach.py        # combat-detach 无 UE 冒烟
   test_world_kb_e2e.py          # world_kb 推送 E2E
   test_phase7_reconnect.py      # 断线重连 + seq 重放验证
-  bench_venus_latency.py / eval_venus_models.py   # LLM 压测/评估
+  bench_venus_latency.py / venus_latency_test.py / eval_venus_models.py   # LLM 压测/延迟/评估
+  analyze_time.py               # 游戏时间流速分析（time_scale 校验）
   push_world_kb.py / setup-cloud-env.sh
 start-debug.sh                  # stable 启动（MySQL + 编译 + MCP + 健康检查）
 start-dev.sh                    # dev 启动 wrapper（偏移端口/库名/日志目录）
-start-tunnel.sh                 # Windows→云端 SSH 反向隧道（Ollama 用）
 start-vllm-tunnel.sh            # Windows→AutoDL SSH 正向隧道（自部署 vLLM 用）
 .env.example                    # 环境变量模板（分组注释）
 CLAUDE.md                       # 工程手册（架构/机制/命令/文件地图，最全）
@@ -384,5 +401,6 @@ CLAUDE.md                       # 工程手册（架构/机制/命令/文件地�
 | `docs/AgentTown_EventDriven_Implementation_Plan.md` | 事件驱动实施计划（P0-P5） |
 | `docs/AgentTown_Core_DeepDive.md` | 核心机制深潜 |
 | `docs/AgentTown_WorldKB_Design.md` | 世界 KB 设计 |
+| `docs/AgentTown_LongTermMemory_SQLite_Design.md` | 长期记忆三表设计（写只在 compact / 读零 LLM / 待办闭环） |
 | `docs/DebugAction_Tool.md` | Debug 工具使用文档 |
 | `docs/llm_metrics.md` | LLM 指标报告（运行时自动生成） |
