@@ -364,10 +364,20 @@ func conversationEndedHint(agentID, peer string, turns []conversationTurn, kb *w
 	return sb.String()
 }
 
-// extractAndReplanCommitments 在对话结束时异步抽取待办，若其中有待办临近到期
-// （≤12 游戏小时，即"当天"要做）则触发战略层重规划预留时间。这是"当天传话/
-// 当天约定"的代码触发口——commitment 由对话结束及时抽出（不必等日切 compact），
-// 临近到期的由代码裁决触发 replan，战术层 LLM 无需感知 replan。
+// extractAndReplanCommitments 在对话结束时异步抽取待办，若其中有待办落在
+// 1~12 游戏小时窗口内（当天晚些时候要做）则触发战略层重规划预留时间。
+// 这是"当天传话/当天约定"的代码触发口——commitment 由对话结束及时抽出
+// （不必等日切 compact），远期由代码裁决触发 replan，战术层 LLM 无需感知
+// replan。
+//
+// ≤1 游戏小时内到期的约定**不触发 replan**（2026-11-03 修复）：临近约定
+// 已由守约 hint（conversationEndedHint，对话终局注入"立即去执行"）+ 战术层
+// 【当前需兑现的约定】（due_start ≤ now+1h 注入，口径刚好衔接）驱动立即
+// 履行——此时再让战略层重排一个时段是双驱动：replan 不知道 NPC 正在履约
+// 途中，排出的槽位若与在途动作错位（实测 2026-11-03：邀约跑步后 replan
+// 把跑步排到 08:12-08:42，而 NPC 07:38 已上跑步机跑完 26 分钟），履约
+// 完成后计划槽位再次驱动——同一约定执行两遍。临近约定履约完自然回原计划
+// （与反应任务同模式）；只有"现在还不到时候"的远期约定才需要预留时段。
 func (a *agentContext) extractAndReplanCommitments(ctx context.Context, agentID, peerID string, turns []conversationTurn, kb *worldkb.KB, profiles map[string]*profile.Profile, logger *slog.Logger) {
 	if len(turns) == 0 {
 		return
@@ -378,11 +388,22 @@ func (a *agentContext) extractAndReplanCommitments(ctx context.Context, agentID,
 	}
 	gameTime := int64(a.as.LatestGameTimeSec())
 	for _, c := range created {
-		if c.DueStart > 0 && c.DueStart <= gameTime+12*3600 {
+		if commitmentNeedsReplan(c.DueStart, gameTime) {
 			// ws 是 maybeStrategicReplan 的遗留参数（内部从未使用），传 nil。
 			a.maybeStrategicReplan(ctx, agentID, nil, kb, profiles, a.weeklySched, logger,
 				"新约定需要预留时间："+c.Content)
 			return
 		}
 	}
+}
+
+// commitmentNeedsReplan reports whether a newly created commitment warrants a
+// strategic replan: only appointments starting 1~12 game hours out. Sooner
+// ones are already covered by the immediate-execution path (守约 hint +
+// tactical 【当前需兑现的约定】 injects within due_start ≤ now+1h) — replanning
+// those double-drives the same commitment (the plan slot fires again after the
+// hint-driven fulfillment). Window-less commitments (relay, due_start=0) never
+// trigger a replan.
+func commitmentNeedsReplan(dueStart, gameTime int64) bool {
+	return dueStart > gameTime+3600 && dueStart <= gameTime+12*3600
 }

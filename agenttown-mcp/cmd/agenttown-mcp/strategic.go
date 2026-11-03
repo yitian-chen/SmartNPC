@@ -213,15 +213,15 @@ func parseDailyPlan(raw string) ([]dailyPlanItem, error) {
 }
 
 // normalizeDailyPlan 校验并补全解析后的每日计划：
-//  1. 丢弃时长 <60min 的时段（调度器按 60min 采样，短时段大概率不被命中）
+//  1. 丢弃非法时段（格式解析失败 / start==end 的退化槽位）
 //  2. 按起始时间排序
 //     2.5 合并相邻同时段：LLM 偶发输出连续两个同名时段（实测连续两段睡眠
 //     20:30-22:58 + 22:58-07:16），每次边界到期都会打断睡眠重新分解，
 //     合并后由后续规则统一填补/后延
-//  3. 首段前伸到 startMinute（触发时刻；早晨例行触发传 dayStartMinute=07:00，
+//     3. 首段前伸到 startMinute（触发时刻；早晨例行触发传 dayStartMinute=07:00，
 //     中途触发传当前时间——不把首段拉回已流逝的时段）
-//  4. 填补中间空白：前段 end < 后段 start 时延长前段
-//  5. 末段后延到次日 06:00（若 LLM 只规划到 18:00，18:00-22:00 会触发 idle wait 瘫痪）；
+//     4. 填补中间空白：前段 end < 后段 start 时延长前段
+//     5. 末段后延到次日 06:00（若 LLM 只规划到 18:00，18:00-22:00 会触发 idle wait 瘫痪）；
 //     跨午夜末段结束早于 06:00 的（如 23:29-00:54）同样后延——否则凌晨出现
 //     空洞，睡眠段半夜到期被打断重睡
 //
@@ -229,11 +229,22 @@ func parseDailyPlan(raw string) ([]dailyPlanItem, error) {
 // 末段若已跨午夜且覆盖到 06:00 及以后则不后延。
 // 全部被丢弃时返回 nil，调用方走 prompt.DefaultDailyPlan(kb, agentID) 兜底。
 func normalizeDailyPlan(items []dailyPlanItem, startMinute int) []dailyPlanItem {
-	// 1. 过滤短时段。跨午夜 slot（end <= start）时长按 end+1440-start 计算。
+	// 1. 过滤非法时段。跨午夜 slot（end <= start）时长按 end+1440-start 计算。
 	valid := make([]dailyPlanItem, 0, len(items))
 	for _, it := range items {
-		_, _, ok := prompt.SplitPlanRange(it.Time)
+		start, end, ok := prompt.SplitPlanRange(it.Time)
 		if !ok {
+			continue
+		}
+		// 退化槽位（start == end）直接丢弃（2026-11-03 修复）：LLM 收尾跨
+		// 午夜末段时偶发残留零长槽位（实测 "21:50-07:09 睡觉" 后跟
+		// "07:09-07:09 睡觉"）。它有两重毒性：下方步骤 2 的按起始时间排序会
+		// 把它排到全天最前（07:09 早于一切晨间时段），本属深夜的睡眠槽被
+		// 空白填补拉成"晨间第一时段"、后续真实时段整体后移（实测 replan
+		// 输出的 07:42-08:04 跑步被推到 08:12-08:42，约定窗口已过、NPC 二
+		// 次赴约）；且 matchPlanSlot 对 end<=start 走跨午夜分支（cur>=start
+		// 恒真），零长槽位一旦混入即在任何时刻命中。
+		if start == end {
 			continue
 		}
 		// 短时段裁剪已停用：minSlotMinutes(60) 与战略层规则"每段 ≥30 分钟"

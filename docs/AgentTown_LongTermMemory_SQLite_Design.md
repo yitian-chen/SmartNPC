@@ -213,7 +213,7 @@ compact 本就调用一次摘要 LLM（`summarizeConversation` → `compactSyste
 待办（`episodic_commitments`）**不在 compact 抽取**——compact 要等上下文够长才触发，当天上午的"帮我传话"会拖到日切才落盘，来不及。改为**对话结束时**（speech 回执终局 / idle 超时关会话）调 `extractConversationCommitments` 一次轻量 LLM，把 transcript 抽成 `new_commitments` + `commitment_changes` 落盘。
 
 - **及时**：当天约定当场落盘，不必等日切。
-- **触发重规划**：抽取后若某条新待办的 `due_start` 落在 ≤12 游戏小时内（当天要做），代码调 `maybeStrategicReplan` 重规划剩余时段预留时间（战术层 LLM 不感知 replan）。
+- **触发重规划**：抽取后若某条新待办的 `due_start` 落在 **1~12 游戏小时窗口**内（当天晚些时候要做），代码调 `maybeStrategicReplan` 重规划剩余时段预留时间（战术层 LLM 不感知 replan）。≤1 游戏小时内到期的约定**不触发** replan——临近约定已由守约 hint（对话终局注入"立即去执行"）+ 战术层【当前需兑现的约定】（`due_start ≤ now+1h` 注入，口径刚好衔接）驱动立即履行，此时再排一个计划时段是双驱动：replan 不知道 NPC 正在履约途中，排出的槽位若与在途动作错位，履约完成后计划槽位会再次驱动同一约定（2026-11-03 实测邀约跑步双跑后收敛为此窗口）。
 - **时间用「日 + HH:MM」抽取，不用绝对秒**（2026-10-26 生日派对实测修正）：LLM 输出
   `due_start_day` / `due_start_time`（如 `"明天下午四点"` → `day=2, time="16:00"`），
   由 `dayTimeToGameSec` 换算成累计游戏秒存 `due_start`。让 LLM 算「一天 86400 秒」的

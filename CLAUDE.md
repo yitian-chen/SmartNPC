@@ -513,7 +513,7 @@ game_time 锚定）+ `episodic_commitments`（未来待办）+ `semantic_people`
 - **记忆写入仅在 compact（2026-10-22 重建）**：`maybeCompactConversation` 压缩上下文后调 `summarizeConversation`（结构化输出 `SendWithSchema`，一次产出 `summary` + `episodes` + `new_commitments` + `commitment_changes` + `people_updates`），再 `persistExtractedMemory` 落三表。**不 compact 时经历仍在上下文中，无需落盘**；摘要滚动合并，读路径取最近 N 条收敛到最新。**日切强制 compact**：跨日 `detectDayRollover` 清空历史前，`compactAtDayRollover` 把当天整段历史也抽一次落盘，兜住低活动日（中途历史不足阈值、未触发 compact）的经历丢失窗口
 - **规则直写（0 LLM，事件时点）**：被攻击（combat-detach 入口）→ combat episode + 攻击者好感度 -50。攻击是边沿触发的关键事实、等不到 compact（combat-detach 直接清上下文不 compact），故在事件时点直写。动作失败不再单独立 memory episode（`action_history` 已完整落盘，且失败多为 UE 侧 bug，记忆价值有限）
 - **战术层记忆注入**：读记忆走内部工具 `memoryReader`（`memory_reader.go`）——`recentEpisodes`（【过往经验】top-3 经历）、`commitmentsNearby`（【当前需兑现的约定】临近 1h/眼前人）、`people`（【人际关系】）。**不注册进 MCP 工具列表、不进 function calling，仅供程序调用、读路径零 LLM**
-- **待办闭环**：`episodic_commitments` 读时 SQL 动态过滤过期（`due_end < now` 的 pending 视为 expired、不回写）；compact 的 `commitment_changes` 核销 done / 改期 / 取消
+- **待办闭环**：`episodic_commitments` 读时 SQL 动态过滤过期（`due_end < now` 的 pending 视为 expired、不回写）；compact 的 `commitment_changes` 核销 done / 改期 / 取消；对话结束抽取（`extractAndReplanCommitments`）落盘新待办，`due_start` 落在 **1~12 游戏小时窗口**（`commitmentNeedsReplan`）的触发战略 replan 预留时段——≤1h 的不触发：守约 hint + 战术层【当前需兑现的约定】（`due_start ≤ now+1h` 注入）已驱动立即履行，再排计划时段是双驱动，槽位与在途履约错位时同一约定执行两遍（2026-11-03 邀约跑步双跑修复）。配套：`normalizeDailyPlan` 丢弃退化槽位（start==end）——LLM 收尾跨午夜末段残留的零长槽位（如 "07:09-07:09"）会被按起始时间排序排到全天最前，把深夜睡眠拉成晨间首段、后续时段整体后移出约定窗口（同一次实测的引爆点）
 - **JSON 解析容错**：`parseMemoryGenerationResult` 容忍 markdown 围栏 ```json ... ``` 和尾随散文，定位首个 `{` 到末个 `}` 后 `json.Unmarshal`
 
 ### 对人认知（Stage 5）

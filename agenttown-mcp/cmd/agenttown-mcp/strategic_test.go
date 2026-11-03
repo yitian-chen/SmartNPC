@@ -625,6 +625,33 @@ func TestNormalizeDailyPlan_AlreadyValid(t *testing.T) {
 	}
 }
 
+// TestNormalizeDailyPlan_DropsDegenerateSlot 验证退化槽位（start==end）被丢弃
+// 且不打乱其余时段的排序。2026-11-03 实测：LLM 收尾跨午夜末段时残留
+// "07:09-07:09 睡觉" 零长槽位——按起始时间排序把它排到全天最前，深夜睡眠
+// 被空白填补拉成"晨间第一时段"、约定时段（07:42-08:04 跑步）整体后移到
+// 08:12 之后，NPC 履约完成后计划槽位再次驱动、二次赴约。
+func TestNormalizeDailyPlan_DropsDegenerateSlot(t *testing.T) {
+	items := []dailyPlanItem{
+		{Time: "07:42-08:04", Goal: "和老陈一起去跑步机跑两圈活动活动"},
+		{Time: "08:04-10:05", Goal: "在物流转运站分拣传送带分拣货物"},
+		{Time: "21:50-07:09", Goal: "回居住区睡眠舱睡觉休息"},
+		{Time: "07:09-07:09", Goal: "回居住区睡眠舱睡觉休息"}, // 退化槽位
+	}
+	got := normalizeDailyPlan(items, 7*60+42)
+	if len(got) != 3 {
+		t.Fatalf("got %d items, want 3 (degenerate slot dropped): %+v", len(got), got)
+	}
+	// 约定时段保持首段、时间不被推迟——修复前它会退居第二段（前面插进
+	// 拉长的晨间睡眠），due 窗口因此错过。
+	if got[0].Goal != "和老陈一起去跑步机跑两圈活动活动" || got[0].Time != "07:42-08:04" {
+		t.Errorf("appointment must stay the first slot unchanged, got %q %q", got[0].Time, got[0].Goal)
+	}
+	// 深夜睡眠仍在末段（跨午夜，未被后延）。
+	if last := got[len(got)-1]; last.Goal != "回居住区睡眠舱睡觉休息" || last.Time != "21:50-07:09" {
+		t.Errorf("night sleep must stay last and unchanged, got %+v", last)
+	}
+}
+
 // TestNormalizeDailyPlan_ExtendsCrossMidnightLastSlot 验证跨午夜末段结束
 // 早于 06:00（如实测的 23:29-00:54）时被后延到 06:00，避免凌晨空洞导致
 // 睡眠段半夜到期被打断重睡。

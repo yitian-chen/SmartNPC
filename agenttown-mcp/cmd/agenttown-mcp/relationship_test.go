@@ -733,3 +733,33 @@ func TestRecordActionCompletion_SpeechRepliedAlsoTerminal(t *testing.T) {
 		t.Errorf("reaction window should be cleared, got desc=%q", d)
 	}
 }
+
+// TestCommitmentNeedsReplan pins the strategic-replan trigger window for
+// newly extracted commitments: 1~12 game hours out. Sooner appointments are
+// the immediate-execution path's territory (守约 hint + tactical injection
+// within due_start ≤ now+1h) — replanning them double-drives the same
+// commitment (2026-11-03 实测：邀约跑步后 replan 排的槽位与在途履约错位，
+// NPC 跑完又被计划拉去跑第二遍)。
+func TestCommitmentNeedsReplan(t *testing.T) {
+	const now = int64(27000) // D1 07:30
+	cases := []struct {
+		due  int64
+		want bool
+		note string
+	}{
+		{0, false, "无时间窗（relay 类）不触发"},
+		{now, false, "立即到期：守约 hint 驱动，不重排计划"},
+		{now + 1800, false, "30 分钟后到期：临近，不 replan"},
+		{now + 3600, false, "恰在 1h 边界：不 replan（严格大于）"},
+		{now + 3601, true, "1h 之外：需要战略层预留时段"},
+		{now + 6 * 3600, true, "当天晚些时候：需要预留"},
+		{now + 12 * 3600, true, "12h 边界内：触发"},
+		{now + 12*3600 + 1, false, "超出 12h：不是当天的事"},
+	}
+	for _, c := range cases {
+		if got := commitmentNeedsReplan(c.due, now); got != c.want {
+			t.Errorf("due=%d (+%dmin): got %v, want %v (%s)",
+				c.due, (c.due-now)/60, got, c.want, c.note)
+		}
+	}
+}
