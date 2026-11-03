@@ -387,6 +387,31 @@ func hasPeerTurn(agentID string, turns []conversationTurn) bool {
 	return false
 }
 
+// conversationHasOwnTurn reports whether the in-progress session contains any
+// turn spoken by the agent itself. route() uses it for the ends_conversation
+// 收口's first-turn exception: an END-marked utterance arriving before the
+// receiver ever spoke is an opener (or a mislabeled invitation), not a
+// conversation tail — fully suppressing the response there leaves the opener
+// unanswered entirely (2026-11-03 实测：误标邀请 34 墙秒无回应).
+func (a *agentContext) conversationHasOwnTurn(agentID string) bool {
+	a.coordMu.Lock()
+	defer a.coordMu.Unlock()
+	for _, t := range a.convTurns {
+		if t.speakerID == agentID {
+			return true
+		}
+	}
+	return false
+}
+
+// conversationTurnsSnapshot returns the in-progress session's peer id and a
+// copy of its turns (for hint building outside the lock).
+func (a *agentContext) conversationTurnsSnapshot() (string, []conversationTurn) {
+	a.coordMu.Lock()
+	defer a.coordMu.Unlock()
+	return a.convPeerID, append([]conversationTurn(nil), a.convTurns...)
+}
+
 // extractAndReplanCommitments 在对话结束时异步抽取待办，若其中有待办落在
 // 1~12 游戏小时窗口内（当天晚些时候要做）则触发战略层重规划预留时间。
 // 这是"当天传话/当天约定"的代码触发口——commitment 由对话结束及时抽出

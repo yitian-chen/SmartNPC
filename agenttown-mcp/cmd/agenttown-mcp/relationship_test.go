@@ -549,7 +549,7 @@ func TestRecordActionCompletion_NoReplyClosesConversationAndSetsHint(t *testing.
 		map[string]any{"target_agent_id": "H-05", "content": "行，跟你一起跑几步。", "interrupt": true},
 		agentstate.SourceTactical, "tc-1")
 
-	_, _ = ac.recordActionCompletion(protocol.ActionCompletedPayload{
+	_, _, _ = ac.recordActionCompletion(protocol.ActionCompletedPayload{
 		ActionID: "act-acc", Result: "success", Reason: "speech:no_reply", DurationMs: 10000,
 	}, nil, nil, nil)
 
@@ -580,7 +580,7 @@ func TestRecordActionCompletion_NoReplyPeerMismatchKeepsSession(t *testing.T) {
 		map[string]any{"target_agent_id": "H-03", "content": "老李，聊两句？"},
 		agentstate.SourceTactical, "tc-1")
 
-	_, _ = ac.recordActionCompletion(protocol.ActionCompletedPayload{
+	_, _, _ = ac.recordActionCompletion(protocol.ActionCompletedPayload{
 		ActionID: "act-x", Result: "success", Reason: "speech:no_reply", DurationMs: 10000,
 	}, nil, nil, nil)
 
@@ -612,7 +612,7 @@ func TestRecordActionCompletion_NoReplyVariantsKeepSession(t *testing.T) {
 				map[string]any{"target_agent_id": "H-05", "content": "行。"},
 				agentstate.SourceTactical, "tc-1")
 
-			_, _ = ac.recordActionCompletion(protocol.ActionCompletedPayload{
+			_, _, _ = ac.recordActionCompletion(protocol.ActionCompletedPayload{
 				ActionID: "act-a", Result: tc.result, Reason: tc.reason, DurationMs: 5000,
 			}, nil, nil, nil)
 
@@ -719,7 +719,7 @@ func TestRecordActionCompletion_SpeechRepliedAlsoTerminal(t *testing.T) {
 		map[string]any{"target_agent_id": "H-05", "content": "行，跟你一起跑两步。", "interrupt": true},
 		agentstate.SourceTactical, "tc-1")
 
-	_, _ = ac.recordActionCompletion(protocol.ActionCompletedPayload{
+	_, _, _ = ac.recordActionCompletion(protocol.ActionCompletedPayload{
 		ActionID: "act-acc", Result: "success", Reason: "speech:replied", DurationMs: 17000,
 	}, nil, nil, nil)
 
@@ -752,8 +752,8 @@ func TestCommitmentNeedsReplan(t *testing.T) {
 		{now + 1800, false, "30 分钟后到期：临近，不 replan"},
 		{now + 3600, false, "恰在 1h 边界：不 replan（严格大于）"},
 		{now + 3601, true, "1h 之外：需要战略层预留时段"},
-		{now + 6 * 3600, true, "当天晚些时候：需要预留"},
-		{now + 12 * 3600, true, "12h 边界内：触发"},
+		{now + 6*3600, true, "当天晚些时候：需要预留"},
+		{now + 12*3600, true, "12h 边界内：触发"},
 		{now + 12*3600 + 1, false, "超出 12h：不是当天的事"},
 	}
 	for _, c := range cases {

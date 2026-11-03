@@ -327,7 +327,7 @@ func (a *agentContext) updateState(report protocol.StateReportPayload) string {
 // 完成（failed/interrupted/error）时触发评估——成功完成是常态，每次都问
 // "要不要打断"意义不大（模型看不到战术层整体规划，只能基于贫乏信息答 continue）。
 // 异常完成才是真正需要反应层介入的时机。
-func (a *agentContext) recordActionCompletion(completion protocol.ActionCompletedPayload, kb *worldkb.KB, profiles map[string]*profile.Profile, logger *slog.Logger) (bool, string) {
+func (a *agentContext) recordActionCompletion(completion protocol.ActionCompletedPayload, kb *worldkb.KB, profiles map[string]*profile.Profile, logger *slog.Logger) (bool, string, string) {
 	// 在 RecordActionCompletion 清除 preface 标志之前读取：自己 stop 导致的
 	// interrupted completion 是预期回包，不应合成 action_failed 事件。
 	wasPreRecorded := a.as.LastEndPrefaced()
@@ -418,19 +418,19 @@ func (a *agentContext) recordActionCompletion(completion protocol.ActionComplete
 	// 反应层触发：仅异常完成触发。detail 用 result 作为去抖维度（避免每次
 	// action_id 不同导致去抖失效），相同 result 在 60s 内不重复触发。
 	if completion.Result == protocol.ResultSuccess {
-		return true, ""
+		return true, "", res.Cmd
 	}
 	// self-stop 引发的 interrupted 完成（slot 切换主动 stop）不触发反应层——
 	// 这是计划内的打断，replan 会干扰刚下发的新 action。
 	if isSelfStop {
-		return true, ""
+		return true, "", res.Cmd
 	}
 	// 我们自己的打断（force/router/social）导致的 interrupted completion
 	// 也不合成事件——打断已触发 replan，这个 completion 只是预期回包。
 	// 2026-09-20 仿真实测：社交打断 stop → UE 回 interrupted → 被误合成
 	// action_failed → 路由判紧急 → 打断刚下发的社交回应 → 死循环。
 	if wasPreRecorded && completion.Result == protocol.ResultInterrupted {
-		return true, ""
+		return true, "", res.Cmd
 	}
 	// 未追踪动作（WasInFlight=false）的 interrupted 也不合成——最典型的是
 	// 冷启动：NPC 出生时 UE 侧自带睡眠状态（start_asleep_*），MCP 从未
@@ -438,7 +438,16 @@ func (a *agentContext) recordActionCompletion(completion protocol.ActionComplete
 	// interrupted。这是正常冷启动流程，不是动作异常（2026-09-20 仿真：
 	// synth_1 即此来源）。
 	if !res.WasInFlight && completion.Result == protocol.ResultInterrupted {
-		return true, ""
+		return true, "", res.Cmd
+	}
+	// 我方主动 stop（force/路由/社交/debug 注入）的 interrupted completion 是
+	// 预期回包（stop 点 recordInterrupted 已预告，res.WasExpectedInterrupt），
+	// 不是动作异常——不合成事件。2026-09-20 的守卫只覆盖 preface/untracked/
+	// self-stop 三类，这类回包漏网被误合成为空壳 action_failed（2026-11-03
+	// 实测：/debug/schedule 注入的 force-stop 回包被合成，路由拿到
+	// "动作  执行失败（原因 ）"空壳只能瞎判）。
+	if res.WasExpectedInterrupt && completion.Result == protocol.ResultInterrupted {
+		return true, "", res.Cmd
 	}
 	// 异常完成：detail 注入下一轮分解上下文，含 UE 给出的 reason（如"寻路不可达"）。
 	detail := fmt.Sprintf("result=%s reason=%s",
@@ -464,7 +473,7 @@ func (a *agentContext) recordActionCompletion(completion protocol.ActionComplete
 		a.as.SetReplanHint(hint)
 	}
 
-	return true, detail
+	return true, detail, res.Cmd
 }
 
 // replanHintByReason 根据上次动作失败的 reason 给出针对性的战术层重规划建议。
@@ -2689,6 +2698,10 @@ func handleDebugSchedule(ctx context.Context, logger *slog.Logger, ws contract.T
 				"agent_id", req.AgentID, "action_id", curID, "err", err)
 		} else {
 			stoppedActionID = curID
+			// 预期打断预告（2026-11-03）：与 force/路由/社交打断同口径——
+			// recordInterrupted 置位后，迟到的 interrupted completion 不再被
+			// 误合成为空壳 action_failed 事件。
+			ac.recordInterrupted("debug/schedule 注入打断")
 			time.Sleep(100 * time.Millisecond)
 		}
 	}

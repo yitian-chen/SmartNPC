@@ -133,6 +133,14 @@ func (rt *Runtime) handleWorldEvent(agentID string, ev protocol.WorldEventPayloa
 			// 随即 pop。见 releaseFarewellSpeaker。
 			if d.SpeakerID != agentID {
 				rt.releaseFarewellSpeaker(d.SpeakerID)
+				// 迟到回复的 hint 修正（2026-11-03）：带收尾标记的回话到达、
+				// 且当前 replanHint 还是「未获应答」变体（此前 no_reply 终局
+				// 注入的"没有回应不等于答应"）时，立即用完整 transcript 重写
+				// 为守约 hint——"未获应答"的判断已过期，下一 refill 即按真实
+				// 答复行事（不打断在途动作/LLM）。见 correctUnansweredHint。
+				if d.EndsConversation {
+					rt.correctUnansweredHint(ac, agentID, d.SpeakerID, *rt.kbPtr)
+				}
 			}
 		}
 	}
@@ -360,6 +368,32 @@ func (rt *Runtime) releaseFarewellSpeaker(speakerID string) {
 	sp.signal()
 	rt.logger.Info("[对话层] 告别语已送达，提前结束等待（跳过 no_reply 窗）",
 		"agent_id", speakerID, "action_id", snap.CurrentActionID)
+}
+
+// correctUnansweredHint rewrites a stale 未获应答 replan hint when a peer
+// reply finally arrives (2026-11-03). The earlier no_reply close injected
+// "没有回应不等于答应，回当前时段目标" from an unanswered transcript, and
+// the refill it drove may have sent the agent away believing it was ignored —
+// while the peer actually answered (just after that close, or even after the
+// woken refill's LLM call had already shipped its prompt). This reply (with
+// the carryover re-open) invalidates the unanswered verdict: rewriting to the
+// normal follow-through hint with the full transcript + signaling lets the
+// NEXT refill act on the real answer. Deliberately does NOT interrupt
+// in-flight actions or LLM calls — the correction is bounded by one refill.
+func (rt *Runtime) correctUnansweredHint(ac *agentContext, agentID, peerID string, kb *worldkb.KB) {
+	if !strings.Contains(ac.as.ReplanHint(), "没有回应不等于答应") {
+		return
+	}
+	peer, turns := ac.conversationTurnsSnapshot()
+	if peer != peerID || !hasPeerTurn(agentID, turns) {
+		return
+	}
+	if h := conversationEndedHint(agentID, peer, turns, kb); h != "" {
+		ac.as.SetReplanHint(h)
+		ac.signal()
+		rt.logger.Info("[对话层] 迟到回话已到达，未获应答 hint 修正为守约 hint",
+			"agent_id", agentID, "peer", peer, "turns", len(turns))
+	}
 }
 
 // forceEventHint formats the replan hint for a force event. The 【强制打断】

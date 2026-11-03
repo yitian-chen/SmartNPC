@@ -161,7 +161,7 @@ func generateDailyMemories(
 // semantic_people。待办（commitments）不再在 compact 抽取——它们由对话结束时
 // 的 extractConversationCommitments 及时抽取（见下）。
 type compactExtract struct {
-	Summary       string            `json:"summary"`
+	Summary       string             `json:"summary"`
 	Episodes      []compactEpisode   `json:"episodes"`
 	PeopleUpdates []compactPersonUpd `json:"people_updates"`
 }

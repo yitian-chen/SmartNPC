@@ -708,7 +708,7 @@ func capabilityParamsSchema(params []protocol.CapabilityParam, name string) json
 	if name == "speak_to" {
 		props["ends_conversation"] = map[string]any{
 			"type":        "boolean",
-			"description": "可选，默认 false。仅当本句是对话真正的最后一句（说完后不再有任何往返）时填 true：告别语、对方应下你的邀请后你回的确认句（如\"好，那就这么定了\"）——填 true 会告知对方对话结束、对方不会再回话，系统也会在话语送达后立即结束等待。期待对方回应、对话还要继续的句子（如邀请、追问、\"走吧跑起来\"这类继续行动的话）一律填 false。",
+			"description": "可选，默认 false。仅当本句说完后**对方不需要回答任何问题**、对话真正到此为止（说完后不再有任何往返）时填 true：告别语、对方应下你的邀请后你回的确认句（如\"好，那就这么定了\"）——填 true 会告知对方对话结束、对方不会再回话，系统也会在话语送达后立即结束等待。期待对方回应、对话还要继续的句子一律填 false——**邀请/提问/约对方做某事必须填 false 且不要填 hold_sec**：你要等对方答复（接受/拒绝），误填 true 会让对方不被提醒回应、你自己也收不到答复就走掉了。",
 		}
 	}
 	schema := map[string]any{
