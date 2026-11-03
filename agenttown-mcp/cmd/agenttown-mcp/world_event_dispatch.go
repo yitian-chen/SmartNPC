@@ -341,6 +341,17 @@ func speechHeardEndsConversation(ev protocol.WorldEventPayload) bool {
 // action_failed synthesis. A racing natural completion yields
 // STOP_ID_MISMATCH — harmless. The ends_conversation flag is MCP-consumed
 // only (stripped before forwarding to UE).
+//
+// 对话终局闭环（2026-11-03）：ends_conversation=true 的 farewell 送达即对话
+// 终局——UE 的 speech:conversation_ended 回执本就是这个语义，此路径只是把
+// 判定提前到送达时刻。终局链（关会话 + 守约 hint + 清社交反应窗口 + 抽取
+// 待办）必须在下方 signal() 之前完成：2026-11-03 实测的竞态是 signal 抢跑、
+// woken refill 的 prompt 比守约 hint 早 35ms 构造，空窗 refill 只见旧的
+// armed 社交 hint（"对方无回音则回日程"）+ 时段 goal，应邀方被推回"晨练
+// 拉伸"goal、分解出原地 Exercise 而非约定的跑步机——守约 hint 21 秒后才被
+// slot 切换 refill 迟到消费，届时 goal 已反转、NPC 已"锻炼过"，约定被叙述
+// 为已履行。UE 优雅 completion 迟到到达时，recordActionCompletion 的终局
+// 判定发现会话已关（closeConversationByPeer 无会话可关）自然幂等。
 func (rt *Runtime) releaseFarewellSpeaker(speakerID string) {
 	sp := rt.lookupAgent(speakerID)
 	if sp == nil {
@@ -353,7 +364,8 @@ func (rt *Runtime) releaseFarewellSpeaker(speakerID string) {
 	// speak_to 签名与 recordActionStarted 的 own-turn 挂钩同款口径：
 	// target_agent_id 存在（cmd 名是 registry 动态的 "SpeakTo"，params
 	// 签名更稳）。非 speak_to 动作即使误带同名参数也不放行。
-	if _, ok := snap.CurrentActionParams["target_agent_id"].(string); !ok {
+	target, ok := snap.CurrentActionParams["target_agent_id"].(string)
+	if !ok || target == "" {
 		return
 	}
 	if b, _ := snap.CurrentActionParams["ends_conversation"].(bool); !b {
@@ -375,6 +387,18 @@ func (rt *Runtime) releaseFarewellSpeaker(speakerID string) {
 		delete(sp.pendingActionTimeouts, snap.CurrentActionID)
 	}
 	sp.coordMu.Unlock()
+	// 对话终局闭环（farewell 送达即终局）：关会话 + 守约 hint + 清社交反应
+	// 窗口 + 抽取待办——与 recordActionCompletion 的终局判定同一条链，但
+	// 抢在 signal() 之前完成，woken refill 的 prompt 当场带守约上下文。
+	if peer, turns := sp.closeConversationByPeer(target); peer != "" && len(turns) > 0 {
+		sp.clearReaction()
+		if h := conversationEndedHint(speakerID, peer, turns, *rt.kbPtr); h != "" {
+			sp.as.SetReplanHint(h)
+			rt.logger.Info("[对话层] 告别语送达即对话终局，立即注入守约 hint",
+				"agent_id", speakerID, "peer", peer, "turns", len(turns))
+		}
+		go sp.extractAndReplanCommitments(rt.ctx, speakerID, peer, turns, *rt.kbPtr, rt.profiles, rt.logger)
+	}
 	sp.signal()
 	rt.logger.Info("[对话层] 告别语已送达，提前结束等待（跳过 no_reply 窗）",
 		"agent_id", speakerID, "action_id", snap.CurrentActionID)

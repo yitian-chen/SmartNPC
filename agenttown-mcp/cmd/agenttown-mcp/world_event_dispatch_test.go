@@ -602,6 +602,14 @@ func TestReleaseFarewellSpeaker_OnDelivery(t *testing.T) {
 	}
 
 	// 正例：带 ends_conversation 的在途 speak_to → speech_heard 送达即 stop。
+	// 会话先有与 H-02 的两轮往来 + 社交反应窗口 armed——2026-11-03 实测的
+	// 竞态是 stop 后的 signal 抢跑、woken refill 比守约 hint 早 35ms 构造，
+	// 空窗 refill 把应邀方推回"晨练拉伸"goal（分解出原地 Exercise 而非跑步
+	// 机）；终局闭环（关会话 + 守约 hint + 清社交窗口）必须在 signal 之前
+	// 完成，woken refill 的 prompt 当场带守约上下文。
+	sp.recordConversationTurn("H-02", "H-02", "一起去跑步机跑两步？", 38800)
+	sp.recordConversationTurn("H-01", "H-02", "好，一起去跑！", 38820)
+	sp.beginReaction(2, 38820, "社交对话", true)
 	sp.as.RecordActionStarted("act-fw1", "SpeakTo", mkParams(true), agentstate.SourceTactical, "")
 	dispatchTestEvent(t, rt, "H-02", replySpeechTestEvent("evt_fw1", "H-01"))
 	stops := stoppedActions(ft)
@@ -610,6 +618,17 @@ func TestReleaseFarewellSpeaker_OnDelivery(t *testing.T) {
 	}
 	if sp.as.CurrentActionID() != "" {
 		t.Fatalf("speaker in-flight must be cleared, got %q", sp.as.CurrentActionID())
+	}
+	// 终局闭环：会话已关 + 守约 hint 已注入（完整两轮 transcript → 守约
+	// 变体而非未获应答）+ 社交反应窗口已清。
+	if peer, turns := sp.conversationPeerState(); peer != "" || turns != 0 {
+		t.Fatalf("conversation must be closed on farewell delivery, got peer=%q turns=%d", peer, turns)
+	}
+	if hint := sp.as.ReplanHint(); !strings.Contains(hint, "【对话结束】") || !strings.Contains(hint, "立即去执行该约定") {
+		t.Fatalf("follow-through hint must be set before signal, got %q", hint)
+	}
+	if active, _, _ := sp.reactionSnapshot(); active {
+		t.Fatal("social reaction window must be lifted with the conversation end")
 	}
 
 	// 反例 1：不带标记的 speak_to（普通对话轮）→ 不 stop（要等对方回话打断）。
