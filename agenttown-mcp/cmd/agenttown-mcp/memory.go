@@ -364,14 +364,15 @@ const conversationCommitmentSystemPrompt = `你是 NPC 待办抽取模块。用�
 
 要求：
 1. 只抽取「未来要做的具体事」，即时性寒暄/闲聊/情绪表达不抽。
-2. 时间用「绝对游戏日 + HH:MM」两个字段（不要算成累计秒）：游戏日以【当前游戏时间】的"D1"为基准——"明天下午四点" = due_start_day 填 2、due_start_time 填 "16:00"；"今天晚饭后" = due_start_day 填 1、due_start_time 填 "19:00"。把相对时间原样抄成"第几天 + 几点"，不要做任何秒的换算。
-3. 区分「谁办的活动」：
+2. 对方未明确应允的邀请不是约定：只有对方在对话中明确答应/确认（如"好，一起去"），才算达成的约定可以抽取；记录里只有你单方面的邀请、对方没有任何回应或明确婉拒了的，一律不抽（2026-11-03 实测：无人应答的邀请被抽成 appointment，NPC 据此"以为对方答应了"）。
+3. 时间用「绝对游戏日 + HH:MM」两个字段（不要算成累计秒）：游戏日以【当前游戏时间】的"D1"为基准——"明天下午四点" = due_start_day 填 2、due_start_time 填 "16:00"；"今天晚饭后" = due_start_day 填 1、due_start_time 填 "19:00"。把相对时间原样抄成"第几天 + 几点"，不要做任何秒的换算。
+4. 区分「谁办的活动」：
    - 别人办的公开活动（生日会/聚会），你受邀参加 → kind 填 invitation，counterpart_id 填活动主角（寿星）的 id。
    - 你自己要办/主持的活动 → kind 填 todo，counterpart_id 留空。
    - 约好和某人一起做某事 → kind 填 appointment，counterpart_id 填对方 id。
    - 答应帮某人传话 → kind 填 relay，counterpart_id 填要传话的对象 id。
-4. 只有对话里明确取消/改期/履行了某个已有待办，才填 commitment_changes（id 是已有待办的 id）；否则空数组。
-5. 没有就填空数组，不要编造。`
+5. 只有对话里明确取消/改期/履行了某个已有待办，才填 commitment_changes（id 是已有待办的 id）；否则空数组。
+6. 没有就填空数组，不要编造。`
 
 const conversationCommitmentSchema = `{
   "type": "object",

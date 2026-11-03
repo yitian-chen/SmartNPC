@@ -754,6 +754,12 @@ func capabilityJSONSchemaType(t string) string {
 // 从 registry.EffectiveActions(agentID) 反查 cmd，params 原样转发。这覆盖
 // UE 通过 capability_registry 新推送的 cmd（无强类型 Go struct，依赖通用工具
 // 注册路径）。registry == nil 时默认分支返回 err（向后兼容旧测试）。
+//
+// minSpeakToHoldSec 是等待型 speak_to（ends_conversation != true）hold_sec
+// 的下限（墙秒），对齐 UE 默认 no_reply 窗（~10s）——见 mapTacticalAction
+// 透传点的钳制注释。
+const minSpeakToHoldSec = 10
+
 func mapTacticalAction(pa plannedAction, agentID string, kb *worldkb.KB, registry *CapabilityRegistry) (cmd string, params map[string]any, err error) {
 	switch pa.Action {
 	// ─── Composite tools → 各自 cmd ───
@@ -853,6 +859,19 @@ func mapTacticalAction(pa plannedAction, agentID string, kb *worldkb.KB, registr
 					continue
 				}
 				out[k] = v
+			}
+			// hold_sec 下限钳制（2026-11-03 修复）：hold_sec 是 UE registry
+			// 声明的 SpeakTo 参数（"说完后面向对方等待的时长"，墙秒）。LLM
+			// 不知道回话往返预算（路由 ~0.5s + 对方 replan LLM 2-6s + 派发
+			// 送达 ~1s ≈ 4-8s），给邀请填 3-5s 会让等待窗先于拒绝/应答到
+			// 期，speech:no_reply 提前终局把无人应答的邀请喂给守约链路
+			// （实测"被拒绝了还以为对方答应了"）。等待型 speak_to
+			// （ends_conversation != true）一律钳到默认窗下限；farewell 型
+			// 不受影响（送达即释放，hold 无意义）。
+			if hold, ok := numericParam(out["hold_sec"]); ok && hold > 0 && hold < minSpeakToHoldSec {
+				if ends, _ := out["ends_conversation"].(bool); !ends {
+					out["hold_sec"] = float64(minSpeakToHoldSec)
+				}
 			}
 			return act.Cmd, out, nil
 		}

@@ -338,6 +338,13 @@ func (a *agentContext) conversationPeerState() (peer string, turns int) {
 // session, is what drives the follow-through at the next refill (2026-10-16
 // 设计：约定事项由系统在对话结束后提示，NPC 届时再执行——优先于当前
 // 时段目标，补上 slot goal 主导下事件只作弱参考的仲裁缺口）。
+//
+// 无应答变体（2026-11-03）：transcript 里没有任何对方轮次时（典型即邀请
+// speak_to 的等待窗先于回话到期——speech:no_reply 即时终局，多因 hold_sec
+// 过短），不能注入守约指令：守约文案的退出分支只枚举"被婉拒/寒暄/告别"，
+// "未获应答"不在其中，LLM 会把无人应答的邀请读成已达成的约定（实测
+// "好，老张也答应了，咱们这就去跑步机跑起来"——拒绝在终局 0.3s 后才
+// 到达）。改注入未获应答语义：没有回应不等于答应。
 func conversationEndedHint(agentID, peer string, turns []conversationTurn, kb *worldkb.KB) string {
 	if peer == "" || len(turns) == 0 {
 		return ""
@@ -356,12 +363,28 @@ func conversationEndedHint(agentID, peer string, turns []conversationTurn, kb *w
 		start = len(turns) - 12
 	}
 	sb.WriteString(renderConversationTurnsFor(agentID, turns[start:], kb))
+	if !hasPeerTurn(agentID, turns) {
+		sb.WriteString("\n对话记录里对方一句话都没有说——你发出的邀请/请求没有获得回应。没有回应不等于答应：不要把邀请当作已达成的约定去执行，回到当前时段目标的原有日程；若对方稍后主动回应，再根据回应内容决定。")
+		return sb.String()
+	}
 	sb.WriteString("\n请结合对话内容决定下一步：若对话中你们约定了一起做某事（如一起去跑步机晨跑），立即去执行该约定——守约优先于当前时段目标，不要因为时段切换而弃约。" +
 		"对话记录中的时间戳早于当前游戏时间是正常的（对话往返在高倍速仿真下会消耗数十游戏分钟）——约定刚刚达成、此刻仍然有效：立即执行不算迟到，更不意味着约定的活动已经完成或窗口已过，禁止以\"时间已过\"为理由把约定叙述为已发生。" +
 		"注意：只用一句独白宣告\"我要去了\"不算执行——本轮分解必须包含执行约定的长动作（如 InteractSmartObject 使用约定设施，按规则 7/8 填 duration），可以先一条 speak 表态，但长动作不可省略。" +
 		"执行约定动作的 duration 按活动实际需要设置（如晨跑 1800-3600 秒），可以超过当前时段的剩余时长——时段切换会在安全点等约定动作结束后再进行，不要为赶日程把约定活动压缩成几分钟的象征性动作；" +
 		"若你的邀请被婉拒或双方只是寒暄/告别，回到当前时段目标的原有日程。")
 	return sb.String()
+}
+
+// hasPeerTurn reports whether any turn in the transcript was spoken by the
+// peer rather than the agent itself — the line between "conversation with a
+// reply to interpret" and "one-sided utterance that never got an answer".
+func hasPeerTurn(agentID string, turns []conversationTurn) bool {
+	for _, t := range turns {
+		if t.speakerID != agentID {
+			return true
+		}
+	}
+	return false
 }
 
 // extractAndReplanCommitments 在对话结束时异步抽取待办，若其中有待办落在

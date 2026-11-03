@@ -763,3 +763,36 @@ func TestCommitmentNeedsReplan(t *testing.T) {
 		}
 	}
 }
+
+// TestConversationEndedHint_NoReplyNotAgreement 验证无应答会话（transcript
+// 全是自己的话、对方一句没说——典型即邀请 speak_to 等待窗先于回话到期的
+// speech:no_reply 终局）注入「未获应答」语义而非守约指令：守约文案的退出
+// 分支只枚举"被婉拒/寒暄/告别"，"未获应答"不在其中，LLM 会把无人应答的
+// 邀请读成已达成的约定（2026-11-03 实测"好，老张也答应了"）。
+func TestConversationEndedHint_NoReplyNotAgreement(t *testing.T) {
+	own := []conversationTurn{
+		{speakerID: "H-02", content: "老张，走，去跑步机那边跑两步活动活动筋骨呗？"},
+	}
+	// 无应答：只有自己的邀请 → 未获应答变体，不含守约执行指令。
+	h := conversationEndedHint("H-02", "H-05", own, nil)
+	if !strings.Contains(h, "没有回应不等于答应") {
+		t.Errorf("unanswered hint must carry the not-agreed caveat, got: %.200s", h)
+	}
+	if strings.Contains(h, "立即去执行该约定") {
+		t.Errorf("unanswered hint must NOT carry the follow-through directive, got: %.200s", h)
+	}
+	if !strings.HasPrefix(h, "【对话结束】") {
+		t.Errorf("hint prefix must stay 【对话结束】 (slot fallback / priority machineries), got: %.40s", h)
+	}
+
+	// 有回复（拒绝）→ 正常守约 hint（其"被婉拒则回日程"分支自然接管）。
+	both := append(append([]conversationTurn(nil), own...),
+		conversationTurn{speakerID: "H-05", content: "我得先把内务收拾利索，要不你先跑着？"})
+	h = conversationEndedHint("H-02", "H-05", both, nil)
+	if !strings.Contains(h, "立即去执行该约定") {
+		t.Errorf("replied conversation keeps the follow-through directive, got: %.200s", h)
+	}
+	if strings.Contains(h, "没有回应不等于答应") {
+		t.Errorf("replied conversation must not use the unanswered variant, got: %.200s", h)
+	}
+}

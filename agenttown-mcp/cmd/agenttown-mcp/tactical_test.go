@@ -2175,3 +2175,64 @@ func TestIsVenusHTTP400(t *testing.T) {
 		}
 	}
 }
+
+// TestMapTacticalAction_HoldSecClamp 验证等待型 speak_to 的 hold_sec 下限
+// 钳制（2026-11-03）：hold_sec 是 UE registry 声明的 SpeakTo 参数（墙秒），
+// LLM 不知道回话往返预算（路由 ~0.5s + 对方 replan LLM 2-6s + 派发 ~1s ≈
+// 4-8s），填 3-5s 会让等待窗先于拒绝/应答到期，speech:no_reply 提前终局把
+// 无人应答的邀请喂给守约链路（实测"被拒绝了还以为对方答应了"）。等待型
+// 一律钳到 minSpeakToHoldSec；farewell 型与不填/长值不动。
+func TestMapTacticalAction_HoldSecClamp(t *testing.T) {
+	reg := NewCapabilityRegistry(nil)
+	reg.Register(protocol.SystemAgentID, []protocol.CapabilityAction{
+		{Cmd: "SpeakTo", Kind: "composite"},
+	})
+
+	// 等待型 + 过短 hold → 钳到下限。
+	pa := plannedAction{Action: "speak_to", Params: map[string]any{
+		"target_agent_id": "H-05", "content": "一起去跑步？",
+		"ends_conversation": false, "hold_sec": float64(4),
+	}}
+	_, params, err := mapTacticalAction(pa, "H-02", nil, reg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := params["hold_sec"]; got != float64(minSpeakToHoldSec) {
+		t.Errorf("waiting speak_to hold_sec = %v, want %d", got, minSpeakToHoldSec)
+	}
+
+	// farewell 型 + 过短 hold → 不钳（送达即释放，hold 无意义）。
+	pa.Params["ends_conversation"] = true
+	_, params, err = mapTacticalAction(pa, "H-02", nil, reg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := params["hold_sec"]; got != float64(4) {
+		t.Errorf("farewell hold_sec = %v, want 4 (unchanged)", got)
+	}
+
+	// 不填 hold → 不新增。
+	pa2 := plannedAction{Action: "speak_to", Params: map[string]any{
+		"target_agent_id": "H-05", "content": "一起去跑步？", "ends_conversation": false,
+	}}
+	_, params, err = mapTacticalAction(pa2, "H-02", nil, reg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, ok := params["hold_sec"]; ok {
+		t.Errorf("hold_sec should be absent when unset, got %v", params["hold_sec"])
+	}
+
+	// 长于下限 → 原样。
+	pa3 := plannedAction{Action: "speak_to", Params: map[string]any{
+		"target_agent_id": "H-05", "content": "一起去跑步？",
+		"ends_conversation": false, "hold_sec": float64(30),
+	}}
+	_, params, err = mapTacticalAction(pa3, "H-02", nil, reg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := params["hold_sec"]; got != float64(30) {
+		t.Errorf("hold_sec = %v, want 30 (unchanged)", got)
+	}
+}
