@@ -133,6 +133,15 @@ func (rt *Runtime) handleWorldEvent(agentID string, ev protocol.WorldEventPayloa
 			// 随即 pop。见 releaseFarewellSpeaker。
 			if d.SpeakerID != agentID {
 				rt.releaseFarewellSpeaker(d.SpeakerID)
+				// 接收方对称释放（2026-11-02）：带 ends_conversation=true 的
+				// 回话到达 = 接收方在途 speak_to 的等待使命已完成——对方已
+				// 明确不期待回话，UE 却要再等满一个 no_reply 窗才完成动作
+				// （2026-11-02 实测：speech:replied 完成比回话到达晚整 10
+				// 墙秒，期间 NPC 原地呆站、后续 refill 无法开始）。立即释放
+				// 等待方。见 releaseFarewellListener。
+				if d.EndsConversation {
+					rt.releaseFarewellListener(ac, agentID, d.SpeakerID)
+				}
 			}
 		}
 	}
@@ -360,6 +369,71 @@ func (rt *Runtime) releaseFarewellSpeaker(speakerID string) {
 	sp.signal()
 	rt.logger.Info("[对话层] 告别语已送达，提前结束等待（跳过 no_reply 窗）",
 		"agent_id", speakerID, "action_id", snap.CurrentActionID)
+}
+
+// releaseFarewellListener is releaseFarewellSpeaker's mirror on the receiving
+// side: the speech just heard carried ends_conversation=true (the speaker is
+// done and expects no reply), and the listener still holds an in-flight
+// speak_to aimed at that speaker — it is standing there waiting for the very
+// reply that just arrived. UE does not complete a replied speak_to on reply
+// receipt: the 2026-11-02 sim shows the speech:replied completion landing
+// exactly one no-reply window (~10s real) AFTER the reply, all of it dead
+// standing time (the queue cannot pop and no refill can start until the
+// completion arrives). Releasing here cuts that window to ~0.
+//
+// Beyond the stop bookkeeping (mirroring releaseFarewellSpeaker: scheduled-end
+// accounting so the late interrupted completion synthesizes no event, stash
+// for action_history, timeout timer cancel), this path ALSO closes the
+// conversation and injects the follow-through hint itself: UE returns a plain
+// "interrupted" for the stopped wait (no speech: reason), so the 对话终局
+// judgment in recordActionCompletion will not fire for it. Idempotent against
+// a graceful UE completion racing in (speech:replied) — the second
+// closeConversationByPeer finds no session and no-ops.
+func (rt *Runtime) releaseFarewellListener(ac *agentContext, receiverID, speakerID string) {
+	snap := ac.as.Snapshot()
+	if snap.CurrentActionID == "" {
+		return
+	}
+	// speak_to 签名检查与 releaseFarewellSpeaker / recordActionStarted 同款
+	// 口径：在途动作的 target_agent_id == 说话人（cmd 名是 registry 动态的
+	// "SpeakTo"，params 签名更稳）。等待的是"这位说话人的回话"——别人的
+	// 收尾不释放对第三方的等待。
+	target, _ := snap.CurrentActionParams["target_agent_id"].(string)
+	if target != speakerID {
+		return
+	}
+	if err := rt.ws.SendStopAction(receiverID, snap.CurrentActionID); err != nil {
+		rt.logger.Warn("[对话层] 等待释放 stop 发送失败（等待将延续到 UE 自然完成）",
+			"agent_id", receiverID, "action_id", snap.CurrentActionID, "err", err)
+		return
+	}
+	// 对方的收尾回话已到达 = 等待使命完成：按"正常结束"记账（preface 使
+	// 迟到的 interrupted completion 不合成事件），stash 保 action_history。
+	ac.recordScheduledEnd()
+	ac.as.ClearInFlightKeepQueue()
+	// 取消该 action 的超时 timer，避免迟到的 timer 误 stop 后续动作。
+	ac.coordMu.Lock()
+	if timer, ok := ac.pendingActionTimeouts[snap.CurrentActionID]; ok {
+		timer.Stop()
+		delete(ac.pendingActionTimeouts, snap.CurrentActionID)
+	}
+	ac.coordMu.Unlock()
+	// 对话终局闭环（迟到的 interrupted completion 不带 speech: reason，
+	// recordActionCompletion 的终局判定不会替这里收尾）：关会话 + 守约
+	// hint + 清社交反应窗口 + 抽取待办——与该判定同一条链。hint 必须在
+	// 下方 signal() 之前落好，woken refill 的 prompt 才带得上守约上下文。
+	if peer, turns := ac.closeConversationByPeer(speakerID); peer != "" && len(turns) > 0 {
+		ac.clearReaction()
+		if h := conversationEndedHint(receiverID, peer, turns, *rt.kbPtr); h != "" {
+			ac.as.SetReplanHint(h)
+			rt.logger.Info("[对话层] 对方已收尾，对话终局，立即注入守约 hint",
+				"agent_id", receiverID, "peer", peer, "turns", len(turns))
+		}
+		go ac.extractAndReplanCommitments(rt.ctx, receiverID, peer, turns, *rt.kbPtr, rt.profiles, rt.logger)
+	}
+	ac.signal()
+	rt.logger.Info("[对话层] 对方告别已收到，释放等待回话的 speak_to（跳过 UE 慢完成窗）",
+		"agent_id", receiverID, "action_id", snap.CurrentActionID, "speaker", speakerID)
 }
 
 // forceEventHint formats the replan hint for a force event. The 【强制打断】
