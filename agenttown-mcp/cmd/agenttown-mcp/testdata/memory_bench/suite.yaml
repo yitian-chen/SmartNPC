@@ -79,7 +79,7 @@ cases:
         peer: H-02
         turns:
           - speaker: H-02
-            content: 请你今天14:00到15:00之间去logistics_hub，向小李H-03转告：老王明天停工一天。
+            content: 请你今天14:00到15:00之间去logistics_hub，向H-03转告：老王明天停工一天。
           - speaker: H-01
             content: 好，我答应今天14:00去logistics_hub向H-03传话。
         replay: >-
