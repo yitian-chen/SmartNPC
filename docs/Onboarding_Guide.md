@@ -70,9 +70,11 @@ dnf install -y mysql-server
 cp .env.example /data/workspace/stable/.env
 cp .env.example /data/workspace/dev/.env
 ```
-编辑两个 .env，填入 VENUS_API_KEY=sk-xxx（必需，缺失 MCP 启动即退）
+编辑两个 .env，填入 VENUS_API_KEY=sk-xxx
 
 可以访问 https://ai.woa.com/#/manager/api-account 获取API。
+
+**若不连 Venus 而用其他大模型服务**（自建 vLLM/SGLang、DeepSeek 官方 API 等 OpenAI 兼容服务）：复制 `assets/llm_backend.example.yaml` 为 `assets/llm_backend.yaml` 填好地址与模型，再在 .env 加一行 `LLM_CONFIG=assets/llm_backend.yaml` 即可（详细步骤见文末附录「配置 LLM 后端切换」）。
 
 ## 步骤 4：启动 stable 实例（端口 8760/9092）
 
