@@ -1,6 +1,6 @@
 # AgentTown — LLM 驱动的 AI NPC 模拟系统
 
-> 🚀 **新同事上手 / 云环境部署**：从零到跑起来的完整步骤见 **[docs/Onboarding_Guide.md](docs/Onboarding_Guide.md)**（容器访问、dev/stable 双实例启动、UE 连接、debug 页面、日志与请求体排查）。
+> **部署指引**：见 **[docs/Onboarding_Guide.md](docs/Onboarding_Guide.md)**
 
 AgentTown 是一个让 AI NPC 在游戏世界里**长期自主生活**的模拟系统：在 UE5 构建的机器人小镇中，5 个拟人 NPC（H-01~H-05）各自拥有独立的性格人设与工种，白天上班装配、累了充电、闲时社交上网、被攻击了逃跑、受损了维修，约好的聚会也会真的赴约——所有行为由 LLM 实时决策，经 MCP 协议驱动真实 UE5 世界，形成完整的"感知 → 决策 → 行动 → 反应"闭环。
 
