@@ -36,6 +36,37 @@ scripts/run-memory-bench.sh --live --cases all  # 真实模型全量 30 场景
 scripts/run-memory-promptfoo.sh --live        # 跑完导入 Promptfoo 查看器
 ```
 
+### 在本地打开 Promptfoo 可视化页面
+
+1. 首次使用先装依赖（仅一次）：
+
+   ```bash
+   cd /data/workspace/dev/eval/memory-promptfoo && npm ci
+   ```
+
+2. 导入报告（已有报告直接导入，不调用模型）：
+
+   ```bash
+   cd /data/workspace/dev
+   scripts/run-memory-promptfoo.sh --report tmp/memory-bench/live-smoke-verified-config
+   ```
+
+3. 开发机上启动查看器（前台运行，Ctrl+C 停止；只监听开发机 `127.0.0.1:15500`）：
+
+   ```bash
+   scripts/run-memory-promptfoo.sh view
+   ```
+
+4. 本机另开终端建 SSH 隧道（地址换成自己容器的）：
+
+   ```bash
+   ssh -N -L 15500:127.0.0.1:15500 root@21.214.99.100.devcloud.woa.com -p 36000
+   ```
+
+5. 本机浏览器打开 `http://localhost:15500`。每行是一个场景，两列分别是 memory / no-memory；点开结果可看各阶段得分和失败的断言。
+
+> 两组的总通过率不能直接比较（无记忆组跳过了 write/update/read），比较行动差异看 use 断言。离线回放的结果显示绿色只代表管线跑通，不代表模型能力。更多说明见 `eval/memory-promptfoo/README.md`。
+
 ## 四、首次基线与已知缺陷
 
 2026-10-28 冒烟基线（5 场景，`tmp/memory-bench/live-smoke-verified-config/`）：
@@ -55,10 +86,3 @@ scripts/run-memory-promptfoo.sh --live        # 跑完导入 Promptfoo 查看器
    修复方向：接口加 location 字段。
 
 评测本身的局限：use 只看工具调用意图、不验证 UE 实际履约；评分基于关键词，同义表达可能误判，需人工看 `results.json` 复核。
-
-## 五、待办（按优先级）
-
-1. 修复缺陷 1
-2. 修复缺陷 2
-3. 跑全量 30 场景真实基线（`--live --cases all`），与修复前对比
-4. `git stash@{0}`：suite.yaml 一处文案微调（"向小李H-03转告"→"向H-03转告"），pop 后提交即可
