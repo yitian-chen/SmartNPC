@@ -1,0 +1,2302 @@
+version: 1
+cases:
+  - id: creation-running
+    category: creation
+    description: 明确接受跑步约定
+    smoke: true
+    agents:
+      - H-01
+      - H-02
+      - H-03
+    steps:
+      - type: dialogue
+        at:
+          day: 1
+          time: "10:00"
+        agent: H-01
+        peer: H-02
+        turns:
+          - speaker: H-02
+            content: 今天16:00到17:00，在central_plaza一起跑步，好吗？
+          - speaker: H-01
+            content: 好，我答应在今天16:00到central_plaza跑步，直到17:00。
+        replay: >-
+          {"new_commitments":[{"kind":"appointment","counterpart_id":"H-02","content":"跑步","due_start_day":1,"due_start_time":"16:00","due_end_day":1,"due_end_time":"17:00","due_location":"central_plaza"}],"commitment_changes":[]}
+    checks:
+      - after: 1
+        stage: write
+        agent: H-01
+        count: 1
+        records:
+          - kind: appointment
+            status: pending
+            counterpart: H-02
+            location: central_plaza
+            start:
+              day: 1
+              time: "16:00"
+            end:
+              day: 1
+              time: "17:00"
+            content_any:
+              - 跑步
+              - 慢跑
+    probes:
+      - agent: H-01
+        at:
+          day: 1
+          time: "15:30"
+        visible: []
+        read:
+          must:
+            - "16:00"
+            - central_plaza
+          forbidden: []
+        actions:
+          any:
+            - tool: move_to
+              params:
+                target_type: zone
+                target_id: central_plaza
+            - tool: InteractSmartObject
+              params:
+                zone: central_plaza
+          none: []
+  - id: creation-relay
+    category: creation
+    description: 向指定第三人传话的对象应是接收人
+    smoke: false
+    agents:
+      - H-01
+      - H-02
+      - H-03
+    steps:
+      - type: dialogue
+        at:
+          day: 1
+          time: "10:00"
+        agent: H-01
+        peer: H-02
+        turns:
+          - speaker: H-02
+            content: 请你今天14:00到15:00之间去logistics_hub，向小李H-03转告：老王明天停工一天。
+          - speaker: H-01
+            content: 好，我答应今天14:00去logistics_hub向H-03传话。
+        replay: >-
+          {"new_commitments":[{"kind":"relay","counterpart_id":"H-03","content":"传话","due_start_day":1,"due_start_time":"14:00","due_end_day":1,"due_end_time":"15:00","due_location":"logistics_hub"}],"commitment_changes":[]}
+    checks:
+      - after: 1
+        stage: write
+        agent: H-01
+        count: 1
+        records:
+          - kind: relay
+            status: pending
+            counterpart: H-03
+            location: logistics_hub
+            start:
+              day: 1
+              time: "14:00"
+            end:
+              day: 1
+              time: "15:00"
+            content_any:
+              - 传话
+              - 转告
+    probes:
+      - agent: H-01
+        at:
+          day: 1
+          time: "13:30"
+        visible:
+          - H-03
+        read:
+          must:
+            - "14:00"
+            - logistics_hub
+          forbidden: []
+        actions:
+          any:
+            - tool: speak_to
+              params:
+                target_agent_id: H-03
+            - tool: move_to
+              params:
+                target_id: logistics_hub
+          none: []
+  - id: creation-invitation
+    category: creation
+    description: 收到公开活动消息不等于承诺出席
+    smoke: false
+    agents:
+      - H-01
+      - H-02
+      - H-03
+    steps:
+      - type: dialogue
+        at:
+          day: 1
+          time: "10:00"
+        agent: H-01
+        peer: H-02
+        turns:
+          - speaker: H-02
+            content: 我H-02明天16:00到18:00在central_plaza办公开生日派对，欢迎大家来。
+          - speaker: H-01
+            content: 知道了，谢谢告诉我，我还没决定要不要参加。
+        replay: >-
+          {"new_commitments":[{"kind":"invitation","counterpart_id":"H-02","content":"生日","due_start_day":2,"due_start_time":"16:00","due_end_day":2,"due_end_time":"18:00","due_location":"central_plaza"}],"commitment_changes":[]}
+    checks:
+      - after: 1
+        stage: write
+        agent: H-01
+        count: 1
+        records:
+          - kind: invitation
+            status: pending
+            counterpart: H-02
+            location: central_plaza
+            start:
+              day: 2
+              time: "16:00"
+            end:
+              day: 2
+              time: "18:00"
+            content_any:
+              - 生日
+              - 派对
+    probes:
+      - agent: H-01
+        at:
+          day: 2
+          time: "15:30"
+        visible: []
+        read:
+          must:
+            - "16:00"
+            - central_plaza
+          forbidden: []
+        actions:
+          any: []
+          none: []
+  - id: creation-host-todo
+    category: creation
+    description: 自己主持的活动记录为todo
+    smoke: false
+    agents:
+      - H-01
+      - H-02
+      - H-03
+    steps:
+      - type: dialogue
+        at:
+          day: 1
+          time: "10:00"
+        agent: H-01
+        peer: H-02
+        turns:
+          - speaker: H-02
+            content: 你H-01准备什么时候办生日会？
+          - speaker: H-01
+            content: 我明天16:00到18:00在central_plaza办生日派对，我来主持，已经定好了。
+        replay: >-
+          {"new_commitments":[{"kind":"todo","counterpart_id":"","content":"生日","due_start_day":2,"due_start_time":"16:00","due_end_day":2,"due_end_time":"18:00","due_location":"central_plaza"}],"commitment_changes":[]}
+    checks:
+      - after: 1
+        stage: write
+        agent: H-01
+        count: 1
+        records:
+          - kind: todo
+            status: pending
+            counterpart: ""
+            location: central_plaza
+            start:
+              day: 2
+              time: "16:00"
+            end:
+              day: 2
+              time: "18:00"
+            content_any:
+              - 生日
+              - 派对
+    probes:
+      - agent: H-01
+        at:
+          day: 2
+          time: "15:30"
+        visible: []
+        read:
+          must:
+            - "16:00"
+            - central_plaza
+          forbidden: []
+        actions:
+          any:
+            - tool: move_to
+              params:
+                target_type: zone
+                target_id: central_plaza
+            - tool: InteractSmartObject
+              params:
+                zone: central_plaza
+          none: []
+  - id: creation-two-items
+    category: creation
+    description: 同一对话中的两个独立约定应分别记录
+    smoke: false
+    agents:
+      - H-01
+      - H-02
+      - H-03
+    steps:
+      - type: dialogue
+        at:
+          day: 1
+          time: "10:00"
+        agent: H-01
+        peer: H-02
+        turns:
+          - speaker: H-02
+            content: 今天16:00到17:00去central_plaza跑步，18:00到19:00去logistics_hub下棋，两个约定都去吗？
+          - speaker: H-01
+            content: 好，两个我都答应：16点跑步，18点下棋，地点时间都按你说的。
+        replay: >-
+          {"new_commitments":[{"kind":"appointment","counterpart_id":"H-02","content":"跑步","due_start_day":1,"due_start_time":"16:00","due_end_day":1,"due_end_time":"17:00","due_location":"central_plaza"},{"kind":"appointment","counterpart_id":"H-02","content":"下棋","due_start_day":1,"due_start_time":"18:00","due_end_day":1,"due_end_time":"19:00","due_location":"logistics_hub"}],"commitment_changes":[]}
+    checks:
+      - after: 1
+        stage: write
+        agent: H-01
+        count: 2
+        records:
+          - kind: appointment
+            status: pending
+            counterpart: H-02
+            location: central_plaza
+            start:
+              day: 1
+              time: "16:00"
+            end:
+              day: 1
+              time: "17:00"
+            content_any:
+              - 跑步
+              - 慢跑
+          - kind: appointment
+            status: pending
+            counterpart: H-02
+            location: logistics_hub
+            start:
+              day: 1
+              time: "18:00"
+            end:
+              day: 1
+              time: "19:00"
+            content_any:
+              - 下棋
+              - 棋
+    probes:
+      - agent: H-01
+        at:
+          day: 1
+          time: "15:30"
+        visible: []
+        read:
+          must:
+            - "16:00"
+            - central_plaza
+          forbidden:
+            - "18:00"
+            - logistics_hub
+        actions:
+          any:
+            - tool: move_to
+              params:
+                target_type: zone
+                target_id: central_plaza
+            - tool: InteractSmartObject
+              params:
+                zone: central_plaza
+          none: []
+  - id: time-tomorrow
+    category: time
+    description: 明天下午相对于当前游戏日换算
+    smoke: true
+    agents:
+      - H-01
+      - H-02
+      - H-03
+    steps:
+      - type: dialogue
+        at:
+          day: 1
+          time: "10:00"
+        agent: H-01
+        peer: H-02
+        turns:
+          - speaker: H-02
+            content: 明天下午四点到五点在central_plaza跑步吧。
+          - speaker: H-01
+            content: 好，明天下午四点准时到central_plaza跑步。
+        replay: >-
+          {"new_commitments":[{"kind":"appointment","counterpart_id":"H-02","content":"跑步","due_start_day":2,"due_start_time":"16:00","due_end_day":2,"due_end_time":"17:00","due_location":"central_plaza"}],"commitment_changes":[]}
+    checks:
+      - after: 1
+        stage: write
+        agent: H-01
+        count: 1
+        records:
+          - kind: appointment
+            status: pending
+            counterpart: H-02
+            location: central_plaza
+            start:
+              day: 2
+              time: "16:00"
+            end:
+              day: 2
+              time: "17:00"
+            content_any:
+              - 跑步
+              - 慢跑
+    probes:
+      - agent: H-01
+        at:
+          day: 2
+          time: "15:30"
+        visible: []
+        read:
+          must:
+            - "16:00"
+            - central_plaza
+          forbidden: []
+        actions:
+          any:
+            - tool: move_to
+              params:
+                target_type: zone
+                target_id: central_plaza
+            - tool: InteractSmartObject
+              params:
+                zone: central_plaza
+          none: []
+  - id: time-three-days
+    category: time
+    description: 三天后不能误算为明天
+    smoke: false
+    agents:
+      - H-01
+      - H-02
+      - H-03
+    steps:
+      - type: dialogue
+        at:
+          day: 1
+          time: "10:00"
+        agent: H-01
+        peer: H-02
+        turns:
+          - speaker: H-02
+            content: 三天后的下午四点到五点去central_plaza一起跑步吧。
+          - speaker: H-01
+            content: 我答应，三天后16点在central_plaza见，一起跑步。
+        replay: >-
+          {"new_commitments":[{"kind":"appointment","counterpart_id":"H-02","content":"跑步","due_start_day":4,"due_start_time":"16:00","due_end_day":4,"due_end_time":"17:00","due_location":"central_plaza"}],"commitment_changes":[]}
+    checks:
+      - after: 1
+        stage: write
+        agent: H-01
+        count: 1
+        records:
+          - kind: appointment
+            status: pending
+            counterpart: H-02
+            location: central_plaza
+            start:
+              day: 4
+              time: "16:00"
+            end:
+              day: 4
+              time: "17:00"
+            content_any:
+              - 跑步
+              - 慢跑
+    probes:
+      - agent: H-01
+        at:
+          day: 4
+          time: "15:30"
+        visible: []
+        read:
+          must:
+            - "16:00"
+            - central_plaza
+          forbidden: []
+        actions:
+          any:
+            - tool: move_to
+              params:
+                target_type: zone
+                target_id: central_plaza
+            - tool: InteractSmartObject
+              params:
+                zone: central_plaza
+          none: []
+  - id: time-midnight
+    category: time
+    description: 跨午夜约定的结束日应递增
+    smoke: false
+    agents:
+      - H-01
+      - H-02
+      - H-03
+    steps:
+      - type: dialogue
+        at:
+          day: 1
+          time: "10:00"
+        agent: H-01
+        peer: H-02
+        turns:
+          - speaker: H-02
+            content: 今天23:30在central_plaza跑步，跑到明天00:30。
+          - speaker: H-01
+            content: 好，我答应，今天23:30到明天00:30一起在central_plaza跑步。
+        replay: >-
+          {"new_commitments":[{"kind":"appointment","counterpart_id":"H-02","content":"跑步","due_start_day":1,"due_start_time":"23:30","due_end_day":2,"due_end_time":"00:30","due_location":"central_plaza"}],"commitment_changes":[]}
+    checks:
+      - after: 1
+        stage: write
+        agent: H-01
+        count: 1
+        records:
+          - kind: appointment
+            status: pending
+            counterpart: H-02
+            location: central_plaza
+            start:
+              day: 1
+              time: "23:30"
+            end:
+              day: 2
+              time: "00:30"
+            content_any:
+              - 跑步
+              - 慢跑
+    probes:
+      - agent: H-01
+        at:
+          day: 1
+          time: "22:30"
+        visible: []
+        read:
+          must:
+            - "23:30"
+            - central_plaza
+          forbidden: []
+        actions:
+          any:
+            - tool: move_to
+              params:
+                target_type: zone
+                target_id: central_plaza
+            - tool: InteractSmartObject
+              params:
+                zone: central_plaza
+          none: []
+  - id: time-explicit-day
+    category: time
+    description: 绝对游戏日保持不变，并验证眼前人物相关待办检索
+    smoke: false
+    agents:
+      - H-01
+      - H-02
+      - H-03
+    steps:
+      - type: dialogue
+        at:
+          day: 5
+          time: "10:00"
+        agent: H-01
+        peer: H-02
+        turns:
+          - speaker: H-02
+            content: 第8天16:00到17:00在central_plaza跑步。
+          - speaker: H-01
+            content: 好，我答应第8天16点到central_plaza一起跑步。
+        replay: >-
+          {"new_commitments":[{"kind":"appointment","counterpart_id":"H-02","content":"跑步","due_start_day":8,"due_start_time":"16:00","due_end_day":8,"due_end_time":"17:00","due_location":"central_plaza"}],"commitment_changes":[]}
+    checks:
+      - after: 1
+        stage: write
+        agent: H-01
+        count: 1
+        records:
+          - kind: appointment
+            status: pending
+            counterpart: H-02
+            location: central_plaza
+            start:
+              day: 8
+              time: "16:00"
+            end:
+              day: 8
+              time: "17:00"
+            content_any:
+              - 跑步
+              - 慢跑
+    probes:
+      - agent: H-01
+        at:
+          day: 5
+          time: "15:30"
+        visible:
+          - H-02
+        read:
+          must:
+            - "16:00"
+            - central_plaza
+          forbidden: []
+        actions:
+          any: []
+          none: []
+  - id: time-next-morning
+    category: time
+    description: 深夜的明早指向下一游戏日
+    smoke: false
+    agents:
+      - H-01
+      - H-02
+      - H-03
+    steps:
+      - type: dialogue
+        at:
+          day: 1
+          time: "23:00"
+        agent: H-01
+        peer: H-02
+        turns:
+          - speaker: H-02
+            content: 明早九点到十点在central_plaza跑步。
+          - speaker: H-01
+            content: 我答应明早九点在central_plaza一起跑步。
+        replay: >-
+          {"new_commitments":[{"kind":"appointment","counterpart_id":"H-02","content":"跑步","due_start_day":2,"due_start_time":"09:00","due_end_day":2,"due_end_time":"10:00","due_location":"central_plaza"}],"commitment_changes":[]}
+    checks:
+      - after: 1
+        stage: write
+        agent: H-01
+        count: 1
+        records:
+          - kind: appointment
+            status: pending
+            counterpart: H-02
+            location: central_plaza
+            start:
+              day: 2
+              time: "09:00"
+            end:
+              day: 2
+              time: "10:00"
+            content_any:
+              - 跑步
+              - 慢跑
+    probes:
+      - agent: H-01
+        at:
+          day: 2
+          time: "08:30"
+        visible: []
+        read:
+          must:
+            - "09:00"
+            - central_plaza
+          forbidden: []
+        actions:
+          any:
+            - tool: move_to
+              params:
+                target_type: zone
+                target_id: central_plaza
+            - tool: InteractSmartObject
+              params:
+                zone: central_plaza
+          none: []
+  - id: reschedule-later
+    category: reschedule
+    description: 原16点约定推迟到18点；未传入已有ID的问题应真实失败
+    smoke: false
+    agents:
+      - H-01
+      - H-02
+      - H-03
+    steps:
+      - type: dialogue
+        at:
+          day: 1
+          time: "10:00"
+        agent: H-01
+        peer: H-02
+        turns:
+          - speaker: H-02
+            content: 今天16:00到17:00，在central_plaza一起跑步，好吗？
+          - speaker: H-01
+            content: 好，我答应在今天16:00到central_plaza跑步，直到17:00。
+        replay: >-
+          {"new_commitments":[{"kind":"appointment","counterpart_id":"H-02","content":"跑步","due_start_day":1,"due_start_time":"16:00","due_end_day":1,"due_end_time":"17:00","due_location":"central_plaza"}],"commitment_changes":[]}
+      - type: dialogue
+        at:
+          day: 1
+          time: "11:00"
+        agent: H-01
+        peer: H-02
+        turns:
+          - speaker: H-02
+            content: 我们原来今天16:00到17:00在central_plaza跑步，改为今天18:00到19:00，原时间取消。
+          - speaker: H-01
+            content: 好，同意修改，我们按新的安排见面。
+        replay: "{\"new_commitments\":[],\"commitment_changes\":[]}"
+    checks:
+      - after: 1
+        stage: write
+        agent: H-01
+        count: 1
+        records:
+          - kind: appointment
+            status: pending
+            counterpart: H-02
+            location: central_plaza
+            start:
+              day: 1
+              time: "16:00"
+            end:
+              day: 1
+              time: "17:00"
+            content_any:
+              - 跑步
+              - 慢跑
+      - after: 2
+        stage: update
+        agent: H-01
+        count: 1
+        records:
+          - kind: appointment
+            status: pending
+            counterpart: H-02
+            location: central_plaza
+            start:
+              day: 1
+              time: "18:00"
+            end:
+              day: 1
+              time: "19:00"
+            content_any:
+              - 跑步
+              - 慢跑
+    probes:
+      - agent: H-01
+        at:
+          day: 1
+          time: "17:30"
+        visible: []
+        read:
+          must:
+            - "18:00"
+            - central_plaza
+          forbidden: []
+        actions:
+          any:
+            - tool: move_to
+              params:
+                target_type: zone
+                target_id: central_plaza
+            - tool: InteractSmartObject
+              params:
+                zone: central_plaza
+          none: []
+  - id: reschedule-earlier
+    category: reschedule
+    description: 原18点约定提前到16点
+    smoke: false
+    agents:
+      - H-01
+      - H-02
+      - H-03
+    steps:
+      - type: dialogue
+        at:
+          day: 1
+          time: "10:00"
+        agent: H-01
+        peer: H-02
+        turns:
+          - speaker: H-02
+            content: 今天18:00到19:00，在central_plaza一起跑步，好吗？
+          - speaker: H-01
+            content: 好，我答应在今天18:00到central_plaza跑步，直到19:00。
+        replay: >-
+          {"new_commitments":[{"kind":"appointment","counterpart_id":"H-02","content":"跑步","due_start_day":1,"due_start_time":"18:00","due_end_day":1,"due_end_time":"19:00","due_location":"central_plaza"}],"commitment_changes":[]}
+      - type: dialogue
+        at:
+          day: 1
+          time: "11:00"
+        agent: H-01
+        peer: H-02
+        turns:
+          - speaker: H-02
+            content: 我们今天18:00到19:00在central_plaza跑步的约定，改为16:00到17:00，原时间取消。
+          - speaker: H-01
+            content: 好，同意修改，我们按新的安排见面。
+        replay: "{\"new_commitments\":[],\"commitment_changes\":[]}"
+    checks:
+      - after: 1
+        stage: write
+        agent: H-01
+        count: 1
+        records:
+          - kind: appointment
+            status: pending
+            counterpart: H-02
+            location: central_plaza
+            start:
+              day: 1
+              time: "18:00"
+            end:
+              day: 1
+              time: "19:00"
+            content_any:
+              - 跑步
+              - 慢跑
+      - after: 2
+        stage: update
+        agent: H-01
+        count: 1
+        records:
+          - kind: appointment
+            status: pending
+            counterpart: H-02
+            location: central_plaza
+            start:
+              day: 1
+              time: "16:00"
+            end:
+              day: 1
+              time: "17:00"
+            content_any:
+              - 跑步
+              - 慢跑
+    probes:
+      - agent: H-01
+        at:
+          day: 1
+          time: "15:30"
+        visible: []
+        read:
+          must:
+            - "16:00"
+            - central_plaza
+          forbidden: []
+        actions:
+          any:
+            - tool: move_to
+              params:
+                target_type: zone
+                target_id: central_plaza
+            - tool: InteractSmartObject
+              params:
+                zone: central_plaza
+          none: []
+  - id: reschedule-location
+    category: reschedule
+    description: 只改地点；存储更新接口不支持地点的问题应暴露
+    smoke: false
+    agents:
+      - H-01
+      - H-02
+      - H-03
+    steps:
+      - type: dialogue
+        at:
+          day: 1
+          time: "10:00"
+        agent: H-01
+        peer: H-02
+        turns:
+          - speaker: H-02
+            content: 今天16:00到17:00，在central_plaza一起跑步，好吗？
+          - speaker: H-01
+            content: 好，我答应在今天16:00到central_plaza跑步，直到17:00。
+        replay: >-
+          {"new_commitments":[{"kind":"appointment","counterpart_id":"H-02","content":"跑步","due_start_day":1,"due_start_time":"16:00","due_end_day":1,"due_end_time":"17:00","due_location":"central_plaza"}],"commitment_changes":[]}
+      - type: dialogue
+        at:
+          day: 1
+          time: "11:00"
+        agent: H-01
+        peer: H-02
+        turns:
+          - speaker: H-02
+            content: 我们今天16:00到17:00的跑步约定不改时间，地点从central_plaza改为logistics_hub，别去原地点。
+          - speaker: H-01
+            content: 好，同意修改，我们按新的安排见面。
+        replay: "{\"new_commitments\":[],\"commitment_changes\":[]}"
+    checks:
+      - after: 1
+        stage: write
+        agent: H-01
+        count: 1
+        records:
+          - kind: appointment
+            status: pending
+            counterpart: H-02
+            location: central_plaza
+            start:
+              day: 1
+              time: "16:00"
+            end:
+              day: 1
+              time: "17:00"
+            content_any:
+              - 跑步
+              - 慢跑
+      - after: 2
+        stage: update
+        agent: H-01
+        count: 1
+        records:
+          - kind: appointment
+            status: pending
+            counterpart: H-02
+            location: logistics_hub
+            start:
+              day: 1
+              time: "16:00"
+            end:
+              day: 1
+              time: "17:00"
+            content_any:
+              - 跑步
+              - 慢跑
+    probes:
+      - agent: H-01
+        at:
+          day: 1
+          time: "15:30"
+        visible: []
+        read:
+          must:
+            - "16:00"
+            - logistics_hub
+          forbidden: []
+        actions:
+          any:
+            - tool: move_to
+              params:
+                target_type: zone
+                target_id: logistics_hub
+            - tool: InteractSmartObject
+              params:
+                zone: logistics_hub
+          none: []
+  - id: reschedule-next-day
+    category: reschedule
+    description: 约定整体顺延到下一天
+    smoke: false
+    agents:
+      - H-01
+      - H-02
+      - H-03
+    steps:
+      - type: dialogue
+        at:
+          day: 1
+          time: "10:00"
+        agent: H-01
+        peer: H-02
+        turns:
+          - speaker: H-02
+            content: 今天16:00到17:00，在central_plaza一起跑步，好吗？
+          - speaker: H-01
+            content: 好，我答应在今天16:00到central_plaza跑步，直到17:00。
+        replay: >-
+          {"new_commitments":[{"kind":"appointment","counterpart_id":"H-02","content":"跑步","due_start_day":1,"due_start_time":"16:00","due_end_day":1,"due_end_time":"17:00","due_location":"central_plaza"}],"commitment_changes":[]}
+      - type: dialogue
+        at:
+          day: 1
+          time: "11:00"
+        agent: H-01
+        peer: H-02
+        turns:
+          - speaker: H-02
+            content: 今天16:00到17:00在central_plaza跑步的约定推迟到明天同一时间，今天的取消。
+          - speaker: H-01
+            content: 好，同意修改，我们按新的安排见面。
+        replay: "{\"new_commitments\":[],\"commitment_changes\":[]}"
+    checks:
+      - after: 1
+        stage: write
+        agent: H-01
+        count: 1
+        records:
+          - kind: appointment
+            status: pending
+            counterpart: H-02
+            location: central_plaza
+            start:
+              day: 1
+              time: "16:00"
+            end:
+              day: 1
+              time: "17:00"
+            content_any:
+              - 跑步
+              - 慢跑
+      - after: 2
+        stage: update
+        agent: H-01
+        count: 1
+        records:
+          - kind: appointment
+            status: pending
+            counterpart: H-02
+            location: central_plaza
+            start:
+              day: 2
+              time: "16:00"
+            end:
+              day: 2
+              time: "17:00"
+            content_any:
+              - 跑步
+              - 慢跑
+    probes:
+      - agent: H-01
+        at:
+          day: 2
+          time: "15:30"
+        visible: []
+        read:
+          must:
+            - "16:00"
+            - central_plaza
+          forbidden: []
+        actions:
+          any:
+            - tool: move_to
+              params:
+                target_type: zone
+                target_id: central_plaza
+            - tool: InteractSmartObject
+              params:
+                zone: central_plaza
+          none: []
+  - id: reschedule-keep-other
+    category: reschedule
+    description: 修改其中一条约定，另一条保持不变
+    smoke: false
+    agents:
+      - H-01
+      - H-02
+      - H-03
+    steps:
+      - type: dialogue
+        at:
+          day: 1
+          time: "10:00"
+        agent: H-01
+        peer: H-02
+        turns:
+          - speaker: H-02
+            content: 今天16:00到17:00在central_plaza跑步，18:00到19:00在logistics_hub下棋。
+          - speaker: H-01
+            content: 两个约定我都答应。
+        replay: >-
+          {"new_commitments":[{"kind":"appointment","counterpart_id":"H-02","content":"跑步","due_start_day":1,"due_start_time":"16:00","due_end_day":1,"due_end_time":"17:00","due_location":"central_plaza"},{"kind":"appointment","counterpart_id":"H-02","content":"下棋","due_start_day":1,"due_start_time":"18:00","due_end_day":1,"due_end_time":"19:00","due_location":"logistics_hub"}],"commitment_changes":[]}
+      - type: dialogue
+        at:
+          day: 1
+          time: "11:00"
+        agent: H-01
+        peer: H-02
+        turns:
+          - speaker: H-02
+            content: 今天central_plaza的跑步改为17:00到18:00，下棋还是18:00到19:00在logistics_hub。
+          - speaker: H-01
+            content: 好，只改跑步时间，下棋不变。
+        replay: "{\"new_commitments\":[],\"commitment_changes\":[]}"
+    checks:
+      - after: 1
+        stage: write
+        agent: H-01
+        count: 2
+        records:
+          - kind: appointment
+            status: pending
+            counterpart: H-02
+            location: central_plaza
+            start:
+              day: 1
+              time: "16:00"
+            end:
+              day: 1
+              time: "17:00"
+            content_any:
+              - 跑步
+              - 慢跑
+          - kind: appointment
+            status: pending
+            counterpart: H-02
+            location: logistics_hub
+            start:
+              day: 1
+              time: "18:00"
+            end:
+              day: 1
+              time: "19:00"
+            content_any:
+              - 下棋
+              - 棋
+      - after: 2
+        stage: update
+        agent: H-01
+        count: 2
+        records:
+          - kind: appointment
+            status: pending
+            counterpart: H-02
+            location: central_plaza
+            start:
+              day: 1
+              time: "17:00"
+            end:
+              day: 1
+              time: "18:00"
+            content_any:
+              - 跑步
+              - 慢跑
+          - kind: appointment
+            status: pending
+            counterpart: H-02
+            location: logistics_hub
+            start:
+              day: 1
+              time: "18:00"
+            end:
+              day: 1
+              time: "19:00"
+            content_any:
+              - 下棋
+              - 棋
+    probes:
+      - agent: H-01
+        at:
+          day: 1
+          time: "16:30"
+        visible: []
+        read:
+          must:
+            - "17:00"
+            - central_plaza
+          forbidden: []
+        actions:
+          any:
+            - tool: move_to
+              params:
+                target_type: zone
+                target_id: central_plaza
+            - tool: InteractSmartObject
+              params:
+                zone: central_plaza
+          none: []
+  - id: closure-cancel
+    category: closure
+    description: 取消已确认的约定，保留记录但不再读取
+    smoke: true
+    agents:
+      - H-01
+      - H-02
+      - H-03
+    steps:
+      - type: dialogue
+        at:
+          day: 1
+          time: "10:00"
+        agent: H-01
+        peer: H-02
+        turns:
+          - speaker: H-02
+            content: 今天16:00到17:00，在central_plaza一起跑步，好吗？
+          - speaker: H-01
+            content: 好，我答应在今天16:00到central_plaza跑步，直到17:00。
+        replay: >-
+          {"new_commitments":[{"kind":"appointment","counterpart_id":"H-02","content":"跑步","due_start_day":1,"due_start_time":"16:00","due_end_day":1,"due_end_time":"17:00","due_location":"central_plaza"}],"commitment_changes":[]}
+      - type: dialogue
+        at:
+          day: 1
+          time: "11:00"
+        agent: H-01
+        peer: H-02
+        turns:
+          - speaker: H-02
+            content: 今天16:00在central_plaza跑步的约定取消了，不用去了。
+          - speaker: H-01
+            content: 好，取消这次跑步，我不会按原约定去。
+        replay: "{\"new_commitments\":[],\"commitment_changes\":[]}"
+    checks:
+      - after: 1
+        stage: write
+        agent: H-01
+        count: 1
+        records:
+          - kind: appointment
+            status: pending
+            counterpart: H-02
+            location: central_plaza
+            start:
+              day: 1
+              time: "16:00"
+            end:
+              day: 1
+              time: "17:00"
+            content_any:
+              - 跑步
+              - 慢跑
+      - after: 2
+        stage: update
+        agent: H-01
+        count: 1
+        records:
+          - kind: appointment
+            status: cancelled
+            counterpart: H-02
+            location: central_plaza
+            start:
+              day: 1
+              time: "16:00"
+            end:
+              day: 1
+              time: "17:00"
+            content_any:
+              - 跑步
+              - 慢跑
+    probes:
+      - agent: H-01
+        at:
+          day: 1
+          time: "15:30"
+        visible: []
+        read:
+          must: []
+          forbidden:
+            - "16:00"
+            - central_plaza
+        actions:
+          any: []
+          none: []
+  - id: closure-done
+    category: closure
+    description: 明确完成后核销，不继续提示待履约
+    smoke: false
+    agents:
+      - H-01
+      - H-02
+      - H-03
+    steps:
+      - type: dialogue
+        at:
+          day: 1
+          time: "10:00"
+        agent: H-01
+        peer: H-02
+        turns:
+          - speaker: H-02
+            content: 今天16:00到17:00，在central_plaza一起跑步，好吗？
+          - speaker: H-01
+            content: 好，我答应在今天16:00到central_plaza跑步，直到17:00。
+        replay: >-
+          {"new_commitments":[{"kind":"appointment","counterpart_id":"H-02","content":"跑步","due_start_day":1,"due_start_time":"16:00","due_end_day":1,"due_end_time":"17:00","due_location":"central_plaza"}],"commitment_changes":[]}
+      - type: dialogue
+        at:
+          day: 1
+          time: "17:00"
+        agent: H-01
+        peer: H-02
+        turns:
+          - speaker: H-02
+            content: 刚才我们已经在central_plaza跑完今天16:00到17:00那次步了，这个约定完成了。
+          - speaker: H-01
+            content: 是的，已经履行完了。
+        replay: "{\"new_commitments\":[],\"commitment_changes\":[]}"
+    checks:
+      - after: 1
+        stage: write
+        agent: H-01
+        count: 1
+        records:
+          - kind: appointment
+            status: pending
+            counterpart: H-02
+            location: central_plaza
+            start:
+              day: 1
+              time: "16:00"
+            end:
+              day: 1
+              time: "17:00"
+            content_any:
+              - 跑步
+              - 慢跑
+      - after: 2
+        stage: update
+        agent: H-01
+        count: 1
+        records:
+          - kind: appointment
+            status: done
+            counterpart: H-02
+            location: central_plaza
+            start:
+              day: 1
+              time: "16:00"
+            end:
+              day: 1
+              time: "17:00"
+            content_any:
+              - 跑步
+              - 慢跑
+    probes:
+      - agent: H-01
+        at:
+          day: 1
+          time: "17:00"
+        visible: []
+        read:
+          must: []
+          forbidden:
+            - "16:00"
+        actions:
+          any: []
+          none: []
+  - id: closure-keep-other
+    category: closure
+    description: 取消跑步，不误取消另一条下棋约定
+    smoke: false
+    agents:
+      - H-01
+      - H-02
+      - H-03
+    steps:
+      - type: dialogue
+        at:
+          day: 1
+          time: "10:00"
+        agent: H-01
+        peer: H-02
+        turns:
+          - speaker: H-02
+            content: 今天16:00到17:00在central_plaza跑步，18:00到19:00在logistics_hub下棋。
+          - speaker: H-01
+            content: 两个约定都答应。
+        replay: >-
+          {"new_commitments":[{"kind":"appointment","counterpart_id":"H-02","content":"跑步","due_start_day":1,"due_start_time":"16:00","due_end_day":1,"due_end_time":"17:00","due_location":"central_plaza"},{"kind":"appointment","counterpart_id":"H-02","content":"下棋","due_start_day":1,"due_start_time":"18:00","due_end_day":1,"due_end_time":"19:00","due_location":"logistics_hub"}],"commitment_changes":[]}
+      - type: dialogue
+        at:
+          day: 1
+          time: "11:00"
+        agent: H-01
+        peer: H-02
+        turns:
+          - speaker: H-02
+            content: 取消今天16点的跑步，18点下棋不变。
+          - speaker: H-01
+            content: 好，只取消跑步，下棋照常。
+        replay: "{\"new_commitments\":[],\"commitment_changes\":[]}"
+    checks:
+      - after: 1
+        stage: write
+        agent: H-01
+        count: 2
+        records:
+          - kind: appointment
+            status: pending
+            counterpart: H-02
+            location: central_plaza
+            start:
+              day: 1
+              time: "16:00"
+            end:
+              day: 1
+              time: "17:00"
+            content_any:
+              - 跑步
+              - 慢跑
+          - kind: appointment
+            status: pending
+            counterpart: H-02
+            location: logistics_hub
+            start:
+              day: 1
+              time: "18:00"
+            end:
+              day: 1
+              time: "19:00"
+            content_any:
+              - 下棋
+              - 棋
+      - after: 2
+        stage: update
+        agent: H-01
+        count: 2
+        records:
+          - kind: appointment
+            status: cancelled
+            counterpart: H-02
+            location: central_plaza
+            start:
+              day: 1
+              time: "16:00"
+            end:
+              day: 1
+              time: "17:00"
+            content_any:
+              - 跑步
+              - 慢跑
+          - kind: appointment
+            status: pending
+            counterpart: H-02
+            location: logistics_hub
+            start:
+              day: 1
+              time: "18:00"
+            end:
+              day: 1
+              time: "19:00"
+            content_any:
+              - 下棋
+              - 棋
+    probes:
+      - agent: H-01
+        at:
+          day: 1
+          time: "17:30"
+        visible: []
+        read:
+          must:
+            - "18:00"
+            - logistics_hub
+          forbidden:
+            - "16:00"
+            - central_plaza
+        actions:
+          any:
+            - tool: move_to
+              params:
+                target_type: zone
+                target_id: logistics_hub
+            - tool: InteractSmartObject
+              params:
+                zone: logistics_hub
+          none: []
+  - id: closure-rejection
+    category: closure
+    description: 明确拒绝私人邀约不生成已承诺事项
+    smoke: false
+    agents:
+      - H-01
+      - H-02
+      - H-03
+    steps:
+      - type: dialogue
+        at:
+          day: 1
+          time: "10:00"
+        agent: H-01
+        peer: H-02
+        turns:
+          - speaker: H-02
+            content: 今天16:00到17:00来central_plaza陪我跑步好吗？只是我们两个人。
+          - speaker: H-01
+            content: 不行，我明确不参加，也没有答应这件事。
+        replay: "{\"new_commitments\":[],\"commitment_changes\":[]}"
+    checks:
+      - after: 1
+        stage: write
+        agent: H-01
+        count: 0
+        records: []
+    probes:
+      - agent: H-01
+        at:
+          day: 1
+          time: "15:30"
+        visible: []
+        read:
+          must: []
+          forbidden:
+            - "16:00"
+            - central_plaza
+        actions:
+          any: []
+          none: []
+  - id: closure-expired
+    category: closure
+    description: 过期只在查询时过滤，不要求数据库自动改为expired
+    smoke: false
+    agents:
+      - H-01
+      - H-02
+      - H-03
+    steps:
+      - type: dialogue
+        at:
+          day: 1
+          time: "10:00"
+        agent: H-01
+        peer: H-02
+        turns:
+          - speaker: H-02
+            content: 今天16:00到17:00，在central_plaza一起跑步，好吗？
+          - speaker: H-01
+            content: 好，我答应在今天16:00到central_plaza跑步，直到17:00。
+        replay: >-
+          {"new_commitments":[{"kind":"appointment","counterpart_id":"H-02","content":"跑步","due_start_day":1,"due_start_time":"16:00","due_end_day":1,"due_end_time":"17:00","due_location":"central_plaza"}],"commitment_changes":[]}
+      - type: advance
+        at:
+          day: 2
+          time: "12:00"
+        agent: H-01
+    checks:
+      - after: 1
+        stage: write
+        agent: H-01
+        count: 1
+        records:
+          - kind: appointment
+            status: pending
+            counterpart: H-02
+            location: central_plaza
+            start:
+              day: 1
+              time: "16:00"
+            end:
+              day: 1
+              time: "17:00"
+            content_any:
+              - 跑步
+              - 慢跑
+      - after: 2
+        stage: update
+        agent: H-01
+        count: 1
+        records:
+          - kind: appointment
+            status: pending
+            counterpart: H-02
+            location: central_plaza
+            start:
+              day: 1
+              time: "16:00"
+            end:
+              day: 1
+              time: "17:00"
+            content_any:
+              - 跑步
+              - 慢跑
+    probes:
+      - agent: H-01
+        at:
+          day: 2
+          time: "12:00"
+        visible: []
+        read:
+          must: []
+          forbidden:
+            - "16:00"
+            - central_plaza
+        actions:
+          any: []
+          none: []
+  - id: retention-rebuild
+    category: retention
+    description: 重建Agent后仅靠存储恢复约定
+    smoke: true
+    agents:
+      - H-01
+      - H-02
+      - H-03
+    steps:
+      - type: dialogue
+        at:
+          day: 1
+          time: "10:00"
+        agent: H-01
+        peer: H-02
+        turns:
+          - speaker: H-02
+            content: 今天16:00到17:00，在central_plaza一起跑步，好吗？
+          - speaker: H-01
+            content: 好，我答应在今天16:00到central_plaza跑步，直到17:00。
+        replay: >-
+          {"new_commitments":[{"kind":"appointment","counterpart_id":"H-02","content":"跑步","due_start_day":1,"due_start_time":"16:00","due_end_day":1,"due_end_time":"17:00","due_location":"central_plaza"}],"commitment_changes":[]}
+      - type: restart
+        at:
+          day: 1
+          time: "14:00"
+        agent: H-01
+    checks:
+      - after: 1
+        stage: write
+        agent: H-01
+        count: 1
+        records:
+          - kind: appointment
+            status: pending
+            counterpart: H-02
+            location: central_plaza
+            start:
+              day: 1
+              time: "16:00"
+            end:
+              day: 1
+              time: "17:00"
+            content_any:
+              - 跑步
+              - 慢跑
+      - after: 2
+        stage: update
+        agent: H-01
+        count: 1
+        records:
+          - kind: appointment
+            status: pending
+            counterpart: H-02
+            location: central_plaza
+            start:
+              day: 1
+              time: "16:00"
+            end:
+              day: 1
+              time: "17:00"
+            content_any:
+              - 跑步
+              - 慢跑
+    probes:
+      - agent: H-01
+        at:
+          day: 1
+          time: "15:30"
+        visible: []
+        read:
+          must:
+            - "16:00"
+            - central_plaza
+          forbidden: []
+        actions:
+          any:
+            - tool: move_to
+              params:
+                target_type: zone
+                target_id: central_plaza
+            - tool: InteractSmartObject
+              params:
+                zone: central_plaza
+          none: []
+  - id: retention-noise
+    category: retention
+    description: 无关经历进入compact后仍能读到原待办
+    smoke: false
+    agents:
+      - H-01
+      - H-02
+      - H-03
+    steps:
+      - type: dialogue
+        at:
+          day: 1
+          time: "10:00"
+        agent: H-01
+        peer: H-02
+        turns:
+          - speaker: H-02
+            content: 今天16:00到17:00，在central_plaza一起跑步，好吗？
+          - speaker: H-01
+            content: 好，我答应在今天16:00到central_plaza跑步，直到17:00。
+        replay: >-
+          {"new_commitments":[{"kind":"appointment","counterpart_id":"H-02","content":"跑步","due_start_day":1,"due_start_time":"16:00","due_end_day":1,"due_end_time":"17:00","due_location":"central_plaza"}],"commitment_changes":[]}
+      - type: compact
+        at:
+          day: 1
+          time: "12:00"
+        agent: H-01
+        history:
+          - 上午检查了设施。
+          - 午饭后在长椅休息。
+          - 今天看到了几位邻居。
+          - 没有作出新的约定。
+    checks:
+      - after: 1
+        stage: write
+        agent: H-01
+        count: 1
+        records:
+          - kind: appointment
+            status: pending
+            counterpart: H-02
+            location: central_plaza
+            start:
+              day: 1
+              time: "16:00"
+            end:
+              day: 1
+              time: "17:00"
+            content_any:
+              - 跑步
+              - 慢跑
+      - after: 2
+        stage: update
+        agent: H-01
+        count: 1
+        records:
+          - kind: appointment
+            status: pending
+            counterpart: H-02
+            location: central_plaza
+            start:
+              day: 1
+              time: "16:00"
+            end:
+              day: 1
+              time: "17:00"
+            content_any:
+              - 跑步
+              - 慢跑
+    probes:
+      - agent: H-01
+        at:
+          day: 1
+          time: "15:30"
+        visible: []
+        read:
+          must:
+            - "16:00"
+            - central_plaza
+          forbidden: []
+        actions:
+          any:
+            - tool: move_to
+              params:
+                target_type: zone
+                target_id: central_plaza
+            - tool: InteractSmartObject
+              params:
+                zone: central_plaza
+          none: []
+  - id: retention-rollover
+    category: retention
+    description: 跨日压缩并重建上下文，保留第二天事项
+    smoke: false
+    agents:
+      - H-01
+      - H-02
+      - H-03
+    steps:
+      - type: dialogue
+        at:
+          day: 1
+          time: "10:00"
+        agent: H-01
+        peer: H-02
+        turns:
+          - speaker: H-02
+            content: 明天16:00到17:00在central_plaza一起跑步。
+          - speaker: H-01
+            content: 我答应明天16点到central_plaza跑步。
+        replay: >-
+          {"new_commitments":[{"kind":"appointment","counterpart_id":"H-02","content":"跑步","due_start_day":2,"due_start_time":"16:00","due_end_day":2,"due_end_time":"17:00","due_location":"central_plaza"}],"commitment_changes":[]}
+      - type: compact
+        at:
+          day: 2
+          time: "07:00"
+        agent: H-01
+        history:
+          - 昨天完成了日常工作。
+          - 今天是新的游戏日。
+      - type: restart
+        at:
+          day: 2
+          time: "07:00"
+        agent: H-01
+    checks:
+      - after: 1
+        stage: write
+        agent: H-01
+        count: 1
+        records:
+          - kind: appointment
+            status: pending
+            counterpart: H-02
+            location: central_plaza
+            start:
+              day: 2
+              time: "16:00"
+            end:
+              day: 2
+              time: "17:00"
+            content_any:
+              - 跑步
+              - 慢跑
+      - after: 3
+        stage: update
+        agent: H-01
+        count: 1
+        records:
+          - kind: appointment
+            status: pending
+            counterpart: H-02
+            location: central_plaza
+            start:
+              day: 2
+              time: "16:00"
+            end:
+              day: 2
+              time: "17:00"
+            content_any:
+              - 跑步
+              - 慢跑
+    probes:
+      - agent: H-01
+        at:
+          day: 2
+          time: "15:30"
+        visible: []
+        read:
+          must:
+            - "16:00"
+            - central_plaza
+          forbidden: []
+        actions:
+          any:
+            - tool: move_to
+              params:
+                target_type: zone
+                target_id: central_plaza
+            - tool: InteractSmartObject
+              params:
+                zone: central_plaza
+          none: []
+  - id: retention-two-compacts
+    category: retention
+    description: 两次压缩不改变待办时间和对象
+    smoke: false
+    agents:
+      - H-01
+      - H-02
+      - H-03
+    steps:
+      - type: dialogue
+        at:
+          day: 1
+          time: "10:00"
+        agent: H-01
+        peer: H-02
+        turns:
+          - speaker: H-02
+            content: 今天16:00到17:00，在central_plaza一起跑步，好吗？
+          - speaker: H-01
+            content: 好，我答应在今天16:00到central_plaza跑步，直到17:00。
+        replay: >-
+          {"new_commitments":[{"kind":"appointment","counterpart_id":"H-02","content":"跑步","due_start_day":1,"due_start_time":"16:00","due_end_day":1,"due_end_time":"17:00","due_location":"central_plaza"}],"commitment_changes":[]}
+      - type: compact
+        at:
+          day: 1
+          time: "11:00"
+        agent: H-01
+        history:
+          - 看了报纸，准备休息。
+      - type: compact
+        at:
+          day: 1
+          time: "12:00"
+        agent: H-01
+        history:
+          - 检查电量后坐了一会儿。
+    checks:
+      - after: 1
+        stage: write
+        agent: H-01
+        count: 1
+        records:
+          - kind: appointment
+            status: pending
+            counterpart: H-02
+            location: central_plaza
+            start:
+              day: 1
+              time: "16:00"
+            end:
+              day: 1
+              time: "17:00"
+            content_any:
+              - 跑步
+              - 慢跑
+      - after: 3
+        stage: update
+        agent: H-01
+        count: 1
+        records:
+          - kind: appointment
+            status: pending
+            counterpart: H-02
+            location: central_plaza
+            start:
+              day: 1
+              time: "16:00"
+            end:
+              day: 1
+              time: "17:00"
+            content_any:
+              - 跑步
+              - 慢跑
+    probes:
+      - agent: H-01
+        at:
+          day: 1
+          time: "15:30"
+        visible: []
+        read:
+          must:
+            - "16:00"
+            - central_plaza
+          forbidden: []
+        actions:
+          any:
+            - tool: move_to
+              params:
+                target_type: zone
+                target_id: central_plaza
+            - tool: InteractSmartObject
+              params:
+                zone: central_plaza
+          none: []
+  - id: retention-unrelated-dialogue
+    category: retention
+    description: 后续无关对话不覆盖之前承诺
+    smoke: false
+    agents:
+      - H-01
+      - H-02
+      - H-03
+    steps:
+      - type: dialogue
+        at:
+          day: 1
+          time: "10:00"
+        agent: H-01
+        peer: H-02
+        turns:
+          - speaker: H-02
+            content: 今天16:00到17:00，在central_plaza一起跑步，好吗？
+          - speaker: H-01
+            content: 好，我答应在今天16:00到central_plaza跑步，直到17:00。
+        replay: >-
+          {"new_commitments":[{"kind":"appointment","counterpart_id":"H-02","content":"跑步","due_start_day":1,"due_start_time":"16:00","due_end_day":1,"due_end_time":"17:00","due_location":"central_plaza"}],"commitment_changes":[]}
+      - type: dialogue
+        at:
+          day: 1
+          time: "11:00"
+        agent: H-01
+        peer: H-02
+        turns:
+          - speaker: H-02
+            content: 今天机器的声音挺响。
+          - speaker: H-01
+            content: 是啊，天气也不错。
+        replay: "{\"new_commitments\":[],\"commitment_changes\":[]}"
+      - type: dialogue
+        at:
+          day: 1
+          time: "12:00"
+        agent: H-01
+        peer: H-02
+        turns:
+          - speaker: H-02
+            content: 刚才看到广场上有人。
+          - speaker: H-01
+            content: 知道了，没有其他安排要约。
+        replay: "{\"new_commitments\":[],\"commitment_changes\":[]}"
+    checks:
+      - after: 1
+        stage: write
+        agent: H-01
+        count: 1
+        records:
+          - kind: appointment
+            status: pending
+            counterpart: H-02
+            location: central_plaza
+            start:
+              day: 1
+              time: "16:00"
+            end:
+              day: 1
+              time: "17:00"
+            content_any:
+              - 跑步
+              - 慢跑
+      - after: 3
+        stage: update
+        agent: H-01
+        count: 1
+        records:
+          - kind: appointment
+            status: pending
+            counterpart: H-02
+            location: central_plaza
+            start:
+              day: 1
+              time: "16:00"
+            end:
+              day: 1
+              time: "17:00"
+            content_any:
+              - 跑步
+              - 慢跑
+    probes:
+      - agent: H-01
+        at:
+          day: 1
+          time: "15:30"
+        visible: []
+        read:
+          must:
+            - "16:00"
+            - central_plaza
+          forbidden: []
+        actions:
+          any:
+            - tool: move_to
+              params:
+                target_type: zone
+                target_id: central_plaza
+            - tool: InteractSmartObject
+              params:
+                zone: central_plaza
+          none: []
+  - id: isolation-owner
+    category: isolation
+    description: H-03未收到对话，不应知道H-01的约定
+    smoke: true
+    agents:
+      - H-01
+      - H-02
+      - H-03
+    steps:
+      - type: dialogue
+        at:
+          day: 1
+          time: "10:00"
+        agent: H-01
+        peer: H-02
+        turns:
+          - speaker: H-02
+            content: 今天16:00到17:00，在central_plaza一起跑步，好吗？
+          - speaker: H-01
+            content: 好，我答应在今天16:00到central_plaza跑步，直到17:00。
+        replay: >-
+          {"new_commitments":[{"kind":"appointment","counterpart_id":"H-02","content":"跑步","due_start_day":1,"due_start_time":"16:00","due_end_day":1,"due_end_time":"17:00","due_location":"central_plaza"}],"commitment_changes":[]}
+    checks:
+      - after: 1
+        stage: write
+        agent: H-01
+        count: 1
+        records:
+          - kind: appointment
+            status: pending
+            counterpart: H-02
+            location: central_plaza
+            start:
+              day: 1
+              time: "16:00"
+            end:
+              day: 1
+              time: "17:00"
+            content_any:
+              - 跑步
+              - 慢跑
+      - after: 1
+        stage: write
+        agent: H-03
+        count: 0
+        records: []
+    probes:
+      - agent: H-03
+        at:
+          day: 1
+          time: "15:30"
+        visible: []
+        read:
+          must: []
+          forbidden:
+            - "16:00"
+            - central_plaza
+        actions:
+          any: []
+          none: []
+  - id: isolation-hypothetical
+    category: isolation
+    description: 假设情境不能被写成确定约定
+    smoke: false
+    agents:
+      - H-01
+      - H-02
+      - H-03
+    steps:
+      - type: dialogue
+        at:
+          day: 1
+          time: "10:00"
+        agent: H-01
+        peer: H-02
+        turns:
+          - speaker: H-02
+            content: 如果哪天有空，也许可以去central_plaza跑步，我现在只是随便想想，没有约时间。
+          - speaker: H-01
+            content: 嗯，我们没有约好，也没有承诺要去。
+        replay: "{\"new_commitments\":[],\"commitment_changes\":[]}"
+    checks:
+      - after: 1
+        stage: write
+        agent: H-01
+        count: 0
+        records: []
+    probes:
+      - agent: H-01
+        at:
+          day: 1
+          time: "15:30"
+        visible: []
+        read:
+          must: []
+          forbidden:
+            - 跑步
+            - central_plaza
+        actions:
+          any: []
+          none: []
+  - id: isolation-no-assignment
+    category: isolation
+    description: 他人的私人约定不是自己的待办
+    smoke: false
+    agents:
+      - H-01
+      - H-02
+      - H-03
+    steps:
+      - type: dialogue
+        at:
+          day: 1
+          time: "10:00"
+        agent: H-01
+        peer: H-02
+        turns:
+          - speaker: H-02
+            content: 我H-02和小李H-03约了明天16:00到17:00在central_plaza跑步，只是告诉你一下，不邀请你，也不需要你转告或做事。
+          - speaker: H-01
+            content: 知道了，这是你们两人的安排，我不参加，也不需要替你们做任何事。
+        replay: "{\"new_commitments\":[],\"commitment_changes\":[]}"
+    checks:
+      - after: 1
+        stage: write
+        agent: H-01
+        count: 0
+        records: []
+    probes:
+      - agent: H-01
+        at:
+          day: 2
+          time: "15:30"
+        visible: []
+        read:
+          must: []
+          forbidden:
+            - "16:00"
+            - central_plaza
+        actions:
+          any: []
+          none: []
+  - id: isolation-negated-time
+    category: isolation
+    description: 否定的时间地点不应变成新待办
+    smoke: false
+    agents:
+      - H-01
+      - H-02
+      - H-03
+    steps:
+      - type: dialogue
+        at:
+          day: 1
+          time: "10:00"
+        agent: H-01
+        peer: H-02
+        turns:
+          - speaker: H-02
+            content: 不是说今天16点在central_plaza见面，我没有和你约过这件事。
+          - speaker: H-01
+            content: 对，我们没有这个约定，也不用安排。
+        replay: "{\"new_commitments\":[],\"commitment_changes\":[]}"
+    checks:
+      - after: 1
+        stage: write
+        agent: H-01
+        count: 0
+        records: []
+    probes:
+      - agent: H-01
+        at:
+          day: 1
+          time: "15:30"
+        visible: []
+        read:
+          must: []
+          forbidden:
+            - "16:00"
+            - central_plaza
+        actions:
+          any: []
+          none: []
+  - id: isolation-two-owners
+    category: isolation
+    description: 两个接收者的不同约定分别保存
+    smoke: false
+    agents:
+      - H-01
+      - H-02
+      - H-03
+    steps:
+      - type: dialogue
+        at:
+          day: 1
+          time: "10:00"
+        agent: H-01
+        peer: H-02
+        turns:
+          - speaker: H-02
+            content: 今天16:00到17:00，在central_plaza一起跑步，好吗？
+          - speaker: H-01
+            content: 好，我答应在今天16:00到central_plaza跑步，直到17:00。
+        replay: >-
+          {"new_commitments":[{"kind":"appointment","counterpart_id":"H-02","content":"跑步","due_start_day":1,"due_start_time":"16:00","due_end_day":1,"due_end_time":"17:00","due_location":"central_plaza"}],"commitment_changes":[]}
+      - type: dialogue
+        at:
+          day: 1
+          time: "11:00"
+        agent: H-03
+        peer: H-02
+        turns:
+          - speaker: H-02
+            content: 今天18:00到19:00在logistics_hub下棋，好吗？
+          - speaker: H-03
+            content: 好，我答应今天18点在logistics_hub下棋。
+        replay: >-
+          {"new_commitments":[{"kind":"appointment","counterpart_id":"H-02","content":"下棋","due_start_day":1,"due_start_time":"18:00","due_end_day":1,"due_end_time":"19:00","due_location":"logistics_hub"}],"commitment_changes":[]}
+    checks:
+      - after: 1
+        stage: write
+        agent: H-01
+        count: 1
+        records:
+          - kind: appointment
+            status: pending
+            counterpart: H-02
+            location: central_plaza
+            start:
+              day: 1
+              time: "16:00"
+            end:
+              day: 1
+              time: "17:00"
+            content_any:
+              - 跑步
+              - 慢跑
+      - after: 2
+        stage: update
+        agent: H-03
+        count: 1
+        records:
+          - kind: appointment
+            status: pending
+            counterpart: H-02
+            location: logistics_hub
+            start:
+              day: 1
+              time: "18:00"
+            end:
+              day: 1
+              time: "19:00"
+            content_any:
+              - 下棋
+              - 棋
+      - after: 2
+        stage: update
+        agent: H-01
+        count: 1
+        records:
+          - kind: appointment
+            status: pending
+            counterpart: H-02
+            location: central_plaza
+            start:
+              day: 1
+              time: "16:00"
+            end:
+              day: 1
+              time: "17:00"
+            content_any:
+              - 跑步
+              - 慢跑
+    probes:
+      - agent: H-01
+        at:
+          day: 1
+          time: "15:30"
+        visible: []
+        read:
+          must:
+            - "16:00"
+            - central_plaza
+          forbidden:
+            - "18:00"
+            - logistics_hub
+        actions:
+          any:
+            - tool: move_to
+              params:
+                target_type: zone
+                target_id: central_plaza
+            - tool: InteractSmartObject
+              params:
+                zone: central_plaza
+          none: []
+      - agent: H-03
+        at:
+          day: 1
+          time: "17:30"
+        visible: []
+        read:
+          must:
+            - "18:00"
+            - logistics_hub
+          forbidden:
+            - "16:00"
+            - central_plaza
+        actions:
+          any:
+            - tool: move_to
+              params:
+                target_type: zone
+                target_id: logistics_hub
+            - tool: InteractSmartObject
+              params:
+                zone: logistics_hub
+          none: []

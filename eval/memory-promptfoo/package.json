@@ -1,0 +1,8 @@
+{
+  "name": "agenttown-memory-promptfoo",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Local Promptfoo adapter for the production Go memory bench",
+  "scripts": { "test": "node --test adapter.test.cjs" },
+  "dependencies": { "node": "22.22.0", "promptfoo": "0.125.1" }
+}
