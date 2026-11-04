@@ -1,6 +1,6 @@
 # AgentTown 部署启动指南
 
-## 双仓库结构
+## 双仓库结构简介
 
 `/data/workspace` 下有 dev 和 stable 两个目录，是**同一工蜂仓库的两个独立 clone**，端口、数据库、日志全隔离，可同时运行互不干扰，目的是随时保留一个稳定版本运行的服务以供联调。
 
@@ -26,7 +26,6 @@ git checkout -b feature/xxx
 
 git add <文件>
 git commit -m "fix(mcp): 一句话说明改了什么"    # 格式 <type>(<scope>): <中文描述>
-git push origin dev-working      # 日常：当前就在 dev-working 分支上，推同名远端分支
 git push -u origin HEAD          # 开了 feature/fix 分支时：推当前分支（-u 建立跟踪，之后 git push 即可）
 # 推送后到工蜂网页（git.woa.com → smartnpc → 合并请求 → 新建）提 MR：dev-working（或 feature 分支）→ master
 ```
@@ -45,7 +44,7 @@ bash start-debug.sh --drop-tables               # 重启生效
 如果已打开，则可以跳过步骤2，项目已经放在开发容器的 /data/workspace/dev 和 /data/workspace/stable下。
 此工作区当前的IP域名：`ssh root@21.214.99.100.devcloud.woa.com -p 36000`
 
-如果需要新建容器并在其中进行开发，则需要进行下面的步骤2。
+如果需要新建云开发容器并在其中进行开发，则需要进行下面的步骤2。
 
 ## 步骤 2：克隆两个仓库（仅首次）
 
@@ -56,6 +55,14 @@ cd stable && git checkout master && cd ..
 git clone https://git.woa.com/yitianchen/smartnpc.git dev
 cd dev && git checkout dev-working && cd ..
 ```
+
+**新建的容器还需安装 MySQL**（rpm 包装在容器系统层，不随数据盘保留；验证：`command -v mysqld`，已有输出则跳过）：
+
+```bash
+dnf install -y mysql-server
+```
+
+装完零配置：start 脚本自动初始化数据目录、拉起 mysqld、按实例建库。数据在 `/data/mysql-data`（持久化盘），同一工作区重建容器不丢；全新工作区从零开始。不装也可运行：`.env` 设 `SKIP_MYSQL=1`（MCP 降级内存模式，记忆/日程不持久化，仅适合协议联调）。
 
 ## 步骤 3：配置 .env（仅首次，两个目录各一份）
 
