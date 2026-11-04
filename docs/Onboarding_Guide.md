@@ -62,7 +62,7 @@ cd dev && git checkout dev-working && cd ..
 dnf install -y mysql-server
 ```
 
-装完零配置：start 脚本自动初始化数据目录、拉起 mysqld、按实例建库。数据在 `/data/mysql-data`（持久化盘），同一工作区重建容器不丢；全新工作区从零开始。不装也可运行：`.env` 设 `SKIP_MYSQL=1`（MCP 降级内存模式，记忆/日程不持久化，仅适合协议联调）。
+装完零配置：start 脚本自动初始化数据目录、拉起 mysqld、按实例建库；**表也不用建**——MCP 启动时自动执行内嵌 migrations 建表（`schema_migrations` 跟踪增量，`--drop-tables` 重置后同样自动重建）。数据在 `/data/mysql-data`（持久化盘），同一工作区重建容器不丢；全新工作区从零开始。
 
 ## 步骤 3：配置 .env（仅首次，两个目录各一份）
 
