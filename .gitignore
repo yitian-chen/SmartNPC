@@ -1,35 +1,58 @@
-.idea
+# ═══════════════ 密钥与环境配置（严禁入库）═══════════════
+# Venus API key 等（模板见 .env.example）
 .env
 # 本地 LLM 推理服务配置（host/model 随环境而异，不入库）
 assets/llm_backend.yaml
 
-# ─── Mock UE 运行时输出 ─────────────────────────────────────
-logs/
-logs-dev/
-__pycache__/
-models_dev_cache.json
-
-# ─── 编译产物与临时目录 ───────────────────────────────────────
-agenttown-mcp/agenttown-mcp
-agenttown-mcp/agenttown-mcp.exe
-agenttown-mcp/agenttown-mcp-dev
-agenttown-mcp/agenttown-mcp-dev.exe
-agenttown-mcp/tmp/
-tmp/
-mcp
-scripts/analyze_latency.py
-
+# ═══════════════ IDE / 编辑器 ═══════════════
+.idea/
+.vscode/
 # 编辑器备份文件（Vim/其他工具的 ~ 后缀）
 *~
+.DS_Store
 
-# ─── 隧道运行时目录（PID / 日志，每次启动都变）──────────────────
-.run/
-
-# ─── world_kb 运行时产物 ─────────────────────────────────────
-# manifest.json 由 MCP 在 UE 推送 world_kb 时落盘（含 SHA256 + 时间戳），
-# 属于运行时产物，不应入库；world_kb.yaml 是手写权威源仍保留 tracked。
-assets/world_kb.manifest.json
-
-
+# ═══════════════ 运行时产物（MCP 每次运行覆盖写入）═══════════════
+# LLM 请求体留存与指标报告（--prompt-doc / --llm-metrics-doc 默认落盘
+# 路径，每次 LLM 调用后 best-effort 覆盖）——tracked 会让每次仿真后
+# 工作区变脏，保持 untracked（文件不存在时 MCP 会自建）。
 docs/actual_prompts.md
 docs/llm_metrics.md
+# UE 推送 world_kb 时落盘的 manifest（含源 SHA256 + 时间戳）
+assets/world_kb.manifest.json
+#
+# 注意：assets/world_kb.yaml 保持 tracked——它是冷启动的 KB seed
+# （MCP 启动 fail-fast 加载，UE 未连时新 clone 靠它起跑）。UE 连上后
+# 推送合并会让本地出现 M 改动，属预期运行时噪音：
+#   git restore assets/world_kb.yaml   # 恢复手写权威源
+
+# ═══════════════ 日志（按日期分目录）═══════════════
+logs/
+logs-dev/
+
+# ═══════════════ 编译产物 ═══════════════
+# MCP 二进制（stable 用 agenttown-mcp[.exe]，dev 用 -dev 后缀；
+# 根目录 mcp 为 `go build -o ../mcp` 的产物）
+agenttown-mcp/agenttown-mcp*
+mcp
+# Go 测试产物
+*.test
+*.out
+
+# ═══════════════ Go 工作区文件 ═══════════════
+# 嵌套 module 靠根 go.mod 的 replace 解析，go.work 会干扰构建（已弃用）
+go.work
+go.work.sum
+
+# ═══════════════ Python 运行时 ═══════════════
+__pycache__/
+*.pyc
+models_dev_cache.json
+
+# ═══════════════ 临时目录 ═══════════════
+tmp/
+agenttown-mcp/tmp/
+# 隧道运行时目录（PID / 日志，每次启动都变）
+.run/
+
+# ═══════════════ 本地一次性脚本（个人分析工具，不入库）═══════════════
+scripts/analyze_latency.py
