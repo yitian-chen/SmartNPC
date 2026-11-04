@@ -1,13 +1,13 @@
 # 记忆评测交接文档
 
 > 包含待办记忆（episodic_commitments）评测体系的建设成果、已发现的业务缺陷与未完成事项。
-> 评测框架的完整使用说明见 **`feature/memory-bench` 分支上的** [AgentTown_MemoryBench.md](AgentTown_MemoryBench.md)（框架/场景/评分/报告）与 `eval/memory-promptfoo/README.md`（查看器）——两份文档随评测分支存在，**合入 master 前本分支链接不可点**，可先 `git show feature/memory-bench:docs/AgentTown_MemoryBench.md` 查看。本文不重复它们，只讲清楚"现在到哪了、接下来做什么"。
+> 评测框架的完整使用说明见 [AgentTown_MemoryBench.md](AgentTown_MemoryBench.md)（框架/场景/评分/报告）。
 
 ---
 
-## 一、现状一句话
+## 一、现状
 
-评测框架与 30 场景测试集**已建完**（`feature/memory-bench` 分支，3 个 commit），跑过一次 5 场景真实冒烟基线；**业务侧存在两个评测已定位但未修复的记忆缺陷**（改期/取消无法关联旧记录、不能改地点），全量 30 场景真实基线未跑。分支已推送远端并提交 **MR !75**（与 master 无文件重叠、合并无冲突）。
+评测框架与 30 场景测试集**已建完**（`feature/memory-bench` 分支，3 个 commit），跑过一次 5 场景真实冒烟基线；**业务侧存在两个评测已定位但未修复的记忆缺陷**（改期/取消无法关联旧记录、不能改地点）。
 
 ## 二、现有成果
 
@@ -16,12 +16,14 @@
 - **复用生产代码**：`extractConversationCommitments`（对话结束抽取）、`memoryReader`（检索）、`generateTacticalPlan`（决策）、跨日 compact——评测的就是生产链路本身，不是仿真替身。不启动 UE/WebSocket/worker
 - **双组对照**：memory 组（真实内存 Store）vs no-memory 组（NoopStore + 跳过写入），人设/任务/状态/能力声明完全相同，隔离地对比"有记忆带来多少行为差异"
 - **四阶段规则评分**：
+
   | 阶段 | 评什么 |
-  |---|---|
+  |------|--------|
   | write | 记录数量/类型/对象/地点/起止游戏时间/关键词 |
   | update | 改期/取消/履约后的状态与时间，且不得误伤其他事项 |
   | read | 生产待办查询结果中应出现/不得出现的文本 |
   | use | 决策产物的工具调用意图（允许组合 + 禁止组合），不比较整段文本 |
+
 - **两种运行模式**：默认离线（`replay` 脚本化模型响应回放，零模型调用，验证管线）与 `--live` 真实模型（凭据走 `.env`/`LLM_CONFIG`，与仿真同源）
 - **HTTP 硬预算**：生产 Venus 客户端加了可选 `Transport` 接缝（`pkg/venus/client.go`，生产默认 nil 零影响），预算在 Transport 层强制，含 agentic loop 重试
 - **报告**：`tmp/memory-bench/<name>/` 下 `summary.md`（分组/分类/阶段断言/token/耗时）、`results.json`（存储快照/检索文本/动作/完整模型请求响应，HTTP 层脱敏）、`cases.json`（输入与标签，配套件 SHA256 可复现）。均不入库
