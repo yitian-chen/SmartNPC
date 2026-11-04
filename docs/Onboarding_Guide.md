@@ -81,16 +81,21 @@ grep 'agent_registered' /data/workspace/dev/logs-dev/$(date +%Y-%m-%d)/debug-mcp
 - dev：`http://21.214.99.100:8770/debug/`
 - stable：`http://21.214.99.100:8760/debug/`
 
+如果重新新建了开发容器，则换成对应容器的IP。
+
 ## 步骤 9：查看日志
 
-```bash
-# dev 实例（stable 换成 logs/ 目录）
-LOG=/data/workspace/dev/logs-dev/$(date +%Y-%m-%d)/debug-mcp.log
+日志按启动日期分目录，路径为 `<实例目录>/logs(-dev)/YYYY-MM-DD/debug-mcp.log`：
 
+- dev 实例：`/data/workspace/dev/logs-dev/2026-11-04/debug-mcp.log`
+- stable 实例：`/data/workspace/stable/logs/2026-11-04/debug-mcp.log`
+
+```bash
 # HTML 报告（可折叠/搜索/过滤）
 cd /data/workspace/dev && python scripts/pretty_log.py --html
 
-# 裸 grep
+# 裸 grep（dev 实例、当天日志；stable 换成 /data/workspace/stable/logs/）
+LOG=/data/workspace/dev/logs-dev/$(date +%Y-%m-%d)/debug-mcp.log
 grep '队列已填充' $LOG            # 战术层每次分解的动作序列
 grep '下发 action' $LOG           # 实际下发给 UE 的动作
 grep 'TACTICAL-PROMPT' $LOG       # 战术层发给 LLM 的 prompt
