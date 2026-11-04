@@ -116,3 +116,46 @@ bash /data/workspace/stable/start-debug.sh --stop
 mysql --socket=/data/mysql-run/mysql.sock -uroot agenttown_dev    # dev 库
 mysql --socket=/data/mysql-run/mysql.sock -uroot agenttown_stable # stable 库
 ```
+
+## 附：配置 LLM 后端切换（可选，llm_backend）
+
+默认不需要配置：不设 `LLM_CONFIG` 时 MCP 直连 Venus（读 `.env` 的 `VENUS_API_KEY`）。只有要把某一层切到自建 vLLM/SGLang 或其他 OpenAI 兼容服务时才配置。
+
+1. 复制模板（实际配置文件已 gitignore，不入库）：
+
+```bash
+cp assets/llm_backend.example.yaml assets/llm_backend.yaml
+```
+
+2. 编辑 `assets/llm_backend.yaml`，按层填后端——战略层（每日计划，一天一次，可用较重模型）与战术层+对话层（高频，复用同一客户端）可分别指向不同服务：
+
+```yaml
+strategic:
+  base_url: "http://v2.open.venus.oa.com/llmproxy"   # 服务根地址，不带 /v1 后缀（客户端自动拼 /v1/chat/completions）
+  api_key: ""          # 留空则读 VENUS_API_KEY 环境变量
+  model: "deepseek-v4-pro"
+  timeout_sec: 120
+
+tactical:
+  base_url: "http://<自建服务host>:<port>"            # 自建服务也可用 host+port 两个字段
+  api_key: ""          # 自建服务无鉴权可留空
+  model: "Qwen3-8B-AWQ"
+  timeout_sec: 120
+```
+
+3. 在 `.env` 里启用（start 脚本读取并透传 `--llm-config`）：
+
+```
+LLM_CONFIG=assets/llm_backend.yaml
+```
+
+4. 重启实例生效：
+
+```bash
+bash start-dev.sh --drop-tables
+```
+
+注意：
+- DeepSeek 官方 thinking 模型（`deepseek-flash`/`deepseek-reasoner`）不支持强制 `tool_choice=required`，给该层加 `tool_choice: "auto"`
+- 真实 api_key 不要提交入库（`llm_backend.yaml` 已 gitignore）
+- 不想用时删掉 `.env` 里的 `LLM_CONFIG` 行即可回到 Venus 默认路径
