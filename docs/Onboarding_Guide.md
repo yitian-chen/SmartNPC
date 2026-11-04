@@ -92,15 +92,14 @@ grep 'agent_registered' /data/workspace/dev/logs-dev/$(date +%Y-%m-%d)/debug-mcp
 
 ## 步骤 10：查看 actual_prompts 与 LLM 指标
 
-```bash
-# H-01 最新一次完整 LLM 请求体（战略/战术/对话/路由）
-less /data/workspace/dev/docs/actual_prompts.md
+- LLM 请求体留存（H-01 最新一次完整请求：战略/战术/对话/路由）：
+  - dev 实例：`/data/workspace/dev/docs/actual_prompts.md`
+  - stable 实例：`/data/workspace/stable/docs/actual_prompts.md`
+- LLM 调用指标（延迟分位/重试率/错误分布）：
+  - dev 实例：`/data/workspace/dev/docs/llm_metrics.md`
+  - stable 实例：`/data/workspace/stable/docs/llm_metrics.md`
 
-# LLM 调用表现（延迟分位/重试率/错误分布）
-less /data/workspace/dev/docs/llm_metrics.md
-```
-
-> 两者随仿真运行实时覆盖写入；是 git 跟踪的运行时产物，提交前注意别把仿真残留带进无关 commit。
+> 两者随仿真运行实时覆盖写入（不入库）。
 
 ## 步骤 11：停止
 
