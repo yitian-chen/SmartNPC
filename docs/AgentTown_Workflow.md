@@ -2,7 +2,7 @@
 
 > 本文档描述机器人小镇（AgentTown）的**生产工作流**，是 Agent 侧决策与 UE 侧 Smart Object 配置的共同参考。
 >
-> **关联文档**：状态系统与货币见 `AgentTown_Phase2_Plan.md`（模块 A-1）；对话见 `AgentTown_Dialogue_Design.md`；通信协议见 `AgentTown_CommProtocol_Values.md`。
+> **关联文档**：对话见 `AgentTown_Dialogue_Design.md`；通信协议见 `AgentTown_CommProtocol_Values.md`。
 
 ---
 

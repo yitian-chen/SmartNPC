@@ -2,7 +2,7 @@
 
 > 评测日期：2026-08-11
 > 评测对象：Venus 平台 5 个候选模型，用于 AgentTown 三层决策架构的战略层与战术层后端选型
-> 评测脚本：`scripts/eval_venus_models.py`
+> 评测脚本：`scripts/eval_venus_models.py`（已从仓库删除，可从 git 历史恢复）
 > 完整数据：`logs/2026-08-11/eval_report.json`
 
 ---

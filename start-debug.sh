@@ -573,7 +573,6 @@ print_summary() {
     echo ""
     echo -e "  ${BOLD}协议文档${NC}"
     echo -e "    docs/AgentTown_CommProtocol_Values.md"
-    echo -e "    docs/AgentTown_Core_DeepDive.md"
     echo ""
     echo -e "  ${YELLOW}注意${NC}"
     if $IN_LINUX; then

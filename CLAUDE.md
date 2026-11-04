@@ -747,7 +747,6 @@ bash start-dev.sh       # 偏移端口 8770/9093 + logs-dev/ 日志目录
 | 路径 | 说明 |
 |------|------|
 | `docs/AgentTown_CommProtocol_Values.md` | 通信协议与数值系统设计文档（唯一权威） |
-| `docs/AgentTown_Reactive_Layer.md` | 反应层设计文档 |
 | `docs/DebugAction_Tool.md` | 联调 Debug 工具 `/debug/action` + `/debug/schedule` 使用文档 |
 | `agenttown-mcp/cmd/agenttown-mcp/main.go` | 入口：flag、端口、agentContext、worker 循环、guardedExecutor、debug handler、装配（Runtime 创建 + 回调注册） |
 | `agenttown-mcp/cmd/agenttown-mcp/runtime.go` | Runtime：入站消息单入口分发（原 main() 的 SetMessageHandler 巨型闭包）+ OnDisconnect，实现契约回调 |

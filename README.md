@@ -287,14 +287,10 @@ docs/                           # 设计文档（协议/事件/架构/KB/记忆�
 scripts/
   pretty_log.py                 # 日志可读化（HTML 报告 + 终端渲染）
   smoke_combat_detach.py        # combat-detach 无 UE 冒烟
-  test_world_kb_e2e.py          # world_kb 推送 E2E
-  test_phase7_reconnect.py      # 断线重连 + seq 重放验证
-  bench_venus_latency.py / venus_latency_test.py / eval_venus_models.py   # LLM 压测/延迟/评估
-  analyze_time.py               # 游戏时间流速分析（time_scale 校验）
+  run-memory-bench.sh / run-memory-promptfoo.sh   # 记忆评测（见 docs/AgentTown_MemoryBench.md）
   push_world_kb.py / setup-cloud-env.sh
 start-debug.sh                  # stable 启动（MySQL + 编译 + MCP + 健康检查）
 start-dev.sh                    # dev 启动 wrapper（偏移端口/库名/日志目录）
-start-vllm-tunnel.sh            # Windows→AutoDL SSH 正向隧道（自部署 vLLM 用）
 .env.example                    # 环境变量模板（分组注释）
 CLAUDE.md                       # 工程手册（架构/机制/命令/文件地图，最全）
 ```
@@ -309,8 +305,6 @@ CLAUDE.md                       # 工程手册（架构/机制/命令/文件地�
 | `docs/AgentTown_CommProtocol_Values.md` | 通信协议与数值系统（唯一权威） |
 | `docs/AgentTown_WorldEvent_Protocol.md` | UE → Agent 事件上传协议（含 combat-detach） |
 | `docs/AgentTown_EventDrivenAgent_Design.html` | 事件驱动异步 Agent 设计 |
-| `docs/AgentTown_EventDriven_Implementation_Plan.md` | 事件驱动实施计划（P0-P5） |
-| `docs/AgentTown_Core_DeepDive.md` | 核心机制深潜 |
 | `docs/AgentTown_WorldKB_Design.md` | 世界 KB 设计 |
 | `docs/AgentTown_LongTermMemory_SQLite_Design.md` | 长期记忆三表设计（写只在 compact / 读零 LLM / 待办闭环） |
 | `docs/DebugAction_Tool.md` | Debug 工具使用文档 |

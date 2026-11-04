@@ -14,7 +14,7 @@ import (
 
 // percentileSorted computes the p-th percentile (0-100) of a pre-sorted
 // slice using the nearest-rank method, matching the existing latency
-// scripts' pct() (scripts/venus_latency_test.py:191). The caller must sort
+// scripts' pct() (former scripts/venus_latency_test.py). The caller must sort
 // first; the input is read-only.
 func percentileSorted(sorted []time.Duration, p float64) time.Duration {
 	if len(sorted) == 0 {

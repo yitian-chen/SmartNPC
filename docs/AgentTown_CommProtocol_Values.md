@@ -1,7 +1,6 @@
 # Agent Town 通信协议与数值系统设计
 
 > 本文档定义 UE5 进程与 Agent 进程之间的通信架构、消息协议、数值归属与同步机制。
-> 作为 `AgentTown_Design.md` 和 `AgentTown_Core_DeepDive.md` 的补充。
 
 ---
 

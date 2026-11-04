@@ -218,8 +218,6 @@ sequenceDiagram
 | `docs/AgentTown_CommProtocol_Values.md` | 通信协议与数值系统（唯一权威） |
 | `docs/AgentTown_WorldEvent_Protocol.md` | UE → Agent 事件上传协议（含 combat-detach） |
 | `docs/AgentTown_EventDrivenAgent_Design.html` | 事件驱动异步 Agent 设计（实现依据） |
-| `docs/AgentTown_EventDriven_Implementation_Plan.md` | 事件驱动实施计划（P0-P5 系列） |
-| `docs/AgentTown_Core_DeepDive.md` | 核心机制深潜 |
 | `docs/AgentTown_Dialogue_Design.md` | 对话系统设计 |
 | `docs/DebugAction_Tool.md` | Debug 工具使用文档 |
 | `CLAUDE.md` | 工程事实全集（架构/机制/命令/文件地图） |
