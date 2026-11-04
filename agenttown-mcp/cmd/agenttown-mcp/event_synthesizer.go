@@ -25,11 +25,25 @@ var synthEventSeq int64
 // decides interrupt-or-enqueue; P3-7 drains it into the tactical prompt at
 // the next safe point).
 func (rt *Runtime) dispatchSynthesizedEvent(ac *agentContext, agentID, detail string) {
-	ev := synthesizeEvent(ac, agentID, detail)
+	rt.dispatchEventPayload(ac, agentID, synthesizeEvent(ac, agentID, detail))
+}
+
+// dispatchActionAnomalyEvent synthesizes an action_failed world_event with
+// STRUCTURED cmd/reason (2026-11-03 修复)：the old path stuffed the whole
+// detail string into a bare {"description": ...} data block, which the
+// renderer unpacked as ActionAnomalyData{Cmd, Reason} — both empty — producing
+// "动作  执行失败（原因 ）" and leaving the judgment model with no facts to
+// judge ("不应打断（概率0.51）" ≈ 抛硬币).
+func (rt *Runtime) dispatchActionAnomalyEvent(ac *agentContext, agentID, cmd, result, reason string) {
+	rt.dispatchEventPayload(ac, agentID, synthesizeActionAnomaly(ac, agentID, cmd, result, reason))
+}
+
+// dispatchEventPayload is the shared enqueue + route tail.
+func (rt *Runtime) dispatchEventPayload(ac *agentContext, agentID string, ev protocol.WorldEventPayload) {
 	ac.as.EnqueueWorldEvent(ev)
 	rt.logger.Info("[事件合成] 本地状态变化已合成 world_event 入队",
 		"agent_id", agentID, "event_id", ev.EventID,
-		"category", ev.Category, "event_type", ev.EventType, "detail", detail)
+		"category", ev.Category, "event_type", ev.EventType)
 	// 路由器裁决（与 UE 事件同一管道）。
 	if rt.eventRouter != nil {
 		go rt.eventRouter.route(rt.ctx, agentID, ev)
@@ -37,11 +51,12 @@ func (rt *Runtime) dispatchSynthesizedEvent(ac *agentContext, agentID, detail st
 }
 
 // synthesizeEvent builds a WorldEventPayload from a locally detected detail.
-// Category is inferred from the detail text: 物理告警 → physical_threshold,
-// 动作异常（result=failed/...）→ action_anomaly, 其余 → world.
+// Category is inferred from the detail text: 物理告警 → physical_threshold，
+// event_notification → world（动作异常走 dispatchActionAnomalyEvent 的结构
+// 化路径，不再从 detail 字符串猜）.
 func synthesizeEvent(ac *agentContext, agentID, detail string) protocol.WorldEventPayload {
 	category := protocol.CategoryWorld
-	eventType := "environment_change"
+	eventType := protocol.EventTypeEnvironmentChange
 	data := map[string]any{"description": detail}
 
 	switch {
@@ -50,9 +65,6 @@ func synthesizeEvent(ac *agentContext, agentID, detail string) protocol.WorldEve
 		eventType = classifyPhysicalEvent(detail)
 		// 附加当前值（detail 形如 "energy 45→39 跌破警戒带 40"）。
 		data = map[string]any{"description": detail}
-	case strings.Contains(detail, "result="):
-		category = protocol.CategoryActionAnomaly
-		eventType = protocol.EventTypeActionFailed
 	case strings.Contains(detail, "event_notification"):
 		category = protocol.CategoryWorld
 		eventType = protocol.EventTypeEnvironmentChange
@@ -71,6 +83,28 @@ func synthesizeEvent(ac *agentContext, agentID, detail string) protocol.WorldEve
 		Data:       mustMarshal(data),
 	}
 	return ev
+}
+
+// synthesizeActionAnomaly builds the action_failed event with typed cmd/reason
+// plus a natural-language description (the renderer's fallback when cmd is
+// absent — defense for future synthesis sources that only carry description).
+func synthesizeActionAnomaly(ac *agentContext, agentID, cmd, result, reason string) protocol.WorldEventPayload {
+	synthEventSeq++
+	return protocol.WorldEventPayload{
+		EventID:    fmt.Sprintf("synth_%d", synthEventSeq),
+		Category:   protocol.CategoryActionAnomaly,
+		EventType:  protocol.EventTypeActionFailed,
+		Force:      false,
+		Severity:   4,
+		Subject:    agentID,
+		GameTime:   ac.as.LatestTimeOfDay(),
+		OccurredAt: 0,
+		Data: mustMarshal(map[string]any{
+			"cmd":         cmd,
+			"reason":      reason,
+			"description": fmt.Sprintf("动作 %s 异常结束（%s，原因 %s）", cmd, result, reason),
+		}),
+	}
 }
 
 // classifyPhysicalEvent maps the physical-alert detail text to the protocol

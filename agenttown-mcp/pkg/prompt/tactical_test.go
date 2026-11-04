@@ -593,11 +593,17 @@ func TestTacticalHintLine_SocialConversationCapped(t *testing.T) {
 // the compact core rules: invitation goals decompose to a single speak_to
 // (the agreed activity is NOT carried by this replan — it rides the
 // post-conversation system hint, per the 2026-10-16 single-action design).
+// The invitation must carry ends_conversation:false explicitly (2026-11-03:
+// LLM read the old "在对话结束后由系统提示驱动执行" phrasing as "the
+// conversation ends with my invitation" and mislabeled invitations as
+// farewells — the receiver then never replied and the inviter walked away).
 func TestTacticalRules_InviteGoalDecomposition(t *testing.T) {
 	for _, want := range []string{
 		"邀请XX一起做XX",
 		"同样只输出一条 speak_to",
-		"约定的事项在对话结束后由系统提示驱动执行",
+		"必须填 ends_conversation: false，且不要填 hold_sec",
+		"对话要等对方回话之后才结束",
+		"对方答复、对话真正结束之后提示执行",
 		"告别/收尾句（含对方应下你的邀请后你回的确认句）给 speak_to 填 ends_conversation: true",
 	} {
 		if !strings.Contains(tacticalCoreRules, want) {

@@ -291,9 +291,20 @@ func (r *eventRouter) route(ctx context.Context, agentID string, ev protocol.Wor
 	// 跑起来"当成对方还在说话反复回话，形成 ping-pong 死循环。
 	if speaker := speechHeardSpeaker(ev); speaker != "" {
 		if speechHeardEndsConversation(ev) {
-			r.logger.Info("[事件路由] 说话人已收尾（ends_conversation），不打断回话",
-				"agent_id", agentID, "event_id", ev.EventID, "speaker", speaker)
-			return // 事件留队列，安全点 drain；接收方继续当前动作
+			// 首句例外（2026-11-03）：会话里还没有接收方自己的任何轮次——
+			// "第一句就带收尾标记"要么是开场告别、要么是被 LLM 误标为收尾的
+			// 邀请（实测：邀请被标 ends_conversation:true 后接收方完全不应
+			// 答，34 墙秒后邀请方以为被无视）。此时不提前收口，照常走下方
+			// 判决/确定性打断，保证开场话语必获回应时机；已有往来后的收尾
+			// 句照旧收口（防 ping-pong 语义不变）。
+			if !ac.conversationHasOwnTurn(agentID) {
+				r.logger.Info("[事件路由] 首句即收尾（会话无己方轮次），不收口——照常裁决是否回应",
+					"agent_id", agentID, "event_id", ev.EventID, "speaker", speaker)
+			} else {
+				r.logger.Info("[事件路由] 说话人已收尾（ends_conversation），不打断回话",
+					"agent_id", agentID, "event_id", ev.EventID, "speaker", speaker)
+				return // 事件留队列，安全点 drain；接收方继续当前动作
+			}
 		}
 		if peer, turns := ac.conversationPeerState(); speaker == peer && turns >= 2 {
 			dec := prompt.RouterDecision{

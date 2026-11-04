@@ -722,3 +722,35 @@ func TestEventRouter_EndsConversationReplyNoInterrupt(t *testing.T) {
 		t.Fatalf("ends_conversation reply must bypass the judge, got %d judge calls", got)
 	}
 }
+
+// TestEventRouter_FirstTurnEndsConversationStillJudged 验证收口的首句例外
+// （2026-11-03）：END 标记的 speech_heard 到达、但接收方会话里还没有自己
+// 的任何轮次（第一句就"收尾"= 开场告别或被 LLM 误标为收尾的邀请）时不
+// 提前收口——照常走判决，保证开场话语必获回应时机。误标邀请实测：接收方
+// 完全不应答 34 墙秒、邀请方以为被无视（实则对方同意了）。
+func TestEventRouter_FirstTurnEndsConversationStillJudged(t *testing.T) {
+	rt, _, _, j, verdicts := newRouterTestRuntime(t, newScriptedJudge(judgeResp(0.9, "social", 0.5)))
+	// 无预置会话：这是 H-02 对 H-01 说的第一句话，且带 END 标记
+	// （实测形态：邀请被 LLM 误标 ends_conversation:true + hold_sec:2）。
+	ev := protocol.WorldEventPayload{
+		EventID:   "evt_first_end",
+		Category:  protocol.CategorySocial,
+		EventType: protocol.EventTypeSpeechHeard,
+		Force:     false,
+		Severity:  5,
+		Subject:   "H-01",
+		GameTime:  "D12 07:19:40",
+		Location:  "residential_quarters",
+		Data:      json.RawMessage(`{"speaker_id":"H-02","speaker_name":"老王","addressee_id":"H-01","content":"老陈，走，去跑步机跑两步？","ends_conversation":true}`),
+	}
+	dispatchTestEvent(t, rt, "H-01", ev)
+
+	// 不收口：照常问 judge、产生判决。
+	time.Sleep(50 * time.Millisecond)
+	if got := len(j.statesOf()); got == 0 {
+		t.Fatal("first-turn END speech must still reach the judge (not suppressed)")
+	}
+	if got := verdicts.len(); got == 0 {
+		t.Fatal("judge verdict must be produced for a first-turn END speech")
+	}
+}

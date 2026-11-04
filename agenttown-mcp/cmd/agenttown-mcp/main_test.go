@@ -37,7 +37,7 @@ func TestRecordActionCompletion_SignalsWorkerAndClearsInFlight(t *testing.T) {
 	default:
 	}
 
-	queued, _ := ac.recordActionCompletion(protocol.ActionCompletedPayload{
+	queued, _, _ := ac.recordActionCompletion(protocol.ActionCompletedPayload{
 		ActionID: "act_t1", Result: protocol.ResultSuccess,
 	}, nil, nil, nil)
 	if !queued {
@@ -64,7 +64,7 @@ func TestRecordActionCompletion_SignalsWorkerAndClearsInFlight(t *testing.T) {
 // 反应层（成功是常态，无需评估）。
 func TestRecordActionCompletion_SuccessNoTrigger(t *testing.T) {
 	ac, _ := newAgentContext(context.Background())
-	queued, detail := ac.recordActionCompletion(protocol.ActionCompletedPayload{
+	queued, detail, _ := ac.recordActionCompletion(protocol.ActionCompletedPayload{
 		ActionID: "act_ok_1", Result: protocol.ResultSuccess,
 	}, nil, nil, nil)
 	if !queued {
@@ -82,7 +82,7 @@ func TestRecordActionCompletion_SuccessNoTrigger(t *testing.T) {
 // 且 detail 用 result 作为去抖维度（不含 action_id，避免去抖失效）。
 func TestRecordActionCompletion_FailureTriggers(t *testing.T) {
 	ac, _ := newAgentContext(context.Background())
-	queued, detail := ac.recordActionCompletion(protocol.ActionCompletedPayload{
+	queued, detail, _ := ac.recordActionCompletion(protocol.ActionCompletedPayload{
 		ActionID: "act_fail_1", Result: protocol.ResultFailed,
 	}, nil, nil, nil)
 	if !queued {
@@ -100,7 +100,7 @@ func TestRecordActionCompletion_FailureTriggers(t *testing.T) {
 // 包含 UE 回传的 reason 字段（如"寻路不可达"），让反应层 Ollama 能看到具体失败原因。
 func TestRecordActionCompletion_FailureDetailIncludesReason(t *testing.T) {
 	ac, _ := newAgentContext(context.Background())
-	_, detail := ac.recordActionCompletion(protocol.ActionCompletedPayload{
+	_, detail, _ := ac.recordActionCompletion(protocol.ActionCompletedPayload{
 		ActionID: "act_fail_2", Result: protocol.ResultFailed,
 		Reason: "寻路不可达",
 	}, nil, nil, nil)
@@ -123,7 +123,7 @@ func TestRecordActionCompletion_FailureSetsReplanHint(t *testing.T) {
 		map[string]any{"semantic_group": "workbench", "interaction": "assemble"},
 		agentstate.SourceTactical, "")
 
-	ac.recordActionCompletion(protocol.ActionCompletedPayload{
+	_, _, _ = ac.recordActionCompletion(protocol.ActionCompletedPayload{
 		ActionID: "act_workbench_fail",
 		Result:   protocol.ResultFailed,
 		Reason:   "claim_queue_not_supported",
@@ -164,7 +164,7 @@ func TestRecordActionCompletion_TooTiredHintGuidesRest(t *testing.T) {
 		map[string]any{"semantic_group": "workbench", "interaction": "assemble"},
 		agentstate.SourceTactical, "")
 
-	ac.recordActionCompletion(protocol.ActionCompletedPayload{
+	_, _, _ = ac.recordActionCompletion(protocol.ActionCompletedPayload{
 		ActionID: "act_too_tired",
 		Result:   protocol.ResultFailed,
 		Reason:   "too_tired",
@@ -189,7 +189,7 @@ func TestRecordActionCompletion_TooTiredHintGuidesRest(t *testing.T) {
 func TestRecordActionCompletion_FailureNoHintForManualAction(t *testing.T) {
 	ac, _ := newAgentContext(context.Background())
 	// 不调 RecordActionStarted —— 模拟 /debug/action 直接走 ws.Call 路径
-	ac.recordActionCompletion(protocol.ActionCompletedPayload{
+	_, _, _ = ac.recordActionCompletion(protocol.ActionCompletedPayload{
 		ActionID: "act_manual_fail",
 		Result:   protocol.ResultFailed,
 		Reason:   "manual test failure",
@@ -207,7 +207,7 @@ func TestRecordActionCompletion_SuccessNoReplanHint(t *testing.T) {
 	ac.as.RecordActionStarted("act_work_ok", "work_shift",
 		map[string]any{"semantic_group": "workbench", "interaction": "assemble"},
 		agentstate.SourceTactical, "")
-	ac.recordActionCompletion(protocol.ActionCompletedPayload{
+	_, _, _ = ac.recordActionCompletion(protocol.ActionCompletedPayload{
 		ActionID: "act_work_ok",
 		Result:   protocol.ResultSuccess,
 	}, nil, nil, nil)
@@ -370,7 +370,7 @@ func TestRecordActionStarted_CompletionAlreadyArrived(t *testing.T) {
 	// Simulate: completion arrives before recordActionStarted.
 	// recordActionCompletion stashes in completedBeforeArm (currentActionID=""
 	// so wasInFlight=false, timer not armed so it goes to completedBeforeArm).
-	ac.recordActionCompletion(protocol.ActionCompletedPayload{
+	_, _, _ = ac.recordActionCompletion(protocol.ActionCompletedPayload{
 		ActionID: "act_short", Result: protocol.ResultSuccess,
 	}, nil, nil, nil)
 
@@ -557,7 +557,7 @@ func TestRecordActionCompletion_ClearsPendingStop(t *testing.T) {
 
 	ac.as.SetPendingStopActionID("act_old_composite")
 
-	ac.recordActionCompletion(protocol.ActionCompletedPayload{
+	_, _, _ = ac.recordActionCompletion(protocol.ActionCompletedPayload{
 		ActionID: "act_old_composite", Result: protocol.ResultSuccess,
 	}, nil, nil, nil)
 
@@ -573,7 +573,7 @@ func TestRecordActionCompletion_SelfStopSuppressesReactive(t *testing.T) {
 
 	ac.as.SetSelfStopInProgress("act_stopped_by_slot_switch")
 
-	queued, detail := ac.recordActionCompletion(protocol.ActionCompletedPayload{
+	queued, detail, _ := ac.recordActionCompletion(protocol.ActionCompletedPayload{
 		ActionID: "act_stopped_by_slot_switch",
 		Result:   protocol.ResultInterrupted, // stop 引发的完成
 	}, nil, nil, nil)
@@ -596,7 +596,7 @@ func TestRecordActionCompletion_OtherFailureStillTriggers(t *testing.T) {
 	ac, _ := newAgentContext(context.Background())
 
 	// 模拟一个普通的 failed completion（非 self-stop）
-	queued, _ := ac.recordActionCompletion(protocol.ActionCompletedPayload{
+	queued, _, _ := ac.recordActionCompletion(protocol.ActionCompletedPayload{
 		ActionID: "act_unexpected_fail",
 		Result:   protocol.ResultFailed,
 	}, nil, nil, nil)

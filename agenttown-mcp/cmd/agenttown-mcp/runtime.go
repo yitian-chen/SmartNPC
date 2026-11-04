@@ -159,15 +159,16 @@ func (rt *Runtime) HandleMessage(_ context.Context, msgType, agentID string, pay
 			rt.logger.Warn("action_completed dropped for unregistered agent", "agent_id", agentID)
 			return
 		}
-		queued, detail := ac.recordActionCompletion(completed, *rt.kbPtr, rt.profiles, rt.logger)
+		queued, detail, cmd := ac.recordActionCompletion(completed, *rt.kbPtr, rt.profiles, rt.logger)
 		rt.logger.Info("action_completed", "agent_id", agentID,
 			"action_id", completed.ActionID, "result", completed.Result,
 			"reason", completed.Reason,
 			"decision_queued", queued)
-		// P4-12：异常完成（failed/interrupted/error）→ 合成 action_anomaly
-		// world_event 入队。成功完成不合成——是常态。
+		// P4-12：异常完成（failed/error，及未经预告的 interrupted）→ 合成
+		// action_anomaly world_event（结构化 cmd/reason，2026-11-03）。成功
+		// 完成与我方主动 stop 的预期回包不合成（守卫在 recordActionCompletion）。
 		if detail != "" && completed.Result != protocol.ResultSuccess && rt.autoPlanEnabled {
-			rt.dispatchSynthesizedEvent(ac, agentID, detail)
+			rt.dispatchActionAnomalyEvent(ac, agentID, cmd, completed.Result, completed.Reason)
 		}
 
 	case protocol.TypeActionQueued:

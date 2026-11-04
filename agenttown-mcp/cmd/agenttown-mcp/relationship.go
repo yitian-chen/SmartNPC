@@ -338,6 +338,13 @@ func (a *agentContext) conversationPeerState() (peer string, turns int) {
 // session, is what drives the follow-through at the next refill (2026-10-16
 // 设计：约定事项由系统在对话结束后提示，NPC 届时再执行——优先于当前
 // 时段目标，补上 slot goal 主导下事件只作弱参考的仲裁缺口）。
+//
+// 无应答变体（2026-11-03）：transcript 里没有任何对方轮次时（典型即邀请
+// speak_to 的等待窗先于回话到期——speech:no_reply 即时终局，多因 hold_sec
+// 过短），不能注入守约指令：守约文案的退出分支只枚举"被婉拒/寒暄/告别"，
+// "未获应答"不在其中，LLM 会把无人应答的邀请读成已达成的约定（实测
+// "好，老张也答应了，咱们这就去跑步机跑起来"——拒绝在终局 0.3s 后才
+// 到达）。改注入未获应答语义：没有回应不等于答应。
 func conversationEndedHint(agentID, peer string, turns []conversationTurn, kb *worldkb.KB) string {
 	if peer == "" || len(turns) == 0 {
 		return ""
@@ -356,18 +363,70 @@ func conversationEndedHint(agentID, peer string, turns []conversationTurn, kb *w
 		start = len(turns) - 12
 	}
 	sb.WriteString(renderConversationTurnsFor(agentID, turns[start:], kb))
+	if !hasPeerTurn(agentID, turns) {
+		sb.WriteString("\n对话记录里对方一句话都没有说——你发出的邀请/请求没有获得回应。没有回应不等于答应：不要把邀请当作已达成的约定去执行，回到当前时段目标的原有日程；若对方稍后主动回应，再根据回应内容决定。")
+		return sb.String()
+	}
 	sb.WriteString("\n请结合对话内容决定下一步：若对话中你们约定了一起做某事（如一起去跑步机晨跑），立即去执行该约定——守约优先于当前时段目标，不要因为时段切换而弃约。" +
 		"对话记录中的时间戳早于当前游戏时间是正常的（对话往返在高倍速仿真下会消耗数十游戏分钟）——约定刚刚达成、此刻仍然有效：立即执行不算迟到，更不意味着约定的活动已经完成或窗口已过，禁止以\"时间已过\"为理由把约定叙述为已发生。" +
 		"注意：只用一句独白宣告\"我要去了\"不算执行——本轮分解必须包含执行约定的长动作（如 InteractSmartObject 使用约定设施，按规则 7/8 填 duration），可以先一条 speak 表态，但长动作不可省略。" +
+		"执行约定的动作必须与对话中约定的具体活动一致——约定里点名了设施或地点（如\"去跑步机跑步\"）就用 InteractSmartObject 使用该设施；原地拉伸、散步、做操等只是相近的活动，不算履约，更不得以\"已经活动/锻炼过了\"为由跳过约定——你在对话之后做过的其他动作不等于约定已经执行。" +
 		"执行约定动作的 duration 按活动实际需要设置（如晨跑 1800-3600 秒），可以超过当前时段的剩余时长——时段切换会在安全点等约定动作结束后再进行，不要为赶日程把约定活动压缩成几分钟的象征性动作；" +
 		"若你的邀请被婉拒或双方只是寒暄/告别，回到当前时段目标的原有日程。")
 	return sb.String()
 }
 
-// extractAndReplanCommitments 在对话结束时异步抽取待办，若其中有待办临近到期
-// （≤12 游戏小时，即"当天"要做）则触发战略层重规划预留时间。这是"当天传话/
-// 当天约定"的代码触发口——commitment 由对话结束及时抽出（不必等日切 compact），
-// 临近到期的由代码裁决触发 replan，战术层 LLM 无需感知 replan。
+// hasPeerTurn reports whether any turn in the transcript was spoken by the
+// peer rather than the agent itself — the line between "conversation with a
+// reply to interpret" and "one-sided utterance that never got an answer".
+func hasPeerTurn(agentID string, turns []conversationTurn) bool {
+	for _, t := range turns {
+		if t.speakerID != agentID {
+			return true
+		}
+	}
+	return false
+}
+
+// conversationHasOwnTurn reports whether the in-progress session contains any
+// turn spoken by the agent itself. route() uses it for the ends_conversation
+// 收口's first-turn exception: an END-marked utterance arriving before the
+// receiver ever spoke is an opener (or a mislabeled invitation), not a
+// conversation tail — fully suppressing the response there leaves the opener
+// unanswered entirely (2026-11-03 实测：误标邀请 34 墙秒无回应).
+func (a *agentContext) conversationHasOwnTurn(agentID string) bool {
+	a.coordMu.Lock()
+	defer a.coordMu.Unlock()
+	for _, t := range a.convTurns {
+		if t.speakerID == agentID {
+			return true
+		}
+	}
+	return false
+}
+
+// conversationTurnsSnapshot returns the in-progress session's peer id and a
+// copy of its turns (for hint building outside the lock).
+func (a *agentContext) conversationTurnsSnapshot() (string, []conversationTurn) {
+	a.coordMu.Lock()
+	defer a.coordMu.Unlock()
+	return a.convPeerID, append([]conversationTurn(nil), a.convTurns...)
+}
+
+// extractAndReplanCommitments 在对话结束时异步抽取待办，若其中有待办落在
+// 1~12 游戏小时窗口内（当天晚些时候要做）则触发战略层重规划预留时间。
+// 这是"当天传话/当天约定"的代码触发口——commitment 由对话结束及时抽出
+// （不必等日切 compact），远期由代码裁决触发 replan，战术层 LLM 无需感知
+// replan。
+//
+// ≤1 游戏小时内到期的约定**不触发 replan**（2026-11-03 修复）：临近约定
+// 已由守约 hint（conversationEndedHint，对话终局注入"立即去执行"）+ 战术层
+// 【当前需兑现的约定】（due_start ≤ now+1h 注入，口径刚好衔接）驱动立即
+// 履行——此时再让战略层重排一个时段是双驱动：replan 不知道 NPC 正在履约
+// 途中，排出的槽位若与在途动作错位（实测 2026-11-03：邀约跑步后 replan
+// 把跑步排到 08:12-08:42，而 NPC 07:38 已上跑步机跑完 26 分钟），履约
+// 完成后计划槽位再次驱动——同一约定执行两遍。临近约定履约完自然回原计划
+// （与反应任务同模式）；只有"现在还不到时候"的远期约定才需要预留时段。
 func (a *agentContext) extractAndReplanCommitments(ctx context.Context, agentID, peerID string, turns []conversationTurn, kb *worldkb.KB, profiles map[string]*profile.Profile, logger *slog.Logger) {
 	if len(turns) == 0 {
 		return
@@ -378,11 +437,22 @@ func (a *agentContext) extractAndReplanCommitments(ctx context.Context, agentID,
 	}
 	gameTime := int64(a.as.LatestGameTimeSec())
 	for _, c := range created {
-		if c.DueStart > 0 && c.DueStart <= gameTime+12*3600 {
+		if commitmentNeedsReplan(c.DueStart, gameTime) {
 			// ws 是 maybeStrategicReplan 的遗留参数（内部从未使用），传 nil。
 			a.maybeStrategicReplan(ctx, agentID, nil, kb, profiles, a.weeklySched, logger,
 				"新约定需要预留时间："+c.Content)
 			return
 		}
 	}
+}
+
+// commitmentNeedsReplan reports whether a newly created commitment warrants a
+// strategic replan: only appointments starting 1~12 game hours out. Sooner
+// ones are already covered by the immediate-execution path (守约 hint +
+// tactical 【当前需兑现的约定】 injects within due_start ≤ now+1h) — replanning
+// those double-drives the same commitment (the plan slot fires again after the
+// hint-driven fulfillment). Window-less commitments (relay, due_start=0) never
+// trigger a replan.
+func commitmentNeedsReplan(dueStart, gameTime int64) bool {
+	return dueStart > gameTime+3600 && dueStart <= gameTime+12*3600
 }

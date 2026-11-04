@@ -464,11 +464,17 @@ type CompletionResult struct {
 	WasInFlight    bool
 	WasPendingStop bool
 	WasSelfStop    bool
-	Src            ActionSource
-	Cmd            string
-	Params         map[string]any
-	Start          time.Time
-	ToolCallID     string
+	// WasExpectedInterrupt: this interrupted completion was announced by our own
+	// stop point (recordInterrupted ran — force / router / social / debug-schedule
+	// injection). It is a planned handover receipt, NOT an anomaly: the caller
+	// skips action_failed event synthesis for it (2026-11-03 修复——此前这类
+	// 回包漏过全部守卫，被误合成为空壳事件)。
+	WasExpectedInterrupt bool
+	Src                  ActionSource
+	Cmd                  string
+	Params               map[string]any
+	Start                time.Time
+	ToolCallID           string
 }
 
 // RecordActionCompletion clears in-flight tracking for the given action
@@ -483,8 +489,10 @@ func (a *AgentState) RecordActionCompletion(actionID, result, reason string) Com
 	// P4-10：上次结束方式记账。stop 点已预告 interrupted（why 更具体——
 	// 事件/裁决来源）时，迟到的 interrupted completion 只确认结果、不覆盖
 	// why；其余情况（success/failed/error，或未经 stop 点的 interrupted）
-	// 按实际结果覆盖。
-	if result == "interrupted" && a.lastEndInterrupted {
+	// 按实际结果覆盖。wasExpectedInterrupt 把"已预告"暴露给调用方：我方
+	// 主动 stop 的回包不是动作异常。
+	wasExpectedInterrupt := result == "interrupted" && a.lastEndInterrupted
+	if wasExpectedInterrupt {
 		a.lastEndInterrupted = false
 	} else if result != "" {
 		a.lastEndResult = result
@@ -539,14 +547,15 @@ func (a *AgentState) RecordActionCompletion(actionID, result, reason string) Com
 	a.mu.Unlock()
 
 	return CompletionResult{
-		WasInFlight:    wasInFlight,
-		WasPendingStop: wasPendingStop,
-		WasSelfStop:    wasSelfStop,
-		Src:            src,
-		Cmd:            cmd,
-		Params:         params,
-		Start:          start,
-		ToolCallID:     toolCallID,
+		WasInFlight:         wasInFlight,
+		WasPendingStop:      wasPendingStop,
+		WasSelfStop:         wasSelfStop,
+		WasExpectedInterrupt: wasExpectedInterrupt,
+		Src:                 src,
+		Cmd:                 cmd,
+		Params:              params,
+		Start:               start,
+		ToolCallID:          toolCallID,
 	}
 }
 

@@ -518,7 +518,7 @@ func TestNoSynthesisForSelfInterruptedCompletion(t *testing.T) {
 	ac.as.ClearInFlightKeepQueue()
 
 	// 被打断的动作回 interrupted completion——应返回空 detail（不合成事件）。
-	_, detail := ac.recordActionCompletion(protocol.ActionCompletedPayload{
+	_, detail, _ := ac.recordActionCompletion(protocol.ActionCompletedPayload{
 		ActionID: "act-1", Result: protocol.ResultInterrupted,
 	}, nil, nil, nil)
 	if detail != "" {
@@ -527,7 +527,7 @@ func TestNoSynthesisForSelfInterruptedCompletion(t *testing.T) {
 
 	// 对照：非自己打断的 interrupted（UE 自身原因）→ 产生 detail。
 	ac.as.RecordActionStarted("act-2", "MoveTo", nil, agentstate.SourceTactical, "")
-	_, detail = ac.recordActionCompletion(protocol.ActionCompletedPayload{
+	_, detail, _ = ac.recordActionCompletion(protocol.ActionCompletedPayload{
 		ActionID: "act-2", Result: protocol.ResultInterrupted, Reason: "dialogue:abandoned by H-03",
 	}, nil, nil, nil)
 	if detail == "" {
@@ -551,7 +551,7 @@ func TestNoSynthesisForTimeToStopAndUntracked(t *testing.T) {
 	ac.recordScheduledEnd()
 	ac.as.ClearInFlightKeepQueue()
 
-	_, detail := ac.recordActionCompletion(protocol.ActionCompletedPayload{
+	_, detail, _ := ac.recordActionCompletion(protocol.ActionCompletedPayload{
 		ActionID: "act-tts", Result: protocol.ResultInterrupted,
 	}, nil, nil, nil)
 	if detail != "" {
@@ -561,7 +561,7 @@ func TestNoSynthesisForTimeToStopAndUntracked(t *testing.T) {
 	// ── 2. 冷启动未追踪动作 ──
 	ac2, _ := newAgentContext(context.Background())
 	// 不调 recordActionStarted——模拟 start_asleep 从未被追踪。
-	_, detail = ac2.recordActionCompletion(protocol.ActionCompletedPayload{
+	_, detail, _ = ac2.recordActionCompletion(protocol.ActionCompletedPayload{
 		ActionID: "start_asleep_H-04", Result: protocol.ResultInterrupted,
 	}, nil, nil, nil)
 	if detail != "" {
@@ -570,7 +570,7 @@ func TestNoSynthesisForTimeToStopAndUntracked(t *testing.T) {
 
 	// 对照：UE 真正的 failed → 照常产生 detail。
 	ac2.as.RecordActionStarted("act-real", "MoveTo", nil, agentstate.SourceTactical, "")
-	_, detail = ac2.recordActionCompletion(protocol.ActionCompletedPayload{
+	_, detail, _ = ac2.recordActionCompletion(protocol.ActionCompletedPayload{
 		ActionID: "act-real", Result: protocol.ResultFailed, Reason: "unreachable",
 	}, nil, nil, nil)
 	if detail == "" {
@@ -602,6 +602,14 @@ func TestReleaseFarewellSpeaker_OnDelivery(t *testing.T) {
 	}
 
 	// 正例：带 ends_conversation 的在途 speak_to → speech_heard 送达即 stop。
+	// 会话先有与 H-02 的两轮往来 + 社交反应窗口 armed——2026-11-03 实测的
+	// 竞态是 stop 后的 signal 抢跑、woken refill 比守约 hint 早 35ms 构造，
+	// 空窗 refill 把应邀方推回"晨练拉伸"goal（分解出原地 Exercise 而非跑步
+	// 机）；终局闭环（关会话 + 守约 hint + 清社交窗口）必须在 signal 之前
+	// 完成，woken refill 的 prompt 当场带守约上下文。
+	sp.recordConversationTurn("H-02", "H-02", "一起去跑步机跑两步？", 38800)
+	sp.recordConversationTurn("H-01", "H-02", "好，一起去跑！", 38820)
+	sp.beginReaction(2, 38820, "社交对话", true)
 	sp.as.RecordActionStarted("act-fw1", "SpeakTo", mkParams(true), agentstate.SourceTactical, "")
 	dispatchTestEvent(t, rt, "H-02", replySpeechTestEvent("evt_fw1", "H-01"))
 	stops := stoppedActions(ft)
@@ -610,6 +618,17 @@ func TestReleaseFarewellSpeaker_OnDelivery(t *testing.T) {
 	}
 	if sp.as.CurrentActionID() != "" {
 		t.Fatalf("speaker in-flight must be cleared, got %q", sp.as.CurrentActionID())
+	}
+	// 终局闭环：会话已关 + 守约 hint 已注入（完整两轮 transcript → 守约
+	// 变体而非未获应答）+ 社交反应窗口已清。
+	if peer, turns := sp.conversationPeerState(); peer != "" || turns != 0 {
+		t.Fatalf("conversation must be closed on farewell delivery, got peer=%q turns=%d", peer, turns)
+	}
+	if hint := sp.as.ReplanHint(); !strings.Contains(hint, "【对话结束】") || !strings.Contains(hint, "立即去执行该约定") {
+		t.Fatalf("follow-through hint must be set before signal, got %q", hint)
+	}
+	if active, _, _ := sp.reactionSnapshot(); active {
+		t.Fatal("social reaction window must be lifted with the conversation end")
 	}
 
 	// 反例 1：不带标记的 speak_to（普通对话轮）→ 不 stop（要等对方回话打断）。
@@ -626,6 +645,40 @@ func TestReleaseFarewellSpeaker_OnDelivery(t *testing.T) {
 	dispatchTestEvent(t, rt, "H-02", replySpeechTestEvent("evt_fw3", "H-01"))
 	if stops := stoppedActions(ft); len(stops) != 1 {
 		t.Fatalf("non-speak_to in-flight must NOT be stopped, got %v", stops)
+	}
+}
+
+// TestCorrectUnansweredHint_OnLateReply 验证迟到回复的 hint 修正（2026-11-03）：
+// no_reply 终局注入的「未获应答」hint（"没有回应不等于答应"），在对方回话
+// 终于到达（会话经 carryover 重开、出现 peer 轮次）后立即被重写为正常守约
+// hint——"未获应答"的判断已过期（实测：邀请方按"对方不理我"走人后 0.04s
+// 对方的同意才到）；非未获应答 hint 不动。
+func TestCorrectUnansweredHint_OnLateReply(t *testing.T) {
+	rt, _, ac := newWorldEventTestRuntime(t)
+	// 复现 no_reply 终局后的状态：会话关闭（只有自己的邀请轮）+ 未获应答 hint。
+	ac.recordConversationTurn("H-01", "H-05", "老张，走，去跑步机跑两步？", 100)
+	peer, turns := ac.closeConversationByPeer("H-05")
+	ac.as.SetReplanHint(conversationEndedHint("H-01", peer, turns, nil))
+	if !strings.Contains(ac.as.ReplanHint(), "没有回应不等于答应") {
+		t.Fatalf("precondition: unanswered hint, got %.120s", ac.as.ReplanHint())
+	}
+
+	// 迟到的同意到达：carryover 重开（出现 peer 轮次）→ 修正。
+	ac.recordConversationTurn("H-05", "H-05", "好嘞，走！一起去跑。", 110)
+	rt.correctUnansweredHint(ac, "H-01", "H-05", *rt.kbPtr)
+	fixed := ac.as.ReplanHint()
+	if strings.Contains(fixed, "没有回应不等于答应") {
+		t.Fatalf("stale unanswered hint must be rewritten, got %.120s", fixed)
+	}
+	if !strings.Contains(fixed, "立即去执行该约定") {
+		t.Fatalf("rewritten hint must be the follow-through variant, got %.120s", fixed)
+	}
+
+	// 非未获应答 hint 不受影响。
+	ac.as.SetReplanHint("【强制打断】其他事件在途")
+	rt.correctUnansweredHint(ac, "H-01", "H-05", *rt.kbPtr)
+	if ac.as.ReplanHint() != "【强制打断】其他事件在途" {
+		t.Fatalf("non-unanswered hint must be left alone, got %q", ac.as.ReplanHint())
 	}
 }
 

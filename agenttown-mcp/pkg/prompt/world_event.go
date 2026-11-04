@@ -213,7 +213,15 @@ func worldEventDescription(ev protocol.WorldEventPayload) string {
 		if err := json.Unmarshal(ev.Data, &d); err == nil {
 			switch ev.EventType {
 			case protocol.EventTypeActionFailed:
-				return fmt.Sprintf("动作 %s 执行失败（原因 %s）", d.Cmd, d.Reason)
+				if d.Cmd != "" {
+					return fmt.Sprintf("动作 %s 执行失败（原因 %s）", d.Cmd, d.Reason)
+				}
+				// cmd 缺失（仅带 description 的合成/未知来源）——渲染原文，
+				// 不输出"动作  执行失败（原因 ）"式空槽（2026-11-03：空壳
+				// 事件行让判决模型与战术层都读不到任何事实）。
+				if d.Description != "" {
+					return d.Description
+				}
 			case protocol.EventTypeSmartObjectOccupied:
 				return fmt.Sprintf("目标设施 %s 被 %s 占用", d.SemanticGroup, d.OccupiedBy)
 			}

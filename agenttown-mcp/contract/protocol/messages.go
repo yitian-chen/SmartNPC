@@ -423,11 +423,15 @@ type SpeechHeardData struct {
 
 // ActionAnomalyData is the data block of category action_anomaly (§3.4).
 // ActionFailed fills Cmd+Reason; SmartObjectOccupied fills
-// SemanticGroup+OccupiedBy.
+// SemanticGroup+OccupiedBy. Description is the natural-language fallback the
+// renderer uses when Cmd is absent (synthesized events carry it alongside the
+// typed fields — 2026-11-03: a data block with only description used to render
+// "动作  执行失败（原因 ）" with empty slots).
 type ActionAnomalyData struct {
 	ActionID      string `json:"action_id"`                // 失败/被占用影响的动作 id
 	Cmd           string `json:"cmd,omitempty"`            // action_failed：失败的 cmd
 	Reason        string `json:"reason,omitempty"`         // action_failed：失败原因（unreachable 等）
+	Description   string `json:"description,omitempty"`    // 自然语言描述（cmd 缺失时的渲染兜底）
 	SemanticGroup string `json:"semantic_group,omitempty"` // smartobject_occupied：目标语义组名
 	OccupiedBy    string `json:"occupied_by,omitempty"`    // smartobject_occupied：占用者 agent id
 }

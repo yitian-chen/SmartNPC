@@ -505,6 +505,12 @@ func TestConversationEndedHint(t *testing.T) {
 		// 刚上去就被切段送走——视觉上等于没赴约）。
 		"可以超过当前时段的剩余时长",
 		"不要为赶日程把约定活动压缩成几分钟的象征性动作",
+		// 履约动作一致性（2026-11-03 实测：应邀方被空窗 refill 推回"晨练
+		// 拉伸"goal 后分解出原地 Exercise 而非约定的跑步机；约定 hint 迟到
+		// 消费时又以"拉伸得差不多了"把约定叙述为已履行）。
+		"必须与对话中约定的具体活动一致",
+		"不算履约",
+		"不等于约定已经执行",
 		"不算执行",
 		"长动作不可省略",
 		"若你的邀请被婉拒或双方只是寒暄/告别",
@@ -549,7 +555,7 @@ func TestRecordActionCompletion_NoReplyClosesConversationAndSetsHint(t *testing.
 		map[string]any{"target_agent_id": "H-05", "content": "行，跟你一起跑几步。", "interrupt": true},
 		agentstate.SourceTactical, "tc-1")
 
-	_, _ = ac.recordActionCompletion(protocol.ActionCompletedPayload{
+	_, _, _ = ac.recordActionCompletion(protocol.ActionCompletedPayload{
 		ActionID: "act-acc", Result: "success", Reason: "speech:no_reply", DurationMs: 10000,
 	}, nil, nil, nil)
 
@@ -580,7 +586,7 @@ func TestRecordActionCompletion_NoReplyPeerMismatchKeepsSession(t *testing.T) {
 		map[string]any{"target_agent_id": "H-03", "content": "老李，聊两句？"},
 		agentstate.SourceTactical, "tc-1")
 
-	_, _ = ac.recordActionCompletion(protocol.ActionCompletedPayload{
+	_, _, _ = ac.recordActionCompletion(protocol.ActionCompletedPayload{
 		ActionID: "act-x", Result: "success", Reason: "speech:no_reply", DurationMs: 10000,
 	}, nil, nil, nil)
 
@@ -612,7 +618,7 @@ func TestRecordActionCompletion_NoReplyVariantsKeepSession(t *testing.T) {
 				map[string]any{"target_agent_id": "H-05", "content": "行。"},
 				agentstate.SourceTactical, "tc-1")
 
-			_, _ = ac.recordActionCompletion(protocol.ActionCompletedPayload{
+			_, _, _ = ac.recordActionCompletion(protocol.ActionCompletedPayload{
 				ActionID: "act-a", Result: tc.result, Reason: tc.reason, DurationMs: 5000,
 			}, nil, nil, nil)
 
@@ -719,7 +725,7 @@ func TestRecordActionCompletion_SpeechRepliedAlsoTerminal(t *testing.T) {
 		map[string]any{"target_agent_id": "H-05", "content": "行，跟你一起跑两步。", "interrupt": true},
 		agentstate.SourceTactical, "tc-1")
 
-	_, _ = ac.recordActionCompletion(protocol.ActionCompletedPayload{
+	_, _, _ = ac.recordActionCompletion(protocol.ActionCompletedPayload{
 		ActionID: "act-acc", Result: "success", Reason: "speech:replied", DurationMs: 17000,
 	}, nil, nil, nil)
 
@@ -731,5 +737,68 @@ func TestRecordActionCompletion_SpeechRepliedAlsoTerminal(t *testing.T) {
 	}
 	if d := ac.reactionDescSnapshot(); d != "" {
 		t.Errorf("reaction window should be cleared, got desc=%q", d)
+	}
+}
+
+// TestCommitmentNeedsReplan pins the strategic-replan trigger window for
+// newly extracted commitments: 1~12 game hours out. Sooner appointments are
+// the immediate-execution path's territory (守约 hint + tactical injection
+// within due_start ≤ now+1h) — replanning them double-drives the same
+// commitment (2026-11-03 实测：邀约跑步后 replan 排的槽位与在途履约错位，
+// NPC 跑完又被计划拉去跑第二遍)。
+func TestCommitmentNeedsReplan(t *testing.T) {
+	const now = int64(27000) // D1 07:30
+	cases := []struct {
+		due  int64
+		want bool
+		note string
+	}{
+		{0, false, "无时间窗（relay 类）不触发"},
+		{now, false, "立即到期：守约 hint 驱动，不重排计划"},
+		{now + 1800, false, "30 分钟后到期：临近，不 replan"},
+		{now + 3600, false, "恰在 1h 边界：不 replan（严格大于）"},
+		{now + 3601, true, "1h 之外：需要战略层预留时段"},
+		{now + 6*3600, true, "当天晚些时候：需要预留"},
+		{now + 12*3600, true, "12h 边界内：触发"},
+		{now + 12*3600 + 1, false, "超出 12h：不是当天的事"},
+	}
+	for _, c := range cases {
+		if got := commitmentNeedsReplan(c.due, now); got != c.want {
+			t.Errorf("due=%d (+%dmin): got %v, want %v (%s)",
+				c.due, (c.due-now)/60, got, c.want, c.note)
+		}
+	}
+}
+
+// TestConversationEndedHint_NoReplyNotAgreement 验证无应答会话（transcript
+// 全是自己的话、对方一句没说——典型即邀请 speak_to 等待窗先于回话到期的
+// speech:no_reply 终局）注入「未获应答」语义而非守约指令：守约文案的退出
+// 分支只枚举"被婉拒/寒暄/告别"，"未获应答"不在其中，LLM 会把无人应答的
+// 邀请读成已达成的约定（2026-11-03 实测"好，老张也答应了"）。
+func TestConversationEndedHint_NoReplyNotAgreement(t *testing.T) {
+	own := []conversationTurn{
+		{speakerID: "H-02", content: "老张，走，去跑步机那边跑两步活动活动筋骨呗？"},
+	}
+	// 无应答：只有自己的邀请 → 未获应答变体，不含守约执行指令。
+	h := conversationEndedHint("H-02", "H-05", own, nil)
+	if !strings.Contains(h, "没有回应不等于答应") {
+		t.Errorf("unanswered hint must carry the not-agreed caveat, got: %.200s", h)
+	}
+	if strings.Contains(h, "立即去执行该约定") {
+		t.Errorf("unanswered hint must NOT carry the follow-through directive, got: %.200s", h)
+	}
+	if !strings.HasPrefix(h, "【对话结束】") {
+		t.Errorf("hint prefix must stay 【对话结束】 (slot fallback / priority machineries), got: %.40s", h)
+	}
+
+	// 有回复（拒绝）→ 正常守约 hint（其"被婉拒则回日程"分支自然接管）。
+	both := append(append([]conversationTurn(nil), own...),
+		conversationTurn{speakerID: "H-05", content: "我得先把内务收拾利索，要不你先跑着？"})
+	h = conversationEndedHint("H-02", "H-05", both, nil)
+	if !strings.Contains(h, "立即去执行该约定") {
+		t.Errorf("replied conversation keeps the follow-through directive, got: %.200s", h)
+	}
+	if strings.Contains(h, "没有回应不等于答应") {
+		t.Errorf("replied conversation must not use the unanswered variant, got: %.200s", h)
 	}
 }
