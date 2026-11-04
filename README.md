@@ -30,30 +30,86 @@ AgentTown 是一个让 AI NPC 在游戏世界里**长期自主生活**的模拟�
 ### 总体架构
 
 ```mermaid
-graph LR
-    subgraph UE["UE5 游戏世界（C++/蓝图）"]
-        UE5["AgentTown 地图<br/>5 NPC · 7 区域 · 57 设施<br/>物理/空间状态主人<br/>战斗行为树（combat-detach）"]
-    end
-    subgraph MCP["agenttown-mcp（Go · 三 module）"]
-        WS["wsserver 连接 module<br/>收发 / seq 重放 / ACK"]
-        RT["Runtime<br/>入站消息单入口分发"]
-        AG["agent 决策核心<br/>战略 / 战术 / 事件路由 /<br/>记忆 / 对话"]
-        DBG["debug 控制台<br/>10+ HTTP 端点"]
-    end
-    subgraph LLM["LLM 后端（可切换）"]
-        VENUS["Venus 网关（默认）<br/>战略 deepseek-v4-pro<br/>战术 deepseek-v4.1-flash<br/>事件判决 jev-1.13.0"]
-        SELF["自部署 vLLM / SGLang<br/>（--llm-config 分层切换）"]
-    end
-    MYSQL[("MySQL<br/>调度状态 / 记忆三表 /<br/>动作历史")]
+%%{init: {"flowchart": {"curve": "basis", "nodeSpacing": 30, "rankSpacing": 48}, "theme": "base", "themeVariables": {"fontFamily": "Microsoft YaHei, Segoe UI, sans-serif", "fontSize": "16px", "primaryColor": "#eef5ff", "primaryBorderColor": "#73a2d1", "lineColor": "#5e748c"}}}%%
+flowchart TB
+    UEI["UE5 世界输入<br/>感知 · 状态 · 事件 · 动作回执"] --> WS["WebSocket / Transport<br/>消息收发 · ACK 等待 · 断线重连与重放"]
 
-    UE5 <-->|"WebSocket :9092<br/>7 字段信封"| WS
-    WS --> RT --> AG
-    AG -->|"Structured Outputs"| VENUS
-    AG -->|"function calling"| VENUS
-    AG -->|"判决 API 三问"| VENUS
-    AG -.->|可选| SELF
-    AG -->|"write-through"| MYSQL
-    DBG --> AG
+    subgraph RT["Agent Runtime：共享消息入口，每个 NPC 独立状态与调度"]
+        direction TB
+        IN["Runtime.HandleMessage<br/>注册 / 注销 · 按消息类型与 NPC 分发"]
+
+        subgraph INPUT["输入处理"]
+            direction LR
+            PER["感知与回执处理<br/>刷新 UE 游戏时间 / 身体 / 可见对象<br/>完成记账 · 清在途 · signal 唤醒"]
+            EVT["世界事件系统<br/>事件去重 · 持续情境<br/>普通事件入队 + Jev 异步判决"]
+        end
+
+        subgraph CONTROL["调度与控制权"]
+            direction LR
+            WORK(("每 NPC 常驻事件循环<br/>等待 wake ↻ 检查时间与状态<br/>时段到点标 pending，安全点切换<br/>补队列 / 调度动作"))
+            FORCE["抢占与重规划协调<br/>取消在途战术请求 · 停止动作<br/>反应截止：60 游戏分钟<br/>重规划互斥与节流"]
+            COMBAT["战斗让位与归还<br/>Jev 选择战斗动作<br/>combat_exit 提前归还<br/>TTL：距最近攻击 120 游戏分钟"]
+        end
+
+        subgraph THINK["计划与动作生产"]
+            direction LR
+            STRAT["战略层<br/>首次注册 / day_count 增长时规划<br/>日内按需修订 dailyPlan"]
+            TACT["战术层<br/>当前目标 + 状态 + 待处理事件<br/>function calling 分解动作"]
+            QUEUE(["FIFO 待执行队列<br/>入队口 / 队尾 → 动作 N · … · 动作 1 → 队首 / 出队口"])
+        end
+
+        subgraph BASE["状态、上下文与记忆支撑"]
+            direction LR
+            STATE["AgentState + agentContext<br/>业务状态：计划 / 感知 / 队列 / 历史<br/>协调状态：唤醒 / 取消 / 定时器 / 让位"]
+            CTX["共享 agenticTurn<br/>system + 摘要 + 历史 + 本轮任务<br/>瞬态状态栏 · 工具目录 · 请求重试"]
+            MEM["记忆读写与 compact<br/>SQL 按场景读取 · 历史压缩提取<br/>对话结束提取待办 · 跨日总结"]
+        end
+
+        OUT["动作映射、校验与下发<br/>出队后单独追踪在途 action_id<br/>长动作：游戏时间起点 + duration<br/>短动作：真实时间回执超时"]
+        IN --> PER
+        IN --> EVT
+        PER --> WORK
+        EVT -->|"保留事件，安全点处理"| WORK
+        EVT -->|"force / 路由判定打断"| FORCE
+        EVT -->|"detach / combat_exit"| COMBAT
+        WORK -->|"首次 / 跨日"| STRAT
+        STRAT -->|"时段目标"| TACT
+        WORK -->|"队列空，按当前时段分解"| TACT
+        FORCE -->|"异步重规划"| TACT
+        TACT -->|"动作批次入队 / 重规划替换"| QUEUE
+        WORK -->|"无在途动作时，从队首取 1 项"| QUEUE
+        QUEUE -->|"出队 → 下发 → 在途追踪"| OUT
+        COMBAT -->|"战斗动作下发"| OUT
+        STATE -.->|"读取 / 更新"| WORK
+        CTX -.->|"战略 / 战术请求共用"| TACT
+        MEM -.->|"检索结果与摘要"| CTX
+    end
+
+    WS --> IN
+    OUT --> UEO["UE5 执行与反馈<br/>行为树 / 动作执行器<br/>started / completed 回到消息入口"]
+    CONFIG["共享世界与能力配置<br/>World KB · Capability Registry<br/>NPC 人设 · 周日程"] -.-> CTX
+    DB[("MySQL<br/>日程状态 · 动作历史 · 长期记忆")] -.-> MEM
+    DEBUG["Debug Web / 日志 / 模型指标<br/>状态观察 · Action / Schedule / 事件注入"] -.-> STATE
+
+    classDef input fill:#e8f3ff,stroke:#548bc1,color:#173d62;
+    classDef control fill:#fff2e4,stroke:#d9a368,color:#754b20;
+    classDef think fill:#f0eaff,stroke:#a28ac6,color:#513c71;
+    classDef memory fill:#eaf6ed,stroke:#81af8c,color:#295738;
+    classDef output fill:#e9f2fa,stroke:#5687ad,color:#244b6a;
+    classDef loop fill:#e8f3ff,stroke:#2379b8,stroke-width:3px,color:#15456a;
+    classDef queue fill:#fff4df,stroke:#d49a31,stroke-width:2px,color:#714b12;
+    class UEI,WS,IN,PER,EVT input;
+    class FORCE,COMBAT control;
+    class WORK loop;
+    class STRAT,TACT think;
+    class QUEUE queue;
+    class STATE,CTX,MEM,DB,CONFIG memory;
+    class OUT,UEO,DEBUG output;
+    style RT fill:#fcfdff,stroke:#a5b7c9,stroke-width:2px
+    style INPUT fill:#f6faff,stroke:#d4e3ef
+    style CONTROL fill:#fffaf4,stroke:#eadcc9
+    style THINK fill:#faf8ff,stroke:#ded5ed
+    style BASE fill:#f5faf6,stroke:#d1e4d4
 ```
 
 | 组件 | 语言 | 职责 |
@@ -245,50 +301,6 @@ tactical:                       # 战术层（高频；记忆压缩复用）
 ```
 
 推理服务跑在远程容器（如 AutoDL）时，Windows 端用 `bash start-vllm-tunnel.sh` 建立 SSH 正向隧道把容器 `:8000` 映射到本地，MCP 指向 `127.0.0.1` 即可。
-
-### 快速开始
-
-同一个远端仓库 clone 成**两个独立目录**，用不同分支 + 端口 + 数据库 + 日志目录完全隔离，可同时运行：
-
-| 目录 | 分支 | MCP HTTP / WS | MySQL 库 | 日志目录 |
-|------|------|---------------|----------|----------|
-| `/data/workspace/stable` | `master` | `8760` / `9092` | `agenttown_stable` | `logs/` |
-| `/data/workspace/dev` | 开发分支 | `8770` / `9093` | `agenttown_dev` | `logs-dev/` |
-
-```bash
-# 1. clone 两份（stable 用 master，dev 用开发分支）
-cd /data/workspace
-git clone https://git.woa.com/yitianchen/smartnpc.git stable && git -C stable checkout master
-git clone https://git.woa.com/yitianchen/smartnpc.git dev
-
-# 2. 各自配 .env（至少 VENUS_API_KEY；自部署后端改用 LLM_CONFIG）
-cp stable/.env.example stable/.env    # 编辑填入凭据
-cp dev/.env.example    dev/.env
-
-# 3. 启动（脚本自动完成：停旧进程 → 拉起 MySQL → 编译 → 启动 MCP → 健康检查）
-cd /data/workspace/dev && bash start-dev.sh        # dev 实例
-cd /data/workspace/stable && bash start-debug.sh   # stable 实例
-
-# 4. 启动 UE5（AgentTown 地图），连接 MCP WS 端点：
-#    stable: ws://<host>:9092/ws    dev: ws://<host>:9093/ws
-#    UE 连接后按序首发：world_kb → agent_registered → capability_registry
-#    随后 resync → state_report → perception_update，仿真开始
-```
-
-启动脚本常用操作：
-
-```bash
-bash start-dev.sh --stop           # 停止所有服务
-bash start-dev.sh --drop-tables    # 清空该实例 MySQL 库后重启（migrations 从零重建），
-                                   # 用于清掉累积的调度/记忆/关系做"干净日"重跑
-```
-
-手动编译（启动脚本已内置，一般不需要）：
-
-```bash
-cd agenttown-mcp
-go build -o ../mcp ./cmd/agenttown-mcp   # 产出仓库根目录 mcp 二进制
-```
 
 ### 环境变量速查（`.env`）
 
