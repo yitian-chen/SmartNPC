@@ -12,9 +12,9 @@
 | 数据库 | `agenttown_dev` | `agenttown_stable` |
 | 日志 | `logs-dev/` | `logs/` |
 
-**dev 工作区的主分支是 `dev-working`**：日常小改动直接在 dev-working 上开发提交，只有较大的任务才另开 feature/fix 分支、完成后合回 dev-working。
+dev 工作区的主分支是 `dev-working`，新任务另开 feature/fix 分支，完成后合回 dev-working。
 
-**使用方式**：日常开发在 dev 下进行（改代码、`--drop-tables` 重启、看日志调试）；代码稳定后通过工蜂 MR 从 `dev-working`（或 feature 分支）合入 `master`，再到 stable 下 pull 更新并重启，可以进行联调验证。
+**使用方式**：日常开发在 dev 下进行（改代码、`--drop-tables` 重启、看日志调试）；代码稳定后通过工蜂 MR 从 feature 分支合入 `master`，再到 stable 下 pull 更新并重启，可以进行联调验证。
 
 **git 提交与拉取**（在 dev 目录下）：
 
@@ -26,7 +26,9 @@ git checkout -b feature/xxx
 
 git add <文件>
 git commit -m "fix(mcp): 一句话说明改了什么"    # 格式 <type>(<scope>): <中文描述>
-git push origin master:dev-working                            # 推到工蜂，网页上提 MR 合入 master
+git push origin dev-working      # 日常：当前就在 dev-working 分支上，推同名远端分支
+git push -u origin HEAD          # 开了 feature/fix 分支时：推当前分支（-u 建立跟踪，之后 git push 即可）
+# 推送后到工蜂网页（git.woa.com → smartnpc → 合并请求 → 新建）提 MR：dev-working（或 feature 分支）→ master
 ```
 
 **更新 stable 供联调**（master 有新合入时）：
