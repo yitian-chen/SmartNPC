@@ -1,5 +1,43 @@
 # AgentTown 部署启动指南
 
+## 双仓库结构
+
+`/data/workspace` 下是**同一工蜂仓库的两个独立 clone**，端口、数据库、日志全隔离，可同时运行互不干扰：
+
+| | dev | stable |
+|---|---|---|
+| 目录 | `/data/workspace/dev` | `/data/workspace/stable` |
+| 分支 | `dev-working` | `master` |
+| 端口 | 8770（HTTP）/ 9093（WS） | 8760（HTTP）/ 9092（WS） |
+| 数据库 | `agenttown_dev` | `agenttown_stable` |
+| 日志 | `logs-dev/` | `logs/` |
+
+**使用方式**：日常开发在 dev 下进行（改代码、`--drop-tables` 重启、看日志调试）；代码稳定后通过工蜂 MR 从 `dev-working`（或 feature 分支）合入 `master`，再到 stable 下 pull 更新并重启，供 UE 同事联调验证。
+
+**git 提交与拉取**（在 dev 目录下）：
+
+```bash
+cd /data/workspace/dev
+
+# 提交：新任务建议开分支（feature/xxx 或 fix/xxx），小改动直接在 dev-working 上做
+git checkout -b feature/xxx
+
+git add <文件>
+git commit -m "fix(mcp): 一句话说明改了什么"    # 格式 <type>(<scope>): <中文描述>
+git push origin HEAD                            # 推到工蜂，网页上提 MR 合入 master
+
+# 拉取最新代码
+git pull
+```
+
+**更新 stable 供联调**（master 有新合入时）：
+
+```bash
+cd /data/workspace/stable
+git pull
+bash start-debug.sh --drop-tables               # 重启生效
+```
+
 ## 步骤 1：进入云开发容器
 
 通过 AnyDev 打开本项目工作区 smartnpc，用SSH连接，用合适的IDE打开。
