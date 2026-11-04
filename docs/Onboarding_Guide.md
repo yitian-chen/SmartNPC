@@ -1,10 +1,12 @@
 # AgentTown 部署启动指南
 
-> FIXME（交接时补充）：AnyDev 工作区的申请/打开入口 URL 与账号流程。
-
 ## 步骤 1：进入云开发容器
 
-通过 AnyDev 打开本项目工作区（远程 Linux 容器）。
+通过 AnyDev 打开本项目工作区 smartnpc，用SSH连接，用合适的IDE打开。
+如果已打开，则可以跳过步骤2，项目已经放在开发容器的 /data/workspace/dev 和 /data/workspace/stable下。
+此工作区当前的IP域名：`ssh root@21.214.99.100.devcloud.woa.com -p 36000`
+
+如果需要新建容器并在其中进行开发，则需要进行下面的步骤2。
 
 ## 步骤 2：克隆两个仓库（仅首次）
 
@@ -21,8 +23,10 @@ cd dev && git checkout dev-working && cd ..
 ```bash
 cp .env.example /data/workspace/stable/.env
 cp .env.example /data/workspace/dev/.env
-# 编辑两个 .env，填入 VENUS_API_KEY=sk-xxx（必需，缺失 MCP 启动即退）
 ```
+编辑两个 .env，填入 VENUS_API_KEY=sk-xxx（必需，缺失 MCP 启动即退）
+
+可以访问 https://ai.woa.com/#/manager/api-account 获取API。
 
 ## 步骤 4：启动 stable 实例（端口 8760/9092）
 
@@ -38,7 +42,7 @@ cd /data/workspace/dev
 bash start-dev.sh --drop-tables
 ```
 
-> `--drop-tables`：重置数据库（DROP + CREATE），migrations 从零重建——日常联调都用它启动；不带则保留上次数据。
+> `--drop-tables`：重置数据库（DROP + CREATE）,日常联调都用它启动；不带则保留上次数据。
 
 启动脚本自动完成：停旧进程 → 起 MySQL → （--drop-tables 时）重置库 → 编译 MCP → 启动并等健康检查。
 
@@ -51,10 +55,12 @@ curl -s http://localhost:8770/healthz   # dev
 
 ## 步骤 7：UE 连接
 
-UE 同事打开 AgentTown 地图工程，WS 地址指向容器：
+在 UE 打开 AgentTown 地图，在项目设置中配置 WS 地址指向容器：
 
 - stable：`ws://<容器IP>:9092/ws`
 - dev：`ws://<容器IP>:9093/ws`
+
+当前工作区IP是ws://21.214.99.100:9093/ws （dev端）。
 
 容器 IP 查法（启动完成的 summary 里也会打印）：
 
@@ -70,18 +76,10 @@ grep 'agent_registered' /data/workspace/dev/logs-dev/$(date +%Y-%m-%d)/debug-mcp
 
 ## 步骤 8：打开 debug 页面
 
-本地浏览器需先能访问容器端口（任选其一）：
+浏览器直接访问：
 
-```bash
-# 方式一：AnyDev 自带端口转发/预览（优先）
-# 方式二：SSH 隧道
-ssh -L 8770:localhost:8770 -L 8760:localhost:8760 <容器>
-```
-
-然后打开：
-
-- dev：`http://localhost:8770/debug/`
-- stable：`http://localhost:8760/debug/`
+- dev：`http://21.214.99.100:8770/debug/`
+- stable：`http://21.214.99.100:8760/debug/`
 
 ## 步骤 9：查看日志
 
