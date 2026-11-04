@@ -2,7 +2,7 @@
 
 ## 双仓库结构
 
-`/data/workspace` 下是**同一工蜂仓库的两个独立 clone**，端口、数据库、日志全隔离，可同时运行互不干扰：
+`/data/workspace` 下有 dev 和 stable 两个目录，是**同一工蜂仓库的两个独立 clone**，端口、数据库、日志全隔离，可同时运行互不干扰，目的是随时保留一个稳定版本运行的服务以供联调。
 
 | | dev | stable |
 |---|---|---|
@@ -12,22 +12,21 @@
 | 数据库 | `agenttown_dev` | `agenttown_stable` |
 | 日志 | `logs-dev/` | `logs/` |
 
-**使用方式**：日常开发在 dev 下进行（改代码、`--drop-tables` 重启、看日志调试）；代码稳定后通过工蜂 MR 从 `dev-working`（或 feature 分支）合入 `master`，再到 stable 下 pull 更新并重启，供 UE 同事联调验证。
+**dev 工作区的主分支是 `dev-working`**：日常小改动直接在 dev-working 上开发提交，只有较大的任务才另开 feature/fix 分支、完成后合回 dev-working。
+
+**使用方式**：日常开发在 dev 下进行（改代码、`--drop-tables` 重启、看日志调试）；代码稳定后通过工蜂 MR 从 `dev-working`（或 feature 分支）合入 `master`，再到 stable 下 pull 更新并重启，可以进行联调验证。
 
 **git 提交与拉取**（在 dev 目录下）：
 
 ```bash
 cd /data/workspace/dev
 
-# 提交：新任务建议开分支（feature/xxx 或 fix/xxx），小改动直接在 dev-working 上做
+# 提交：新任务建议开分支（feature/xxx 或 fix/xxx）
 git checkout -b feature/xxx
 
 git add <文件>
 git commit -m "fix(mcp): 一句话说明改了什么"    # 格式 <type>(<scope>): <中文描述>
-git push origin HEAD                            # 推到工蜂，网页上提 MR 合入 master
-
-# 拉取最新代码
-git pull
+git push origin master:dev-working                            # 推到工蜂，网页上提 MR 合入 master
 ```
 
 **更新 stable 供联调**（master 有新合入时）：
