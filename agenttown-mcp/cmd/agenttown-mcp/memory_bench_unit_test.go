@@ -182,7 +182,7 @@ func TestBenchRunner_BaselineDoesNotLeakDialogueOrGold(t *testing.T) {
 	capabilityRegistryRef = registry
 	defer func() { capabilityRegistryRef = old }()
 	cfg := llmconfig.Config{Strategic: llmconfig.Backend{BaseURL: "http://offline.invalid", Model: "offline"}, Tactical: llmconfig.Backend{BaseURL: "http://offline.invalid", Model: "offline"}}
-	r := benchRunOne(context.Background(), c, "no-memory", 1, false, cfg, &benchBudget{Max: 1}, benchWorld(), registry)
+	r := benchRunOne(context.Background(), c, "no-memory", 1, false, cfg, &benchBudget{Max: 1}, benchWorld(), registry, 0, benchMemoryStoreFactory)
 	if r.Status != "offline_validated" || len(r.Calls) != 1 {
 		t.Fatalf("run: status=%s calls=%d", r.Status, len(r.Calls))
 	}

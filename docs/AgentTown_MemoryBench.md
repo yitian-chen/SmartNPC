@@ -14,16 +14,17 @@
 
 ### 怎么评
 
-- **直接跑生产代码**：抽取用生产的 `extractConversationCommitments`，检索用生产的 `memoryReader`，决策用生产的 `generateTacticalPlan`，跨日压缩用生产的 compact。评测的就是仿真里实际运行的链路，不是替身
+- **直接跑生产代码**：抽取用生产的 `extractConversationCommitments`，检索用生产的 `memoryReader`，决策用生产的 `generateTacticalPlan`，跨日压缩用生产的 compact，存储用生产的 `MySQLStore`（真实 MySQL，表结构由生产 migrations 建出）。评测的就是仿真里实际运行的链路，不是替身
 - **不启动仿真**：不连 UE、不起 WebSocket 和 worker 循环。用固定对话 + 虚拟游戏时钟驱动，步骤串行执行，不等真实时间
 - **双组对照**：
 
   | 组 | 存储 | 写入 |
   |---|---|---|
-  | memory | 内存 Store（忠实实现生产 Store 接口） | 正常抽取写入 |
-  | no-memory | NoopStore | 跳过 |
+  | memory | 生产 `MySQLStore`，每次运行一个独立临时库 | 正常抽取写入 |
+  | no-memory | `NoopStore`（即生产的无持久化模式） | 跳过 |
 
   两组的人设、当前任务、物理状态、可用工具完全相同，只差有没有记忆，因此两组行为差异 = 记忆带来的效果
+- **运行隔离**：memory 组的每一次运行（场景×重复）都在本机 MySQL 上新建一个临时库 `memory_bench_<时间>_<进程号>_<序号>`，经生产 `storage.NewMySQLStore` 打开（自动执行生产 migrations 建表），运行结束即删库。不同场景、重复、并发 worker、多次运行之间互不共享数据，也不会碰到 `agenttown_dev`/`agenttown_stable`
 - **防泄漏**：每次决策前重建 Agent（清空会话历史、滚动摘要、守约 hint、旧计划，只保留本组 Store）——模型只能通过记忆检索拿到信息。原始对话和评分标签都不进决策请求
 
 ### 四阶段评分
@@ -58,7 +59,8 @@
 |---|---|
 | `memory_bench_runner_test.go` | 主流程：`TestMemoryBench_Run` 入口，逐场景×组×重复执行（`benchRunOne`），生成报告 |
 | `memory_bench_types_test.go` | 场景 YAML 结构定义与加载；四阶段评分器（记录匹配、检索文本、动作匹配） |
-| `memory_bench_store_test.go` | 内存版 Store（实现生产 `storage.Store` 接口，每个场景独立一份） |
+| `memory_bench_mysql_test.go` | MySQL 隔离：每次运行建临时库 → 生产 `NewMySQLStore` 打开 → 结束删库 |
+| `memory_bench_store_test.go` | 内存版 Store（`--store memory` 时使用，以及框架单测用；实现生产 `storage.Store` 接口） |
 | `memory_bench_transport_test.go` | HTTP 层：调用预算硬上限、请求响应记录、凭据脱敏 |
 | `memory_bench_suite_test.go` / `memory_bench_unit_test.go` | 框架自身的测试（场景集校验、评分器、预算、防泄漏） |
 
@@ -138,7 +140,7 @@ HTTP 预算通过生产 Venus 客户端的可选 `Transport` 接缝注入（`pkg
 
 ### 运行
 
-在仓库根目录执行（Go 1.25+）：
+在仓库根目录执行（Go 1.25+）。默认使用本机 MySQL（`127.0.0.1:3306`，root 无密码，即 start 脚本拉起的那个实例）——先确认 MySQL 已运行（启动过 `start-dev.sh` 即可，或 `mysql --socket=/data/mysql-run/mysql.sock -uroot -e 'SELECT 1'` 能通）：
 
 ```bash
 # 离线全量：30 场景 × 2 组 × 2 次 = 120 次回放，零模型调用
@@ -150,8 +152,11 @@ scripts/run-memory-bench.sh --live
 # 真实跑指定若干场景（逗号分隔）
 scripts/run-memory-bench.sh --live --cases creation-relay,time-midnight
 
-# 只重跑一个场景，只跑 memory 组
-scripts/run-memory-bench.sh --live --cases closure-cancel --groups memory --max-calls 5
+# 只重跑一个场景，只跑 memory 组，并保留临时库供事后查看
+scripts/run-memory-bench.sh --live --cases closure-cancel --groups memory --max-calls 5 --keep-db
+
+# 没有 MySQL 的环境：改用内存版 Store
+scripts/run-memory-bench.sh --store memory
 ```
 
 参数：
@@ -167,6 +172,9 @@ scripts/run-memory-bench.sh --live --cases closure-cancel --groups memory --max-
 | `--llm-config` | `.env` 的 `LLM_CONFIG` | 分层模型配置（格式同仿真的 `llm_backend.yaml`） |
 | `--suite` | 上述 suite.yaml | 场景集文件 |
 | `--output` | `tmp/memory-bench/<时间-进程号>/` | 报告目录 |
+| `--store` | `mysql` | `mysql`（生产 MySQLStore，每次运行一个临时库）或 `memory`（内存版，无需数据库） |
+| `--mysql-dsn` | `.env` 的 `MYSQL_DSN`，否则 `root@tcp(127.0.0.1:3306)/?parseTime=true&charset=utf8mb4` | MySQL 服务器地址；DSN 里的库名会被忽略，替换为临时库 |
+| `--keep-db` | 关 | 运行结束后保留临时库（默认删除），用于直接查表排障 |
 
 **真实全量 30 场景**：单次运行最多 30 次 HTTP，而一个场景×两组通常要 3-4 次调用，全量需按类别分批跑（如 `--cases` 每次列一类的 5 个场景 ID）；要一次跑完需修改 `TestMemoryBench_Run` 里的 30 上限。
 
@@ -192,6 +200,21 @@ scripts/run-memory-bench.sh --live --cases closure-cancel --groups memory --max-
 | `service_error` / `budget_stopped` / `invalid_fixture` | 服务错误 / 预算耗尽 / 场景配置非法 | 非 0 |
 
 排查失败：在 `results.json` 中找到对应场景，依次看存储快照（写入对不对）→ 检索文本（查到了没有）→ 模型请求响应（为什么这么决策）。关键词评分可能误判同义表达，需人工复核。
+
+直接查表：加 `--keep-db` 运行，`results.json` 里每条 memory 组结果的 `database` 字段就是它的临时库名：
+
+```bash
+mysql --socket=/data/mysql-run/mysql.sock -uroot <database> -e "SELECT * FROM episodic_commitments\G"
+```
+
+用完（或运行被中途杀掉留下残库时）清理所有临时库：
+
+```bash
+for d in $(mysql --socket=/data/mysql-run/mysql.sock -uroot -N -e \
+  "SELECT SCHEMA_NAME FROM information_schema.SCHEMATA WHERE SCHEMA_NAME LIKE 'memory\_bench\_%'"); do
+  mysql --socket=/data/mysql-run/mysql.sock -uroot -e "DROP DATABASE \`$d\`"
+done
+```
 
 ### 可视化（Promptfoo）
 
@@ -224,11 +247,11 @@ cd agenttown-mcp
 go test ./cmd/agenttown-mcp -run '^TestBench' -race -count=1   # 框架自身测试
 ```
 
-普通 `go test ./...` 不会调用真实模型（`TestMemoryBench_Run` 需脚本显式触发）。
+普通 `go test ./...` 不会调用真实模型，也不需要 MySQL（`TestMemoryBench_Run` 需脚本显式触发；框架单测用内存版 Store）。
 
 ## 四、局限
 
 - use 只判断工具调用意图，**不验证 UE 中实际履约**
-- 存储用内存实现，不验证 MySQL 的持久性与 SQL 性能
+- 每次运行从空库开始，不覆盖"MCP 进程重启后从同一个库恢复"这种跨进程场景（`restart` 步骤只重建 Agent，存储连接不变）
 - 世界、人设、能力声明使用固定小镇样本，不加载运行中的 World KB
 - 评分基于字段与关键词匹配，不是语义裁判

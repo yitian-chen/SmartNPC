@@ -36,6 +36,9 @@ var (
 	benchConfigFlag      = flag.String("memory-bench-config", "", "existing llmconfig YAML (or LLM_CONFIG)")
 	benchOutputFlag      = flag.String("memory-bench-output", "../../tmp/memory-bench", "report directory")
 	benchMaxCallsFlag    = flag.Int64("memory-bench-max-calls", 30, "hard maximum actual HTTP calls")
+	benchStoreFlag       = flag.String("memory-bench-store", "mysql", "mysql (production MySQLStore, one temporary database per run) or memory")
+	benchMySQLDSNFlag    = flag.String("memory-bench-mysql-dsn", "root@tcp(127.0.0.1:3306)/?parseTime=true&charset=utf8mb4", "MySQL server DSN; database name is ignored")
+	benchKeepDBFlag      = flag.Bool("memory-bench-keep-db", false, "keep per-run MySQL databases for inspection")
 )
 
 func benchWorld() *worldkb.KB {
@@ -101,19 +104,23 @@ func benchNewClient(b llmconfig.Backend, tr *benchTransport, logger *slog.Logger
 	return venus.New(venus.Config{BaseURL: b.ResolvedBaseURL(), APIKey: b.APIKey, Model: b.Model, Timeout: b.Timeout(), ToolChoice: b.ToolChoice, Logger: logger, Transport: tr})
 }
 
-func benchRunOne(ctx context.Context, c benchCase, group string, repeat int, live bool, cfg llmconfig.Config, budget *benchBudget, kb *worldkb.KB, registry *CapabilityRegistry) (result benchResult) {
+func benchRunOne(ctx context.Context, c benchCase, group string, repeat int, live bool, cfg llmconfig.Config, budget *benchBudget, kb *worldkb.KB, registry *CapabilityRegistry, job int, newStore benchStoreFactory) (result benchResult) {
 	started := time.Now()
 	result = benchResult{Case: c.ID, Category: c.Category, Group: group, Repeat: repeat, Status: "passed", Checks: []benchAssertion{}, Snapshots: []benchSnapshot{}, Probes: []benchProbeResult{}}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	tr := &benchTransport{Budget: budget, Offline: !live, Secrets: []string{cfg.Strategic.APIKey, cfg.Tactical.APIKey}}
 	strategic := benchNewClient(cfg.Strategic, tr, logger)
 	tactical := benchNewClient(cfg.Tactical, tr, logger)
-	store := newBenchStore()
+	// Only the memory group owns a store: the no-memory baseline runs the
+	// production memory-disabled mode (NoopStore) for every step and probe.
+	var store storage.Store = storage.NoopStore{}
+	releaseStore := func() {}
 	agents := map[string]*agentContext{}
 	defer func() {
 		for _, a := range agents {
 			a.cancel()
 		}
+		releaseStore()
 		result.Calls = tr.snapshot()
 		result.DurationMS = time.Since(started).Milliseconds()
 		if problem := benchCallProblem(result.Calls); problem != "" {
@@ -126,6 +133,14 @@ func benchRunOne(ctx context.Context, c benchCase, group string, repeat int, liv
 	stop := func(status, msg string) {
 		result.Status = status
 		result.Error = benchSafeError(fmt.Errorf("%s", msg), tr.Secrets)
+	}
+	if group == "memory" {
+		st, name, cleanup, err := newStore(ctx, job)
+		if err != nil {
+			stop("service_error", "store: "+err.Error())
+			return
+		}
+		store, releaseStore, result.Database = st, cleanup, name
 	}
 	for _, id := range c.Agents {
 		a, e := benchNewAgent(ctx, id, store, strategic, c.Steps[0].At)
@@ -183,6 +198,9 @@ func benchRunOne(ctx context.Context, c benchCase, group string, repeat int, liv
 		// Snapshot every actor so accidental cross-owner writes remain visible.
 		for _, id := range c.Agents {
 			rows, _ := store.LoadCommitments(ctx, id, storage.CommitmentQuery{})
+			if rows == nil {
+				rows = []storage.Commitment{}
+			}
 			result.Snapshots = append(result.Snapshots, benchSnapshot{i + 1, id, rows})
 		}
 		for _, check := range c.Checks {
@@ -199,10 +217,7 @@ func benchRunOne(ctx context.Context, c benchCase, group string, repeat int, liv
 	for _, probe := range c.Probes {
 		// A fresh context has no previous dialogue, summary, hint or plan. The only
 		// experimental variable is the production memory reader's store contents.
-		var activeStore storage.Store = storage.NoopStore{}
-		if group == "memory" {
-			activeStore = store
-		}
+		activeStore := store
 		ac, e := benchNewAgent(ctx, probe.Agent, activeStore, tactical, probe.At)
 		if e != nil {
 			stop("invalid_fixture", e.Error())
@@ -301,7 +316,7 @@ func benchWriteReport(dir string, report benchReport, cases []benchCase) error {
 		return err
 	}
 	var md strings.Builder
-	fmt.Fprintf(&md, "# 待办记忆评测\n\n模式：**%s**；套件 SHA256：`%s`。\n\n", report.Mode, report.SuiteSHA256)
+	fmt.Fprintf(&md, "# 待办记忆评测\n\n模式：**%s**；存储：**%s**；套件 SHA256：`%s`。\n\n", report.Mode, report.Store, report.SuiteSHA256)
 	if report.Mode == "offline" {
 		md.WriteString("离线回放只验证接口、存读与评分链路；回放断言不代表真实模型能力，不计算模型通过率。\n\n")
 	}
@@ -439,7 +454,20 @@ func TestMemoryBench_Run(t *testing.T) {
 		t.Fatal(err)
 	}
 	sum := sha256.Sum256(b)
-	report := benchReport{Mode: "offline", SuiteSHA256: hex.EncodeToString(sum[:]), Started: time.Now().UTC(), MaxCalls: *benchMaxCallsFlag}
+	newStore := benchMemoryStoreFactory
+	switch *benchStoreFlag {
+	case "memory":
+	case "mysql":
+		factory, closeAdmin, err := newBenchMySQLStoreFactory(context.Background(), *benchMySQLDSNFlag, *benchKeepDBFlag)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer closeAdmin()
+		newStore = factory
+	default:
+		t.Fatal("store must be mysql or memory")
+	}
+	report := benchReport{Mode: "offline", Store: *benchStoreFlag, SuiteSHA256: hex.EncodeToString(sum[:]), Started: time.Now().UTC(), MaxCalls: *benchMaxCallsFlag}
 	if *benchLiveFlag {
 		report.Mode = "live"
 	}
@@ -471,7 +499,7 @@ func TestMemoryBench_Run(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for j := range queue {
-				report.Results[j.Index] = benchRunOne(context.Background(), j.Case, j.Group, j.Repeat, *benchLiveFlag, cfg, budget, kb, registry)
+				report.Results[j.Index] = benchRunOne(context.Background(), j.Case, j.Group, j.Repeat, *benchLiveFlag, cfg, budget, kb, registry, j.Index, newStore)
 			}
 		}()
 	}

@@ -57,7 +57,7 @@ func TestBenchSuite_AllCasesReplayProductionAndHideGold(t *testing.T) {
 				mutated.Probes[i].Read.Must = append(mutated.Probes[i].Read.Must, sentinel)
 			}
 			for _, group := range []string{"memory", "no-memory"} {
-				r := benchRunOne(context.Background(), mutated, group, 1, false, cfg, &benchBudget{Max: 1}, benchWorld(), reg)
+				r := benchRunOne(context.Background(), mutated, group, 1, false, cfg, &benchBudget{Max: 1}, benchWorld(), reg, 0, benchMemoryStoreFactory)
 				if r.Status != "offline_validated" {
 					t.Fatalf("%s: %s %s", group, r.Status, r.Error)
 				}

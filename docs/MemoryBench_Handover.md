@@ -12,7 +12,7 @@
 
 | 内容 | 位置 | 说明 |
 |---|---|---|
-| 评测框架 | `agenttown-mcp/cmd/agenttown-mcp/memory_bench_*_test.go` | 入口 `TestMemoryBench_Run`；直接复用生产链路（对话抽取 → 检索 → 战术决策 → compact），不启 UE |
+| 评测框架 | `agenttown-mcp/cmd/agenttown-mcp/memory_bench_*_test.go` | 入口 `TestMemoryBench_Run`；直接复用生产链路（对话抽取 → MySQL 存储 → 检索 → 战术决策 → compact），不启 UE |
 | 场景集 | `agenttown-mcp/cmd/agenttown-mcp/testdata/memory_bench/suite.yaml` | 30 场景，六类各 5：新增 / 时间换算 / 改期 / 取消履约过期 / 记忆保持 / 隔离 |
 | 运行脚本 | `scripts/run-memory-bench.sh` | 离线回放（零模型调用）或 `--live` 真实模型 |
 | 可视化 | `eval/memory-promptfoo/` + `scripts/run-memory-promptfoo.sh` | Promptfoo 本地查看器，memory / no-memory 两列对比 |
@@ -20,6 +20,7 @@
 
 评测设计要点：
 - **双组对照**：memory 组（有记忆）vs no-memory 组（无记忆），其余输入完全相同
+- **真实存储 + 运行隔离**：memory 组用生产 `MySQLStore` 读写本机 MySQL，每次运行（场景×重复）新建一个临时库 `memory_bench_*`、经生产 migrations 建表、结束即删，互不干扰，也不碰 dev/stable 库；无 MySQL 时可 `--store memory` 退回内存版
 - **四阶段评分**：
 
   | 阶段 | 评什么 |
@@ -30,6 +31,8 @@
   | use | 决策产物的工具调用是否符合约定 |
 
 ## 三、怎么跑
+
+需要本机 MySQL 在运行（启动过 `start-dev.sh` 即可）。
 
 ```bash
 scripts/run-memory-bench.sh                   # 离线全量（零模型调用，验证管线）

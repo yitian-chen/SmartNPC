@@ -347,6 +347,7 @@ type benchResult struct {
 	Repeat     int                `json:"repeat"`
 	Status     string             `json:"status"`
 	Error      string             `json:"error,omitempty"`
+	Database   string             `json:"database,omitempty"`
 	Checks     []benchAssertion   `json:"checks"`
 	Snapshots  []benchSnapshot    `json:"snapshots"`
 	Probes     []benchProbeResult `json:"probes"`
@@ -355,6 +356,7 @@ type benchResult struct {
 }
 type benchReport struct {
 	Mode        string        `json:"mode"`
+	Store       string        `json:"store"`
 	SuiteSHA256 string        `json:"suite_sha256"`
 	Started     time.Time     `json:"started"`
 	HTTPCalls   int64         `json:"http_calls"`
