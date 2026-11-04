@@ -1,7 +1,7 @@
 # 记忆评测交接文档
 
-> 待办记忆（episodic_commitments）评测体系的建设成果、已发现的业务缺陷与未完成事项。
-> 评测框架的完整使用说明见 [AgentTown_MemoryBench.md](AgentTown_MemoryBench.md)（框架/场景/评分/报告）与 [eval/memory-promptfoo/README.md](../eval/memory-promptfoo/README.md)（查看器），本文不重复，只讲清楚"现在到哪了、接下来做什么"。
+> 包含待办记忆（episodic_commitments）评测体系的建设成果、已发现的业务缺陷与未完成事项。
+> 评测框架的完整使用说明见 **`feature/memory-bench` 分支上的** [AgentTown_MemoryBench.md](AgentTown_MemoryBench.md)（框架/场景/评分/报告）与 `eval/memory-promptfoo/README.md`（查看器）——两份文档随评测分支存在，**合入 master 前本分支链接不可点**，可先 `git show feature/memory-bench:docs/AgentTown_MemoryBench.md` 查看。本文不重复它们，只讲清楚"现在到哪了、接下来做什么"。
 
 ---
 
