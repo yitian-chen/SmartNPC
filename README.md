@@ -307,5 +307,7 @@ CLAUDE.md                       # 工程手册（架构/机制/命令/文件地�
 | `docs/AgentTown_EventDrivenAgent_Design.html` | 事件驱动异步 Agent 设计 |
 | `docs/AgentTown_WorldKB_Design.md` | 世界 KB 设计 |
 | `docs/AgentTown_LongTermMemory_SQLite_Design.md` | 长期记忆三表设计（写只在 compact / 读零 LLM / 待办闭环） |
+| `docs/MemoryBench_Handover.md` | 记忆评测交接文档：现状、已知缺陷、下一步计划 |
+| `docs/AgentTown_MemoryBench.md` | 记忆评测系统：原理、结构、使用方法 |
 | `docs/DebugAction_Tool.md` | Debug 工具使用文档 |
 | `docs/llm_metrics.md` | LLM 指标报告（运行时自动生成） |
