@@ -14,20 +14,20 @@
 
 dev 工作区的主分支是 `dev-working`，新任务另开 feature/fix 分支，完成后合回 dev-working。
 
-**使用方式**：日常开发在 dev 下进行（改代码、`--drop-tables` 重启、看日志调试）；代码稳定后通过工蜂 MR 从 feature 分支合入 `master`，再到 stable 下 pull 更新并重启，可以进行联调验证。
+**使用方式**：日常开发在 dev 下进行（改代码、`--drop-tables` 重启、看日志调试）；代码稳定后把本地 dev-working 直接推送到远端 master（远端不存 dev-working 分支），再到 stable 下 pull 更新并重启，可以进行联调验证。
 
 **git 提交与拉取**（在 dev 目录下）：
 
 ```bash
 cd /data/workspace/dev
 
-# 提交：新任务建议开分支（feature/xxx 或 fix/xxx）
+# 提交：新任务建议开分支（feature/xxx 或 fix/xxx），完成后合回 dev-working
 git checkout -b feature/xxx
 
 git add <文件>
 git commit -m "fix(mcp): 一句话说明改了什么"    # 格式 <type>(<scope>): <中文描述>
-git push -u origin HEAD          # 开了 feature/fix 分支时：推当前分支（-u 建立跟踪，之后 git push 即可）
-# 推送后到工蜂网页（git.woa.com → smartnpc → 合并请求 → 新建）提 MR：dev-working（或 feature 分支）→ master
+
+git push origin dev-working:master   # 推送：本地 dev-working 直接推到远端 master（远端无 dev-working 分支）
 ```
 
 **更新 stable 供联调**（master 有新合入时）：
