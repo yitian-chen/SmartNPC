@@ -1,120 +1,234 @@
-# 离线待办记忆 Bench
+# 记忆评测系统（Memory Bench）
 
-已接入本地 Promptfoo 查看器：安装后运行 `scripts/run-memory-promptfoo.sh`，或用 `scripts/run-memory-promptfoo.sh --report tmp/memory-bench/my-smoke` 导入已有报告，不增加模型调用。安装、SSH 隧道与结果口径见 [Promptfoo 使用说明](../eval/memory-promptfoo/README.md)。
+> 交接现状、已知缺陷与下一步计划见 [MemoryBench_Handover.md](MemoryBench_Handover.md)。
 
-Bench 用固定对话和虚拟游戏时间驱动生产记忆代码，不启动 UE、WebSocket 或完整 worker。它评估待办的新增、时间换算、变更、检索与后续动作选择。
+## 一、原理
 
-## 一条命令运行
+### 评什么
 
-在仓库根目录运行，要求 Go 1.25+：
+评测 NPC 的**待办记忆**（`episodic_commitments`：约定、传话、邀请、待办）在完整生命周期里是否正确：
 
-```bash
-# 30 个场景 × 2 次 × 两组：120 次离线回放，零真实模型请求
-scripts/run-memory-bench.sh
-
-# 只运行 5 个真实冒烟场景；默认两组、重复 1 次、并发 1、最多 30 次 HTTP
-scripts/run-memory-bench.sh --live
-
-# 使用现有分层模型配置，指定输出位置
-scripts/run-memory-bench.sh --live --cases smoke \
-  --llm-config assets/llm_backend.yaml --output tmp/memory-bench/my-smoke
-
-# 只重跑某个场景
-scripts/run-memory-bench.sh --live --cases closure-cancel \
-  --groups memory --repeats 1 --max-calls 5
+```
+对话 ──抽取──▶ 写入(write) ──改期/取消/履约──▶ 更新(update) ──查询──▶ 检索(read) ──决策──▶ 行动(use)
 ```
 
-`--live` 未提供时，使用脚本化模型响应回放，不联网。离线回放用于验证接口、存储、上下文隔离与评分链路，**不是模型能力分数**；其中行为断言可能失败，因为决策回放固定返回中性的休息动作。
+### 怎么评
 
-脚本在真实运行时加载项目 `.env`，复用 `LLM_CONFIG` 或 `VENUS_API_KEY`、`VENUS_URL`、`VENUS_MODEL`、`VENUS_STRATEGIC_MODEL`。分层 YAML 格式沿用现有 `llmconfig`；配置中未提供 API key 时使用环境凭据，超时默认 60 秒。凭据不写入报告，也不通过命令行参数传递。
+- **直接跑生产代码**：抽取用生产的 `extractConversationCommitments`，检索用生产的 `memoryReader`，决策用生产的 `generateTacticalPlan`，跨日压缩用生产的 compact。评测的就是仿真里实际运行的链路，不是替身
+- **不启动仿真**：不连 UE、不起 WebSocket 和 worker 循环。用固定对话 + 虚拟游戏时钟驱动，步骤串行执行，不等真实时间
+- **双组对照**：
 
-其他参数：`--suite FILE`、`--cases all|smoke|id,id`、`--groups memory,no-memory`、`--repeats N`、`--concurrency N`、`--output DIR`、`--max-calls N`。普通运行默认重复 2 次；真实运行默认只选 smoke、重复 1 次。超出模型调用预算会报告中止，不自动增加预算。
+  | 组 | 存储 | 写入 |
+  |---|---|---|
+  | memory | 内存 Store（忠实实现生产 Store 接口） | 正常抽取写入 |
+  | no-memory | NoopStore | 跳过 |
 
-## 运行与评分方式
+  两组的人设、当前任务、物理状态、可用工具完全相同，只差有没有记忆，因此两组行为差异 = 记忆带来的效果
+- **防泄漏**：每次决策前重建 Agent（清空会话历史、滚动摘要、守约 hint、旧计划，只保留本组 Store）——模型只能通过记忆检索拿到信息。原始对话和评分标签都不进决策请求
 
-1. 每个场景／组／重复创建独立的内存 Store 和多个 Agent 状态。
-2. 按剧本推进游戏时钟，将完整对话交给生产 `extractConversationCommitments`，复用其模型提示、Schema、时间换算和持久化逻辑。步骤串行完成，不等待真实游戏时间。
-3. 在写入／更新检查点匹配记录；记录不按随机生成的数据库 ID 评分。
-4. 每次决策前重建 Agent，清除会话、滚动摘要、守约 hint 和旧计划，保留本组 Store。使用生产 memoryReader 查询，再调用生产 `generateTacticalPlan`。
-5. 无记忆组跳过写入并使用 NoopStore，当前任务、人设、状态和能力相同。原始对话和评分标签均不进入决策请求。
+### 四阶段评分
 
-本版不启动 UE 执行动作，**use 评分只判断生成的工具调用意图，不证明游戏世界中实际履约**。能力声明、世界与人设使用固定小镇样本；不加载运行中的 World KB 或真实 NPC 会话。
+| 阶段 | 检查对象 | 判定规则 |
+|---|---|---|
+| write | 抽取后的存储记录 | 记录数量、类型、对象、地点、起止游戏时间、内容关键词 |
+| update | 改期/取消/履约后的存储记录 | 状态与时间正确，且其他未变更事项不受影响 |
+| read | 生产待办查询的格式化文本 | 必须出现的文本 / 不得出现的文本 |
+| use | 战术层输出的工具调用 | 至少命中一个允许的工具+参数组合，且不命中禁止组合（不比较整段文本） |
 
-| 阶段 | 规则评分 |
+记录按字段匹配，不依赖随机生成的数据库 ID。
+
+**组间对比只看 use**：write/update/read 只对 memory 组适用，场景总通过数不能直接当作组间能力差。
+
+### 两种运行模式
+
+| 模式 | 模型 | 用途 |
+|---|---|---|
+| 离线（默认） | 回放场景里预写的模型响应（`replay` 字段），零网络请求 | 验证接口、存储、评分链路是否正常——**不是模型能力分数** |
+| 真实（`--live`） | 调真实模型，配置与仿真同源（`.env` / `LLM_CONFIG`） | 测量真实记忆效果 |
+
+离线模式下决策回放固定返回中性的休息动作，use 断言失败是正常的。
+
+## 二、结构
+
+### 代码
+
+均位于 `agenttown-mcp/cmd/agenttown-mcp/`（与生产代码同包，可直接调用内部函数）：
+
+| 文件 | 职责 |
 |---|---|
-| write | 记录数量、类型、对象、地点、起止游戏时间与关键词；多条预期必须匹配不同记录 |
-| update | 改期、取消、履约后的状态和时间；保留其他未变更事项 |
-| read | 应出现与不得出现的文本；通过生产待办查询与格式化获得 |
-| use | 至少一个允许的工具／参数组合，以及禁止的组合；不比较整段生成文本 |
+| `memory_bench_runner_test.go` | 主流程：`TestMemoryBench_Run` 入口，逐场景×组×重复执行（`benchRunOne`），生成报告 |
+| `memory_bench_types_test.go` | 场景 YAML 结构定义与加载；四阶段评分器（记录匹配、检索文本、动作匹配） |
+| `memory_bench_store_test.go` | 内存版 Store（实现生产 `storage.Store` 接口，每个场景独立一份） |
+| `memory_bench_transport_test.go` | HTTP 层：调用预算硬上限、请求响应记录、凭据脱敏 |
+| `memory_bench_suite_test.go` / `memory_bench_unit_test.go` | 框架自身的测试（场景集校验、评分器、预算、防泄漏） |
 
-全局对照使用 **use 行动断言通过率差**。完整场景通过数同时包含写入和检索，仅有记忆组适用这些阶段，不能直接当作公平的组间能力差。
+HTTP 预算通过生产 Venus 客户端的可选 `Transport` 接缝注入（`pkg/venus/client.go`，生产默认 nil，零影响），agentic loop 内的重试也计入预算。
 
-## 测试集
+### 场景集
 
-固定套件位于 `agenttown-mcp/cmd/agenttown-mcp/testdata/memory_bench/suite.yaml`。共六类，每类 5 个场景：
+`agenttown-mcp/cmd/agenttown-mcp/testdata/memory_bench/suite.yaml`，30 个场景，六类各 5 个：
 
-- `creation`：跑步约定、传话、公开邀请、自己主持活动、多个事项。
-- `time`：明天、三天后、跨午夜、绝对游戏日、深夜的明早；覆盖眼前人物相关的远期待办读取。
-- `reschedule`：推迟、提前、更换地点、顺延一天、只修改其中一项。
-- `closure`：取消、履约、取消其中一项、拒绝邀约、过期过滤。
-- `retention`：重建 Agent、噪声 compact、跨日、重复 compact、无关新对话。
-- `isolation`：未获知消息的角色、假设、他人私人事项、否定、两个拥有者。
+| 类别 | 覆盖内容 |
+|---|---|
+| `creation` | 跑步约定、传话、公开邀请、自己主持活动、多个事项 |
+| `time` | 明天、三天后、跨午夜、绝对游戏日、深夜说的"明早" |
+| `reschedule` | 推迟、提前、换地点、顺延一天、只改其中一项 |
+| `closure` | 取消、履约、取消其中一项、拒绝邀约、过期过滤 |
+| `retention` | 重建 Agent、噪声 compact、跨日、重复 compact、无关新对话 |
+| `isolation` | 未获知消息者、假设性对话、他人私事、否定句、两个拥有者 |
 
-冒烟固定选择 `creation-running`、`time-tomorrow`、`closure-cancel`、`retention-rebuild`、`isolation-owner`。收到邀请不等于承诺出席，相关场景不会要求 NPC 必须参加。未获知消息的角色也不会仅因随机选择了同一公共地点而被误判泄露；隔离主要依据记录和检索内容评分。
+其中 5 个标记 `smoke: true` 作为冒烟集：`creation-running`、`time-tomorrow`、`closure-cancel`、`retention-rebuild`、`isolation-owner`。
 
-YAML 中 `steps` 仅包含可观察输入：时间、说话人和对话。`checks`、`probes.read`、`probes.actions` 是人工预期，只交给评分器。`replay` 是离线专用的固定抽取响应，真实模式完全忽略它；更新场景的回放也不伪造生产未提供的内部记录 ID。
+### 场景格式
+
+每个场景由三部分组成：`steps`（输入，只含可观察内容）、`checks`（存储断言）、`probes`（检索与行动断言）。`checks`/`probes` 只交给评分器，不进模型请求。示例（`closure-cancel` 精简）：
+
+```yaml
+- id: closure-cancel
+  category: closure
+  smoke: true
+  agents: [H-01, H-02, H-03]
+  steps:                              # 输入：按顺序执行
+    - type: dialogue                  # 一段对话结束 → 触发生产抽取
+      at: {day: 1, time: "10:00"}
+      agent: H-01                     # 记忆拥有者
+      peer: H-02
+      turns:
+        - {speaker: H-02, content: 今天16:00到17:00，在central_plaza一起跑步，好吗？}
+        - {speaker: H-01, content: 好，我答应在今天16:00到central_plaza跑步，直到17:00。}
+      replay: '{"new_commitments":[...],"commitment_changes":[]}'   # 仅离线模式用
+    - type: dialogue
+      at: {day: 1, time: "11:00"}
+      ...                             # H-02 取消约定
+  checks:                             # 存储断言：after = 第几个 step 之后检查
+    - after: 1
+      stage: write
+      agent: H-01
+      count: 1
+      records:
+        - {kind: appointment, status: pending, counterpart: H-02, location: central_plaza,
+           start: {day: 1, time: "16:00"}, end: {day: 1, time: "17:00"}, content_any: [跑步, 慢跑]}
+    - after: 2
+      stage: update
+      ...                             # 同一条记录 status 应为 cancelled
+  probes:                             # 在指定时刻检索 + 决策
+    - agent: H-01
+      at: {day: 1, time: "15:30"}
+      visible: []                     # 决策时眼前的 NPC
+      read:
+        must: []
+        forbidden: ["16:00", central_plaza]   # 已取消的约定不应再被检索到
+      actions:
+        any: []                       # 允许组合，例：{tool: move_to, params: {target_type: zone, target_id: central_plaza}}
+        none: []                      # 禁止组合
+```
 
 步骤类型：
 
-- `dialogue`：结束一段固定对话并提取待办。
-- `advance`：推进游戏时钟。
-- `restart`：重建该 NPC 状态，保留隔离存储。
-- `compact`：把给定的干扰历史交给生产跨日 compact，之后清空会话。
+| type | 作用 |
+|---|---|
+| `dialogue` | 结束一段对话并调用生产抽取写入待办 |
+| `advance` | 推进游戏时钟 |
+| `restart` | 重建该 NPC 的 Agent 状态，保留存储 |
+| `compact` | 把给定干扰历史交给生产跨日 compact，之后清空会话 |
 
-检查点 `after` 从 1 开始。时间统一为 `{day: 1, time: '16:00'}`；排序、到期过滤和状态更新遵守现有 Store 契约。当前存储为忠实内存实现，**不验证 MySQL 的实际重启持久性或 SQL 性能**。
+`after` 从 1 开始计数；时间统一写成 `{day: 1, time: "16:00"}`。
 
-## 报告与失败排查
+## 三、使用方法
 
-默认产物放在已被 Git 忽略的 `tmp/memory-bench/<时间-进程>/`：
+### 运行
 
-- `summary.md`：分组与分类结果、各阶段断言、token、调用耗时和用例状态。
-- `results.json`：存储快照、检索文本、工具动作、实际模型请求和响应；HTTP 层脱敏，不记录请求头和服务地址。
-- `cases.json`：该次运行的输入与人工标签，配合套件 SHA256 复现结果。
+在仓库根目录执行（Go 1.25+）：
 
-报告中的状态：`passed`、`ability_failed`、`service_error`、`budget_stopped`、`invalid_fixture`、`offline_validated`。服务错误、预算中止和非法配置使脚本非零退出；能力失败保留报告并正常退出，便于收集真实基线，而不是为了通过测试修改业务规则。
+```bash
+# 离线全量：30 场景 × 2 组 × 2 次 = 120 次回放，零模型调用
+scripts/run-memory-bench.sh
 
-HTTP 硬预算在生产 Venus 客户端的可选 Transport 接缝上执行，包含 agentic loop 的重试与跳转。保留的请求只有合成测试内容，仍应按内部调试产物保管，不提交完整原始报告。
+# 真实冒烟：默认 5 个冒烟场景、2 组、1 次、最多 30 次 HTTP
+scripts/run-memory-bench.sh --live
 
-## 当前已知业务限制
+# 真实跑指定若干场景（逗号分隔）
+scripts/run-memory-bench.sh --live --cases creation-relay,time-midnight
 
-- 对话结束抽取要求模型输出已有事项的 ID，但当前请求没有注入已有事项清单。取消、履约和改期可能无法关联已有记录，或被重复写成新事项。Bench 不把内部 ID 塞入对话来绕过此问题。
-- 当前 `UpdateCommitment` 接口只更新状态与起止时间，不能修改地点。因此“只改地点”的完整正确性预期可能失败。
-- 检索有意过滤过期 pending，而不自动回写 `expired`；相应用例保留 pending 的存储预期。
-- 规则评分中的关键词并非完整语义裁判；疑似同义表达导致的误判须结合请求／响应人工复核，再改进标注。
+# 只重跑一个场景，只跑 memory 组
+scripts/run-memory-bench.sh --live --cases closure-cancel --groups memory --max-calls 5
+```
 
-## 开发验证
+参数：
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `--live` | 关 | 调真实模型 |
+| `--cases` | 离线 `all` / 真实 `smoke` | `all`、`smoke` 或逗号分隔的场景 ID |
+| `--groups` | `memory,no-memory` | 运行哪些组 |
+| `--repeats` | 离线 2 / 真实 1 | 每个场景重复次数 |
+| `--concurrency` | 1 | 并发数 |
+| `--max-calls` | 30 | HTTP 调用上限，超出即中止。**真实模式硬上限 30**，只能调低不能调高 |
+| `--llm-config` | `.env` 的 `LLM_CONFIG` | 分层模型配置（格式同仿真的 `llm_backend.yaml`） |
+| `--suite` | 上述 suite.yaml | 场景集文件 |
+| `--output` | `tmp/memory-bench/<时间-进程号>/` | 报告目录 |
+
+**真实全量 30 场景**：单次运行最多 30 次 HTTP，而一个场景×两组通常要 3-4 次调用，全量需按类别分批跑（如 `--cases` 每次列一类的 5 个场景 ID）；要一次跑完需修改 `TestMemoryBench_Run` 里的 30 上限。
+
+真实模式自动加载项目 `.env`，凭据只从环境读取，不经命令行、不写入报告。
+
+### 看报告
+
+输出目录（`tmp/`，不入库）下三个文件：
+
+| 文件 | 内容 |
+|---|---|
+| `summary.md` | 分组/分类结果、各阶段断言通过数、token、耗时、场景状态——**先看这个** |
+| `results.json` | 每个场景的存储快照、检索文本、生成的动作、完整模型请求与响应（已脱敏）——排查失败看这个 |
+| `cases.json` | 本次运行的输入与标签，配合场景集 SHA256 可复现 |
+
+场景状态：
+
+| 状态 | 含义 | 脚本退出码 |
+|---|---|---|
+| `passed` | 全部断言通过 | 0 |
+| `ability_failed` | 有断言失败（能力问题） | 0（保留报告便于收集基线） |
+| `offline_validated` | 离线回放链路跑通 | 0 |
+| `service_error` / `budget_stopped` / `invalid_fixture` | 服务错误 / 预算耗尽 / 场景配置非法 | 非 0 |
+
+排查失败：在 `results.json` 中找到对应场景，依次看存储快照（写入对不对）→ 检索文本（查到了没有）→ 模型请求响应（为什么这么决策）。关键词评分可能误判同义表达，需人工复核。
+
+### 可视化（Promptfoo）
+
+```bash
+cd eval/memory-promptfoo && npm ci && cd ../..                           # 首次装依赖
+scripts/run-memory-promptfoo.sh --live                                   # 跑评测并导入
+scripts/run-memory-promptfoo.sh --report tmp/memory-bench/<报告目录>     # 或导入已有报告（零模型调用）
+scripts/run-memory-promptfoo.sh view                                     # 启动查看器（127.0.0.1:15500）
+```
+
+本机建 SSH 隧道 `ssh -N -L 15500:127.0.0.1:15500 root@<容器地址> -p 36000` 后浏览器打开 `http://localhost:15500`。详见 `eval/memory-promptfoo/README.md`。
+
+### 新增场景
+
+1. 在 `suite.yaml` 的 `cases` 下按上面的格式加一个场景，`id` 唯一、`category` 用六类之一
+2. `dialogue` 步骤写好 `replay`（离线回放用的预期抽取 JSON，格式不合法会报 `invalid_fixture`）
+3. 先跑框架校验，再跑真实单场景：
+
+   ```bash
+   cd agenttown-mcp && go test ./cmd/agenttown-mcp -run '^TestBench' -count=1 && cd ..
+   scripts/run-memory-bench.sh --live --cases <新场景id> --max-calls 10
+   ```
+
+`TestBenchSuite_ThirtyCasesAndFiveSmoke` 断言了 30/5 的数量，增删场景时同步修改。
+
+### 开发验证
 
 ```bash
 cd agenttown-mcp
-go test ./... -count=1
-go test ./cmd/agenttown-mcp -run '^TestBench' -race -count=1
-go build -o /tmp/agenttown-memory-bench-build ./cmd/agenttown-mcp
+go test ./cmd/agenttown-mcp -run '^TestBench' -race -count=1   # 框架自身测试
 ```
 
-普通 `go test` 不会调用真实模型；显式评测入口是 `TestMemoryBench_Run`。业务修复不属于本次 Bench 建设范围，应另开提交，并保留修复前基线。
+普通 `go test ./...` 不会调用真实模型（`TestMemoryBench_Run` 需脚本显式触发）。
 
-## 首次真实冒烟基线（2026-10-28）
+## 四、局限
 
-5 个固定冒烟场景 × 两组 × 1 次，串行完成，17 次真实 HTTP 请求，无服务错误、无预算中止。此前配置接入检查消耗 10 次鉴权失败请求；修正评测配置的环境变量回退后，以剩余 20 次预算重跑，总计 27 次，没有运行全量真实评测。
-
-| 场景 | 有记忆 | 无记忆 | 观察 |
-|---|---|---|---|
-| 新增约定 | 通过 | 行动失败 | 有记忆时生成前往中央广场的完整动作 |
-| 明日时间换算 | 行动失败 | 行动失败 | 日期、写入和检索正确，但未生成满足约束的行动 |
-| 取消 | 更新、检索失败 | 通过 | 原约定仍为 pending，随后仍被检索到 |
-| 清空会话后读取 | 行动失败 | 行动失败 | 记录保留且检索正确，模型表达赴约意图，但 move_to 缺少 target_id |
-| 角色隔离 | 通过 | 通过 | 未收到消息的 H-03 没有获得 H-01 的约定 |
-
-有记忆组写入断言 11/11，更新 3/4，检索 8/10；适用的行动断言有记忆 1/3、无记忆 0/3。取消和隔离的无记忆“通过”主要表示未发生不应有的读取，不应解读为完整记忆能力。样本量小且只重复一次，以上结果仅作为缺陷定位基线。
-
-该次报告位于 `tmp/memory-bench/live-smoke-verified-config/`，完整离线 30 场景、两组、重复 2 次的 120 次运行位于 `tmp/memory-bench/offline-30/`；原始产物均不提交 Git。
+- use 只判断工具调用意图，**不验证 UE 中实际履约**
+- 存储用内存实现，不验证 MySQL 的持久性与 SQL 性能
+- 世界、人设、能力声明使用固定小镇样本，不加载运行中的 World KB
+- 评分基于字段与关键词匹配，不是语义裁判
