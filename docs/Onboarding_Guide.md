@@ -90,20 +90,6 @@ grep 'agent_registered' /data/workspace/dev/logs-dev/$(date +%Y-%m-%d)/debug-mcp
 - dev 实例：`/data/workspace/dev/logs-dev/2026-11-04/debug-mcp.log`
 - stable 实例：`/data/workspace/stable/logs/2026-11-04/debug-mcp.log`
 
-```bash
-# HTML 报告（可折叠/搜索/过滤）
-cd /data/workspace/dev && python scripts/pretty_log.py --html
-
-# 裸 grep（dev 实例、当天日志；stable 换成 /data/workspace/stable/logs/）
-LOG=/data/workspace/dev/logs-dev/$(date +%Y-%m-%d)/debug-mcp.log
-grep '队列已填充' $LOG            # 战术层每次分解的动作序列
-grep '下发 action' $LOG           # 实际下发给 UE 的动作
-grep 'TACTICAL-PROMPT' $LOG       # 战术层发给 LLM 的 prompt
-grep 'speech' $LOG                # 对话链路
-grep '事件路由' $LOG              # 事件判决
-grep 'error' $LOG                 # 错误
-```
-
 ## 步骤 10：查看 actual_prompts 与 LLM 指标
 
 ```bash
